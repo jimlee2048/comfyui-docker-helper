@@ -1,5 +1,5 @@
 [project]
-name = "comfyui-docker-builder"
+name = "comfyui-docker-helper"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

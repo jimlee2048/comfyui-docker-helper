@@ -2,8 +2,10 @@
 .agents/**
 .codex/**
 .opencode/**
-CONTEXT.md
 skills-lock.json
+
+# Local docs
+docs/drafts/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

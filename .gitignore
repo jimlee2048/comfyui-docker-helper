@@ -6,6 +6,7 @@ skills-lock.json
 
 # Local docs
 docs/drafts/**
+docs/workdesk/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

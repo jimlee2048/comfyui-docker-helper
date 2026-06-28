@@ -49,6 +49,8 @@ Use `pytest` for testing:
 
 ### Python
 - Keep modules, functions, variables, and pytest tests in `snake_case`; use `PascalCase` for classes and Pydantic models.
+- Use Pydantic models for structured configuration and validation boundaries.
+- Keep Pydantic models strictly typed; prefer precise field types, `Literal`, and discriminated unions over broad `dict`, `object`, or `Any`.
 - Prefer `pathlib.Path` for filesystem code.
 - When using Python language features, check the requires-python field in pyproject.toml for the current minimum supported runtime.
 
@@ -58,6 +60,8 @@ Use `pytest` for testing:
 - Name test files `test_*.py` and place focused unit coverage in `tests/unit/`.
 - Pytest is configured with strict markers. Mark expensive or environment-dependent tests with the existing markers: `docker`, `network`, `gpu`, `slow`, or `smoke`.
 - Use `tests/integration/` when behavior crosses CLI, rendering, subprocess, or filesystem boundaries.
+- Test the current behavior contract; avoid guard tests that only assert deprecated legacy behavior is absent.
+- Mark temporary development-only tests with a code comment, and remove them before the related work is complete.
 - For quicker local checks, run targeted paths such as `uv run pytest tests/unit` before the full suite.
 
 
@@ -71,6 +75,7 @@ Use `pytest` for testing:
 
 ### General
 - Project work planning and progress documents live under `docs/workdesk/`. That path is intentionally gitignored and must not be committed.
+- Keep work planning details in `docs/workdesk/`; do not mention milestones, task plans, or implementation work status in docs, examples, code comments, or user-facing copy.
 - Work on one active plan at a time, and one plan task inside it at a time.
 - Load task-relevant skills when the current agent runtime provides them.
 - For real browser verification, use the browser verification tool selected by the current agent runtime when it declares a preference. Delegate browser verification to a sub-agent when sub-agents are available.

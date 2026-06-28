@@ -71,6 +71,17 @@ Use `pytest` for testing:
 - Pull requests should describe behavior changes, list validation commands run, link related issues when available, and include screenshots or logs only when CLI output, Docker rendering, or diagnostics changed.
 
 
+## External Resources
+
+### ComfyUI
+- [ComfyUI App](https://github.com/Comfy-Org/ComfyUI)
+- [comfy-cli](https://github.com/Comfy-Org/comfy-cli)
+- [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager/tree/manager-v4): 
+    - Branch `manager-v4` is the correct and latest branch.
+    - Includes `cm-cli`; some features of `comfy-cli` depend on `cm-cli`.
+- [Comfy Registry](https://registry.comfy.org/): the official registry of ComfyUI custom_nodes.
+
+
 ## Agent-Specific Working Rules
 
 ### General

@@ -1,0 +1,93 @@
+# syntax=docker/dockerfile:1.7
+
+ARG UV_IMAGE_TAG={{ build_arguments.UV_IMAGE_TAG | dockerfile_word }}
+ARG CUDA_IMAGE_TAG={{ build_arguments.CUDA_IMAGE_TAG | dockerfile_word }}
+FROM ghcr.io/astral-sh/uv:${UV_IMAGE_TAG} AS uv
+FROM nvidia/cuda:${CUDA_IMAGE_TAG}
+
+COPY --from=uv /uv /uvx /bin/
+
+{% for argument in stage_arguments %}
+ARG {{ argument.name | dockerfile_identifier }}={{ argument.value | dockerfile_word }}
+{% endfor %}
+
+ENV VIRTUAL_ENV={{ plan.paths.venv | dockerfile_word }}
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV WORKSPACE={{ plan.paths.workspace | dockerfile_word }}
+ENV COMFYUI_PATH={{ plan.paths.comfyui | dockerfile_word }}
+{% for variable in plan.environment %}
+ENV {{ variable.name | dockerfile_identifier }}={{ variable.value | dockerfile_word }}
+{% endfor %}
+
+# Keep APT downloads so BuildKit cache mounts can retain and reuse them.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+ && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- \
+{% for package in plan.os_packages %}
+    {{ package | shell_argument }}{% if not loop.last %} \
+{% endif %}
+{% endfor %}
+
+RUN mkdir -p -- \
+{% for directory in plan.paths.preinstall_directories %}
+    {{ directory | shell_argument }}{% if not loop.last %} \
+{% endif %}
+{% endfor %}{{ "\n" }}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv python install -- "${PYTHON_VERSION}" \
+ && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \
+      --index-url "{{ plan.pytorch.index_base_url | dockerfile_word }}/${PYTORCH_WHEEL_TAG}" \
+      -- \
+      "torch==${PYTORCH_VERSION}"{% for package in pytorch_extra_packages %} \
+      {{ package | shell_argument }}{% endfor %}
+
+{% if plan.python.extra_packages %}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" -- \
+{% for package in plan.python.extra_packages %}
+      {{ package | shell_argument }}{% if not loop.last %} \
+{% endif %}
+{% endfor %}
+
+{% endif %}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$COMFY_CLI_VERSION" = latest ]; then \
+      uv pip install --python "$VIRTUAL_ENV/bin/python" -- comfy-cli; \
+    else \
+      uv pip install --python "$VIRTUAL_ENV/bin/python" -- "comfy-cli==${COMFY_CLI_VERSION}"; \
+    fi
+
+RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install \
+      --nvidia \
+      --version "$COMFYUI_VERSION" \
+      --skip-torch-or-directml \
+      --fast-deps{% if not plan.comfyui.install_manager %} \
+      --skip-manager{% endif %}
+
+RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" -- /tmp/cdh/packages/cdh
+
+{% if plan.custom_nodes.items %}
+RUN --mount=type=bind,source=config/custom-nodes.toml,target=/tmp/cdh/config/custom-nodes.toml{% if plan.custom_nodes.has_hooks %} \
+    --mount=type=bind,source=scripts,target=/tmp/cdh/scripts{% endif %} \
+    cdh container install-custom-nodes \
+      --config /tmp/cdh/config/custom-nodes.toml{% if plan.custom_nodes.has_hooks %} \
+      --scripts-dir /tmp/cdh/scripts{% endif %}
+
+{% endif %}
+{% if plan.files.items %}
+RUN --mount=type=bind,source=config/files.toml,target=/tmp/cdh/config/files.toml \
+    cdh container download-files \
+      --config /tmp/cdh/config/files.toml
+
+{% endif %}
+WORKDIR {{ plan.paths.workspace | dockerfile_word }}
+CMD {{ plan.comfyui.launch_command | json_array }}

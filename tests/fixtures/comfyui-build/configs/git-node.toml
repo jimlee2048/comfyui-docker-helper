@@ -1,0 +1,18 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "12.9.2"
+
+[pytorch]
+version = "2.10"
+
+[comfyui]
+version = "latest"
+install_manager = true
+launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
+ref = "609f3afaa74b2f88ef9ce8d939626065e3247469"

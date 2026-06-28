@@ -1,0 +1,56 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "12.9.2"
+
+[system]
+workspace = "/workspace"
+comfyui_path = "/workspace/ComfyUI"
+
+[system.env]
+CDH_SMOKE_ENV = "comfyui-build-full"
+
+[pytorch]
+version = "2.10"
+
+[downloader]
+default = "httpx"
+
+[downloader.aria2]
+rpc_port = 6811
+split = 1
+max_connection_per_server = 1
+min_split_size = "1M"
+resume_download = true
+
+[comfyui]
+version = "latest"
+install_manager = true
+launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "comfyui-custom-scripts"
+version = "latest"
+pre_install_scripts = ["pre.sh", "pre.py"]
+post_install_scripts = ["post.sh", "post.py"]
+
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
+ref = "609f3afaa74b2f88ef9ce8d939626065e3247469"
+
+[[files]]
+url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+dir = "models/cdh-smoke"
+filename = "full-httpx-readme.md"
+overwrite = true
+downloader = "httpx"
+
+[[files]]
+url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+dir = "models/cdh-smoke"
+filename = "full-aria2-readme.md"
+overwrite = true
+downloader = "aria2"

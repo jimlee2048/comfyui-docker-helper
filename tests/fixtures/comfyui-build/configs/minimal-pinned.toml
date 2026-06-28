@@ -1,0 +1,13 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "12.9.2"
+
+[pytorch]
+version = "2.10"
+
+[comfyui]
+version = "0.9.2"
+install_manager = false
+launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]

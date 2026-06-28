@@ -8,6 +8,9 @@ skills-lock.json
 docs/drafts/**
 docs/workdesk/**
 
+# cdh artifacts
+.cdh/**
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

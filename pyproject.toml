@@ -1,7 +1,94 @@
 [project]
 name = "comfyui-docker-helper"
 version = "0.1.0"
-description = "Add your description here"
+description = "Build customized ComfyUI Docker images from declarative configuration"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
-dependencies = []
+authors = [
+    { name = "jimlee2048" },
+]
+maintainers = [
+    { name = "jimlee2048" },
+]
+keywords = [
+    "comfyui",
+    "docker",
+    "docker-buildx",
+    "buildkit",
+    "cli",
+    "developer-tools",
+    "container-images",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "aria2p",
+    "httpx",
+    "jinja2",
+    "packaging>=26.2",
+    "pydantic>=2,<3",
+    "rich",
+    "tomli-w",
+    "typer",
+]
+
+[project.scripts]
+cdh = "comfyui_docker_helper.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/jimlee2048/comfyui-docker-helper"
+Repository = "https://github.com/jimlee2048/comfyui-docker-helper"
+Issues = "https://github.com/jimlee2048/comfyui-docker-helper/issues"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "comfyui_docker_helper"
+
+[tool.pytest.ini_options]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+]
+markers = [
+    "unit: fast tests for isolated units",
+    "integration: tests that exercise interactions across modules or CLI boundaries",
+    "smoke: lightweight smoke checks or smoke fixture validation",
+    "docker: tests that require Docker",
+    "network: tests that require network access",
+    "gpu: tests that require GPU access",
+    "slow: tests that are intentionally slower than the default suite",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+indent-style = "space"
+line-ending = "lf"
+quote-style = "double"

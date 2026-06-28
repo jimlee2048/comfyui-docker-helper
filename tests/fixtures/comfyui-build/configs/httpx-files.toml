@@ -1,0 +1,37 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "12.9.2"
+
+[pytorch]
+version = "2.10"
+
+[downloader]
+default = "httpx"
+
+[comfyui]
+version = "latest"
+install_manager = false
+launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+
+[[files]]
+url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+dir = "models/cdh-smoke"
+filename = "httpx-readme.md"
+overwrite = false
+downloader = "httpx"
+
+[[files]]
+url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts/raw/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+dir = "models/cdh-smoke"
+filename = "httpx-readme.md"
+overwrite = true
+downloader = "httpx"
+
+[[files]]
+url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+dir = "models/cdh-smoke"
+filename = "httpx-readme.md"
+overwrite = false
+downloader = "httpx"

@@ -1,0 +1,33 @@
+"""Deterministic renderers for build-context artifacts."""
+
+from comfyui_docker_helper.rendering.context import (
+    ContextWriteError,
+    MaterializationError,
+    has_valid_context_marker,
+    materialize_build_context,
+    serialize_custom_nodes_toml,
+    serialize_files_toml,
+    write_build_context,
+)
+from comfyui_docker_helper.rendering.dockerfile import (
+    render_dockerfile,
+    serialize_dockerfile_identifier,
+    serialize_dockerfile_word,
+    serialize_json_array,
+    serialize_posix_shell_argument,
+)
+
+__all__ = [
+    "ContextWriteError",
+    "MaterializationError",
+    "has_valid_context_marker",
+    "materialize_build_context",
+    "render_dockerfile",
+    "serialize_custom_nodes_toml",
+    "serialize_dockerfile_identifier",
+    "serialize_dockerfile_word",
+    "serialize_files_toml",
+    "serialize_json_array",
+    "serialize_posix_shell_argument",
+    "write_build_context",
+]

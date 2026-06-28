@@ -1,0 +1,121 @@
+# Complete annotated ComfyUI Docker Helper configuration.
+# Copy this file and remove fields you do not need. Fields not shown in
+# minimal.toml usually have defaults, but they are included here for reference.
+
+[compute_platform]
+# Required. Currently only "cuda" is supported.
+type = "cuda"
+
+[compute_platform.cuda]
+# Required. Numeric CUDA version used in the nvidia/cuda base image tag.
+version = "12.9.2"
+# Default: "cudnn-devel". Supported: "base", "runtime", "devel",
+# "cudnn-runtime", "cudnn-devel".
+image_flavor = "cudnn-devel"
+# Default: "ubuntu24.04". Supported: "ubuntu22.04", "ubuntu24.04".
+image_distro = "ubuntu24.04"
+
+[system]
+# Default: "/workspace". Must be an absolute POSIX container path.
+workspace = "/workspace"
+# Default: workspace + "/ComfyUI". Must be absolute and must not equal workspace.
+comfyui_path = "/workspace/ComfyUI"
+# Extra apt packages installed after the default OS package set.
+extra_packages = ["ffmpeg", "libgl1"]
+
+[system.env]
+# Values become Dockerfile ENV entries and may appear in image history/logs.
+# Do not put secrets here unless that exposure is acceptable.
+COMFYUI_PORT = "8188"
+EXAMPLE_PROFILE = "full"
+
+[python]
+# Default: "3.12". Passed to uv's Python installation workflow.
+version = "3.12"
+# Default: "latest". Used as the ghcr.io/astral-sh/uv image tag.
+uv_version = "latest"
+# Extra Python packages installed into the final virtualenv after PyTorch.
+extra_packages = ["numpy"]
+
+[pytorch]
+# Required. Installs torch==version from the CUDA wheel index inferred from CUDA.
+version = "2.10"
+# Additional PyTorch-family packages. Do not include "torch" here.
+extra_packages = ["torchvision", "torchaudio"]
+
+[downloader]
+# Default: "aria2". Supported: "aria2", "httpx".
+# Per-file downloader values override this default.
+default = "aria2"
+
+[downloader.httpx]
+# Default: 60. Seconds for each HTTPX request attempt.
+timeout = 60
+# Default: 3. Number of retry attempts for HTTPX downloads.
+retries = 3
+
+[downloader.aria2]
+# Default: 6800. Container-local aria2 RPC port used during file downloads.
+rpc_port = 6800
+# Default: 16. aria2 split count.
+split = 16
+# Default: 16. aria2 max connections per server.
+max_connection_per_server = 16
+# Default: "1M". aria2 minimum split size.
+min_split_size = "1M"
+# Default: true. Keep aria2 resume support enabled.
+resume_download = true
+
+[comfyui]
+# Required. Supported: "latest", "nightly", semver, or v-prefixed semver.
+version = "latest"
+# Default: "latest". Supported: "latest" or a public PEP 440 comfy-cli version.
+cli_version = "latest"
+# Default: true. Must be true when custom_nodes are configured.
+install_manager = true
+# Default shown below. Passed to ComfyUI's final python main.py command.
+launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch", "--port", "8188"]
+
+[[comfyui.custom_nodes]]
+# Registry custom node installed with ComfyUI-Manager.
+type = "registry"
+# Required for registry nodes. Registry IDs must be unique in this file.
+id = "comfyui-custom-scripts"
+# Default: unset. Use "latest" or a registry-supported version selector.
+version = "latest"
+# Hook paths are relative to --scripts-dir, must not contain "..", and must end
+# in .sh or .py. Shell hooks run with bash; Python hooks run with the venv Python.
+pre_install_scripts = ["pre.sh"]
+post_install_scripts = []
+
+[[comfyui.custom_nodes]]
+# Git custom node cloned directly into ComfyUI/custom_nodes.
+type = "git"
+# Required for git nodes. Git URLs must be unique in this file.
+url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
+# Default: unset. Branch, tag, or commit checked out after clone when provided.
+ref = "main"
+# Default: inferred from the URL basename with a trailing .git stripped.
+# Must be a single safe directory name under ComfyUI/custom_nodes.
+target_dir = "ComfyUI-Custom-Scripts"
+pre_install_scripts = []
+post_install_scripts = ["post.sh"]
+
+[[files]]
+# Required. Must be an HTTP(S) URL with a host.
+url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
+# Required. Relative to COMFYUI_PATH; absolute paths and ".." are rejected.
+dir = "models/example-docs"
+# Required. Must be a single filename component.
+filename = "comfyui-readme-aria2.md"
+# Default: false. Existing targets are skipped unless true.
+overwrite = false
+# Default: downloader.default. Supported: "aria2", "httpx".
+downloader = "aria2"
+
+[[files]]
+url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
+dir = "models/example-docs"
+filename = "comfyui-readme-httpx.md"
+overwrite = true
+downloader = "httpx"

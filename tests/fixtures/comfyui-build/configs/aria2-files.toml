@@ -1,0 +1,30 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "12.9.2"
+
+[pytorch]
+version = "2.10"
+
+[downloader]
+default = "aria2"
+
+[downloader.aria2]
+rpc_port = 6811
+split = 1
+max_connection_per_server = 1
+min_split_size = "1M"
+resume_download = true
+
+[comfyui]
+version = "latest"
+install_manager = false
+launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+
+[[files]]
+url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+dir = "models/cdh-smoke"
+filename = "aria2-readme.md"
+overwrite = true
+downloader = "aria2"

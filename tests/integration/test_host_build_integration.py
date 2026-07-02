@@ -293,6 +293,106 @@ def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
     )
 
 
+def test_host_build_wires_package_indexes_before_fake_docker(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render package index settings before invoking fake Buildx."""
+    python_index_url = "https://python.example.test/simple"
+    pytorch_index_base_url = "https://torch.example.test/whl"
+    config = tmp_path / "indexes.toml"
+    config.write_text(
+        f"""\
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "12.9.2"
+
+[python]
+index_url = "{python_index_url}"
+
+[pytorch]
+version = "2.10"
+index_base_url = "{pytorch_index_base_url}"
+
+[comfyui]
+version = "latest"
+""",
+        encoding="utf-8",
+    )
+    context = tmp_path / "context"
+    calls: list[tuple[tuple[str, ...], str, Path, Path]] = []
+
+    def fake_buildx(
+        *,
+        image_tags: tuple[str, ...],
+        output: str,
+        context_dir: Path,
+        cwd: Path,
+        log,
+    ) -> BuildxBuildResult:
+        del log
+        dockerfile = (context_dir / "Dockerfile").read_text(encoding="utf-8")
+        python_layer_start = dockerfile.index(
+            'uv python install -- "${PYTHON_VERSION}"'
+        )
+        python_install_layer = dockerfile[
+            python_layer_start : dockerfile.index("\n\nRUN ", python_layer_start)
+        ]
+        torch_index = dockerfile.index(
+            f"--index-url {pytorch_index_base_url}/${{PYTORCH_WHEEL_TAG}}"
+        )
+        torch_install_layer = dockerfile[
+            dockerfile.rfind("RUN ", 0, torch_index) : dockerfile.index(
+                "\nRUN ",
+                torch_index,
+            )
+        ]
+
+        assert image_tags == ("demo:indexes",)
+        assert output == "load"
+        assert context_dir == context
+        assert cwd == Path.cwd()
+        assert has_valid_context_marker(context_dir)
+        assert f"--index-url {python_index_url}" in python_install_layer
+        assert f"--index-url {pytorch_index_base_url}/${{PYTORCH_WHEEL_TAG}}" in (
+            torch_install_layer
+        )
+        assert "ARG PYTORCH_WHEEL_TAG=cu129" in dockerfile
+        assert '"torch==${PYTORCH_VERSION}"' in torch_install_layer
+        calls.append((image_tags, output, context_dir, cwd))
+        return BuildxBuildResult(
+            argv=("docker", "buildx", "build", "--load", "-t", image_tags[0]),
+            context_dir=context_dir,
+            image_tags=image_tags,
+            output=output,
+        )
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        fake_buildx,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "demo:indexes",
+            "--context-dir",
+            str(context),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(("demo:indexes",), "load", context, Path.cwd())]
+
+
 def test_host_build_failure_after_context_completion_keeps_full_context(
     cli_runner: CliRunner,
     tmp_path: Path,

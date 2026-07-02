@@ -8,8 +8,8 @@ configuration. They are separate from internal test fixtures under
 
 - `minimal.toml` is a small copyable configuration for the minimal practical
   CUDA compute-platform build path.
-- `full.toml` is an annotated reference configuration covering every supported
-  block and field.
+- `full.toml` is an annotated reference configuration covering the supported
+  host build blocks and commonly customized fields.
 - `scripts/pre.sh` and `scripts/post.sh` are example custom-node hook scripts
   referenced by `full.toml`.
 
@@ -32,9 +32,9 @@ cdh host render -f examples/full.toml -o .cdh/build/full --scripts-dir examples/
 ```
 
 The rendered context is retained after render and build commands so you can
-inspect generated files such as `Dockerfile`, `config/custom-nodes.toml`,
-`config/files.toml`, and copied `scripts/` content. Only directories with a
-valid `.cdh-rendered` marker are automatically replaced by `--overwrite`.
+inspect generated files such as `Dockerfile`, `config.toml`,
+`config.lock.toml`, and copied `scripts/` content. Only directories with a valid
+`.cdh-rendered` marker are automatically replaced by `--overwrite`.
 
 ## Build
 
@@ -43,8 +43,23 @@ Python packages, clone ComfyUI/custom-node sources, and download configured
 files over the network.
 
 ```bash
-cdh host build -f examples/minimal.toml -t comfyui-example:minimal --context-dir .cdh/build/minimal
+cdh host build -f examples/minimal.toml -t comfyui-example:minimal --load --context-dir .cdh/build/minimal
 cdh host build -f examples/full.toml -t comfyui-example:full --scripts-dir examples/scripts --context-dir .cdh/build/full
+cdh host build -f examples/full.toml --scripts-dir examples/scripts --context-dir .cdh/build/full
+cdh host build -f examples/full.toml -t registry.example.com/my-comfy:dev --push --scripts-dir examples/scripts --context-dir .cdh/build/full
+```
+
+`full.toml` demonstrates `[cdh]` downloader defaults, `[build]` image tags,
+`[build].output`, Python and PyTorch index URLs, custom-node hooks, and file
+downloads. CLI `--tag` values replace `[build].tags`; repeat `--tag` to build
+multiple effective tags from the same config.
+
+Use `--locked` to rebuild from an existing `config.lock.toml`, or
+`--upgrade-lock` to refresh moving selectors before rendering and building:
+
+```bash
+cdh host build -f examples/full.toml --locked --scripts-dir examples/scripts --context-dir .cdh/build/full
+cdh host render -f examples/full.toml -o .cdh/build/full --upgrade-lock --scripts-dir examples/scripts --overwrite
 ```
 
 Do not run these build commands unless Docker Buildx is available and network,

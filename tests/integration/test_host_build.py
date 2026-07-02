@@ -135,10 +135,16 @@ def test_build_help_exposes_current_options(cli_runner: CliRunner) -> None:
     assert "--file" in result.stdout
     assert "-t" in result.stdout
     assert "--tag" in result.stdout
+    normalized_stdout = " ".join(result.stdout.split())
+    for token in ("May", "repeated", "replaces", "config", "build", "tags"):
+        assert token in normalized_stdout
     assert "--load" in result.stdout
     assert "--push" in result.stdout
+    assert "--locked" in result.stdout
+    assert "--upgrade-lock" in result.stdout
     assert "--scripts-dir" in result.stdout
     assert "--context-dir" in result.stdout
+    assert "--output" not in result.stdout
     assert "--clean-context" not in result.stdout
     assert "--force" not in result.stdout
     assert "--overwrite" not in result.stdout

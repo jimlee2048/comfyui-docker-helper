@@ -189,7 +189,10 @@ def build(
         typer.Option(
             "--tag",
             "-t",
-            help="Docker image tag to build. Replaces [build].tags when provided.",
+            help=(
+                "Docker image tag to build. May be repeated; replaces config "
+                "build tags when provided."
+            ),
             metavar="IMAGE:TAG",
         ),
     ] = None,

@@ -106,7 +106,7 @@ class HttpRegistryProvider:
     """Read Comfy Registry metadata through its HTTP API."""
 
     client: httpx.Client
-    base_url: str = "https://registry.comfy.org"
+    base_url: str = "https://api.comfy.org"
 
     def get_install_metadata(
         self,
@@ -247,7 +247,7 @@ def _registry_install_metadata(
             reason="response did not contain a version string",
         )
     return RegistryInstallMetadata(
-        node_id=str(data.get("id", data.get("node_id", node_id))),
+        node_id=str(data.get("node_id", data.get("id", node_id))),
         version=resolved_version,
         active=bool(data.get("active", True)),
         installable=bool(data.get("installable", True)),
@@ -273,7 +273,7 @@ def _registry_version_candidate(
             reason="version item did not contain a version string",
         )
     return RegistryVersionCandidate(
-        node_id=str(data.get("id", data.get("node_id", node_id))),
+        node_id=str(data.get("node_id", data.get("id", node_id))),
         version=version,
         active=bool(data.get("active", True)),
         installable=bool(data.get("installable", True)),

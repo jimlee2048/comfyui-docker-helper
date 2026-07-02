@@ -78,9 +78,11 @@ tags = ["my-comfy:dev", "registry.example.com/my-comfy:dev"]
 output = "load"
 
 [comfyui]
-# Required. Supported: "latest", "nightly", semver, or v-prefixed semver.
+# Required. Supported: "latest", "nightly", semver, v-prefixed semver, or
+# PEP 440-style constraints such as ">=0.3.0,<0.4.0" where accepted upstream.
 version = "latest"
-# Default: "latest". Supported: "latest" or a public PEP 440 comfy-cli version.
+# Default: "latest". Supported: "latest", a public PEP 440 comfy-cli version,
+# or PEP 440-style constraints such as ">=1.4.0,<2.0.0".
 cli_version = "latest"
 # Default: true. Must be true when custom_nodes are configured.
 install_manager = true
@@ -92,7 +94,8 @@ launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch", "--port", "8188"]
 type = "registry"
 # Required for registry nodes. Registry IDs must be unique in this file.
 id = "comfyui-custom-scripts"
-# Default: unset. Use "latest" or a registry-supported version selector.
+# Default: unset. Use "latest", a registry-supported version selector, or
+# PEP 440-style constraints such as ">=1.0.0,<2.0.0" where applicable.
 version = "latest"
 # Hook paths are relative to --scripts-dir, must not contain "..", and must end
 # in .sh or .py. Shell hooks run with bash; Python hooks run with the venv Python.

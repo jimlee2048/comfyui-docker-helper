@@ -205,6 +205,61 @@ def test_registry_provider_wraps_json_decode_failures() -> None:
     assert error.value.reason == "response body was not valid JSON"
 
 
+def test_registry_provider_uses_api_base_url_by_default() -> None:
+    """Registry provider defaults to the public API host, not the web UI host."""
+    client = FakeHttpClient(
+        response=FakeResponse(data={"id": "node", "version": "1.0.0"})
+    )
+
+    HttpRegistryProvider(client).get_install_metadata("node")
+
+    assert client.calls == [
+        ("https://api.comfy.org/nodes/node/install", {}),
+    ]
+
+
+def test_registry_provider_prefers_install_node_id_over_uuid_id() -> None:
+    """Registry install responses can include both UUID ``id`` and slug ``node_id``."""
+    client = FakeHttpClient(
+        response=FakeResponse(
+            data={
+                "id": "0baa100d-0000-4000-8000-000000000000",
+                "node_id": "comfyui-custom-scripts",
+                "version": "1.2.5",
+            }
+        )
+    )
+
+    metadata = HttpRegistryProvider(client).get_install_metadata(
+        "comfyui-custom-scripts"
+    )
+
+    assert metadata.node_id == "comfyui-custom-scripts"
+    assert metadata.version == "1.2.5"
+
+
+def test_registry_provider_prefers_version_node_id_over_uuid_id() -> None:
+    """Registry version responses can include both UUID ``id`` and slug ``node_id``."""
+    client = FakeHttpClient(
+        response=FakeResponse(
+            data={
+                "versions": [
+                    {
+                        "id": "0baa100d-0000-4000-8000-000000000000",
+                        "node_id": "comfyui-custom-scripts",
+                        "version": "1.2.5",
+                    }
+                ]
+            }
+        )
+    )
+
+    versions = HttpRegistryProvider(client).list_versions("comfyui-custom-scripts")
+
+    assert versions[0].node_id == "comfyui-custom-scripts"
+    assert versions[0].version == "1.2.5"
+
+
 def test_registry_provider_rejects_invalid_install_shape() -> None:
     """Registry install responses must include a concrete version."""
     client = FakeHttpClient(response=FakeResponse(data={"id": "node"}))

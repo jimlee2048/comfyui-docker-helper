@@ -328,14 +328,14 @@ def test_files_resolve_defaults_targets_order_and_downloader_settings() -> None:
     """Materialize every dependent file default and both backend settings."""
     config = make_config()
     config.system.workspace = "/srv"
-    config.downloader.default = "httpx"
-    config.downloader.aria2.rpc_port = 7000
-    config.downloader.aria2.split = 8
-    config.downloader.aria2.max_connection_per_server = 4
-    config.downloader.aria2.min_split_size = "2M"
-    config.downloader.aria2.resume_download = False
-    config.downloader.httpx.timeout = 90.5
-    config.downloader.httpx.retries = 5
+    config.cdh.default_downloader = "httpx"
+    config.cdh.downloader.aria2.rpc_port = 7000
+    config.cdh.downloader.aria2.split = 8
+    config.cdh.downloader.aria2.max_connection_per_server = 4
+    config.cdh.downloader.aria2.min_split_size = "2M"
+    config.cdh.downloader.aria2.resume_download = False
+    config.cdh.downloader.httpx.timeout = 90.5
+    config.cdh.downloader.httpx.retries = 5
     config.files = [
         FileConfig(
             url="https://example.com/first.bin",

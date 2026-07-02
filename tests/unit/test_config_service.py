@@ -121,8 +121,8 @@ PROFILE = "base"
 [python]
 extra_packages = ["base-python"]
 
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
 [[comfyui.custom_nodes]]
 type = "registry"
@@ -185,7 +185,7 @@ filename = "extra.bin"
     )
     local.write_text(
         """
-[downloader.httpx]
+[cdh.downloader.httpx]
 retries = 7
 """,
         encoding="utf-8",

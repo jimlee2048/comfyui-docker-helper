@@ -134,6 +134,7 @@ def validate_config(
     _validate_compute_platform(config, diagnostics)
     _validate_system(config, diagnostics)
     _validate_pytorch(config, diagnostics)
+    _validate_build(config, diagnostics)
     _validate_comfyui(config, scripts_dir, diagnostics)
     _validate_downloader(config, diagnostics)
     _validate_files(config, diagnostics)
@@ -411,55 +412,74 @@ def _validate_hook(
 
 def _validate_downloader(config: Config, diagnostics: list[Diagnostic]) -> None:
     _require_allowed(
-        config.downloader.default,
+        config.cdh.default_downloader,
         _DOWNLOADERS,
-        ("downloader", "default"),
-        "downloader.unsupported_default",
+        ("cdh", "default_downloader"),
+        "cdh.unsupported_default_downloader",
         "must be aria2 or httpx",
         diagnostics,
     )
-    aria2 = config.downloader.aria2
-    httpx = config.downloader.httpx
+    aria2 = config.cdh.downloader.aria2
+    httpx = config.cdh.downloader.httpx
     _require_range(
         httpx.timeout,
         lambda value: value > 0,
-        ("downloader", "httpx", "timeout"),
-        "downloader.httpx_timeout_not_positive",
+        ("cdh", "downloader", "httpx", "timeout"),
+        "cdh.downloader.httpx_timeout_not_positive",
         "must be greater than 0",
         diagnostics,
     )
     _require_range(
         httpx.retries,
         lambda value: value >= 0,
-        ("downloader", "httpx", "retries"),
-        "downloader.httpx_retries_negative",
+        ("cdh", "downloader", "httpx", "retries"),
+        "cdh.downloader.httpx_retries_negative",
         "must be greater than or equal to 0",
         diagnostics,
     )
     _require_range(
         aria2.rpc_port,
         lambda value: 1 <= value <= 65535,
-        ("downloader", "aria2", "rpc_port"),
-        "downloader.aria2_rpc_port_out_of_range",
+        ("cdh", "downloader", "aria2", "rpc_port"),
+        "cdh.downloader.aria2_rpc_port_out_of_range",
         "must be in range 1..65535",
         diagnostics,
     )
     _require_range(
         aria2.split,
         lambda value: value > 0,
-        ("downloader", "aria2", "split"),
-        "downloader.aria2_split_not_positive",
+        ("cdh", "downloader", "aria2", "split"),
+        "cdh.downloader.aria2_split_not_positive",
         "must be greater than 0",
         diagnostics,
     )
     _require_range(
         aria2.max_connection_per_server,
         lambda value: value > 0,
-        ("downloader", "aria2", "max_connection_per_server"),
-        "downloader.aria2_max_connection_per_server_not_positive",
+        ("cdh", "downloader", "aria2", "max_connection_per_server"),
+        "cdh.downloader.aria2_max_connection_per_server_not_positive",
         "must be greater than 0",
         diagnostics,
     )
+
+
+def _validate_build(config: Config, diagnostics: list[Diagnostic]) -> None:
+    for index, tag in enumerate(config.build.tags):
+        if (
+            not tag
+            or any(character.isspace() for character in tag)
+            or any(ord(character) < 32 or ord(character) == 127 for character in tag)
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    path=("build", "tags", index),
+                    code="build.invalid_tag",
+                    message=(
+                        "must be non-empty and must not contain whitespace "
+                        "or control characters"
+                    ),
+                )
+            )
 
 
 def _validate_dockerfile_source_strings(
@@ -480,7 +500,9 @@ def _validate_dockerfile_source_strings(
         (config.system.workspace, ("system", "workspace")),
         (config.python.version, ("python", "version")),
         (config.python.uv_version, ("python", "uv_version")),
+        (config.python.index_url, ("python", "index_url")),
         (config.pytorch.version, ("pytorch", "version")),
+        (config.pytorch.index_base_url, ("pytorch", "index_base_url")),
         (config.comfyui.cli_version, ("comfyui", "cli_version")),
         (config.comfyui.version, ("comfyui", "version")),
     ]

@@ -40,6 +40,7 @@ class PythonConfig(ConfigModel):
 
     version: str = "3.12"
     uv_version: str = "latest"
+    index_url: str = "https://pypi.org/simple"
     extra_packages: list[str] = Field(default_factory=list)
 
 
@@ -47,6 +48,7 @@ class PyTorchConfig(ConfigModel):
     """PyTorch installation settings."""
 
     version: str
+    index_base_url: str = "https://download.pytorch.org/whl"
     extra_packages: list[str] = Field(default_factory=list)
 
 
@@ -67,12 +69,26 @@ class HttpxConfig(ConfigModel):
     retries: int = 3
 
 
-class DownloaderConfig(ConfigModel):
-    """Global downloader selection and backend settings."""
+class CdhDownloaderConfig(ConfigModel):
+    """cdh-owned downloader backend settings."""
 
-    default: str = "aria2"
     aria2: Aria2Config = Field(default_factory=Aria2Config)
     httpx: HttpxConfig = Field(default_factory=HttpxConfig)
+
+
+class CdhConfig(ConfigModel):
+    """cdh-owned helper settings."""
+
+    default_downloader: str = "aria2"
+    default_download_mode: Literal["sync"] = "sync"
+    downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
+
+
+class BuildConfig(ConfigModel):
+    """Docker build ergonomics."""
+
+    tags: list[str] = Field(default_factory=list)
+    output: Literal["load", "push"] = "load"
 
 
 class _CustomNodeConfig(ConfigModel):
@@ -134,10 +150,11 @@ class FileConfig(ConfigModel):
 class Config(ConfigModel):
     """Root public configuration loaded from one TOML document."""
 
+    cdh: CdhConfig = Field(default_factory=CdhConfig)
     compute_platform: ComputePlatformConfig
     system: SystemConfig = Field(default_factory=SystemConfig)
     python: PythonConfig = Field(default_factory=PythonConfig)
     pytorch: PyTorchConfig
-    downloader: DownloaderConfig = Field(default_factory=DownloaderConfig)
+    build: BuildConfig = Field(default_factory=BuildConfig)
     comfyui: ComfyUIConfig
     files: list[FileConfig] = Field(default_factory=list)

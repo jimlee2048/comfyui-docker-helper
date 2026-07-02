@@ -22,7 +22,6 @@ _DEFAULT_OS_PACKAGES = (
     "build-essential",
     "aria2",
 )
-_PYTORCH_INDEX_BASE_URL = "https://download.pytorch.org/whl"
 
 
 class Layer(StrEnum):
@@ -286,7 +285,7 @@ def build_render_plan(
     pytorch = PyTorchPlan(
         version=config.pytorch.version,
         wheel_tag=wheel_tag,
-        index_base_url=_PYTORCH_INDEX_BASE_URL,
+        index_base_url=config.pytorch.index_base_url,
         requirements=(
             f"torch=={config.pytorch.version}",
             *config.pytorch.extra_packages,
@@ -428,19 +427,19 @@ def _build_custom_nodes_plan(
 
 def _build_files_plan(config: Config, comfyui_path: str) -> FilesPlan:
     downloader = DownloaderPlan(
-        default=config.downloader.default,
+        default=config.cdh.default_downloader,
         aria2=Aria2Plan(
-            rpc_port=config.downloader.aria2.rpc_port,
-            split=config.downloader.aria2.split,
+            rpc_port=config.cdh.downloader.aria2.rpc_port,
+            split=config.cdh.downloader.aria2.split,
             max_connection_per_server=(
-                config.downloader.aria2.max_connection_per_server
+                config.cdh.downloader.aria2.max_connection_per_server
             ),
-            min_split_size=config.downloader.aria2.min_split_size,
-            resume_download=config.downloader.aria2.resume_download,
+            min_split_size=config.cdh.downloader.aria2.min_split_size,
+            resume_download=config.cdh.downloader.aria2.resume_download,
         ),
         httpx=HttpxPlan(
-            timeout=config.downloader.httpx.timeout,
-            retries=config.downloader.httpx.retries,
+            timeout=config.cdh.downloader.httpx.timeout,
+            retries=config.cdh.downloader.httpx.retries,
         ),
     )
     items: list[FilePlan] = []

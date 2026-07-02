@@ -765,7 +765,7 @@ def test_node_diagnostics_follow_node_and_field_order(tmp_path: Path) -> None:
 def test_supported_global_downloaders_are_valid(downloader: str) -> None:
     """Accept both configured downloader backends."""
     config = make_config()
-    config.downloader.default = downloader
+    config.cdh.default_downloader = downloader
 
     assert validate_config(config) == ()
 
@@ -773,31 +773,34 @@ def test_supported_global_downloaders_are_valid(downloader: str) -> None:
 def test_global_downloader_enum_and_numeric_ranges_are_validated() -> None:
     """Reject unknown backends and impossible downloader numeric settings."""
     config = make_config()
-    config.downloader.default = "curl"
-    config.downloader.aria2.rpc_port = -1
-    config.downloader.aria2.split = 0
-    config.downloader.aria2.max_connection_per_server = 0
-    config.downloader.httpx.timeout = -0.5
-    config.downloader.httpx.retries = -3
+    config.cdh.default_downloader = "curl"
+    config.cdh.downloader.aria2.rpc_port = -1
+    config.cdh.downloader.aria2.split = 0
+    config.cdh.downloader.aria2.max_connection_per_server = 0
+    config.cdh.downloader.httpx.timeout = -0.5
+    config.cdh.downloader.httpx.retries = -3
 
     assert locations_and_codes(validate_config(config)) == [
-        (("downloader", "default"), "downloader.unsupported_default"),
+        (("cdh", "default_downloader"), "cdh.unsupported_default_downloader"),
         (
-            ("downloader", "httpx", "timeout"),
-            "downloader.httpx_timeout_not_positive",
+            ("cdh", "downloader", "httpx", "timeout"),
+            "cdh.downloader.httpx_timeout_not_positive",
         ),
         (
-            ("downloader", "httpx", "retries"),
-            "downloader.httpx_retries_negative",
+            ("cdh", "downloader", "httpx", "retries"),
+            "cdh.downloader.httpx_retries_negative",
         ),
         (
-            ("downloader", "aria2", "rpc_port"),
-            "downloader.aria2_rpc_port_out_of_range",
+            ("cdh", "downloader", "aria2", "rpc_port"),
+            "cdh.downloader.aria2_rpc_port_out_of_range",
         ),
-        (("downloader", "aria2", "split"), "downloader.aria2_split_not_positive"),
         (
-            ("downloader", "aria2", "max_connection_per_server"),
-            "downloader.aria2_max_connection_per_server_not_positive",
+            ("cdh", "downloader", "aria2", "split"),
+            "cdh.downloader.aria2_split_not_positive",
+        ),
+        (
+            ("cdh", "downloader", "aria2", "max_connection_per_server"),
+            "cdh.downloader.aria2_max_connection_per_server_not_positive",
         ),
     ]
 
@@ -806,9 +809,60 @@ def test_global_downloader_enum_and_numeric_ranges_are_validated() -> None:
 def test_aria2_rpc_port_accepts_valid_tcp_port_range(port: int) -> None:
     """Allow every valid TCP port, including privileged ports."""
     config = make_config()
-    config.downloader.aria2.rpc_port = port
+    config.cdh.downloader.aria2.rpc_port = port
 
     assert validate_config(config) == ()
+
+
+def test_build_tags_accept_non_empty_image_references() -> None:
+    """Accept one or more configured Docker image tags for host build."""
+    config = make_config()
+    config.build.tags = ["my-comfy:dev", "registry.example.com/team/my-comfy:dev"]
+
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["", " my-comfy:dev", "my-comfy:dev ", "bad tag:dev", "bad\ntag", "bad\x7ftag"],
+)
+def test_build_tags_reject_empty_whitespace_and_control_characters(tag: str) -> None:
+    """Reject tag strings that are obviously not valid CLI tag arguments."""
+    config = make_config()
+    config.build.tags = ["valid:tag", tag]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (("build", "tags", 1), "build.invalid_tag")
+    ]
+
+
+@pytest.mark.parametrize("output", ["load", "push"])
+def test_build_output_accepts_load_and_push(output: str) -> None:
+    """Accept the two v0.2 build output modes."""
+    config = make_config()
+    config.build.output = output
+
+    assert validate_config(config) == ()
+
+
+def test_build_output_rejects_unknown_modes_structurally() -> None:
+    """Reject unsupported Buildx output modes in the public schema stage."""
+    with pytest.raises(ValidationError) as raised:
+        Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "build": {"output": "registry"},
+                "comfyui": {"version": "latest"},
+            }
+        )
+
+    assert (("build", "output"), "literal_error") in {
+        (error["loc"], error["type"]) for error in raised.value.errors()
+    }
 
 
 @pytest.mark.parametrize(
@@ -927,7 +981,7 @@ def test_independent_business_errors_are_aggregated_in_config_order() -> None:
     config.pytorch.extra_packages = ["torch"]
     config.comfyui.version = "bad"
     config.comfyui.cli_version = ">=1"
-    config.downloader.default = "curl"
+    config.cdh.default_downloader = "curl"
     config.files = [
         FileConfig(
             url="ftp://example.com/",
@@ -956,7 +1010,7 @@ def test_independent_business_errors_are_aggregated_in_config_order() -> None:
         (("pytorch", "extra_packages", 0), "pytorch.duplicate_torch"),
         (("comfyui", "version"), "comfyui.invalid_version"),
         (("comfyui", "cli_version"), "comfyui.invalid_cli_version"),
-        (("downloader", "default"), "downloader.unsupported_default"),
+        (("cdh", "default_downloader"), "cdh.unsupported_default_downloader"),
         (("files", 0, "url"), "file.invalid_url"),
         (("files", 0, "dir"), "file.directory_traversal"),
         (("files", 0, "downloader"), "file.unsupported_downloader"),

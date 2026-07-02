@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.lock import (
@@ -119,6 +119,7 @@ def resolve_lockfile(
         resolvers,
         options,
         warnings,
+        lock_input_digest,
     )
     lockfile = Lockfile(
         schema_version=LOCKFILE_SCHEMA_VERSION,
@@ -231,6 +232,7 @@ def _resolve_custom_nodes(
     resolvers: SourceResolvers,
     options: LockOptions,
     warnings: list[Diagnostic],
+    lock_input_digest: str,
 ) -> list[RegistryLockedCustomNode | GitLockedCustomNode]:
     registry_entries = _registry_entries(existing_lockfile)
     git_entries = _git_entries(existing_lockfile)
@@ -260,13 +262,23 @@ def _resolve_custom_nodes(
                     resolvers.registry,
                 ),
             )
-            warnings.extend(resolved.warnings)
+            warnings.extend(
+                _diagnostics_at_path(
+                    resolved.warnings,
+                    ("comfyui", "custom_nodes", index, "version"),
+                )
+            )
             locked_nodes.append(resolved.to_locked())
         elif isinstance(node, GitCustomNodeConfig):
             existing = git_entries.get(node.url)
             if (
                 existing is not None
                 and not _upgrade_git(node.ref, options)
+                and not _moving_git_ref_needs_resolution(
+                    node.ref,
+                    existing_lockfile,
+                    lock_input_digest,
+                )
                 and locked_git_custom_node_satisfies_selector(
                     existing,
                     node.url,
@@ -452,6 +464,26 @@ def _upgrade_git(ref: str | None, options: LockOptions) -> bool:
     if not options.upgrade_lock:
         return False
     return ref is None or not _is_commit(ref)
+
+
+def _moving_git_ref_needs_resolution(
+    ref: str | None,
+    existing_lockfile: Lockfile | None,
+    lock_input_digest: str,
+) -> bool:
+    if ref is not None and _is_commit(ref):
+        return False
+    return (
+        existing_lockfile is not None
+        and existing_lockfile.manifest.lock_input_digest != lock_input_digest
+    )
+
+
+def _diagnostics_at_path(
+    diagnostics: tuple[Diagnostic, ...],
+    path: tuple[str | int, ...],
+) -> tuple[Diagnostic, ...]:
+    return tuple(replace(diagnostic, path=path) for diagnostic in diagnostics)
 
 
 def _looks_like_constraint(selector: str) -> bool:

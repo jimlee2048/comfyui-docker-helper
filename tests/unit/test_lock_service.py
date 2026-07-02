@@ -269,6 +269,29 @@ def test_default_rewrites_digest_when_new_selector_accepts_existing_lock() -> No
     providers.assert_zero_calls()
 
 
+def test_default_resolves_moving_git_ref_when_lock_inputs_changed() -> None:
+    """Do not reuse a moving Git ref across digest changes for a different ref."""
+    old_config = make_config(
+        custom_nodes=[{"type": "git", "url": GIT_URL, "ref": "main"}]
+    )
+    config = make_config(
+        custom_nodes=[{"type": "git", "url": GIT_URL, "ref": "release"}]
+    )
+    existing = make_lockfile(old_config)
+    existing.custom_nodes = [
+        GitLockedCustomNode(type="git", url=GIT_URL, commit=COMMIT_A)
+    ]
+    providers = FakeProviders()
+    providers.git.refs["release"] = COMMIT_B
+
+    result = resolve_lockfile(config, existing, providers.resolvers())
+
+    assert result.lockfile.custom_nodes == [
+        GitLockedCustomNode(type="git", url=GIT_URL, commit=COMMIT_B)
+    ]
+    assert providers.git.ref_calls == [(GIT_URL, "release")]
+
+
 def test_default_drops_extra_entries_and_keeps_config_order() -> None:
     """Produced non-locked lockfiles contain only config entries in config order."""
     config = make_config(
@@ -589,8 +612,9 @@ def test_registry_deprecated_warning_is_propagated() -> None:
 
     result = resolve_lockfile(config, None, providers.resolvers())
 
-    assert [(item.code, item.severity) for item in result.warnings] == [
+    assert [(item.path, item.code, item.severity) for item in result.warnings] == [
         (
+            ("comfyui", "custom_nodes", 0, "version"),
             "custom_node.deprecated_registry_version",
             DiagnosticSeverity.WARNING,
         )

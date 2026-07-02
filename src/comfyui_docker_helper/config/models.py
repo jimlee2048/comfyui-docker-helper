@@ -145,6 +145,7 @@ class FileConfig(ConfigModel):
     filename: str
     overwrite: bool = False
     downloader: str | None = None
+    download_mode: Literal["sync"] | None = None
 
 
 class Config(ConfigModel):

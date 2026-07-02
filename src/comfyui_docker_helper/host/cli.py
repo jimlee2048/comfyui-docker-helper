@@ -8,12 +8,13 @@ import typer
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
-    load_validate_plan,
+    load_validate_plan_result,
 )
 from comfyui_docker_helper.errors import ApplicationError
 from comfyui_docker_helper.host.buildx import build_image_with_buildx
 from comfyui_docker_helper.host.diagnostics import (
     render_configuration_diagnostics,
+    render_configuration_warnings,
     render_plan_preview,
 )
 from comfyui_docker_helper.rendering import (
@@ -62,13 +63,14 @@ def validate(
     """Validate configuration and build its normalized plan without writing files."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     try:
-        load_validate_plan(config_files, scripts_dir=scripts_dir)
+        result = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    render_configuration_warnings(_format_config_files(config_files), result.warnings)
 
 
 @app.command("render", context_settings=HELP_CONTEXT_SETTINGS)
@@ -118,13 +120,15 @@ def render(
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
     try:
-        plan = load_validate_plan(config_files, scripts_dir=scripts_dir)
+        result = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    render_configuration_warnings(_format_config_files(config_files), result.warnings)
+    plan = result.plan
 
     if dry_run:
         render_plan_preview(plan)
@@ -184,13 +188,15 @@ def build(
     image_tag = _require_exactly_one(image_tags, "--tag/-t")
 
     try:
-        plan = load_validate_plan(config_files, scripts_dir=scripts_dir)
+        result = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    render_configuration_warnings(_format_config_files(config_files), result.warnings)
+    plan = result.plan
 
     try:
         write_build_context(

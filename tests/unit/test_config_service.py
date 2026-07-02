@@ -7,8 +7,10 @@ import pytest
 
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
+    DiagnosticSeverity,
     RenderPlan,
     load_validate_plan,
+    load_validate_plan_result,
 )
 
 MINIMAL_CONFIG = """\
@@ -53,6 +55,57 @@ def test_minimal_config_returns_complete_normalized_plan(
     assert plan.paths.comfyui == "/workspace/ComfyUI"
     assert plan.pytorch.wheel_tag == "cu129"
     assert plan.files.downloader.default == "aria2"
+
+
+def test_result_collects_host_download_mode_warnings(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Keep runtime-only download-mode fields non-fatal in host workflows."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "sync"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "sync"
+"""
+    )
+
+    result = load_validate_plan_result(write_config(document))
+
+    assert isinstance(result.plan, RenderPlan)
+    assert [(item.path, item.code, item.severity) for item in result.warnings] == [
+        (
+            ("cdh", "default_download_mode"),
+            "host.runtime_download_mode_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("files", 0, "download_mode"),
+            "host.runtime_download_mode_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+    ]
+    assert "remove this field" in result.warnings[0].message
+
+
+def test_plan_only_loader_ignores_host_download_mode_warnings(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Preserve the existing load_validate_plan return contract."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "sync"
+"""
+    )
+
+    assert isinstance(load_validate_plan(write_config(document)), RenderPlan)
 
 
 def test_full_config_and_hooks_use_explicit_scripts_directory(

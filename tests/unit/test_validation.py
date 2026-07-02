@@ -805,6 +805,55 @@ def test_global_downloader_enum_and_numeric_ranges_are_validated() -> None:
     ]
 
 
+def test_async_download_mode_is_rejected_by_public_schema() -> None:
+    """Reject future runtime async mode before host warning logic can run."""
+    with pytest.raises(ValidationError) as raised:
+        Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "cdh": {"default_download_mode": "async"},
+                "comfyui": {"version": "latest"},
+                "files": [
+                    {
+                        "url": "https://example.com/model.bin",
+                        "dir": "models",
+                        "filename": "model.bin",
+                        "download_mode": "async",
+                    }
+                ],
+            }
+        )
+
+    assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
+        (("cdh", "default_download_mode"), "literal_error"),
+        (("files", 0, "download_mode"), "literal_error"),
+    }
+
+
+def test_unknown_sections_stay_hard_schema_errors() -> None:
+    """Keep extra root sections out of host warning compatibility handling."""
+    with pytest.raises(ValidationError) as raised:
+        Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "comfyui": {"version": "latest"},
+                "runtime": {"download_mode": "sync"},
+            }
+        )
+
+    assert (("runtime",), "extra_forbidden") in {
+        (error["loc"], error["type"]) for error in raised.value.errors()
+    }
+
+
 @pytest.mark.parametrize("port", [1, 65535])
 def test_aria2_rpc_port_accepts_valid_tcp_port_range(port: int) -> None:
     """Allow every valid TCP port, including privileged ports."""

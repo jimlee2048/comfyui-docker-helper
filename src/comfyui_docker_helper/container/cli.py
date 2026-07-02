@@ -32,7 +32,15 @@ def install_custom_nodes_command(
         Path,
         typer.Option(
             "--config",
-            help="Generated custom-node helper TOML.",
+            help="Root rendered config.toml.",
+            show_default=False,
+        ),
+    ],
+    lock: Annotated[
+        Path,
+        typer.Option(
+            "--lock",
+            help="Root rendered config.lock.toml.",
             show_default=False,
         ),
     ],
@@ -49,6 +57,7 @@ def install_custom_nodes_command(
 
     install_custom_nodes(
         config,
+        lock,
         scripts_dir=scripts_dir,
         runtime=ContainerRuntime.from_env(),
     )
@@ -60,7 +69,15 @@ def download_files_command(
         Path,
         typer.Option(
             "--config",
-            help="Generated file-download helper TOML.",
+            help="Root rendered config.toml.",
+            show_default=False,
+        ),
+    ],
+    lock: Annotated[
+        Path,
+        typer.Option(
+            "--lock",
+            help="Root rendered config.lock.toml.",
             show_default=False,
         ),
     ],
@@ -68,4 +85,4 @@ def download_files_command(
     """Download configured files inside the build container."""
 
     runtime = ContainerRuntime.from_env()
-    download_files(config, comfyui_path=runtime.comfyui_path)
+    download_files(config, lock, comfyui_path=runtime.comfyui_path)

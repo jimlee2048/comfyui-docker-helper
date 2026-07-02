@@ -98,20 +98,17 @@ def test_validate_accepts_repeated_file_options_in_order(
         config_files: list[Path], *, scripts_dir: Path
     ) -> ConfigurationResult:
         calls.append((config_files, scripts_dir))
-        return ConfigurationResult(
-            plan=build_render_plan(
-                Config.model_validate(
-                    {
-                        "compute_platform": {
-                            "type": "cuda",
-                            "cuda": {"version": "12.9.2"},
-                        },
-                        "pytorch": {"version": "2.10"},
-                        "comfyui": {"version": "latest"},
-                    }
-                )
-            )
+        config = Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "comfyui": {"version": "latest"},
+            }
         )
+        return ConfigurationResult(config=config, plan=build_render_plan(config))
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.load_validate_plan_result",
@@ -434,6 +431,58 @@ def test_render_dry_run_prints_preview_and_writes_nothing(
     assert not (tmp_path / "missing").exists()
 
 
+@pytest.mark.parametrize(
+    ("lock_flag", "mode", "resolution"),
+    [
+        ("--locked", "Mode: locked + dry-run", "Resolution: no update; no resolution"),
+        (
+            "--upgrade-lock",
+            "Mode: upgrade + dry-run",
+            "Resolution: re-resolve moving selectors",
+        ),
+    ],
+)
+def test_render_dry_run_with_lock_flags_reports_behavior_and_writes_nothing(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    lock_flag: str,
+    mode: str,
+    resolution: str,
+) -> None:
+    """Dry-run lock flags report effective lock behavior without writing files."""
+    path = _write_config(tmp_path)
+    output = tmp_path / "context"
+    rendered = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output)],
+    )
+    assert rendered.exit_code == 0
+    before = {
+        item.relative_to(output).as_posix(): item.read_bytes()
+        for item in output.rglob("*")
+        if item.is_file()
+    }
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output), "--dry-run", lock_flag],
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert "Lock:" in result.stdout
+    assert mode in result.stdout
+    assert resolution in result.stdout
+    assert "Write: no (dry-run)" in result.stdout
+    assert "ComfyUI: 0.26.0 @" in result.stdout
+    assert "comfy-cli: 1.5.0" in result.stdout
+    assert {
+        item.relative_to(output).as_posix(): item.read_bytes()
+        for item in output.rglob("*")
+        if item.is_file()
+    } == before
+
+
 def test_render_dry_run_merges_repeated_file_options(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -467,6 +516,36 @@ workspace = "/srv"
 
     assert result.exit_code == 0
     assert "Workspace: /srv" in result.stdout
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("extra_flag", "message"),
+    [
+        ("--dry-run", "--check cannot be combined with --dry-run"),
+        ("--upgrade-lock", "--check cannot be combined with --upgrade-lock"),
+    ],
+)
+def test_render_check_rejects_incompatible_flags_at_cli_level(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    extra_flag: str,
+    message: str,
+) -> None:
+    """Render CLI surfaces shared lock option compatibility diagnostics."""
+    path = _write_config(tmp_path)
+    output = tmp_path / "context"
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output), "--check", extra_flag],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Configuration is invalid:" in result.stderr
+    assert "lock.options_incompatible" in result.stderr
+    assert message in result.stderr
     assert not output.exists()
 
 
@@ -555,6 +634,8 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             "  - final",
             "",
             "Output manifest:",
+            "  - config.toml [file]",
+            "  - config.lock.toml [file]",
             "  - Dockerfile [file]",
             "  - .cdh-rendered [file]",
             "  - packages/cdh/pyproject.toml [file]",
@@ -589,7 +670,7 @@ def test_render_cli_writes_conditional_configs_and_scripts(
     cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Write helper configs and scripts only when render-plan features need them."""
+    """Write root artifacts and scripts only when render-plan features need them."""
     path = _write_config(
         tmp_path,
         MINIMAL_CONFIG
@@ -627,8 +708,10 @@ filename = "model.safetensors"
 
     assert result.exit_code == 0
     assert has_valid_context_marker(output)
-    assert (output / "config" / "custom-nodes.toml").is_file()
-    assert (output / "config" / "files.toml").is_file()
+    assert (output / "config.toml").is_file()
+    assert (output / "config.lock.toml").is_file()
+    assert not (output / "config" / "custom-nodes.toml").exists()
+    assert not (output / "config" / "files.toml").exists()
     assert (output / "scripts" / "hook.sh").read_text() == "#!/bin/sh\n"
     assert (output / "scripts" / "unused.txt").read_text() == (
         "copy whole scripts tree\n"

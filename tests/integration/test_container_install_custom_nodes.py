@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.artifact_helpers import COMMIT_A, write_root_artifacts
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
@@ -17,9 +18,15 @@ from comfyui_docker_helper.container.runners import (
 
 
 def write_config(tmp_path: Path, body: str) -> Path:
-    """Write a generated helper TOML document."""
-    config = tmp_path / "custom-nodes.toml"
-    config.write_text(body.lstrip(), encoding="utf-8")
+    """Write root config and lock artifacts for custom-node tests."""
+    normalized = body.lstrip()
+    if "[comfyui]\nversion" not in normalized:
+        normalized = normalized.replace(
+            "[comfyui]\n",
+            '[comfyui]\nversion = "latest"\n',
+            1,
+        )
+    config, _ = write_root_artifacts(tmp_path, normalized)
     return config
 
 
@@ -68,20 +75,28 @@ version = "1.0.0"
         description: str,
     ) -> None:
         calls.append((description, argv, str(cwd), env))
-        if description == "custom-node git clone https://example.com/second.git@stable":
+        if (
+            description
+            == f"custom-node git clone https://example.com/second.git@{COMMIT_A}"
+        ):
             (runtime.comfyui_path / "custom_nodes" / "second").mkdir(parents=True)
 
     monkeypatch.setattr(installer, "run_argv", fake_run_argv)
-    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: "abc123")
+    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: COMMIT_A)
 
-    install_custom_nodes(config, runtime=runtime, log=lambda _: None)
+    install_custom_nodes(
+        config,
+        config.with_name("config.lock.toml"),
+        runtime=runtime,
+        log=lambda _: None,
+    )
 
     assert [call[0] for call in calls] == [
         "custom-node registry cache update",
-        "custom-node install first",
-        "custom-node git clone https://example.com/second.git@stable",
-        "custom-node git checkout https://example.com/second.git@stable",
-        "custom-node git submodules https://example.com/second.git@stable",
+        "custom-node install first@1.0.0",
+        f"custom-node git clone https://example.com/second.git@{COMMIT_A}",
+        f"custom-node git checkout https://example.com/second.git@{COMMIT_A}",
+        f"custom-node git submodules https://example.com/second.git@{COMMIT_A}",
         "custom-node install third@1.0.0",
     ]
     assert calls[0][1] == [str(runtime.python), "-m", "cm_cli", "update-cache"]
@@ -94,7 +109,7 @@ version = "1.0.0"
         "install",
         "--exit-on-fail",
         "--fast-deps",
-        "first",
+        "first@1.0.0",
     ]
     assert calls[2][1] == [
         "git",
@@ -109,7 +124,7 @@ version = "1.0.0"
         str(runtime.comfyui_path / "custom_nodes" / "second"),
         "checkout",
         "--detach",
-        "stable",
+        COMMIT_A,
     ]
     assert calls[4][1] == [
         "git",
@@ -151,16 +166,26 @@ url = "https://example.com/only"
     ) -> None:
         del argv, cwd, env
         calls.append(description)
-        if description == "custom-node git clone https://example.com/only":
+        if description == f"custom-node git clone https://example.com/only@{COMMIT_A}":
             (tmp_path / "workspace" / "ComfyUI" / "custom_nodes" / "only").mkdir(
                 parents=True
             )
 
     monkeypatch.setattr(installer, "run_argv", fake_run_argv)
+    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: COMMIT_A)
 
-    install_custom_nodes(config, runtime=make_runtime(tmp_path), log=lambda _: None)
+    install_custom_nodes(
+        config,
+        config.with_name("config.lock.toml"),
+        runtime=make_runtime(tmp_path),
+        log=lambda _: None,
+    )
 
-    assert calls == ["custom-node git clone https://example.com/only"]
+    assert calls == [
+        f"custom-node git clone https://example.com/only@{COMMIT_A}",
+        f"custom-node git checkout https://example.com/only@{COMMIT_A}",
+        f"custom-node git submodules https://example.com/only@{COMMIT_A}",
+    ]
 
 
 def test_git_node_clones_to_explicit_target_dir(
@@ -191,12 +216,21 @@ target_dir = "custom-name"
     ) -> None:
         del cwd, env
         calls.append(argv)
-        if description == "custom-node git clone https://example.com/upstream.git":
+        if (
+            description
+            == f"custom-node git clone https://example.com/upstream.git@{COMMIT_A}"
+        ):
             (runtime.comfyui_path / "custom_nodes" / "custom-name").mkdir(parents=True)
 
     monkeypatch.setattr(installer, "run_argv", fake_run_argv)
+    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: COMMIT_A)
 
-    install_custom_nodes(config, runtime=runtime, log=lambda _: None)
+    install_custom_nodes(
+        config,
+        config.with_name("config.lock.toml"),
+        runtime=runtime,
+        log=lambda _: None,
+    )
 
     assert calls == [
         [
@@ -205,7 +239,24 @@ target_dir = "custom-name"
             "--recursive",
             "https://example.com/upstream.git",
             str(runtime.comfyui_path / "custom_nodes" / "custom-name"),
-        ]
+        ],
+        [
+            "git",
+            "-C",
+            str(runtime.comfyui_path / "custom_nodes" / "custom-name"),
+            "checkout",
+            "--detach",
+            COMMIT_A,
+        ],
+        [
+            "git",
+            "-C",
+            str(runtime.comfyui_path / "custom_nodes" / "custom-name"),
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
     ]
 
 
@@ -252,7 +303,12 @@ ref = "{ref}"
     monkeypatch.setattr(installer, "run_argv", fake_run_argv)
     monkeypatch.setattr(installer, "_git_output", lambda *_, **__: ref)
 
-    install_custom_nodes(config, runtime=runtime, log=lambda _: None)
+    install_custom_nodes(
+        config,
+        config.with_name("config.lock.toml"),
+        runtime=runtime,
+        log=lambda _: None,
+    )
 
     assert [call[0] for call in calls] == [
         f"custom-node git clone https://example.com/ComfyUI-Example.git@{ref}",
@@ -323,13 +379,79 @@ ref = "{ref}"
     )
 
     with pytest.raises(ContainerCommandError, match="ref verification failed"):
-        install_custom_nodes(config, runtime=runtime, log=lambda _: None)
+        install_custom_nodes(
+            config,
+            config.with_name("config.lock.toml"),
+            runtime=runtime,
+            log=lambda _: None,
+        )
 
     assert events == [
         f"custom-node git clone https://example.com/bad.git@{ref}",
         f"custom-node git checkout https://example.com/bad.git@{ref}",
         f"custom-node git submodules https://example.com/bad.git@{ref}",
     ]
+
+
+@pytest.mark.parametrize("failed_step", ["clone", "checkout"])
+def test_locked_git_commit_fetch_or_checkout_failure_is_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_step: str,
+) -> None:
+    """Surface failures fetching or checking out the locked git commit."""
+    config = write_config(
+        tmp_path,
+        """
+[comfyui]
+
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://example.com/unreachable.git"
+""",
+    )
+    runtime = make_runtime(tmp_path)
+    repo_path = runtime.comfyui_path / "custom_nodes" / "unreachable"
+    events: list[str] = []
+    clone_description = (
+        f"custom-node git clone https://example.com/unreachable.git@{COMMIT_A}"
+    )
+    checkout_description = (
+        f"custom-node git checkout https://example.com/unreachable.git@{COMMIT_A}"
+    )
+    fail_description = {
+        "clone": clone_description,
+        "checkout": checkout_description,
+    }[failed_step]
+
+    def fake_run_argv(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        description: str,
+    ) -> None:
+        del argv, cwd, env
+        events.append(description)
+        if description == fail_description:
+            raise ContainerCommandError(f"{description} failed")
+        if description == clone_description:
+            repo_path.mkdir(parents=True)
+
+    monkeypatch.setattr(installer, "run_argv", fake_run_argv)
+
+    with pytest.raises(ContainerCommandError, match=f"{failed_step}.*failed"):
+        install_custom_nodes(
+            config,
+            config.with_name("config.lock.toml"),
+            runtime=runtime,
+            log=lambda _: None,
+        )
+
+    if failed_step == "clone":
+        assert events == [clone_description]
+    else:
+        assert events == [clone_description, checkout_description]
 
 
 def test_hooks_run_pre_install_post_for_each_node(
@@ -380,6 +502,7 @@ post_install_scripts = ["post.py"]
 
     install_custom_nodes(
         config,
+        config.with_name("config.lock.toml"),
         scripts_dir=scripts,
         runtime=make_runtime(tmp_path),
         log=lambda _: None,
@@ -388,14 +511,14 @@ post_install_scripts = ["post.py"]
     assert events == [
         "custom-node registry cache update",
         "hooks:pre.sh",
-        "custom-node install node",
+        "custom-node install node@1.0.0",
         "hooks:post.py",
     ]
 
 
 @pytest.mark.parametrize(
     "fail_description",
-    ["custom-node registry cache update", "custom-node install node"],
+    ["custom-node registry cache update", "custom-node install node@1.0.0"],
 )
 def test_failures_stop_immediately(
     tmp_path: Path,
@@ -451,6 +574,7 @@ id = "next"
     with pytest.raises(ContainerCommandError, match=fail_description):
         install_custom_nodes(
             config,
+            config.with_name("config.lock.toml"),
             scripts_dir=scripts,
             runtime=make_runtime(tmp_path),
             log=lambda _: None,
@@ -461,7 +585,7 @@ id = "next"
     else:
         assert events == [
             "custom-node registry cache update",
-            "custom-node install node",
+            "custom-node install node@1.0.0",
         ]
 
 
@@ -517,6 +641,7 @@ id = "next"
     with pytest.raises(ContainerCommandError, match="pre hook failed"):
         install_custom_nodes(
             config,
+            config.with_name("config.lock.toml"),
             scripts_dir=scripts,
             runtime=make_runtime(tmp_path),
             log=lambda _: None,
@@ -577,6 +702,7 @@ id = "next"
     with pytest.raises(ContainerCommandError, match="post hook failed"):
         install_custom_nodes(
             config,
+            config.with_name("config.lock.toml"),
             scripts_dir=scripts,
             runtime=make_runtime(tmp_path),
             log=lambda _: None,
@@ -584,7 +710,7 @@ id = "next"
 
     assert events == [
         "custom-node registry cache update",
-        "custom-node install node",
+        "custom-node install node@1.0.0",
         "hooks:post.sh",
     ]
 
@@ -596,16 +722,19 @@ def test_cli_registers_install_custom_nodes_command(
 ) -> None:
     """Invoke the supported container helper and pass options through."""
     config = tmp_path / "custom-nodes.toml"
+    lock = tmp_path / "config.lock.toml"
     scripts = tmp_path / "scripts"
     seen: dict[str, Path | None | ContainerRuntime] = {}
 
     def fake_install_custom_nodes(
         config_path: Path,
+        lock_path: Path,
         *,
         scripts_dir: Path | None = None,
         runtime: ContainerRuntime,
     ) -> None:
         seen["config"] = config_path
+        seen["lock"] = lock_path
         seen["scripts_dir"] = scripts_dir
         seen["runtime"] = runtime
 
@@ -623,6 +752,8 @@ def test_cli_registers_install_custom_nodes_command(
             "install-custom-nodes",
             "--config",
             str(config),
+            "--lock",
+            str(lock),
             "--scripts-dir",
             str(scripts),
         ],
@@ -630,6 +761,7 @@ def test_cli_registers_install_custom_nodes_command(
 
     assert result.exit_code == 0
     assert seen["config"] == config
+    assert seen["lock"] == lock
     assert seen["scripts_dir"] == scripts
     assert isinstance(seen["runtime"], ContainerRuntime)
     assert seen["runtime"].workspace == Path("/srv/work")
@@ -643,13 +775,22 @@ def test_cli_install_custom_nodes_fails_without_container_paths(
 ) -> None:
     """Require Docker-managed path environment before helper execution."""
     config = tmp_path / "custom-nodes.toml"
+    lock = tmp_path / "config.lock.toml"
     config.write_text("", encoding="utf-8")
+    lock.write_text("", encoding="utf-8")
     monkeypatch.delenv("WORKSPACE", raising=False)
     monkeypatch.delenv("COMFYUI_PATH", raising=False)
 
     result = cli_runner.invoke(
         app,
-        ["container", "install-custom-nodes", "--config", str(config)],
+        [
+            "container",
+            "install-custom-nodes",
+            "--config",
+            str(config),
+            "--lock",
+            str(lock),
+        ],
     )
 
     assert result.exit_code == 1

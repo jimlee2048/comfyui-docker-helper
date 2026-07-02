@@ -380,7 +380,7 @@ def test_files_resolve_defaults_targets_order_and_downloader_settings() -> None:
 def test_full_feature_layers_and_manifest_are_conditional_and_ordered(
     tmp_path: Path,
 ) -> None:
-    """Activate extras, nodes, files, helper configs, and scripts in spec order."""
+    """Activate extras, nodes, files, root artifacts, and scripts in spec order."""
     (tmp_path / "hook.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     config = make_config()
     config.python.extra_packages = ["xformers"]
@@ -415,16 +415,6 @@ def test_full_feature_layers_and_manifest_are_conditional_and_ordered(
     )
     assert plan.output_manifest.conditional == (
         OutputArtifact(
-            "config/custom-nodes.toml",
-            ArtifactKind.FILE,
-            ArtifactCondition.CUSTOM_NODES,
-        ),
-        OutputArtifact(
-            "config/files.toml",
-            ArtifactKind.FILE,
-            ArtifactCondition.FILES,
-        ),
-        OutputArtifact(
             "scripts",
             ArtifactKind.TREE,
             ArtifactCondition.HOOKS,
@@ -433,7 +423,7 @@ def test_full_feature_layers_and_manifest_are_conditional_and_ordered(
 
 
 def test_nodes_without_hooks_omit_scripts_artifact() -> None:
-    """Emit the node helper config but no scripts tree when hooks are absent."""
+    """Do not emit hook scripts when hooks are absent."""
     config = make_config()
     config.comfyui.custom_nodes = [
         RegistryCustomNodeConfig.model_validate({"type": "registry", "id": "node"})
@@ -441,13 +431,7 @@ def test_nodes_without_hooks_omit_scripts_artifact() -> None:
 
     manifest = build_render_plan(config).output_manifest
 
-    assert manifest.conditional == (
-        OutputArtifact(
-            "config/custom-nodes.toml",
-            ArtifactKind.FILE,
-            ArtifactCondition.CUSTOM_NODES,
-        ),
-    )
+    assert manifest.conditional == ()
 
 
 def test_plan_construction_is_deterministic_and_detached_from_public_mutation() -> None:

@@ -510,22 +510,6 @@ def _build_output_manifest(
         OutputArtifact("packages/cdh/src", ArtifactKind.TREE),
     )
     conditional: list[OutputArtifact] = []
-    if custom_nodes.items:
-        conditional.append(
-            OutputArtifact(
-                "config/custom-nodes.toml",
-                ArtifactKind.FILE,
-                ArtifactCondition.CUSTOM_NODES,
-            )
-        )
-    if files.items:
-        conditional.append(
-            OutputArtifact(
-                "config/files.toml",
-                ArtifactKind.FILE,
-                ArtifactCondition.FILES,
-            )
-        )
     if custom_nodes.has_hooks:
         conditional.append(
             OutputArtifact(

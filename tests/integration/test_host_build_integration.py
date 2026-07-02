@@ -207,21 +207,23 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
 
     assert result.exit_code == 0
     assert docker_calls == [(f"demo:{case.name}", context, Path.cwd())]
-    assert (context / "config" / "custom-nodes.toml").exists() is (
-        case.expect_custom_nodes
-    )
-    assert (context / "config" / "files.toml").exists() is case.expect_files
+    assert (context / "config.toml").is_file()
+    assert (context / "config.lock.toml").is_file()
+    assert not (context / "config" / "custom-nodes.toml").exists()
+    assert not (context / "config" / "files.toml").exists()
     assert (context / "scripts").exists() is case.expect_scripts
 
     if case.expect_custom_nodes:
         custom_nodes = load_custom_nodes_plan(
-            context / "config" / "custom-nodes.toml",
+            context / "config.toml",
+            context / "config.lock.toml",
             scripts_dir=context / "scripts" if case.expect_scripts else None,
         )
         assert custom_nodes.items
     if case.expect_files:
         files = load_file_download_plan(
-            context / "config" / "files.toml",
+            context / "config.toml",
+            context / "config.lock.toml",
             comfyui_path="/work dir/Comfy UI" if case.name == "full" else None,
         )
         assert files.items
@@ -307,8 +309,10 @@ def test_host_build_failure_after_context_completion_keeps_full_context(
     def fail_after_context(*, context_dir: Path, **kwargs) -> None:
         del kwargs
         assert has_valid_context_marker(context_dir)
-        assert (context_dir / "config" / "custom-nodes.toml").is_file()
-        assert (context_dir / "config" / "files.toml").is_file()
+        assert (context_dir / "config.toml").is_file()
+        assert (context_dir / "config.lock.toml").is_file()
+        assert not (context_dir / "config" / "custom-nodes.toml").exists()
+        assert not (context_dir / "config" / "files.toml").exists()
         assert (context_dir / "scripts" / "pre.sh").is_file()
         raise BuildxBuildError("fake docker failed after render")
 
@@ -336,6 +340,8 @@ def test_host_build_failure_after_context_completion_keeps_full_context(
     assert result.exit_code == 1
     assert "fake docker failed after render" in result.stderr
     assert has_valid_context_marker(context)
-    assert (context / "config" / "custom-nodes.toml").is_file()
-    assert (context / "config" / "files.toml").is_file()
+    assert (context / "config.toml").is_file()
+    assert (context / "config.lock.toml").is_file()
+    assert not (context / "config" / "custom-nodes.toml").exists()
+    assert not (context / "config" / "files.toml").exists()
     assert (context / "scripts" / "post.py").is_file()

@@ -15,6 +15,7 @@ from comfyui_docker_helper.config import (
     LockManifest,
     RegistryCustomNodeConfig,
     RegistryLockedCustomNode,
+    compute_git_custom_nodes_input_digest,
     compute_lock_input_digest,
     dump_lockfile_toml,
     load_lockfile,
@@ -44,7 +45,9 @@ def make_lockfile() -> Lockfile:
         schema_version=1,
         manifest=LockManifest(
             lock_input_digest="sha256:"
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            git_custom_nodes_input_digest="sha256:"
+            "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
         ),
         comfyui=LockedComfyUI(
             repo="https://github.com/comfyanonymous/ComfyUI.git",
@@ -78,6 +81,10 @@ def test_lockfile_round_trips_through_deterministic_toml(tmp_path: Path) -> None
     assert path.read_text(encoding="utf-8") == document
     assert parse_lockfile_toml(document) == lockfile
     assert load_lockfile(path) == lockfile
+    assert (
+        parse_lockfile_toml(document).manifest.git_custom_nodes_input_digest
+        == lockfile.manifest.git_custom_nodes_input_digest
+    )
 
 
 def test_nightly_lockfile_omits_stable_comfyui_version() -> None:
@@ -104,6 +111,8 @@ def test_lockfile_serialization_is_deterministic() -> None:
         "[manifest]\n"
         'lock_input_digest = "sha256:'
         '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n'
+        'git_custom_nodes_input_digest = "sha256:'
+        'abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"\n'
         "\n"
         "[comfyui]\n"
         'repo = "https://github.com/comfyanonymous/ComfyUI.git"\n'
@@ -123,12 +132,41 @@ def test_lockfile_serialization_is_deterministic() -> None:
     )
 
 
+def test_lockfile_manifest_git_digest_round_trips_deterministically() -> None:
+    """Persist the Git custom-node input digest in deterministic manifest output."""
+    config = make_config()
+    config.comfyui.custom_nodes = [
+        GitCustomNodeConfig.model_validate(
+            {"type": "git", "url": "https://example.com/b.git", "ref": "main"}
+        ),
+        GitCustomNodeConfig.model_validate(
+            {"type": "git", "url": "https://example.com/a.git", "ref": "release"}
+        ),
+    ]
+    git_digest = compute_git_custom_nodes_input_digest(config)
+    lockfile = make_lockfile()
+    lockfile.manifest.git_custom_nodes_input_digest = git_digest
+
+    document = dump_lockfile_toml(lockfile)
+
+    assert (
+        "[manifest]\n"
+        f'lock_input_digest = "{lockfile.manifest.lock_input_digest}"\n'
+        f'git_custom_nodes_input_digest = "{git_digest}"\n'
+    ) in document
+    assert (
+        parse_lockfile_toml(document).manifest.git_custom_nodes_input_digest
+        == git_digest
+    )
+
+
 @pytest.mark.parametrize(
     "document",
     [
         """
 [manifest]
 lock_input_digest = "sha256:abc"
+git_custom_nodes_input_digest = "sha256:def"
 
 [comfyui]
 repo = "https://example.com/ComfyUI.git"
@@ -140,6 +178,7 @@ schema_version = 2
 
 [manifest]
 lock_input_digest = "sha256:abc"
+git_custom_nodes_input_digest = "sha256:def"
 
 [comfyui]
 repo = "https://example.com/ComfyUI.git"
@@ -162,6 +201,7 @@ unknown = true
 
 [manifest]
 lock_input_digest = "sha256:abc"
+git_custom_nodes_input_digest = "sha256:def"
 
 [comfyui]
 repo = "https://example.com/ComfyUI.git"
@@ -173,6 +213,7 @@ schema_version = 1
 
 [manifest]
 lock_input_digest = "sha256:abc"
+git_custom_nodes_input_digest = "sha256:def"
 
 [comfyui]
 repo = "https://example.com/ComfyUI.git"
@@ -188,6 +229,7 @@ schema_version = 1
 
 [manifest]
 lock_input_digest = "sha256:abc"
+git_custom_nodes_input_digest = "sha256:def"
 
 [comfyui]
 repo = "https://example.com/ComfyUI.git"

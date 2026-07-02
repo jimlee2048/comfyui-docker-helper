@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.artifact_helpers import COMMIT_A
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
@@ -34,7 +35,7 @@ def test_rendered_custom_node_context_feeds_container_installer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Render public config, then consume generated helper TOML and scripts."""
+    """Render public root artifacts, then consume them with scripts."""
     config = tmp_path / "config.toml"
     config.write_text(
         MINIMAL_CONFIG
@@ -87,11 +88,19 @@ post_install_scripts = ["post.py"]
 
     assert render.exit_code == 0
     assert has_valid_context_marker(output)
-    assert (output / "config" / "custom-nodes.toml").is_file()
+    assert (output / "config.toml").is_file()
+    assert (output / "config.lock.toml").is_file()
+    assert not (output / "config" / "custom-nodes.toml").exists()
     assert (output / "scripts" / "pre.sh").is_file()
     assert (output / "scripts" / "post.py").is_file()
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
-    assert "source=config/custom-nodes.toml" in dockerfile
+    assert "comfy-cli==" in dockerfile
+    assert '--version "$COMFYUI_VERSION"' not in dockerfile
+    assert 'if [ "$COMFY_CLI_VERSION" = latest ]' not in dockerfile
+    assert 'git -C "$COMFYUI_PATH" rev-parse HEAD' in dockerfile
+    assert "source=config.toml" in dockerfile
+    assert "source=config.lock.toml" in dockerfile
+    assert "source=config/custom-nodes.toml" not in dockerfile
     assert "source=scripts,target=/tmp/cdh/scripts" in dockerfile
     assert "cdh container install-custom-nodes" in dockerfile
 
@@ -117,16 +126,17 @@ post_install_scripts = ["post.py"]
         subprocess_calls.append((description, argv))
         if (
             description
-            == "custom-node git clone https://example.com/git-node.git@stable"
+            == f"custom-node git clone https://example.com/git-node.git@{COMMIT_A}"
         ):
             (comfyui_path / "custom_nodes" / "explicit-git-node").mkdir(parents=True)
 
     monkeypatch.setenv("HOOK_LOG", str(hook_log))
     monkeypatch.setattr(installer, "run_argv", fake_run_argv)
-    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: "abc123")
+    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: COMMIT_A)
 
     install_custom_nodes(
-        output / "config" / "custom-nodes.toml",
+        output / "config.toml",
+        output / "config.lock.toml",
         scripts_dir=output / "scripts",
         runtime=runtime,
         log=lambda _: None,
@@ -135,9 +145,9 @@ post_install_scripts = ["post.py"]
     assert [call[0] for call in subprocess_calls] == [
         "custom-node registry cache update",
         "custom-node install registry-node@1.2.3",
-        "custom-node git clone https://example.com/git-node.git@stable",
-        "custom-node git checkout https://example.com/git-node.git@stable",
-        "custom-node git submodules https://example.com/git-node.git@stable",
+        f"custom-node git clone https://example.com/git-node.git@{COMMIT_A}",
+        f"custom-node git checkout https://example.com/git-node.git@{COMMIT_A}",
+        f"custom-node git submodules https://example.com/git-node.git@{COMMIT_A}",
     ]
     assert subprocess_calls[0][1] == [
         str(runtime.python),
@@ -153,7 +163,7 @@ post_install_scripts = ["post.py"]
         "https://example.com/git-node.git",
         str(comfyui_path / "custom_nodes" / "explicit-git-node"),
     ]
-    assert subprocess_calls[3][1][-2:] == ["--detach", "stable"]
+    assert subprocess_calls[3][1][-2:] == ["--detach", COMMIT_A]
     assert hook_log.read_text(encoding="utf-8").splitlines() == [
         f"pre:{comfyui_path}:{comfyui_path}:{workspace}:{runtime.virtual_env}",
         f"post:{comfyui_path}:{comfyui_path}:{workspace}:{runtime.virtual_env}",

@@ -3,19 +3,18 @@
 import json
 import shutil
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from importlib import metadata, resources
 from pathlib import Path, PurePosixPath
 
 import tomli_w
 
+from comfyui_docker_helper.config.lock import Lockfile, dump_lockfile_toml
+from comfyui_docker_helper.config.models import Config
 from comfyui_docker_helper.config.plan import (
     ArtifactKind,
-    CustomNodesPlan,
-    FilesPlan,
-    GitCustomNodePlan,
     OutputArtifact,
-    RegistryCustomNodePlan,
     RenderPlan,
 )
 from comfyui_docker_helper.rendering.dockerfile import render_dockerfile
@@ -62,6 +61,8 @@ def write_build_context(
     plan: RenderPlan,
     output_directory: str | Path,
     *,
+    config: Config | None = None,
+    lockfile: Lockfile | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
     config_file: ConfigInput | None = None,
@@ -93,7 +94,7 @@ def write_build_context(
     try:
         overwrite_existing = _validate_destination_state(output, overwrite=overwrite)
         staging = _create_sibling_directory(output, "staging")
-        materialize_build_context(plan, staging)
+        materialize_build_context(plan, staging, config=config, lockfile=lockfile)
         _write_marker(staging)
         _replace_destination(staging, output, overwrite_existing=overwrite_existing)
     except BaseException:
@@ -117,85 +118,18 @@ def has_valid_context_marker(directory: str | Path) -> bool:
     return all(payload.get(key) == value for key, value in _MARKER_PAYLOAD.items())
 
 
-def serialize_custom_nodes_toml(plan: CustomNodesPlan) -> bytes:
-    """Serialize normalized custom nodes as deterministic helper TOML bytes."""
-    nodes: list[dict[str, object]] = []
-    for node in plan.items:
-        if isinstance(node, RegistryCustomNodePlan):
-            item = _ordered_mapping(
-                ("type", node.type),
-                ("id", node.id),
-            )
-            if node.version is not None:
-                item["version"] = node.version
-        elif isinstance(node, GitCustomNodePlan):
-            item = _ordered_mapping(
-                ("type", node.type),
-                ("url", node.url),
-            )
-            if node.ref is not None:
-                item["ref"] = node.ref
-            if node.target_dir is not None:
-                item["target_dir"] = node.target_dir
-        else:  # pragma: no cover - frozen plan union is exhaustive
-            raise TypeError(f"unsupported custom-node plan: {type(node).__name__}")
-        item["pre_install_scripts"] = list(node.pre_install_scripts)
-        item["post_install_scripts"] = list(node.post_install_scripts)
-        nodes.append(item)
-
-    document = _ordered_mapping(
-        (
-            "comfyui",
-            _ordered_mapping(("custom_nodes", nodes)),
-        )
-    )
-    return tomli_w.dumps(document).encode("utf-8")
-
-
-def serialize_files_toml(plan: FilesPlan) -> bytes:
-    """Serialize normalized downloader settings and files as helper TOML bytes."""
-    aria2 = plan.downloader.aria2
-    httpx = plan.downloader.httpx
-    downloader = _ordered_mapping(
-        ("default", plan.downloader.default),
-        (
-            "aria2",
-            _ordered_mapping(
-                ("rpc_port", aria2.rpc_port),
-                ("split", aria2.split),
-                ("max_connection_per_server", aria2.max_connection_per_server),
-                ("min_split_size", aria2.min_split_size),
-                ("resume_download", aria2.resume_download),
-            ),
-        ),
-        (
-            "httpx",
-            _ordered_mapping(
-                ("timeout", httpx.timeout),
-                ("retries", httpx.retries),
-            ),
-        ),
-    )
-    files = [
-        _ordered_mapping(
-            ("url", item.url),
-            ("dir", item.directory),
-            ("filename", item.filename),
-            ("overwrite", item.overwrite),
-            ("downloader", item.downloader),
-        )
-        for item in plan.items
-    ]
-    document = _ordered_mapping(
-        ("downloader", downloader),
-        ("files", files),
-    )
+def serialize_config_toml(config: Config) -> bytes:
+    """Serialize the merged effective root config as deterministic TOML bytes."""
+    document = config.model_dump(mode="json", exclude_none=True)
     return tomli_w.dumps(document).encode("utf-8")
 
 
 def materialize_build_context(
     plan: RenderPlan,
     staging_directory: str | Path,
+    *,
+    config: Config | None = None,
+    lockfile: Lockfile | None = None,
 ) -> None:
     """Populate a caller-owned, existing, empty staging directory.
 
@@ -209,19 +143,24 @@ def materialize_build_context(
     _require_empty_staging_directory(destination)
 
     try:
-        _write_text(destination / "Dockerfile", render_dockerfile(plan))
+        if (config is None) != (lockfile is None):
+            raise MaterializationError(
+                "root config and lock artifacts must be rendered together"
+            )
+        if config is not None and lockfile is not None:
+            _write_bytes(destination / "config.toml", serialize_config_toml(config))
+            _write_text(destination / "config.lock.toml", dump_lockfile_toml(lockfile))
+        else:
+            raise MaterializationError(
+                "root config and lock artifacts are required for Dockerfile rendering"
+            )
+
+        _write_text(
+            destination / "Dockerfile",
+            render_dockerfile(plan, lockfile=lockfile),
+        )
         _materialize_package_projection(destination / "packages" / "cdh")
 
-        if plan.custom_nodes.items:
-            _write_bytes(
-                destination / "config" / "custom-nodes.toml",
-                serialize_custom_nodes_toml(plan.custom_nodes),
-            )
-        if plan.files.items:
-            _write_bytes(
-                destination / "config" / "files.toml",
-                serialize_files_toml(plan.files),
-            )
         if plan.custom_nodes.has_hooks:
             scripts_source = plan.custom_nodes.scripts_source_dir
             if scripts_source is None:
@@ -230,15 +169,66 @@ def materialize_build_context(
                 )
             _copy_plain_tree(scripts_source, destination / "scripts", "scripts")
 
-        _reconcile_manifest(destination, plan.output_manifest.all)
+        _reconcile_manifest(
+            destination,
+            _root_artifacts(config, lockfile) + plan.output_manifest.all,
+        )
     except BaseException:
         _clear_staging_contents(destination)
         raise
 
 
+@contextmanager
+def materialize_expected_build_context(
+    plan: RenderPlan,
+    parent_directory: str | Path,
+    *,
+    config: Config,
+    lockfile: Lockfile,
+) -> Iterator[Path]:
+    """Yield a temporary marked context containing the expected render output."""
+    parent = _resolve_existing_directory(Path(parent_directory), "check parent")
+    _validate_scripts_source_tree(plan)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".cdh-check-",
+            dir=parent,
+        ) as temporary:
+            expected = Path(temporary)
+            expected.chmod(_DIRECTORY_MODE)
+            materialize_build_context(
+                plan,
+                expected,
+                config=config,
+                lockfile=lockfile,
+            )
+            _write_marker(expected)
+            yield expected
+    except MaterializationError:
+        raise
+    except OSError as exc:
+        raise ContextWriteError("could not create expected check context") from exc
+
+
 def _ordered_mapping(*items: tuple[str, object]) -> dict[str, object]:
     """Construct a TOML mapping whose insertion order is explicit at the callsite."""
     return dict(items)
+
+
+def _root_artifacts(
+    config: Config | None,
+    lockfile: Lockfile | None,
+) -> tuple[OutputArtifact, ...]:
+    if config is None and lockfile is None:
+        return ()
+    if config is None or lockfile is None:
+        raise MaterializationError(
+            "root config and lock artifacts must be rendered together"
+        )
+    return (
+        OutputArtifact("config.toml", ArtifactKind.FILE),
+        OutputArtifact("config.lock.toml", ArtifactKind.FILE),
+    )
 
 
 def _require_empty_staging_directory(destination: Path) -> None:

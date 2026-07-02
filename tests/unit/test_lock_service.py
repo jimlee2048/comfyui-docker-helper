@@ -21,6 +21,7 @@ from comfyui_docker_helper.config import (
     RegistryLockedCustomNode,
     RegistryVersionCandidate,
     SourceResolvers,
+    compute_git_custom_nodes_input_digest,
     compute_lock_input_digest,
     dump_lockfile_toml,
     resolve_lockfile,
@@ -182,7 +183,8 @@ def make_lockfile(config: Config, *, digest: str | None = None) -> Lockfile:
     return Lockfile(
         schema_version=1,
         manifest=LockManifest(
-            lock_input_digest=digest or compute_lock_input_digest(config)
+            lock_input_digest=digest or compute_lock_input_digest(config),
+            git_custom_nodes_input_digest=compute_git_custom_nodes_input_digest(config),
         ),
         comfyui=LockedComfyUI(
             repo=COMFYUI_REPO_URL,
@@ -269,8 +271,43 @@ def test_default_rewrites_digest_when_new_selector_accepts_existing_lock() -> No
     providers.assert_zero_calls()
 
 
-def test_default_resolves_moving_git_ref_when_lock_inputs_changed() -> None:
-    """Do not reuse a moving Git ref across digest changes for a different ref."""
+def test_default_reuses_same_moving_git_ref_when_unrelated_selector_changed() -> None:
+    """Digest drift from another selector does not refresh a compatible Git ref."""
+    old_config = make_config(
+        custom_nodes=[
+            {"type": "registry", "id": "node"},
+            {"type": "git", "url": GIT_URL, "ref": "main"},
+        ]
+    )
+    config = make_config(
+        custom_nodes=[
+            {"type": "registry", "id": "node", "version": ">=1,<2"},
+            {"type": "git", "url": GIT_URL, "ref": "main"},
+        ]
+    )
+    existing = make_lockfile(old_config)
+    providers = FakeProviders()
+    providers.git.refs["main"] = COMMIT_B
+
+    assert compute_git_custom_nodes_input_digest(config) == (
+        compute_git_custom_nodes_input_digest(old_config)
+    )
+
+    result = resolve_lockfile(config, existing, providers.resolvers())
+
+    assert result.changed is True
+    assert result.lockfile.manifest.lock_input_digest == compute_lock_input_digest(
+        config
+    )
+    assert result.lockfile.custom_nodes == [
+        RegistryLockedCustomNode(type="registry", id="node", version="1.5.0"),
+        GitLockedCustomNode(type="git", url=GIT_URL, commit=COMMIT_A),
+    ]
+    providers.assert_zero_calls()
+
+
+def test_default_resolves_moving_git_ref_when_git_selector_changed() -> None:
+    """Moving Git ref changes re-resolve even when an old commit is compatible."""
     old_config = make_config(
         custom_nodes=[{"type": "git", "url": GIT_URL, "ref": "main"}]
     )
@@ -284,8 +321,15 @@ def test_default_resolves_moving_git_ref_when_lock_inputs_changed() -> None:
     providers = FakeProviders()
     providers.git.refs["release"] = COMMIT_B
 
+    assert compute_git_custom_nodes_input_digest(config) != (
+        compute_git_custom_nodes_input_digest(old_config)
+    )
+
     result = resolve_lockfile(config, existing, providers.resolvers())
 
+    assert result.lockfile.manifest.git_custom_nodes_input_digest == (
+        compute_git_custom_nodes_input_digest(config)
+    )
     assert result.lockfile.custom_nodes == [
         GitLockedCustomNode(type="git", url=GIT_URL, commit=COMMIT_B)
     ]

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.artifact_helpers import write_root_artifacts
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
@@ -33,6 +34,26 @@ version = "2.10"
 [comfyui]
 version = "latest"
 """
+
+
+def write_file_root_artifacts(tmp_path: Path, body: str) -> tuple[Path, Path]:
+    """Write file-download root config and lock artifacts from a compact body."""
+    root_body = (
+        body.lstrip()
+        .replace("[downloader]", "[cdh]")
+        .replace("[downloader.aria2]", "[cdh.downloader.aria2]")
+        .replace("[downloader.httpx]", "[cdh.downloader.httpx]")
+        .replace('default = "', 'default_downloader = "')
+    )
+    return write_root_artifacts(
+        tmp_path,
+        """
+[comfyui]
+version = "latest"
+
+"""
+        + root_body,
+    )
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
@@ -172,7 +193,7 @@ def test_rendered_files_context_downloads_from_local_http(
     monkeypatch: pytest.MonkeyPatch,
     local_http_server: tuple[str, RecordingHttpServer],
 ) -> None:
-    """Render public config, then consume generated files.toml with HTTPX."""
+    """Render public config, then consume root artifacts with HTTPX."""
     base_url, server = local_http_server
     server.routes = {
         "/first.bin": b"first",
@@ -206,15 +227,18 @@ filename = "second.bin"
 
     assert render.exit_code == 0
     assert has_valid_context_marker(output)
-    files_config = output / "config" / "files.toml"
+    files_config = output / "config.toml"
+    lock_config = output / "config.lock.toml"
     assert files_config.is_file()
+    assert lock_config.is_file()
+    assert not (output / "config" / "files.toml").exists()
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
     assert "cdh container download-files" in dockerfile
 
     comfyui_path = tmp_path / "runtime" / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
 
-    results = download_files(files_config, log=lambda _: None)
+    results = download_files(files_config, lock_config, log=lambda _: None)
 
     assert [result.item.filename for result in results] == [
         "first.bin",
@@ -245,8 +269,8 @@ def test_download_files_overwrites_and_preserves_request_order(
     target.parent.mkdir(parents=True)
     target.write_bytes(b"old-a")
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         f"""
 [downloader]
 default = "httpx"
@@ -276,10 +300,9 @@ filename = "b.bin"
 overwrite = false
 downloader = "httpx"
 """,
-        encoding="utf-8",
     )
 
-    download_files(config, log=lambda _: None)
+    download_files(config, lock, log=lambda _: None)
 
     assert target.read_bytes() == b"new-a"
     assert (comfyui_path / "models" / "b.bin").read_bytes() == b"new-b"
@@ -298,8 +321,8 @@ def test_download_files_aria2_overwrite_removes_target_and_control_file(
     control_file = Path(f"{target}.aria2")
     control_file.write_text("partial\n", encoding="utf-8")
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         """
 [downloader]
 default = "aria2"
@@ -322,12 +345,12 @@ filename = "model.bin"
 overwrite = true
 downloader = "aria2"
 """,
-        encoding="utf-8",
     )
     observed: list[str] = []
 
     download_files(
         config,
+        lock,
         aria2_downloader_factory=lambda *, log: Aria2Downloader(
             process_factory=lambda _: FakeAria2Process(),
             client_factory=lambda **_: FakeAria2Client(),
@@ -348,11 +371,11 @@ def test_download_files_rejects_tampered_paths_without_writing_outside(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep generated-helper containment even if files.toml is tampered."""
+    """Keep root config containment even if file paths are tampered."""
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         """
 [downloader]
 default = "httpx"
@@ -375,11 +398,10 @@ filename = "escape.bin"
 overwrite = false
 downloader = "httpx"
 """,
-        encoding="utf-8",
     )
 
     with pytest.raises(Exception, match="dir must not contain"):
-        download_files(config, log=lambda _: None)
+        download_files(config, lock, log=lambda _: None)
 
     assert not (tmp_path / "escape" / "escape.bin").exists()
 
@@ -391,8 +413,8 @@ def test_download_files_cleans_up_aria2_context_on_interruption(
     """Run aria2 cleanup even when processing is interrupted."""
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         """
 [downloader]
 default = "aria2"
@@ -415,13 +437,13 @@ filename = "a.bin"
 overwrite = false
 downloader = "aria2"
 """,
-        encoding="utf-8",
     )
     events: list[str] = []
 
     with pytest.raises(KeyboardInterrupt):
         download_files(
             config,
+            lock,
             aria2_downloader_factory=lambda *, log: InterruptingManagedBackend(events),
             log=lambda _: None,
         )
@@ -445,8 +467,8 @@ def test_real_aria2_smoke_when_available(
     server.routes = {"/aria2.bin": b"aria2"}
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         f"""
 [downloader]
 default = "aria2"
@@ -469,10 +491,9 @@ filename = "aria2.bin"
 overwrite = false
 downloader = "aria2"
 """,
-        encoding="utf-8",
     )
 
-    download_files(config, log=lambda _: None)
+    download_files(config, lock, log=lambda _: None)
 
     assert (comfyui_path / "models" / "aria2.bin").read_bytes() == b"aria2"
     assert server.requests == ["/aria2.bin"]

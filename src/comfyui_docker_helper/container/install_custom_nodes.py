@@ -29,14 +29,15 @@ class Logger(Protocol):
 
 def install_custom_nodes(
     config_path: str | Path,
+    lock_path: str | Path,
     *,
     scripts_dir: str | Path | None = None,
     runtime: ContainerRuntime = _DEFAULT_RUNTIME,
     log: Logger = print,
 ) -> None:
-    """Install custom nodes from the generated helper config."""
+    """Install custom nodes from the validated root artifacts."""
 
-    plan = load_custom_nodes_plan(config_path, scripts_dir=scripts_dir)
+    plan = load_custom_nodes_plan(config_path, lock_path, scripts_dir=scripts_dir)
     env = runtime.env()
 
     if plan.update_cache:

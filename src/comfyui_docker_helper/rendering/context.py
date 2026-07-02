@@ -149,8 +149,15 @@ def materialize_build_context(
         if config is not None and lockfile is not None:
             _write_bytes(destination / "config.toml", serialize_config_toml(config))
             _write_text(destination / "config.lock.toml", dump_lockfile_toml(lockfile))
+        else:
+            raise MaterializationError(
+                "root config and lock artifacts are required for Dockerfile rendering"
+            )
 
-        _write_text(destination / "Dockerfile", render_dockerfile(plan))
+        _write_text(
+            destination / "Dockerfile",
+            render_dockerfile(plan, lockfile=lockfile),
+        )
         _materialize_package_projection(destination / "packages" / "cdh")
 
         if plan.custom_nodes.has_hooks:

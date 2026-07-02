@@ -93,6 +93,10 @@ post_install_scripts = ["post.py"]
     assert (output / "scripts" / "pre.sh").is_file()
     assert (output / "scripts" / "post.py").is_file()
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
+    assert "comfy-cli==" in dockerfile
+    assert '--version "$COMFYUI_VERSION"' not in dockerfile
+    assert 'if [ "$COMFY_CLI_VERSION" = latest ]' not in dockerfile
+    assert 'git -C "$COMFYUI_PATH" rev-parse HEAD' in dockerfile
     assert "source=config.toml" in dockerfile
     assert "source=config.lock.toml" in dockerfile
     assert "source=config/custom-nodes.toml" not in dockerfile

@@ -211,6 +211,14 @@ def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
     assert lockfile.comfyui.commit == COMMIT_1
     assert lockfile.custom_nodes[0].version == "1.0.0"
     assert lockfile.custom_nodes[1].commit == COMMIT_A
+    dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
+    assert "comfy-cli==1.5.0" in dockerfile
+    assert "      --version \\\n      0.26.0 \\" in dockerfile
+    expected_verify = (
+        'RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && '
+        f'test "$comfyui_commit" = {COMMIT_1}'
+    )
+    assert expected_verify in dockerfile
 
 
 def test_root_artifacts_omitted_during_dry_run(tmp_path: Path) -> None:

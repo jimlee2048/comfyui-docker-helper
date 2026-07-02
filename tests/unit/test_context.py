@@ -12,6 +12,7 @@ from importlib import metadata
 from pathlib import Path
 
 import pytest
+from tests.artifact_helpers import make_lockfile
 
 import comfyui_docker_helper.rendering.context as context_module
 from comfyui_docker_helper.config import (
@@ -77,7 +78,12 @@ def materialize(
     plan = build_render_plan(config, scripts_dir=scripts)
     staging = tmp_path / name
     staging.mkdir()
-    materialize_build_context(plan, staging)
+    materialize_build_context(
+        plan,
+        staging,
+        config=config,
+        lockfile=make_lockfile(config),
+    )
     return staging, plan
 
 
@@ -95,6 +101,8 @@ def write_context(
     write_build_context(
         plan,
         output,
+        config=config,
+        lockfile=make_lockfile(config),
         overwrite=overwrite,
         working_directory=tmp_path,
         config_file=config_file,
@@ -158,7 +166,10 @@ def test_minimal_context_projects_running_distribution_without_readme(
     """Project package resources and generated metadata, not a repository checkout."""
     staging, plan = materialize(tmp_path, make_config())
 
-    assert (staging / "Dockerfile").read_text() == render_dockerfile(plan)
+    assert (staging / "Dockerfile").read_text() == render_dockerfile(
+        plan,
+        lockfile=make_lockfile(make_config()),
+    )
     package = staging / "packages" / "cdh"
     assert {path.name for path in package.iterdir()} == {"pyproject.toml", "src"}
     assert not (package / "README.md").exists()
@@ -486,7 +497,8 @@ def test_write_build_context_cleans_created_parents_when_materialization_fails(
     tmp_path: Path,
 ) -> None:
     """Failed renders remove staging and created output parent directories."""
-    plan = build_render_plan(make_config())
+    config = make_config()
+    plan = build_render_plan(config)
     broken_manifest = OutputManifest(
         always=(
             *plan.output_manifest.always,
@@ -500,6 +512,8 @@ def test_write_build_context_cleans_created_parents_when_materialization_fails(
         write_build_context(
             replace(plan, output_manifest=broken_manifest),
             output,
+            config=config,
+            lockfile=make_lockfile(config),
             working_directory=tmp_path,
         )
 
@@ -513,7 +527,8 @@ def test_write_build_context_preserves_marked_destination_when_materialization_f
     output = tmp_path / "context"
     write_valid_marker(output)
     (output / "old.txt").write_text("preserve\n")
-    plan = build_render_plan(make_config())
+    config = make_config()
+    plan = build_render_plan(config)
     broken_manifest = OutputManifest(
         always=(
             *plan.output_manifest.always,
@@ -526,6 +541,8 @@ def test_write_build_context_preserves_marked_destination_when_materialization_f
         write_build_context(
             replace(plan, output_manifest=broken_manifest),
             output,
+            config=config,
+            lockfile=make_lockfile(config),
             overwrite=True,
             working_directory=tmp_path,
         )
@@ -699,7 +716,15 @@ staging = Path(sys.argv[3]).resolve()
 sys.path.insert(0, str(install_target))
 
 import comfyui_docker_helper
-from comfyui_docker_helper.config import Config, build_render_plan
+from comfyui_docker_helper.config import (
+    COMFYUI_REPO_URL,
+    Config,
+    LockedComfyUI,
+    Lockfile,
+    LockManifest,
+    build_render_plan,
+    compute_lock_input_digest,
+)
 from comfyui_docker_helper.rendering import materialize_build_context
 
 package_file = Path(comfyui_docker_helper.__file__).resolve()
@@ -712,7 +737,22 @@ config = Config.model_validate({
     "pytorch": {"version": "2.10"},
     "comfyui": {"version": "latest"},
 })
-materialize_build_context(build_render_plan(config), staging)
+lockfile = Lockfile(
+    schema_version=1,
+    manifest=LockManifest(lock_input_digest=compute_lock_input_digest(config)),
+    comfyui=LockedComfyUI(
+        repo=COMFYUI_REPO_URL,
+        version="0.26.0",
+        commit="1" * 40,
+        cli_version="1.5.0",
+    ),
+)
+materialize_build_context(
+    build_render_plan(config),
+    staging,
+    config=config,
+    lockfile=lockfile,
+)
 package = staging / "packages" / "cdh"
 assert (package / "pyproject.toml").is_file()
 assert not (package / "README.md").exists()
@@ -760,7 +800,8 @@ def test_staging_precondition_requires_an_existing_empty_directory(
 
 def test_manifest_failure_cleans_only_created_staging_contents(tmp_path: Path) -> None:
     """Keep the staging container and unrelated paths when reconciliation fails."""
-    plan = build_render_plan(make_config())
+    config = make_config()
+    plan = build_render_plan(config)
     broken_manifest = OutputManifest(
         always=(
             *plan.output_manifest.always,
@@ -775,7 +816,12 @@ def test_manifest_failure_cleans_only_created_staging_contents(tmp_path: Path) -
     sibling.write_text("preserve\n")
 
     with pytest.raises(MaterializationError, match="missing file artifact"):
-        materialize_build_context(broken_plan, staging)
+        materialize_build_context(
+            broken_plan,
+            staging,
+            config=config,
+            lockfile=make_lockfile(config),
+        )
 
     assert staging.is_dir()
     assert list(staging.iterdir()) == []
@@ -784,7 +830,8 @@ def test_manifest_failure_cleans_only_created_staging_contents(tmp_path: Path) -
 
 def test_manifest_reconciliation_rejects_unexpected_artifacts(tmp_path: Path) -> None:
     """Fail closed when actual materialization and the plan manifest diverge."""
-    plan = build_render_plan(make_config())
+    config = make_config()
+    plan = build_render_plan(config)
     broken_manifest = OutputManifest(
         always=tuple(
             artifact
@@ -803,6 +850,8 @@ def test_manifest_reconciliation_rejects_unexpected_artifacts(tmp_path: Path) ->
         materialize_build_context(
             replace(plan, output_manifest=broken_manifest),
             staging,
+            config=config,
+            lockfile=make_lockfile(config),
         )
 
     assert list(staging.iterdir()) == []

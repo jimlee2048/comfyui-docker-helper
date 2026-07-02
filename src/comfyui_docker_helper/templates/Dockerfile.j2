@@ -58,19 +58,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 {% endif %}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$COMFY_CLI_VERSION" = latest ]; then \
-      uv pip install --python "$VIRTUAL_ENV/bin/python" -- comfy-cli; \
-    else \
-      uv pip install --python "$VIRTUAL_ENV/bin/python" -- "comfy-cli==${COMFY_CLI_VERSION}"; \
-    fi
+    uv pip install --python "$VIRTUAL_ENV/bin/python" -- {{ locked_comfyui.cli_requirement | shell_argument }}
 
 RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install \
       --nvidia \
-      --version "$COMFYUI_VERSION" \
+{% for argument in locked_comfyui.install_arguments %}
+      {{ argument | shell_argument }} \
+{% endfor %}
       --skip-torch-or-directml \
       --fast-deps{% if not plan.comfyui.install_manager %} \
       --skip-manager{% endif %}
 
+{% if locked_comfyui.verify_stable_commit %}
+RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_commit" = {{ locked_comfyui.commit | shell_argument }}
+
+{% endif %}
 RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python "$VIRTUAL_ENV/bin/python" -- /tmp/cdh/packages/cdh

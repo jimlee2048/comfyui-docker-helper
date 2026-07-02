@@ -9,6 +9,8 @@ from pathlib import Path, PurePosixPath
 
 import tomli_w
 
+from comfyui_docker_helper.config.lock import Lockfile, dump_lockfile_toml
+from comfyui_docker_helper.config.models import Config
 from comfyui_docker_helper.config.plan import (
     ArtifactKind,
     CustomNodesPlan,
@@ -62,6 +64,8 @@ def write_build_context(
     plan: RenderPlan,
     output_directory: str | Path,
     *,
+    config: Config | None = None,
+    lockfile: Lockfile | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
     config_file: ConfigInput | None = None,
@@ -93,7 +97,7 @@ def write_build_context(
     try:
         overwrite_existing = _validate_destination_state(output, overwrite=overwrite)
         staging = _create_sibling_directory(output, "staging")
-        materialize_build_context(plan, staging)
+        materialize_build_context(plan, staging, config=config, lockfile=lockfile)
         _write_marker(staging)
         _replace_destination(staging, output, overwrite_existing=overwrite_existing)
     except BaseException:
@@ -193,9 +197,18 @@ def serialize_files_toml(plan: FilesPlan) -> bytes:
     return tomli_w.dumps(document).encode("utf-8")
 
 
+def serialize_config_toml(config: Config) -> bytes:
+    """Serialize the merged effective root config as deterministic TOML bytes."""
+    document = config.model_dump(mode="json", exclude_none=True)
+    return tomli_w.dumps(document).encode("utf-8")
+
+
 def materialize_build_context(
     plan: RenderPlan,
     staging_directory: str | Path,
+    *,
+    config: Config | None = None,
+    lockfile: Lockfile | None = None,
 ) -> None:
     """Populate a caller-owned, existing, empty staging directory.
 
@@ -209,6 +222,14 @@ def materialize_build_context(
     _require_empty_staging_directory(destination)
 
     try:
+        if (config is None) != (lockfile is None):
+            raise MaterializationError(
+                "root config and lock artifacts must be rendered together"
+            )
+        if config is not None and lockfile is not None:
+            _write_bytes(destination / "config.toml", serialize_config_toml(config))
+            _write_text(destination / "config.lock.toml", dump_lockfile_toml(lockfile))
+
         _write_text(destination / "Dockerfile", render_dockerfile(plan))
         _materialize_package_projection(destination / "packages" / "cdh")
 
@@ -230,7 +251,10 @@ def materialize_build_context(
                 )
             _copy_plain_tree(scripts_source, destination / "scripts", "scripts")
 
-        _reconcile_manifest(destination, plan.output_manifest.all)
+        _reconcile_manifest(
+            destination,
+            _root_artifacts(config, lockfile) + plan.output_manifest.all,
+        )
     except BaseException:
         _clear_staging_contents(destination)
         raise
@@ -239,6 +263,22 @@ def materialize_build_context(
 def _ordered_mapping(*items: tuple[str, object]) -> dict[str, object]:
     """Construct a TOML mapping whose insertion order is explicit at the callsite."""
     return dict(items)
+
+
+def _root_artifacts(
+    config: Config | None,
+    lockfile: Lockfile | None,
+) -> tuple[OutputArtifact, ...]:
+    if config is None and lockfile is None:
+        return ()
+    if config is None or lockfile is None:
+        raise MaterializationError(
+            "root config and lock artifacts must be rendered together"
+        )
+    return (
+        OutputArtifact("config.toml", ArtifactKind.FILE),
+        OutputArtifact("config.lock.toml", ArtifactKind.FILE),
+    )
 
 
 def _require_empty_staging_directory(destination: Path) -> None:

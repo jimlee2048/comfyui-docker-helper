@@ -98,20 +98,17 @@ def test_validate_accepts_repeated_file_options_in_order(
         config_files: list[Path], *, scripts_dir: Path
     ) -> ConfigurationResult:
         calls.append((config_files, scripts_dir))
-        return ConfigurationResult(
-            plan=build_render_plan(
-                Config.model_validate(
-                    {
-                        "compute_platform": {
-                            "type": "cuda",
-                            "cuda": {"version": "12.9.2"},
-                        },
-                        "pytorch": {"version": "2.10"},
-                        "comfyui": {"version": "latest"},
-                    }
-                )
-            )
+        config = Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "comfyui": {"version": "latest"},
+            }
         )
+        return ConfigurationResult(config=config, plan=build_render_plan(config))
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.load_validate_plan_result",

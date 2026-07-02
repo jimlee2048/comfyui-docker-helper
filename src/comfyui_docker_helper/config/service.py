@@ -29,6 +29,7 @@ type ConfigPath = str | Path
 class ConfigurationResult:
     """A validated render plan and non-fatal host-context diagnostics."""
 
+    config: Config
     plan: RenderPlan
     warnings: tuple[Diagnostic, ...] = ()
 
@@ -69,7 +70,7 @@ def load_validate_plan_result(
         plan = build_render_plan(config, scripts_dir=scripts_dir)
     except RenderPlanValidationError as error:
         raise ConfigurationServiceError(error.diagnostics) from error
-    return ConfigurationResult(plan=plan, warnings=warnings)
+    return ConfigurationResult(config=config, plan=plan, warnings=warnings)
 
 
 def _coerce_config_paths(

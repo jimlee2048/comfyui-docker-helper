@@ -100,6 +100,7 @@ def render_plan_preview(
     output.print("Python:")
     output.print(f"  Version: {plan.python.version}")
     output.print(f"  uv image tag: {plan.python.uv_version}")
+    output.print(f"  Index URL: {plan.python.index_url}")
     output.print(f"  Extra packages: {_format_list(plan.python.extra_packages)}")
     output.print()
     output.print("PyTorch:")

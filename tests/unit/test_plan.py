@@ -56,6 +56,7 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.environment == ()
     assert plan.python.version == "3.12"
     assert plan.python.uv_version == "latest"
+    assert plan.python.index_url == "https://pypi.org/simple"
     assert plan.python.extra_packages == ()
     assert plan.pytorch.version == "2.10"
     assert plan.pytorch.wheel_tag == "cu129"
@@ -172,6 +173,7 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     config.system.env = {"B": "second", "A": "first"}
     config.python.version = "3.13"
     config.python.uv_version = "0.8.0"
+    config.python.index_url = "https://mirror.example.com/simple"
     config.python.extra_packages = ["one", "two"]
     config.pytorch.version = "2.11"
     config.pytorch.extra_packages = ["torchvision", "torchaudio"]
@@ -191,6 +193,7 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     ]
     assert plan.python.version == "3.13"
     assert plan.python.uv_version == "0.8.0"
+    assert plan.python.index_url == "https://mirror.example.com/simple"
     assert plan.python.extra_packages == ("one", "two")
     assert plan.pytorch.version == "2.11"
     assert plan.pytorch.requirements == (

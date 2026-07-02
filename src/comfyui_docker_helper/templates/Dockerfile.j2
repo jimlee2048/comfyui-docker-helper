@@ -39,18 +39,21 @@ RUN mkdir -p -- \
 {% endfor %}{{ "\n" }}
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv python install -- "${PYTHON_VERSION}" \
- && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed
+ && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed \
+      --index-url {{ plan.python.index_url | shell_argument }}
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python "$VIRTUAL_ENV/bin/python" \
-      --index-url "{{ plan.pytorch.index_base_url | dockerfile_word }}/${PYTORCH_WHEEL_TAG}" \
+      --index-url {{ plan.pytorch.index_base_url | shell_argument }}/${PYTORCH_WHEEL_TAG} \
       -- \
       "torch==${PYTORCH_VERSION}"{% for package in pytorch_extra_packages %} \
       {{ package | shell_argument }}{% endfor %}
 
 {% if plan.python.extra_packages %}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \
+      --index-url {{ plan.python.index_url | shell_argument }} \
+      -- \
 {% for package in plan.python.extra_packages %}
       {{ package | shell_argument }}{% if not loop.last %} \
 {% endif %}
@@ -58,7 +61,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 {% endif %}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- {{ locked_comfyui.cli_requirement | shell_argument }}
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \
+      --index-url {{ plan.python.index_url | shell_argument }} \
+      -- {{ locked_comfyui.cli_requirement | shell_argument }}
 
 RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install \
       --nvidia \
@@ -75,7 +80,9 @@ RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_
 {% endif %}
 RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- /tmp/cdh/packages/cdh
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \
+      --index-url {{ plan.python.index_url | shell_argument }} \
+      -- /tmp/cdh/packages/cdh
 
 {% if plan.custom_nodes.items %}
 RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \

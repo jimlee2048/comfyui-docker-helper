@@ -579,6 +579,7 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             "Python:",
             "  Version: 3.12",
             "  uv image tag: latest",
+            "  Index URL: https://pypi.org/simple",
             "  Extra packages: none",
             "",
             "PyTorch:",

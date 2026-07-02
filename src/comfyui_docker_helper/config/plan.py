@@ -80,6 +80,7 @@ class PythonPlan:
 
     version: str
     uv_version: str
+    index_url: str
     extra_packages: tuple[str, ...]
 
 
@@ -280,6 +281,7 @@ def build_render_plan(
     python = PythonPlan(
         version=config.python.version,
         uv_version=config.python.uv_version,
+        index_url=config.python.index_url,
         extra_packages=tuple(config.python.extra_packages),
     )
     pytorch = PyTorchPlan(

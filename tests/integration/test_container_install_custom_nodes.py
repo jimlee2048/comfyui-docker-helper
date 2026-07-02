@@ -271,6 +271,9 @@ def test_git_node_installs_requirements_and_install_script(
         f"""
 [comfyui]
 
+[python]
+index_url = "https://python.example.com/simple"
+
 [[comfyui.custom_nodes]]
 type = "git"
 url = "https://example.com/ComfyUI-Example.git"
@@ -331,6 +334,8 @@ ref = "{ref}"
         "install",
         "--python",
         str(runtime.python),
+        "--index-url",
+        "https://python.example.com/simple",
         "-r",
         str(repo_path / "requirements.txt"),
     ]

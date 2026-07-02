@@ -17,6 +17,13 @@ from comfyui_docker_helper.config.lock import (
     validate_lock_domain_unique,
     write_lockfile,
 )
+from comfyui_docker_helper.config.lock_service import (
+    LockOptions,
+    LockServiceError,
+    LockServiceResult,
+    SourceResolvers,
+    resolve_lockfile,
+)
 from comfyui_docker_helper.config.models import (
     Aria2Config,
     BuildConfig,
@@ -141,6 +148,9 @@ __all__ = [
     "Layer",
     "LockDomainError",
     "LockManifest",
+    "LockOptions",
+    "LockServiceError",
+    "LockServiceResult",
     "LockedComfyUI",
     "LockedCustomNode",
     "Lockfile",
@@ -166,6 +176,7 @@ __all__ = [
     "ResolvedGitCustomNode",
     "ResolvedRegistryCustomNode",
     "ResolverError",
+    "SourceResolvers",
     "SystemConfig",
     "UpstreamResponseError",
     "build_render_plan",
@@ -185,6 +196,7 @@ __all__ = [
     "resolve_comfy_cli",
     "resolve_comfyui",
     "resolve_git_custom_node",
+    "resolve_lockfile",
     "resolve_registry_custom_node",
     "validate_config",
     "validate_lock_domain_unique",

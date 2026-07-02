@@ -1,7 +1,7 @@
 """Tests for ComfyUI and comfy-cli source resolvers."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -9,6 +9,7 @@ from comfyui_docker_helper.config import (
     COMFYUI_REPO_URL,
     ComfyCliVersionCandidate,
     ComfyUIReleaseCandidate,
+    GitLockedCustomNode,
     LockedComfyUI,
     NoMatchingVersionError,
     RegistryInstallMetadata,
@@ -18,9 +19,11 @@ from comfyui_docker_helper.config import (
     UpstreamResponseError,
     locked_comfy_cli_satisfies_selector,
     locked_comfyui_satisfies_selector,
+    locked_git_custom_node_satisfies_selector,
     locked_registry_custom_node_satisfies_selector,
     resolve_comfy_cli,
     resolve_comfyui,
+    resolve_git_custom_node,
     resolve_registry_custom_node,
 )
 
@@ -29,6 +32,11 @@ COMMIT_2 = "2" * 40
 COMMIT_3 = "3" * 40
 COMMIT_4 = "4" * 40
 COMMIT_5 = "5" * 40
+COMMIT_A = "a" * 40
+COMMIT_B = "b" * 40
+COMMIT_C = "c" * 40
+UPPER_COMMIT_A = "A" * 40
+GIT_URL = "https://example.com/custom-node.git"
 
 
 @dataclass(slots=True)
@@ -94,6 +102,29 @@ class FakeRegistryProvider:
                 reason="registry version listing is unavailable",
             )
         return self.versions
+
+
+@dataclass(slots=True)
+class FakeGitProvider:
+    """In-memory Git provider that records resolver boundary calls."""
+
+    default_commit: str | Exception = COMMIT_A
+    refs: dict[str, str | Exception] = field(default_factory=dict)
+    default_calls: list[str] = field(default_factory=list)
+    ref_calls: list[tuple[str, str]] = field(default_factory=list)
+
+    def resolve_default_branch_head(self, url: str) -> str:
+        self.default_calls.append(url)
+        if isinstance(self.default_commit, Exception):
+            raise self.default_commit
+        return self.default_commit
+
+    def resolve_ref(self, url: str, ref: str) -> str:
+        self.ref_calls.append((url, ref))
+        result = self.refs[ref]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def comfyui_candidates() -> list[ComfyUIReleaseCandidate]:
@@ -530,6 +561,124 @@ def test_registry_deprecated_response_warns_but_resolves() -> None:
     assert len(resolved.warnings) == 1
     assert resolved.warnings[0].code == "custom_node.deprecated_registry_version"
     assert resolved.warnings[0].severity == "warning"
+
+
+def test_git_omitted_ref_uses_default_branch_boundary_and_normalizes_commit() -> None:
+    """Resolve omitted Git refs through the default branch boundary."""
+    provider = FakeGitProvider(default_commit=UPPER_COMMIT_A)
+
+    resolved = resolve_git_custom_node(GIT_URL, None, provider)
+
+    assert resolved.url == GIT_URL
+    assert resolved.commit == COMMIT_A
+    assert provider.default_calls == [GIT_URL]
+    assert provider.ref_calls == []
+
+
+@pytest.mark.parametrize("ref", ["main", "v1.2.3", "HEAD"])
+def test_git_explicit_moving_ref_uses_explicit_boundary(ref: str) -> None:
+    """Resolve branch, tag, and symbolic refs through the explicit ref boundary."""
+    provider = FakeGitProvider(refs={ref: COMMIT_B})
+
+    resolved = resolve_git_custom_node(GIT_URL, ref, provider)
+
+    assert resolved.commit == COMMIT_B
+    assert provider.default_calls == []
+    assert provider.ref_calls == [(GIT_URL, ref)]
+
+
+def test_git_full_commit_input_returns_directly_without_provider_call() -> None:
+    """Treat exact full commit selectors as stable lock inputs."""
+    provider = FakeGitProvider(default_commit=LookupError("should not be called"))
+
+    resolved = resolve_git_custom_node(GIT_URL, UPPER_COMMIT_A, provider)
+
+    assert resolved.commit == COMMIT_A
+    assert provider.default_calls == []
+    assert provider.ref_calls == []
+
+
+def test_git_short_commit_like_input_resolves_through_explicit_boundary() -> None:
+    """Short SHA-like selectors are refs, not locked commits."""
+    provider = FakeGitProvider(refs={"abc1234": COMMIT_C})
+
+    resolved = resolve_git_custom_node(GIT_URL, "abc1234", provider)
+
+    assert resolved.commit == COMMIT_C
+    assert provider.ref_calls == [(GIT_URL, "abc1234")]
+
+
+def test_git_provider_no_match_reports_user_readable_diagnostic() -> None:
+    """Wrap provider no-match failures with selector and source context."""
+    provider = FakeGitProvider(refs={"missing": LookupError("missing ref")})
+
+    with pytest.raises(NoMatchingVersionError) as error:
+        resolve_git_custom_node(GIT_URL, "missing", provider)
+
+    assert error.value.source == "git custom-node"
+    assert error.value.selector == "missing"
+    assert GIT_URL in str(error.value)
+
+
+def test_git_malformed_provider_commit_fails_as_upstream_response() -> None:
+    """Reject provider commits that are not full 40-character hex SHA values."""
+    provider = FakeGitProvider(default_commit="not-a-sha")
+
+    with pytest.raises(UpstreamResponseError) as error:
+        resolve_git_custom_node(GIT_URL, None, provider)
+
+    assert error.value.source == "git custom-node ref"
+    assert error.value.selector == "<default branch>"
+
+
+def test_git_resolved_custom_node_to_locked_output() -> None:
+    """Convert resolved Git selections to the lockfile model."""
+    provider = FakeGitProvider(default_commit=COMMIT_A)
+
+    resolved = resolve_git_custom_node(GIT_URL, None, provider)
+
+    assert resolved.to_locked() == GitLockedCustomNode(
+        type="git",
+        url=GIT_URL,
+        commit=COMMIT_A,
+    )
+
+
+def test_locked_git_reuse_checks_selector_without_provider_calls() -> None:
+    """Strict locked mode can check Git selectors without provider calls."""
+    provider = FakeGitProvider(default_commit=COMMIT_C, refs={"main": COMMIT_C})
+    locked = GitLockedCustomNode(type="git", url=GIT_URL, commit=COMMIT_A)
+
+    assert locked_git_custom_node_satisfies_selector(locked, GIT_URL, None) is True
+    assert locked_git_custom_node_satisfies_selector(locked, GIT_URL, "main") is True
+    assert (
+        locked_git_custom_node_satisfies_selector(locked, GIT_URL, "refs/tags/v1")
+        is True
+    )
+    assert (
+        locked_git_custom_node_satisfies_selector(locked, GIT_URL, UPPER_COMMIT_A)
+        is True
+    )
+    assert locked_git_custom_node_satisfies_selector(locked, GIT_URL, COMMIT_B) is False
+    assert (
+        locked_git_custom_node_satisfies_selector(
+            locked,
+            "https://example.com/other.git",
+            None,
+        )
+        is False
+    )
+    assert provider.default_calls == []
+    assert provider.ref_calls == []
+
+
+def test_locked_git_malformed_commit_is_incompatible() -> None:
+    """Treat malformed local Git lock data as incompatible."""
+    locked = GitLockedCustomNode(type="git", url=GIT_URL, commit="not-a-sha")
+
+    assert locked_git_custom_node_satisfies_selector(locked, GIT_URL, None) is False
+    assert locked_git_custom_node_satisfies_selector(locked, GIT_URL, "main") is False
+    assert locked_git_custom_node_satisfies_selector(locked, GIT_URL, COMMIT_A) is False
 
 
 def test_locked_registry_reuse_checks_selector_without_provider_calls() -> None:

@@ -11,7 +11,11 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
-from comfyui_docker_helper.config.lock import LockedComfyUI, RegistryLockedCustomNode
+from comfyui_docker_helper.config.lock import (
+    GitLockedCustomNode,
+    LockedComfyUI,
+    RegistryLockedCustomNode,
+)
 from comfyui_docker_helper.config.validation import (
     normalize_comfy_cli_version,
     normalize_comfyui_version,
@@ -124,6 +128,22 @@ class ResolvedRegistryCustomNode:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedGitCustomNode:
+    """Resolved Git custom-node source selection."""
+
+    url: str
+    commit: str
+
+    def to_locked(self) -> GitLockedCustomNode:
+        """Return the minimal lockfile entry for this Git custom node."""
+        return GitLockedCustomNode(
+            type="git",
+            url=self.url,
+            commit=self.commit,
+        )
+
+
 class ComfyUIReleaseProvider(Protocol):
     """Mockable boundary for ComfyUI release and nightly metadata."""
 
@@ -153,6 +173,16 @@ class RegistryCustomNodeProvider(Protocol):
 
     def list_versions(self, node_id: str) -> Sequence[RegistryVersionCandidate]:
         """Return available registry versions for one custom-node ID."""
+
+
+class GitCustomNodeProvider(Protocol):
+    """Mockable boundary for Git custom-node ref resolution."""
+
+    def resolve_default_branch_head(self, url: str) -> str:
+        """Resolve a repository default branch HEAD to a full commit SHA."""
+
+    def resolve_ref(self, url: str, ref: str) -> str:
+        """Resolve an explicit branch, tag, symbolic ref, or commit to a SHA."""
 
 
 def resolve_comfyui(
@@ -272,6 +302,40 @@ def resolve_registry_custom_node(
     )
 
 
+def resolve_git_custom_node(
+    url: str,
+    ref: str | None,
+    provider: GitCustomNodeProvider,
+) -> ResolvedGitCustomNode:
+    """Resolve an already-validated Git custom-node selector to a full commit."""
+    selector = _git_selector(ref)
+    if ref is not None and _is_commit(ref):
+        return ResolvedGitCustomNode(url=url, commit=ref.lower())
+
+    try:
+        if ref is None:
+            commit = provider.resolve_default_branch_head(url)
+        else:
+            commit = provider.resolve_ref(url, ref)
+    except NoMatchingVersionError:
+        raise
+    except ResolverError:
+        raise
+    except LookupError as error:
+        raise NoMatchingVersionError(
+            source="git custom-node",
+            selector=selector,
+            reason=f"no commit matches url {url!r}",
+        ) from error
+
+    _validate_commit(
+        commit,
+        source="git custom-node ref",
+        selector=selector,
+    )
+    return ResolvedGitCustomNode(url=url, commit=commit.lower())
+
+
 def locked_comfyui_satisfies_selector(
     locked: LockedComfyUI,
     selector: str,
@@ -371,6 +435,19 @@ def locked_registry_custom_node_satisfies_selector(
             normalized_selector
         ).contains(locked_version, prereleases=False)
     return normalized_locked == normalized_selector
+
+
+def locked_git_custom_node_satisfies_selector(
+    locked: GitLockedCustomNode,
+    url: str,
+    ref: str | None,
+) -> bool:
+    """Return whether a locked Git entry can be reused without provider calls."""
+    if locked.type != "git" or locked.url != url or not _is_commit(locked.commit):
+        return False
+    if ref is None or not _is_commit(ref):
+        return True
+    return locked.commit.lower() == ref.lower()
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,6 +627,12 @@ def _normalize_registry_selector(selector: str | None) -> str:
     if selector is None:
         return "latest"
     return normalize_registry_version(selector)
+
+
+def _git_selector(ref: str | None) -> str:
+    if ref is None:
+        return "<default branch>"
+    return ref
 
 
 def _list_registry_versions(

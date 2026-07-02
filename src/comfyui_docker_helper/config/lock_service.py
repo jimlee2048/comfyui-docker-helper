@@ -14,6 +14,7 @@ from comfyui_docker_helper.config.lock import (
     Lockfile,
     LockManifest,
     RegistryLockedCustomNode,
+    compute_git_custom_nodes_input_digest,
     compute_lock_input_digest,
 )
 from comfyui_docker_helper.config.models import (
@@ -97,6 +98,7 @@ def resolve_lockfile(
 
     try:
         lock_input_digest = compute_lock_input_digest(config)
+        git_custom_nodes_input_digest = compute_git_custom_nodes_input_digest(config)
     except LockDomainError as error:
         raise LockServiceError(
             (
@@ -119,11 +121,14 @@ def resolve_lockfile(
         resolvers,
         options,
         warnings,
-        lock_input_digest,
+        git_custom_nodes_input_digest,
     )
     lockfile = Lockfile(
         schema_version=LOCKFILE_SCHEMA_VERSION,
-        manifest=LockManifest(lock_input_digest=lock_input_digest),
+        manifest=LockManifest(
+            lock_input_digest=lock_input_digest,
+            git_custom_nodes_input_digest=git_custom_nodes_input_digest,
+        ),
         comfyui=comfyui,
         custom_nodes=custom_nodes,
     )
@@ -232,7 +237,7 @@ def _resolve_custom_nodes(
     resolvers: SourceResolvers,
     options: LockOptions,
     warnings: list[Diagnostic],
-    lock_input_digest: str,
+    git_custom_nodes_input_digest: str,
 ) -> list[RegistryLockedCustomNode | GitLockedCustomNode]:
     registry_entries = _registry_entries(existing_lockfile)
     git_entries = _git_entries(existing_lockfile)
@@ -277,7 +282,7 @@ def _resolve_custom_nodes(
                 and not _moving_git_ref_needs_resolution(
                     node.ref,
                     existing_lockfile,
-                    lock_input_digest,
+                    git_custom_nodes_input_digest,
                 )
                 and locked_git_custom_node_satisfies_selector(
                     existing,
@@ -469,13 +474,14 @@ def _upgrade_git(ref: str | None, options: LockOptions) -> bool:
 def _moving_git_ref_needs_resolution(
     ref: str | None,
     existing_lockfile: Lockfile | None,
-    lock_input_digest: str,
+    git_custom_nodes_input_digest: str,
 ) -> bool:
     if ref is not None and _is_commit(ref):
         return False
     return (
         existing_lockfile is not None
-        and existing_lockfile.manifest.lock_input_digest != lock_input_digest
+        and existing_lockfile.manifest.git_custom_nodes_input_digest
+        != git_custom_nodes_input_digest
     )
 
 

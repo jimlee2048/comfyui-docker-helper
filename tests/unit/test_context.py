@@ -758,6 +758,7 @@ from comfyui_docker_helper.config import (
     LockManifest,
     build_render_plan,
     compute_lock_input_digest,
+    compute_git_custom_nodes_input_digest,
 )
 from comfyui_docker_helper.rendering import materialize_build_context
 
@@ -773,7 +774,10 @@ config = Config.model_validate({
 })
 lockfile = Lockfile(
     schema_version=1,
-    manifest=LockManifest(lock_input_digest=compute_lock_input_digest(config)),
+    manifest=LockManifest(
+        lock_input_digest=compute_lock_input_digest(config),
+        git_custom_nodes_input_digest=compute_git_custom_nodes_input_digest(config),
+    ),
     comfyui=LockedComfyUI(
         repo=COMFYUI_REPO_URL,
         version="0.26.0",

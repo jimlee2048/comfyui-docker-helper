@@ -38,6 +38,7 @@ class LockManifest(LockConfigModel):
     """Lockfile manifest metadata."""
 
     lock_input_digest: str
+    git_custom_nodes_input_digest: str
 
 
 class LockedComfyUI(LockConfigModel):
@@ -110,7 +111,16 @@ def write_lockfile(path: str | Path, lockfile: Lockfile) -> None:
 
 def compute_lock_input_digest(config: Config) -> str:
     """Return the digest for the lock-relevant effective config subset only."""
-    payload = _lock_input_payload(config)
+    return _compute_digest(_lock_input_payload(config))
+
+
+def compute_git_custom_nodes_input_digest(config: Config) -> str:
+    """Return a stable digest for Git custom-node URL/ref inputs only."""
+    validate_lock_domain_unique(config)
+    return _compute_digest(_git_custom_nodes_input_payload(config))
+
+
+def _compute_digest(payload: object) -> str:
     canonical = json.dumps(
         payload,
         ensure_ascii=True,
@@ -146,7 +156,6 @@ def _lock_input_payload(config: Config) -> dict[str, object]:
     validate_lock_domain_unique(config)
 
     registry_nodes = []
-    git_nodes = []
     for node in config.comfyui.custom_nodes:
         if isinstance(node, RegistryCustomNodeConfig):
             registry_nodes.append(
@@ -155,8 +164,6 @@ def _lock_input_payload(config: Config) -> dict[str, object]:
                     "version": _normalize_registry_lock_selector(node.version),
                 }
             )
-        elif isinstance(node, GitCustomNodeConfig):
-            git_nodes.append({"url": node.url, "ref": node.ref})
 
     return {
         "comfyui": {
@@ -165,9 +172,17 @@ def _lock_input_payload(config: Config) -> dict[str, object]:
         },
         "custom_nodes": {
             "registry": sorted(registry_nodes, key=lambda item: item["id"]),
-            "git": sorted(git_nodes, key=lambda item: item["url"]),
+            "git": _git_custom_nodes_input_payload(config),
         },
     }
+
+
+def _git_custom_nodes_input_payload(config: Config) -> list[dict[str, str | None]]:
+    git_nodes = []
+    for node in config.comfyui.custom_nodes:
+        if isinstance(node, GitCustomNodeConfig):
+            git_nodes.append({"url": node.url, "ref": node.ref})
+    return sorted(git_nodes, key=lambda item: item["url"])
 
 
 def _normalize_registry_lock_selector(version: str | None) -> str:

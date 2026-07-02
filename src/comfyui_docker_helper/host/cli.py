@@ -165,7 +165,11 @@ def render(
     render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
 
     if dry_run:
-        render_plan_preview(prepared.plan)
+        render_plan_preview(
+            prepared.plan,
+            lock_result=prepared.lock_result,
+            lock_options=lock_options,
+        )
         return
 
 

@@ -384,6 +384,19 @@ def test_check_mode_reports_package_projection_drift(tmp_path: Path) -> None:
         render_context(tmp_path, output=output, options=LockOptions(check=True))
 
 
+def test_check_mode_reports_stale_file_under_package_source_tree(
+    tmp_path: Path,
+) -> None:
+    """Check mode catches actual-only files inside managed package trees."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    stale = output / "packages" / "cdh" / "src" / "stale.py"
+    stale.write_text("stale\n", encoding="utf-8")
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+
 def test_check_mode_reports_symlink_package_projection_file(
     tmp_path: Path,
 ) -> None:
@@ -432,6 +445,33 @@ def test_check_mode_reports_scripts_drift_when_hooks_are_present(
         scripts_dir=scripts,
     )
     (output / "scripts" / "pre.sh").write_text("changed\n", encoding="utf-8")
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(
+            tmp_path,
+            output=output,
+            config_content=HOOK_CONFIG,
+            scripts_dir=scripts,
+            options=LockOptions(check=True),
+        )
+
+
+def test_check_mode_reports_stale_file_under_scripts_when_hooks_are_present(
+    tmp_path: Path,
+) -> None:
+    """Check mode catches actual-only files inside the managed scripts tree."""
+    output = tmp_path / "context"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    render_context(
+        tmp_path,
+        output=output,
+        config_content=HOOK_CONFIG,
+        scripts_dir=scripts,
+    )
+    stale = output / "scripts" / "stale.sh"
+    stale.write_text("#!/bin/sh\n", encoding="utf-8")
 
     with pytest_raises_host_error("render.check_changed"):
         render_context(
@@ -516,6 +556,20 @@ def test_check_mode_ignores_unmanaged_extras_and_keeps_target_unchanged(
 
     assert file_contents(output) == before
     assert extra.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_check_mode_reports_retired_helper_projection_config_tree(
+    tmp_path: Path,
+) -> None:
+    """Check mode catches stale v0.1 helper projection paths."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    old_config = output / "config"
+    old_config.mkdir()
+    (old_config / "custom-nodes.toml").write_text("[custom_nodes]\n", encoding="utf-8")
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
 
 
 def test_check_mode_cleans_temporary_expected_contexts(tmp_path: Path) -> None:

@@ -406,7 +406,10 @@ def _run_stable_commit_verification_command(
         pytest.param(
             Lockfile(
                 schema_version=1,
-                manifest=LockManifest(lock_input_digest="sha256:" + "0" * 64),
+                manifest=LockManifest(
+                    lock_input_digest="sha256:" + "0" * 64,
+                    git_custom_nodes_input_digest="sha256:" + "1" * 64,
+                ),
                 comfyui=LockedComfyUI(
                     repo="https://github.com/comfyanonymous/ComfyUI.git",
                     version="0.26.0",
@@ -420,7 +423,10 @@ def _run_stable_commit_verification_command(
         pytest.param(
             Lockfile(
                 schema_version=1,
-                manifest=LockManifest(lock_input_digest="sha256:" + "0" * 64),
+                manifest=LockManifest(
+                    lock_input_digest="sha256:" + "0" * 64,
+                    git_custom_nodes_input_digest="sha256:" + "1" * 64,
+                ),
                 comfyui=LockedComfyUI(
                     repo="https://github.com/comfyanonymous/ComfyUI.git",
                     version="",
@@ -434,7 +440,10 @@ def _run_stable_commit_verification_command(
         pytest.param(
             Lockfile(
                 schema_version=1,
-                manifest=LockManifest(lock_input_digest="sha256:" + "0" * 64),
+                manifest=LockManifest(
+                    lock_input_digest="sha256:" + "0" * 64,
+                    git_custom_nodes_input_digest="sha256:" + "1" * 64,
+                ),
                 comfyui=LockedComfyUI(
                     repo="https://github.com/comfyanonymous/ComfyUI.git",
                     version=None,

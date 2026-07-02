@@ -102,6 +102,38 @@ def test_comfyui_release_listing_keeps_lightweight_tag_commit(
     assert releases[0].commit == COMMIT_A
 
 
+def test_git_ref_resolution_uses_peeled_ref_for_annotated_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Annotated tags resolve to their target commit, not the tag object."""
+    refs = "\n".join(
+        [
+            f"{COMMIT_1}\trefs/tags/v0.1.0",
+            f"{COMMIT_2}\trefs/tags/v0.1.0^{{}}",
+        ]
+    )
+    monkeypatch.setattr(provider_module, "_run_git", lambda *args: refs)
+
+    commit = GitRemoteProvider().resolve_ref("https://example.com/repo.git", "v0.1.0")
+
+    assert commit == COMMIT_2
+
+
+def test_git_ref_resolution_keeps_lightweight_tag_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lightweight tags resolve to their single returned commit."""
+    monkeypatch.setattr(
+        provider_module,
+        "_run_git",
+        lambda *args: f"{COMMIT_A}\trefs/tags/v0.2.0\n",
+    )
+
+    commit = GitRemoteProvider().resolve_ref("https://example.com/repo.git", "v0.2.0")
+
+    assert commit == COMMIT_A
+
+
 def test_pypi_provider_wraps_http_request_errors() -> None:
     """HTTP transport failures become resolver diagnostics."""
     client = FakeHttpClient(

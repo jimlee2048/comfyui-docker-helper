@@ -28,6 +28,10 @@ from comfyui_docker_helper.rendering import (
 )
 from comfyui_docker_helper.rendering.context import ConfigInput
 
+_ALWAYS_MANAGED_TREES = ("packages/cdh/src",)
+_CONDITIONAL_MANAGED_TREES = ("scripts",)
+_RETIRED_HELPER_PROJECTION_ROOTS = ("config",)
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedContext:
@@ -233,7 +237,52 @@ def _compare_managed_artifacts(
             or not _files_match(expected_path, actual_path)
         ):
             diagnostics.append(_changed_artifact_diagnostic(artifact))
+    diagnostics.extend(
+        _actual_only_managed_artifact_diagnostics(expected_dir, output_dir)
+    )
     return diagnostics
+
+
+def _actual_only_managed_artifact_diagnostics(
+    expected_dir: Path,
+    output_dir: Path,
+) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    for root in _expected_managed_tree_roots(expected_dir):
+        actual_root = output_dir / root
+        if (
+            not actual_root.exists()
+            or actual_root.is_symlink()
+            or not actual_root.is_dir()
+        ):
+            continue
+        for actual_path in _walk_actual_artifacts(actual_root):
+            relative = actual_path.relative_to(output_dir)
+            if not (expected_dir / relative).exists():
+                diagnostics.append(_changed_artifact_diagnostic(relative.as_posix()))
+
+    for root in _RETIRED_HELPER_PROJECTION_ROOTS:
+        actual_path = output_dir / root
+        if actual_path.exists() or actual_path.is_symlink():
+            diagnostics.append(_changed_artifact_diagnostic(root))
+    return diagnostics
+
+
+def _expected_managed_tree_roots(expected_dir: Path) -> tuple[str, ...]:
+    roots = list(_ALWAYS_MANAGED_TREES)
+    for root in _CONDITIONAL_MANAGED_TREES:
+        if (expected_dir / root).exists():
+            roots.append(root)
+    return tuple(roots)
+
+
+def _walk_actual_artifacts(root: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted(
+            root.rglob("*"),
+            key=lambda path: path.as_posix(),
+        )
+    )
 
 
 def _files_match(expected_path: Path, actual_path: Path) -> bool:

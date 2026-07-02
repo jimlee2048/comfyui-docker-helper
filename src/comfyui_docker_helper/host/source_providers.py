@@ -74,7 +74,7 @@ class GitRemoteProvider:
                 selector=ref,
                 reason=f"no remote ref matched url {url!r}",
             )
-        commit, _ = _split_ls_remote_line(lines[0])
+        commit, _ = _select_resolved_ref(lines)
         return commit
 
 
@@ -174,6 +174,14 @@ def _run_git(git_executable: str, *args: str) -> str:
             reason=reason or f"git exited with code {completed.returncode}",
         )
     return completed.stdout
+
+
+def _select_resolved_ref(lines: Sequence[str]) -> tuple[str, str]:
+    resolved_refs = [_split_ls_remote_line(line) for line in lines]
+    for commit, ref in resolved_refs:
+        if ref.endswith("^{}"):
+            return commit, ref
+    return resolved_refs[0]
 
 
 def _get_json(

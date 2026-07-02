@@ -14,6 +14,7 @@ from comfyui_docker_helper.config import (
     Lockfile,
     LockManifest,
     RegistryLockedCustomNode,
+    compute_git_custom_nodes_input_digest,
     compute_lock_input_digest,
     dump_lockfile_toml,
 )
@@ -72,7 +73,10 @@ def make_lockfile(config: Config) -> Lockfile:
             )
     return Lockfile(
         schema_version=1,
-        manifest=LockManifest(lock_input_digest=compute_lock_input_digest(config)),
+        manifest=LockManifest(
+            lock_input_digest=compute_lock_input_digest(config),
+            git_custom_nodes_input_digest=compute_git_custom_nodes_input_digest(config),
+        ),
         comfyui=LockedComfyUI(
             repo=COMFYUI_REPO_URL,
             version="0.26.0",

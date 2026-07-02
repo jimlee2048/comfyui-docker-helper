@@ -431,6 +431,58 @@ def test_render_dry_run_prints_preview_and_writes_nothing(
     assert not (tmp_path / "missing").exists()
 
 
+@pytest.mark.parametrize(
+    ("lock_flag", "mode", "resolution"),
+    [
+        ("--locked", "Mode: locked + dry-run", "Resolution: no update; no resolution"),
+        (
+            "--upgrade-lock",
+            "Mode: upgrade + dry-run",
+            "Resolution: re-resolve moving selectors",
+        ),
+    ],
+)
+def test_render_dry_run_with_lock_flags_reports_behavior_and_writes_nothing(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    lock_flag: str,
+    mode: str,
+    resolution: str,
+) -> None:
+    """Dry-run lock flags report effective lock behavior without writing files."""
+    path = _write_config(tmp_path)
+    output = tmp_path / "context"
+    rendered = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output)],
+    )
+    assert rendered.exit_code == 0
+    before = {
+        item.relative_to(output).as_posix(): item.read_bytes()
+        for item in output.rglob("*")
+        if item.is_file()
+    }
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output), "--dry-run", lock_flag],
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert "Lock:" in result.stdout
+    assert mode in result.stdout
+    assert resolution in result.stdout
+    assert "Write: no (dry-run)" in result.stdout
+    assert "ComfyUI: 0.26.0 @" in result.stdout
+    assert "comfy-cli: 1.5.0" in result.stdout
+    assert {
+        item.relative_to(output).as_posix(): item.read_bytes()
+        for item in output.rglob("*")
+        if item.is_file()
+    } == before
+
+
 def test_render_dry_run_merges_repeated_file_options(
     cli_runner: CliRunner,
     tmp_path: Path,

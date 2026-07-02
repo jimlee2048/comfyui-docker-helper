@@ -18,17 +18,18 @@ EXPECTED_FULL_KEYS = {
     "compute_platform.cuda": {"version", "image_flavor", "image_distro"},
     "system": {"workspace", "comfyui_path", "extra_packages", "env"},
     "system.env": {"COMFYUI_PORT", "EXAMPLE_PROFILE"},
-    "python": {"version", "uv_version", "extra_packages"},
-    "pytorch": {"version", "extra_packages"},
-    "downloader": {"default", "httpx", "aria2"},
-    "downloader.httpx": {"timeout", "retries"},
-    "downloader.aria2": {
+    "python": {"version", "uv_version", "index_url", "extra_packages"},
+    "pytorch": {"version", "index_base_url", "extra_packages"},
+    "cdh": {"default_downloader", "default_download_mode", "downloader"},
+    "cdh.downloader.httpx": {"timeout", "retries"},
+    "cdh.downloader.aria2": {
         "rpc_port",
         "split",
         "max_connection_per_server",
         "min_split_size",
         "resume_download",
     },
+    "build": {"tags", "output"},
     "comfyui": {
         "version",
         "cli_version",
@@ -71,7 +72,8 @@ def test_full_example_covers_all_public_config_fields() -> None:
         "system",
         "python",
         "pytorch",
-        "downloader",
+        "cdh",
+        "build",
         "comfyui",
         "files",
     }
@@ -84,13 +86,16 @@ def test_full_example_covers_all_public_config_fields() -> None:
     assert set(document["system"]["env"]) == EXPECTED_FULL_KEYS["system.env"]
     assert set(document["python"]) == EXPECTED_FULL_KEYS["python"]
     assert set(document["pytorch"]) == EXPECTED_FULL_KEYS["pytorch"]
-    assert set(document["downloader"]) == EXPECTED_FULL_KEYS["downloader"]
+    assert set(document["cdh"]) == EXPECTED_FULL_KEYS["cdh"]
     assert (
-        set(document["downloader"]["httpx"]) == EXPECTED_FULL_KEYS["downloader.httpx"]
+        set(document["cdh"]["downloader"]["httpx"])
+        == EXPECTED_FULL_KEYS["cdh.downloader.httpx"]
     )
     assert (
-        set(document["downloader"]["aria2"]) == EXPECTED_FULL_KEYS["downloader.aria2"]
+        set(document["cdh"]["downloader"]["aria2"])
+        == EXPECTED_FULL_KEYS["cdh.downloader.aria2"]
     )
+    assert set(document["build"]) == EXPECTED_FULL_KEYS["build"]
     assert set(document["comfyui"]) == EXPECTED_FULL_KEYS["comfyui"]
 
     custom_nodes = document["comfyui"]["custom_nodes"]

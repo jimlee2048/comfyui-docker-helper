@@ -7,10 +7,10 @@ version = "12.9.2"
 [pytorch]
 version = "2.10"
 
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 1
 max_connection_per_server = 1

@@ -262,6 +262,64 @@ workspace = "/srv"
     assert "ENV WORKSPACE=/srv" in (context / "Dockerfile").read_text(encoding="utf-8")
 
 
+def test_build_with_host_warnings_still_renders_and_invokes_buildx(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Print host-context warnings without blocking the v0.2 build flow."""
+    config = write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "sync"
+""",
+    )
+    context = tmp_path / "context"
+    calls: list[str] = []
+
+    def fake_buildx(
+        *,
+        image_tag: str,
+        context_dir: Path,
+        cwd: Path,
+        log,
+    ) -> BuildxBuildResult:
+        del context_dir, cwd, log
+        calls.append(image_tag)
+        return BuildxBuildResult(
+            argv=("docker",),
+            context_dir=context,
+            image_tag=image_tag,
+        )
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        fake_buildx,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "demo:warning",
+            "--context-dir",
+            str(context),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Configuration has warnings:" in result.stderr
+    assert "[cdh.default_download_mode]" in result.stderr
+    assert has_valid_context_marker(context)
+    assert calls == ["demo:warning"]
+
+
 def test_build_rejects_repeated_singleton_options_before_loading(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
@@ -275,7 +333,7 @@ def test_build_rejects_repeated_singleton_options_before_loading(
         called = True
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.load_validate_plan",
+        "comfyui_docker_helper.host.cli.load_validate_plan_result",
         fail_if_called,
     )
 

@@ -7,8 +7,8 @@ version = "12.9.2"
 [pytorch]
 version = "2.10"
 
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
 [comfyui]
 version = "latest"

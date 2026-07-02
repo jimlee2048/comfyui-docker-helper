@@ -1,15 +1,17 @@
 """Public configuration models and TOML loading."""
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.loading import load_config
 from comfyui_docker_helper.config.models import (
     Aria2Config,
+    BuildConfig,
+    CdhConfig,
+    CdhDownloaderConfig,
     ComfyUIConfig,
     ComputePlatformConfig,
     Config,
     CudaConfig,
     CustomNodeConfig,
-    DownloaderConfig,
     FileConfig,
     GitCustomNodeConfig,
     HttpxConfig,
@@ -44,8 +46,10 @@ from comfyui_docker_helper.config.plan import (
     build_render_plan,
 )
 from comfyui_docker_helper.config.service import (
+    ConfigurationResult,
     ConfigurationServiceError,
     load_validate_plan,
+    load_validate_plan_result,
 )
 from comfyui_docker_helper.config.validation import (
     normalize_comfy_cli_version,
@@ -59,17 +63,21 @@ __all__ = [
     "ArtifactCondition",
     "ArtifactKind",
     "BuildArgument",
+    "BuildConfig",
+    "CdhConfig",
+    "CdhDownloaderConfig",
     "ComfyUIConfig",
     "ComfyUIPlan",
     "ComputePlatformConfig",
     "Config",
+    "ConfigurationResult",
     "ConfigurationServiceError",
     "CudaConfig",
     "CustomNodeConfig",
     "CustomNodePlan",
     "CustomNodesPlan",
     "Diagnostic",
-    "DownloaderConfig",
+    "DiagnosticSeverity",
     "DownloaderPlan",
     "EnvironmentVariable",
     "FileConfig",
@@ -95,6 +103,7 @@ __all__ = [
     "build_render_plan",
     "load_config",
     "load_validate_plan",
+    "load_validate_plan_result",
     "normalize_comfy_cli_version",
     "normalize_comfyui_version",
     "validate_config",

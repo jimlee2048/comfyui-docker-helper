@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
@@ -59,6 +60,8 @@ _HOOK_SUFFIXES = frozenset({".py", ".sh"})
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _GIT_TARGET_DIR_PATTERN = re.compile(r"[A-Za-z0-9._-]+\Z")
 _DOCKERFILE_SOURCE_FORBIDDEN = frozenset({"\0", "\r", "\n"})
+_SUPPORTED_VERSION_CONSTRAINT_OPERATORS = ("==", "!=", "<=", ">=", "<", ">")
+_UNSUPPORTED_VERSION_CONSTRAINT_TOKENS = ("~=", "===", "^", "||")
 
 
 def normalize_comfyui_version(version: str) -> str:
@@ -66,25 +69,115 @@ def normalize_comfyui_version(version: str) -> str:
     if version in {"latest", "nightly"}:
         return version
 
+    if _looks_like_version_constraint(version):
+        return _normalize_version_constraint(version, allow_local_versions=False)
+
     normalized = version.removeprefix("v")
     if not _SEMVER_PATTERN.fullmatch(normalized):
-        raise ValueError("must be latest, nightly, semver, or v-prefixed semver")
+        raise ValueError(
+            "must be latest, nightly, semver, v-prefixed semver, or a supported "
+            "PEP 440 comparison constraint"
+        )
     return normalized
 
 
 def normalize_comfy_cli_version(version: str) -> str:
-    """Validate and canonicalize a comfy-cli public PEP 440 version."""
+    """Validate and canonicalize a comfy-cli public PEP 440 selector."""
     if version == "latest":
         return version
+
+    if _looks_like_version_constraint(version):
+        return _normalize_version_constraint(version, allow_local_versions=False)
 
     try:
         parsed = Version(version)
     except InvalidVersion as error:
-        raise ValueError("must be latest or a PEP 440 public version") from error
+        raise ValueError(
+            "must be latest, a PEP 440 public version, or a supported PEP 440 "
+            "comparison constraint"
+        ) from error
 
     if parsed.local is not None:
         raise ValueError("must not contain a PEP 440 local-version label")
     return parsed.public
+
+
+def normalize_registry_version(version: str) -> str:
+    """Validate a registry custom-node version selector without resolving it."""
+    if version == "latest":
+        return version
+
+    if _looks_like_version_constraint(version):
+        return _normalize_version_constraint(version, allow_local_versions=False)
+
+    normalized = version.removeprefix("v")
+    if not _SEMVER_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            "must be latest, semver, v-prefixed semver, or a supported PEP 440 "
+            "comparison constraint"
+        )
+    return normalized
+
+
+def _looks_like_version_constraint(version: str) -> bool:
+    stripped = version.strip()
+    return stripped.startswith((*_SUPPORTED_VERSION_CONSTRAINT_OPERATORS, "~", "^"))
+
+
+def _has_version_constraint_syntax(value: str) -> bool:
+    """Return whether an arbitrary unsupported field contains constraint syntax."""
+    stripped = value.strip()
+    if _looks_like_version_constraint(stripped):
+        return True
+    if "," in stripped:
+        parts = [part.strip() for part in stripped.split(",")]
+        return len(parts) > 1 and any(
+            _looks_like_version_constraint(part) for part in parts
+        )
+    return any(
+        token in stripped
+        for token in ("===", "==", "!=", "<=", ">=", "<", ">", "~=", "^")
+    )
+
+
+def _normalize_version_constraint(
+    version: str,
+    *,
+    allow_local_versions: bool = True,
+) -> str:
+    """Validate supported PEP 440 comparison syntax for future stable resolution."""
+    if any(token in version for token in _UNSUPPORTED_VERSION_CONSTRAINT_TOKENS):
+        raise ValueError("must use only ==, !=, <, <=, >, >= comparison constraints")
+    if "*" in version:
+        raise ValueError("must not use wildcard version constraints")
+
+    parts = [part.strip() for part in version.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("must be a comma-separated list of comparison constraints")
+    if not all(
+        part.startswith(_SUPPORTED_VERSION_CONSTRAINT_OPERATORS) for part in parts
+    ):
+        raise ValueError("must use only ==, !=, <, <=, >, >= comparison constraints")
+
+    try:
+        # M2 resolution filters upstream candidates to stable releases; M1 only
+        # validates the selector syntax without network-backed enumeration.
+        specifier_set = SpecifierSet(version)
+    except InvalidSpecifier as error:
+        raise ValueError("must be a valid PEP 440 comparison constraint") from error
+
+    if not allow_local_versions:
+        for specifier in specifier_set:
+            try:
+                parsed = Version(specifier.version)
+            except InvalidVersion as error:
+                raise ValueError(
+                    "constraint operands must be public PEP 440 versions"
+                ) from error
+            if parsed.local is not None:
+                raise ValueError("constraint operands must not contain local versions")
+
+    return str(specifier_set)
 
 
 def infer_git_target_dir(url: str) -> str | None:
@@ -133,7 +226,10 @@ def validate_config(
 
     _validate_compute_platform(config, diagnostics)
     _validate_system(config, diagnostics)
+    _validate_package_indexes(config, diagnostics)
     _validate_pytorch(config, diagnostics)
+    _validate_unsupported_version_constraints(config, diagnostics)
+    _validate_build(config, diagnostics)
     _validate_comfyui(config, scripts_dir, diagnostics)
     _validate_downloader(config, diagnostics)
     _validate_files(config, diagnostics)
@@ -233,6 +329,58 @@ def _validate_pytorch(config: Config, diagnostics: list[Diagnostic]) -> None:
             )
 
 
+def _validate_package_indexes(config: Config, diagnostics: list[Diagnostic]) -> None:
+    _require_http_index_url(
+        config.python.index_url,
+        ("python", "index_url"),
+        "python.invalid_index_url",
+        diagnostics,
+    )
+    _require_http_index_url(
+        config.pytorch.index_base_url,
+        ("pytorch", "index_base_url"),
+        "pytorch.invalid_index_base_url",
+        diagnostics,
+    )
+
+
+def _validate_unsupported_version_constraints(
+    config: Config,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Reject selector constraints outside the lock-domain fields."""
+    values: list[tuple[str, DiagnosticPath]] = [
+        (
+            config.compute_platform.cuda.version,
+            ("compute_platform", "cuda", "version"),
+        ),
+        (config.python.version, ("python", "version")),
+        (config.python.uv_version, ("python", "uv_version")),
+        (config.pytorch.version, ("pytorch", "version")),
+    ]
+    values.extend(
+        (package, ("system", "extra_packages", index))
+        for index, package in enumerate(config.system.extra_packages)
+    )
+    values.extend(
+        (file.filename, ("files", index, "filename"))
+        for index, file in enumerate(config.files)
+    )
+
+    for value, path in values:
+        if _has_version_constraint_syntax(value):
+            diagnostics.append(
+                Diagnostic(
+                    path=path,
+                    code="version_constraint.unsupported_field",
+                    message=(
+                        "version constraints are only supported for ComfyUI, "
+                        "comfy-cli, and registry custom-node versions"
+                    ),
+                )
+            )
+
+
 def _validate_comfyui(
     config: Config,
     scripts_dir: str | Path | None,
@@ -316,6 +464,17 @@ def _validate_comfyui(
                     )
                 git_target_dirs.setdefault(git_target_dir, node.url)
         else:
+            if node.version is not None:
+                try:
+                    normalize_registry_version(node.version)
+                except ValueError as error:
+                    diagnostics.append(
+                        Diagnostic(
+                            path=(*node_path, "version"),
+                            code="custom_node.invalid_registry_version",
+                            message=str(error),
+                        )
+                    )
             if node.id in registry_ids:
                 diagnostics.append(
                     Diagnostic(
@@ -411,55 +570,74 @@ def _validate_hook(
 
 def _validate_downloader(config: Config, diagnostics: list[Diagnostic]) -> None:
     _require_allowed(
-        config.downloader.default,
+        config.cdh.default_downloader,
         _DOWNLOADERS,
-        ("downloader", "default"),
-        "downloader.unsupported_default",
+        ("cdh", "default_downloader"),
+        "cdh.unsupported_default_downloader",
         "must be aria2 or httpx",
         diagnostics,
     )
-    aria2 = config.downloader.aria2
-    httpx = config.downloader.httpx
+    aria2 = config.cdh.downloader.aria2
+    httpx = config.cdh.downloader.httpx
     _require_range(
         httpx.timeout,
         lambda value: value > 0,
-        ("downloader", "httpx", "timeout"),
-        "downloader.httpx_timeout_not_positive",
+        ("cdh", "downloader", "httpx", "timeout"),
+        "cdh.downloader.httpx_timeout_not_positive",
         "must be greater than 0",
         diagnostics,
     )
     _require_range(
         httpx.retries,
         lambda value: value >= 0,
-        ("downloader", "httpx", "retries"),
-        "downloader.httpx_retries_negative",
+        ("cdh", "downloader", "httpx", "retries"),
+        "cdh.downloader.httpx_retries_negative",
         "must be greater than or equal to 0",
         diagnostics,
     )
     _require_range(
         aria2.rpc_port,
         lambda value: 1 <= value <= 65535,
-        ("downloader", "aria2", "rpc_port"),
-        "downloader.aria2_rpc_port_out_of_range",
+        ("cdh", "downloader", "aria2", "rpc_port"),
+        "cdh.downloader.aria2_rpc_port_out_of_range",
         "must be in range 1..65535",
         diagnostics,
     )
     _require_range(
         aria2.split,
         lambda value: value > 0,
-        ("downloader", "aria2", "split"),
-        "downloader.aria2_split_not_positive",
+        ("cdh", "downloader", "aria2", "split"),
+        "cdh.downloader.aria2_split_not_positive",
         "must be greater than 0",
         diagnostics,
     )
     _require_range(
         aria2.max_connection_per_server,
         lambda value: value > 0,
-        ("downloader", "aria2", "max_connection_per_server"),
-        "downloader.aria2_max_connection_per_server_not_positive",
+        ("cdh", "downloader", "aria2", "max_connection_per_server"),
+        "cdh.downloader.aria2_max_connection_per_server_not_positive",
         "must be greater than 0",
         diagnostics,
     )
+
+
+def _validate_build(config: Config, diagnostics: list[Diagnostic]) -> None:
+    for index, tag in enumerate(config.build.tags):
+        if (
+            not tag
+            or any(character.isspace() for character in tag)
+            or any(ord(character) < 32 or ord(character) == 127 for character in tag)
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    path=("build", "tags", index),
+                    code="build.invalid_tag",
+                    message=(
+                        "must be non-empty and must not contain whitespace "
+                        "or control characters"
+                    ),
+                )
+            )
 
 
 def _validate_dockerfile_source_strings(
@@ -480,7 +658,9 @@ def _validate_dockerfile_source_strings(
         (config.system.workspace, ("system", "workspace")),
         (config.python.version, ("python", "version")),
         (config.python.uv_version, ("python", "uv_version")),
+        (config.python.index_url, ("python", "index_url")),
         (config.pytorch.version, ("pytorch", "version")),
+        (config.pytorch.index_base_url, ("pytorch", "index_base_url")),
         (config.comfyui.cli_version, ("comfyui", "cli_version")),
         (config.comfyui.version, ("comfyui", "version")),
     ]
@@ -634,6 +814,34 @@ def _is_http_url(url: str) -> bool:
         and "\\" not in parsed.netloc
         and not any(character.isspace() for character in parsed.netloc)
     )
+
+
+def _require_http_index_url(
+    url: str,
+    path: DiagnosticPath,
+    code: str,
+    diagnostics: list[Diagnostic],
+) -> None:
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        parsed = None
+        hostname = None
+
+    if (
+        parsed is None
+        or parsed.scheme.casefold() not in {"http", "https"}
+        or not hostname
+        or "\\" in parsed.netloc
+        or any(character.isspace() for character in parsed.netloc)
+    ):
+        diagnostics.append(Diagnostic(path, code, "must be an HTTP(S) URL with a host"))
+        return
+
+    if parsed.username is not None or parsed.password is not None:
+        diagnostics.append(Diagnostic(path, code, "must not include URL userinfo"))
 
 
 def _is_safe_filename(filename: str) -> bool:

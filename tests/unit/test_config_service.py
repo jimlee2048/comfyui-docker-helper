@@ -7,8 +7,10 @@ import pytest
 
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
+    DiagnosticSeverity,
     RenderPlan,
     load_validate_plan,
+    load_validate_plan_result,
 )
 
 MINIMAL_CONFIG = """\
@@ -53,6 +55,57 @@ def test_minimal_config_returns_complete_normalized_plan(
     assert plan.paths.comfyui == "/workspace/ComfyUI"
     assert plan.pytorch.wheel_tag == "cu129"
     assert plan.files.downloader.default == "aria2"
+
+
+def test_result_collects_host_download_mode_warnings(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Keep runtime-only download-mode fields non-fatal in host workflows."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "sync"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "sync"
+"""
+    )
+
+    result = load_validate_plan_result(write_config(document))
+
+    assert isinstance(result.plan, RenderPlan)
+    assert [(item.path, item.code, item.severity) for item in result.warnings] == [
+        (
+            ("cdh", "default_download_mode"),
+            "host.runtime_download_mode_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("files", 0, "download_mode"),
+            "host.runtime_download_mode_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+    ]
+    assert "remove this field" in result.warnings[0].message
+
+
+def test_plan_only_loader_ignores_host_download_mode_warnings(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Preserve the existing load_validate_plan return contract."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "sync"
+"""
+    )
+
+    assert isinstance(load_validate_plan(write_config(document)), RenderPlan)
 
 
 def test_full_config_and_hooks_use_explicit_scripts_directory(
@@ -121,13 +174,13 @@ PROFILE = "base"
 [python]
 extra_packages = ["base-python"]
 
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "same-registry"
-version = "1.0"
+version = "1.0.0"
 pre_install_scripts = ["base.sh"]
 
 [[comfyui.custom_nodes]]
@@ -161,7 +214,7 @@ launch_args = ["--cpu"]
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "same-registry"
-version = "2.0"
+version = "2.0.0"
 pre_install_scripts = []
 
 [[comfyui.custom_nodes]]
@@ -185,7 +238,7 @@ filename = "extra.bin"
     )
     local.write_text(
         """
-[downloader.httpx]
+[cdh.downloader.httpx]
 retries = 7
 """,
         encoding="utf-8",
@@ -202,7 +255,7 @@ retries = 7
     assert plan.python.extra_packages == ("profile-python",)
     assert plan.comfyui.launch_arguments == ("--cpu",)
     assert [(node.type, node.target) for node in plan.custom_nodes.items] == [
-        ("registry", "same-registry@2.0"),
+        ("registry", "same-registry@2.0.0"),
         ("git", "https://example.com/same.git@old"),
         ("git", "https://example.com/new.git"),
     ]
@@ -264,12 +317,12 @@ def test_multi_file_merge_preserves_duplicate_custom_node_validation(
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "duplicate"
-version = "1"
+version = "1.0.0"
 
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "duplicate"
-version = "2"
+version = "2.0.0"
 """,
         encoding="utf-8",
     )

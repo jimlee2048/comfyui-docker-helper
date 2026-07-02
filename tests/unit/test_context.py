@@ -804,14 +804,14 @@ def test_custom_nodes_toml_is_ordered_deterministic_and_round_trippable(
 def test_files_toml_is_ordered_deterministic_and_round_trippable() -> None:
     """Expand downloader/file defaults and preserve ordered file entries."""
     config = make_config()
-    config.downloader.default = "httpx"
-    config.downloader.aria2.rpc_port = 6811
-    config.downloader.aria2.split = 8
-    config.downloader.aria2.max_connection_per_server = 4
-    config.downloader.aria2.min_split_size = "2M"
-    config.downloader.aria2.resume_download = False
-    config.downloader.httpx.timeout = 90.5
-    config.downloader.httpx.retries = 5
+    config.cdh.default_downloader = "httpx"
+    config.cdh.downloader.aria2.rpc_port = 6811
+    config.cdh.downloader.aria2.split = 8
+    config.cdh.downloader.aria2.max_connection_per_server = 4
+    config.cdh.downloader.aria2.min_split_size = "2M"
+    config.cdh.downloader.aria2.resume_download = False
+    config.cdh.downloader.httpx.timeout = 90.5
+    config.cdh.downloader.httpx.retries = 5
     config.files = [
         FileConfig(
             url="https://example.com/first.bin",

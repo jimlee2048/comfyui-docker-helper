@@ -8,7 +8,11 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config import Config, build_render_plan
+from comfyui_docker_helper.config import (
+    Config,
+    ConfigurationResult,
+    build_render_plan,
+)
 from comfyui_docker_helper.host.diagnostics import render_plan_preview
 from comfyui_docker_helper.rendering import has_valid_context_marker
 
@@ -90,12 +94,28 @@ def test_validate_accepts_repeated_file_options_in_order(
     """Preserve repeated -f/--file order before config loading."""
     calls: list[tuple[list[Path], Path]] = []
 
-    def fake_load_validate_plan(config_files: list[Path], *, scripts_dir: Path) -> None:
+    def fake_load_validate_plan_result(
+        config_files: list[Path], *, scripts_dir: Path
+    ) -> ConfigurationResult:
         calls.append((config_files, scripts_dir))
+        return ConfigurationResult(
+            plan=build_render_plan(
+                Config.model_validate(
+                    {
+                        "compute_platform": {
+                            "type": "cuda",
+                            "cuda": {"version": "12.9.2"},
+                        },
+                        "pytorch": {"version": "2.10"},
+                        "comfyui": {"version": "latest"},
+                    }
+                )
+            )
+        )
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.load_validate_plan",
-        fake_load_validate_plan,
+        "comfyui_docker_helper.host.cli.load_validate_plan_result",
+        fake_load_validate_plan_result,
     )
 
     result = cli_runner.invoke(app, ["host", "validate", *file_args])
@@ -124,7 +144,7 @@ def test_render_rejects_repeated_singleton_options_before_loading(
         called = True
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.load_validate_plan",
+        "comfyui_docker_helper.host.cli.load_validate_plan_result",
         fail_if_called,
     )
 
@@ -150,6 +170,66 @@ def test_valid_input_is_silent_and_writes_nothing(
     assert result.stderr == ""
     assert result.output == ""
     assert {item.name: item.read_bytes() for item in tmp_path.iterdir()} == before
+
+
+def test_valid_input_with_host_warnings_succeeds_and_renders_stderr(
+    cli_runner: CliRunner, tmp_path: Path
+) -> None:
+    """Warn about runtime-only download-mode fields without failing validation."""
+    path = _write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "sync"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "sync"
+""",
+    )
+
+    result = cli_runner.invoke(app, ["host", "validate", "-f", str(path)])
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "Configuration has warnings:" in result.stderr
+    assert "[cdh.default_download_mode]" in result.stderr
+    assert "[files.0.download_mode]" in result.stderr
+    assert "runtime-only in v0.2 host workflows" in result.stderr
+    assert "remove this field" in result.stderr
+    assert "Configuration is invalid:" not in result.stderr
+
+
+def test_render_with_host_warnings_still_writes_context(
+    cli_runner: CliRunner, tmp_path: Path
+) -> None:
+    """Render warning-bearing host config while preserving success semantics."""
+    path = _write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "sync"
+""",
+    )
+    output = tmp_path / "context"
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "Configuration has warnings:" in result.stderr
+    assert "[files.0.download_mode]" in result.stderr
+    assert has_valid_context_marker(output)
 
 
 def test_invalid_input_renders_every_diagnostic_to_stderr(

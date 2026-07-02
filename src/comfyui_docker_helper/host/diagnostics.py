@@ -5,7 +5,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.text import Text
 
-from comfyui_docker_helper.config import Diagnostic
+from comfyui_docker_helper.config import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.plan import (
     GitCustomNodePlan,
     RegistryCustomNodePlan,
@@ -21,7 +21,46 @@ def render_configuration_diagnostics(
 ) -> None:
     """Render every configuration diagnostic as safe human-readable text."""
     output = console or Console(stderr=True, highlight=False)
-    output.print(Text(f"Configuration is invalid: {config_path}", style="bold red"))
+    errors = tuple(
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic.severity == DiagnosticSeverity.ERROR
+    )
+    warnings = tuple(
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic.severity == DiagnosticSeverity.WARNING
+    )
+    if errors:
+        output.print(Text(f"Configuration is invalid: {config_path}", style="bold red"))
+        _render_diagnostic_items(errors, output)
+    if warnings:
+        output.print(
+            Text(f"Configuration has warnings: {config_path}", style="bold yellow")
+        )
+        _render_diagnostic_items(warnings, output)
+
+
+def render_configuration_warnings(
+    config_path: str | Path,
+    diagnostics: tuple[Diagnostic, ...],
+    *,
+    console: Console | None = None,
+) -> None:
+    """Render non-fatal configuration warnings as safe human-readable text."""
+    warnings = tuple(
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic.severity == DiagnosticSeverity.WARNING
+    )
+    if warnings:
+        render_configuration_diagnostics(config_path, warnings, console=console)
+
+
+def _render_diagnostic_items(
+    diagnostics: tuple[Diagnostic, ...],
+    output: Console,
+) -> None:
     for diagnostic in diagnostics:
         output.print()
         output.print(Text(f"[{_format_path(diagnostic.path)}]", style="bold yellow"))

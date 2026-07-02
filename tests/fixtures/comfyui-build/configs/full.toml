@@ -14,10 +14,10 @@ CDH_SMOKE_ENV = "comfyui-build-full"
 [pytorch]
 version = "2.10"
 
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 1
 max_connection_per_server = 1

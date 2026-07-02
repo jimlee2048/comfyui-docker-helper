@@ -69,8 +69,8 @@ version = "latest"
 [comfyui]
 version = "latest"
 
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
 [[files]]
 url = "https://example.com/model.safetensors"
@@ -109,8 +109,8 @@ SAFE_VALUE = 'space $cash "quote" \\ backtick` ;'
 version = "latest"
 launch_args = ["--listen", 'value "quoted" $cash \\ path']
 
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
 [[comfyui.custom_nodes]]
 type = "registry"

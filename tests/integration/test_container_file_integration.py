@@ -182,8 +182,8 @@ def test_rendered_files_context_downloads_from_local_http(
     config.write_text(
         MINIMAL_CONFIG
         + f"""
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
 [[files]]
 url = "{base_url}/first.bin"

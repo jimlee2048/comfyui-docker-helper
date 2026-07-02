@@ -8,11 +8,13 @@ from pydantic import ValidationError
 
 from comfyui_docker_helper.config import (
     Aria2Config,
+    BuildConfig,
+    CdhConfig,
+    CdhDownloaderConfig,
     ComfyUIConfig,
     ComputePlatformConfig,
     Config,
     CudaConfig,
-    DownloaderConfig,
     FileConfig,
     GitCustomNodeConfig,
     HttpxConfig,
@@ -58,25 +60,32 @@ HF_HOME = "/workspace/.cache/huggingface"
 [python]
 version = "3.12"
 uv_version = "latest"
+index_url = "https://mirror.example.com/pypi/simple"
 extra_packages = ["xformers"]
 
 [pytorch]
 version = "2.10"
+index_base_url = "https://mirror.example.com/pytorch/whl"
 extra_packages = ["torchvision", "torchaudio"]
 
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
+default_download_mode = "sync"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6800
 split = 16
 max_connection_per_server = 16
 min_split_size = "1M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 60.5
 retries = 3
+
+[build]
+tags = ["my-comfy:dev", "registry.example.com/team/my-comfy:dev"]
+output = "push"
 
 [comfyui]
 version = "latest"
@@ -132,6 +141,20 @@ def test_minimal_config_expands_static_defaults(
     config = load_config(write_config(MINIMAL_CONFIG))
 
     assert config.compute_platform.type == "cuda"
+    assert config.cdh.model_dump() == {
+        "default_downloader": "aria2",
+        "default_download_mode": "sync",
+        "downloader": {
+            "aria2": {
+                "rpc_port": 6800,
+                "split": 16,
+                "max_connection_per_server": 16,
+                "min_split_size": "1M",
+                "resume_download": True,
+            },
+            "httpx": {"timeout": 60, "retries": 3},
+        },
+    }
     assert config.compute_platform.cuda.model_dump() == {
         "version": "12.9.2",
         "image_flavor": "cudnn-devel",
@@ -146,23 +169,15 @@ def test_minimal_config_expands_static_defaults(
     assert config.python.model_dump() == {
         "version": "3.12",
         "uv_version": "latest",
+        "index_url": "https://pypi.org/simple",
         "extra_packages": [],
     }
     assert config.pytorch.model_dump() == {
         "version": "2.10",
+        "index_base_url": "https://download.pytorch.org/whl",
         "extra_packages": [],
     }
-    assert config.downloader.model_dump() == {
-        "default": "aria2",
-        "aria2": {
-            "rpc_port": 6800,
-            "split": 16,
-            "max_connection_per_server": 16,
-            "min_split_size": "1M",
-            "resume_download": True,
-        },
-        "httpx": {"timeout": 60, "retries": 3},
-    }
+    assert config.build.model_dump() == {"tags": [], "output": "load"}
     assert config.comfyui.model_dump() == {
         "version": "latest",
         "cli_version": "latest",
@@ -181,10 +196,17 @@ def test_complete_config_covers_every_top_level_block(
 
     assert config.system.extra_packages == ["ffmpeg", "libgl1"]
     assert config.system.env == {"HF_HOME": "/workspace/.cache/huggingface"}
+    assert config.cdh.downloader.aria2.split == 16
+    assert config.cdh.downloader.httpx.timeout == 60.5
+    assert config.build.tags == [
+        "my-comfy:dev",
+        "registry.example.com/team/my-comfy:dev",
+    ]
+    assert config.build.output == "push"
+    assert config.python.index_url == "https://mirror.example.com/pypi/simple"
+    assert config.pytorch.index_base_url == "https://mirror.example.com/pytorch/whl"
     assert config.python.extra_packages == ["xformers"]
     assert config.pytorch.extra_packages == ["torchvision", "torchaudio"]
-    assert config.downloader.aria2.split == 16
-    assert config.downloader.httpx.timeout == 60.5
     assert isinstance(config.comfyui.custom_nodes[0], RegistryCustomNodeConfig)
     assert isinstance(config.comfyui.custom_nodes[1], GitCustomNodeConfig)
     assert config.comfyui.custom_nodes[1].target_dir == "ComfyUI-Example"
@@ -227,12 +249,12 @@ def test_default_factories_do_not_share_mutable_state(
 
     first.system.extra_packages.append("ffmpeg")
     first.system.env["A"] = "B"
-    first.downloader.aria2.split = 8
+    first.cdh.downloader.aria2.split = 8
     first.comfyui.launch_args.append("--cpu")
 
     assert second.system.extra_packages == []
     assert second.system.env == {}
-    assert second.downloader.aria2.split == 16
+    assert second.cdh.downloader.aria2.split == 16
     assert second.comfyui.launch_args == [
         "--listen",
         "0.0.0.0",
@@ -320,8 +342,8 @@ overwrite = true
     )
     local.write_text(
         """
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 """,
         encoding="utf-8",
     )
@@ -333,19 +355,21 @@ default = "httpx"
     assert config.system.env == {"PROFILE": "profile", "EXTRA": "yes"}
     assert config.files[0].url == "https://example.com/profile.bin"
     assert config.files[0].overwrite is True
-    assert config.downloader.default == "httpx"
+    assert config.cdh.default_downloader == "httpx"
 
 
 @pytest.mark.parametrize(
     "model",
     [
         Config,
+        BuildConfig,
+        CdhConfig,
+        CdhDownloaderConfig,
         ComputePlatformConfig,
         CudaConfig,
         SystemConfig,
         PythonConfig,
         PyTorchConfig,
-        DownloaderConfig,
         Aria2Config,
         HttpxConfig,
         ComfyUIConfig,
@@ -381,6 +405,26 @@ def test_unknown_fields_are_rejected_at_any_depth(
     """Forbid typo-like fields in root and nested blocks."""
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         load_config(write_config(document))
+
+
+def test_old_top_level_downloader_is_an_ordinary_unknown_section(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Reject the removed v0.1 downloader table through the generic extra path."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[downloader]
+default = "aria2"
+"""
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        load_config(write_config(document))
+
+    assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
+        (("downloader",), "extra_forbidden")
+    }
 
 
 @pytest.mark.parametrize(
@@ -444,10 +488,10 @@ def test_strict_models_do_not_coerce_values(
 ) -> None:
     """Reject coercible values for declared integer, number, and bool fields."""
     sections = {
-        "rpc_port": "\n[downloader.aria2]\n",
-        "resume_download": "\n[downloader.aria2]\n",
-        "timeout": "\n[downloader.httpx]\n",
-        "retries": "\n[downloader.httpx]\n",
+        "rpc_port": "\n[cdh.downloader.aria2]\n",
+        "resume_download": "\n[cdh.downloader.aria2]\n",
+        "timeout": "\n[cdh.downloader.httpx]\n",
+        "retries": "\n[cdh.downloader.httpx]\n",
         "install_manager": "\n[comfyui]\n",
         "overwrite": (
             '\n[[files]]\nurl = "https://example.com/a"\n'

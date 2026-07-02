@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.artifact_helpers import COMMIT_A
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
@@ -125,13 +126,13 @@ post_install_scripts = ["post.py"]
         subprocess_calls.append((description, argv))
         if (
             description
-            == "custom-node git clone https://example.com/git-node.git@stable"
+            == f"custom-node git clone https://example.com/git-node.git@{COMMIT_A}"
         ):
             (comfyui_path / "custom_nodes" / "explicit-git-node").mkdir(parents=True)
 
     monkeypatch.setenv("HOOK_LOG", str(hook_log))
     monkeypatch.setattr(installer, "run_argv", fake_run_argv)
-    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: "abc123")
+    monkeypatch.setattr(installer, "_git_output", lambda *_, **__: COMMIT_A)
 
     install_custom_nodes(
         output / "config.toml",
@@ -144,9 +145,9 @@ post_install_scripts = ["post.py"]
     assert [call[0] for call in subprocess_calls] == [
         "custom-node registry cache update",
         "custom-node install registry-node@1.2.3",
-        "custom-node git clone https://example.com/git-node.git@stable",
-        "custom-node git checkout https://example.com/git-node.git@stable",
-        "custom-node git submodules https://example.com/git-node.git@stable",
+        f"custom-node git clone https://example.com/git-node.git@{COMMIT_A}",
+        f"custom-node git checkout https://example.com/git-node.git@{COMMIT_A}",
+        f"custom-node git submodules https://example.com/git-node.git@{COMMIT_A}",
     ]
     assert subprocess_calls[0][1] == [
         str(runtime.python),
@@ -162,7 +163,7 @@ post_install_scripts = ["post.py"]
         "https://example.com/git-node.git",
         str(comfyui_path / "custom_nodes" / "explicit-git-node"),
     ]
-    assert subprocess_calls[3][1][-2:] == ["--detach", "stable"]
+    assert subprocess_calls[3][1][-2:] == ["--detach", COMMIT_A]
     assert hook_log.read_text(encoding="utf-8").splitlines() == [
         f"pre:{comfyui_path}:{comfyui_path}:{workspace}:{runtime.virtual_env}",
         f"post:{comfyui_path}:{comfyui_path}:{workspace}:{runtime.virtual_env}",

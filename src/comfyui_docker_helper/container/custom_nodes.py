@@ -45,7 +45,7 @@ def load_custom_nodes_plan(
         artifacts = load_container_root_artifacts(config_path, lock_path)
     except ContainerRootConfigError as error:
         raise CustomNodesConfigError(str(error)) from error
-    document = custom_nodes_document(artifacts.config)
+    document = custom_nodes_document(artifacts.config, artifacts.lockfile)
     return build_custom_nodes_plan(document, scripts_dir=scripts_dir)
 
 

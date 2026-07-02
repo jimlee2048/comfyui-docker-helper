@@ -12,9 +12,12 @@ from pydantic import ValidationError
 from comfyui_docker_helper.config import (
     Config,
     Diagnostic,
+    GitCustomNodeConfig,
+    GitLockedCustomNode,
     Lockfile,
     LockOptions,
     LockServiceError,
+    RegistryLockedCustomNode,
     SourceResolvers,
     parse_lockfile_toml,
     resolve_lockfile,
@@ -45,16 +48,31 @@ def load_container_root_artifacts(
     return ContainerRootArtifacts(config=config, lockfile=lockfile)
 
 
-def custom_nodes_document(config: Config) -> dict[str, object]:
-    """Extract the custom-node helper view from the full root config."""
-    return {
-        "comfyui": {
-            "custom_nodes": [
-                node.model_dump(mode="json", exclude_none=True)
-                for node in config.comfyui.custom_nodes
-            ]
-        }
+def custom_nodes_document(config: Config, lockfile: Lockfile) -> dict[str, object]:
+    """Extract the locked custom-node helper view from root artifacts."""
+    registry_locks = {
+        node.id: node
+        for node in lockfile.custom_nodes
+        if isinstance(node, RegistryLockedCustomNode)
     }
+    git_locks = {
+        node.url: node
+        for node in lockfile.custom_nodes
+        if isinstance(node, GitLockedCustomNode)
+    }
+    nodes: list[dict[str, object]] = []
+    for node in config.comfyui.custom_nodes:
+        item = node.model_dump(mode="json", exclude_none=True)
+        if isinstance(node, GitCustomNodeConfig):
+            locked = git_locks[node.url]
+            item["url"] = locked.url
+            item["ref"] = locked.commit
+        else:
+            locked = registry_locks[node.id]
+            item["version"] = locked.version
+        nodes.append(item)
+
+    return {"comfyui": {"custom_nodes": nodes}}
 
 
 def files_document(config: Config) -> dict[str, object]:

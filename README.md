@@ -4,8 +4,10 @@ Build customized ComfyUI Docker images from a declarative TOML configuration.
 
 This project targets advanced local users who are already comfortable with
 Docker Buildx, ComfyUI, Python packaging, and build-time Docker diagnostics.
-v0.1 focuses on deterministic context rendering and local image builds; live
-upstream ComfyUI smoke fixtures are optional validation assets.
+v0.2 focuses on build-context lock artifacts and host build ergonomics:
+rendered contexts contain root `config.toml` and `config.lock.toml`, and host
+builds can load or push one or more image tags from either CLI flags or
+configuration.
 
 ## Prerequisites
 
@@ -52,8 +54,7 @@ User-facing starting points live in the repository's `examples/` directory:
 - [`examples/minimal.toml`](https://github.com/jimlee2048/comfyui-docker-helper/blob/main/examples/minimal.toml)
   is a small copyable config.
 - [`examples/full.toml`](https://github.com/jimlee2048/comfyui-docker-helper/blob/main/examples/full.toml)
-  is an annotated reference covering every supported configuration block and
-  field.
+  is an annotated reference for host-build and common configuration fields.
 - [`examples/README.md`](https://github.com/jimlee2048/comfyui-docker-helper/blob/main/examples/README.md)
   shows validate, render, and build commands.
 
@@ -70,6 +71,8 @@ cdh host validate -f config.toml
 ```
 
 Repeat `-f/--file` to layer partial TOML overrides; later files take priority.
+The examples use a single root `config.toml` shape with supported blocks such
+as `[cdh]`, `[build]`, `[python]`, `[pytorch]`, `[comfyui]`, and `[[files]]`.
 
 Render an inspectable Docker build context:
 
@@ -77,13 +80,22 @@ Render an inspectable Docker build context:
 cdh host render -f config.toml -o .cdh/build/current --overwrite
 ```
 
+Use `--locked` to render from an existing context `config.lock.toml`, or
+`--upgrade-lock` to refresh moving selectors before writing a new lock file.
+Lock artifacts live in the rendered context root; there is no separate
+source-side lock command.
+
 Build and load a local Docker image:
 
 ```bash
-cdh host build -f config.toml -t comfyui-custom:dev
+cdh host build -f config.toml -t comfyui-custom:dev --load
 ```
 
-Use `--context-dir <dir>` to choose a non-default rendered context location.
+Repeat `-t/--tag` to build multiple effective image tags. CLI tags replace
+`[build].tags`; if no CLI tags are passed, `cdh host build` uses `[build].tags`
+from the configuration. Use `--load` or `--push` to override `[build].output`
+for the current build. Use `--context-dir <dir>` to choose a non-default
+rendered context location.
 
 `cdh host build` is equivalent to rendering the context with safe internal
 overwrite semantics and then running:
@@ -108,7 +120,8 @@ Rendered contexts are intentionally inspectable. They include:
 - `Dockerfile`;
 - a minimal projected `packages/cdh` Python package used by build-time helpers;
 - `config.toml`, the validated configuration used for the render;
-- `config.lock.toml`, the resolved build plan used by container helpers;
+- `config.lock.toml`, the resolved source and lock selections used by
+  container helpers;
 - `scripts/` only when hook scripts are referenced.
 
 The context is retained so you can inspect the Dockerfile, rendered
@@ -133,18 +146,21 @@ out of that directory.
 ## Files and downloaders
 
 Configured files are downloaded during the Docker build by
-`cdh container download-files`. v0.1 supports:
+`cdh container download-files`. v0.2 supports:
 
 - `httpx` for simple HTTP(S) downloads with retries and temporary-file rename;
 - `aria2` for build-time RPC-controlled downloads with per-file serialization.
 
 Files are processed in configuration order, one active item at a time. Existing
 targets are skipped unless `overwrite = true`. Each file entry must declare an
-explicit `filename`; download targets are not inferred from URLs.
+explicit `filename`; download targets are not inferred from URLs. Set the
+default downloader under `[cdh]`, and override it per file with `downloader`.
+Configure package indexes with `python.index_url` and
+`pytorch.index_base_url`.
 
 ## Secrets and logs
 
-Values in `[system.env]` are ordinary Dockerfile `ENV` values. v0.1 does not
+Values in `[system.env]` are ordinary Dockerfile `ENV` values. v0.2 does not
 hide token-like values, prevent them from appearing in image history, or redact
 them from build output. Do not put secrets in configuration unless that exposure
 is acceptable.

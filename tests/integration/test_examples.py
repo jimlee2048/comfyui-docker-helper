@@ -172,8 +172,15 @@ def test_user_facing_docs_reject_removed_or_unsupported_feature_claims() -> None
     forbidden = [
         "config/custom-nodes.toml",
         "config/files.toml",
+        "cdh host lock",
+        "--frozen",
+        "comfy.lock",
         "helper configs",
         "[downloader]",
+        "source-side lockfile",
+        "runtime config",
+        "runtime download",
+        "runtime downloads",
         "runtime entrypoint",
         "entrypoint",
         "SSH",
@@ -183,6 +190,15 @@ def test_user_facing_docs_reject_removed_or_unsupported_feature_claims() -> None
     ]
     for text in forbidden:
         assert text not in user_facing_text
+
+
+def test_user_facing_docs_do_not_describe_current_behavior_as_v01() -> None:
+    """Keep README/examples from presenting stale v0.1 behavior as current."""
+    docs = [Path("README.md"), EXAMPLES / "README.md", EXAMPLES / "full.toml"]
+
+    for path in docs:
+        text = path.read_text(encoding="utf-8")
+        assert "v0.1" not in text
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

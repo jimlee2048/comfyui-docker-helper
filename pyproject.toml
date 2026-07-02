@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-docker-helper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Build customized ComfyUI Docker images from declarative configuration"
 readme = "README.md"
 license = "MIT"

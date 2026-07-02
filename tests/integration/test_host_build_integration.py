@@ -158,11 +158,12 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
 
-    docker_calls: list[tuple[str, Path, Path]] = []
+    docker_calls: list[tuple[tuple[str, ...], str, Path, Path]] = []
 
     def fake_buildx(
         *,
-        image_tag: str,
+        image_tags: tuple[str, ...],
+        output: str,
         context_dir: Path,
         cwd: Path,
         log,
@@ -170,7 +171,7 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
         del log
         assert has_valid_context_marker(context_dir)
         assert (context_dir / "Dockerfile").is_file()
-        docker_calls.append((image_tag, context_dir, cwd))
+        docker_calls.append((image_tags, output, context_dir, cwd))
         return BuildxBuildResult(
             argv=(
                 "docker",
@@ -178,11 +179,12 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
                 "build",
                 "--load",
                 "-t",
-                image_tag,
+                image_tags[0],
                 str(context_dir),
             ),
             context_dir=context_dir,
-            image_tag=image_tag,
+            image_tags=image_tags,
+            output=output,
         )
 
     monkeypatch.setattr(
@@ -206,7 +208,7 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
     result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 0
-    assert docker_calls == [(f"demo:{case.name}", context, Path.cwd())]
+    assert docker_calls == [((f"demo:{case.name}",), "load", context, Path.cwd())]
     assert (context / "config.toml").is_file()
     assert (context / "config.lock.toml").is_file()
     assert not (context / "config" / "custom-nodes.toml").exists()
@@ -250,7 +252,8 @@ def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
         lambda **kwargs: BuildxBuildResult(
             argv=("docker",),
             context_dir=kwargs["context_dir"],
-            image_tag=kwargs["image_tag"],
+            image_tags=kwargs["image_tags"],
+            output=kwargs["output"],
         ),
     )
 

@@ -20,6 +20,7 @@ from comfyui_docker_helper.config import (
     Lockfile,
     LockManifest,
     RegistryCustomNodeConfig,
+    RenderPlanValidationError,
     build_render_plan,
 )
 from comfyui_docker_helper.rendering import (
@@ -71,15 +72,18 @@ RUN mkdir -p -- \\
 
 RUN --mount=type=cache,target=/root/.cache/uv \\
     uv python install -- "${PYTHON_VERSION}" \\
- && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed
+ && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed \\
+      --index-url https://pypi.org/simple
 
 RUN --mount=type=cache,target=/root/.cache/uv \\
     uv pip install --python "$VIRTUAL_ENV/bin/python" \\
-      --index-url "https://download.pytorch.org/whl/${PYTORCH_WHEEL_TAG}" \\
+      --index-url https://download.pytorch.org/whl/${PYTORCH_WHEEL_TAG} \\
       -- \\
       "torch==${PYTORCH_VERSION}"
 RUN --mount=type=cache,target=/root/.cache/uv \\
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- comfy-cli==1.5.0
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \\
+      --index-url https://pypi.org/simple \\
+      -- comfy-cli==1.5.0
 
 RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install \\
       --nvidia \\
@@ -91,7 +95,9 @@ RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_
 
 RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \\
     --mount=type=cache,target=/root/.cache/uv \\
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- /tmp/cdh/packages/cdh
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \\
+      --index-url https://pypi.org/simple \\
+      -- /tmp/cdh/packages/cdh
 
 WORKDIR /workspace
 CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--disable-auto-launch"]
@@ -163,21 +169,26 @@ RUN mkdir -p -- \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv python install -- "${PYTHON_VERSION}" \
- && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed
+ && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed \
+      --index-url https://pypi.org/simple
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python "$VIRTUAL_ENV/bin/python" \
-      --index-url "https://download.pytorch.org/whl/${PYTORCH_WHEEL_TAG}" \
+      --index-url https://download.pytorch.org/whl/${PYTORCH_WHEEL_TAG} \
       -- \
       "torch==${PYTORCH_VERSION}" \
       --pre \
       torchvision==1
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \
+      --index-url https://pypi.org/simple \
+      -- \
       --index-url=https://example.invalid \
       'a'"'"'b'
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- comfy-cli==1.5.0
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \
+      --index-url https://pypi.org/simple \
+      -- comfy-cli==1.5.0
 
 RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install \
       --nvidia \
@@ -189,7 +200,9 @@ RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_
 
 RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -- /tmp/cdh/packages/cdh
+    uv pip install --python "$VIRTUAL_ENV/bin/python" \
+      --index-url https://pypi.org/simple \
+      -- /tmp/cdh/packages/cdh
 
 RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
     --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
@@ -261,7 +274,7 @@ def test_stable_comfyui_and_cli_replay_use_locked_versions() -> None:
     )
 
     assert (
-        'uv pip install --python "$VIRTUAL_ENV/bin/python" -- comfy-cli==1.5.0'
+        "      --index-url https://pypi.org/simple \\\n      -- comfy-cli==1.5.0"
         in rendered
     )
     assert "      --version \\\n      0.26.0 \\" in rendered
@@ -274,6 +287,82 @@ def test_stable_comfyui_and_cli_replay_use_locked_versions() -> None:
         not in rendered
     )
     assert '--version "$COMFYUI_VERSION"' not in rendered
+
+
+def test_custom_package_indexes_are_wired_to_their_own_install_layers() -> None:
+    """Use the Python index for cdh-managed Python installs and PyTorch index for torch."""
+    config = make_config()
+    config.python.index_url = "https://python.example.com/simple"
+    config.python.extra_packages = ["httpx"]
+    config.pytorch.index_base_url = "https://torch.example.com/whl"
+
+    rendered = render_dockerfile(
+        build_render_plan(config),
+        lockfile=make_lockfile(config),
+    )
+
+    assert rendered.count("--index-url https://python.example.com/simple") == 4
+    assert (
+        rendered.count("--index-url https://torch.example.com/whl/${PYTORCH_WHEEL_TAG}")
+        == 1
+    )
+    assert "https://python.example.com/simple/${PYTORCH_WHEEL_TAG}" not in rendered
+    assert "https://torch.example.com/whl --" not in rendered
+    torch_layer = rendered[
+        rendered.index("https://torch.example.com/whl") : rendered.index(
+            '"torch==${PYTORCH_VERSION}"'
+        )
+    ]
+    assert "https://python.example.com/simple" not in torch_layer
+
+
+def test_package_index_urls_are_shell_quoted_in_dockerfile() -> None:
+    """Quote index URL values as one shell argument before Docker executes RUN."""
+    config = make_config()
+    config.python.index_url = "https://python.example.com/simple;touch"
+    config.python.extra_packages = ["httpx"]
+    config.pytorch.index_base_url = "https://torch.example.com/whl;touch"
+
+    rendered = render_dockerfile(
+        build_render_plan(config),
+        lockfile=make_lockfile(config),
+    )
+
+    assert rendered.count("--index-url 'https://python.example.com/simple;touch'") == 4
+    assert (
+        "--index-url 'https://torch.example.com/whl;touch'/${PYTORCH_WHEEL_TAG}"
+        in rendered
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param(
+            "python",
+            "https://user:token@example.com/simple",
+            id="python-userinfo",
+        ),
+        pytest.param(
+            "pytorch",
+            "https://token@example.com/whl",
+            id="pytorch-userinfo",
+        ),
+    ],
+)
+def test_credential_bearing_index_urls_fail_before_dockerfile_render(
+    field: str,
+    value: str,
+) -> None:
+    """Fail closed before credentials can be rendered into Dockerfile source."""
+    config = make_config()
+    if field == "python":
+        config.python.index_url = value
+    else:
+        config.pytorch.index_base_url = value
+
+    with pytest.raises(RenderPlanValidationError):
+        build_render_plan(config)
 
 
 def test_stable_comfyui_commit_verification_command_succeeds_for_match(
@@ -613,6 +702,7 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
         "apt-get install",
         "RUN mkdir -p",
         "uv python install",
+        "--index-url https://pypi.org/simple",
         '"torch==${PYTORCH_VERSION}"',
         "--index-url=https://example.invalid",
         "comfy-cli==1.5.0",

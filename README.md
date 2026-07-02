@@ -107,12 +107,12 @@ Rendered contexts are intentionally inspectable. They include:
 
 - `Dockerfile`;
 - a minimal projected `packages/cdh` Python package used by build-time helpers;
-- `config/custom-nodes.toml` only when custom nodes are configured;
-- `config/files.toml` only when files are configured;
+- `config.toml`, the validated configuration used for the render;
+- `config.lock.toml`, the resolved build plan used by container helpers;
 - `scripts/` only when hook scripts are referenced.
 
-The context is retained so you can inspect the Dockerfile, helper configs, and
-scripts after failures.
+The context is retained so you can inspect the Dockerfile, rendered
+configuration, lock file, and scripts after failures.
 
 ## Custom-node hooks and scripts
 

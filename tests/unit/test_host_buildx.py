@@ -12,7 +12,7 @@ from comfyui_docker_helper.host.buildx import (
 
 
 def test_buildx_invocation_uses_required_argv_and_cwd(tmp_path: Path) -> None:
-    """Call exactly docker buildx build --load -t with no fallback command."""
+    """Call exactly docker buildx build --load with repeated tags and no fallback."""
     calls: list[tuple[tuple[str, ...], Path | None, bool]] = []
     logs: list[str] = []
 
@@ -26,7 +26,7 @@ def test_buildx_invocation_uses_required_argv_and_cwd(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(args, 0)
 
     result = build_image_with_buildx(
-        image_tag="example/comfy:dev",
+        image_tags=("example/comfy:dev", "example/comfy:latest"),
         context_dir=tmp_path / "context with space",
         cwd=tmp_path,
         runner=runner,
@@ -42,6 +42,8 @@ def test_buildx_invocation_uses_required_argv_and_cwd(tmp_path: Path) -> None:
                 "--load",
                 "-t",
                 "example/comfy:dev",
+                "-t",
+                "example/comfy:latest",
                 str(tmp_path / "context with space"),
             ),
             tmp_path,
@@ -50,12 +52,52 @@ def test_buildx_invocation_uses_required_argv_and_cwd(tmp_path: Path) -> None:
     ]
     assert result.argv == calls[0][0]
     assert result.context_dir == tmp_path / "context with space"
-    assert result.image_tag == "example/comfy:dev"
+    assert result.image_tags == ("example/comfy:dev", "example/comfy:latest")
+    assert result.output == "load"
     assert logs == [
         "Running Docker Buildx: docker buildx build --load -t "
-        f"example/comfy:dev '{tmp_path / 'context with space'}'",
-        "Docker Buildx loaded image: example/comfy:dev",
+        "example/comfy:dev -t example/comfy:latest "
+        f"'{tmp_path / 'context with space'}'",
+        "Docker Buildx loaded image tags: example/comfy:dev, example/comfy:latest",
     ]
+
+
+def test_buildx_invocation_can_push_tags(tmp_path: Path) -> None:
+    """Use --push instead of --load when requested."""
+    calls: list[tuple[str, ...]] = []
+    logs: list[str] = []
+
+    def runner(
+        args: tuple[str, ...],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[object]:
+        del kwargs
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    result = build_image_with_buildx(
+        image_tags=("registry.example.com/comfy:dev",),
+        output="push",
+        context_dir=tmp_path,
+        runner=runner,
+        log=logs.append,
+    )
+
+    assert calls == [
+        (
+            "docker",
+            "buildx",
+            "build",
+            "--push",
+            "-t",
+            "registry.example.com/comfy:dev",
+            str(tmp_path),
+        )
+    ]
+    assert result.output == "push"
+    assert logs[-1] == (
+        "Docker Buildx pushed image tags: registry.example.com/comfy:dev"
+    )
 
 
 def test_buildx_invocation_uses_inherited_output_streams(tmp_path: Path) -> None:
@@ -68,7 +110,7 @@ def test_buildx_invocation_uses_inherited_output_streams(tmp_path: Path) -> None
         return subprocess.CompletedProcess(args, 0)
 
     build_image_with_buildx(
-        image_tag="image:tag",
+        image_tags=("image:tag",),
         context_dir=tmp_path,
         runner=runner,
         log=lambda message: None,
@@ -83,7 +125,7 @@ def test_buildx_missing_docker_is_user_facing(tmp_path: Path) -> None:
 
     with pytest.raises(BuildxBuildError, match="executable was not found"):
         build_image_with_buildx(
-            image_tag="image:tag",
+            image_tags=("image:tag",),
             context_dir=tmp_path,
             runner=runner,
             log=lambda message: None,
@@ -101,7 +143,7 @@ def test_buildx_nonzero_exit_is_user_facing(tmp_path: Path) -> None:
 
     with pytest.raises(BuildxBuildError, match="exit code 17"):
         build_image_with_buildx(
-            image_tag="image:tag",
+            image_tags=("image:tag",),
             context_dir=tmp_path,
             runner=runner,
             log=lambda message: None,
@@ -116,7 +158,7 @@ def test_buildx_start_os_error_is_user_facing(tmp_path: Path) -> None:
 
     with pytest.raises(BuildxBuildError, match="could not be started"):
         build_image_with_buildx(
-            image_tag="image:tag",
+            image_tags=("image:tag",),
             context_dir=tmp_path,
             runner=runner,
             log=lambda message: None,
@@ -131,7 +173,7 @@ def test_buildx_keyboard_interrupt_is_not_swallowed(tmp_path: Path) -> None:
 
     with pytest.raises(KeyboardInterrupt):
         build_image_with_buildx(
-            image_tag="image:tag",
+            image_tags=("image:tag",),
             context_dir=tmp_path,
             runner=runner,
             log=lambda message: None,

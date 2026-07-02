@@ -52,8 +52,6 @@ extra_packages = ["torchvision", "torchaudio"]
 # Default: "aria2". Supported: "aria2", "httpx".
 # Per-file downloader values override this default.
 default_downloader = "aria2"
-# Default: "sync". Runtime-only in v0.2 host workflows.
-default_download_mode = "sync"
 
 [cdh.downloader.httpx]
 # Default: 60. Seconds for each HTTPX request attempt.
@@ -75,7 +73,7 @@ resume_download = true
 
 [build]
 # Optional for render. Required by host build when no CLI -t/--tag is supplied.
-tags = ["my-comfy:dev"]
+tags = ["my-comfy:dev", "registry.example.com/my-comfy:dev"]
 # Default: "load". Supported: "load", "push".
 output = "load"
 

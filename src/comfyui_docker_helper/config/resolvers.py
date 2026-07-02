@@ -10,10 +10,12 @@ from typing import Protocol
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.lock import LockedComfyUI
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
+from comfyui_docker_helper.config.lock import LockedComfyUI, RegistryLockedCustomNode
 from comfyui_docker_helper.config.validation import (
     normalize_comfy_cli_version,
     normalize_comfyui_version,
+    normalize_registry_version,
 )
 
 COMFYUI_REPO_URL = "https://github.com/comfyanonymous/ComfyUI.git"
@@ -37,6 +39,10 @@ class NoMatchingVersionError(ResolverError):
 
 class UpstreamResponseError(ResolverError):
     """Raised when upstream data does not satisfy the expected response shape."""
+
+
+class RegistryVersionListingUnavailableError(ResolverError):
+    """Raised when registry version listing is required but unavailable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +85,45 @@ class ResolvedComfyCli:
     version: str
 
 
+@dataclass(frozen=True, slots=True)
+class RegistryInstallMetadata:
+    """One registry install endpoint response returned by the upstream boundary."""
+
+    node_id: str
+    version: str
+    active: bool = True
+    installable: bool = True
+    deprecated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryVersionCandidate:
+    """One registry custom-node version candidate returned by the upstream boundary."""
+
+    node_id: str
+    version: str
+    active: bool = True
+    installable: bool = True
+    deprecated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRegistryCustomNode:
+    """Resolved registry custom-node source selection."""
+
+    id: str
+    version: str
+    warnings: tuple[Diagnostic, ...] = ()
+
+    def to_locked(self) -> RegistryLockedCustomNode:
+        """Return the minimal lockfile entry for this registry custom node."""
+        return RegistryLockedCustomNode(
+            type="registry",
+            id=self.id,
+            version=self.version,
+        )
+
+
 class ComfyUIReleaseProvider(Protocol):
     """Mockable boundary for ComfyUI release and nightly metadata."""
 
@@ -94,6 +139,20 @@ class ComfyCliPackageProvider(Protocol):
 
     def list_versions(self) -> Sequence[ComfyCliVersionCandidate]:
         """Return available comfy-cli package versions."""
+
+
+class RegistryCustomNodeProvider(Protocol):
+    """Mockable boundary for Comfy Registry custom-node metadata."""
+
+    def get_install_metadata(
+        self,
+        node_id: str,
+        version: str | None = None,
+    ) -> RegistryInstallMetadata:
+        """Return install endpoint metadata for a node and optional exact version."""
+
+    def list_versions(self, node_id: str) -> Sequence[RegistryVersionCandidate]:
+        """Return available registry versions for one custom-node ID."""
 
 
 def resolve_comfyui(
@@ -163,6 +222,56 @@ def resolve_comfy_cli(
     return ResolvedComfyCli(version=candidate.version)
 
 
+def resolve_registry_custom_node(
+    node_id: str,
+    selector: str | None,
+    provider: RegistryCustomNodeProvider,
+) -> ResolvedRegistryCustomNode:
+    """Resolve an already-validated registry custom-node selector."""
+    normalized_selector = _normalize_registry_selector(selector)
+    if normalized_selector == "latest":
+        install_metadata = provider.get_install_metadata(node_id)
+        expected_version = None
+    elif _looks_like_constraint(normalized_selector):
+        registry_candidates = [
+            candidate
+            for candidate in _list_registry_versions(
+                provider,
+                node_id,
+                normalized_selector,
+            )
+            if candidate.node_id == node_id
+            and candidate.active
+            and candidate.installable
+        ]
+        candidate = _highest_stable_registry_candidate(
+            [
+                candidate
+                for candidate in _validated_registry_candidates(
+                    registry_candidates,
+                    selector=normalized_selector,
+                )
+                if SpecifierSet(normalized_selector).contains(
+                    candidate.parsed,
+                    prereleases=False,
+                )
+            ],
+            selector=normalized_selector,
+        )
+        expected_version = candidate.version
+        install_metadata = provider.get_install_metadata(node_id, expected_version)
+    else:
+        expected_version = normalized_selector
+        install_metadata = provider.get_install_metadata(node_id, expected_version)
+
+    return _resolved_registry_install_metadata(
+        install_metadata,
+        node_id=node_id,
+        expected_version=expected_version,
+        selector=normalized_selector,
+    )
+
+
 def locked_comfyui_satisfies_selector(
     locked: LockedComfyUI,
     selector: str,
@@ -227,6 +336,43 @@ def locked_comfy_cli_satisfies_selector(
     )
 
 
+def locked_registry_custom_node_satisfies_selector(
+    locked: RegistryLockedCustomNode,
+    node_id: str,
+    selector: str | None,
+) -> bool:
+    """Return whether a locked registry entry can be reused without provider calls."""
+    if locked.type != "registry" or locked.id != node_id:
+        return False
+
+    normalized_selector = _normalize_registry_selector(selector)
+    try:
+        normalized_locked = _normalize_registry_exact_version(
+            locked.version,
+            source="locked registry custom-node",
+            selector=normalized_selector,
+        )
+    except UpstreamResponseError:
+        return False
+
+    if normalized_selector == "latest":
+        return True
+
+    if _looks_like_constraint(normalized_selector):
+        try:
+            locked_version = _parse_version(
+                normalized_locked,
+                source="locked registry custom-node",
+                selector=normalized_selector,
+            )
+        except UpstreamResponseError:
+            return False
+        return _is_stable_version(locked_version) and SpecifierSet(
+            normalized_selector
+        ).contains(locked_version, prereleases=False)
+    return normalized_locked == normalized_selector
+
+
 @dataclass(frozen=True, slots=True)
 class _ParsedComfyUIReleaseCandidate:
     version: str
@@ -239,6 +385,16 @@ class _ParsedComfyUIReleaseCandidate:
 class _ParsedComfyCliVersionCandidate:
     version: str
     parsed: Version
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedRegistryVersionCandidate:
+    node_id: str
+    version: str
+    parsed: Version
+    active: bool
+    installable: bool
+    deprecated: bool
 
 
 def _validated_comfyui_candidates(
@@ -287,6 +443,38 @@ def _validated_comfy_cli_candidates(
     return parsed_candidates
 
 
+def _validated_registry_candidates(
+    candidates: Sequence[RegistryVersionCandidate],
+    selector: str,
+) -> list[_ParsedRegistryVersionCandidate]:
+    parsed_candidates: list[_ParsedRegistryVersionCandidate] = []
+    for index, candidate in enumerate(candidates):
+        source = f"registry custom-node version candidate {index}"
+        version = _normalize_registry_exact_version(
+            candidate.version,
+            source=source,
+            selector=selector,
+        )
+        parsed = _try_parse_registry_constraint_candidate(
+            version,
+            source=source,
+            selector=selector,
+        )
+        if parsed is None:
+            continue
+        parsed_candidates.append(
+            _ParsedRegistryVersionCandidate(
+                node_id=candidate.node_id,
+                version=version,
+                parsed=parsed,
+                active=candidate.active,
+                installable=candidate.installable,
+                deprecated=candidate.deprecated,
+            )
+        )
+    return parsed_candidates
+
+
 def _highest_stable_comfyui_candidate(
     candidates: Sequence[_ParsedComfyUIReleaseCandidate],
     selector: str,
@@ -321,6 +509,22 @@ def _highest_stable_comfy_cli_candidate(
     return max(stable_candidates, key=lambda candidate: candidate.parsed)
 
 
+def _highest_stable_registry_candidate(
+    candidates: Sequence[_ParsedRegistryVersionCandidate],
+    selector: str,
+) -> _ParsedRegistryVersionCandidate:
+    stable_candidates = [
+        candidate for candidate in candidates if _is_stable_version(candidate.parsed)
+    ]
+    if not stable_candidates:
+        raise NoMatchingVersionError(
+            source="registry custom-node versions",
+            selector=selector,
+            reason="no stable active installable version matches the selector",
+        )
+    return max(stable_candidates, key=lambda candidate: candidate.parsed)
+
+
 def _find_exact_stable_comfyui_candidate(
     candidates: Sequence[_ParsedComfyUIReleaseCandidate],
     *,
@@ -342,6 +546,89 @@ def _looks_like_constraint(selector: str) -> bool:
     return selector.startswith(("==", "!=", "<=", ">=", "<", ">"))
 
 
+def _normalize_registry_selector(selector: str | None) -> str:
+    if selector is None:
+        return "latest"
+    return normalize_registry_version(selector)
+
+
+def _list_registry_versions(
+    provider: RegistryCustomNodeProvider,
+    node_id: str,
+    selector: str,
+) -> Sequence[RegistryVersionCandidate]:
+    try:
+        return provider.list_versions(node_id)
+    except RegistryVersionListingUnavailableError:
+        raise
+    except NotImplementedError as error:
+        raise RegistryVersionListingUnavailableError(
+            source="registry custom-node versions",
+            selector=selector,
+            reason="registry version listing is unavailable for constrained selectors",
+        ) from error
+
+
+def _resolved_registry_install_metadata(
+    metadata: RegistryInstallMetadata,
+    *,
+    node_id: str,
+    expected_version: str | None,
+    selector: str,
+) -> ResolvedRegistryCustomNode:
+    if metadata.node_id != node_id:
+        raise UpstreamResponseError(
+            source="registry custom-node install response",
+            selector=selector,
+            reason=(
+                f"response node id {metadata.node_id!r} does not match "
+                f"requested node id {node_id!r}"
+            ),
+        )
+
+    version = _normalize_registry_exact_version(
+        metadata.version,
+        source="registry custom-node install response",
+        selector=selector,
+    )
+    if expected_version is not None and version != expected_version:
+        raise UpstreamResponseError(
+            source="registry custom-node install response",
+            selector=selector,
+            reason=(
+                f"response version {version!r} does not match requested "
+                f"version {expected_version!r}"
+            ),
+        )
+    if not metadata.active:
+        raise UpstreamResponseError(
+            source="registry custom-node install response",
+            selector=selector,
+            reason="selected registry custom-node version is not active",
+        )
+    if not metadata.installable:
+        raise UpstreamResponseError(
+            source="registry custom-node install response",
+            selector=selector,
+            reason="selected registry custom-node version is not installable",
+        )
+
+    warnings = ()
+    if metadata.deprecated:
+        warnings = (
+            Diagnostic(
+                path=("comfyui", "custom_nodes", node_id, "version"),
+                code="custom_node.deprecated_registry_version",
+                message=(
+                    f"registry custom-node {node_id!r} version {version!r} "
+                    "is deprecated"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            ),
+        )
+    return ResolvedRegistryCustomNode(id=node_id, version=version, warnings=warnings)
+
+
 def _validate_comfyui_candidate_commit(
     candidate: _ParsedComfyUIReleaseCandidate,
     selector: str,
@@ -359,6 +646,45 @@ def _parse_version(version: str, *, source: str, selector: str) -> Version:
             reason=f"candidate version {version!r} is not PEP 440-compatible",
         ) from error
     return parsed
+
+
+def _parse_registry_version(version: str, *, source: str, selector: str) -> Version:
+    return _parse_version(version.removeprefix("v"), source=source, selector=selector)
+
+
+def _try_parse_registry_constraint_candidate(
+    version: str,
+    *,
+    source: str,
+    selector: str,
+) -> Version | None:
+    try:
+        return _parse_registry_version(version, source=source, selector=selector)
+    except UpstreamResponseError:
+        return None
+
+
+def _normalize_registry_exact_version(
+    version: str,
+    *,
+    source: str,
+    selector: str,
+) -> str:
+    try:
+        normalized = normalize_registry_version(version)
+    except ValueError as error:
+        raise UpstreamResponseError(
+            source=source,
+            selector=selector,
+            reason=f"version {version!r} is not a supported registry semver",
+        ) from error
+    if normalized == "latest" or _looks_like_constraint(normalized):
+        raise UpstreamResponseError(
+            source=source,
+            selector=selector,
+            reason=f"version {version!r} is not an exact registry semver",
+        )
+    return normalized
 
 
 def _is_stable_version(version: Version) -> bool:

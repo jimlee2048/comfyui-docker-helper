@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.artifact_helpers import write_root_artifacts
 
 from comfyui_docker_helper.container.download_files import (
     DownloadFilesConfigError,
@@ -33,7 +34,7 @@ class RecordingBackend:
 
 
 def make_document() -> dict[str, object]:
-    """Return a normalized generated files.toml document shape."""
+    """Return a normalized extracted file-download view."""
     return {
         "downloader": {
             "default": "httpx",
@@ -109,13 +110,50 @@ def test_load_file_download_plan_reports_missing_and_invalid_toml(
 ) -> None:
     """Translate file and TOML errors into user-facing helper errors."""
     with pytest.raises(DownloadFilesConfigError, match="does not exist"):
-        load_file_download_plan(tmp_path / "missing.toml")
+        load_file_download_plan(tmp_path / "missing.toml", tmp_path / "missing.lock")
 
     config = tmp_path / "bad.toml"
     config.write_text("[downloader\n", encoding="utf-8")
+    lock = tmp_path / "config.lock.toml"
+    lock.write_text("", encoding="utf-8")
 
     with pytest.raises(DownloadFilesConfigError, match="not valid TOML"):
-        load_file_download_plan(config)
+        load_file_download_plan(config, lock)
+
+
+def test_load_file_download_plan_extracts_files_from_root_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Build a file download plan from root config.toml and config.lock.toml."""
+    config, lock = write_root_artifacts(
+        tmp_path,
+        """
+[comfyui]
+version = "latest"
+
+[cdh]
+default_downloader = "httpx"
+
+[cdh.downloader.httpx]
+timeout = 42
+retries = 4
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models/checkpoints"
+filename = "model.bin"
+overwrite = true
+""",
+    )
+
+    plan = load_file_download_plan(config, lock, comfyui_path=tmp_path / "ComfyUI")
+
+    assert plan.downloader.default == "httpx"
+    assert plan.downloader.httpx.timeout == 42
+    assert plan.downloader.httpx.retries == 4
+    assert plan.items[0].filename == "model.bin"
+    assert plan.items[0].downloader == "httpx"
+    assert plan.items[0].target == tmp_path / "ComfyUI/models/checkpoints/model.bin"
 
 
 @pytest.mark.parametrize(
@@ -173,7 +211,7 @@ def test_build_file_download_plan_defensively_rejects_invalid_config(
     message: str,
     tmp_path: Path,
 ) -> None:
-    """Reject malformed generated helper config before processing."""
+    """Reject malformed file-download helper data before processing."""
     document = make_document()
     mutation(document)
 

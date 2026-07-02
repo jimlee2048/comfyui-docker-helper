@@ -77,6 +77,26 @@ def test_help_succeeds(
     assert usage in result.output
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["container", "install-custom-nodes"],
+        ["container", "download-files"],
+    ],
+)
+def test_container_helper_help_exposes_lock_option(
+    cli_runner: CliRunner,
+    args: list[str],
+) -> None:
+    """Keep root lock artifacts visible on container helper commands."""
+    result = cli_runner.invoke(app, [*args, "--help"])
+
+    assert result.exit_code == 0
+    assert "--config" in result.output
+    assert "--lock" in result.output
+    assert "Root rendered config.lock.toml." in result.output
+
+
 @pytest.mark.parametrize("args", [["--install-completion"], ["--show-completion"]])
 def test_completion_options_remain_disabled(
     cli_runner: CliRunner,

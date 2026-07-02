@@ -586,7 +586,7 @@ def test_render_cli_writes_conditional_configs_and_scripts(
     cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Write helper configs and scripts only when render-plan features need them."""
+    """Write root artifacts and scripts only when render-plan features need them."""
     path = _write_config(
         tmp_path,
         MINIMAL_CONFIG
@@ -624,8 +624,10 @@ filename = "model.safetensors"
 
     assert result.exit_code == 0
     assert has_valid_context_marker(output)
-    assert (output / "config" / "custom-nodes.toml").is_file()
-    assert (output / "config" / "files.toml").is_file()
+    assert (output / "config.toml").is_file()
+    assert (output / "config.lock.toml").is_file()
+    assert not (output / "config" / "custom-nodes.toml").exists()
+    assert not (output / "config" / "files.toml").exists()
     assert (output / "scripts" / "hook.sh").read_text() == "#!/bin/sh\n"
     assert (output / "scripts" / "unused.txt").read_text() == (
         "copy whole scripts tree\n"

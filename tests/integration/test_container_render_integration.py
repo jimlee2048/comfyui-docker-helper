@@ -34,7 +34,7 @@ def test_rendered_custom_node_context_feeds_container_installer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Render public config, then consume generated helper TOML and scripts."""
+    """Render public root artifacts, then consume them with scripts."""
     config = tmp_path / "config.toml"
     config.write_text(
         MINIMAL_CONFIG
@@ -87,11 +87,15 @@ post_install_scripts = ["post.py"]
 
     assert render.exit_code == 0
     assert has_valid_context_marker(output)
-    assert (output / "config" / "custom-nodes.toml").is_file()
+    assert (output / "config.toml").is_file()
+    assert (output / "config.lock.toml").is_file()
+    assert not (output / "config" / "custom-nodes.toml").exists()
     assert (output / "scripts" / "pre.sh").is_file()
     assert (output / "scripts" / "post.py").is_file()
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
-    assert "source=config/custom-nodes.toml" in dockerfile
+    assert "source=config.toml" in dockerfile
+    assert "source=config.lock.toml" in dockerfile
+    assert "source=config/custom-nodes.toml" not in dockerfile
     assert "source=scripts,target=/tmp/cdh/scripts" in dockerfile
     assert "cdh container install-custom-nodes" in dockerfile
 
@@ -126,7 +130,8 @@ post_install_scripts = ["post.py"]
     monkeypatch.setattr(installer, "_git_output", lambda *_, **__: "abc123")
 
     install_custom_nodes(
-        output / "config" / "custom-nodes.toml",
+        output / "config.toml",
+        output / "config.lock.toml",
         scripts_dir=output / "scripts",
         runtime=runtime,
         log=lambda _: None,

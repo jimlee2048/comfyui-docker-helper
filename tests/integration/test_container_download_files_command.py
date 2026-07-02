@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.artifact_helpers import write_root_artifacts
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
@@ -56,19 +57,22 @@ def write_files_config(
     files: list[dict[str, object]],
     default: str = "httpx",
 ) -> Path:
-    """Write a generated files.toml test config."""
+    """Write root config and lock artifacts for download tests."""
     lines = [
-        "[downloader]",
-        f'default = "{default}"',
+        "[comfyui]",
+        'version = "latest"',
         "",
-        "[downloader.aria2]",
+        "[cdh]",
+        f'default_downloader = "{default}"',
+        "",
+        "[cdh.downloader.aria2]",
         "rpc_port = 6811",
         "split = 8",
         "max_connection_per_server = 4",
         'min_split_size = "2M"',
         "resume_download = true",
         "",
-        "[downloader.httpx]",
+        "[cdh.downloader.httpx]",
         "timeout = 30",
         "retries = 2",
         "",
@@ -86,8 +90,7 @@ def write_files_config(
             ]
         )
 
-    config_path = tmp_path / "files.toml"
-    config_path.write_text("\n".join(lines), encoding="utf-8")
+    config_path, _ = write_root_artifacts(tmp_path, "\n".join(lines))
     return config_path
 
 
@@ -124,6 +127,7 @@ def test_download_files_uses_httpx_without_starting_aria2(
 
     results = download_files(
         config,
+        config.with_name("config.lock.toml"),
         httpx_downloader=RecordingBackend("httpx", events),
         aria2_downloader_factory=unexpected_aria2_factory,
         log=lambda _: None,
@@ -155,6 +159,7 @@ def test_download_files_processes_mixed_backends_serially(
 
     results = download_files(
         config,
+        config.with_name("config.lock.toml"),
         httpx_downloader=RecordingBackend("httpx", events),
         aria2_downloader_factory=lambda *, log: ManagedRecordingBackend(
             "aria2",
@@ -202,6 +207,7 @@ def test_download_files_stops_on_failure_and_cleans_up_aria2(
     with pytest.raises(DownloadFilesError, match="aria2 failed"):
         download_files(
             config,
+            config.with_name("config.lock.toml"),
             httpx_downloader=RecordingBackend("httpx", events),
             aria2_downloader_factory=lambda *, log: ManagedRecordingBackend(
                 "aria2",
@@ -221,27 +227,34 @@ def test_cli_exposes_download_files_and_passes_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Invoke the supported container helper and pass --config through."""
-    calls: list[tuple[Path, Path | None]] = []
+    calls: list[tuple[Path, Path, Path | None]] = []
 
-    def fake_download_files(config: Path, *, comfyui_path: Path | None = None) -> None:
-        calls.append((config, comfyui_path))
+    def fake_download_files(
+        config: Path,
+        lock: Path,
+        *,
+        comfyui_path: Path | None = None,
+    ) -> None:
+        calls.append((config, lock, comfyui_path))
 
     monkeypatch.setattr(
         "comfyui_docker_helper.container.cli.download_files",
         fake_download_files,
     )
     config = tmp_path / "files.toml"
+    lock = tmp_path / "config.lock.toml"
     config.write_text("", encoding="utf-8")
+    lock.write_text("", encoding="utf-8")
     monkeypatch.setenv("WORKSPACE", "/srv/work")
     monkeypatch.setenv("COMFYUI_PATH", "/opt/comfy")
 
     result = cli_runner.invoke(
         app,
-        ["container", "download-files", "--config", str(config)],
+        ["container", "download-files", "--config", str(config), "--lock", str(lock)],
     )
 
     assert result.exit_code == 0
-    assert calls == [(config, Path("/opt/comfy"))]
+    assert calls == [(config, lock, Path("/opt/comfy"))]
 
 
 def test_cli_download_files_fails_without_container_paths(
@@ -251,13 +264,15 @@ def test_cli_download_files_fails_without_container_paths(
 ) -> None:
     """Require Docker-managed path environment before helper execution."""
     config = tmp_path / "files.toml"
+    lock = tmp_path / "config.lock.toml"
     config.write_text("", encoding="utf-8")
+    lock.write_text("", encoding="utf-8")
     monkeypatch.delenv("WORKSPACE", raising=False)
     monkeypatch.delenv("COMFYUI_PATH", raising=False)
 
     result = cli_runner.invoke(
         app,
-        ["container", "download-files", "--config", str(config)],
+        ["container", "download-files", "--config", str(config), "--lock", str(lock)],
     )
 
     assert result.exit_code == 1

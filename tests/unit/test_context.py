@@ -17,7 +17,6 @@ import comfyui_docker_helper.rendering.context as context_module
 from comfyui_docker_helper.config import (
     Config,
     FileConfig,
-    GitCustomNodeConfig,
     OutputArtifact,
     OutputManifest,
     RegistryCustomNodeConfig,
@@ -30,8 +29,6 @@ from comfyui_docker_helper.rendering import (
     has_valid_context_marker,
     materialize_build_context,
     render_dockerfile,
-    serialize_custom_nodes_toml,
-    serialize_files_toml,
     write_build_context,
 )
 
@@ -239,7 +236,6 @@ def test_materialized_directories_ignore_process_umask(tmp_path: Path) -> None:
     assert directory_modes["packages/cdh"] == 0o755
     assert directory_modes["packages/cdh/src"] == 0o755
     assert directory_modes["packages/cdh/src/comfyui_docker_helper"] == 0o755
-    assert directory_modes["config"] == 0o755
 
 
 def test_write_build_context_recursively_creates_parent_and_marker(
@@ -567,24 +563,19 @@ def test_write_build_context_rejects_script_source_special_files_before_mutation
     ("with_node", "with_file", "with_hooks", "expected"),
     [
         (False, False, False, set()),
-        (True, False, False, {"config/custom-nodes.toml"}),
-        (False, True, False, {"config/files.toml"}),
+        (True, False, False, set()),
+        (False, True, False, set()),
         (
             True,
             False,
             True,
-            {"config/custom-nodes.toml", "scripts/pre.sh", "scripts/unused.txt"},
+            {"scripts/pre.sh", "scripts/unused.txt"},
         ),
         (
             True,
             True,
             True,
-            {
-                "config/custom-nodes.toml",
-                "config/files.toml",
-                "scripts/pre.sh",
-                "scripts/unused.txt",
-            },
+            {"scripts/pre.sh", "scripts/unused.txt"},
         ),
     ],
     ids=("minimal", "node", "file", "hook", "full"),
@@ -740,125 +731,6 @@ assert template.is_file()
         cwd=non_repo_cwd,
         env=env,
     )
-
-
-def test_custom_nodes_toml_is_ordered_deterministic_and_round_trippable(
-    tmp_path: Path,
-) -> None:
-    """Preserve node/hook order, expand list defaults, and omit None values."""
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    for name in ("pre-a.sh", "pre-b.py", "post.py"):
-        (scripts / name).write_text("pass\n")
-    config = make_config()
-    config.comfyui.custom_nodes = [
-        RegistryCustomNodeConfig.model_validate(
-            {
-                "type": "registry",
-                "id": "first",
-                "pre_install_scripts": ["pre-a.sh", "pre-b.py"],
-            }
-        ),
-        GitCustomNodeConfig.model_validate(
-            {
-                "type": "git",
-                "url": "https://example.com/second.git",
-                "ref": "stable",
-                "target_dir": "second-custom",
-                "post_install_scripts": ["post.py"],
-            }
-        ),
-    ]
-    plan = build_render_plan(config, scripts_dir=scripts)
-
-    first = serialize_custom_nodes_toml(plan.custom_nodes)
-    second = serialize_custom_nodes_toml(plan.custom_nodes)
-    parsed = tomllib.loads(first.decode())
-    nodes = parsed["comfyui"]["custom_nodes"]
-
-    assert first == second
-    assert list(parsed) == ["comfyui"]
-    assert [node["type"] for node in nodes] == ["registry", "git"]
-    assert list(nodes[0]) == [
-        "type",
-        "id",
-        "pre_install_scripts",
-        "post_install_scripts",
-    ]
-    assert "version" not in nodes[0]
-    assert nodes[0]["pre_install_scripts"] == ["pre-a.sh", "pre-b.py"]
-    assert nodes[0]["post_install_scripts"] == []
-    assert list(nodes[1]) == [
-        "type",
-        "url",
-        "ref",
-        "target_dir",
-        "pre_install_scripts",
-        "post_install_scripts",
-    ]
-    assert nodes[1]["target_dir"] == "second-custom"
-    assert nodes[1]["post_install_scripts"] == ["post.py"]
-    assert b"\ntarget = " not in first
-
-
-def test_files_toml_is_ordered_deterministic_and_round_trippable() -> None:
-    """Expand downloader/file defaults and preserve ordered file entries."""
-    config = make_config()
-    config.cdh.default_downloader = "httpx"
-    config.cdh.downloader.aria2.rpc_port = 6811
-    config.cdh.downloader.aria2.split = 8
-    config.cdh.downloader.aria2.max_connection_per_server = 4
-    config.cdh.downloader.aria2.min_split_size = "2M"
-    config.cdh.downloader.aria2.resume_download = False
-    config.cdh.downloader.httpx.timeout = 90.5
-    config.cdh.downloader.httpx.retries = 5
-    config.files = [
-        FileConfig(
-            url="https://example.com/first.bin",
-            dir="models/a",
-            filename="first.bin",
-        ),
-        FileConfig(
-            url="https://example.com/download",
-            dir="models/b",
-            filename="second.bin",
-            overwrite=True,
-            downloader="aria2",
-        ),
-    ]
-    plan = build_render_plan(config)
-
-    first = serialize_files_toml(plan.files)
-    second = serialize_files_toml(plan.files)
-    parsed = tomllib.loads(first.decode())
-
-    assert first == second
-    assert list(parsed) == ["downloader", "files"]
-    assert list(parsed["downloader"]) == ["default", "aria2", "httpx"]
-    assert list(parsed["downloader"]["aria2"]) == [
-        "rpc_port",
-        "split",
-        "max_connection_per_server",
-        "min_split_size",
-        "resume_download",
-    ]
-    assert list(parsed["downloader"]["httpx"]) == ["timeout", "retries"]
-    assert [item["filename"] for item in parsed["files"]] == [
-        "first.bin",
-        "second.bin",
-    ]
-    assert [item["downloader"] for item in parsed["files"]] == [
-        "httpx",
-        "aria2",
-    ]
-    assert list(parsed["files"][0]) == [
-        "url",
-        "dir",
-        "filename",
-        "overwrite",
-        "downloader",
-    ]
-    assert "target" not in parsed["files"][0]
 
 
 @pytest.mark.parametrize("kind", ["missing", "file", "nonempty"])

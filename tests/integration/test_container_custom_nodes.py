@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.artifact_helpers import write_root_artifacts
 
 from comfyui_docker_helper.container.custom_nodes import (
     CustomNodesConfigError,
@@ -16,16 +17,17 @@ from comfyui_docker_helper.container.custom_nodes import (
 def test_load_custom_nodes_plan_preserves_order_targets_and_cache_flag(
     tmp_path: Path,
 ) -> None:
-    """Build a deterministic plan from generated helper TOML."""
-    config = tmp_path / "custom-nodes.toml"
+    """Build a deterministic plan from root config and lock artifacts."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "pre-a.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (scripts / "pre-b.py").write_text("pass\n", encoding="utf-8")
     (scripts / "post.py").write_text("pass\n", encoding="utf-8")
-    config.write_text(
+    config, lock = write_root_artifacts(
+        tmp_path,
         """
 [comfyui]
+version = "latest"
 
 [[comfyui.custom_nodes]]
 type = "registry"
@@ -48,10 +50,9 @@ id = "third"
 pre_install_scripts = []
 post_install_scripts = []
 """.lstrip(),
-        encoding="utf-8",
     )
 
-    plan = load_custom_nodes_plan(config, scripts_dir=scripts)
+    plan = load_custom_nodes_plan(config, lock, scripts_dir=scripts)
 
     assert plan.update_cache is True
     assert plan.has_hooks is True
@@ -135,7 +136,7 @@ def test_hooks_are_defensively_validated(
     hook: str,
     message: str,
 ) -> None:
-    """Repeat host-side hook path checks for generated helper TOML."""
+    """Repeat host-side hook path checks for extracted custom-node views."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     document = {
@@ -177,7 +178,7 @@ def test_duplicate_node_sources_are_rejected(
     nodes: list[dict[str, str]],
     message: str,
 ) -> None:
-    """Defensively reject generated helper TOML with duplicate node sources."""
+    """Defensively reject extracted custom-node views with duplicate sources."""
     with pytest.raises(CustomNodesConfigError, match=message):
         build_custom_nodes_plan({"comfyui": {"custom_nodes": nodes}})
 
@@ -227,7 +228,7 @@ def test_defensive_validation_rejects_malformed_helper_documents(
     document: dict[str, object],
     message: str,
 ) -> None:
-    """Reject shapes outside the generated helper TOML contract."""
+    """Reject shapes outside the extracted custom-node view contract."""
     with pytest.raises(CustomNodesConfigError, match=message):
         build_custom_nodes_plan(document)
 
@@ -237,10 +238,12 @@ def test_load_custom_nodes_plan_reports_missing_and_invalid_toml(
 ) -> None:
     """Translate file and TOML errors into user-facing helper errors."""
     with pytest.raises(CustomNodesConfigError, match="does not exist"):
-        load_custom_nodes_plan(tmp_path / "missing.toml")
+        load_custom_nodes_plan(tmp_path / "missing.toml", tmp_path / "missing.lock")
 
     config = tmp_path / "bad.toml"
     config.write_text("[comfyui\n", encoding="utf-8")
+    lock = tmp_path / "config.lock.toml"
+    lock.write_text("", encoding="utf-8")
 
     with pytest.raises(CustomNodesConfigError, match="not valid TOML"):
-        load_custom_nodes_plan(config)
+        load_custom_nodes_plan(config, lock)

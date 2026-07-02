@@ -76,17 +76,21 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
     uv pip install --python "$VIRTUAL_ENV/bin/python" -- /tmp/cdh/packages/cdh
 
 {% if plan.custom_nodes.items %}
-RUN --mount=type=bind,source=config/custom-nodes.toml,target=/tmp/cdh/config/custom-nodes.toml{% if plan.custom_nodes.has_hooks %} \
+RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
+    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml{% if plan.custom_nodes.has_hooks %} \
     --mount=type=bind,source=scripts,target=/tmp/cdh/scripts{% endif %} \
     cdh container install-custom-nodes \
-      --config /tmp/cdh/config/custom-nodes.toml{% if plan.custom_nodes.has_hooks %} \
+      --config /tmp/cdh/config.toml \
+      --lock /tmp/cdh/config.lock.toml{% if plan.custom_nodes.has_hooks %} \
       --scripts-dir /tmp/cdh/scripts{% endif %}
 
 {% endif %}
 {% if plan.files.items %}
-RUN --mount=type=bind,source=config/files.toml,target=/tmp/cdh/config/files.toml \
+RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
+    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
     cdh container download-files \
-      --config /tmp/cdh/config/files.toml
+      --config /tmp/cdh/config.toml \
+      --lock /tmp/cdh/config.lock.toml
 
 {% endif %}
 WORKDIR {{ plan.paths.workspace | dockerfile_word }}

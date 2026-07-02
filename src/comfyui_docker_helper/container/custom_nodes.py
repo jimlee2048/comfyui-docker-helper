@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -19,6 +18,11 @@ from comfyui_docker_helper.config.plan import (
     RegistryCustomNodePlan,
 )
 from comfyui_docker_helper.config.validation import resolve_git_target_dir
+from comfyui_docker_helper.container.root_config import (
+    ContainerRootConfigError,
+    custom_nodes_document,
+    load_container_root_artifacts,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 _CUSTOM_NODES_ADAPTER = TypeAdapter(list[CustomNodeConfig])
@@ -31,28 +35,17 @@ class CustomNodesConfigError(ApplicationError):
 
 def load_custom_nodes_plan(
     config_path: str | Path,
+    lock_path: str | Path,
     *,
     scripts_dir: str | Path | None = None,
 ) -> CustomNodesPlan:
-    """Load the generated helper TOML and build a deterministic install plan."""
+    """Load root artifacts and build a deterministic custom-node install plan."""
 
-    path = Path(config_path)
     try:
-        with path.open("rb") as config_file:
-            document = tomllib.load(config_file)
-    except FileNotFoundError as error:
-        raise CustomNodesConfigError(
-            f"custom-node config does not exist: {path}"
-        ) from error
-    except tomllib.TOMLDecodeError as error:
-        raise CustomNodesConfigError(
-            f"custom-node config is not valid TOML: {path}: {error}"
-        ) from error
-    except OSError as error:
-        raise CustomNodesConfigError(
-            f"custom-node config cannot be read: {path}: {error}"
-        ) from error
-
+        artifacts = load_container_root_artifacts(config_path, lock_path)
+    except ContainerRootConfigError as error:
+        raise CustomNodesConfigError(str(error)) from error
+    document = custom_nodes_document(artifacts.config)
     return build_custom_nodes_plan(document, scripts_dir=scripts_dir)
 
 

@@ -7,7 +7,6 @@ import secrets
 import stat
 import subprocess
 import time
-import tomllib
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -22,6 +21,11 @@ import httpx
 from pydantic import Field, ValidationError
 
 from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.container.root_config import (
+    ContainerRootConfigError,
+    files_document,
+    load_container_root_artifacts,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 
@@ -415,28 +419,17 @@ class _FilesConfig(ConfigModel):
 
 def load_file_download_plan(
     config_path: str | Path,
+    lock_path: str | Path,
     *,
     comfyui_path: str | Path | None = None,
 ) -> FileDownloadPlan:
-    """Load generated files.toml and build a deterministic download plan."""
+    """Load root artifacts and build a deterministic file-download plan."""
 
-    path = Path(config_path)
     try:
-        with path.open("rb") as config_file:
-            document = tomllib.load(config_file)
-    except FileNotFoundError as error:
-        raise DownloadFilesConfigError(
-            f"file-download config does not exist: {path}"
-        ) from error
-    except tomllib.TOMLDecodeError as error:
-        raise DownloadFilesConfigError(
-            f"file-download config is not valid TOML: {path}: {error}"
-        ) from error
-    except OSError as error:
-        raise DownloadFilesConfigError(
-            f"file-download config cannot be read: {path}: {error}"
-        ) from error
-
+        artifacts = load_container_root_artifacts(config_path, lock_path)
+    except ContainerRootConfigError as error:
+        raise DownloadFilesConfigError(str(error)) from error
+    document = files_document(artifacts.config)
     return build_file_download_plan(document, comfyui_path=comfyui_path)
 
 
@@ -445,7 +438,7 @@ def build_file_download_plan(
     *,
     comfyui_path: str | Path | None = None,
 ) -> FileDownloadPlan:
-    """Validate generated file config data and derive container targets."""
+    """Validate file-download helper data and derive container targets."""
 
     try:
         config = _FilesConfig.model_validate(document)
@@ -510,15 +503,20 @@ def process_file_downloads(
 
 def download_files(
     config_path: str | Path,
+    lock_path: str | Path,
     *,
     comfyui_path: str | Path | None = None,
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
 ) -> tuple[DownloadResult, ...]:
-    """Download files from the generated helper config with managed backends."""
+    """Download files from validated root artifacts with managed backends."""
 
-    plan = load_file_download_plan(config_path, comfyui_path=comfyui_path)
+    plan = load_file_download_plan(
+        config_path,
+        lock_path,
+        comfyui_path=comfyui_path,
+    )
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 

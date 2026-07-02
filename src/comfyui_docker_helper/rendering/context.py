@@ -13,11 +13,7 @@ from comfyui_docker_helper.config.lock import Lockfile, dump_lockfile_toml
 from comfyui_docker_helper.config.models import Config
 from comfyui_docker_helper.config.plan import (
     ArtifactKind,
-    CustomNodesPlan,
-    FilesPlan,
-    GitCustomNodePlan,
     OutputArtifact,
-    RegistryCustomNodePlan,
     RenderPlan,
 )
 from comfyui_docker_helper.rendering.dockerfile import render_dockerfile
@@ -121,82 +117,6 @@ def has_valid_context_marker(directory: str | Path) -> bool:
     return all(payload.get(key) == value for key, value in _MARKER_PAYLOAD.items())
 
 
-def serialize_custom_nodes_toml(plan: CustomNodesPlan) -> bytes:
-    """Serialize normalized custom nodes as deterministic helper TOML bytes."""
-    nodes: list[dict[str, object]] = []
-    for node in plan.items:
-        if isinstance(node, RegistryCustomNodePlan):
-            item = _ordered_mapping(
-                ("type", node.type),
-                ("id", node.id),
-            )
-            if node.version is not None:
-                item["version"] = node.version
-        elif isinstance(node, GitCustomNodePlan):
-            item = _ordered_mapping(
-                ("type", node.type),
-                ("url", node.url),
-            )
-            if node.ref is not None:
-                item["ref"] = node.ref
-            if node.target_dir is not None:
-                item["target_dir"] = node.target_dir
-        else:  # pragma: no cover - frozen plan union is exhaustive
-            raise TypeError(f"unsupported custom-node plan: {type(node).__name__}")
-        item["pre_install_scripts"] = list(node.pre_install_scripts)
-        item["post_install_scripts"] = list(node.post_install_scripts)
-        nodes.append(item)
-
-    document = _ordered_mapping(
-        (
-            "comfyui",
-            _ordered_mapping(("custom_nodes", nodes)),
-        )
-    )
-    return tomli_w.dumps(document).encode("utf-8")
-
-
-def serialize_files_toml(plan: FilesPlan) -> bytes:
-    """Serialize normalized downloader settings and files as helper TOML bytes."""
-    aria2 = plan.downloader.aria2
-    httpx = plan.downloader.httpx
-    downloader = _ordered_mapping(
-        ("default", plan.downloader.default),
-        (
-            "aria2",
-            _ordered_mapping(
-                ("rpc_port", aria2.rpc_port),
-                ("split", aria2.split),
-                ("max_connection_per_server", aria2.max_connection_per_server),
-                ("min_split_size", aria2.min_split_size),
-                ("resume_download", aria2.resume_download),
-            ),
-        ),
-        (
-            "httpx",
-            _ordered_mapping(
-                ("timeout", httpx.timeout),
-                ("retries", httpx.retries),
-            ),
-        ),
-    )
-    files = [
-        _ordered_mapping(
-            ("url", item.url),
-            ("dir", item.directory),
-            ("filename", item.filename),
-            ("overwrite", item.overwrite),
-            ("downloader", item.downloader),
-        )
-        for item in plan.items
-    ]
-    document = _ordered_mapping(
-        ("downloader", downloader),
-        ("files", files),
-    )
-    return tomli_w.dumps(document).encode("utf-8")
-
-
 def serialize_config_toml(config: Config) -> bytes:
     """Serialize the merged effective root config as deterministic TOML bytes."""
     document = config.model_dump(mode="json", exclude_none=True)
@@ -233,16 +153,6 @@ def materialize_build_context(
         _write_text(destination / "Dockerfile", render_dockerfile(plan))
         _materialize_package_projection(destination / "packages" / "cdh")
 
-        if plan.custom_nodes.items:
-            _write_bytes(
-                destination / "config" / "custom-nodes.toml",
-                serialize_custom_nodes_toml(plan.custom_nodes),
-            )
-        if plan.files.items:
-            _write_bytes(
-                destination / "config" / "files.toml",
-                serialize_files_toml(plan.files),
-            )
         if plan.custom_nodes.has_hooks:
             scripts_source = plan.custom_nodes.scripts_source_dir
             if scripts_source is None:

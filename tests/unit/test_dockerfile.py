@@ -93,18 +93,24 @@ WORKDIR /workspace
 CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--disable-auto-launch"]
 """
 
-_NODE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config/custom-nodes.toml,target=/tmp/cdh/config/custom-nodes.toml \
+_NODE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
+    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
     cdh container install-custom-nodes \
-      --config /tmp/cdh/config/custom-nodes.toml
+      --config /tmp/cdh/config.toml \
+      --lock /tmp/cdh/config.lock.toml
 """
-_FILE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config/files.toml,target=/tmp/cdh/config/files.toml \
+_FILE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
+    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
     cdh container download-files \
-      --config /tmp/cdh/config/files.toml
+      --config /tmp/cdh/config.toml \
+      --lock /tmp/cdh/config.lock.toml
 """
-_HOOK_LAYER = r"""RUN --mount=type=bind,source=config/custom-nodes.toml,target=/tmp/cdh/config/custom-nodes.toml \
+_HOOK_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
+    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
     --mount=type=bind,source=scripts,target=/tmp/cdh/scripts \
     cdh container install-custom-nodes \
-      --config /tmp/cdh/config/custom-nodes.toml \
+      --config /tmp/cdh/config.toml \
+      --lock /tmp/cdh/config.lock.toml \
       --scripts-dir /tmp/cdh/scripts
 """
 
@@ -182,14 +188,18 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python "$VIRTUAL_ENV/bin/python" -- /tmp/cdh/packages/cdh
 
-RUN --mount=type=bind,source=config/custom-nodes.toml,target=/tmp/cdh/config/custom-nodes.toml \
+RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
+    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
     --mount=type=bind,source=scripts,target=/tmp/cdh/scripts \
     cdh container install-custom-nodes \
-      --config /tmp/cdh/config/custom-nodes.toml \
+      --config /tmp/cdh/config.toml \
+      --lock /tmp/cdh/config.lock.toml \
       --scripts-dir /tmp/cdh/scripts
-RUN --mount=type=bind,source=config/files.toml,target=/tmp/cdh/config/files.toml \
+RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
+    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
     cdh container download-files \
-      --config /tmp/cdh/config/files.toml
+      --config /tmp/cdh/config.toml \
+      --lock /tmp/cdh/config.lock.toml
 
 WORKDIR "/work dir/\$cash/\"quote\"/back\\slash"
 CMD ["python", "/opt/Comfy UI/main.py", "--listen", "value \"quoted\" $cash \\ path"]
@@ -239,19 +249,29 @@ def test_minimal_dockerfile_matches_complete_deterministic_snapshot() -> None:
         pytest.param(
             "node",
             _NODE_ONLY_LAYER.rstrip(),
-            ("source=config/files.toml", "source=scripts", "--scripts-dir"),
+            (
+                "source=config/custom-nodes.toml",
+                "source=config/files.toml",
+                "source=scripts",
+                "--scripts-dir",
+            ),
             id="node-only",
         ),
         pytest.param(
             "file",
             _FILE_ONLY_LAYER.rstrip(),
-            ("source=config/custom-nodes.toml", "source=scripts", "--scripts-dir"),
+            (
+                "source=config/custom-nodes.toml",
+                "source=config/files.toml",
+                "source=scripts",
+                "--scripts-dir",
+            ),
             id="file-only",
         ),
         pytest.param(
             "hook",
             _HOOK_LAYER.rstrip(),
-            ("source=config/files.toml",),
+            ("source=config/custom-nodes.toml", "source=config/files.toml"),
             id="hook-only",
         ),
     ],
@@ -305,7 +325,7 @@ def test_optional_helper_layers_are_emitted_only_for_enabled_features(
     if feature == "hook":
         assert rendered.count("source=scripts,target=/tmp/cdh/scripts") == 1
         assert rendered.count("--scripts-dir /tmp/cdh/scripts") == 1
-        assert rendered.index("source=config/custom-nodes.toml") < rendered.index(
+        assert rendered.index("source=config.lock.toml") < rendered.index(
             "source=scripts"
         )
 
@@ -373,8 +393,8 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
         'if [ "$COMFY_CLI_VERSION" = latest ]',
         "RUN comfy --skip-prompt",
         "source=packages/cdh",
-        "source=config/custom-nodes.toml",
-        "source=config/files.toml",
+        "source=config.toml",
+        "source=config.lock.toml",
         "WORKDIR",
         "CMD",
     ]

@@ -432,16 +432,16 @@ def test_upgrade_lock_refreshes_moving_source_selections(tmp_path: Path) -> None
     assert lockfile.custom_nodes[1].commit == COMMIT_B
 
 
-def test_old_helper_projections_remain_available_for_m3_t1(tmp_path: Path) -> None:
-    """M3-T1 writes root artifacts while preserving v0.1 helper projections."""
+def test_old_helper_projections_are_omitted_for_m3_t2(tmp_path: Path) -> None:
+    """M3-T2 renders root artifacts without v0.1 helper projections."""
     output = tmp_path / "context"
 
     render_context(tmp_path, output=output)
 
     assert (output / "config.toml").is_file()
     assert (output / "config.lock.toml").is_file()
-    assert (output / "config" / "custom-nodes.toml").is_file()
-    assert (output / "config" / "files.toml").is_file()
+    assert not (output / "config" / "custom-nodes.toml").exists()
+    assert not (output / "config" / "files.toml").exists()
 
 
 def file_contents(root: Path) -> dict[str, bytes]:

@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
+from comfyui_docker_helper.config import (
+    ComfyCliVersionCandidate,
+    ComfyUIReleaseCandidate,
+    RegistryInstallMetadata,
+    RegistryVersionCandidate,
+    SourceResolvers,
+    parse_lockfile_toml,
+)
 from comfyui_docker_helper.host.buildx import BuildxBuildError, BuildxBuildResult
 from comfyui_docker_helper.rendering import has_valid_context_marker
+
+COMMIT_1 = "1" * 40
+COMMIT_2 = "2" * 40
 
 MINIMAL_CONFIG = """\
 [compute_platform]
@@ -31,6 +44,85 @@ def write_config(root: Path, document: str = MINIMAL_CONFIG) -> Path:
     path = root / "config.toml"
     path.write_text(document, encoding="utf-8")
     return path
+
+
+@dataclass(frozen=True, slots=True)
+class BuildWorkflowComfyUIProvider:
+    """Configurable ComfyUI resolver for host build workflow tests."""
+
+    version: str = "0.26.0"
+    commit: str = COMMIT_1
+
+    def list_releases(self) -> Sequence[ComfyUIReleaseCandidate]:
+        return [ComfyUIReleaseCandidate(version=self.version, commit=self.commit)]
+
+    def get_nightly_commit(self) -> str:
+        return self.commit
+
+
+@dataclass(frozen=True, slots=True)
+class BuildWorkflowComfyCliProvider:
+    """Configurable comfy-cli resolver for host build workflow tests."""
+
+    version: str = "1.5.0"
+
+    def list_versions(self) -> Sequence[ComfyCliVersionCandidate]:
+        return [ComfyCliVersionCandidate(version=self.version)]
+
+
+class FailingComfyUIProvider:
+    """Provider that fails if strict locked mode performs resolution."""
+
+    def list_releases(self) -> Sequence[ComfyUIReleaseCandidate]:
+        raise AssertionError("ComfyUI resolver should not be called")
+
+    def get_nightly_commit(self) -> str:
+        raise AssertionError("ComfyUI resolver should not be called")
+
+
+class FailingComfyCliProvider:
+    """Provider that fails if strict locked mode performs resolution."""
+
+    def list_versions(self) -> Sequence[ComfyCliVersionCandidate]:
+        raise AssertionError("comfy-cli resolver should not be called")
+
+
+class FailingRegistryProvider:
+    """Provider that fails if strict locked mode performs resolution."""
+
+    def get_install_metadata(
+        self,
+        node_id: str,
+        version: str | None = None,
+    ) -> RegistryInstallMetadata:
+        del node_id, version
+        raise AssertionError("registry resolver should not be called")
+
+    def list_versions(self, node_id: str) -> Sequence[RegistryVersionCandidate]:
+        del node_id
+        raise AssertionError("registry resolver should not be called")
+
+
+class FailingGitProvider:
+    """Provider that fails if strict locked mode performs resolution."""
+
+    def resolve_default_branch_head(self, url: str) -> str:
+        del url
+        raise AssertionError("git resolver should not be called")
+
+    def resolve_ref(self, url: str, ref: str) -> str:
+        del url, ref
+        raise AssertionError("git resolver should not be called")
+
+
+def failing_source_resolvers() -> SourceResolvers:
+    """Return resolvers that fail on every provider boundary call."""
+    return SourceResolvers(
+        comfyui=FailingComfyUIProvider(),
+        comfy_cli=FailingComfyCliProvider(),
+        registry=FailingRegistryProvider(),
+        git=FailingGitProvider(),
+    )
 
 
 def test_build_help_exposes_current_options(cli_runner: CliRunner) -> None:
@@ -476,6 +568,173 @@ output = "push"
 
     assert result.exit_code == 0
     assert calls == ["push"]
+
+
+def test_build_locked_reuses_existing_context_lock_without_resolver_calls(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict locked host build reuses the context lock and still calls Buildx."""
+    config = write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[build]
+tags = ["locked:one", "locked:two"]
+output = "push"
+""",
+    )
+    context = tmp_path / "context"
+    calls: list[tuple[tuple[str, ...], str, Path]] = []
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        lambda **kwargs: calls.append(
+            (kwargs["image_tags"], kwargs["output"], kwargs["context_dir"])
+        ),
+    )
+
+    initial = cli_runner.invoke(
+        app,
+        ["host", "build", "-f", str(config), "--context-dir", str(context)],
+    )
+    assert initial.exit_code == 0
+    assert calls == [(("locked:one", "locked:two"), "push", context)]
+    original_lock = (context / "config.lock.toml").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.create_default_source_resolvers",
+        failing_source_resolvers,
+    )
+
+    locked = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "--locked",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(context),
+        ],
+    )
+
+    assert locked.exit_code == 0
+    assert calls == [
+        (("locked:one", "locked:two"), "push", context),
+        (("locked:one", "locked:two"), "push", context),
+    ]
+    assert (context / "config.lock.toml").read_text(encoding="utf-8") == original_lock
+
+
+def test_build_upgrade_lock_updates_context_lock_before_buildx(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upgrade-lock host build refreshes moving selections before Buildx."""
+    config = write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[build]
+tags = ["upgrade:locked"]
+output = "load"
+""",
+    )
+    context = tmp_path / "context"
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.create_default_source_resolvers",
+        lambda: SourceResolvers(
+            comfyui=BuildWorkflowComfyUIProvider(version="0.26.0", commit=COMMIT_1),
+            comfy_cli=BuildWorkflowComfyCliProvider(version="1.5.0"),
+            registry=FailingRegistryProvider(),
+            git=FailingGitProvider(),
+        ),
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        lambda **kwargs: BuildxBuildResult(
+            argv=("docker",),
+            context_dir=kwargs["context_dir"],
+            image_tags=kwargs["image_tags"],
+            output=kwargs["output"],
+        ),
+    )
+
+    initial = cli_runner.invoke(
+        app,
+        ["host", "build", "-f", str(config), "--context-dir", str(context)],
+    )
+    assert initial.exit_code == 0
+    original_lock = parse_lockfile_toml(
+        (context / "config.lock.toml").read_text(encoding="utf-8")
+    )
+    assert original_lock.comfyui.version == "0.26.0"
+    assert original_lock.comfyui.commit == COMMIT_1
+
+    calls: list[tuple[tuple[str, ...], str]] = []
+
+    def assert_upgraded_lock_before_buildx(
+        *,
+        image_tags: tuple[str, ...],
+        output: str,
+        context_dir: Path,
+        cwd: Path,
+        log,
+    ) -> BuildxBuildResult:
+        del cwd, log
+        lockfile = parse_lockfile_toml(
+            (context_dir / "config.lock.toml").read_text(encoding="utf-8")
+        )
+        assert lockfile.comfyui.version == "0.27.0"
+        assert lockfile.comfyui.commit == COMMIT_2
+        assert lockfile.comfyui.cli_version == "2.0.0"
+        calls.append((image_tags, output))
+        return BuildxBuildResult(
+            argv=("docker",),
+            context_dir=context_dir,
+            image_tags=image_tags,
+            output=output,
+        )
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.create_default_source_resolvers",
+        lambda: SourceResolvers(
+            comfyui=BuildWorkflowComfyUIProvider(version="0.27.0", commit=COMMIT_2),
+            comfy_cli=BuildWorkflowComfyCliProvider(version="2.0.0"),
+            registry=FailingRegistryProvider(),
+            git=FailingGitProvider(),
+        ),
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        assert_upgraded_lock_before_buildx,
+    )
+
+    upgraded = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "--upgrade-lock",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(context),
+        ],
+    )
+
+    assert upgraded.exit_code == 0
+    assert calls == [(("upgrade:locked",), "load")]
+    upgraded_lock = parse_lockfile_toml(
+        (context / "config.lock.toml").read_text(encoding="utf-8")
+    )
+    assert upgraded_lock.comfyui.version == "0.27.0"
+    assert upgraded_lock.comfyui.commit == COMMIT_2
 
 
 def test_build_rejects_load_and_push_together_before_loading(

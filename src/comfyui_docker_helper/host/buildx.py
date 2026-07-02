@@ -7,9 +7,11 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from comfyui_docker_helper.errors import ApplicationError
+
+type BuildxOutput = Literal["load", "push"]
 
 
 class BuildxBuildError(ApplicationError):
@@ -22,7 +24,8 @@ class BuildxBuildResult:
 
     argv: tuple[str, ...]
     context_dir: Path
-    image_tag: str
+    image_tags: tuple[str, ...]
+    output: BuildxOutput
 
 
 class BuildxRunner(Protocol):
@@ -42,27 +45,29 @@ BuildxLogger = Callable[[str], None]
 
 def build_image_with_buildx(
     *,
-    image_tag: str,
+    image_tags: Sequence[str],
+    output: BuildxOutput = "load",
     context_dir: str | Path,
     cwd: str | Path | None = None,
     docker_executable: str = "docker",
     runner: BuildxRunner = subprocess.run,
     log: BuildxLogger = print,
 ) -> BuildxBuildResult:
-    """Run the supported v0.1 Docker Buildx command and stream output.
+    """Run the supported Docker Buildx command and stream output.
 
     The subprocess inherits stdout/stderr from the current process because no
-    capture arguments are passed. v0.1 intentionally does not use the Docker
+    capture arguments are passed. This intentionally does not use the Docker
     SDK, retry, or fall back to ``docker build``.
     """
     resolved_context = Path(context_dir)
+    tags = tuple(image_tags)
+    tag_args = tuple(arg for tag in tags for arg in ("-t", tag))
     argv = (
         docker_executable,
         "buildx",
         "build",
-        "--load",
-        "-t",
-        image_tag,
+        f"--{output}",
+        *tag_args,
         str(resolved_context),
     )
     log(f"Running Docker Buildx: {shlex.join(argv)}")
@@ -88,9 +93,14 @@ def build_image_with_buildx(
             f"Docker Buildx failed with exit code {completed.returncode}"
         )
 
-    log(f"Docker Buildx loaded image: {image_tag}")
+    tag_summary = ", ".join(tags)
+    if output == "push":
+        log(f"Docker Buildx pushed image tags: {tag_summary}")
+    else:
+        log(f"Docker Buildx loaded image tags: {tag_summary}")
     return BuildxBuildResult(
         argv=argv,
         context_dir=resolved_context,
-        image_tag=image_tag,
+        image_tags=tags,
+        output=output,
     )

@@ -159,17 +159,20 @@ def test_examples_readme_documents_v02_build_ergonomics() -> None:
     ) in readme
 
 
-def test_examples_reject_removed_or_unsupported_feature_claims() -> None:
-    """Prevent stale or unsupported feature claims from returning to examples."""
-    user_facing_text = "\n".join(
-        path.read_text(encoding="utf-8")
+def test_user_facing_docs_reject_removed_or_unsupported_feature_claims() -> None:
+    """Prevent stale or unsupported feature claims from returning to docs."""
+    docs = [Path("README.md")]
+    docs.extend(
+        path
         for path in sorted(EXAMPLES.rglob("*"))
         if path.is_file() and path.suffix in {".md", ".toml", ".sh"}
     )
+    user_facing_text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
 
     forbidden = [
         "config/custom-nodes.toml",
         "config/files.toml",
+        "helper configs",
         "[downloader]",
         "runtime entrypoint",
         "entrypoint",

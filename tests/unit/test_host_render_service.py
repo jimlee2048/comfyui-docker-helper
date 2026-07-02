@@ -62,6 +62,11 @@ dir = "models/checkpoints"
 filename = "model.safetensors"
 """
 
+HOOK_CONFIG = CONFIG.replace(
+    'id = "node"\n',
+    'id = "node"\npre_install_scripts = ["pre.sh"]\n',
+)
+
 
 @dataclass(slots=True)
 class FakeComfyUIProvider:
@@ -173,6 +178,8 @@ def render_context(
     *,
     output: Path | None = None,
     working_directory: Path | None = None,
+    config_content: str = CONFIG,
+    scripts_dir: Path | None = None,
     resolvers: FakeResolvers | None = None,
     options: LockOptions | None = None,
     overwrite: bool = False,
@@ -181,8 +188,9 @@ def render_context(
     providers = resolvers or FakeResolvers()
     work = tmp_path if working_directory is None else working_directory
     prepare_render_context(
-        write_config(work),
+        write_config(work, config_content),
         output or tmp_path / "context",
+        scripts_dir=scripts_dir or work / "scripts",
         resolvers=providers.source_resolvers(),
         lock_options=options,
         overwrite=overwrite,
@@ -355,6 +363,193 @@ def test_check_mode_reports_root_artifact_drift(tmp_path: Path) -> None:
         render_context(tmp_path, output=output, options=LockOptions(check=True))
 
 
+def test_check_mode_reports_dockerfile_drift(tmp_path: Path) -> None:
+    """Check mode compares the generated Dockerfile, not only root TOML."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    (output / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+
+def test_check_mode_reports_package_projection_drift(tmp_path: Path) -> None:
+    """Check mode compares managed package projection files."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    package_pyproject = output / "packages" / "cdh" / "pyproject.toml"
+    package_pyproject.write_text('[project]\nname = "changed"\n', encoding="utf-8")
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+
+def test_check_mode_reports_symlink_package_projection_file(
+    tmp_path: Path,
+) -> None:
+    """Check mode treats symlinked managed package files as drift."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported on this platform")
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    package_pyproject = output / "packages" / "cdh" / "pyproject.toml"
+    real_pyproject = tmp_path / "real-package-pyproject.toml"
+    real_pyproject.write_bytes(package_pyproject.read_bytes())
+    package_pyproject.unlink()
+    package_pyproject.symlink_to(real_pyproject)
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+
+def test_check_mode_reports_symlink_package_projection_dir(tmp_path: Path) -> None:
+    """Check mode treats symlinked managed package directories as drift."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported on this platform")
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    package_src = output / "packages" / "cdh" / "src"
+    real_src = tmp_path / "real-package-src"
+    package_src.rename(real_src)
+    package_src.symlink_to(real_src, target_is_directory=True)
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+
+def test_check_mode_reports_scripts_drift_when_hooks_are_present(
+    tmp_path: Path,
+) -> None:
+    """Check mode compares copied scripts when the render plan has hooks."""
+    output = tmp_path / "context"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    render_context(
+        tmp_path,
+        output=output,
+        config_content=HOOK_CONFIG,
+        scripts_dir=scripts,
+    )
+    (output / "scripts" / "pre.sh").write_text("changed\n", encoding="utf-8")
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(
+            tmp_path,
+            output=output,
+            config_content=HOOK_CONFIG,
+            scripts_dir=scripts,
+            options=LockOptions(check=True),
+        )
+
+
+def test_check_mode_reports_symlink_script_when_hooks_are_present(
+    tmp_path: Path,
+) -> None:
+    """Check mode treats symlinked managed hook scripts as drift."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported on this platform")
+    output = tmp_path / "context"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    render_context(
+        tmp_path,
+        output=output,
+        config_content=HOOK_CONFIG,
+        scripts_dir=scripts,
+    )
+    real_script = tmp_path / "real-pre.sh"
+    real_script.write_bytes((output / "scripts" / "pre.sh").read_bytes())
+    (output / "scripts" / "pre.sh").unlink()
+    (output / "scripts" / "pre.sh").symlink_to(real_script)
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(
+            tmp_path,
+            output=output,
+            config_content=HOOK_CONFIG,
+            scripts_dir=scripts,
+            options=LockOptions(check=True),
+        )
+
+
+def test_check_mode_reports_missing_scripts_when_hooks_are_present(
+    tmp_path: Path,
+) -> None:
+    """Check mode fails when a managed scripts tree is missing."""
+    output = tmp_path / "context"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    render_context(
+        tmp_path,
+        output=output,
+        config_content=HOOK_CONFIG,
+        scripts_dir=scripts,
+    )
+    (output / "scripts" / "pre.sh").unlink()
+    (output / "scripts").rmdir()
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(
+            tmp_path,
+            output=output,
+            config_content=HOOK_CONFIG,
+            scripts_dir=scripts,
+            options=LockOptions(check=True),
+        )
+
+
+def test_check_mode_ignores_unmanaged_extras_and_keeps_target_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Check mode neither reports nor deletes files outside managed artifacts."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    extra = output / "unmanaged" / "extra.txt"
+    extra.parent.mkdir()
+    extra.write_text("keep me\n", encoding="utf-8")
+    before = file_contents(output)
+
+    render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+    assert file_contents(output) == before
+    assert extra.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_check_mode_cleans_temporary_expected_contexts(tmp_path: Path) -> None:
+    """Check mode removes temporary expected contexts after success and failure."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+
+    render_context(tmp_path, output=output, options=LockOptions(check=True))
+    assert check_temp_dirs(tmp_path) == []
+
+    (output / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+    assert check_temp_dirs(tmp_path) == []
+
+
+def test_check_locked_mode_reuses_compatible_lock_without_provider_calls(
+    tmp_path: Path,
+) -> None:
+    """Check plus locked mode keeps the strict no-resolution lock behavior."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    providers = FakeResolvers()
+
+    render_context(
+        tmp_path,
+        output=output,
+        resolvers=providers,
+        options=LockOptions(check=True, locked=True),
+    )
+
+    providers.assert_zero_calls()
+
+
 def test_check_mode_rejects_missing_context(tmp_path: Path) -> None:
     """Check mode fails before accepting absent output paths."""
     with pytest_raises_host_error("render.context_missing"):
@@ -448,6 +643,7 @@ def test_old_helper_projections_are_omitted_for_m3_t2(tmp_path: Path) -> None:
 
     assert (output / "config.toml").is_file()
     assert (output / "config.lock.toml").is_file()
+    assert not (output / "config").exists()
     assert not (output / "config" / "custom-nodes.toml").exists()
     assert not (output / "config" / "files.toml").exists()
 
@@ -459,6 +655,11 @@ def file_contents(root: Path) -> dict[str, bytes]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def check_temp_dirs(parent: Path) -> list[Path]:
+    """Return leaked render-check temporary context directories."""
+    return sorted(parent.glob(".cdh-check-*"))
 
 
 class pytest_raises_host_error(AbstractContextManager[None]):

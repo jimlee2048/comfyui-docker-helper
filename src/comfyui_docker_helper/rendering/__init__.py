@@ -5,6 +5,7 @@ from comfyui_docker_helper.rendering.context import (
     MaterializationError,
     has_valid_context_marker,
     materialize_build_context,
+    materialize_expected_build_context,
     serialize_config_toml,
     write_build_context,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "MaterializationError",
     "has_valid_context_marker",
     "materialize_build_context",
+    "materialize_expected_build_context",
     "render_dockerfile",
     "serialize_config_toml",
     "serialize_dockerfile_identifier",

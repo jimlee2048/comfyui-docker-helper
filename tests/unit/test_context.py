@@ -29,6 +29,7 @@ from comfyui_docker_helper.rendering import (
     MaterializationError,
     has_valid_context_marker,
     materialize_build_context,
+    materialize_expected_build_context,
     render_dockerfile,
     write_build_context,
 )
@@ -518,6 +519,39 @@ def test_write_build_context_cleans_created_parents_when_materialization_fails(
         )
 
     assert not (tmp_path / "created").exists()
+
+
+def test_expected_context_cleans_temp_dir_when_materialization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed check-context materialization removes the temporary directory."""
+    config = make_config()
+    plan = build_render_plan(config)
+
+    def fail_after_temp_dir_exists(*args, **kwargs) -> None:
+        del args, kwargs
+        assert list(tmp_path.glob(".cdh-check-*"))
+        raise MaterializationError("forced materialization failure")
+
+    monkeypatch.setattr(
+        context_module,
+        "materialize_build_context",
+        fail_after_temp_dir_exists,
+    )
+
+    with (
+        pytest.raises(MaterializationError, match="forced materialization failure"),
+        materialize_expected_build_context(
+            plan,
+            tmp_path,
+            config=config,
+            lockfile=make_lockfile(config),
+        ),
+    ):
+        pytest.fail("expected context should not be yielded")
+
+    assert not list(tmp_path.glob(".cdh-check-*"))
 
 
 def test_write_build_context_preserves_marked_destination_when_materialization_fails(

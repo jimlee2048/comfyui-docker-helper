@@ -143,6 +143,8 @@ def render_plan_preview(
         output.print(f"  - {layer.value}")
     output.print()
     output.print("Output manifest:")
+    output.print("  - config.toml [file]")
+    output.print("  - config.lock.toml [file]")
     for artifact in plan.output_manifest.all:
         condition = f" ({artifact.condition.value})" if artifact.condition else ""
         output.print(f"  - {artifact.path} [{artifact.kind.value}]{condition}")

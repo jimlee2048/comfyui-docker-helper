@@ -467,6 +467,36 @@ workspace = "/srv"
     assert not output.exists()
 
 
+@pytest.mark.parametrize(
+    ("extra_flag", "message"),
+    [
+        ("--dry-run", "--check cannot be combined with --dry-run"),
+        ("--upgrade-lock", "--check cannot be combined with --upgrade-lock"),
+    ],
+)
+def test_render_check_rejects_incompatible_flags_at_cli_level(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    extra_flag: str,
+    message: str,
+) -> None:
+    """Render CLI surfaces shared lock option compatibility diagnostics."""
+    path = _write_config(tmp_path)
+    output = tmp_path / "context"
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output), "--check", extra_flag],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Configuration is invalid:" in result.stderr
+    assert "lock.options_incompatible" in result.stderr
+    assert message in result.stderr
+    assert not output.exists()
+
+
 def test_render_plan_preview_has_stable_full_shape() -> None:
     """Lock the minimal dry-run preview order and labels."""
     plan = build_render_plan(Config.model_validate(toml_minimal_config()))
@@ -552,6 +582,8 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             "  - final",
             "",
             "Output manifest:",
+            "  - config.toml [file]",
+            "  - config.lock.toml [file]",
             "  - Dockerfile [file]",
             "  - .cdh-rendered [file]",
             "  - packages/cdh/pyproject.toml [file]",

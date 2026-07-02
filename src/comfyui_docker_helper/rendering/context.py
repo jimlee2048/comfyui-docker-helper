@@ -3,7 +3,8 @@
 import json
 import shutil
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from importlib import metadata, resources
 from pathlib import Path, PurePosixPath
 
@@ -175,6 +176,38 @@ def materialize_build_context(
     except BaseException:
         _clear_staging_contents(destination)
         raise
+
+
+@contextmanager
+def materialize_expected_build_context(
+    plan: RenderPlan,
+    parent_directory: str | Path,
+    *,
+    config: Config,
+    lockfile: Lockfile,
+) -> Iterator[Path]:
+    """Yield a temporary marked context containing the expected render output."""
+    parent = _resolve_existing_directory(Path(parent_directory), "check parent")
+    _validate_scripts_source_tree(plan)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".cdh-check-",
+            dir=parent,
+        ) as temporary:
+            expected = Path(temporary)
+            expected.chmod(_DIRECTORY_MODE)
+            materialize_build_context(
+                plan,
+                expected,
+                config=config,
+                lockfile=lockfile,
+            )
+            _write_marker(expected)
+            yield expected
+    except MaterializationError:
+        raise
+    except OSError as exc:
+        raise ContextWriteError("could not create expected check context") from exc
 
 
 def _ordered_mapping(*items: tuple[str, object]) -> dict[str, object]:

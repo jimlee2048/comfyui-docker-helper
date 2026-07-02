@@ -15,7 +15,6 @@ from comfyui_docker_helper.config import (
     LockServiceResult,
     RenderPlan,
     SourceResolvers,
-    dump_lockfile_toml,
     load_validate_plan_result,
     parse_lockfile_toml,
     resolve_lockfile,
@@ -24,7 +23,7 @@ from comfyui_docker_helper.rendering import (
     ContextWriteError,
     MaterializationError,
     has_valid_context_marker,
-    serialize_config_toml,
+    materialize_expected_build_context,
     write_build_context,
 )
 from comfyui_docker_helper.rendering.context import ConfigInput
@@ -76,7 +75,12 @@ def prepare_render_context(
 
     warnings = (*result.warnings, *lock_result.warnings)
     if options.check:
-        _check_root_artifacts(output_path, result.config, lock_result.lockfile)
+        _check_managed_artifacts(
+            output_path,
+            result.plan,
+            result.config,
+            lock_result.lockfile,
+        )
         return PreparedContext(
             plan=result.plan,
             lock_result=lock_result,
@@ -160,7 +164,12 @@ def _resolve_effective_output_path(
     return candidate.resolve(strict=False)
 
 
-def _check_root_artifacts(output_dir: Path, config, lockfile: Lockfile) -> None:
+def _check_managed_artifacts(
+    output_dir: Path,
+    plan: RenderPlan,
+    config,
+    lockfile: Lockfile,
+) -> None:
     if not output_dir.is_dir():
         raise HostRenderServiceError(
             (
@@ -181,24 +190,71 @@ def _check_root_artifacts(output_dir: Path, config, lockfile: Lockfile) -> None:
                 ),
             )
         )
-    expected = {
-        "config.toml": serialize_config_toml(config),
-        "config.lock.toml": _lockfile_bytes(lockfile),
-    }
-    diagnostics: list[Diagnostic] = []
-    for name, content in expected.items():
-        path = output_dir / name
-        if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
-            diagnostics.append(
+    try:
+        with materialize_expected_build_context(
+            plan,
+            output_dir.parent,
+            config=config,
+            lockfile=lockfile,
+        ) as expected:
+            diagnostics = _compare_managed_artifacts(expected, output_dir)
+    except (ContextWriteError, MaterializationError) as error:
+        raise HostRenderServiceError(
+            (
                 Diagnostic(
-                    path=(name,),
-                    code="render.check_changed",
-                    message=f"{name} would be changed by render",
-                )
+                    path=("render", "check"),
+                    code="render.check_failed",
+                    message=str(error),
+                ),
             )
+        ) from error
     if diagnostics:
         raise HostRenderServiceError(tuple(diagnostics))
 
 
-def _lockfile_bytes(lockfile: Lockfile) -> bytes:
-    return dump_lockfile_toml(lockfile).encode("utf-8")
+def _compare_managed_artifacts(
+    expected_dir: Path,
+    output_dir: Path,
+) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    for expected_path in _walk_expected_artifacts(expected_dir):
+        relative = expected_path.relative_to(expected_dir)
+        actual_path = output_dir / relative
+        artifact = relative.as_posix()
+        if expected_path.is_dir():
+            if actual_path.is_symlink() or not actual_path.is_dir():
+                diagnostics.append(_changed_artifact_diagnostic(artifact))
+            continue
+        if not expected_path.is_file():
+            continue
+        if (
+            actual_path.is_symlink()
+            or not actual_path.is_file()
+            or not _files_match(expected_path, actual_path)
+        ):
+            diagnostics.append(_changed_artifact_diagnostic(artifact))
+    return diagnostics
+
+
+def _files_match(expected_path: Path, actual_path: Path) -> bool:
+    try:
+        return actual_path.read_bytes() == expected_path.read_bytes()
+    except OSError:
+        return False
+
+
+def _walk_expected_artifacts(expected_dir: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted(
+            expected_dir.rglob("*"),
+            key=lambda path: path.relative_to(expected_dir).as_posix(),
+        )
+    )
+
+
+def _changed_artifact_diagnostic(artifact: str) -> Diagnostic:
+    return Diagnostic(
+        path=tuple(artifact.split("/")),
+        code="render.check_changed",
+        message=f"{artifact} would be changed by render",
+    )

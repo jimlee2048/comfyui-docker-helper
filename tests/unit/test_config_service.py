@@ -180,7 +180,7 @@ default_downloader = "aria2"
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "same-registry"
-version = "1.0"
+version = "1.0.0"
 pre_install_scripts = ["base.sh"]
 
 [[comfyui.custom_nodes]]
@@ -214,7 +214,7 @@ launch_args = ["--cpu"]
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "same-registry"
-version = "2.0"
+version = "2.0.0"
 pre_install_scripts = []
 
 [[comfyui.custom_nodes]]
@@ -255,7 +255,7 @@ retries = 7
     assert plan.python.extra_packages == ("profile-python",)
     assert plan.comfyui.launch_arguments == ("--cpu",)
     assert [(node.type, node.target) for node in plan.custom_nodes.items] == [
-        ("registry", "same-registry@2.0"),
+        ("registry", "same-registry@2.0.0"),
         ("git", "https://example.com/same.git@old"),
         ("git", "https://example.com/new.git"),
     ]
@@ -317,12 +317,12 @@ def test_multi_file_merge_preserves_duplicate_custom_node_validation(
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "duplicate"
-version = "1"
+version = "1.0.0"
 
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "duplicate"
-version = "2"
+version = "2.0.0"
 """,
         encoding="utf-8",
     )

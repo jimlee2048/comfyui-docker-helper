@@ -16,7 +16,10 @@ from comfyui_docker_helper.config import (
     normalize_comfyui_version,
     validate_config,
 )
-from comfyui_docker_helper.config.validation import resolve_git_target_dir
+from comfyui_docker_helper.config.validation import (
+    normalize_registry_version,
+    resolve_git_target_dir,
+)
 
 
 def make_config() -> Config:
@@ -365,6 +368,71 @@ def test_required_pytorch_version_remains_structural() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("python_index", "http://mirror.example.com/simple"),
+        ("python_index", "https://mirror.example.com/simple"),
+        ("pytorch_index", "http://mirror.example.com/whl"),
+        ("pytorch_index", "https://mirror.example.com/whl"),
+    ],
+)
+def test_package_index_urls_accept_http_and_https(field: str, value: str) -> None:
+    """Accept package index URLs with an HTTP(S) scheme and host."""
+    config = make_config()
+    if field == "python_index":
+        config.python.index_url = value
+    else:
+        config.pytorch.index_base_url = value
+
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "path", "code"),
+    [
+        (
+            "python_index",
+            "file:///tmp/simple",
+            ("python", "index_url"),
+            "python.invalid_index_url",
+        ),
+        (
+            "python_index",
+            "https://user:token@example.com/simple",
+            ("python", "index_url"),
+            "python.invalid_index_url",
+        ),
+        (
+            "pytorch_index",
+            "ftp://example.com/whl",
+            ("pytorch", "index_base_url"),
+            "pytorch.invalid_index_base_url",
+        ),
+        (
+            "pytorch_index",
+            "https://token@example.com/whl",
+            ("pytorch", "index_base_url"),
+            "pytorch.invalid_index_base_url",
+        ),
+    ],
+)
+def test_package_index_urls_reject_non_http_and_userinfo(
+    field: str,
+    value: str,
+    path: tuple[str | int, ...],
+    code: str,
+) -> None:
+    """Reject non-HTTP(S) indexes and TOML-embedded index credentials."""
+    config = make_config()
+    if field == "python_index":
+        config.python.index_url = value
+    else:
+        config.pytorch.index_base_url = value
+
+    assert locations_and_codes(validate_config(config)) == [(path, code)]
+
+
+@pytest.mark.parametrize(
     ("version", "normalized"),
     [
         ("latest", "latest"),
@@ -372,6 +440,9 @@ def test_required_pytorch_version_remains_structural() -> None:
         ("1.2.3", "1.2.3"),
         ("v1.2.3", "1.2.3"),
         ("1.2.3-rc.1+build.5", "1.2.3-rc.1+build.5"),
+        (">=1.0,<2", "<2,>=1.0"),
+        ("<2", "<2"),
+        ("!=1.2.3", "!=1.2.3"),
     ],
 )
 def test_comfyui_versions_validate_and_normalize(version: str, normalized: str) -> None:
@@ -385,7 +456,23 @@ def test_comfyui_versions_validate_and_normalize(version: str, normalized: str) 
 
 @pytest.mark.parametrize(
     "version",
-    ["1.2", "v1.2", "V1.2.3", "01.2.3", "commit:abc", "https://example.com"],
+    [
+        "1.2",
+        "v1.2",
+        "V1.2.3",
+        "01.2.3",
+        "commit:abc",
+        "https://example.com",
+        "~=1.2",
+        "==1.*",
+        "^1.2.3",
+        "~1.2.3",
+        ">=1 || <2",
+        "===1.2.3",
+        ">=1,,<2",
+        "==1.0+local",
+        "!=1.0+local",
+    ],
 )
 def test_invalid_comfyui_versions_are_rejected(version: str) -> None:
     """Reject non-semver and unsupported ComfyUI install modes."""
@@ -406,6 +493,9 @@ def test_invalid_comfyui_versions_are_rejected(version: str) -> None:
         ("1.0", "1.0"),
         ("v2.0RC1", "2.0rc1"),
         ("1!2.0.post1", "1!2.0.post1"),
+        (">=1.0,<2", "<2,>=1.0"),
+        ("<2", "<2"),
+        ("==1.2.3", "==1.2.3"),
     ],
 )
 def test_comfy_cli_versions_use_packaging_normalization(
@@ -422,15 +512,21 @@ def test_comfy_cli_versions_use_packaging_normalization(
 @pytest.mark.parametrize(
     "version",
     [
-        ">=1.0",
         "1.0+local",
         "https://example.com/package.whl",
         "git+https://example.com/repo.git",
         "nightly",
+        "~=1.2",
+        "==1.*",
+        "^1.2.3",
+        "~1.2.3",
+        ">=1 || <2",
+        "===1.2.3",
+        ">=1,,<2",
     ],
 )
 def test_invalid_comfy_cli_versions_are_rejected(version: str) -> None:
-    """Reject specifiers, local labels, URLs, VCS, and non-latest labels."""
+    """Reject unsupported constraints, local labels, URLs, VCS, and labels."""
     config = make_config()
     config.comfyui.cli_version = version
 
@@ -439,6 +535,114 @@ def test_invalid_comfy_cli_versions_are_rejected(version: str) -> None:
     ]
     with pytest.raises(ValueError):
         normalize_comfy_cli_version(version)
+
+
+@pytest.mark.parametrize(
+    ("version", "normalized"),
+    [
+        ("latest", "latest"),
+        ("1.2.3", "1.2.3"),
+        ("v1.2.3", "1.2.3"),
+        (">=1.0,<2", "<2,>=1.0"),
+        ("<2", "<2"),
+    ],
+)
+def test_registry_versions_validate_and_normalize(
+    version: str,
+    normalized: str,
+) -> None:
+    """Accept latest, exact semver, and supported constraints for registry nodes."""
+    assert normalize_registry_version(version) == normalized
+
+    config = make_config()
+    config.comfyui.custom_nodes = [
+        RegistryCustomNodeConfig.model_validate(
+            {"type": "registry", "id": "node", "version": version}
+        )
+    ]
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["1.2", "channel:beta", "~=1.2", "==1.*", "^1.2.3", ">=1 || <2", "===1.2.3"],
+)
+def test_invalid_registry_versions_are_rejected(version: str) -> None:
+    """Reject arbitrary registry selectors and unsupported constraint syntax."""
+    config = make_config()
+    config.comfyui.custom_nodes = [
+        RegistryCustomNodeConfig.model_validate(
+            {"type": "registry", "id": "node", "version": version}
+        )
+    ]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (
+            ("comfyui", "custom_nodes", 0, "version"),
+            "custom_node.invalid_registry_version",
+        )
+    ]
+    with pytest.raises(ValueError):
+        normalize_registry_version(version)
+
+
+@pytest.mark.parametrize(
+    ("field", "path"),
+    [
+        ("python_version", ("python", "version")),
+        ("uv_version", ("python", "uv_version")),
+        ("pytorch_version", ("pytorch", "version")),
+        ("system_package", ("system", "extra_packages", 0)),
+        ("file_name", ("files", 0, "filename")),
+    ],
+)
+def test_constraints_are_rejected_on_unsupported_fields(
+    field: str,
+    path: tuple[str | int, ...],
+) -> None:
+    """Keep constraints limited to fields with later lock-domain resolution."""
+    config = make_config()
+    if field == "python_version":
+        config.python.version = "3.12,<3.13"
+    elif field == "uv_version":
+        config.python.uv_version = "latest,<1"
+    elif field == "pytorch_version":
+        config.pytorch.version = "2.7.1,<3"
+    elif field == "system_package":
+        config.system.extra_packages = ["curl>=8"]
+    elif field == "file_name":
+        config.files = [
+            FileConfig.model_validate(
+                {
+                    "url": "https://example.com/model.bin",
+                    "dir": "models",
+                    "filename": "model>=1.bin",
+                }
+            )
+        ]
+    else:
+        raise AssertionError(f"unknown test field: {field}")
+
+    assert locations_and_codes(validate_config(config)) == [
+        (path, "version_constraint.unsupported_field")
+    ]
+
+
+def test_cuda_constraints_are_rejected_without_broadening_cuda_versions() -> None:
+    """Keep CUDA on its numeric image-tag contract and reject constraints."""
+    config = make_config()
+    config.compute_platform.cuda.version = ">=12"
+
+    assert locations_and_codes(validate_config(config)) == [
+        (
+            ("compute_platform", "cuda", "version"),
+            "compute_platform.invalid_cuda_version",
+        ),
+        (
+            ("compute_platform", "cuda", "version"),
+            "version_constraint.unsupported_field",
+        ),
+    ]
 
 
 def test_custom_nodes_require_manager() -> None:
@@ -459,10 +663,10 @@ def test_registry_ids_must_be_unique_in_input_order() -> None:
     config = make_config()
     config.comfyui.custom_nodes = [
         RegistryCustomNodeConfig.model_validate(
-            {"type": "registry", "id": "same", "version": "1"}
+            {"type": "registry", "id": "same", "version": "1.0.0"}
         ),
         RegistryCustomNodeConfig.model_validate(
-            {"type": "registry", "id": "same", "version": "2"}
+            {"type": "registry", "id": "same", "version": "2.0.0"}
         ),
         RegistryCustomNodeConfig.model_validate({"type": "registry", "id": "same"}),
     ]
@@ -1029,7 +1233,7 @@ def test_independent_business_errors_are_aggregated_in_config_order() -> None:
     config.system.env = {"PATH": "override"}
     config.pytorch.extra_packages = ["torch"]
     config.comfyui.version = "bad"
-    config.comfyui.cli_version = ">=1"
+    config.comfyui.cli_version = "~=1"
     config.cdh.default_downloader = "curl"
     config.files = [
         FileConfig(

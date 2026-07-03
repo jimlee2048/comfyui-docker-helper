@@ -464,8 +464,11 @@ def test_host_render_representative_contexts_write_root_artifacts(
             context / "config.lock.toml",
             comfyui_path="/workspace/ComfyUI",
         )
+        runtime_config = _parse_toml(context / "runtime" / "config.toml")
         assert len(files.items) == 1
         assert files.items[0].downloader == "httpx"
+        assert runtime_config["files"][0]["url"] == files.items[0].url
+        assert runtime_config["files"][0]["downloader"] == "httpx"
 
 
 def _write_registry_latest_config(tmp_path: Path) -> Path:

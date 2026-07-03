@@ -108,6 +108,7 @@ from comfyui_docker_helper.config.runtime_projection import (
     RuntimeComfyUIConfig,
     RuntimeConfig,
     RuntimeConfigProjection,
+    RuntimeFileConfig,
     project_runtime_config,
     serialize_runtime_config_toml,
 )
@@ -200,6 +201,7 @@ __all__ = [
     "RuntimeConfigProjection",
     "RuntimeConfigurationError",
     "RuntimeConfigurationResult",
+    "RuntimeFileConfig",
     "SourceResolvers",
     "SystemConfig",
     "UpstreamResponseError",

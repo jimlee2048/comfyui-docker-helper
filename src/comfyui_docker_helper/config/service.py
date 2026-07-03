@@ -8,11 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.diagnostics import (
-    Diagnostic,
-    DiagnosticPath,
-    DiagnosticSeverity,
-)
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticPath
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import Config
 from comfyui_docker_helper.config.plan import (
@@ -177,40 +173,9 @@ def _validate_structure(document: Mapping[str, Any]) -> Config:
 
 
 def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...]:
-    """Collect host command warnings for runtime-only config fields."""
-    diagnostics: list[Diagnostic] = []
-
-    cdh = document.get("cdh")
-    if isinstance(cdh, Mapping) and cdh.get("default_download_mode") == "sync":
-        diagnostics.append(
-            Diagnostic(
-                path=("cdh", "default_download_mode"),
-                code="host.runtime_download_mode_ignored",
-                message=(
-                    "sync download mode is ignored by host commands; remove this "
-                    "field from host build configuration"
-                ),
-                severity=DiagnosticSeverity.WARNING,
-            )
-        )
-
-    files = document.get("files")
-    if isinstance(files, Sequence) and not isinstance(files, (str, bytes)):
-        for index, item in enumerate(files):
-            if isinstance(item, Mapping) and item.get("download_mode") == "sync":
-                diagnostics.append(
-                    Diagnostic(
-                        path=("files", index, "download_mode"),
-                        code="host.runtime_download_mode_ignored",
-                        message=(
-                            "sync download mode is ignored by host commands; "
-                            "remove this field from host build configuration"
-                        ),
-                        severity=DiagnosticSeverity.WARNING,
-                    )
-                )
-
-    return tuple(diagnostics)
+    """Collect host command warnings for cross-context fields."""
+    del document
+    return ()
 
 
 def _with_source(message: str, path: Path, include_source: bool) -> str:

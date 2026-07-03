@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.config import Diagnostic
+from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
@@ -361,7 +361,7 @@ filename = "model.bin"
     def runtime_downloader(
         plan: RuntimeFilePlan,
         *,
-        config: object,
+        config: RuntimeConfig,
         log: Logger,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         del config, log
@@ -417,7 +417,7 @@ filename = "model.bin"
     def runtime_downloader(
         plan: RuntimeFilePlan,
         *,
-        config: object,
+        config: RuntimeConfig,
         log: Logger,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         del plan, config, log
@@ -499,3 +499,65 @@ filename = "model.bin"
     )
 
     assert actions == ["download"]
+
+
+def test_env_downloader_default_affects_runtime_files_without_overriding_explicit(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_downloader = "aria2"
+
+[[files]]
+url = "https://example.com/default.bin"
+dir = "models"
+filename = "default.bin"
+
+[[files]]
+url = "https://example.com/explicit.bin"
+dir = "models"
+filename = "explicit.bin"
+downloader = "aria2"
+download_mode = "sync"
+""",
+    )
+    seen: list[tuple[str | None, str]] = []
+    default_downloader: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: object,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del log
+        default_downloader.append(config.cdh.default_downloader)
+        seen.extend((item.downloader, item.download_mode) for item in plan.items)
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={"CDH_DEFAULT_DOWNLOADER": "httpx"},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+        )
+        == 0
+    )
+
+    assert default_downloader == ["httpx"]
+    assert seen == [(None, "sync"), ("aria2", "sync")]

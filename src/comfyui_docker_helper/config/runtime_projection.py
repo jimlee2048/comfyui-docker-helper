@@ -12,7 +12,7 @@ from comfyui_docker_helper.config.models import (
     ConfigModel,
 )
 
-type ConfigPath = tuple[str, ...]
+type ConfigPath = tuple[str | int, ...]
 
 
 class RuntimeComfyUIConfig(ConfigModel):
@@ -38,11 +38,23 @@ class RuntimeConfig(ConfigModel):
     cdh: RuntimeCdhConfig = Field(default_factory=RuntimeCdhConfig)
 
 
+class RuntimeFileConfig(ConfigModel):
+    """Runtime-supported file download defaults."""
+
+    url: str
+    dir: str
+    filename: str
+    overwrite: bool = False
+    downloader: Literal["aria2", "httpx"] | None = None
+    download_mode: Literal["sync"] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeConfigProjection:
     """Validated runtime config bytes plus raw-document field provenance."""
 
     config: RuntimeConfig
+    files: tuple[RuntimeFileConfig, ...]
     explicit_paths: frozenset[ConfigPath]
 
     def is_explicit(self, path: ConfigPath) -> bool:
@@ -51,7 +63,7 @@ class RuntimeConfigProjection:
 
     def to_toml_bytes(self) -> bytes:
         """Serialize the effective runtime defaults deterministically."""
-        return serialize_runtime_config_toml(self.config)
+        return serialize_runtime_config_toml(self.config, files=self.files)
 
 
 def project_runtime_config(
@@ -70,17 +82,41 @@ def project_runtime_config(
             "default_download_mode": config.cdh.default_download_mode,
             "downloader": config.cdh.downloader.model_dump(mode="json"),
         },
+        "files": [
+            {
+                "url": file.url,
+                "dir": file.dir,
+                "filename": file.filename,
+                "overwrite": file.overwrite,
+                **({"downloader": file.downloader} if file.downloader else {}),
+                **({"download_mode": file.download_mode} if file.download_mode else {}),
+            }
+            for file in config.files
+        ],
     }
-    runtime_config = RuntimeConfig.model_validate(document)
+    files = tuple(RuntimeFileConfig.model_validate(item) for item in document["files"])
+    runtime_config = RuntimeConfig.model_validate(
+        {key: value for key, value in document.items() if key != "files"}
+    )
     return RuntimeConfigProjection(
         config=runtime_config,
+        files=files,
         explicit_paths=_runtime_explicit_paths(raw_document),
     )
 
 
-def serialize_runtime_config_toml(config: RuntimeConfig) -> bytes:
+def serialize_runtime_config_toml(
+    config: RuntimeConfig,
+    *,
+    files: tuple[RuntimeFileConfig, ...] = (),
+) -> bytes:
     """Serialize a runtime-supported config as deterministic TOML bytes."""
-    return tomli_w.dumps(config.model_dump(mode="json")).encode("utf-8")
+    document = config.model_dump(mode="json")
+    if files:
+        document["files"] = [
+            file.model_dump(mode="json", exclude_none=True) for file in files
+        ]
+    return tomli_w.dumps(document).encode("utf-8")
 
 
 def _runtime_explicit_paths(raw_document: dict[str, Any]) -> frozenset[ConfigPath]:
@@ -102,6 +138,9 @@ def _collect_explicit_runtime_paths(
         for key, item in value.items():
             if isinstance(key, str):
                 _collect_explicit_runtime_paths(item, (*path, key), paths)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _collect_explicit_runtime_paths(item, (*path, index), paths)
 
 
 def _is_runtime_supported_path(path: ConfigPath) -> bool:
@@ -109,13 +148,22 @@ def _is_runtime_supported_path(path: ConfigPath) -> bool:
         return True
     if path[0] == "comfyui":
         return len(path) <= 2 and (len(path) == 1 or path[1] in _COMFYUI_FIELDS)
-    if path[0] != "cdh":
-        return False
-    if len(path) == 1:
-        return True
-    if path[1] in {"default_downloader", "default_download_mode"}:
-        return len(path) == 2
-    return path[1] == "downloader"
+    if path[0] == "files":
+        if len(path) == 1:
+            return True
+        if len(path) == 2:
+            return isinstance(path[1], int)
+        return len(path) == 3 and isinstance(path[1], int) and path[2] in _FILE_FIELDS
+    if path[0] == "cdh":
+        if len(path) == 1:
+            return True
+        if path[1] in {"default_downloader", "default_download_mode"}:
+            return len(path) == 2
+        return path[1] == "downloader"
+    return False
 
 
 _COMFYUI_FIELDS = frozenset({"listen", "port", "extra_args"})
+_FILE_FIELDS = frozenset(
+    {"url", "dir", "filename", "overwrite", "downloader", "download_mode"}
+)

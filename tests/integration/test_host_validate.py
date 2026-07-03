@@ -1,5 +1,6 @@
 """CLI tests for ``cdh host validate`` and Rich diagnostics."""
 
+import tomllib
 from io import StringIO
 from pathlib import Path
 
@@ -175,10 +176,10 @@ def test_valid_input_is_silent_and_writes_nothing(
     assert {item.name: item.read_bytes() for item in tmp_path.iterdir()} == before
 
 
-def test_valid_input_with_host_warnings_succeeds_and_renders_stderr(
+def test_valid_runtime_download_mode_input_is_silent(
     cli_runner: CliRunner, tmp_path: Path
 ) -> None:
-    """Warn about runtime-only download-mode fields without failing validation."""
+    """Runtime download-mode fields are valid host inputs for baked defaults."""
     path = _write_config(
         tmp_path,
         MINIMAL_CONFIG
@@ -198,19 +199,13 @@ download_mode = "sync"
 
     assert result.exit_code == 0
     assert result.stdout == ""
-    assert "Configuration has warnings:" in result.stderr
-    assert "[cdh.default_download_mode]" in result.stderr
-    assert "[files.0.download_mode]" in result.stderr
-    assert "sync download mode is ignored by host commands" in result.stderr
-    assert "remove this field from host" in result.stderr
-    assert "build configuration" in result.stderr
-    assert "Configuration is invalid:" not in result.stderr
+    assert result.stderr == ""
 
 
-def test_render_with_host_warnings_still_writes_context(
+def test_render_with_runtime_download_mode_writes_context(
     cli_runner: CliRunner, tmp_path: Path
 ) -> None:
-    """Render warning-bearing host config while preserving success semantics."""
+    """Render runtime file download-mode defaults into the build context."""
     path = _write_config(
         tmp_path,
         MINIMAL_CONFIG
@@ -231,9 +226,12 @@ download_mode = "sync"
 
     assert result.exit_code == 0
     assert result.stdout == ""
-    assert "Configuration has warnings:" in result.stderr
-    assert "[files.0.download_mode]" in result.stderr
+    assert result.stderr == ""
     assert has_valid_context_marker(output)
+    rendered_runtime = tomllib.loads(
+        (output / "runtime" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert rendered_runtime["files"][0]["download_mode"] == "sync"
 
 
 def test_invalid_input_renders_every_diagnostic_to_stderr(

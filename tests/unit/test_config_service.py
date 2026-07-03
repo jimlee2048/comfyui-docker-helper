@@ -7,7 +7,6 @@ import pytest
 
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
-    DiagnosticSeverity,
     RenderPlan,
     load_validate_plan,
     load_validate_plan_result,
@@ -57,10 +56,10 @@ def test_minimal_config_returns_complete_normalized_plan(
     assert plan.files.downloader.default == "aria2"
 
 
-def test_result_collects_host_download_mode_warnings(
+def test_result_bakes_host_download_mode_without_warnings(
     write_config: Callable[[str], Path],
 ) -> None:
-    """Keep runtime-only download-mode fields non-fatal in host workflows."""
+    """Runtime download-mode fields are now part of baked runtime defaults."""
     document = (
         MINIMAL_CONFIG
         + """
@@ -78,22 +77,12 @@ download_mode = "sync"
     result = load_validate_plan_result(write_config(document))
 
     assert isinstance(result.plan, RenderPlan)
-    assert [(item.path, item.code, item.severity) for item in result.warnings] == [
-        (
-            ("cdh", "default_download_mode"),
-            "host.runtime_download_mode_ignored",
-            DiagnosticSeverity.WARNING,
-        ),
-        (
-            ("files", 0, "download_mode"),
-            "host.runtime_download_mode_ignored",
-            DiagnosticSeverity.WARNING,
-        ),
-    ]
-    assert "remove this field" in result.warnings[0].message
+    assert result.warnings == ()
+    assert result.runtime_config.files[0].download_mode == "sync"
+    assert result.runtime_config.config.cdh.default_download_mode == "sync"
 
 
-def test_plan_only_loader_ignores_host_download_mode_warnings(
+def test_plan_only_loader_accepts_host_download_mode_fields(
     write_config: Callable[[str], Path],
 ) -> None:
     """Preserve the existing load_validate_plan return contract."""
@@ -106,6 +95,58 @@ default_download_mode = "sync"
     )
 
     assert isinstance(load_validate_plan(write_config(document)), RenderPlan)
+
+
+def test_unsupported_host_file_download_mode_fails_before_runtime_projection(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Keep v0.3 runtime file download mode limited to sync."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "async"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan_result(write_config(document))
+
+    assert _identities(raised.value) == [
+        (("files", 0, "download_mode"), "schema.literal_error")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("directory", "code"),
+    [
+        ("models/", "file.trailing_slash"),
+        ("models//checkpoints", "file.empty_directory_segment"),
+    ],
+)
+def test_runtime_incompatible_host_file_dirs_fail_before_projection(
+    write_config: Callable[[str], Path],
+    directory: str,
+    code: str,
+) -> None:
+    """Reject host file dirs that would make baked runtime config invalid."""
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+[[files]]
+url = "https://example.com/model.bin"
+dir = "{directory}"
+filename = "model.bin"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan_result(write_config(document))
+
+    assert _identities(raised.value) == [(("files", 0, "dir"), code)]
 
 
 def test_full_config_and_hooks_use_explicit_scripts_directory(

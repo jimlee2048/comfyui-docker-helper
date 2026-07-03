@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -233,6 +234,12 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
             comfyui_path="/work dir/Comfy UI" if case.name == "full" else None,
         )
         assert files.items
+        runtime_config = tomllib.loads(
+            (context / "runtime" / "config.toml").read_text(encoding="utf-8")
+        )
+        assert [item["url"] for item in runtime_config["files"]] == [
+            item.url for item in files.items
+        ]
 
 
 def test_host_build_full_fixture_preserves_quoting_env_and_entrypoint(

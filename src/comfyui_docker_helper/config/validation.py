@@ -729,8 +729,8 @@ def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
                 )
             )
 
-        directory = PurePosixPath(file.dir)
-        if directory.is_absolute():
+        skip_segment_checks = False
+        if file.dir.startswith("/"):
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "dir"),
@@ -738,22 +738,42 @@ def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
                     "must be relative to COMFYUI_PATH",
                 )
             )
-        if ".." in directory.parts:
+            skip_segment_checks = True
+        if file.dir.endswith("/"):
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "dir"),
-                    "file.directory_traversal",
-                    "must not contain '..'",
+                    "file.trailing_slash",
+                    "must not end with a slash",
                 )
             )
-        if not directory.parts or directory == PurePosixPath("."):
-            diagnostics.append(
-                Diagnostic(
-                    (*file_path, "dir"),
-                    "file.empty_directory",
-                    "must be a non-empty relative directory",
+            skip_segment_checks = True
+        if not skip_segment_checks:
+            directory_parts = file.dir.split("/")
+            if not file.dir or any(part == "" for part in directory_parts):
+                diagnostics.append(
+                    Diagnostic(
+                        (*file_path, "dir"),
+                        "file.empty_directory_segment",
+                        "must not contain empty path segments",
+                    )
                 )
-            )
+            if any(part == "." for part in directory_parts):
+                diagnostics.append(
+                    Diagnostic(
+                        (*file_path, "dir"),
+                        "file.current_directory_segment",
+                        "must not contain '.'",
+                    )
+                )
+            if any(part == ".." for part in directory_parts):
+                diagnostics.append(
+                    Diagnostic(
+                        (*file_path, "dir"),
+                        "file.directory_traversal",
+                        "must not contain '..'",
+                    )
+                )
 
         if not _is_safe_filename(file.filename):
             diagnostics.append(

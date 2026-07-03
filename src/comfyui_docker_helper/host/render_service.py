@@ -82,6 +82,11 @@ def prepare_render_context(
     )
     plan = with_runtime_hooks_plan(result.plan, runtime_hooks)
     output_path = _resolve_effective_output_path(output_dir, working_directory)
+    _validate_output_source_relationships(
+        output_path,
+        scripts_source=plan.custom_nodes.scripts_source_dir,
+        runtime_hooks_source=plan.runtime_hooks.source_dir,
+    )
     existing_lockfile = _load_existing_lockfile(output_path)
     try:
         lock_result = resolve_lockfile(
@@ -136,6 +141,49 @@ def prepare_render_context(
             )
         ) from error
     return PreparedContext(plan=plan, lock_result=lock_result, warnings=warnings)
+
+
+def _validate_output_source_relationships(
+    output_path: Path,
+    *,
+    scripts_source: Path | None,
+    runtime_hooks_source: Path | None,
+) -> None:
+    for label, source in (
+        ("scripts source", scripts_source),
+        ("runtime hooks source", runtime_hooks_source),
+    ):
+        if source is None:
+            continue
+        message = _output_source_relationship_error(output_path, source, label)
+        if message is not None:
+            raise HostRenderServiceError(
+                (
+                    Diagnostic(
+                        path=("render",),
+                        code="render.context_write_failed",
+                        message=message,
+                    ),
+                )
+            )
+
+
+def _output_source_relationship_error(
+    output_path: Path,
+    source: Path,
+    label: str,
+) -> str | None:
+    output = output_path.resolve(strict=False)
+    protected = source.resolve(strict=False)
+    if _is_equal_or_ancestor(output, protected):
+        return f"output directory must not be equal to or an ancestor of {label}"
+    if protected in output.parents:
+        return f"output directory must not be nested inside the {label}"
+    return None
+
+
+def _is_equal_or_ancestor(candidate: Path, target: Path) -> bool:
+    return candidate == target or candidate in target.parents
 
 
 def _resolve_runtime_hooks_plan(

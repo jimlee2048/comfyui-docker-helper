@@ -705,6 +705,50 @@ def test_check_mode_reports_stale_runtime_hooks_tree_when_hooks_are_removed(
     assert ("runtime", "hooks") in changed_paths
 
 
+def test_check_mode_rejects_runtime_hooks_source_inside_output(
+    tmp_path: Path,
+) -> None:
+    """Check mode must not derive expected hooks from the rendered output."""
+    output = tmp_path / "context"
+    hooks = write_runtime_hook_tree(tmp_path / "hooks")
+    render_context(tmp_path, output=output, hooks_dir=hooks)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(
+            tmp_path,
+            output=output,
+            hooks_dir=output / "runtime" / "hooks",
+            options=LockOptions(check=True),
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("render",), "render.context_write_failed")
+    ]
+    assert "ancestor of runtime hooks source" in error.value.diagnostics[0].message
+
+
+def test_dry_run_rejects_output_nested_inside_runtime_hooks_source(
+    tmp_path: Path,
+) -> None:
+    """Early-return render modes still enforce hook source ancestry safety."""
+    hooks = write_runtime_hook_tree(tmp_path / "hooks")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(
+            tmp_path,
+            output=hooks / "pre-start.d" / "context",
+            hooks_dir=hooks,
+            options=LockOptions(dry_run=True),
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("render",), "render.context_write_failed")
+    ]
+    assert (
+        "nested inside the runtime hooks source" in error.value.diagnostics[0].message
+    )
+
+
 def test_check_mode_reports_symlink_script_when_hooks_are_present(
     tmp_path: Path,
 ) -> None:

@@ -10,4 +10,6 @@ version = "2.10"
 [comfyui]
 version = "nightly"
 install_manager = false
-launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+listen = "0.0.0.0"
+port = 8188
+extra_args = []

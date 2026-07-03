@@ -88,6 +88,7 @@ def run_argv(
     cwd: str | Path,
     env: Mapping[str, str],
     description: str = "command",
+    start_new_session: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an argv subprocess with inherited stdout/stderr and strict failure."""
 
@@ -96,13 +97,15 @@ def run_argv(
         raise ContainerCommandError(f"{description} argv must not be empty")
 
     try:
-        result = subprocess.run(
-            command,
-            cwd=os.fspath(cwd),
-            env=dict(env),
-            shell=False,
-            check=False,
-        )
+        run_kwargs: dict[str, object] = {
+            "cwd": os.fspath(cwd),
+            "env": dict(env),
+            "shell": False,
+            "check": False,
+        }
+        if start_new_session:
+            run_kwargs["start_new_session"] = True
+        result = subprocess.run(command, **run_kwargs)
     except FileNotFoundError as error:
         raise ContainerCommandError(
             f"{description} executable not found: {command[0]}"

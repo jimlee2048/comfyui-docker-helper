@@ -262,6 +262,47 @@ def test_pre_start_hook_failure_stops_phase(tmp_path: Path) -> None:
     ]
 
 
+def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    baked = tmp_path / "baked"
+    mounted = tmp_path / "mounted"
+    _write_hook(baked, "stop.d", "10-baked.sh")
+    _write_hook(mounted, "stop.d", "10-mounted.py")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=baked,
+        mounted_hooks_path=mounted,
+    )
+    calls: list[tuple[str, bool]] = []
+    logs: list[str] = []
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> object:
+        del cwd, env, description
+        calls.append((Path(argv[-1]).name, start_new_session))
+        return object()
+
+    run_runtime_hooks(
+        plan,
+        "stop",
+        runtime=runtime,
+        log=logs.append,
+        runner=runner,
+        start_new_session=True,
+    )
+
+    assert calls == [("10-baked.sh", True), ("10-mounted.py", True)]
+    assert logs == [
+        "Running runtime hook source=baked phase=stop filename=10-baked.sh",
+        "Running runtime hook source=mounted phase=stop filename=10-mounted.py",
+    ]
+
+
 def locations_and_codes(
     error: RuntimeHookError,
 ) -> list[tuple[tuple[object, ...], str]]:

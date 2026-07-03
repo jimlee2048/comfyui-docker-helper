@@ -100,6 +100,7 @@ class RuntimeHookRunner(Protocol):
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
         log: Logger,
+        start_new_session: bool = False,
     ) -> tuple[RuntimeHookResult, ...]: ...
 
 
@@ -184,7 +185,15 @@ def run_entrypoint(
         runtime_hook_runner=runtime_hook_runner,
     )
 
-    return _normalize_child_exit_code(_wait_with_signal_forwarding(completed))
+    return _normalize_child_exit_code(
+        _wait_with_signal_forwarding(
+            completed,
+            hook_plan=hook_plan,
+            runtime=runtime,
+            source_env=source_env,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+    )
 
 
 def _discover_runtime_hooks(
@@ -327,22 +336,77 @@ def _terminate_child_if_running(child: ChildProcess) -> None:
         child.terminate()
 
 
-def _wait_with_signal_forwarding(child: ChildProcess) -> int:
+class _ShutdownRequested(Exception):
+    """The first normal-shutdown signal received during child wait."""
+
+    def __init__(self, sig: signal.Signals) -> None:
+        self.sig = sig
+        super().__init__(sig.name)
+
+
+def _wait_with_signal_forwarding(
+    child: ChildProcess,
+    *,
+    hook_plan: RuntimeHookPlan,
+    runtime: ContainerRuntime,
+    source_env: Mapping[str, str],
+    runtime_hook_runner: RuntimeHookRunner,
+) -> int:
     previous_handlers = {
         sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
     }
+    shutdown_requested = False
 
     def forward(sig: signal.Signals, frame: object) -> None:
-        if child.returncode is None:
-            child.send_signal(sig)
+        del frame
+        nonlocal shutdown_requested
+        if shutdown_requested:
+            return
+        requested = signal.Signals(sig)
+        if child.poll() is None:
+            shutdown_requested = True
+            raise _ShutdownRequested(requested)
 
     try:
         signal.signal(signal.SIGTERM, forward)
         signal.signal(signal.SIGINT, forward)
-        return child.wait()
+        try:
+            return child.wait()
+        except _ShutdownRequested as request:
+            _run_stop_hooks_before_signal(
+                hook_plan,
+                runtime=runtime,
+                source_env=source_env,
+                runtime_hook_runner=runtime_hook_runner,
+            )
+            if child.poll() is None:
+                child.send_signal(request.sig)
+            return child.wait()
     finally:
         for sig, previous in previous_handlers.items():
             signal.signal(sig, previous)
+
+
+def _run_stop_hooks_before_signal(
+    hook_plan: RuntimeHookPlan,
+    *,
+    runtime: ContainerRuntime,
+    source_env: Mapping[str, str],
+    runtime_hook_runner: RuntimeHookRunner,
+) -> None:
+    if not hook_plan.for_phase("stop"):
+        return
+    try:
+        runtime_hook_runner(
+            hook_plan,
+            "stop",
+            runtime=runtime,
+            env=source_env,
+            log=print,
+            start_new_session=True,
+        )
+    except RuntimeHookError as error:
+        _render_nonfatal_diagnostics("Runtime stop hook failed:", error.diagnostics)
 
 
 def _normalize_child_exit_code(returncode: int) -> int:
@@ -369,6 +433,20 @@ def _render_runtime_config_warnings(diagnostics: tuple[Diagnostic, ...]) -> None
     if not diagnostics:
         return
     print("Runtime configuration warnings:", file=sys.stderr)
+    _render_diagnostics_to_stderr(diagnostics)
+
+
+def _render_nonfatal_diagnostics(
+    header: str,
+    diagnostics: tuple[Diagnostic, ...],
+) -> None:
+    if not diagnostics:
+        return
+    print(header, file=sys.stderr)
+    _render_diagnostics_to_stderr(diagnostics)
+
+
+def _render_diagnostics_to_stderr(diagnostics: tuple[Diagnostic, ...]) -> None:
     for diagnostic in diagnostics:
         print(
             f"[{_format_path(diagnostic.path)}] "

@@ -100,6 +100,35 @@ def test_run_argv_uses_cwd_env_and_inherited_output(
     assert output.read_text(encoding="utf-8") == f"{tmp_path}|/workspace/ComfyUI"
 
 
+def test_run_argv_can_request_new_process_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass start_new_session only when process-group isolation is requested."""
+    calls: list[dict[str, object]] = []
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append({"command": command, **kwargs})
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    run_argv(["echo", "default"], cwd=tmp_path, env={}, description="default")
+    run_argv(
+        ["echo", "isolated"],
+        cwd=tmp_path,
+        env={},
+        description="isolated",
+        start_new_session=True,
+    )
+
+    assert "start_new_session" not in calls[0]
+    assert calls[1]["start_new_session"] is True
+
+
 def test_run_argv_rejects_empty_argv(tmp_path: Path) -> None:
     """Do not allow ambiguous empty subprocess invocations."""
     with pytest.raises(ContainerCommandError, match="must not be empty"):

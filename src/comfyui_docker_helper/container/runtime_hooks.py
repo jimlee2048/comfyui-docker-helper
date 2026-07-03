@@ -57,6 +57,7 @@ class RuntimeHookCommandRunner(Protocol):
         cwd: str | Path,
         env: Mapping[str, str],
         description: str,
+        start_new_session: bool = False,
     ) -> object: ...
 
 
@@ -149,6 +150,7 @@ def run_runtime_hooks(
     env: Mapping[str, str] | None = None,
     log: Callable[[str], object] = print,
     runner: RuntimeHookCommandRunner = run_argv,
+    start_new_session: bool = False,
 ) -> tuple[RuntimeHookResult, ...]:
     """Run hooks for one phase in discovered order and stop on first failure."""
     hook_env = runtime.env(env)
@@ -160,14 +162,16 @@ def run_runtime_hooks(
             f"source={hook.source} phase={hook.phase} filename={hook.filename}"
         )
         try:
-            runner(
-                argv,
-                cwd=runtime.comfyui_path,
-                env=hook_env,
-                description=(
+            runner_kwargs = {
+                "cwd": runtime.comfyui_path,
+                "env": hook_env,
+                "description": (
                     f"runtime hook {hook.source}/{hook.phase}/{hook.filename}"
                 ),
-            )
+            }
+            if start_new_session:
+                runner_kwargs["start_new_session"] = True
+            runner(argv, **runner_kwargs)
         except ContainerCommandError as error:
             raise RuntimeHookError(
                 (

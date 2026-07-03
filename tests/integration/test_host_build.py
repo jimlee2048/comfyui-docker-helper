@@ -374,7 +374,7 @@ def test_build_with_host_warnings_still_renders_and_invokes_buildx(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Print host-context warnings without blocking the v0.2 build flow."""
+    """Print host-context warnings without blocking the current build flow."""
     config = write_config(
         tmp_path,
         MINIMAL_CONFIG

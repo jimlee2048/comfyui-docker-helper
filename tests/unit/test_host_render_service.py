@@ -584,7 +584,7 @@ def test_check_mode_ignores_unmanaged_extras_and_keeps_target_unchanged(
 def test_check_mode_reports_retired_helper_projection_config_tree(
     tmp_path: Path,
 ) -> None:
-    """Check mode catches stale v0.1 helper projection paths."""
+    """Check mode catches stale helper projection paths from older layouts."""
     output = tmp_path / "context"
     render_context(tmp_path, output=output)
     old_config = output / "config"
@@ -712,8 +712,8 @@ def test_upgrade_lock_refreshes_moving_source_selections(tmp_path: Path) -> None
     assert lockfile.custom_nodes[1].commit == COMMIT_B
 
 
-def test_old_helper_projections_are_omitted_for_m3_t2(tmp_path: Path) -> None:
-    """M3-T2 renders root artifacts without v0.1 helper projections."""
+def test_retired_helper_projection_files_are_omitted(tmp_path: Path) -> None:
+    """Render writes root artifacts without retired helper projection files."""
     output = tmp_path / "context"
 
     render_context(tmp_path, output=output)

@@ -22,6 +22,8 @@ GITHUB_REDIRECT_README_URL = (
     f"{CUSTOM_SCRIPTS_REF}/README.md"
 )
 EXPECTED_SCENARIOS = {
+    # Keep the smoke fixture set explicit so every expensive Docker scenario has
+    # a cheap schema/semantic check here.
     "minimal-pinned": {
         "config": "minimal-pinned.toml",
         "scripts": False,

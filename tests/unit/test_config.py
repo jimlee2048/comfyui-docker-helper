@@ -420,7 +420,7 @@ def test_unknown_fields_are_rejected_at_any_depth(
 def test_old_top_level_downloader_is_an_ordinary_unknown_section(
     write_config: Callable[[str], Path],
 ) -> None:
-    """Reject the removed v0.1 downloader table through the generic extra path."""
+    """Reject the removed downloader table through the generic extra path."""
     document = (
         MINIMAL_CONFIG
         + """

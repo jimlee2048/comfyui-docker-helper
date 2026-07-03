@@ -91,7 +91,7 @@ def test_cuda_version_rejects_other_formats(version: str) -> None:
 
 
 def test_only_cuda_platform_is_supported() -> None:
-    """Reject compute platform names outside the v0.1 CUDA contract."""
+    """Reject compute platform names outside the current CUDA-only contract."""
     config = make_config()
     config.compute_platform.type = "rocm"
 
@@ -1091,7 +1091,7 @@ def test_build_tags_reject_empty_whitespace_and_control_characters(tag: str) -> 
 
 @pytest.mark.parametrize("output", ["load", "push"])
 def test_build_output_accepts_load_and_push(output: str) -> None:
-    """Accept the two v0.2 build output modes."""
+    """Accept the supported Buildx output modes."""
     config = make_config()
     config.build.output = output
 

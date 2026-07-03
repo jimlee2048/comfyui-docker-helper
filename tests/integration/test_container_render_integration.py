@@ -30,12 +30,7 @@ version = "latest"
 """
 
 
-def test_rendered_custom_node_context_feeds_container_installer(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Render public root artifacts, then consume them with scripts."""
+def _write_custom_node_config(tmp_path: Path) -> Path:
     config = tmp_path / "config.toml"
     config.write_text(
         MINIMAL_CONFIG
@@ -55,6 +50,10 @@ post_install_scripts = ["post.py"]
 """,
         encoding="utf-8",
     )
+    return config
+
+
+def _write_hook_scripts(tmp_path: Path) -> tuple[Path, Path]:
     hook_log = tmp_path / "hook.log"
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -70,6 +69,67 @@ post_install_scripts = ["post.py"]
         "{os.environ['WORKSPACE']}:{os.environ['VIRTUAL_ENV']}\\n\")\n",
         encoding="utf-8",
     )
+    return scripts, hook_log
+
+
+def _assert_rendered_custom_node_context(output: Path) -> None:
+    assert has_valid_context_marker(output)
+    assert (output / "config.toml").is_file()
+    assert (output / "config.lock.toml").is_file()
+    assert not (output / "config" / "custom-nodes.toml").exists()
+    assert (output / "scripts" / "pre.sh").is_file()
+    assert (output / "scripts" / "post.py").is_file()
+
+    dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
+    assert "comfy-cli==" in dockerfile
+    assert '--version "$COMFYUI_VERSION"' not in dockerfile
+    assert 'if [ "$COMFY_CLI_VERSION" = latest ]' not in dockerfile
+    assert 'git -C "$COMFYUI_PATH" rev-parse HEAD' in dockerfile
+    assert "source=config.toml" in dockerfile
+    assert "source=config.lock.toml" in dockerfile
+    assert "source=config/custom-nodes.toml" not in dockerfile
+    assert "source=scripts,target=/tmp/cdh/scripts" in dockerfile
+    assert "cdh container install-custom-nodes" in dockerfile
+
+
+def _assert_installer_subprocess_contract(
+    subprocess_calls: list[tuple[str, list[str]]],
+    runtime: ContainerRuntime,
+    comfyui_path: Path,
+) -> None:
+    # The installer must consume locked registry and git sources in dependency order.
+    assert [call[0] for call in subprocess_calls] == [
+        "custom-node registry cache update",
+        "custom-node install registry-node@1.2.3",
+        f"custom-node git clone https://example.com/git-node.git@{COMMIT_A}",
+        f"custom-node git checkout https://example.com/git-node.git@{COMMIT_A}",
+        f"custom-node git submodules https://example.com/git-node.git@{COMMIT_A}",
+    ]
+    assert subprocess_calls[0][1] == [
+        str(runtime.python),
+        "-m",
+        "cm_cli",
+        "update-cache",
+    ]
+    assert subprocess_calls[1][1][-1] == "registry-node@1.2.3"
+    assert subprocess_calls[2][1] == [
+        "git",
+        "clone",
+        "--recursive",
+        "https://example.com/git-node.git",
+        str(comfyui_path / "custom_nodes" / "explicit-git-node"),
+    ]
+    assert subprocess_calls[3][1][-2:] == ["--detach", COMMIT_A]
+
+
+def test_rendered_custom_node_context_feeds_container_installer(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render public root artifacts, then consume them with container helpers."""
+    config = _write_custom_node_config(tmp_path)
+    scripts, hook_log = _write_hook_scripts(tmp_path)
     output = tmp_path / "context"
 
     render = cli_runner.invoke(
@@ -87,22 +147,7 @@ post_install_scripts = ["post.py"]
     )
 
     assert render.exit_code == 0
-    assert has_valid_context_marker(output)
-    assert (output / "config.toml").is_file()
-    assert (output / "config.lock.toml").is_file()
-    assert not (output / "config" / "custom-nodes.toml").exists()
-    assert (output / "scripts" / "pre.sh").is_file()
-    assert (output / "scripts" / "post.py").is_file()
-    dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
-    assert "comfy-cli==" in dockerfile
-    assert '--version "$COMFYUI_VERSION"' not in dockerfile
-    assert 'if [ "$COMFY_CLI_VERSION" = latest ]' not in dockerfile
-    assert 'git -C "$COMFYUI_PATH" rev-parse HEAD' in dockerfile
-    assert "source=config.toml" in dockerfile
-    assert "source=config.lock.toml" in dockerfile
-    assert "source=config/custom-nodes.toml" not in dockerfile
-    assert "source=scripts,target=/tmp/cdh/scripts" in dockerfile
-    assert "cdh container install-custom-nodes" in dockerfile
+    _assert_rendered_custom_node_context(output)
 
     workspace = tmp_path / "workspace"
     comfyui_path = workspace / "ComfyUI"
@@ -142,28 +187,7 @@ post_install_scripts = ["post.py"]
         log=lambda _: None,
     )
 
-    assert [call[0] for call in subprocess_calls] == [
-        "custom-node registry cache update",
-        "custom-node install registry-node@1.2.3",
-        f"custom-node git clone https://example.com/git-node.git@{COMMIT_A}",
-        f"custom-node git checkout https://example.com/git-node.git@{COMMIT_A}",
-        f"custom-node git submodules https://example.com/git-node.git@{COMMIT_A}",
-    ]
-    assert subprocess_calls[0][1] == [
-        str(runtime.python),
-        "-m",
-        "cm_cli",
-        "update-cache",
-    ]
-    assert subprocess_calls[1][1][-1] == "registry-node@1.2.3"
-    assert subprocess_calls[2][1] == [
-        "git",
-        "clone",
-        "--recursive",
-        "https://example.com/git-node.git",
-        str(comfyui_path / "custom_nodes" / "explicit-git-node"),
-    ]
-    assert subprocess_calls[3][1][-2:] == ["--detach", COMMIT_A]
+    _assert_installer_subprocess_contract(subprocess_calls, runtime, comfyui_path)
     assert hook_log.read_text(encoding="utf-8").splitlines() == [
         f"pre:{comfyui_path}:{comfyui_path}:{workspace}:{runtime.virtual_env}",
         f"post:{comfyui_path}:{comfyui_path}:{workspace}:{runtime.virtual_env}",

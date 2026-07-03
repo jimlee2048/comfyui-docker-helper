@@ -38,7 +38,7 @@ def _write_config(root: Path, document: str = MINIMAL_CONFIG) -> Path:
 
 
 def test_validate_help_exposes_current_options(cli_runner: CliRunner) -> None:
-    """Expose the validate options that are part of the v0.1 CLI contract."""
+    """Expose the current validate options and keep removed aliases hidden."""
     result = cli_runner.invoke(app, ["host", "validate", "--help"])
 
     assert result.exit_code == 0

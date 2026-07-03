@@ -552,7 +552,7 @@ def test_registry_non_active_or_non_installable_install_response_fails(
 
 
 def test_registry_deprecated_response_warns_but_resolves() -> None:
-    """Deprecated registry metadata is diagnostic-only for v0.2 resolution."""
+    """Deprecated registry metadata is diagnostic-only during resolution."""
     provider = FakeRegistryProvider(registry_install("1.2.3", deprecated=True))
 
     resolved = resolve_registry_custom_node("node", "latest", provider)

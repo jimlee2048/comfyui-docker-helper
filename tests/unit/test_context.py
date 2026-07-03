@@ -111,7 +111,7 @@ def write_context(
 
 
 def write_valid_marker(directory: Path) -> None:
-    """Write the v0.1 context marker used by write_build_context."""
+    """Write the current context marker used by write_build_context."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / ".cdh-rendered").write_text(
         '{"kind":"build-context","tool":"comfyui-docker-helper","version":"0.1"}\n',
@@ -348,7 +348,7 @@ def test_write_build_context_rejects_malformed_and_foreign_markers(
 
 
 def test_has_valid_context_marker_accepts_unknown_fields(tmp_path: Path) -> None:
-    """Forward-compatible marker fields do not invalidate the v0.1 marker."""
+    """Forward-compatible marker fields do not invalidate current markers."""
     output = tmp_path / "context"
     output.mkdir()
     (output / ".cdh-rendered").write_text(

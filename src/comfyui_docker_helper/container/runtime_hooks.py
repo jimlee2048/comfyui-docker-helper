@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import stat
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -15,10 +17,14 @@ from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
     run_argv,
+    start_argv,
 )
 
 BAKED_RUNTIME_HOOKS_PATH = Path("/opt/cdh/runtime/hooks")
 MOUNTED_RUNTIME_HOOKS_PATH = Path("/etc/cdh/runtime/hooks")
+STOP_HOOK_TIMEOUT_SECONDS = 30.0
+STOP_HOOK_TERMINATION_GRACE_SECONDS = 2.0
+STOP_HOOK_POLL_INTERVAL_SECONDS = 0.1
 
 _KNOWN_PHASE_DIRS = {
     "pre-start": "pre-start.d",
@@ -29,6 +35,10 @@ _SUPPORTED_SUFFIXES = frozenset({".sh", ".py"})
 
 type RuntimeHookPhase = Literal["pre-start", "post-start", "stop"]
 type RuntimeHookSource = Literal["baked", "mounted"]
+type CancelRequested = Callable[[], bool]
+type Monotonic = Callable[[], float]
+type ProcessGroupSignaler = Callable[[int, signal.Signals], object]
+type Sleep = Callable[[float], object]
 
 
 class RuntimeHookStatus(StrEnum):
@@ -59,6 +69,30 @@ class RuntimeHookCommandRunner(Protocol):
         description: str,
         start_new_session: bool = False,
     ) -> object: ...
+
+
+class RuntimeHookProcess(Protocol):
+    """Running hook process controlled during graceful shutdown."""
+
+    pid: int
+
+    def poll(self) -> int | None: ...
+
+    def wait(self) -> int: ...
+
+
+class RuntimeHookProcessRunner(Protocol):
+    """Subprocess-compatible hook process starter."""
+
+    def __call__(
+        self,
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> RuntimeHookProcess: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +226,95 @@ def run_runtime_hooks(
     return tuple(results)
 
 
+def run_runtime_stop_hooks(
+    plan: RuntimeHookPlan,
+    *,
+    runtime: ContainerRuntime,
+    env: Mapping[str, str] | None = None,
+    log: Callable[[str], object] = print,
+    runner: RuntimeHookProcessRunner = start_argv,
+    cancel_requested: CancelRequested = lambda: False,
+    timeout_seconds: float = STOP_HOOK_TIMEOUT_SECONDS,
+    termination_grace_seconds: float = STOP_HOOK_TERMINATION_GRACE_SECONDS,
+    poll_interval_seconds: float = STOP_HOOK_POLL_INTERVAL_SECONDS,
+    monotonic: Monotonic = time.monotonic,
+    sleep: Sleep = time.sleep,
+    process_group_signaler: ProcessGroupSignaler | None = None,
+) -> tuple[RuntimeHookResult, ...]:
+    """Run stop hooks with bounded cancellation and process-group cleanup."""
+    _validate_stop_hook_bounds(
+        timeout_seconds=timeout_seconds,
+        termination_grace_seconds=termination_grace_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    hook_env = runtime.env(env)
+    results: list[RuntimeHookResult] = []
+
+    for hook in plan.for_phase("stop"):
+        _raise_if_stop_cancelled(hook, cancel_requested)
+        argv = _hook_argv(hook, runtime)
+        log(
+            "Running runtime hook "
+            f"source={hook.source} phase={hook.phase} filename={hook.filename}"
+        )
+        try:
+            process = runner(
+                argv,
+                cwd=runtime.comfyui_path,
+                env=hook_env,
+                description=f"runtime hook {hook.source}/{hook.phase}/{hook.filename}",
+                start_new_session=True,
+            )
+            returncode = _wait_for_stop_hook_process(
+                process,
+                hook=hook,
+                cancel_requested=cancel_requested,
+                timeout_seconds=timeout_seconds,
+                termination_grace_seconds=termination_grace_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                monotonic=monotonic,
+                sleep=sleep,
+                process_group_signaler=(
+                    _signal_process_group
+                    if process_group_signaler is None
+                    else process_group_signaler
+                ),
+            )
+        except ContainerCommandError as error:
+            raise RuntimeHookError(
+                (
+                    Diagnostic(
+                        path=_hook_path(hook),
+                        code="runtime_hook.execution_failed",
+                        message=str(error),
+                    ),
+                )
+            ) from error
+
+        if returncode != 0:
+            raise RuntimeHookError(
+                (
+                    Diagnostic(
+                        path=_hook_path(hook),
+                        code="runtime_hook.execution_failed",
+                        message=(
+                            "runtime hook failed with exit code "
+                            f"{returncode}: {_format_hook_argv(argv)}"
+                        ),
+                    ),
+                )
+            )
+        results.append(
+            RuntimeHookResult(
+                hook=hook,
+                argv=tuple(os.fspath(argument) for argument in argv),
+                status=RuntimeHookStatus.COMPLETED,
+            )
+        )
+
+    return tuple(results)
+
+
 def _discover_phase_hooks(
     hook_root: RuntimeHookRoot,
     phase: RuntimeHookPhase,
@@ -309,6 +432,160 @@ def _validate_hook_file(
     return None
 
 
+def _validate_stop_hook_bounds(
+    *,
+    timeout_seconds: float,
+    termination_grace_seconds: float,
+    poll_interval_seconds: float,
+) -> None:
+    if timeout_seconds <= 0:
+        raise ValueError("stop hook timeout must be positive")
+    if termination_grace_seconds <= 0:
+        raise ValueError("stop hook termination grace must be positive")
+    if poll_interval_seconds <= 0:
+        raise ValueError("stop hook poll interval must be positive")
+
+
+def _wait_for_stop_hook_process(
+    process: RuntimeHookProcess,
+    *,
+    hook: RuntimeHook,
+    cancel_requested: CancelRequested,
+    timeout_seconds: float,
+    termination_grace_seconds: float,
+    poll_interval_seconds: float,
+    monotonic: Monotonic,
+    sleep: Sleep,
+    process_group_signaler: ProcessGroupSignaler,
+) -> int:
+    deadline = monotonic() + timeout_seconds
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            return process.wait()
+        if cancel_requested():
+            _terminate_hook_process_group(
+                process,
+                hook=hook,
+                termination_grace_seconds=termination_grace_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                monotonic=monotonic,
+                sleep=sleep,
+                process_group_signaler=process_group_signaler,
+            )
+            _raise_stop_cancelled(hook)
+        now = monotonic()
+        if now >= deadline:
+            _terminate_hook_process_group(
+                process,
+                hook=hook,
+                termination_grace_seconds=termination_grace_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                monotonic=monotonic,
+                sleep=sleep,
+                process_group_signaler=process_group_signaler,
+            )
+            raise RuntimeHookError(
+                (
+                    Diagnostic(
+                        path=_hook_path(hook),
+                        code="runtime_hook.timeout",
+                        message=(
+                            f"runtime hook timed out after {timeout_seconds:g} seconds"
+                        ),
+                    ),
+                )
+            )
+        sleep(min(poll_interval_seconds, deadline - now))
+
+
+def _terminate_hook_process_group(
+    process: RuntimeHookProcess,
+    *,
+    hook: RuntimeHook,
+    termination_grace_seconds: float,
+    poll_interval_seconds: float,
+    monotonic: Monotonic,
+    sleep: Sleep,
+    process_group_signaler: ProcessGroupSignaler,
+) -> None:
+    if process.poll() is not None:
+        return
+
+    if not _send_hook_process_group_signal(
+        process,
+        hook=hook,
+        sig=signal.SIGTERM,
+        process_group_signaler=process_group_signaler,
+    ):
+        return
+    deadline = monotonic() + termination_grace_seconds
+    while True:
+        if process.poll() is not None:
+            return
+        now = monotonic()
+        if now >= deadline:
+            _send_hook_process_group_signal(
+                process,
+                hook=hook,
+                sig=signal.SIGKILL,
+                process_group_signaler=process_group_signaler,
+            )
+            return
+        sleep(min(poll_interval_seconds, deadline - now))
+
+
+def _send_hook_process_group_signal(
+    process: RuntimeHookProcess,
+    *,
+    hook: RuntimeHook,
+    sig: signal.Signals,
+    process_group_signaler: ProcessGroupSignaler,
+) -> bool:
+    try:
+        process_group_signaler(process.pid, sig)
+    except ProcessLookupError:
+        return False
+    except OSError as error:
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=_hook_path(hook),
+                    code="runtime_hook.termination_failed",
+                    message=(
+                        "runtime hook process group could not be signaled with "
+                        f"{sig.name}: {error}"
+                    ),
+                ),
+            )
+        ) from error
+    return True
+
+
+def _raise_if_stop_cancelled(
+    hook: RuntimeHook,
+    cancel_requested: CancelRequested,
+) -> None:
+    if cancel_requested():
+        _raise_stop_cancelled(hook)
+
+
+def _raise_stop_cancelled(hook: RuntimeHook) -> None:
+    raise RuntimeHookError(
+        (
+            Diagnostic(
+                path=_hook_path(hook),
+                code="runtime_hook.cancelled",
+                message="runtime hook was cancelled by a shutdown signal",
+            ),
+        )
+    )
+
+
+def _signal_process_group(pid: int, sig: signal.Signals) -> None:
+    os.killpg(os.getpgid(pid), sig)
+
+
 def _hook_argv(
     hook: RuntimeHook,
     runtime: ContainerRuntime,
@@ -338,3 +615,7 @@ def _root_exists(path: Path) -> bool:
 
 def _hook_path(hook: RuntimeHook) -> tuple[str, str, str, str]:
     return ("hooks", hook.source, hook.phase, hook.filename)
+
+
+def _format_hook_argv(argv: Sequence[str | os.PathLike[str]]) -> str:
+    return " ".join(os.fspath(argument) for argument in argv)

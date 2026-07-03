@@ -6,7 +6,7 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Protocol
@@ -42,6 +42,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
     discover_runtime_hooks,
     run_runtime_hooks,
+    run_runtime_stop_hooks,
 )
 from comfyui_docker_helper.errors import ApplicationError
 
@@ -104,6 +105,20 @@ class RuntimeHookRunner(Protocol):
     ) -> tuple[RuntimeHookResult, ...]: ...
 
 
+class RuntimeStopHookRunner(Protocol):
+    """Runtime stop-hook runner with shutdown cancellation support."""
+
+    def __call__(
+        self,
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]: ...
+
+
 class ReadinessWaiter(Protocol):
     """ComfyUI readiness waiter callable used before post-start hooks."""
 
@@ -126,6 +141,7 @@ def run_entrypoint(
     runner: EntrypointRunner = subprocess.Popen,
     runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
     runtime_hook_runner: RuntimeHookRunner = run_runtime_hooks,
+    runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
 ) -> int:
     """Load runtime config, run ComfyUI, and return the child exit code."""
@@ -191,7 +207,7 @@ def run_entrypoint(
             hook_plan=hook_plan,
             runtime=runtime,
             source_env=source_env,
-            runtime_hook_runner=runtime_hook_runner,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
         )
     )
 
@@ -344,27 +360,41 @@ class _ShutdownRequested(Exception):
         super().__init__(sig.name)
 
 
+class _ShutdownState:
+    """Mutable state shared with signal handlers during graceful shutdown."""
+
+    def __init__(self) -> None:
+        self.requested = False
+        self._stop_hooks_cancelled = False
+
+    def cancel_stop_hooks(self) -> None:
+        self._stop_hooks_cancelled = True
+
+    def stop_hooks_cancelled(self) -> bool:
+        return self._stop_hooks_cancelled
+
+
 def _wait_with_signal_forwarding(
     child: ChildProcess,
     *,
     hook_plan: RuntimeHookPlan,
     runtime: ContainerRuntime,
     source_env: Mapping[str, str],
-    runtime_hook_runner: RuntimeHookRunner,
+    runtime_stop_hook_runner: RuntimeStopHookRunner,
 ) -> int:
     previous_handlers = {
         sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
     }
-    shutdown_requested = False
+    shutdown_state = _ShutdownState()
 
     def forward(sig: signal.Signals, frame: object) -> None:
         del frame
-        nonlocal shutdown_requested
-        if shutdown_requested:
+        if shutdown_state.requested:
+            shutdown_state.cancel_stop_hooks()
             return
         requested = signal.Signals(sig)
         if child.poll() is None:
-            shutdown_requested = True
+            shutdown_state.requested = True
             raise _ShutdownRequested(requested)
 
     try:
@@ -377,7 +407,8 @@ def _wait_with_signal_forwarding(
                 hook_plan,
                 runtime=runtime,
                 source_env=source_env,
-                runtime_hook_runner=runtime_hook_runner,
+                runtime_stop_hook_runner=runtime_stop_hook_runner,
+                cancel_requested=shutdown_state.stop_hooks_cancelled,
             )
             if child.poll() is None:
                 child.send_signal(request.sig)
@@ -392,18 +423,18 @@ def _run_stop_hooks_before_signal(
     *,
     runtime: ContainerRuntime,
     source_env: Mapping[str, str],
-    runtime_hook_runner: RuntimeHookRunner,
+    runtime_stop_hook_runner: RuntimeStopHookRunner,
+    cancel_requested: Callable[[], bool],
 ) -> None:
     if not hook_plan.for_phase("stop"):
         return
     try:
-        runtime_hook_runner(
+        runtime_stop_hook_runner(
             hook_plan,
-            "stop",
             runtime=runtime,
             env=source_env,
             log=print,
-            start_new_session=True,
+            cancel_requested=cancel_requested,
         )
     except RuntimeHookError as error:
         _render_nonfatal_diagnostics("Runtime stop hook failed:", error.diagnostics)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -13,9 +14,13 @@ from comfyui_docker_helper.container.runners import (
     ContainerRuntime,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
+    STOP_HOOK_POLL_INTERVAL_SECONDS,
+    STOP_HOOK_TERMINATION_GRACE_SECONDS,
+    STOP_HOOK_TIMEOUT_SECONDS,
     RuntimeHookError,
     discover_runtime_hooks,
     run_runtime_hooks,
+    run_runtime_stop_hooks,
 )
 
 
@@ -33,6 +38,39 @@ def _write_hook(root: Path, phase_dir: str, filename: str, content: str = "") ->
     path = phase / filename
     path.write_text(content or f"# {filename}\n", encoding="utf-8")
     return path
+
+
+class FakeClock:
+    """Manual monotonic clock for fast stop-hook timeout tests."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class FakeHookProcess:
+    """Minimal process surface used by bounded stop-hook tests."""
+
+    def __init__(self, pid: int, returncode: int | None = None) -> None:
+        self.pid = pid
+        self.returncode = returncode
+        self.waits = 0
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self) -> int:
+        self.waits += 1
+        if self.returncode is None:
+            raise AssertionError("running fake process cannot be waited")
+        return self.returncode
 
 
 def test_discovery_order_is_baked_then_mounted_lexical_and_allows_duplicates(
@@ -282,18 +320,16 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
         env: Mapping[str, str],
         description: str,
         start_new_session: bool = False,
-    ) -> object:
+    ) -> FakeHookProcess:
         del cwd, env, description
         calls.append((Path(argv[-1]).name, start_new_session))
-        return object()
+        return FakeHookProcess(pid=100 + len(calls), returncode=0)
 
-    run_runtime_hooks(
+    run_runtime_stop_hooks(
         plan,
-        "stop",
         runtime=runtime,
         log=logs.append,
         runner=runner,
-        start_new_session=True,
     )
 
     assert calls == [("10-baked.sh", True), ("10-mounted.py", True)]
@@ -301,6 +337,166 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
         "Running runtime hook source=baked phase=stop filename=10-baked.sh",
         "Running runtime hook source=mounted phase=stop filename=10-mounted.py",
     ]
+
+
+def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-hang.sh")
+    _write_hook(mounted, "stop.d", "20-skip.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    clock = FakeClock()
+    process = FakeHookProcess(pid=4242)
+    started: list[str] = []
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> FakeHookProcess:
+        del cwd, env, description
+        assert start_new_session is True
+        started.append(Path(argv[-1]).name)
+        return process
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    with pytest.raises(RuntimeHookError) as error:
+        run_runtime_stop_hooks(
+            plan,
+            runtime=runtime,
+            runner=runner,
+            timeout_seconds=0.2,
+            termination_grace_seconds=0.2,
+            poll_interval_seconds=0.1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+            process_group_signaler=signaler,
+        )
+
+    assert started == ["10-hang.sh"]
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.timeout")
+    ]
+    assert signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+
+
+def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-hang.sh")
+    _write_hook(mounted, "stop.d", "20-skip.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    clock = FakeClock()
+    process = FakeHookProcess(pid=4343)
+    started: list[str] = []
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> FakeHookProcess:
+        del cwd, env, description
+        assert start_new_session is True
+        started.append(Path(argv[-1]).name)
+        return process
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    with pytest.raises(RuntimeHookError) as error:
+        run_runtime_stop_hooks(
+            plan,
+            runtime=runtime,
+            runner=runner,
+            cancel_requested=lambda: clock.now >= 0.1,
+            timeout_seconds=1.0,
+            termination_grace_seconds=0.2,
+            poll_interval_seconds=0.1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+            process_group_signaler=signaler,
+        )
+
+    assert started == ["10-hang.sh"]
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.cancelled")
+    ]
+    assert signals == [(4343, signal.SIGTERM), (4343, signal.SIGKILL)]
+
+
+def test_stop_hook_termination_omits_sigkill_when_hook_exits_during_grace(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-hang.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    clock = FakeClock()
+    process = FakeHookProcess(pid=4444)
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> FakeHookProcess:
+        del argv, cwd, env, description, start_new_session
+        return process
+
+    def sleep(seconds: float) -> None:
+        clock.sleep(seconds)
+        if signals == [(4444, signal.SIGTERM)]:
+            process.returncode = -int(signal.SIGTERM)
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    with pytest.raises(RuntimeHookError):
+        run_runtime_stop_hooks(
+            plan,
+            runtime=runtime,
+            runner=runner,
+            cancel_requested=lambda: clock.now >= 0.1,
+            timeout_seconds=1.0,
+            termination_grace_seconds=0.5,
+            poll_interval_seconds=0.1,
+            monotonic=clock.monotonic,
+            sleep=sleep,
+            process_group_signaler=signaler,
+        )
+
+    assert signals == [(4444, signal.SIGTERM)]
+
+
+def test_stop_hook_timeout_constants_are_bounded() -> None:
+    assert 0 < STOP_HOOK_POLL_INTERVAL_SECONDS < STOP_HOOK_TIMEOUT_SECONDS
+    assert 0 < STOP_HOOK_TERMINATION_GRACE_SECONDS < STOP_HOOK_TIMEOUT_SECONDS
 
 
 def locations_and_codes(

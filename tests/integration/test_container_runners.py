@@ -15,6 +15,7 @@ from comfyui_docker_helper.container.runners import (
     run_argv,
     run_hook,
     run_hooks,
+    start_argv,
 )
 
 
@@ -118,6 +119,35 @@ def test_run_argv_can_request_new_process_session(
 
     run_argv(["echo", "default"], cwd=tmp_path, env={}, description="default")
     run_argv(
+        ["echo", "isolated"],
+        cwd=tmp_path,
+        env={},
+        description="isolated",
+        start_new_session=True,
+    )
+
+    assert "start_new_session" not in calls[0]
+    assert calls[1]["start_new_session"] is True
+
+
+def test_start_argv_can_request_new_process_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass start_new_session only when starting an isolated subprocess."""
+    calls: list[dict[str, object]] = []
+
+    def fake_popen(
+        command: list[str],
+        **kwargs: object,
+    ) -> object:
+        calls.append({"command": command, **kwargs})
+        return object()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    start_argv(["echo", "default"], cwd=tmp_path, env={}, description="default")
+    start_argv(
         ["echo", "isolated"],
         cwd=tmp_path,
         env={},

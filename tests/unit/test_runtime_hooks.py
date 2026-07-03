@@ -371,6 +371,8 @@ def test_startup_hook_cancellation_terminates_group_and_skips_remaining(
 
     def signaler(pid: int, sig: signal.Signals) -> None:
         signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            process.returncode = -int(signal.SIGKILL)
 
     with pytest.raises(RuntimeHookError) as error:
         run_runtime_startup_hooks(
@@ -391,6 +393,7 @@ def test_startup_hook_cancellation_terminates_group_and_skips_remaining(
         (("hooks", "mounted", "pre-start", "10-hang.sh"), "runtime_hook.cancelled")
     ]
     assert signals == [(4141, signal.SIGTERM), (4141, signal.SIGKILL)]
+    assert process.waits == 1
 
 
 def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
@@ -424,6 +427,8 @@ def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
 
     def signaler(pid: int, sig: signal.Signals) -> None:
         signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            process.returncode = -int(signal.SIGKILL)
 
     with pytest.raises(RuntimeHookError) as error:
         run_runtime_stop_hooks(
@@ -443,6 +448,7 @@ def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
         (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.timeout")
     ]
     assert signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    assert process.waits == 1
 
 
 def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
@@ -476,6 +482,8 @@ def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
 
     def signaler(pid: int, sig: signal.Signals) -> None:
         signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            process.returncode = -int(signal.SIGKILL)
 
     with pytest.raises(RuntimeHookError) as error:
         run_runtime_stop_hooks(
@@ -496,6 +504,7 @@ def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
         (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.cancelled")
     ]
     assert signals == [(4343, signal.SIGTERM), (4343, signal.SIGKILL)]
+    assert process.waits == 1
 
 
 def test_stop_hook_termination_omits_sigkill_when_hook_exits_during_grace(
@@ -546,6 +555,7 @@ def test_stop_hook_termination_omits_sigkill_when_hook_exits_during_grace(
         )
 
     assert signals == [(4444, signal.SIGTERM)]
+    assert process.waits == 1
 
 
 def test_stop_hook_timeout_constants_are_bounded() -> None:

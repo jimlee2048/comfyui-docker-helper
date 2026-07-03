@@ -54,8 +54,10 @@ class FakeChild:
         self._wait_returncode = returncode
         self.signals: list[signal.Signals] = []
         self.terminated = False
+        self.wait_calls = 0
 
     def wait(self) -> int:
+        self.wait_calls += 1
         self.returncode = self._wait_returncode
         return self._wait_returncode
 
@@ -82,6 +84,7 @@ class FakeHookProcess:
         self.trigger = trigger
         self.returncode: int | None = None
         self._triggered = False
+        self.wait_calls = 0
 
     def poll(self) -> int | None:
         if not self._triggered:
@@ -90,6 +93,7 @@ class FakeHookProcess:
         return self.returncode
 
     def wait(self) -> int:
+        self.wait_calls += 1
         if self.returncode is None:
             raise AssertionError("running fake hook process cannot be waited")
         return self.returncode
@@ -596,6 +600,86 @@ def test_stop_hook_failure_is_logged_and_signal_still_forwards(
     assert "runtime_hook.execution_failed" in captured.err
 
 
+def test_stop_hook_failure_does_not_override_child_exit_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop.d", "10-fail.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class ShutdownChild(FakeChild):
+        def __init__(self) -> None:
+            super().__init__(17)
+            self.wait_calls = 0
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("shutdown signal handler should interrupt wait")
+            events.append("wait")
+            self.returncode = self._wait_returncode
+            return self._wait_returncode
+
+        def send_signal(self, sig: signal.Signals) -> None:
+            events.append(f"signal:{sig.name}")
+            super().send_signal(sig)
+
+    child = ShutdownChild()
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return child
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        events.append("stop-failed")
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "stop", "10-fail.sh"),
+                    code="runtime_hook.execution_failed",
+                    message="stop hook failed in test",
+                ),
+            )
+        )
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+        )
+        == 17
+    )
+
+    assert events == ["stop-failed", "signal:SIGTERM", "wait"]
+    assert child.signals == [signal.SIGTERM]
+
+
 def test_second_shutdown_signal_cancels_stop_hooks_then_forwards_original_signal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -798,6 +882,7 @@ def test_shutdown_signal_during_pre_start_hook_cancels_hook_and_prevents_spawn(
     clock = FakeClock()
     events: list[str] = []
     hook_signals: list[tuple[int, signal.Signals]] = []
+    hook_processes: list[FakeHookProcess] = []
 
     def runner(
         argv: Sequence[str],
@@ -822,10 +907,17 @@ def test_shutdown_signal_during_pre_start_hook_cancels_hook_and_prevents_spawn(
         assert start_new_session is True
         filename = Path(argv[-1]).name
         events.append(f"hook:{filename}")
-        return FakeHookProcess(
+        process = FakeHookProcess(
             pid=5151,
             trigger=lambda: handlers[signal.SIGTERM](signal.SIGTERM, None),
         )
+        hook_processes.append(process)
+        return process
+
+    def process_group_signaler(pid: int, sig: signal.Signals) -> None:
+        hook_signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            hook_processes[-1].returncode = -int(signal.SIGKILL)
 
     def runtime_hook_runner(
         plan: RuntimeHookPlan,
@@ -848,7 +940,7 @@ def test_shutdown_signal_during_pre_start_hook_cancels_hook_and_prevents_spawn(
             poll_interval_seconds=0.1,
             monotonic=clock.monotonic,
             sleep=clock.sleep,
-            process_group_signaler=lambda pid, sig: hook_signals.append((pid, sig)),
+            process_group_signaler=process_group_signaler,
         )
 
     def runtime_stop_hook_runner(
@@ -880,6 +972,7 @@ def test_shutdown_signal_during_pre_start_hook_cancels_hook_and_prevents_spawn(
 
     assert events == ["hook:10-hang.sh"]
     assert hook_signals == [(5151, signal.SIGTERM), (5151, signal.SIGKILL)]
+    assert hook_processes[0].wait_calls == 1
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
 
@@ -1051,6 +1144,7 @@ def test_shutdown_signal_during_post_start_hook_cancels_hook_and_signals_child(
     child = FakeChild(-int(signal.SIGTERM))
     events: list[str] = []
     hook_signals: list[tuple[int, signal.Signals]] = []
+    hook_processes: list[FakeHookProcess] = []
 
     def runner(
         argv: Sequence[str],
@@ -1080,10 +1174,17 @@ def test_shutdown_signal_during_post_start_hook_cancels_hook_and_signals_child(
         assert start_new_session is True
         filename = Path(argv[-1]).name
         events.append(f"hook:{filename}")
-        return FakeHookProcess(
+        process = FakeHookProcess(
             pid=5252,
             trigger=lambda: handlers[signal.SIGTERM](signal.SIGTERM, None),
         )
+        hook_processes.append(process)
+        return process
+
+    def process_group_signaler(pid: int, sig: signal.Signals) -> None:
+        hook_signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            hook_processes[-1].returncode = -int(signal.SIGKILL)
 
     def runtime_hook_runner(
         plan: RuntimeHookPlan,
@@ -1106,7 +1207,7 @@ def test_shutdown_signal_during_post_start_hook_cancels_hook_and_signals_child(
             poll_interval_seconds=0.1,
             monotonic=clock.monotonic,
             sleep=clock.sleep,
-            process_group_signaler=lambda pid, sig: hook_signals.append((pid, sig)),
+            process_group_signaler=process_group_signaler,
         )
 
     def runtime_stop_hook_runner(
@@ -1139,6 +1240,7 @@ def test_shutdown_signal_during_post_start_hook_cancels_hook_and_signals_child(
 
     assert events == ["spawn", "readiness", "hook:10-hang.sh"]
     assert hook_signals == [(5252, signal.SIGTERM), (5252, signal.SIGKILL)]
+    assert hook_processes[0].wait_calls == 1
     assert child.signals == [signal.SIGTERM]
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
@@ -1792,6 +1894,59 @@ def test_readiness_failure_terminates_child_and_prevents_normal_wait(
     assert "readiness.timeout" in str(error.value)
 
 
+def test_readiness_failure_reaps_child_that_exits_after_terminate(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+
+    class ExitsOnTerminateChild(FakeChild):
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = self._wait_returncode
+
+    child = ExitsOnTerminateChild(0)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port, child
+        raise ReadinessError(
+            (
+                Diagnostic(
+                    path=("readiness",),
+                    code="readiness.timeout",
+                    message="ComfyUI did not become ready before timeout",
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError):
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+        )
+
+    assert child.terminated is True
+    assert child.wait_calls == 1
+    assert child.returncode == 0
+
+
 def test_post_start_hook_failure_terminates_child_and_prevents_normal_wait(
     tmp_path: Path,
 ) -> None:
@@ -1857,6 +2012,71 @@ def test_post_start_hook_failure_terminates_child_and_prevents_normal_wait(
     assert child.returncode is None
     assert "runtime hook failed" in str(error.value)
     assert "[hooks.mounted.post-start.10-fail.sh]" in str(error.value)
+
+
+def test_post_start_failure_reaps_child_that_exits_after_terminate(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-fail.sh")
+
+    class ExitsOnTerminateChild(FakeChild):
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = self._wait_returncode
+
+    child = ExitsOnTerminateChild(0)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port, child
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log, cancel_requested
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "post-start", "10-fail.sh"),
+                    code="runtime_hook.execution_failed",
+                    message="post hook failed in test",
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError):
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+
+    assert child.terminated is True
+    assert child.wait_calls == 1
+    assert child.returncode == 0
 
 
 def test_post_start_success_returns_natural_child_exit(tmp_path: Path) -> None:

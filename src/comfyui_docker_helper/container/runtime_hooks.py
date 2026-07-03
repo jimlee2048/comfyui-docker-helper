@@ -636,7 +636,7 @@ def _terminate_hook_process_group(
     sleep: Sleep,
     process_group_signaler: ProcessGroupSignaler,
 ) -> None:
-    if process.poll() is not None:
+    if _reap_hook_process_if_exited(process):
         return
 
     if not _send_hook_process_group_signal(
@@ -645,10 +645,11 @@ def _terminate_hook_process_group(
         sig=signal.SIGTERM,
         process_group_signaler=process_group_signaler,
     ):
+        _reap_hook_process_if_exited(process)
         return
     deadline = monotonic() + termination_grace_seconds
     while True:
-        if process.poll() is not None:
+        if _reap_hook_process_if_exited(process):
             return
         now = monotonic()
         if now >= deadline:
@@ -658,8 +659,16 @@ def _terminate_hook_process_group(
                 sig=signal.SIGKILL,
                 process_group_signaler=process_group_signaler,
             )
+            _reap_hook_process_if_exited(process)
             return
         sleep(min(poll_interval_seconds, deadline - now))
+
+
+def _reap_hook_process_if_exited(process: RuntimeHookProcess) -> bool:
+    if process.poll() is None:
+        return False
+    process.wait()
+    return True
 
 
 def _send_hook_process_group_signal(

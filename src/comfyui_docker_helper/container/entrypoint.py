@@ -422,10 +422,19 @@ def _run_post_start_hooks_if_required(
 
 
 def _terminate_child_if_running(child: ChildProcess) -> None:
-    if child.poll() is not None:
+    if _reap_child_if_exited(child):
         return
     with suppress(OSError):
         child.terminate()
+    _reap_child_if_exited(child)
+
+
+def _reap_child_if_exited(child: ChildProcess) -> bool:
+    if child.poll() is None:
+        return False
+    with suppress(OSError):
+        child.wait()
+    return True
 
 
 class _StartupShutdownRequested(BaseException):

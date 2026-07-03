@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -46,6 +47,9 @@ from comfyui_docker_helper.container.runtime_hooks import (
     run_runtime_stop_hooks,
 )
 from comfyui_docker_helper.errors import ApplicationError
+
+CHILD_TERMINATION_REAP_GRACE_SECONDS = 2.0
+CHILD_REAP_POLL_INTERVAL_SECONDS = 0.1
 
 
 class EntrypointError(ApplicationError):
@@ -426,7 +430,7 @@ def _terminate_child_if_running(child: ChildProcess) -> None:
         return
     with suppress(OSError):
         child.terminate()
-    _reap_child_if_exited(child)
+    _reap_child_until_exited(child)
 
 
 def _reap_child_if_exited(child: ChildProcess) -> bool:
@@ -435,6 +439,17 @@ def _reap_child_if_exited(child: ChildProcess) -> bool:
     with suppress(OSError):
         child.wait()
     return True
+
+
+def _reap_child_until_exited(child: ChildProcess) -> None:
+    deadline = time.monotonic() + CHILD_TERMINATION_REAP_GRACE_SECONDS
+    while True:
+        if _reap_child_if_exited(child):
+            return
+        now = time.monotonic()
+        if now >= deadline:
+            return
+        time.sleep(min(CHILD_REAP_POLL_INTERVAL_SECONDS, deadline - now))
 
 
 class _StartupShutdownRequested(BaseException):

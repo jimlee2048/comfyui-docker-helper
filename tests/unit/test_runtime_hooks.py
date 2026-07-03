@@ -451,6 +451,60 @@ def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
     assert process.waits == 1
 
 
+def test_stop_hook_sigkill_reaps_process_after_delayed_exit(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-hang.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    clock = FakeClock()
+    process = FakeHookProcess(pid=4243)
+    signals: list[tuple[int, signal.Signals]] = []
+    sigkill_sent = False
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> FakeHookProcess:
+        del argv, cwd, env, description, start_new_session
+        return process
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        nonlocal sigkill_sent
+        signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            sigkill_sent = True
+
+    def sleep(seconds: float) -> None:
+        clock.sleep(seconds)
+        if sigkill_sent and process.returncode is None:
+            process.returncode = -int(signal.SIGKILL)
+
+    with pytest.raises(RuntimeHookError):
+        run_runtime_stop_hooks(
+            plan,
+            runtime=runtime,
+            runner=runner,
+            timeout_seconds=0.2,
+            termination_grace_seconds=0.2,
+            poll_interval_seconds=0.1,
+            monotonic=clock.monotonic,
+            sleep=sleep,
+            process_group_signaler=signaler,
+        )
+
+    assert signals == [(4243, signal.SIGTERM), (4243, signal.SIGKILL)]
+    assert process.waits == 1
+
+
 def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
     tmp_path: Path,
 ) -> None:

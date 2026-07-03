@@ -659,7 +659,31 @@ def _terminate_hook_process_group(
                 sig=signal.SIGKILL,
                 process_group_signaler=process_group_signaler,
             )
-            _reap_hook_process_if_exited(process)
+            _reap_hook_process_until_exited(
+                process,
+                termination_grace_seconds=termination_grace_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
+            return
+        sleep(min(poll_interval_seconds, deadline - now))
+
+
+def _reap_hook_process_until_exited(
+    process: RuntimeHookProcess,
+    *,
+    termination_grace_seconds: float,
+    poll_interval_seconds: float,
+    monotonic: Monotonic,
+    sleep: Sleep,
+) -> None:
+    deadline = monotonic() + termination_grace_seconds
+    while True:
+        if _reap_hook_process_if_exited(process):
+            return
+        now = monotonic()
+        if now >= deadline:
             return
         sleep(min(poll_interval_seconds, deadline - now))
 

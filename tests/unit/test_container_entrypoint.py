@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
+from comfyui_docker_helper.container import entrypoint as entrypoint_module
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -1830,10 +1831,14 @@ def test_child_exit_before_readiness_is_startup_failure(
 
 def test_readiness_failure_terminates_child_and_prevents_normal_wait(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     hooks = tmp_path / "hooks"
     _write_hook(hooks, "post-start.d", "10-post.sh")
+    clock = FakeClock()
+    monkeypatch.setattr(entrypoint_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(entrypoint_module.time, "sleep", clock.sleep)
     child = FakeChild(0)
     events: list[str] = []
 
@@ -1896,15 +1901,29 @@ def test_readiness_failure_terminates_child_and_prevents_normal_wait(
 
 def test_readiness_failure_reaps_child_that_exits_after_terminate(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     hooks = tmp_path / "hooks"
     _write_hook(hooks, "post-start.d", "10-post.sh")
+    clock = FakeClock()
+    monkeypatch.setattr(entrypoint_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(entrypoint_module.time, "sleep", clock.sleep)
 
     class ExitsOnTerminateChild(FakeChild):
+        def __init__(self, returncode: int) -> None:
+            super().__init__(returncode)
+            self.polls_after_terminate = 0
+
         def terminate(self) -> None:
             self.terminated = True
-            self.returncode = self._wait_returncode
+
+        def poll(self) -> int | None:
+            if self.terminated and self.returncode is None:
+                self.polls_after_terminate += 1
+                if self.polls_after_terminate >= 2:
+                    self.returncode = self._wait_returncode
+            return self.returncode
 
     child = ExitsOnTerminateChild(0)
 
@@ -1949,10 +1968,14 @@ def test_readiness_failure_reaps_child_that_exits_after_terminate(
 
 def test_post_start_hook_failure_terminates_child_and_prevents_normal_wait(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     hooks = tmp_path / "hooks"
     _write_hook(hooks, "post-start.d", "10-fail.sh")
+    clock = FakeClock()
+    monkeypatch.setattr(entrypoint_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(entrypoint_module.time, "sleep", clock.sleep)
     child = FakeChild(0)
     events: list[str] = []
 

@@ -4,8 +4,7 @@ Build customized ComfyUI Docker images from a declarative TOML configuration.
 
 This project targets advanced local users who are already comfortable with
 Docker Buildx, ComfyUI, Python packaging, and build-time Docker diagnostics.
-v0.2 focuses on build-context lock artifacts and host build ergonomics:
-rendered contexts contain root `config.toml` and `config.lock.toml`, and host
+Rendered contexts contain root `config.toml` and `config.lock.toml`, and host
 builds can load or push one or more image tags from either CLI flags or
 configuration.
 
@@ -146,7 +145,7 @@ out of that directory.
 ## Files and downloaders
 
 Configured files are downloaded during the Docker build by
-`cdh container download-files`. v0.2 supports:
+`cdh container download-files`. The available download backends are:
 
 - `httpx` for simple HTTP(S) downloads with retries and temporary-file rename;
 - `aria2` for build-time RPC-controlled downloads with per-file serialization.
@@ -160,10 +159,10 @@ Configure package indexes with `python.index_url` and
 
 ## Secrets and logs
 
-Values in `[system.env]` are ordinary Dockerfile `ENV` values. v0.2 does not
-hide token-like values, prevent them from appearing in image history, or redact
-them from build output. Do not put secrets in configuration unless that exposure
-is acceptable.
+Values in `[system.env]` are ordinary Dockerfile `ENV` values. Token-like
+values are not hidden, prevented from appearing in image history, or redacted
+from build output. Do not put secrets in configuration unless that exposure is
+acceptable.
 
 The temporary aria2 RPC secret is generated inside the helper process and is not
 written to helper configuration or normal helper logs.

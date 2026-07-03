@@ -160,8 +160,8 @@ def _normalize_version_constraint(
         raise ValueError("must use only ==, !=, <, <=, >, >= comparison constraints")
 
     try:
-        # M2 resolution filters upstream candidates to stable releases; M1 only
-        # validates the selector syntax without network-backed enumeration.
+        # Syntax validation accepts semantic version spelling while resolution
+        # filters stable upstream candidates during network-backed enumeration.
         specifier_set = SpecifierSet(version)
     except InvalidSpecifier as error:
         raise ValueError("must be a valid PEP 440 comparison constraint") from error

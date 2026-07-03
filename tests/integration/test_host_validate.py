@@ -195,8 +195,9 @@ download_mode = "sync"
     assert "Configuration has warnings:" in result.stderr
     assert "[cdh.default_download_mode]" in result.stderr
     assert "[files.0.download_mode]" in result.stderr
-    assert "runtime-only in v0.2 host workflows" in result.stderr
-    assert "remove this field" in result.stderr
+    assert "sync download mode is ignored by host commands" in result.stderr
+    assert "remove this field from host" in result.stderr
+    assert "build configuration" in result.stderr
     assert "Configuration is invalid:" not in result.stderr
 
 

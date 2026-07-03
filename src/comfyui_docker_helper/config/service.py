@@ -164,7 +164,7 @@ def _validate_structure(document: Mapping[str, Any]) -> Config:
 
 
 def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...]:
-    """Collect v0.2 host workflow warnings for runtime-only config fields."""
+    """Collect host command warnings for runtime-only config fields."""
     diagnostics: list[Diagnostic] = []
 
     cdh = document.get("cdh")
@@ -174,8 +174,8 @@ def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...
                 path=("cdh", "default_download_mode"),
                 code="host.runtime_download_mode_ignored",
                 message=(
-                    "sync download mode is runtime-only in v0.2 host workflows; "
-                    "remove this field"
+                    "sync download mode is ignored by host commands; remove this "
+                    "field from host build configuration"
                 ),
                 severity=DiagnosticSeverity.WARNING,
             )
@@ -190,8 +190,8 @@ def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...
                         path=("files", index, "download_mode"),
                         code="host.runtime_download_mode_ignored",
                         message=(
-                            "sync download mode is runtime-only in v0.2 host "
-                            "workflows; remove this field"
+                            "sync download mode is ignored by host commands; "
+                            "remove this field from host build configuration"
                         ),
                         severity=DiagnosticSeverity.WARNING,
                     )

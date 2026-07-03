@@ -102,7 +102,7 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \\
 COPY runtime/config.toml /opt/cdh/runtime/config.toml
 
 WORKDIR /workspace
-CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch"]
+ENTRYPOINT ["cdh", "container", "entrypoint"]
 """
 
 _NODE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
@@ -222,7 +222,7 @@ RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
       --lock /tmp/cdh/config.lock.toml
 
 WORKDIR "/work dir/\$cash/\"quote\"/back\\slash"
-CMD ["python", "/opt/Comfy UI/main.py", "--listen", "value \"quoted\" $cash \\ path", "--port", "8190", "--disable-auto-launch", "--preview-method", "auto", "--cpu"]
+ENTRYPOINT ["cdh", "container", "entrypoint"]
 """
 
 
@@ -637,7 +637,11 @@ def test_optional_helper_layers_are_emitted_only_for_enabled_features(
     assert rendered.count("cdh container download-files") == (
         1 if feature == "file" else 0
     )
-    assert "WORKDIR /workspace\nCMD " in rendered
+    assert (
+        'WORKDIR /workspace\nENTRYPOINT ["cdh", "container", "entrypoint"]' in rendered
+    )
+    assert "\nCMD " not in rendered
+    assert "/workspace/ComfyUI/main.py" not in rendered
     for fragment in absent_fragments:
         assert fragment not in rendered
     if feature == "hook":
@@ -700,8 +704,10 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
     assert "      --skip-manager" not in rendered
     assert rendered.endswith(
         f"WORKDIR {serialize_dockerfile_word(config.system.workspace)}\n"
-        f"CMD {json.dumps(list(plan.comfyui.launch_command), ensure_ascii=False)}\n"
+        'ENTRYPOINT ["cdh", "container", "entrypoint"]\n'
     )
+    assert "\nCMD " not in rendered
+    assert "/opt/Comfy UI/main.py" not in rendered
     assert plan.comfyui.launch_command[-8:] == (
         "--listen",
         'value "quoted" $cash \\ path',
@@ -728,7 +734,7 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
         "source=config.toml",
         "source=config.lock.toml",
         "WORKDIR",
-        "CMD",
+        "ENTRYPOINT",
     ]
     positions = [rendered.index(fragment) for fragment in ordered_fragments]
     assert positions == sorted(positions)

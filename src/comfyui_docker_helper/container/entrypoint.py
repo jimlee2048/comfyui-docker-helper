@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -34,8 +35,17 @@ class EntrypointRunner(Protocol):
         cwd: str,
         env: Mapping[str, str],
         shell: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]: ...
+    ) -> ChildProcess: ...
+
+
+class ChildProcess(Protocol):
+    """Minimal child process interface used by the entrypoint."""
+
+    returncode: int | None
+
+    def wait(self) -> int: ...
+
+    def send_signal(self, sig: signal.Signals) -> None: ...
 
 
 def run_entrypoint(
@@ -44,7 +54,7 @@ def run_entrypoint(
     baked_config_path: str | Path = BAKED_RUNTIME_CONFIG_PATH,
     mounted_config_path: str | Path = MOUNTED_RUNTIME_CONFIG_PATH,
     environ: Mapping[str, str] | None = None,
-    runner: EntrypointRunner = subprocess.run,
+    runner: EntrypointRunner = subprocess.Popen,
 ) -> int:
     """Load runtime config, run ComfyUI, and return the child exit code."""
     source_env = os.environ if environ is None else environ
@@ -66,14 +76,13 @@ def run_entrypoint(
             cwd=os.fspath(runtime.comfyui_path),
             env=runtime.env(source_env),
             shell=False,
-            check=False,
         )
     except FileNotFoundError as error:
         raise EntrypointError(f"ComfyUI executable not found: {argv[0]}") from error
     except OSError as error:
         raise EntrypointError(f"ComfyUI failed to start: {error}") from error
 
-    return completed.returncode
+    return _normalize_child_exit_code(_wait_with_signal_forwarding(completed))
 
 
 def build_comfyui_argv(
@@ -93,6 +102,30 @@ def build_comfyui_argv(
         "--disable-auto-launch",
         *comfyui.extra_args,
     ]
+
+
+def _wait_with_signal_forwarding(child: ChildProcess) -> int:
+    previous_handlers = {
+        sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
+    }
+
+    def forward(sig: signal.Signals, frame: object) -> None:
+        if child.returncode is None:
+            child.send_signal(sig)
+
+    try:
+        signal.signal(signal.SIGTERM, forward)
+        signal.signal(signal.SIGINT, forward)
+        return child.wait()
+    finally:
+        for sig, previous in previous_handlers.items():
+            signal.signal(sig, previous)
+
+
+def _normalize_child_exit_code(returncode: int) -> int:
+    if returncode >= 0:
+        return returncode
+    return 128 + abs(returncode)
 
 
 def _format_runtime_config_error(diagnostics: tuple[Diagnostic, ...]) -> str:

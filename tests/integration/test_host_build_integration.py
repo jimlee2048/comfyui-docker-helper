@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -236,12 +235,12 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
         assert files.items
 
 
-def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
+def test_host_build_full_fixture_preserves_quoting_env_and_entrypoint(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise special env/CMD serialization through host build."""
+    """Exercise special env/entrypoint serialization through host build."""
     case = next(item for item in FIXTURE_CASES if item.name == "full")
     config = tmp_path / "full.toml"
     config.write_text(MINIMAL_CONFIG + case.extra_config, encoding="utf-8")
@@ -283,25 +282,9 @@ def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
     safe_value = 'space $cash "quote" \\ backtick` ;'
     assert f"ENV SAFE_VALUE={serialize_dockerfile_word(safe_value)}" in dockerfile
     assert f"WORKDIR {serialize_dockerfile_word('/work dir')}" in dockerfile
-    assert (
-        "CMD "
-        + json.dumps(
-            [
-                "python",
-                "/work dir/Comfy UI/main.py",
-                "--listen",
-                'value "quoted" $cash \\ path',
-                "--port",
-                "8190",
-                "--disable-auto-launch",
-                "--preview-method",
-                "auto",
-                "--cpu",
-            ],
-            ensure_ascii=False,
-        )
-        in dockerfile
-    )
+    assert 'ENTRYPOINT ["cdh", "container", "entrypoint"]' in dockerfile
+    assert "\nCMD " not in dockerfile
+    assert "/work dir/Comfy UI/main.py" not in dockerfile
 
 
 def test_host_build_wires_package_indexes_before_fake_docker(

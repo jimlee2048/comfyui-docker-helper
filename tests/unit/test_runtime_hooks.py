@@ -20,6 +20,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     discover_runtime_hooks,
     run_runtime_hooks,
+    run_runtime_startup_hooks,
     run_runtime_stop_hooks,
 )
 
@@ -337,6 +338,59 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
         "Running runtime hook source=baked phase=stop filename=10-baked.sh",
         "Running runtime hook source=mounted phase=stop filename=10-mounted.py",
     ]
+
+
+def test_startup_hook_cancellation_terminates_group_and_skips_remaining(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "pre-start.d", "10-hang.sh")
+    _write_hook(mounted, "pre-start.d", "20-skip.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    clock = FakeClock()
+    process = FakeHookProcess(pid=4141)
+    started: list[str] = []
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> FakeHookProcess:
+        del cwd, env, description
+        assert start_new_session is True
+        started.append(Path(argv[-1]).name)
+        return process
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    with pytest.raises(RuntimeHookError) as error:
+        run_runtime_startup_hooks(
+            plan,
+            "pre-start",
+            runtime=runtime,
+            runner=runner,
+            cancel_requested=lambda: clock.now >= 0.1,
+            termination_grace_seconds=0.2,
+            poll_interval_seconds=0.1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+            process_group_signaler=signaler,
+        )
+
+    assert started == ["10-hang.sh"]
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted", "pre-start", "10-hang.sh"), "runtime_hook.cancelled")
+    ]
+    assert signals == [(4141, signal.SIGTERM), (4141, signal.SIGKILL)]
 
 
 def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(

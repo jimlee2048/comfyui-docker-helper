@@ -7,8 +7,9 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
+from types import FrameType
 from typing import Protocol
 
 from comfyui_docker_helper.config import (
@@ -41,7 +42,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
     discover_runtime_hooks,
-    run_runtime_hooks,
+    run_runtime_startup_hooks,
     run_runtime_stop_hooks,
 )
 from comfyui_docker_helper.errors import ApplicationError
@@ -101,7 +102,7 @@ class RuntimeHookRunner(Protocol):
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
         log: Logger,
-        start_new_session: bool = False,
+        cancel_requested: Callable[[], bool],
     ) -> tuple[RuntimeHookResult, ...]: ...
 
 
@@ -140,7 +141,7 @@ def run_entrypoint(
     environ: Mapping[str, str] | None = None,
     runner: EntrypointRunner = subprocess.Popen,
     runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
-    runtime_hook_runner: RuntimeHookRunner = run_runtime_hooks,
+    runtime_hook_runner: RuntimeHookRunner = run_runtime_startup_hooks,
     runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
 ) -> int:
@@ -162,45 +163,102 @@ def run_entrypoint(
         baked_hooks_path=baked_hooks_path,
         mounted_hooks_path=mounted_hooks_path,
     )
-    _run_runtime_downloads(
-        result,
-        runtime=runtime,
-        runtime_downloader=runtime_downloader,
-    )
-    _run_pre_start_hooks(
-        hook_plan,
-        runtime=runtime,
-        source_env=source_env,
-        runtime_hook_runner=runtime_hook_runner,
-    )
+    startup_shutdown = _StartupShutdownState()
+    with _startup_shutdown_signal_handlers(startup_shutdown):
+        try:
+            _run_runtime_downloads(
+                result,
+                runtime=runtime,
+                runtime_downloader=runtime_downloader,
+            )
+            if startup_shutdown.requested_signal is not None:
+                return _normalize_signal_exit_code(startup_shutdown.requested_signal)
+            _run_pre_start_hooks(
+                hook_plan,
+                runtime=runtime,
+                source_env=source_env,
+                runtime_hook_runner=runtime_hook_runner,
+                startup_shutdown=startup_shutdown,
+            )
+            if startup_shutdown.requested_signal is not None:
+                return _normalize_signal_exit_code(startup_shutdown.requested_signal)
+        except _StartupShutdownRequested as request:
+            return _normalize_signal_exit_code(request.sig)
 
-    argv = build_comfyui_argv(runtime=runtime, config=result.config)
-    try:
-        completed = runner(
-            argv,
-            cwd=os.fspath(runtime.comfyui_path),
-            env=runtime.env(source_env),
-            shell=False,
-        )
-    except FileNotFoundError as error:
-        raise EntrypointError(f"ComfyUI executable not found: {argv[0]}") from error
-    except OSError as error:
-        raise EntrypointError(f"ComfyUI failed to start: {error}") from error
+        completed: ChildProcess | None = None
+        try:
+            startup_shutdown.raise_on_signal = False
+            try:
+                if startup_shutdown.requested_signal is not None:
+                    return _normalize_signal_exit_code(
+                        startup_shutdown.requested_signal
+                    )
+                argv = build_comfyui_argv(runtime=runtime, config=result.config)
+                if startup_shutdown.requested_signal is not None:
+                    return _normalize_signal_exit_code(
+                        startup_shutdown.requested_signal
+                    )
+                try:
+                    completed = runner(
+                        argv,
+                        cwd=os.fspath(runtime.comfyui_path),
+                        env=runtime.env(source_env),
+                        shell=False,
+                    )
+                except FileNotFoundError as error:
+                    if startup_shutdown.requested_signal is not None:
+                        return _normalize_signal_exit_code(
+                            startup_shutdown.requested_signal
+                        )
+                    raise EntrypointError(
+                        f"ComfyUI executable not found: {argv[0]}"
+                    ) from error
+                except OSError as error:
+                    if startup_shutdown.requested_signal is not None:
+                        return _normalize_signal_exit_code(
+                            startup_shutdown.requested_signal
+                        )
+                    raise EntrypointError(
+                        f"ComfyUI failed to start: {error}"
+                    ) from error
+                if startup_shutdown.requested_signal is not None:
+                    return _forward_startup_shutdown_to_child(
+                        completed,
+                        startup_shutdown.requested_signal,
+                    )
+            finally:
+                startup_shutdown.raise_on_signal = True
 
-    _wait_for_readiness_if_required(
-        hook_plan,
-        config=result.config,
-        child=completed,
-        readiness_waiter=readiness_waiter,
-    )
-    _run_post_start_hooks_if_required(
-        hook_plan,
-        runtime=runtime,
-        source_env=source_env,
-        child=completed,
-        runtime_hook_runner=runtime_hook_runner,
-    )
+            if startup_shutdown.requested_signal is not None:
+                return _forward_startup_shutdown_to_child(
+                    completed,
+                    startup_shutdown.requested_signal,
+                )
+            _wait_for_readiness_if_required(
+                hook_plan,
+                config=result.config,
+                child=completed,
+                readiness_waiter=readiness_waiter,
+            )
+            _run_post_start_hooks_if_required(
+                hook_plan,
+                runtime=runtime,
+                source_env=source_env,
+                child=completed,
+                runtime_hook_runner=runtime_hook_runner,
+                startup_shutdown=startup_shutdown,
+            )
+            if startup_shutdown.requested_signal is not None:
+                return _forward_startup_shutdown_to_child(
+                    completed,
+                    startup_shutdown.requested_signal,
+                )
+        except _StartupShutdownRequested as request:
+            if completed is None:
+                return _normalize_signal_exit_code(request.sig)
+            return _forward_startup_shutdown_to_child(completed, request.sig)
 
+    assert completed is not None
     return _normalize_child_exit_code(
         _wait_with_signal_forwarding(
             completed,
@@ -285,9 +343,11 @@ def _run_pre_start_hooks(
     runtime: ContainerRuntime,
     source_env: Mapping[str, str],
     runtime_hook_runner: RuntimeHookRunner,
+    startup_shutdown: _StartupShutdownState,
 ) -> None:
     if not hook_plan.for_phase("pre-start"):
         return
+    startup_shutdown.raise_on_signal = False
     try:
         runtime_hook_runner(
             hook_plan,
@@ -295,11 +355,18 @@ def _run_pre_start_hooks(
             runtime=runtime,
             env=source_env,
             log=print,
+            cancel_requested=startup_shutdown.cancel_requested,
         )
     except RuntimeHookError as error:
+        if startup_shutdown.requested_signal is not None:
+            raise _StartupShutdownRequested(
+                startup_shutdown.requested_signal
+            ) from error
         raise EntrypointError(
             _format_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
+    finally:
+        startup_shutdown.raise_on_signal = True
 
 
 def _wait_for_readiness_if_required(
@@ -327,9 +394,11 @@ def _run_post_start_hooks_if_required(
     source_env: Mapping[str, str],
     child: ChildProcess,
     runtime_hook_runner: RuntimeHookRunner,
+    startup_shutdown: _StartupShutdownState,
 ) -> None:
     if not hook_plan.for_phase("post-start"):
         return
+    startup_shutdown.raise_on_signal = False
     try:
         runtime_hook_runner(
             hook_plan,
@@ -337,12 +406,19 @@ def _run_post_start_hooks_if_required(
             runtime=runtime,
             env=source_env,
             log=print,
+            cancel_requested=startup_shutdown.cancel_requested,
         )
     except RuntimeHookError as error:
+        if startup_shutdown.requested_signal is not None:
+            raise _StartupShutdownRequested(
+                startup_shutdown.requested_signal
+            ) from error
         _terminate_child_if_running(child)
         raise EntrypointError(
             _format_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
+    finally:
+        startup_shutdown.raise_on_signal = True
 
 
 def _terminate_child_if_running(child: ChildProcess) -> None:
@@ -350,6 +426,65 @@ def _terminate_child_if_running(child: ChildProcess) -> None:
         return
     with suppress(OSError):
         child.terminate()
+
+
+class _StartupShutdownRequested(BaseException):
+    """A normal shutdown signal received before startup completed."""
+
+    def __init__(self, sig: signal.Signals) -> None:
+        self.sig = sig
+        super().__init__(sig.name)
+
+
+class _StartupShutdownState:
+    """Signal state used while startup work is still cancellable."""
+
+    def __init__(self) -> None:
+        self.requested_signal: signal.Signals | None = None
+        self.raise_on_signal = True
+
+    def request_shutdown(self, sig: signal.Signals) -> None:
+        if self.requested_signal is None:
+            self.requested_signal = sig
+        if self.raise_on_signal:
+            raise _StartupShutdownRequested(self.requested_signal)
+
+    def cancel_requested(self) -> bool:
+        return self.requested_signal is not None
+
+
+@contextmanager
+def _startup_shutdown_signal_handlers(
+    state: _StartupShutdownState,
+):
+    previous_handlers = {
+        sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
+    }
+
+    def request_shutdown(sig: signal.Signals, frame: FrameType | None) -> None:
+        del frame
+        state.request_shutdown(signal.Signals(sig))
+
+    try:
+        signal.signal(signal.SIGTERM, request_shutdown)
+        signal.signal(signal.SIGINT, request_shutdown)
+        yield
+    finally:
+        for sig, previous in previous_handlers.items():
+            signal.signal(sig, previous)
+
+
+def _normalize_signal_exit_code(sig: signal.Signals) -> int:
+    return _normalize_child_exit_code(-int(sig))
+
+
+def _forward_startup_shutdown_to_child(
+    child: ChildProcess,
+    sig: signal.Signals,
+) -> int:
+    if child.poll() is None:
+        child.send_signal(sig)
+    return _normalize_child_exit_code(child.wait())
 
 
 class _ShutdownRequested(Exception):

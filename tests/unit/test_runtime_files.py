@@ -31,7 +31,8 @@ def _identities(error: RuntimeFilePlanError) -> list[tuple[tuple, str]]:
 
 
 class FakeDownloadBackend:
-    def __init__(self) -> None:
+    def __init__(self, payload: bytes = b"downloaded") -> None:
+        self.payload = payload
         self.calls: list[tuple[FileDownloadItem, DownloaderSettings]] = []
 
     def download(
@@ -40,11 +41,12 @@ class FakeDownloadBackend:
         settings: DownloaderSettings,
     ) -> None:
         self.calls.append((item, settings))
+        item.target.write_bytes(self.payload)
 
 
 class FakeManagedDownloadBackend(FakeDownloadBackend):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, payload: bytes = b"downloaded") -> None:
+        super().__init__(payload=payload)
         self.entered = False
         self.exited = False
 
@@ -294,10 +296,10 @@ def test_runtime_file_download_selects_explicit_backend_before_default(
         "https://example.com/default.bin"
     ]
     assert httpx_backend.calls[0][0].target == (
-        comfyui / "models" / ".httpx.bin.cdh-download"
+        comfyui / "models" / ".cdh-staging" / "httpx.bin.cdh-download"
     )
     assert aria2_backend.calls[0][0].target == (
-        comfyui / "models" / ".default.bin.cdh-download"
+        comfyui / "models" / ".cdh-staging" / "default.bin.cdh-download"
     )
     assert httpx_backend.calls[0][0].target != results[0].item.target
     assert aria2_backend.calls[0][0].target != results[1].item.target
@@ -360,7 +362,7 @@ def test_runtime_file_download_uses_runtime_downloader_settings(
     assert settings.httpx.retries == 1
 
 
-def test_runtime_file_httpx_download_writes_staging_not_final_target(
+def test_runtime_file_httpx_download_places_staged_bytes_at_final_target(
     tmp_path: Path,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -395,10 +397,10 @@ def test_runtime_file_httpx_download_writes_staging_not_final_target(
     )
 
     final_target = comfyui / "models" / "a.bin"
-    staging_target = comfyui / "models" / ".a.bin.cdh-download"
+    staging_target = comfyui / "models" / ".cdh-staging" / "a.bin.cdh-download"
     assert results[0].staging_target == staging_target
-    assert staging_target.read_bytes() == b"runtime-bytes"
-    assert not final_target.exists()
+    assert final_target.read_bytes() == b"runtime-bytes"
+    assert not staging_target.exists()
 
 
 def test_runtime_file_aria2_factory_is_used_only_when_needed(
@@ -440,9 +442,37 @@ def test_runtime_file_aria2_factory_is_used_only_when_needed(
     aria2_backend = FakeManagedDownloadBackend()
     factory = FakeAria2Factory(aria2_backend)
     config = RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}})
+    skipped_target = comfyui / "models" / "skipped.bin"
+    skipped_target.parent.mkdir(parents=True)
+    skipped_target.write_bytes(b"already present")
+    skipped_aria2_plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/skipped.bin",
+                        "dir": "models",
+                        "filename": "skipped.bin",
+                        "downloader": "aria2",
+                        "overwrite": False,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
 
     download_runtime_files(
         httpx_plan,
+        config=config,
+        httpx_downloader=httpx_backend,
+        aria2_downloader_factory=factory,
+        log=lambda message: None,
+    )
+    assert factory.calls == []
+
+    download_runtime_files(
+        skipped_aria2_plan,
         config=config,
         httpx_downloader=httpx_backend,
         aria2_downloader_factory=factory,
@@ -462,7 +492,7 @@ def test_runtime_file_aria2_factory_is_used_only_when_needed(
     assert aria2_backend.entered is True
     assert aria2_backend.exited is True
     assert aria2_backend.calls[0][0].target == (
-        comfyui / "models" / ".aria2.bin.cdh-download"
+        comfyui / "models" / ".cdh-staging" / "aria2.bin.cdh-download"
     )
     assert results[0].staging_target == aria2_backend.calls[0][0].target
 
@@ -498,6 +528,302 @@ def test_runtime_file_download_reports_unavailable_backend(tmp_path: Path) -> No
     assert [(item.path, item.code) for item in error.value.diagnostics] == [
         (("files", 0, "downloader"), "runtime_file.downloader_unavailable")
     ]
+
+
+def test_runtime_file_download_places_successful_transfer_at_final_target(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FakeDownloadBackend(payload=b"final-bytes")
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": backend},
+        log=lambda message: None,
+    )
+
+    final_target = comfyui / "models" / "a.bin"
+    assert final_target.read_bytes() == b"final-bytes"
+    assert results[0].staging_target == (
+        comfyui / "models" / ".cdh-staging" / "a.bin.cdh-download"
+    )
+    assert backend.calls[0][0].target == results[0].staging_target
+    assert not results[0].staging_target.exists()
+
+
+def test_runtime_file_download_skips_existing_without_backend_call(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    final_target = comfyui / "models" / "a.bin"
+    final_target.parent.mkdir(parents=True)
+    final_target.write_bytes(b"existing")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "overwrite": False,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FakeDownloadBackend(payload=b"new")
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": backend},
+        log=lambda message: None,
+    )
+
+    assert final_target.read_bytes() == b"existing"
+    assert backend.calls == []
+    assert results[0].status.value == "skipped"
+
+
+def test_runtime_file_download_overwrite_true_replaces_existing_after_success(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    final_target = comfyui / "models" / "a.bin"
+    final_target.parent.mkdir(parents=True)
+    final_target.write_bytes(b"old")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "overwrite": True,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": FakeDownloadBackend(payload=b"new")},
+        log=lambda message: None,
+    )
+
+    assert final_target.read_bytes() == b"new"
+
+
+def test_runtime_file_download_failure_keeps_final_absent_and_cleans_partial(
+    tmp_path: Path,
+) -> None:
+    class FailingBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            raise RuntimeError("backend failed")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FailingBackend()
+
+    with pytest.raises(RuntimeError, match="backend failed"):
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    final_target = comfyui / "models" / "a.bin"
+    assert not final_target.exists()
+    assert not backend.calls[0][0].target.exists()
+
+
+def test_runtime_file_download_failure_keeps_existing_final_unchanged(
+    tmp_path: Path,
+) -> None:
+    class FailingBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            raise RuntimeError("backend failed")
+
+    comfyui = tmp_path / "ComfyUI"
+    final_target = comfyui / "models" / "a.bin"
+    final_target.parent.mkdir(parents=True)
+    final_target.write_bytes(b"old")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "overwrite": True,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FailingBackend()
+
+    with pytest.raises(RuntimeError, match="backend failed"):
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert final_target.read_bytes() == b"old"
+    assert not backend.calls[0][0].target.exists()
+
+
+def test_runtime_file_download_rejects_racing_final_when_overwrite_false(
+    tmp_path: Path,
+) -> None:
+    class RacingBackend(FakeDownloadBackend):
+        def __init__(self, final_target: Path) -> None:
+            super().__init__(payload=b"new")
+            self._final_target = final_target
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            super().download(item, settings)
+            self._final_target.write_bytes(b"raced")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    final_target = comfyui / "models" / "a.bin"
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "overwrite": False,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = RacingBackend(final_target)
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.final_target_exists")
+    ]
+    assert final_target.read_bytes() == b"raced"
+    assert not backend.calls[0][0].target.exists()
+
+
+def test_runtime_file_download_cleans_only_cdh_owned_staging_files(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    staging_dir = comfyui / "models" / ".cdh-staging"
+    staging_dir.mkdir(parents=True)
+    stale = staging_dir / "old.bin.cdh-download"
+    stale_tmp = staging_dir / "old.bin.cdh-download.tmp"
+    stale_control = staging_dir / "old.bin.cdh-download.aria2"
+    user_file = staging_dir / "user-file.txt"
+    outside = comfyui / "models" / "outside.bin.cdh-download"
+    for path in (stale, stale_tmp, stale_control, user_file, outside):
+        path.write_bytes(b"keep-or-clean")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": FakeDownloadBackend(payload=b"new")},
+        log=lambda message: None,
+    )
+
+    assert not stale.exists()
+    assert not stale_tmp.exists()
+    assert not stale_control.exists()
+    assert user_file.read_bytes() == b"keep-or-clean"
+    assert outside.read_bytes() == b"keep-or-clean"
+    assert (comfyui / "models" / "a.bin").read_bytes() == b"new"
 
 
 @pytest.mark.parametrize(

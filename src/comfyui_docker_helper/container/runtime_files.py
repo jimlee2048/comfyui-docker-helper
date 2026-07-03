@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -192,21 +193,16 @@ def process_runtime_file_downloads(
             ) from error
 
         staging_item = _runtime_staging_download_item(item, backend_name)
-        try:
-            staging_item.target.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            raise RuntimeFileDownloadError(
-                (
-                    Diagnostic(
-                        path=("files", index - 1, "target"),
-                        code="runtime_file.staging_parent_failed",
-                        message=f"staging parent could not be created: {error}",
-                    ),
-                )
-            ) from error
+        _prepare_staging_parent(staging_item.target.parent, ("files", index - 1))
 
         log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
-        backend.download(staging_item, settings)
+        try:
+            backend.download(staging_item, settings)
+            _place_staged_runtime_file(item, staging_item.target, ("files", index - 1))
+        except Exception:
+            _cleanup_current_staging(staging_item.target)
+            raise
+
         results.append(
             RuntimeFileDownloadResult(
                 item=item,
@@ -231,7 +227,7 @@ def download_runtime_files(
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 
-    if not any(_effective_downloader(item, config) == "aria2" for item in plan.items):
+    if not _requires_aria2_backend(plan, config):
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -321,6 +317,14 @@ def _effective_downloader(
     return item.downloader or config.cdh.default_downloader
 
 
+def _requires_aria2_backend(plan: RuntimeFilePlan, config: RuntimeConfig) -> bool:
+    return any(
+        item.action != "skip_existing"
+        and _effective_downloader(item, config) == "aria2"
+        for item in plan.items
+    )
+
+
 def _runtime_staging_download_item(
     item: RuntimeFilePlanItem,
     downloader: Literal["aria2", "httpx"],
@@ -336,7 +340,134 @@ def _runtime_staging_download_item(
 
 
 def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:
-    return item.target.with_name(f".{item.target.name}.cdh-download")
+    return item.target.parent / ".cdh-staging" / f"{item.target.name}.cdh-download"
+
+
+def _prepare_staging_parent(
+    staging_parent: Path,
+    path: RuntimeFilePath,
+) -> None:
+    try:
+        staging_parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeFileDownloadError(
+            (
+                Diagnostic(
+                    path=(*path, "target"),
+                    code="runtime_file.staging_parent_failed",
+                    message=f"staging parent could not be created: {error}",
+                ),
+            )
+        ) from error
+
+    _cleanup_stale_staging_files(staging_parent)
+
+
+def _place_staged_runtime_file(
+    item: RuntimeFilePlanItem,
+    staging_target: Path,
+    path: RuntimeFilePath,
+) -> None:
+    if not staging_target.is_file():
+        raise RuntimeFileDownloadError(
+            (
+                Diagnostic(
+                    path=(*path, "target"),
+                    code="runtime_file.staging_missing",
+                    message="download backend did not produce a regular staging file",
+                ),
+            )
+        )
+
+    existing_error = _validate_final_target_before_replace(item, path)
+    if existing_error is not None:
+        raise RuntimeFileDownloadError((existing_error,))
+
+    try:
+        staging_target.replace(item.target)
+    except OSError as error:
+        raise RuntimeFileDownloadError(
+            (
+                Diagnostic(
+                    path=(*path, "target"),
+                    code="runtime_file.final_replace_failed",
+                    message=f"staged file could not be placed at final target: {error}",
+                ),
+            )
+        ) from error
+
+
+def _validate_final_target_before_replace(
+    item: RuntimeFilePlanItem,
+    path: RuntimeFilePath,
+) -> Diagnostic | None:
+    try:
+        mode = item.target.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return Diagnostic(
+            path=(*path, "target"),
+            code="runtime_file.final_target_inspect_failed",
+            message=f"final target could not be inspected before placement: {error}",
+        )
+
+    if not stat.S_ISREG(mode):
+        return Diagnostic(
+            path=(*path, "target"),
+            code="runtime_file.non_regular_target",
+            message="final target exists but is not a regular file",
+        )
+    if not item.overwrite:
+        return Diagnostic(
+            path=(*path, "target"),
+            code="runtime_file.final_target_exists",
+            message="final target appeared before placement and overwrite is false",
+        )
+    return None
+
+
+def _cleanup_stale_staging_files(staging_parent: Path) -> None:
+    try:
+        entries = tuple(staging_parent.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+    for entry in entries:
+        if not _is_cdh_staging_artifact(entry):
+            continue
+        try:
+            if entry.is_file() or entry.is_symlink():
+                entry.unlink()
+        except OSError:
+            pass
+
+
+def _cleanup_current_staging(staging_target: Path) -> None:
+    for path in (
+        staging_target,
+        staging_target.with_name(f"{staging_target.name}.tmp"),
+        Path(f"{staging_target}.aria2"),
+    ):
+        if not _is_cdh_staging_artifact(path):
+            continue
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _is_cdh_staging_artifact(path: Path) -> bool:
+    if path.parent.name != ".cdh-staging":
+        return False
+    return (
+        path.name.endswith(".cdh-download")
+        or path.name.endswith(".cdh-download.tmp")
+        or path.name.endswith(".cdh-download.aria2")
+    )
 
 
 def _merge_key(

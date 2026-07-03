@@ -33,6 +33,8 @@ def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
     assert result.config.comfyui.extra_args == []
     assert result.config.cdh.default_downloader == "aria2"
     assert result.config.cdh.default_download_mode == "sync"
+    assert result.files == ()
+    assert result.file_documents == ()
     assert result.warnings == ()
     assert result.explicit_paths == frozenset()
 
@@ -283,7 +285,7 @@ unexpected = "value"
     ]
 
 
-def test_runtime_file_entries_are_rejected_until_m3(tmp_path: Path) -> None:
+def test_runtime_file_entries_are_accepted_and_recorded(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
         """
@@ -294,14 +296,174 @@ filename = "model.bin"
 """,
     )
 
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=mounted,
+    )
+
+    assert result.files == (
+        {
+            "url": "https://example.com/model.bin",
+            "dir": "models",
+            "filename": "model.bin",
+        },
+    )
+    assert result.file_documents == (
+        {
+            "files": [
+                {
+                    "url": "https://example.com/model.bin",
+                    "dir": "models",
+                    "filename": "model.bin",
+                }
+            ]
+        },
+    )
+
+
+def test_runtime_file_unsupported_download_mode_fails_schema_validation(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "async"
+""",
+    )
+
     with pytest.raises(RuntimeConfigurationError) as error:
         load_runtime_config(
             baked_config_path=tmp_path / "missing-baked.toml",
             mounted_config_path=mounted,
         )
 
-    assert _identities(error.value) == [(("files",), "runtime.files_unsupported")]
-    assert "not supported until v0.3-M3" in error.value.diagnostics[0].message
+    assert _identities(error.value) == [
+        (("files", 0, "download_mode"), "schema.literal_error")
+    ]
+
+
+def test_runtime_file_unknown_field_fails_schema_validation(tmp_path: Path) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+unexpected = true
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "unexpected"), "schema.extra_forbidden")
+    ]
+
+
+def test_runtime_file_merge_appends_mounted_files_to_baked_files(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/baked.bin"
+dir = "models"
+filename = "baked.bin"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/mounted.bin"
+dir = "models"
+filename = "mounted.bin"
+downloader = "httpx"
+""",
+    )
+
+    result = load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+
+    assert result.files == (
+        {
+            "url": "https://example.com/baked.bin",
+            "dir": "models",
+            "filename": "baked.bin",
+        },
+        {
+            "url": "https://example.com/mounted.bin",
+            "dir": "models",
+            "filename": "mounted.bin",
+            "downloader": "httpx",
+        },
+    )
+
+
+def test_runtime_file_merge_same_key_mounted_values_override_baked(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/baked.bin"
+dir = "models"
+filename = "model.bin"
+overwrite = false
+downloader = "aria2"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/mounted.bin"
+dir = "models"
+filename = "model.bin"
+overwrite = true
+""",
+    )
+
+    result = load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+
+    assert result.files == (
+        {
+            "url": "https://example.com/mounted.bin",
+            "dir": "models",
+            "filename": "model.bin",
+            "overwrite": True,
+            "downloader": "aria2",
+        },
+    )
+
+
+def test_runtime_file_merge_mounted_empty_files_resets_baked_files(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/baked.bin"
+dir = "models"
+filename = "baked.bin"
+""",
+    )
+    mounted = _write(tmp_path / "mounted.toml", "files = []\n")
+
+    result = load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+
+    assert result.files == ()
 
 
 def test_invalid_baked_aria2_backend_values_fail_runtime_validation(

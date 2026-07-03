@@ -6,8 +6,15 @@ from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_files import (
+    Logger,
+    RuntimeFileDownloadError,
+    RuntimeFileDownloadResult,
+    RuntimeFilePlan,
+)
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -324,7 +331,9 @@ launch_args = ["--cpu"]
     assert "[comfyui.launch_args]" in str(error.value)
 
 
-def test_runtime_files_are_rejected_before_spawn(tmp_path: Path) -> None:
+def test_runtime_downloads_run_before_spawn_without_root_lock(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
         tmp_path / "mounted.toml",
@@ -335,7 +344,8 @@ dir = "models"
 filename = "model.bin"
 """,
     )
-    calls: list[list[str]] = []
+    spawn_calls: list[list[str]] = []
+    download_calls: list[RuntimeFilePlan] = []
 
     def runner(
         argv: Sequence[str],
@@ -344,8 +354,82 @@ filename = "model.bin"
         env: Mapping[str, str],
         shell: bool,
     ) -> FakeChild:
-        calls.append(list(argv))
+        assert len(download_calls) == 1
+        spawn_calls.append(list(argv))
         return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: object,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del config, log
+        assert spawn_calls == []
+        download_calls.append(plan)
+        return ()
+
+    assert not (tmp_path / "config.toml").exists()
+    assert not (tmp_path / "config.lock.toml").exists()
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+        )
+        == 0
+    )
+
+    assert len(download_calls) == 1
+    assert download_calls[0].items[0].target == (
+        runtime.comfyui_path / "models" / "model.bin"
+    )
+    assert download_calls[0].items[0].action == "download"
+    assert spawn_calls
+
+
+def test_runtime_download_failure_prevents_spawn(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    spawn_calls: list[list[str]] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        spawn_calls.append(list(argv))
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: object,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        raise RuntimeFileDownloadError(
+            (
+                Diagnostic(
+                    path=("files", 0, "target"),
+                    code="runtime_file.test_failure",
+                    message="download failed in test",
+                ),
+            )
+        )
 
     with pytest.raises(EntrypointError) as error:
         run_entrypoint(
@@ -354,7 +438,64 @@ filename = "model.bin"
             mounted_config_path=mounted,
             environ={},
             runner=runner,
+            runtime_downloader=runtime_downloader,
         )
 
-    assert calls == []
-    assert "runtime.files_unsupported" in str(error.value)
+    assert spawn_calls == []
+    assert "runtime download failed" in str(error.value)
+    assert "[files.0.target]" in str(error.value)
+    assert "runtime_file.test_failure" in str(error.value)
+
+
+def test_runtime_staging_file_is_not_treated_as_completed_final_file(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    staging = (
+        runtime.comfyui_path / "models" / ".cdh-staging" / "model.bin.cdh-download"
+    )
+    staging.parent.mkdir(parents=True)
+    staging.write_bytes(b"partial")
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    actions: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: object,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del config, log
+        actions.extend(item.action for item in plan.items)
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+        )
+        == 0
+    )
+
+    assert actions == ["download"]

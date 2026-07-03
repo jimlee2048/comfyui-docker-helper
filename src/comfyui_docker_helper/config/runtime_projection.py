@@ -26,7 +26,7 @@ class RuntimeComfyUIConfig(ConfigModel):
 class RuntimeCdhConfig(ConfigModel):
     """cdh-owned runtime downloader defaults and backend settings."""
 
-    default_downloader: str = "aria2"
+    default_downloader: Literal["aria2", "httpx"] = "aria2"
     default_download_mode: Literal["sync"] = "sync"
     downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
 
@@ -34,8 +34,8 @@ class RuntimeCdhConfig(ConfigModel):
 class RuntimeConfig(ConfigModel):
     """Strict private schema for fields baked into runtime/config.toml."""
 
-    comfyui: RuntimeComfyUIConfig
-    cdh: RuntimeCdhConfig
+    comfyui: RuntimeComfyUIConfig = Field(default_factory=RuntimeComfyUIConfig)
+    cdh: RuntimeCdhConfig = Field(default_factory=RuntimeCdhConfig)
 
 
 @dataclass(frozen=True, slots=True)

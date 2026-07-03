@@ -7,6 +7,7 @@ import typer
 
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.container.download_files import download_files
+from comfyui_docker_helper.container.entrypoint import run_entrypoint
 from comfyui_docker_helper.container.install_custom_nodes import (
     install_custom_nodes,
 )
@@ -86,3 +87,11 @@ def download_files_command(
 
     runtime = ContainerRuntime.from_env()
     download_files(config, lock, comfyui_path=runtime.comfyui_path)
+
+
+@app.command("entrypoint", context_settings=HELP_CONTEXT_SETTINGS)
+def entrypoint_command() -> None:
+    """Start ComfyUI through the cdh runtime entrypoint."""
+
+    runtime = ContainerRuntime.from_env()
+    raise typer.Exit(code=run_entrypoint(runtime=runtime))

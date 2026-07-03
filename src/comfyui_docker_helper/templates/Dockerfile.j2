@@ -105,4 +105,4 @@ RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
 
 {% endif %}
 WORKDIR {{ plan.paths.workspace | dockerfile_word }}
-CMD {{ plan.comfyui.launch_command | json_array }}
+ENTRYPOINT ["cdh", "container", "entrypoint"]

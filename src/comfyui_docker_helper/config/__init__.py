@@ -96,6 +96,13 @@ from comfyui_docker_helper.config.resolvers import (
     resolve_git_custom_node,
     resolve_registry_custom_node,
 )
+from comfyui_docker_helper.config.runtime_config import (
+    BAKED_RUNTIME_CONFIG_PATH,
+    MOUNTED_RUNTIME_CONFIG_PATH,
+    RuntimeConfigurationError,
+    RuntimeConfigurationResult,
+    load_runtime_config,
+)
 from comfyui_docker_helper.config.runtime_projection import (
     RuntimeCdhConfig,
     RuntimeComfyUIConfig,
@@ -117,8 +124,10 @@ from comfyui_docker_helper.config.validation import (
 )
 
 __all__ = [
+    "BAKED_RUNTIME_CONFIG_PATH",
     "COMFYUI_REPO_URL",
     "COMFY_CLI_PACKAGE_NAME",
+    "MOUNTED_RUNTIME_CONFIG_PATH",
     "Aria2Config",
     "Aria2Plan",
     "ArtifactCondition",
@@ -189,6 +198,8 @@ __all__ = [
     "RuntimeComfyUIConfig",
     "RuntimeConfig",
     "RuntimeConfigProjection",
+    "RuntimeConfigurationError",
+    "RuntimeConfigurationResult",
     "SourceResolvers",
     "SystemConfig",
     "UpstreamResponseError",
@@ -198,6 +209,7 @@ __all__ = [
     "dump_lockfile_toml",
     "load_config",
     "load_lockfile",
+    "load_runtime_config",
     "load_validate_plan",
     "load_validate_plan_result",
     "locked_comfy_cli_satisfies_selector",

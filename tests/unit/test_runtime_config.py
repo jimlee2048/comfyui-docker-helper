@@ -129,6 +129,57 @@ split = 8
     assert result.config.cdh.downloader.aria2.split == 8
 
 
+def test_env_overrides_mounted_and_baked_runtime_config(tmp_path: Path) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[comfyui]
+listen = "127.0.0.1"
+port = 8190
+extra_args = ["--cpu"]
+
+[cdh]
+default_downloader = "httpx"
+default_download_mode = "sync"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[comfyui]
+listen = "0.0.0.0"
+port = 8288
+extra_args = ["--preview-method", "auto"]
+
+[cdh]
+default_downloader = "aria2"
+default_download_mode = "sync"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+        environ={
+            "CDH_COMFYUI_LISTEN": "192.0.2.10",
+            "CDH_COMFYUI_PORT": "8388",
+            "CDH_COMFYUI_EXTRA_ARGS": '--preview-method "latent2rgb" --cpu',
+            "CDH_DEFAULT_DOWNLOADER": "httpx",
+            "CDH_DEFAULT_DOWNLOAD_MODE": "sync",
+        },
+    )
+
+    assert result.config.comfyui.listen == "192.0.2.10"
+    assert result.config.comfyui.port == 8388
+    assert result.config.comfyui.extra_args == [
+        "--preview-method",
+        "latent2rgb",
+        "--cpu",
+    ]
+    assert result.config.cdh.default_downloader == "httpx"
+    assert result.config.cdh.default_download_mode == "sync"
+
+
 def test_known_host_only_runtime_config_warns_and_is_ignored(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
@@ -318,6 +369,101 @@ retries = -1
     ]
 
 
+def test_malformed_env_extra_args_fail_runtime_validation(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={"CDH_COMFYUI_EXTRA_ARGS": '"unterminated'},
+        )
+
+    assert _identities(error.value) == [
+        (("env", "CDH_COMFYUI_EXTRA_ARGS"), "env.invalid_extra_args")
+    ]
+
+
+@pytest.mark.parametrize("value", ["", "0", "65536", "8188.0", "abc"])
+def test_invalid_env_port_values_fail_runtime_validation(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={"CDH_COMFYUI_PORT": value},
+        )
+
+    assert _identities(error.value) == [
+        (("env", "CDH_COMFYUI_PORT"), "env.invalid_port")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        (
+            "CDH_DEFAULT_DOWNLOADER",
+            "curl",
+            (("cdh", "default_downloader"), "schema.literal_error"),
+        ),
+        (
+            "CDH_DEFAULT_DOWNLOAD_MODE",
+            "async",
+            (("cdh", "default_download_mode"), "schema.literal_error"),
+        ),
+    ],
+)
+def test_invalid_env_enum_values_fail_runtime_validation(
+    tmp_path: Path,
+    name: str,
+    value: str,
+    expected: tuple[tuple, str],
+) -> None:
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={name: value},
+        )
+
+    assert _identities(error.value) == [expected]
+
+
+def test_unsupported_downloader_alias_env_var_has_no_effect(tmp_path: Path) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_downloader = "aria2"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=mounted,
+        environ={"CDH_DOWNLOADER_DEFAULT": "httpx"},
+    )
+
+    assert result.config.cdh.default_downloader == "aria2"
+
+
+def test_backend_tuning_env_vars_are_not_applied(tmp_path: Path) -> None:
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={
+            "CDH_ARIA2_RPC_PORT": "6811",
+            "CDH_DOWNLOADER_ARIA2_SPLIT": "1",
+            "CDH_HTTPX_TIMEOUT": "5",
+        },
+    )
+
+    assert result.config.cdh.downloader.aria2.rpc_port == 6800
+    assert result.config.cdh.downloader.aria2.split == 16
+    assert result.config.cdh.downloader.httpx.timeout == 60
+
+
 @pytest.mark.parametrize(
     "argument",
     [
@@ -347,6 +493,19 @@ extra_args = ["--cpu", "{argument}"]
         load_runtime_config(
             baked_config_path=tmp_path / "missing-baked.toml",
             mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
+    ]
+
+
+def test_env_extra_args_reject_cdh_controlled_flags(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={"CDH_COMFYUI_EXTRA_ARGS": "--cpu --port=8190"},
         )
 
     assert _identities(error.value) == [

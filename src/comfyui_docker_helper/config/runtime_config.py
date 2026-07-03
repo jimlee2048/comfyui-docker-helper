@@ -1,5 +1,7 @@
 """Runtime configuration loading and merge for container startup."""
 
+import os
+import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -96,6 +98,7 @@ def load_runtime_config(
     *,
     baked_config_path: RuntimeConfigPath = BAKED_RUNTIME_CONFIG_PATH,
     mounted_config_path: RuntimeConfigPath = MOUNTED_RUNTIME_CONFIG_PATH,
+    environ: Mapping[str, str] | None = None,
 ) -> RuntimeConfigurationResult:
     """Load and merge code defaults, baked runtime config, and mounted config."""
     warnings: list[Diagnostic] = []
@@ -117,6 +120,11 @@ def load_runtime_config(
         if source == "mounted":
             explicit_paths.update(_runtime_explicit_paths(document))
 
+    env_document = _runtime_env_document(os.environ if environ is None else environ)
+    if env_document:
+        _validate_runtime_patch(env_document)
+        documents.append(env_document)
+
     merged = merge_toml_documents(documents)
     config = _validate_effective_runtime_config(merged)
     _validate_runtime_downloader(config)
@@ -130,6 +138,72 @@ def load_runtime_config(
 
 def _runtime_defaults_document() -> dict[str, Any]:
     return RuntimeConfig().model_dump(mode="json")
+
+
+def _runtime_env_document(environ: Mapping[str, str]) -> dict[str, Any]:
+    document: dict[str, Any] = {}
+
+    if "CDH_COMFYUI_LISTEN" in environ:
+        document.setdefault("comfyui", {})["listen"] = environ["CDH_COMFYUI_LISTEN"]
+    if "CDH_COMFYUI_PORT" in environ:
+        document.setdefault("comfyui", {})["port"] = _parse_env_port(
+            environ["CDH_COMFYUI_PORT"]
+        )
+    if "CDH_COMFYUI_EXTRA_ARGS" in environ:
+        document.setdefault("comfyui", {})["extra_args"] = _parse_env_extra_args(
+            environ["CDH_COMFYUI_EXTRA_ARGS"]
+        )
+    if "CDH_DEFAULT_DOWNLOADER" in environ:
+        document.setdefault("cdh", {})["default_downloader"] = environ[
+            "CDH_DEFAULT_DOWNLOADER"
+        ]
+    if "CDH_DEFAULT_DOWNLOAD_MODE" in environ:
+        document.setdefault("cdh", {})["default_download_mode"] = environ[
+            "CDH_DEFAULT_DOWNLOAD_MODE"
+        ]
+
+    return document
+
+
+def _parse_env_port(value: str) -> int:
+    try:
+        port = int(value, 10)
+    except ValueError as error:
+        raise RuntimeConfigurationError(
+            (
+                Diagnostic(
+                    path=("env", "CDH_COMFYUI_PORT"),
+                    code="env.invalid_port",
+                    message="must be an integer TCP port in range 1..65535",
+                ),
+            )
+        ) from error
+    if not 1 <= port <= 65535:
+        raise RuntimeConfigurationError(
+            (
+                Diagnostic(
+                    path=("env", "CDH_COMFYUI_PORT"),
+                    code="env.invalid_port",
+                    message="must be an integer TCP port in range 1..65535",
+                ),
+            )
+        )
+    return port
+
+
+def _parse_env_extra_args(value: str) -> list[str]:
+    try:
+        return shlex.split(value, posix=True)
+    except ValueError as error:
+        raise RuntimeConfigurationError(
+            (
+                Diagnostic(
+                    path=("env", "CDH_COMFYUI_EXTRA_ARGS"),
+                    code="env.invalid_extra_args",
+                    message="must be valid POSIX shell-like arguments",
+                ),
+            )
+        ) from error
 
 
 def _read_runtime_toml(config_path: Path) -> dict[str, Any]:

@@ -99,8 +99,10 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \\
       --index-url https://pypi.org/simple \\
       -- /tmp/cdh/packages/cdh
 
+COPY runtime/config.toml /opt/cdh/runtime/config.toml
+
 WORKDIR /workspace
-CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--disable-auto-launch"]
+CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch"]
 """
 
 _NODE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
@@ -204,6 +206,8 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
       --index-url https://pypi.org/simple \
       -- /tmp/cdh/packages/cdh
 
+COPY runtime/config.toml /opt/cdh/runtime/config.toml
+
 RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
     --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
     --mount=type=bind,source=scripts,target=/tmp/cdh/scripts \
@@ -218,7 +222,7 @@ RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
       --lock /tmp/cdh/config.lock.toml
 
 WORKDIR "/work dir/\$cash/\"quote\"/back\\slash"
-CMD ["python", "/opt/Comfy UI/main.py", "--listen", "value \"quoted\" $cash \\ path"]
+CMD ["python", "/opt/Comfy UI/main.py", "--listen", "value \"quoted\" $cash \\ path", "--port", "8190", "--disable-auto-launch", "--preview-method", "auto", "--cpu"]
 """
 
 
@@ -662,7 +666,9 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
     config.comfyui.cli_version = "2.0"
     config.comfyui.version = "v1.2.3"
     config.comfyui.install_manager = True
-    config.comfyui.launch_args = ["--listen", 'value "quoted" $cash \\ path']
+    config.comfyui.listen = 'value "quoted" $cash \\ path'
+    config.comfyui.port = 8190
+    config.comfyui.extra_args = ["--preview-method", "auto", "--cpu"]
     config.comfyui.custom_nodes = [
         RegistryCustomNodeConfig.model_validate(
             {
@@ -695,6 +701,16 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
     assert rendered.endswith(
         f"WORKDIR {serialize_dockerfile_word(config.system.workspace)}\n"
         f"CMD {json.dumps(list(plan.comfyui.launch_command), ensure_ascii=False)}\n"
+    )
+    assert plan.comfyui.launch_command[-8:] == (
+        "--listen",
+        'value "quoted" $cash \\ path',
+        "--port",
+        "8190",
+        "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
     )
 
     ordered_fragments = [
@@ -734,7 +750,7 @@ def test_manager_off_adds_skip_manager_to_comfy_install() -> None:
 
 
 def test_build_only_inputs_are_never_persistently_copied() -> None:
-    """Use bind mounts for every generated input and COPY only official uv binaries."""
+    """Use bind mounts for build inputs and only COPY uv plus runtime defaults."""
     config = make_config()
     rendered = render_dockerfile(
         build_render_plan(config),
@@ -742,8 +758,11 @@ def test_build_only_inputs_are_never_persistently_copied() -> None:
     )
 
     copy_lines = [line for line in rendered.splitlines() if line.startswith("COPY ")]
-    assert copy_lines == ["COPY --from=uv /uv /uvx /bin/"]
-    assert "/opt/cdh/" not in rendered
+    assert copy_lines == [
+        "COPY --from=uv /uv /uvx /bin/",
+        "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
+    ]
+    assert "/opt/cdh/runtime/config.toml" in rendered
     assert "COPY packages" not in rendered
     assert "COPY config" not in rendered
     assert "COPY scripts" not in rendered

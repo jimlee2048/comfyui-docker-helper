@@ -86,8 +86,14 @@ version = "latest"
 cli_version = "latest"
 # Default: true. Must be true when custom_nodes are configured.
 install_manager = true
-# Default shown below. Passed to ComfyUI's final python main.py command.
-launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch", "--port", "8188"]
+# Default: "0.0.0.0". cdh owns the final ComfyUI --listen argument.
+listen = "0.0.0.0"
+# Default: 8188. cdh owns the final ComfyUI --port argument.
+port = 8188
+# Default: []. Additional ComfyUI CLI arguments appended after cdh-owned
+# startup flags. Do not include --listen, --port, --auto-launch, or
+# --disable-auto-launch here.
+extra_args = []
 
 [[comfyui.custom_nodes]]
 # Registry custom node installed with ComfyUI-Manager.

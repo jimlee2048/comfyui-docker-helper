@@ -200,12 +200,13 @@ def render_context(
 
 
 def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
-    """A successful host render writes root config and lock artifacts."""
+    """A successful host render writes root, runtime, and lock artifacts."""
     output = tmp_path / "context"
 
     render_context(tmp_path, output=output)
 
     config_data = tomllib.loads((output / "config.toml").read_text())
+    runtime_data = tomllib.loads((output / "runtime" / "config.toml").read_text())
     lockfile = parse_lockfile_toml((output / "config.lock.toml").read_text())
     assert config_data["comfyui"]["version"] == "latest"
     assert config_data["comfyui"]["custom_nodes"][0] == {
@@ -219,6 +220,16 @@ def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
     assert lockfile.comfyui.commit == COMMIT_1
     assert lockfile.custom_nodes[0].version == "1.0.0"
     assert lockfile.custom_nodes[1].commit == COMMIT_A
+    assert runtime_data["comfyui"] == {
+        "listen": "0.0.0.0",
+        "port": 8188,
+        "extra_args": [],
+    }
+    assert runtime_data["cdh"]["default_downloader"] == "aria2"
+    assert runtime_data["cdh"]["default_download_mode"] == "sync"
+    assert "downloader" in runtime_data["cdh"]
+    assert "files" not in runtime_data
+    assert "custom_nodes" not in runtime_data["comfyui"]
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
     assert "comfy-cli==1.5.0" in dockerfile
     assert "      --version \\\n      0.26.0 \\" in dockerfile
@@ -251,6 +262,7 @@ def test_root_artifacts_are_deterministic_across_repeated_renders(
     first = (
         (output / "config.toml").read_bytes(),
         (output / "config.lock.toml").read_bytes(),
+        (output / "runtime" / "config.toml").read_bytes(),
     )
 
     render_context(tmp_path, output=output, overwrite=True)
@@ -258,6 +270,7 @@ def test_root_artifacts_are_deterministic_across_repeated_renders(
     assert (
         (output / "config.toml").read_bytes(),
         (output / "config.lock.toml").read_bytes(),
+        (output / "runtime" / "config.toml").read_bytes(),
     ) == first
 
 
@@ -358,6 +371,19 @@ def test_check_mode_reports_root_artifact_drift(tmp_path: Path) -> None:
     output = tmp_path / "context"
     render_context(tmp_path, output=output)
     (output / "config.toml").write_text("changed = true\n", encoding="utf-8")
+
+    with pytest_raises_host_error("render.check_changed"):
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+
+def test_check_mode_reports_runtime_config_drift(tmp_path: Path) -> None:
+    """Check mode compares the managed baked runtime config."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    (output / "runtime" / "config.toml").write_text(
+        '[comfyui]\nlisten = "127.0.0.1"\n',
+        encoding="utf-8",
+    )
 
     with pytest_raises_host_error("render.check_changed"):
         render_context(tmp_path, output=output, options=LockOptions(check=True))
@@ -720,6 +746,7 @@ def test_retired_helper_projection_files_are_omitted(tmp_path: Path) -> None:
 
     assert (output / "config.toml").is_file()
     assert (output / "config.lock.toml").is_file()
+    assert (output / "runtime" / "config.toml").is_file()
     assert not (output / "config").exists()
     assert not (output / "config" / "custom-nodes.toml").exists()
     assert not (output / "config" / "files.toml").exists()

@@ -127,13 +127,9 @@ class ComfyUIConfig(ConfigModel):
     version: str
     cli_version: str = "latest"
     install_manager: bool = True
-    launch_args: list[str] = Field(
-        default_factory=lambda: [
-            "--listen",
-            "0.0.0.0",
-            "--disable-auto-launch",
-        ]
-    )
+    listen: str = "0.0.0.0"
+    port: int = Field(default=8188, ge=1, le=65535)
+    extra_args: list[str] = Field(default_factory=list)
     custom_nodes: list[CustomNodeConfig] = Field(default_factory=list)
 
 

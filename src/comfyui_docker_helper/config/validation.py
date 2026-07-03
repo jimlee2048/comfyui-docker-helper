@@ -57,6 +57,9 @@ _MANAGED_ENV_KEYS = frozenset(
 )
 _DOWNLOADERS = frozenset({"aria2", "httpx"})
 _HOOK_SUFFIXES = frozenset({".py", ".sh"})
+_COMFYUI_CONTROLLED_LAUNCH_FLAGS = frozenset(
+    {"--listen", "--port", "--auto-launch", "--disable-auto-launch"}
+)
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _GIT_TARGET_DIR_PATTERN = re.compile(r"[A-Za-z0-9._-]+\Z")
 _DOCKERFILE_SOURCE_FORBIDDEN = frozenset({"\0", "\r", "\n"})
@@ -419,6 +422,21 @@ def _validate_comfyui(
             )
         )
 
+    for index, argument in enumerate(comfyui.extra_args):
+        flag = argument.split("=", maxsplit=1)[0]
+        if flag in _COMFYUI_CONTROLLED_LAUNCH_FLAGS:
+            diagnostics.append(
+                Diagnostic(
+                    path=("comfyui", "extra_args", index),
+                    code="comfyui.controlled_extra_arg",
+                    message=(
+                        "must not include --listen, --port, --auto-launch, "
+                        "or --disable-auto-launch because cdh controls these "
+                        "startup flags"
+                    ),
+                )
+            )
+
     hook_paths = tuple(_iter_hooks(config))
     scripts_root = _validate_scripts_dir(hook_paths, scripts_dir, diagnostics)
     registry_ids: set[str] = set()
@@ -682,9 +700,10 @@ def _validate_dockerfile_source_strings(
         (package, ("pytorch", "extra_packages", index))
         for index, package in enumerate(config.pytorch.extra_packages)
     )
+    values.append((config.comfyui.listen, ("comfyui", "listen")))
     values.extend(
-        (argument, ("comfyui", "launch_args", index))
-        for index, argument in enumerate(config.comfyui.launch_args)
+        (argument, ("comfyui", "extra_args", index))
+        for index, argument in enumerate(config.comfyui.extra_args)
     )
 
     for value, path in values:

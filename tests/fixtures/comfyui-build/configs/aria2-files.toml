@@ -20,7 +20,9 @@ resume_download = true
 [comfyui]
 version = "latest"
 install_manager = false
-launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+listen = "0.0.0.0"
+port = 8188
+extra_args = []
 
 [[files]]
 url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"

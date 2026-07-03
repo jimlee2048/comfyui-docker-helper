@@ -12,6 +12,7 @@ from comfyui_docker_helper.config import (
     Config,
     ConfigurationResult,
     build_render_plan,
+    project_runtime_config,
 )
 from comfyui_docker_helper.host.diagnostics import render_plan_preview
 from comfyui_docker_helper.rendering import has_valid_context_marker
@@ -108,7 +109,12 @@ def test_validate_accepts_repeated_file_options_in_order(
                 "comfyui": {"version": "latest"},
             }
         )
-        return ConfigurationResult(config=config, plan=build_render_plan(config))
+        return ConfigurationResult(
+            config=config,
+            plan=build_render_plan(config),
+            raw_document={},
+            runtime_config=project_runtime_config(config, {}),
+        )
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.load_validate_plan_result",
@@ -599,7 +605,7 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             ),
             (
                 "  Launch command: python, /workspace/ComfyUI/main.py, "
-                "--listen, 0.0.0.0, --disable-auto-launch"
+                "--listen, 0.0.0.0, --port, 8188, --disable-auto-launch"
             ),
             "",
             "Environment:",
@@ -640,6 +646,7 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             "  - config.lock.toml [file]",
             "  - Dockerfile [file]",
             "  - .cdh-rendered [file]",
+            "  - runtime/config.toml [file]",
             "  - packages/cdh/pyproject.toml [file]",
             "  - packages/cdh/src [tree]",
             "",

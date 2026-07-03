@@ -66,6 +66,9 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.comfyui.cli_requirement == "comfy-cli"
     assert plan.comfyui.version == "latest"
     assert plan.comfyui.install_manager is True
+    assert plan.comfyui.listen == "0.0.0.0"
+    assert plan.comfyui.port == 8188
+    assert plan.comfyui.extra_arguments == ()
     assert plan.comfyui.install_arguments == (
         "--nvidia",
         "--version",
@@ -76,6 +79,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.comfyui.launch_arguments == (
         "--listen",
         "0.0.0.0",
+        "--port",
+        "8188",
         "--disable-auto-launch",
     )
     assert plan.comfyui.launch_command == (
@@ -83,6 +88,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
         "/workspace/ComfyUI/main.py",
         "--listen",
         "0.0.0.0",
+        "--port",
+        "8188",
         "--disable-auto-launch",
     )
     assert plan.custom_nodes.items == ()
@@ -141,6 +148,7 @@ def test_minimal_manifest_contains_only_always_present_artifacts() -> None:
     assert manifest.always == (
         OutputArtifact("Dockerfile", ArtifactKind.FILE),
         OutputArtifact(".cdh-rendered", ArtifactKind.FILE),
+        OutputArtifact("runtime/config.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/pyproject.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/src", ArtifactKind.TREE),
     )
@@ -179,7 +187,9 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     config.pytorch.extra_packages = ["torchvision", "torchaudio"]
     config.comfyui.cli_version = "v2.0RC1"
     config.comfyui.version = "v1.2.3"
-    config.comfyui.launch_args = ["--listen", "127.0.0.1"]
+    config.comfyui.listen = "127.0.0.1"
+    config.comfyui.port = 8190
+    config.comfyui.extra_args = ["--preview-method", "auto", "--cpu"]
 
     plan = build_render_plan(config)
 
@@ -204,12 +214,30 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     assert plan.comfyui.cli_version == "2.0rc1"
     assert plan.comfyui.cli_requirement == "comfy-cli==2.0rc1"
     assert plan.comfyui.version == "1.2.3"
-    assert plan.comfyui.launch_arguments == ("--listen", "127.0.0.1")
+    assert plan.comfyui.listen == "127.0.0.1"
+    assert plan.comfyui.port == 8190
+    assert plan.comfyui.extra_arguments == ("--preview-method", "auto", "--cpu")
+    assert plan.comfyui.launch_arguments == (
+        "--listen",
+        "127.0.0.1",
+        "--port",
+        "8190",
+        "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
+    )
     assert plan.comfyui.launch_command == (
         "python",
         "/opt/custom/ComfyUI/main.py",
         "--listen",
         "127.0.0.1",
+        "--port",
+        "8190",
+        "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
     )
     assert plan.layers[5] is Layer.PYTHON_EXTRAS
 

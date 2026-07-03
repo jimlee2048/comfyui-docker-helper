@@ -84,6 +84,8 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
       --index-url {{ plan.python.index_url | shell_argument }} \
       -- /tmp/cdh/packages/cdh
 
+COPY runtime/config.toml /opt/cdh/runtime/config.toml
+
 {% if plan.custom_nodes.items %}
 RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
     --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml{% if plan.custom_nodes.has_hooks %} \

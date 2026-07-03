@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from comfyui_docker_helper.config import (
+    ConfigurationResult,
     Diagnostic,
     Lockfile,
     LockOptions,
@@ -61,10 +62,14 @@ def prepare_render_context(
     lock_options: LockOptions | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
+    configuration_result: ConfigurationResult | None = None,
 ) -> PreparedContext:
     """Validate config, resolve/check the lock, and optionally write the context."""
     options = lock_options or LockOptions()
-    result = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
+    result = configuration_result or load_validate_plan_result(
+        config_files,
+        scripts_dir=scripts_dir,
+    )
     output_path = _resolve_effective_output_path(output_dir, working_directory)
     existing_lockfile = _load_existing_lockfile(output_path)
     try:
@@ -84,6 +89,7 @@ def prepare_render_context(
             result.plan,
             result.config,
             lock_result.lockfile,
+            result.runtime_config,
         )
         return PreparedContext(
             plan=result.plan,
@@ -103,6 +109,7 @@ def prepare_render_context(
             output_path,
             config=result.config,
             lockfile=lock_result.lockfile,
+            runtime_config=result.runtime_config,
             overwrite=overwrite,
             working_directory=working_directory,
             config_file=config_files,
@@ -173,6 +180,7 @@ def _check_managed_artifacts(
     plan: RenderPlan,
     config,
     lockfile: Lockfile,
+    runtime_config,
 ) -> None:
     if not output_dir.is_dir():
         raise HostRenderServiceError(
@@ -200,6 +208,7 @@ def _check_managed_artifacts(
             output_dir.parent,
             config=config,
             lockfile=lockfile,
+            runtime_config=runtime_config,
         ) as expected:
             diagnostics = _compare_managed_artifacts(expected, output_dir)
     except (ContextWriteError, MaterializationError) as error:

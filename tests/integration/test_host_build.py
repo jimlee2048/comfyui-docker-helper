@@ -145,6 +145,7 @@ def test_build_help_exposes_current_options(cli_runner: CliRunner) -> None:
     assert "--locked" in result.stdout
     assert "--upgrade-lock" in result.stdout
     assert "--scripts-dir" in result.stdout
+    assert "--hooks-dir" in result.stdout
     assert "--context-dir" in result.stdout
     assert "--output" not in result.stdout
     assert "--clean-context" not in result.stdout

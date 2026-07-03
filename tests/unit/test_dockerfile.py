@@ -21,7 +21,9 @@ from comfyui_docker_helper.config import (
     LockManifest,
     RegistryCustomNodeConfig,
     RenderPlanValidationError,
+    RuntimeHooksPlan,
     build_render_plan,
+    with_runtime_hooks_plan,
 )
 from comfyui_docker_helper.rendering import (
     render_dockerfile,
@@ -772,6 +774,27 @@ def test_build_only_inputs_are_never_persistently_copied() -> None:
     assert "COPY packages" not in rendered
     assert "COPY config" not in rendered
     assert "COPY scripts" not in rendered
+
+
+def test_runtime_hooks_copy_is_conditional() -> None:
+    """Bake runtime hook sources only when a host hook source is active."""
+    config = make_config()
+    plan = with_runtime_hooks_plan(
+        build_render_plan(config),
+        RuntimeHooksPlan(has_hooks=True, source_dir=Path("/tmp/hooks")),
+    )
+
+    rendered = render_dockerfile(plan, lockfile=make_lockfile(config))
+
+    copy_lines = [line for line in rendered.splitlines() if line.startswith("COPY ")]
+    assert copy_lines == [
+        "COPY --from=uv /uv /uvx /bin/",
+        "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
+        "COPY runtime/hooks /opt/cdh/runtime/hooks",
+    ]
+    assert rendered.index("COPY runtime/config.toml") < rendered.index(
+        "COPY runtime/hooks"
+    )
 
 
 def test_serializers_handle_adversarial_literal_values() -> None:

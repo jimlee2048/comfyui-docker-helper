@@ -15,10 +15,12 @@ from comfyui_docker_helper.config import (
     LockServiceError,
     LockServiceResult,
     RenderPlan,
+    RuntimeHooksPlan,
     SourceResolvers,
     load_validate_plan_result,
     parse_lockfile_toml,
     resolve_lockfile,
+    with_runtime_hooks_plan,
 )
 from comfyui_docker_helper.rendering import (
     ContextWriteError,
@@ -30,8 +32,11 @@ from comfyui_docker_helper.rendering import (
 from comfyui_docker_helper.rendering.context import ConfigInput
 
 _ALWAYS_MANAGED_TREES = ("packages/cdh/src",)
-_CONDITIONAL_MANAGED_TREES = ("scripts",)
+_CONDITIONAL_MANAGED_TREES = ("scripts", "runtime/hooks")
 _RETIRED_HELPER_PROJECTION_ROOTS = ("config",)
+_DEFAULT_RUNTIME_HOOKS_DIR = Path("./hooks")
+_RUNTIME_HOOK_PHASE_DIRS = frozenset({"pre-start.d", "post-start.d", "stop.d"})
+_RUNTIME_HOOK_SUFFIXES = frozenset({".sh", ".py"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,7 @@ def prepare_render_context(
     output_dir: str | Path,
     *,
     scripts_dir: str | Path = "./scripts",
+    hooks_dir: str | Path | None = None,
     resolvers: SourceResolvers,
     lock_options: LockOptions | None = None,
     overwrite: bool = False,
@@ -70,6 +76,11 @@ def prepare_render_context(
         config_files,
         scripts_dir=scripts_dir,
     )
+    runtime_hooks = _resolve_runtime_hooks_plan(
+        hooks_dir,
+        working_directory=working_directory,
+    )
+    plan = with_runtime_hooks_plan(result.plan, runtime_hooks)
     output_path = _resolve_effective_output_path(output_dir, working_directory)
     existing_lockfile = _load_existing_lockfile(output_path)
     try:
@@ -86,26 +97,26 @@ def prepare_render_context(
     if options.check:
         _check_managed_artifacts(
             output_path,
-            result.plan,
+            plan,
             result.config,
             lock_result.lockfile,
             result.runtime_config,
         )
         return PreparedContext(
-            plan=result.plan,
+            plan=plan,
             lock_result=lock_result,
             warnings=warnings,
         )
     if options.dry_run:
         return PreparedContext(
-            plan=result.plan,
+            plan=plan,
             lock_result=lock_result,
             warnings=warnings,
         )
 
     try:
         write_build_context(
-            result.plan,
+            plan,
             output_path,
             config=result.config,
             lockfile=lock_result.lockfile,
@@ -124,7 +135,136 @@ def prepare_render_context(
                 ),
             )
         ) from error
-    return PreparedContext(plan=result.plan, lock_result=lock_result, warnings=warnings)
+    return PreparedContext(plan=plan, lock_result=lock_result, warnings=warnings)
+
+
+def _resolve_runtime_hooks_plan(
+    hooks_dir: str | Path | None,
+    *,
+    working_directory: str | Path | None,
+) -> RuntimeHooksPlan:
+    base = Path.cwd() if working_directory is None else Path(working_directory)
+    explicit = hooks_dir is not None
+    source = Path(hooks_dir) if explicit else _DEFAULT_RUNTIME_HOOKS_DIR
+    candidate = source if source.is_absolute() else base / source
+
+    if not explicit and not candidate.exists() and not candidate.is_symlink():
+        return RuntimeHooksPlan(has_hooks=False, source_dir=None)
+
+    diagnostics = _validate_runtime_hooks_source(candidate)
+    if diagnostics:
+        raise HostRenderServiceError(tuple(diagnostics))
+    return RuntimeHooksPlan(has_hooks=True, source_dir=candidate.resolve(strict=True))
+
+
+def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
+    diagnostics: list[Diagnostic] = []
+    if source.is_symlink() or not source.exists():
+        diagnostics.append(
+            Diagnostic(
+                path=("hooks_dir",),
+                code="runtime_hooks.source_not_directory",
+                message="runtime hook source must be an existing real directory",
+            )
+        )
+        return diagnostics
+    if not source.is_dir():
+        diagnostics.append(
+            Diagnostic(
+                path=("hooks_dir",),
+                code="runtime_hooks.source_not_directory",
+                message="runtime hook source must be an existing real directory",
+            )
+        )
+        return diagnostics
+
+    for child in sorted(source.iterdir(), key=lambda item: item.name):
+        child_path = ("hooks_dir", child.name)
+        if child.is_symlink():
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.symlink",
+                    message="runtime hook source must not contain symlinks",
+                )
+            )
+            continue
+        if not child.is_dir() and not child.is_file():
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.special_file",
+                    message="runtime hook source must not contain special files",
+                )
+            )
+            continue
+        if child.name not in _RUNTIME_HOOK_PHASE_DIRS:
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.unknown_top_level",
+                    message=(
+                        "runtime hook source may only contain pre-start.d, "
+                        "post-start.d, and stop.d directories"
+                    ),
+                )
+            )
+            continue
+        if not child.is_dir():
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.phase_not_directory",
+                    message="runtime hook phase entries must be directories",
+                )
+            )
+            continue
+        _validate_runtime_hook_phase(child, child_path, diagnostics)
+    return diagnostics
+
+
+def _validate_runtime_hook_phase(
+    phase: Path,
+    path: tuple[str, ...],
+    diagnostics: list[Diagnostic],
+) -> None:
+    for child in sorted(phase.iterdir(), key=lambda item: item.name):
+        child_path = (*path, child.name)
+        if child.is_symlink():
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.symlink",
+                    message="runtime hook source must not contain symlinks",
+                )
+            )
+            continue
+        if child.is_dir():
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.entry_not_file",
+                    message="runtime hook phase entries must be regular files",
+                )
+            )
+            continue
+        if not child.is_file():
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.special_file",
+                    message="runtime hook source must not contain special files",
+                )
+            )
+            continue
+        if child.suffix not in _RUNTIME_HOOK_SUFFIXES:
+            diagnostics.append(
+                Diagnostic(
+                    path=child_path,
+                    code="runtime_hooks.unsupported_extension",
+                    message="runtime hook files must end in .sh or .py",
+                )
+            )
 
 
 def _load_existing_lockfile(output_dir: Path) -> Lockfile | None:

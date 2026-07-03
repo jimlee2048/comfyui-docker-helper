@@ -66,7 +66,9 @@ from comfyui_docker_helper.config.plan import (
     RegistryCustomNodePlan,
     RenderPlan,
     RenderPlanValidationError,
+    RuntimeHooksPlan,
     build_render_plan,
+    with_runtime_hooks_plan,
 )
 from comfyui_docker_helper.config.resolvers import (
     COMFY_CLI_PACKAGE_NAME,
@@ -202,6 +204,7 @@ __all__ = [
     "RuntimeConfigurationError",
     "RuntimeConfigurationResult",
     "RuntimeFileConfig",
+    "RuntimeHooksPlan",
     "SourceResolvers",
     "SystemConfig",
     "UpstreamResponseError",
@@ -230,5 +233,6 @@ __all__ = [
     "serialize_runtime_config_toml",
     "validate_config",
     "validate_lock_domain_unique",
+    "with_runtime_hooks_plan",
     "write_lockfile",
 ]

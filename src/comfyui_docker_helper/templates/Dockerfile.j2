@@ -85,6 +85,9 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
       -- /tmp/cdh/packages/cdh
 
 COPY runtime/config.toml /opt/cdh/runtime/config.toml
+{% if plan.runtime_hooks.has_hooks %}
+COPY runtime/hooks /opt/cdh/runtime/hooks
+{% endif %}
 
 {% if plan.custom_nodes.items %}
 RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \

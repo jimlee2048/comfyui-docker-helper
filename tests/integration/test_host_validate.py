@@ -62,6 +62,7 @@ def test_render_help_exposes_current_options(cli_runner: CliRunner) -> None:
     assert "-o" in result.stdout
     assert "--output" in result.stdout
     assert "--scripts-dir" in result.stdout
+    assert "--hooks-dir" in result.stdout
     assert "--dry-run" in result.stdout
     assert "--overwrite" in result.stdout
     assert "--force" not in result.stdout

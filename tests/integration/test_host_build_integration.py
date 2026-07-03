@@ -28,6 +28,20 @@ version = "2.10"
 """
 
 
+def write_runtime_hooks(root: Path) -> Path:
+    """Write a valid runtime hook tree for build CLI tests."""
+    (root / "pre-start.d").mkdir(parents=True)
+    (root / "post-start.d").mkdir()
+    (root / "stop.d").mkdir()
+    (root / "pre-start.d" / "10-pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "post-start.d" / "20-post.py").write_text(
+        "print('post')\n",
+        encoding="utf-8",
+    )
+    (root / "stop.d" / "30-stop.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return root
+
+
 @dataclass(frozen=True, slots=True)
 class FixtureCase:
     """One host-build integration fixture."""
@@ -292,6 +306,78 @@ def test_host_build_full_fixture_preserves_quoting_env_and_entrypoint(
     assert 'ENTRYPOINT ["cdh", "container", "entrypoint"]' in dockerfile
     assert "\nCMD " not in dockerfile
     assert "/work dir/Comfy UI/main.py" not in dockerfile
+
+
+def test_host_build_hooks_dir_option_copies_runtime_hooks_before_fake_docker(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The build CLI passes --hooks-dir through render before Docker starts."""
+    config = tmp_path / "config.toml"
+    config.write_text(
+        MINIMAL_CONFIG
+        + """
+[comfyui]
+version = "latest"
+""",
+        encoding="utf-8",
+    )
+    context = tmp_path / "context"
+    hooks = write_runtime_hooks(tmp_path / "runtime-hooks")
+    calls: list[Path] = []
+
+    def fake_buildx(
+        *,
+        image_tags: tuple[str, ...],
+        output: str,
+        context_dir: Path,
+        cwd: Path,
+        log,
+    ) -> BuildxBuildResult:
+        del log
+        assert image_tags == ("demo:hooks",)
+        assert output == "load"
+        assert context_dir == context
+        assert cwd == Path.cwd()
+        assert has_valid_context_marker(context_dir)
+        assert (
+            context_dir / "runtime" / "hooks" / "post-start.d" / "20-post.py"
+        ).read_text(encoding="utf-8") == "print('post')\n"
+        assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in (
+            context_dir / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        calls.append(context_dir)
+        return BuildxBuildResult(
+            argv=("docker", "buildx", "build", "--load", "-t", image_tags[0]),
+            context_dir=context_dir,
+            image_tags=image_tags,
+            output=output,
+        )
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        fake_buildx,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "demo:hooks",
+            "--context-dir",
+            str(context),
+            "--hooks-dir",
+            str(hooks),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [context]
 
 
 def test_host_build_wires_package_indexes_before_fake_docker(

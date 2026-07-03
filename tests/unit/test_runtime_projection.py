@@ -65,6 +65,9 @@ id = "node"
 url = "https://example.com/model.bin"
 dir = "models"
 filename = "model.bin"
+overwrite = true
+downloader = "httpx"
+download_mode = "sync"
 """,
         encoding="utf-8",
     )
@@ -95,8 +98,17 @@ filename = "model.bin"
                 "httpx": {"timeout": 30, "retries": 5},
             },
         },
+        "files": [
+            {
+                "url": "https://example.com/model.bin",
+                "dir": "models",
+                "filename": "model.bin",
+                "overwrite": True,
+                "downloader": "httpx",
+                "download_mode": "sync",
+            }
+        ],
     }
-    assert "files" not in document
     assert "system" not in document
     assert "python" not in document
     assert "pytorch" not in document
@@ -105,6 +117,8 @@ filename = "model.bin"
     assert "cli_version" not in document["comfyui"]
     assert "install_manager" not in document["comfyui"]
     assert "custom_nodes" not in document["comfyui"]
+    assert projection.is_explicit(("files", 0, "url"))
+    assert projection.is_explicit(("files", 0, "download_mode"))
 
 
 def test_runtime_projection_tracks_only_user_explicit_runtime_fields(tmp_path) -> None:

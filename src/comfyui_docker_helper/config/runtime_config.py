@@ -5,7 +5,7 @@ import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import Field, ValidationError
@@ -18,12 +18,14 @@ from comfyui_docker_helper.config.diagnostics import (
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import ConfigModel
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.url_validation import is_http_url
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
 
 type RuntimeConfigPath = str | Path
 type RuntimePath = tuple[str, ...]
+type RuntimeFilePath = tuple[str | int, ...]
 
 _HOST_ONLY_ROOT_SECTIONS = frozenset(
     {"compute_platform", "system", "python", "pytorch", "build"}
@@ -41,6 +43,8 @@ class RuntimeConfigurationResult:
     """Merged runtime config plus non-fatal cross-context diagnostics."""
 
     config: RuntimeConfig
+    files: tuple[dict[str, Any], ...] = ()
+    file_documents: tuple[dict[str, Any], ...] = ()
     warnings: tuple[Diagnostic, ...] = ()
     explicit_paths: frozenset[RuntimePath] = frozenset()
 
@@ -89,9 +93,19 @@ class _RuntimeComfyUIConfigPatch(ConfigModel):
     extra_args: list[str] | None = None
 
 
+class _RuntimeFilePatch(ConfigModel):
+    url: str | None = None
+    dir: str
+    filename: str
+    overwrite: bool | None = None
+    downloader: Literal["aria2", "httpx"] | None = None
+    download_mode: Literal["sync"] | None = None
+
+
 class _RuntimeConfigPatch(ConfigModel):
     comfyui: _RuntimeComfyUIConfigPatch | None = None
     cdh: _RuntimeCdhConfigPatch | None = None
+    files: list[_RuntimeFilePatch] | None = None
 
 
 def load_runtime_config(
@@ -103,6 +117,7 @@ def load_runtime_config(
     """Load and merge code defaults, baked runtime config, and mounted config."""
     warnings: list[Diagnostic] = []
     documents: list[dict[str, Any]] = [_runtime_defaults_document()]
+    file_documents: list[dict[str, Any]] = []
     explicit_paths: set[RuntimePath] = set()
 
     for source, config_path in (
@@ -116,7 +131,9 @@ def load_runtime_config(
         document, document_warnings = _prepare_runtime_document(raw_document)
         warnings.extend(document_warnings)
         _validate_runtime_patch(document)
-        documents.append(document)
+        documents.append(_runtime_config_document(document))
+        if "files" in document:
+            file_documents.append({"files": document["files"]})
         if source == "mounted":
             explicit_paths.update(_runtime_explicit_paths(document))
 
@@ -125,12 +142,15 @@ def load_runtime_config(
         _validate_runtime_patch(env_document)
         documents.append(env_document)
 
+    files = _merge_runtime_file_items(file_documents)
     merged = merge_toml_documents(documents)
     config = _validate_effective_runtime_config(merged)
     _validate_runtime_downloader(config)
     _validate_runtime_extra_args(config)
     return RuntimeConfigurationResult(
         config=config,
+        files=files,
+        file_documents=tuple(file_documents),
         warnings=tuple(warnings),
         explicit_paths=frozenset(explicit_paths),
     )
@@ -138,6 +158,10 @@ def load_runtime_config(
 
 def _runtime_defaults_document() -> dict[str, Any]:
     return RuntimeConfig().model_dump(mode="json")
+
+
+def _runtime_config_document(document: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in document.items() if key != "files"}
 
 
 def _runtime_env_document(environ: Mapping[str, str]) -> dict[str, Any]:
@@ -254,18 +278,6 @@ def _prepare_runtime_document(
         if key in _HOST_ONLY_ROOT_SECTIONS:
             diagnostics.append(_host_only_warning((key,)))
             continue
-        if key == "files":
-            raise RuntimeConfigurationError(
-                (
-                    Diagnostic(
-                        path=("files",),
-                        code="runtime.files_unsupported",
-                        message=(
-                            "runtime [[files]] entries are not supported until v0.3-M3"
-                        ),
-                    ),
-                )
-            )
         if key == "comfyui" and isinstance(value, Mapping):
             prepared[key] = _prepare_comfyui_document(value, diagnostics)
             continue
@@ -310,6 +322,157 @@ def _validate_effective_runtime_config(document: Mapping[str, Any]) -> RuntimeCo
     except ValidationError as error:
         diagnostics = _diagnostics_from_validation_error(error)
         raise RuntimeConfigurationError(diagnostics) from error
+
+
+def _merge_runtime_file_items(
+    documents: list[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    merged: list[dict[str, Any]] = []
+    indexes: dict[str, int] = {}
+    diagnostics: list[Diagnostic] = []
+
+    for document in documents:
+        try:
+            parsed = _RuntimeConfigPatch.model_validate(document)
+        except ValidationError as error:
+            diagnostics.extend(_diagnostics_from_validation_error(error))
+            continue
+
+        if parsed.files is None:
+            continue
+        if not parsed.files:
+            merged.clear()
+            indexes.clear()
+            continue
+
+        for item in parsed.files:
+            path: RuntimeFilePath = ("files", len(merged))
+            item_document = item.model_dump(mode="json", exclude_none=True)
+            has_valid_url = _validate_runtime_file_url(
+                item.url,
+                (*path, "url"),
+                diagnostics,
+            )
+            key = _runtime_file_merge_key(item, path, diagnostics)
+            if key is None or not has_valid_url:
+                continue
+            if key in indexes:
+                merged[indexes[key]] = {**merged[indexes[key]], **item_document}
+            else:
+                indexes[key] = len(merged)
+                merged.append(item_document)
+
+    if diagnostics:
+        raise RuntimeConfigurationError(tuple(diagnostics))
+    return tuple(merged)
+
+
+def _validate_runtime_file_url(
+    value: str | None,
+    path: RuntimeFilePath,
+    diagnostics: list[Diagnostic],
+) -> bool:
+    if value is None or is_http_url(value):
+        return True
+    diagnostics.append(
+        Diagnostic(
+            path,
+            "runtime_file.invalid_url",
+            "must be an HTTP(S) URL with a host",
+        )
+    )
+    return False
+
+
+def _runtime_file_merge_key(
+    item: _RuntimeFilePatch,
+    path: RuntimeFilePath,
+    diagnostics: list[Diagnostic],
+) -> str | None:
+    directory = _normalize_runtime_file_directory(item.dir, (*path, "dir"), diagnostics)
+    filename = _normalize_runtime_file_filename(
+        item.filename,
+        (*path, "filename"),
+        diagnostics,
+    )
+    if directory is None or filename is None:
+        return None
+    return (directory / filename).as_posix()
+
+
+def _normalize_runtime_file_directory(
+    value: str,
+    path: RuntimeFilePath,
+    diagnostics: list[Diagnostic],
+) -> PurePosixPath | None:
+    if value.startswith("/"):
+        diagnostics.append(
+            Diagnostic(path, "runtime_file.absolute_directory", "must be relative")
+        )
+        return None
+    if value.endswith("/"):
+        diagnostics.append(
+            Diagnostic(
+                path,
+                "runtime_file.trailing_slash",
+                "must not end with a slash",
+            )
+        )
+        return None
+
+    parts = value.split("/")
+    if not value or any(part == "" for part in parts):
+        diagnostics.append(
+            Diagnostic(
+                path,
+                "runtime_file.empty_directory_segment",
+                "must not contain empty path segments",
+            )
+        )
+        return None
+    if any(part == "." for part in parts):
+        diagnostics.append(
+            Diagnostic(
+                path,
+                "runtime_file.current_directory_segment",
+                "must not contain '.'",
+            )
+        )
+        return None
+    if any(part == ".." for part in parts):
+        diagnostics.append(
+            Diagnostic(
+                path,
+                "runtime_file.parent_directory_segment",
+                "must not contain '..'",
+            )
+        )
+        return None
+
+    normalized = PurePosixPath(os.path.normpath(value))
+    if normalized == PurePosixPath("."):
+        diagnostics.append(
+            Diagnostic(path, "runtime_file.empty_directory", "must not be empty")
+        )
+        return None
+    return normalized
+
+
+def _normalize_runtime_file_filename(
+    value: str,
+    path: RuntimeFilePath,
+    diagnostics: list[Diagnostic],
+) -> str | None:
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        diagnostics.append(
+            Diagnostic(
+                path,
+                "runtime_file.invalid_filename",
+                "must be one nonempty filename component",
+            )
+        )
+        return None
+    return value
 
 
 def _diagnostics_from_validation_error(

@@ -1180,8 +1180,8 @@ def test_http_and_https_file_urls_are_valid(url: str) -> None:
     assert validate_config(config) == ()
 
 
-def test_file_directories_are_relative_nonempty_and_non_traversing() -> None:
-    """Reject absolute, empty, dot, and parent-traversing target directories."""
+def test_file_directories_follow_runtime_lexical_rules() -> None:
+    """Reject dirs that runtime config would reject before baking."""
     config = make_config()
     config.files = [
         FileConfig(url="https://example.com/a", dir="/models", filename="a.bin"),
@@ -1192,13 +1192,21 @@ def test_file_directories_are_relative_nonempty_and_non_traversing() -> None:
         ),
         FileConfig(url="https://example.com/c", dir="", filename="c.bin"),
         FileConfig(url="https://example.com/d", dir=".", filename="d.bin"),
+        FileConfig(url="https://example.com/e", dir="models/", filename="e.bin"),
+        FileConfig(
+            url="https://example.com/f",
+            dir="models//checkpoints",
+            filename="f.bin",
+        ),
     ]
 
     assert locations_and_codes(validate_config(config)) == [
         (("files", 0, "dir"), "file.absolute_directory"),
         (("files", 1, "dir"), "file.directory_traversal"),
-        (("files", 2, "dir"), "file.empty_directory"),
-        (("files", 3, "dir"), "file.empty_directory"),
+        (("files", 2, "dir"), "file.empty_directory_segment"),
+        (("files", 3, "dir"), "file.current_directory_segment"),
+        (("files", 4, "dir"), "file.trailing_slash"),
+        (("files", 5, "dir"), "file.empty_directory_segment"),
     ]
 
 

@@ -16,9 +16,19 @@ from comfyui_docker_helper.config import (
     Diagnostic,
     RuntimeConfig,
     RuntimeConfigurationError,
+    RuntimeConfigurationResult,
     load_runtime_config,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_files import (
+    Logger,
+    RuntimeFileDownloadError,
+    RuntimeFileDownloadResult,
+    RuntimeFilePlan,
+    RuntimeFilePlanError,
+    build_runtime_file_plan,
+    download_runtime_files,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 
@@ -49,6 +59,18 @@ class ChildProcess(Protocol):
     def send_signal(self, sig: signal.Signals) -> None: ...
 
 
+class RuntimeDownloadRunner(Protocol):
+    """Runtime file downloader callable used before ComfyUI spawn."""
+
+    def __call__(
+        self,
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]: ...
+
+
 def run_entrypoint(
     *,
     runtime: ContainerRuntime,
@@ -56,6 +78,7 @@ def run_entrypoint(
     mounted_config_path: str | Path = MOUNTED_RUNTIME_CONFIG_PATH,
     environ: Mapping[str, str] | None = None,
     runner: EntrypointRunner = subprocess.Popen,
+    runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
 ) -> int:
     """Load runtime config, run ComfyUI, and return the child exit code."""
     source_env = os.environ if environ is None else environ
@@ -71,6 +94,11 @@ def run_entrypoint(
         ) from error
 
     _render_runtime_config_warnings(result.warnings)
+    _run_runtime_downloads(
+        result,
+        runtime=runtime,
+        runtime_downloader=runtime_downloader,
+    )
 
     argv = build_comfyui_argv(runtime=runtime, config=result.config)
     try:
@@ -107,6 +135,35 @@ def build_comfyui_argv(
     ]
 
 
+def _run_runtime_downloads(
+    result: RuntimeConfigurationResult,
+    *,
+    runtime: ContainerRuntime,
+    runtime_downloader: RuntimeDownloadRunner,
+) -> None:
+    if not result.files:
+        return
+
+    try:
+        plan = build_runtime_file_plan(
+            ({"files": list(result.files)},),
+            comfyui_path=runtime.comfyui_path,
+        )
+        runtime_downloader(plan, config=result.config, log=print)
+    except RuntimeFilePlanError as error:
+        raise EntrypointError(
+            _format_diagnostics(
+                "runtime file configuration is invalid", error.diagnostics
+            )
+        ) from error
+    except RuntimeFileDownloadError as error:
+        raise EntrypointError(
+            _format_diagnostics("runtime download failed", error.diagnostics)
+        ) from error
+    except ApplicationError as error:
+        raise EntrypointError(f"runtime download failed: {error}") from error
+
+
 def _wait_with_signal_forwarding(child: ChildProcess) -> int:
     previous_handlers = {
         sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
@@ -132,7 +189,11 @@ def _normalize_child_exit_code(returncode: int) -> int:
 
 
 def _format_runtime_config_error(diagnostics: tuple[Diagnostic, ...]) -> str:
-    lines = ["runtime configuration is invalid"]
+    return _format_diagnostics("runtime configuration is invalid", diagnostics)
+
+
+def _format_diagnostics(header: str, diagnostics: tuple[Diagnostic, ...]) -> str:
+    lines = [header]
     for diagnostic in diagnostics:
         lines.append(
             f"[{_format_path(diagnostic.path)}] "

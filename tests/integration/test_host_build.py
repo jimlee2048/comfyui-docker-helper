@@ -454,12 +454,12 @@ workspace = "/srv"
     assert "ENV WORKSPACE=/srv" in (context / "Dockerfile").read_text(encoding="utf-8")
 
 
-def test_build_with_host_warnings_still_renders_and_invokes_buildx(
+def test_build_with_runtime_download_mode_renders_and_invokes_buildx(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Print host-context warnings without blocking the current build flow."""
+    """Bake runtime download-mode defaults without warning or blocking build."""
     config = write_config(
         tmp_path,
         MINIMAL_CONFIG
@@ -508,9 +508,12 @@ default_download_mode = "sync"
     )
 
     assert result.exit_code == 0
-    assert "Configuration has warnings:" in result.stderr
-    assert "[cdh.default_download_mode]" in result.stderr
+    assert result.stderr == ""
     assert has_valid_context_marker(context)
+    runtime_config = tomllib.loads(
+        (context / "runtime" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert runtime_config["cdh"]["default_download_mode"] == "sync"
     assert calls == [("demo:warning",)]
 
 

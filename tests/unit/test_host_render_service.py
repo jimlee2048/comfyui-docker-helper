@@ -228,7 +228,14 @@ def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
     assert runtime_data["cdh"]["default_downloader"] == "aria2"
     assert runtime_data["cdh"]["default_download_mode"] == "sync"
     assert "downloader" in runtime_data["cdh"]
-    assert "files" not in runtime_data
+    assert runtime_data["files"] == [
+        {
+            "url": "https://example.com/model.safetensors",
+            "dir": "models/checkpoints",
+            "filename": "model.safetensors",
+            "overwrite": False,
+        }
+    ]
     assert "custom_nodes" not in runtime_data["comfyui"]
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
     assert "comfy-cli==1.5.0" in dockerfile

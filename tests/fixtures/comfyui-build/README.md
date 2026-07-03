@@ -113,7 +113,7 @@ cdh host build -f tests/fixtures/comfyui-build/configs/full.toml -t cdh-smoke:fu
 
 | ID | Scenario | Config intent | Command | Required evidence | Pass criteria |
 | --- | --- | --- | --- | --- | --- |
-| S1 | pinned minimal | `comfyui.version` pinned or stable, `install_manager=false`, no nodes/files | S1 command | build log, rendered context, image ID, `docker image inspect`, container filesystem checks | Build succeeds; ComfyUI installed under `COMFYUI_PATH`; `/opt/venv` exists; `$COMFYUI_PATH/.venv` absent; final image does not include build-only context artifacts such as `/tmp/cdh`, `packages/cdh`, `scripts`, or root render artifacts; `WORKDIR`/`CMD` match config. |
+| S1 | pinned minimal | `comfyui.version` pinned or stable, `install_manager=false`, no nodes/files | S1 command | build log, rendered context, image ID, `docker image inspect`, container filesystem checks | Build succeeds; ComfyUI installed under `COMFYUI_PATH`; `/opt/venv` exists; `$COMFYUI_PATH/.venv` absent; final image does not include build-only context artifacts such as `/tmp/cdh`, `packages/cdh`, `scripts`, or root render artifacts; `WORKDIR` and cdh `ENTRYPOINT` match the rendered Dockerfile. |
 | S2 | latest ComfyUI | `comfyui.version="latest"`, Manager off | S2 command | comfy-cli install output, ComfyUI git/version evidence | Build succeeds or external conflict is recorded; latest behavior is identified from real install output. |
 | S3 | nightly ComfyUI | `comfyui.version="nightly"`, Manager off | S3 command | comfy-cli install output, ComfyUI git/version evidence | Build succeeds or the conflict is recorded without an undocumented workaround. |
 | S4 | Manager on, no nodes | `install_manager=true`, no custom nodes | S4 command | `cm_cli` availability, Manager source/version, manager requirements relationship | Manager is available from final venv; Manager source/version assumptions are verified from the final image. |
@@ -122,7 +122,7 @@ cdh host build -f tests/fixtures/comfyui-build/configs/full.toml -t cdh-smoke:fu
 | S7 | hooks matrix | `.sh` and `.py` hooks in both pre-install and post-install phases | S7 command | hook side-effect files, cwd/env output, log order | All four hook phase/type combinations execute with expected cwd/env; failure behavior is covered by controlled negative or integration evidence. |
 | S8 | httpx downloader | local public/small HTTP server or small public asset, redirect, overwrite, skip | S8 command | build log, target file contents/path, request log, overwrite/skip evidence | Real httpx backend covers download, redirect, overwrite, skip, and target path. |
 | S9 | aria2 downloader | local public/small HTTP asset through aria2 backend | S9 command | aria2 RPC log, process cleanup check, target file, no secret in logs | Real aria2 backend succeeds; no persistent RPC config/process remains; secret is absent from captured logs/config. |
-| S10 | mixed full workflow | nodes, hooks, httpx, aria2, custom env/CMD | S10 command | full build log, context/image inspection, startup check | Combined workflow succeeds; serial order and backend override evidence captured; image starts configured ComfyUI from `WORKSPACE`. |
+| S10 | mixed full workflow | nodes, hooks, httpx, aria2, custom env, entrypoint startup | S10 command | full build log, context/image inspection, startup check | Combined workflow succeeds; serial order and backend override evidence captured; image starts configured ComfyUI from `WORKSPACE` through the cdh entrypoint. |
 
 ## Resource And Cleanup Guidance
 

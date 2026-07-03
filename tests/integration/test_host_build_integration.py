@@ -41,6 +41,9 @@ class FixtureCase:
 
 
 FIXTURE_CASES = (
+    # Cover the host build surfaces that must render before Docker is invoked:
+    # plain config, custom nodes, file downloads, hook scripts, and quoting-heavy
+    # combined input.
     FixtureCase(
         name="minimal",
         extra_config="""

@@ -283,41 +283,107 @@ def test_lockfile_rejects_duplicate_git_urls() -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda config: setattr(config.compute_platform.cuda, "version", "13.0.2"),
-        lambda config: setattr(config.compute_platform.cuda, "image_flavor", "devel"),
-        lambda config: setattr(
-            config.compute_platform.cuda,
-            "image_distro",
-            "ubuntu22.04",
+        pytest.param(
+            lambda config: setattr(config.compute_platform.cuda, "version", "13.0.2"),
+            id="cuda-version",
         ),
-        lambda config: setattr(config.system, "extra_packages", ["ffmpeg"]),
-        lambda config: setattr(config.system, "env", {"HF_HOME": "/cache"}),
-        lambda config: setattr(config.cdh.downloader.aria2, "split", 8),
-        lambda config: setattr(config.cdh, "default_downloader", "httpx"),
-        lambda config: setattr(config.python, "version", "3.13"),
-        lambda config: setattr(config.python, "index_url", "https://mirror/simple"),
-        lambda config: setattr(config.python, "extra_packages", ["httpx"]),
-        lambda config: setattr(config.pytorch, "version", "2.11"),
-        lambda config: setattr(
-            config.pytorch,
-            "index_base_url",
-            "https://mirror/pytorch",
+        pytest.param(
+            lambda config: setattr(
+                config.compute_platform.cuda,
+                "image_flavor",
+                "devel",
+            ),
+            id="cuda-image-flavor",
         ),
-        lambda config: setattr(config.pytorch, "extra_packages", ["torchvision"]),
-        lambda config: setattr(config.build, "tags", ["example:dev"]),
-        lambda config: setattr(config.build, "output", "push"),
-        lambda config: setattr(config.comfyui, "install_manager", False),
-        lambda config: setattr(config.comfyui, "launch_args", ["--cpu"]),
-        lambda config: setattr(
-            config,
-            "files",
-            [
-                {
-                    "url": "https://example.com/model.bin",
-                    "dir": "models",
-                    "filename": "model.bin",
-                }
-            ],
+        pytest.param(
+            lambda config: setattr(
+                config.compute_platform.cuda,
+                "image_distro",
+                "ubuntu22.04",
+            ),
+            id="cuda-image-distro",
+        ),
+        pytest.param(
+            lambda config: setattr(config.system, "extra_packages", ["ffmpeg"]),
+            id="system-extra-packages",
+        ),
+        pytest.param(
+            lambda config: setattr(config.system, "env", {"HF_HOME": "/cache"}),
+            id="system-env",
+        ),
+        pytest.param(
+            lambda config: setattr(config.cdh.downloader.aria2, "split", 8),
+            id="aria2-split",
+        ),
+        pytest.param(
+            lambda config: setattr(config.cdh, "default_downloader", "httpx"),
+            id="default-downloader",
+        ),
+        pytest.param(
+            lambda config: setattr(config.python, "version", "3.13"),
+            id="python-version",
+        ),
+        pytest.param(
+            lambda config: setattr(
+                config.python,
+                "index_url",
+                "https://mirror/simple",
+            ),
+            id="python-index-url",
+        ),
+        pytest.param(
+            lambda config: setattr(config.python, "extra_packages", ["httpx"]),
+            id="python-extra-packages",
+        ),
+        pytest.param(
+            lambda config: setattr(config.pytorch, "version", "2.11"),
+            id="pytorch-version",
+        ),
+        pytest.param(
+            lambda config: setattr(
+                config.pytorch,
+                "index_base_url",
+                "https://mirror/pytorch",
+            ),
+            id="pytorch-index-base-url",
+        ),
+        pytest.param(
+            lambda config: setattr(
+                config.pytorch,
+                "extra_packages",
+                ["torchvision"],
+            ),
+            id="pytorch-extra-packages",
+        ),
+        pytest.param(
+            lambda config: setattr(config.build, "tags", ["example:dev"]),
+            id="build-tags",
+        ),
+        pytest.param(
+            lambda config: setattr(config.build, "output", "push"),
+            id="build-output",
+        ),
+        pytest.param(
+            lambda config: setattr(config.comfyui, "install_manager", False),
+            id="comfyui-install-manager",
+        ),
+        pytest.param(
+            lambda config: setattr(config.comfyui, "launch_args", ["--cpu"]),
+            id="comfyui-launch-args",
+        ),
+        pytest.param(
+            lambda config: setattr(
+                config,
+                "files",
+                [
+                    {
+                        "url": "https://example.com/model.bin",
+                        "dir": "models",
+                        "filename": "model.bin",
+                    }
+                ],
+            ),
+            id="files",
         ),
     ],
 )
@@ -375,38 +441,53 @@ def test_lock_input_digest_ignores_custom_node_install_details() -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda config: setattr(config.comfyui, "version", "nightly"),
-        lambda config: setattr(config.comfyui, "cli_version", "1.5.0"),
-        lambda config: setattr(
-            config.comfyui,
-            "custom_nodes",
-            [
-                RegistryCustomNodeConfig.model_validate(
-                    {"type": "registry", "id": "node", "version": "1.0.0"}
-                )
-            ],
+        pytest.param(
+            lambda config: setattr(config.comfyui, "version", "nightly"),
+            id="comfyui-version",
         ),
-        lambda config: setattr(
-            config.comfyui,
-            "custom_nodes",
-            [
-                GitCustomNodeConfig.model_validate(
-                    {"type": "git", "url": "https://example.com/node.git"}
-                )
-            ],
+        pytest.param(
+            lambda config: setattr(config.comfyui, "cli_version", "1.5.0"),
+            id="comfyui-cli-version",
         ),
-        lambda config: setattr(
-            config.comfyui,
-            "custom_nodes",
-            [
-                GitCustomNodeConfig.model_validate(
-                    {
-                        "type": "git",
-                        "url": "https://example.com/node.git",
-                        "ref": "v1.0.0",
-                    }
-                )
-            ],
+        pytest.param(
+            lambda config: setattr(
+                config.comfyui,
+                "custom_nodes",
+                [
+                    RegistryCustomNodeConfig.model_validate(
+                        {"type": "registry", "id": "node", "version": "1.0.0"}
+                    )
+                ],
+            ),
+            id="registry-node",
+        ),
+        pytest.param(
+            lambda config: setattr(
+                config.comfyui,
+                "custom_nodes",
+                [
+                    GitCustomNodeConfig.model_validate(
+                        {"type": "git", "url": "https://example.com/node.git"}
+                    )
+                ],
+            ),
+            id="git-node-default-ref",
+        ),
+        pytest.param(
+            lambda config: setattr(
+                config.comfyui,
+                "custom_nodes",
+                [
+                    GitCustomNodeConfig.model_validate(
+                        {
+                            "type": "git",
+                            "url": "https://example.com/node.git",
+                            "ref": "v1.0.0",
+                        }
+                    )
+                ],
+            ),
+            id="git-node-explicit-ref",
         ),
     ],
 )

@@ -125,8 +125,8 @@ def test_full_example_covers_all_public_config_fields() -> None:
     assert file_keys == [EXPECTED_FULL_KEYS["files"], EXPECTED_FULL_KEYS["files"]]
 
 
-def test_full_example_demonstrates_v02_build_ergonomics() -> None:
-    """Keep the reference example focused on v0.2 build ergonomics."""
+def test_full_example_documents_host_build_defaults() -> None:
+    """Keep the reference example aligned with the host build contract."""
     document = _read_toml(EXAMPLES / "full.toml")
 
     assert "cdh" in document
@@ -139,8 +139,8 @@ def test_full_example_demonstrates_v02_build_ergonomics() -> None:
     assert document["pytorch"]["index_base_url"] == "https://download.pytorch.org/whl"
 
 
-def test_examples_readme_documents_v02_build_ergonomics() -> None:
-    """Keep user-facing example docs aligned with v0.2 build workflows."""
+def test_examples_readme_documents_host_build_workflow() -> None:
+    """Keep user-facing example docs aligned with host build workflows."""
     readme = (EXAMPLES / "README.md").read_text(encoding="utf-8")
 
     assert "[cdh]" in readme
@@ -159,8 +159,8 @@ def test_examples_readme_documents_v02_build_ergonomics() -> None:
     ) in readme
 
 
-def test_user_facing_docs_reject_removed_or_unsupported_feature_claims() -> None:
-    """Prevent stale or unsupported feature claims from returning to docs."""
+def test_user_facing_docs_describe_rendered_context_artifacts() -> None:
+    """Keep docs centered on the current root rendered-context artifacts."""
     docs = [Path("README.md")]
     docs.extend(
         path
@@ -169,36 +169,43 @@ def test_user_facing_docs_reject_removed_or_unsupported_feature_claims() -> None
     )
     user_facing_text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
 
-    forbidden = [
+    assert "config.toml" in user_facing_text
+    assert "config.lock.toml" in user_facing_text
+
+    stale_artifacts = [
         "config/custom-nodes.toml",
         "config/files.toml",
-        "cdh host lock",
-        "--frozen",
         "comfy.lock",
         "helper configs",
-        "[downloader]",
-        "source-side lockfile",
-        "runtime config",
-        "runtime download",
-        "runtime downloads",
-        "runtime entrypoint",
-        "entrypoint",
-        "SSH",
-        "ssh",
-        "async",
-        "default_download_mode",
     ]
-    for text in forbidden:
+    for text in stale_artifacts:
         assert text not in user_facing_text
 
 
-def test_user_facing_docs_do_not_describe_current_behavior_as_v01() -> None:
-    """Keep README/examples from presenting stale v0.1 behavior as current."""
-    docs = [Path("README.md"), EXAMPLES / "README.md", EXAMPLES / "full.toml"]
+def test_user_facing_docs_describe_current_lock_and_downloader_layout() -> None:
+    """Prevent narrow stale lock and downloader layout claims from returning."""
+    docs = [Path("README.md")]
+    docs.extend(
+        path
+        for path in sorted(EXAMPLES.rglob("*"))
+        if path.is_file() and path.suffix in {".md", ".toml", ".sh"}
+    )
+    user_facing_text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
 
-    for path in docs:
-        text = path.read_text(encoding="utf-8")
-        assert "v0.1" not in text
+    assert "--locked" in user_facing_text
+    assert "--upgrade-lock" in user_facing_text
+    assert "[cdh]" in user_facing_text
+    assert "[cdh]" in (EXAMPLES / "full.toml").read_text(encoding="utf-8")
+
+    stale_workflows = [
+        "cdh host lock",
+        "--frozen",
+        "[downloader]",
+        "source-side lockfile",
+        "default_download_mode",
+    ]
+    for text in stale_workflows:
+        assert text not in user_facing_text
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

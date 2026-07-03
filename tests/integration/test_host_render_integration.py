@@ -258,19 +258,36 @@ def _assert_context_tree_shape(context: Path) -> None:
     assert not (context / "config" / "files.toml").exists()
 
 
-def _assert_lock_omits_requested_fields(lock_text: str) -> None:
-    forbidden_fields = (
+def _collect_schema_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {
+            nested_key
+            for nested_value in value.values()
+            for nested_key in _collect_schema_keys(nested_value)
+        }
+    if isinstance(value, list):
+        return {
+            nested_key
+            for nested_value in value
+            for nested_key in _collect_schema_keys(nested_value)
+        }
+    return set()
+
+
+def _assert_lock_uses_resolved_source_schema(lock_data: dict[str, object]) -> None:
+    """Lock artifacts persist resolved source fields, not request selectors."""
+    forbidden_keys = {
         "requested_version",
         "requested_ref",
         "selector",
         "version_selector",
-        "ref =",
-    )
-    for field_name in forbidden_fields:
-        assert field_name not in lock_text
+        "ref",
+    }
+    assert _collect_schema_keys(lock_data).isdisjoint(forbidden_keys)
 
 
 RENDER_FIXTURE_CASES = (
+    # Matrix covers selector forms while keeping all resolver inputs deterministic.
     RenderFixtureCase(
         name="minimal",
         extra_config="",
@@ -398,8 +415,7 @@ def test_host_render_representative_contexts_write_root_artifacts(
 
     rendered_config = _parse_toml(context / "config.toml")
     rendered_lock = _parse_toml(context / "config.lock.toml")
-    lock_text = (context / "config.lock.toml").read_text(encoding="utf-8")
-    _assert_lock_omits_requested_fields(lock_text)
+    _assert_lock_uses_resolved_source_schema(rendered_lock)
 
     comfyui_config = rendered_config["comfyui"]
     comfyui_lock = rendered_lock["comfyui"]
@@ -452,13 +468,8 @@ def test_host_render_representative_contexts_write_root_artifacts(
         assert files.items[0].downloader == "httpx"
 
 
-def test_host_render_lock_modes_reuse_check_refresh_and_no_write_paths(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cover render lock modes at the CLI/artifact boundary."""
-    config = _write_config(
+def _write_registry_latest_config(tmp_path: Path) -> Path:
+    return _write_config(
         tmp_path,
         MINIMAL_CONFIG
         + """
@@ -468,9 +479,19 @@ id = "registry-node"
 version = "latest"
 """,
     )
+
+
+def _render_registry_context(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    version: str = "1.5.0",
+) -> tuple[Path, Path, str, str]:
+    config = _write_registry_latest_config(tmp_path)
     context = tmp_path / "context"
     first_registry = RenderWorkflowRegistryProvider(
-        latest_versions={"registry-node": "1.5.0"}
+        latest_versions={"registry-node": version}
     )
     _install_resolvers(monkeypatch, _resolvers(registry=first_registry))
 
@@ -482,9 +503,23 @@ version = "latest"
     _assert_context_tree_shape(context)
     first_lock = (context / "config.lock.toml").read_text(encoding="utf-8")
     first_dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
-    assert "1.5.0" in first_lock
+    assert version in first_lock
+    return config, context, first_lock, first_dockerfile
 
+
+def test_host_render_locked_reuses_existing_lock_without_resolution(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Locked mode reuses the existing artifact lock at the CLI boundary."""
+    config, context, first_lock, _ = _render_registry_context(
+        cli_runner,
+        tmp_path,
+        monkeypatch,
+    )
     _install_resolvers(monkeypatch, _failing_resolvers())
+
     locked = cli_runner.invoke(
         app,
         [
@@ -501,8 +536,22 @@ version = "latest"
     assert locked.exit_code == 0
     assert (context / "config.lock.toml").read_text(encoding="utf-8") == first_lock
 
+
+def test_host_render_check_mode_is_non_mutating_and_reports_dockerfile_drift(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check mode validates rendered artifacts without modifying caller files."""
+    config, context, first_lock, first_dockerfile = _render_registry_context(
+        cli_runner,
+        tmp_path,
+        monkeypatch,
+    )
     untouched = tmp_path / "untouched.txt"
     untouched.write_text("caller-owned\n", encoding="utf-8")
+
+    _install_resolvers(monkeypatch, _failing_resolvers())
     checked = cli_runner.invoke(
         app,
         ["host", "render", "-f", str(config), "-o", str(context), "--check"],
@@ -523,6 +572,18 @@ version = "latest"
     assert "Dockerfile would be changed by render" in drift_check.stderr
     assert (context / "Dockerfile").read_text(encoding="utf-8") == drifted_dockerfile
 
+
+def test_host_render_upgrade_lock_refreshes_moving_registry_selection(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upgrade mode refreshes moving registry selections in config.lock.toml."""
+    config, context, first_lock, _ = _render_registry_context(
+        cli_runner,
+        tmp_path,
+        monkeypatch,
+    )
     upgraded_registry = RenderWorkflowRegistryProvider(
         latest_versions={"registry-node": "1.6.0"}
     )
@@ -545,8 +606,21 @@ version = "latest"
     assert upgraded_lock != first_lock
     assert "1.6.0" in upgraded_lock
 
+
+def test_host_render_dry_run_writes_no_context_artifacts(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dry-run mode resolves successfully without creating the output context."""
+    config = _write_registry_latest_config(tmp_path)
+    registry = RenderWorkflowRegistryProvider(
+        latest_versions={"registry-node": "1.5.0"}
+    )
+    _install_resolvers(monkeypatch, _resolvers(registry=registry))
     dry_run_context = tmp_path / "dry-run-context"
     before = sorted(item.name for item in tmp_path.iterdir())
+
     dry_run = cli_runner.invoke(
         app,
         ["host", "render", "-f", str(config), "-o", str(dry_run_context), "--dry-run"],

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from comfyui_docker_helper.config import (
 )
 
 _GITHUB_TAG_REFS_PREFIX = "refs/tags/"
+_GIT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,12 +59,16 @@ class GitRemoteProvider:
 
     def get_nightly_commit(self) -> str:
         refs = _run_git(self.git_executable, "ls-remote", COMFYUI_REPO_URL, "HEAD")
-        commit, _ = _split_ls_remote_line(refs.splitlines()[0])
+        commit, _ = _select_single_ls_remote_ref(
+            refs,
+            selector="HEAD",
+            url=COMFYUI_REPO_URL,
+        )
         return commit
 
     def resolve_default_branch_head(self, url: str) -> str:
         refs = _run_git(self.git_executable, "ls-remote", url, "HEAD")
-        commit, _ = _split_ls_remote_line(refs.splitlines()[0])
+        commit, _ = _select_single_ls_remote_ref(refs, selector="HEAD", url=url)
         return commit
 
     def resolve_ref(self, url: str, ref: str) -> str:
@@ -74,7 +80,7 @@ class GitRemoteProvider:
                 selector=ref,
                 reason=f"no remote ref matched url {url!r}",
             )
-        commit, _ = _select_resolved_ref(lines)
+        commit, _ = _select_resolved_ref(lines, selector=ref)
         return commit
 
 
@@ -153,13 +159,28 @@ def create_default_source_resolvers() -> SourceResolvers:
 
 
 def _run_git(git_executable: str, *args: str) -> str:
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "",
+        "GCM_INTERACTIVE": "never",
+        "SSH_ASKPASS": "",
+    }
     try:
         completed = subprocess.run(
             (git_executable, *args),
             text=True,
             capture_output=True,
             check=False,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            env=env,
         )
+    except subprocess.TimeoutExpired as error:
+        raise UpstreamResponseError(
+            source="git",
+            selector=" ".join(args),
+            reason=f"git command timed out after {_GIT_TIMEOUT_SECONDS:g} seconds",
+        ) from error
     except OSError as error:
         raise UpstreamResponseError(
             source="git",
@@ -176,12 +197,49 @@ def _run_git(git_executable: str, *args: str) -> str:
     return completed.stdout
 
 
-def _select_resolved_ref(lines: Sequence[str]) -> tuple[str, str]:
+def _select_single_ls_remote_ref(
+    refs: str,
+    *,
+    selector: str,
+    url: str,
+) -> tuple[str, str]:
+    lines = refs.splitlines()
+    if not lines:
+        raise UpstreamResponseError(
+            source="git ls-remote",
+            selector=selector,
+            reason=f"no remote ref matched url {url!r}",
+        )
+    return _select_resolved_ref(lines, selector=selector)
+
+
+def _select_resolved_ref(lines: Sequence[str], *, selector: str) -> tuple[str, str]:
     resolved_refs = [_split_ls_remote_line(line) for line in lines]
+    _reject_ambiguous_shorthand_ref(resolved_refs, selector)
     for commit, ref in resolved_refs:
         if ref.endswith("^{}"):
             return commit, ref
     return resolved_refs[0]
+
+
+def _reject_ambiguous_shorthand_ref(
+    resolved_refs: Sequence[tuple[str, str]],
+    selector: str,
+) -> None:
+    if selector == "HEAD" or selector.startswith("refs/"):
+        return
+    base_refs = {ref.removesuffix("^{}") for _, ref in resolved_refs}
+    if len(base_refs) <= 1:
+        return
+    formatted_refs = ", ".join(sorted(base_refs))
+    raise UpstreamResponseError(
+        source="git ls-remote",
+        selector=selector,
+        reason=(
+            f"ambiguous remote ref matched {formatted_refs}; "
+            "use a full ref such as refs/heads/name or refs/tags/name"
+        ),
+    )
 
 
 def _get_json(
@@ -249,9 +307,27 @@ def _registry_install_metadata(
     return RegistryInstallMetadata(
         node_id=str(data.get("node_id", data.get("id", node_id))),
         version=resolved_version,
-        active=bool(data.get("active", True)),
-        installable=bool(data.get("installable", True)),
-        deprecated=bool(data.get("deprecated", False)),
+        active=_registry_bool(
+            data,
+            "active",
+            default=True,
+            source="Comfy Registry install",
+            selector=version or "latest",
+        ),
+        installable=_registry_bool(
+            data,
+            "installable",
+            default=True,
+            source="Comfy Registry install",
+            selector=version or "latest",
+        ),
+        deprecated=_registry_bool(
+            data,
+            "deprecated",
+            default=False,
+            source="Comfy Registry install",
+            selector=version or "latest",
+        ),
     )
 
 
@@ -275,7 +351,43 @@ def _registry_version_candidate(
     return RegistryVersionCandidate(
         node_id=str(data.get("node_id", data.get("id", node_id))),
         version=version,
-        active=bool(data.get("active", True)),
-        installable=bool(data.get("installable", True)),
-        deprecated=bool(data.get("deprecated", False)),
+        active=_registry_bool(
+            data,
+            "active",
+            default=True,
+            source="Comfy Registry versions",
+            selector=node_id,
+        ),
+        installable=_registry_bool(
+            data,
+            "installable",
+            default=True,
+            source="Comfy Registry versions",
+            selector=node_id,
+        ),
+        deprecated=_registry_bool(
+            data,
+            "deprecated",
+            default=False,
+            source="Comfy Registry versions",
+            selector=node_id,
+        ),
+    )
+
+
+def _registry_bool(
+    data: Mapping[str, object],
+    field: str,
+    *,
+    default: bool,
+    source: str,
+    selector: str,
+) -> bool:
+    value = data.get(field, default)
+    if isinstance(value, bool):
+        return value
+    raise UpstreamResponseError(
+        source=source,
+        selector=selector,
+        reason=f"response field {field!r} must be a boolean",
     )

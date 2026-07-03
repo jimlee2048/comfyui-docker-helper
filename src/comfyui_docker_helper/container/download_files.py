@@ -111,7 +111,7 @@ class DownloadBackend(Protocol):
 
 
 class HttpxDownloader:
-    """HTTPX streaming downloader with v0.1 retry and tmp-file semantics."""
+    """HTTPX streaming downloader with retries and temporary-file replacement."""
 
     chunk_size = 1024 * 1024
     progress_interval_seconds = 5.0

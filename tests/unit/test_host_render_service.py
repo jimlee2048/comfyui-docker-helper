@@ -483,6 +483,29 @@ def test_check_mode_reports_stale_file_under_scripts_when_hooks_are_present(
         )
 
 
+def test_check_mode_reports_stale_scripts_tree_when_hooks_are_removed(
+    tmp_path: Path,
+) -> None:
+    """Check mode catches a previously managed scripts tree after hooks are removed."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    stale_scripts = output / "scripts"
+    stale_scripts.mkdir()
+    (stale_scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(
+            tmp_path,
+            output=output,
+            options=LockOptions(check=True),
+        )
+    assert [
+        diagnostic.path
+        for diagnostic in error.value.diagnostics
+        if diagnostic.code == "render.check_changed"
+    ] == [("scripts",)]
+
+
 def test_check_mode_reports_symlink_script_when_hooks_are_present(
     tmp_path: Path,
 ) -> None:
@@ -561,7 +584,7 @@ def test_check_mode_ignores_unmanaged_extras_and_keeps_target_unchanged(
 def test_check_mode_reports_retired_helper_projection_config_tree(
     tmp_path: Path,
 ) -> None:
-    """Check mode catches stale v0.1 helper projection paths."""
+    """Check mode catches stale helper projection paths from older layouts."""
     output = tmp_path / "context"
     render_context(tmp_path, output=output)
     old_config = output / "config"
@@ -689,8 +712,8 @@ def test_upgrade_lock_refreshes_moving_source_selections(tmp_path: Path) -> None
     assert lockfile.custom_nodes[1].commit == COMMIT_B
 
 
-def test_old_helper_projections_are_omitted_for_m3_t2(tmp_path: Path) -> None:
-    """M3-T2 renders root artifacts without v0.1 helper projections."""
+def test_retired_helper_projection_files_are_omitted(tmp_path: Path) -> None:
+    """Render writes root artifacts without retired helper projection files."""
     output = tmp_path / "context"
 
     render_context(tmp_path, output=output)

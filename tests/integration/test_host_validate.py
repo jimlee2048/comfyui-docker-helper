@@ -38,7 +38,7 @@ def _write_config(root: Path, document: str = MINIMAL_CONFIG) -> Path:
 
 
 def test_validate_help_exposes_current_options(cli_runner: CliRunner) -> None:
-    """Expose the validate options that are part of the v0.1 CLI contract."""
+    """Expose the current validate options and keep removed aliases hidden."""
     result = cli_runner.invoke(app, ["host", "validate", "--help"])
 
     assert result.exit_code == 0
@@ -195,8 +195,9 @@ download_mode = "sync"
     assert "Configuration has warnings:" in result.stderr
     assert "[cdh.default_download_mode]" in result.stderr
     assert "[files.0.download_mode]" in result.stderr
-    assert "runtime-only in v0.2 host workflows" in result.stderr
-    assert "remove this field" in result.stderr
+    assert "sync download mode is ignored by host commands" in result.stderr
+    assert "remove this field from host" in result.stderr
+    assert "build configuration" in result.stderr
     assert "Configuration is invalid:" not in result.stderr
 
 

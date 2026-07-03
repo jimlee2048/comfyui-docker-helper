@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +19,10 @@ from comfyui_docker_helper.config import (
     RuntimeConfigurationError,
     RuntimeConfigurationResult,
     load_runtime_config,
+)
+from comfyui_docker_helper.container.readiness import (
+    ReadinessError,
+    wait_for_comfyui_readiness,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
@@ -65,7 +70,11 @@ class ChildProcess(Protocol):
 
     def wait(self) -> int: ...
 
+    def poll(self) -> int | None: ...
+
     def send_signal(self, sig: signal.Signals) -> None: ...
+
+    def terminate(self) -> None: ...
 
 
 class RuntimeDownloadRunner(Protocol):
@@ -94,6 +103,17 @@ class RuntimeHookRunner(Protocol):
     ) -> tuple[RuntimeHookResult, ...]: ...
 
 
+class ReadinessWaiter(Protocol):
+    """ComfyUI readiness waiter callable used before post-start hooks."""
+
+    def __call__(
+        self,
+        port: int,
+        *,
+        child: ChildProcess,
+    ) -> object: ...
+
+
 def run_entrypoint(
     *,
     runtime: ContainerRuntime,
@@ -105,6 +125,7 @@ def run_entrypoint(
     runner: EntrypointRunner = subprocess.Popen,
     runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
     runtime_hook_runner: RuntimeHookRunner = run_runtime_hooks,
+    readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
 ) -> int:
     """Load runtime config, run ComfyUI, and return the child exit code."""
     source_env = os.environ if environ is None else environ
@@ -148,6 +169,13 @@ def run_entrypoint(
         raise EntrypointError(f"ComfyUI executable not found: {argv[0]}") from error
     except OSError as error:
         raise EntrypointError(f"ComfyUI failed to start: {error}") from error
+
+    _wait_for_readiness_if_required(
+        hook_plan,
+        config=result.config,
+        child=completed,
+        readiness_waiter=readiness_waiter,
+    )
 
     return _normalize_child_exit_code(_wait_with_signal_forwarding(completed))
 
@@ -240,6 +268,31 @@ def _run_pre_start_hooks(
         raise EntrypointError(
             _format_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
+
+
+def _wait_for_readiness_if_required(
+    hook_plan: RuntimeHookPlan,
+    *,
+    config: RuntimeConfig,
+    child: ChildProcess,
+    readiness_waiter: ReadinessWaiter,
+) -> None:
+    if not hook_plan.for_phase("post-start"):
+        return
+    try:
+        readiness_waiter(config.comfyui.port, child=child)
+    except ReadinessError as error:
+        _terminate_child_if_running(child)
+        raise EntrypointError(
+            _format_diagnostics("ComfyUI readiness failed", error.diagnostics)
+        ) from error
+
+
+def _terminate_child_if_running(child: ChildProcess) -> None:
+    if child.poll() is not None:
+        return
+    with suppress(OSError):
+        child.terminate()
 
 
 def _wait_with_signal_forwarding(child: ChildProcess) -> int:

@@ -8,6 +8,7 @@ import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
+from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
@@ -50,13 +51,20 @@ class FakeChild:
         self.returncode: int | None = None
         self._wait_returncode = returncode
         self.signals: list[signal.Signals] = []
+        self.terminated = False
 
     def wait(self) -> int:
         self.returncode = self._wait_returncode
         return self._wait_returncode
 
+    def poll(self) -> int | None:
+        return self.returncode
+
     def send_signal(self, sig: signal.Signals) -> None:
         self.signals.append(sig)
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 def test_default_argv_uses_runtime_defaults_and_venv_python(tmp_path: Path) -> None:
@@ -628,6 +636,212 @@ def test_absent_hook_roots_do_not_execute_hook_runner(tmp_path: Path) -> None:
     )
 
     assert calls == ["spawn"]
+
+
+def test_readiness_is_skipped_without_post_start_hooks(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    calls: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        calls.append("spawn")
+        return FakeChild(0)
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log
+        calls.append("pre-start")
+        return ()
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port, child
+        raise AssertionError("readiness should not run without post-start hooks")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_hook_runner=runtime_hook_runner,
+            readiness_waiter=readiness_waiter,
+        )
+        == 0
+    )
+
+    assert calls == ["pre-start", "spawn"]
+
+
+def test_readiness_runs_after_spawn_when_post_start_hooks_exist(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted_config = _write(
+        tmp_path / "mounted.toml",
+        """
+[comfyui]
+port = 8299
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        assert port == 8299
+        assert child.poll() is None
+        assert events == ["spawn"]
+        events.append("readiness")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted_config,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+        )
+        == 0
+    )
+
+    assert events == ["spawn", "readiness"]
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_child_exit_before_readiness_is_startup_failure(
+    tmp_path: Path,
+    returncode: int,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    child = FakeChild(returncode)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        child.returncode = returncode
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        raise ReadinessError(
+            (
+                Diagnostic(
+                    path=("readiness",),
+                    code="readiness.child_exited",
+                    message=(
+                        "ComfyUI exited before readiness succeeded "
+                        f"with code {child.poll()}"
+                    ),
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+        )
+
+    assert not child.terminated
+    assert "ComfyUI readiness failed" in str(error.value)
+    assert "readiness.child_exited" in str(error.value)
+    assert f"code {returncode}" in str(error.value)
+
+
+def test_readiness_failure_terminates_child_and_prevents_normal_wait(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    child = FakeChild(0)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        events.append("readiness")
+        assert child.poll() is None
+        raise ReadinessError(
+            (
+                Diagnostic(
+                    path=("readiness",),
+                    code="readiness.timeout",
+                    message="ComfyUI did not become ready before timeout",
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+        )
+
+    assert events == ["spawn", "readiness"]
+    assert child.terminated is True
+    assert child.returncode is None
+    assert "readiness.timeout" in str(error.value)
 
 
 def test_runtime_download_failure_prevents_spawn(tmp_path: Path) -> None:

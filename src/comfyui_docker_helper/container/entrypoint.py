@@ -176,6 +176,13 @@ def run_entrypoint(
         child=completed,
         readiness_waiter=readiness_waiter,
     )
+    _run_post_start_hooks_if_required(
+        hook_plan,
+        runtime=runtime,
+        source_env=source_env,
+        child=completed,
+        runtime_hook_runner=runtime_hook_runner,
+    )
 
     return _normalize_child_exit_code(_wait_with_signal_forwarding(completed))
 
@@ -285,6 +292,31 @@ def _wait_for_readiness_if_required(
         _terminate_child_if_running(child)
         raise EntrypointError(
             _format_diagnostics("ComfyUI readiness failed", error.diagnostics)
+        ) from error
+
+
+def _run_post_start_hooks_if_required(
+    hook_plan: RuntimeHookPlan,
+    *,
+    runtime: ContainerRuntime,
+    source_env: Mapping[str, str],
+    child: ChildProcess,
+    runtime_hook_runner: RuntimeHookRunner,
+) -> None:
+    if not hook_plan.for_phase("post-start"):
+        return
+    try:
+        runtime_hook_runner(
+            hook_plan,
+            "post-start",
+            runtime=runtime,
+            env=source_env,
+            log=print,
+        )
+    except RuntimeHookError as error:
+        _terminate_child_if_running(child)
+        raise EntrypointError(
+            _format_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
 
 

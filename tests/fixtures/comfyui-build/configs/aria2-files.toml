@@ -9,6 +9,7 @@ version = "2.10"
 
 [cdh]
 default_downloader = "aria2"
+default_download_mode = "sync"
 
 [cdh.downloader.aria2]
 rpc_port = 6811
@@ -30,3 +31,4 @@ dir = "models/cdh-smoke"
 filename = "aria2-readme.md"
 overwrite = true
 downloader = "aria2"
+download_mode = "sync"

@@ -20,7 +20,7 @@ EXPECTED_FULL_KEYS = {
     "system.env": {"COMFYUI_PORT", "EXAMPLE_PROFILE"},
     "python": {"version", "uv_version", "index_url", "extra_packages"},
     "pytorch": {"version", "index_base_url", "extra_packages"},
-    "cdh": {"default_downloader", "downloader"},
+    "cdh": {"default_downloader", "default_download_mode", "downloader"},
     "cdh.downloader.httpx": {"timeout", "retries"},
     "cdh.downloader.aria2": {
         "rpc_port",
@@ -39,7 +39,7 @@ EXPECTED_FULL_KEYS = {
         "extra_args",
         "custom_nodes",
     },
-    "files": {"url", "dir", "filename", "overwrite", "downloader"},
+    "files": {"url", "dir", "filename", "overwrite", "downloader", "download_mode"},
 }
 
 
@@ -137,6 +137,7 @@ def test_full_example_documents_host_build_defaults() -> None:
         "registry.example.com/my-comfy:dev",
     ]
     assert document["build"]["output"] == "load"
+    assert document["cdh"]["default_download_mode"] == "sync"
     assert document["python"]["index_url"] == "https://pypi.org/simple"
     assert document["pytorch"]["index_base_url"] == "https://download.pytorch.org/whl"
 
@@ -146,6 +147,7 @@ def test_examples_readme_documents_host_build_workflow() -> None:
     readme = (EXAMPLES / "README.md").read_text(encoding="utf-8")
 
     assert "[cdh]" in readme
+    assert "default_download_mode" in readme
     assert "[build]" in readme
     assert "[build].tags" in readme
     assert "[build].output" in readme
@@ -173,6 +175,8 @@ def test_user_facing_docs_describe_rendered_context_artifacts() -> None:
 
     assert "config.toml" in user_facing_text
     assert "config.lock.toml" in user_facing_text
+    assert "runtime/config.toml" in user_facing_text
+    assert 'ENTRYPOINT ["cdh", "container", "entrypoint"]' in user_facing_text
 
     stale_artifacts = [
         "config/custom-nodes.toml",
@@ -197,6 +201,8 @@ def test_user_facing_docs_describe_current_lock_and_downloader_layout() -> None:
     assert "--locked" in user_facing_text
     assert "--upgrade-lock" in user_facing_text
     assert "[cdh]" in user_facing_text
+    assert "default_download_mode" in user_facing_text
+    assert "CDH_DEFAULT_DOWNLOAD_MODE" in user_facing_text
     assert "[cdh]" in (EXAMPLES / "full.toml").read_text(encoding="utf-8")
 
     stale_workflows = [
@@ -204,7 +210,6 @@ def test_user_facing_docs_describe_current_lock_and_downloader_layout() -> None:
         "--frozen",
         "[downloader]",
         "source-side lockfile",
-        "default_download_mode",
     ]
     for text in stale_workflows:
         assert text not in user_facing_text

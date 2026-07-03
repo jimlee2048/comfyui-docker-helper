@@ -1,6 +1,9 @@
 # comfyui-docker-helper
 
 Build customized ComfyUI Docker images from a declarative TOML configuration.
+Rendered images start through the `cdh` entrypoint so runtime defaults,
+mounted overrides, downloads, lifecycle hooks, and ComfyUI startup arguments are
+handled consistently.
 
 This project targets advanced local users who are already comfortable with
 Docker Buildx, ComfyUI, Python packaging, and build-time Docker diagnostics.
@@ -15,7 +18,9 @@ configuration.
 - Docker with Buildx.
 - BuildKit support for Dockerfile `RUN --mount=type=bind`.
 - Network access during Docker builds for base images, Python packages, ComfyUI,
-  custom nodes, and configured files.
+  custom nodes, and configured files. Container startup may also need network
+  access when effective runtime file downloads target missing files or set
+  `overwrite = true`.
 
 The rendered image installs `aria2` inside the build container. A host-side
 `aria2c` binary is not required unless you are running the optional local smoke
@@ -121,15 +126,19 @@ Rendered contexts are intentionally inspectable. They include:
 - `config.toml`, the validated configuration used for the render;
 - `config.lock.toml`, the resolved source and lock selections used by
   container helpers;
-- `scripts/` only when hook scripts are referenced.
+- `runtime/config.toml`, the runtime-supported defaults baked into the image;
+- `runtime/hooks/` only when runtime lifecycle hooks are supplied;
+- `scripts/` only when custom-node hook scripts are referenced.
 
 The context is retained so you can inspect the Dockerfile, rendered
 configuration, lock file, and scripts after failures.
 
-## Custom-node hooks and scripts
+## Custom-node Hooks and Scripts
 
-Hook scripts referenced by custom nodes must be relative paths ending in `.sh`
-or `.py`. If any hook is referenced, pass the scripts directory:
+Custom-node hook scripts run during image build around custom-node
+installation. Hook paths referenced by custom nodes must be relative paths
+ending in `.sh` or `.py`. If any custom-node hook is referenced, pass the
+scripts directory:
 
 ```bash
 cdh host build \
@@ -138,24 +147,89 @@ cdh host build \
   --scripts-dir ./scripts
 ```
 
-When hooks are present, the whole scripts directory is copied into the build
-context and bind-mounted during the helper step. Keep unrelated sensitive files
-out of that directory.
+When custom-node hooks are present, the whole scripts directory is copied into
+the build context and bind-mounted during the helper step. Keep unrelated
+sensitive files out of that directory.
+
+## Runtime Startup and Overrides
+
+Rendered images use:
+
+```dockerfile
+ENTRYPOINT ["cdh", "container", "entrypoint"]
+```
+
+At container startup, the entrypoint loads runtime defaults in this order:
+
+1. built-in defaults;
+2. baked `/opt/cdh/runtime/config.toml`;
+3. optional mounted `/etc/cdh/runtime/config.toml`;
+4. supported environment overrides.
+
+The baked runtime config contains only runtime-supported fields: `[comfyui]`
+startup values (`listen`, `port`, and `extra_args`), `[cdh]` downloader
+defaults/backend settings, and any `[[files]]` defaults. Host-only build fields
+such as base image, Python, PyTorch, image tags, ComfyUI version selection, and
+custom-node sources are not written into the runtime config.
+
+The entrypoint starts ComfyUI with the effective runtime values:
+
+```bash
+python "$COMFYUI_PATH/main.py" --listen "$LISTEN" --port "$PORT" --disable-auto-launch "${EXTRA_ARGS[@]}"
+```
+
+Supported startup environment overrides are `CDH_COMFYUI_LISTEN`,
+`CDH_COMFYUI_PORT`, `CDH_COMFYUI_EXTRA_ARGS`, `CDH_DEFAULT_DOWNLOADER`, and
+`CDH_DEFAULT_DOWNLOAD_MODE`. Environment overrides replace the corresponding
+runtime defaults; they do not rewrite explicit per-file values.
 
 ## Files and downloaders
 
-Configured files are downloaded during the Docker build by
-`cdh container download-files`. The available download backends are:
+Host `[[files]]` entries are downloaded into the image during Docker build and
+are also baked as runtime defaults. At container startup, effective runtime
+files are processed synchronously before pre-start hooks and before ComfyUI is
+spawned. Existing targets are skipped unless `overwrite = true`; a download
+failure stops the queue and prevents startup.
+
+The available download backends are:
 
 - `httpx` for simple HTTP(S) downloads with retries and temporary-file rename;
-- `aria2` for build-time RPC-controlled downloads with per-file serialization.
+- `aria2` for RPC-controlled downloads with per-file serialization.
 
 Files are processed in configuration order, one active item at a time. Existing
 targets are skipped unless `overwrite = true`. Each file entry must declare an
 explicit `filename`; download targets are not inferred from URLs. Set the
 default downloader under `[cdh]`, and override it per file with `downloader`.
-Configure package indexes with `python.index_url` and
+Set `default_download_mode = "sync"` under `[cdh]` or `download_mode = "sync"`
+per file when you want to be explicit; `sync` is the supported mode. Mounted
+runtime configs merge file entries by normalized target path, with later
+same-target entries taking priority; `files = []` clears earlier runtime file
+defaults. Configure package indexes with `python.index_url` and
 `pytorch.index_base_url`.
+
+## Runtime Lifecycle Hooks
+
+Runtime lifecycle hooks are separate from custom-node build hooks. Pass
+`--hooks-dir <dir>` to `cdh host render` or `cdh host build` to bake a runtime
+hook tree into `/opt/cdh/runtime/hooks`; mount another tree at
+`/etc/cdh/runtime/hooks` to add runtime hook files.
+
+A runtime hook tree can contain these phase directories:
+
+```text
+pre-start.d/
+post-start.d/
+stop.d/
+```
+
+Hook files must be regular `.sh` or `.py` files. Baked hooks are discovered
+before mounted hooks, and hook files run in lexical order within each phase.
+Pre-start hooks run after runtime downloads and before ComfyUI starts. When
+post-start hooks exist, the entrypoint waits for ComfyUI readiness at
+`http://127.0.0.1:<port>/system_stats` before running them. After normal
+startup has completed, a graceful `SIGTERM` or `SIGINT` runs stop hooks before
+forwarding the original signal to ComfyUI; stop-hook failures are logged without
+overriding ComfyUI's final result.
 
 ## Secrets and logs
 
@@ -180,7 +254,7 @@ for real Docker builds:
 | custom node git install with hooks | hook copy/mount and subprocess behavior |
 | httpx file download | local/remote file download path |
 | aria2 file download | real aria2 daemon path |
-| full config | combined nodes, hooks, files, env, CMD, and launch args |
+| full config | combined nodes, hooks, files, env, entrypoint, and startup args |
 
 These commands are resource-heavy. Run them deliberately after checking that
 network, disk, Docker cache, and CUDA base image requirements are acceptable for

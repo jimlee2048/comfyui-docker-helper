@@ -100,7 +100,7 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \\
       -- /tmp/cdh/packages/cdh
 
 WORKDIR /workspace
-CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--disable-auto-launch"]
+CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch"]
 """
 
 _NODE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
@@ -218,7 +218,7 @@ RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
       --lock /tmp/cdh/config.lock.toml
 
 WORKDIR "/work dir/\$cash/\"quote\"/back\\slash"
-CMD ["python", "/opt/Comfy UI/main.py", "--listen", "value \"quoted\" $cash \\ path"]
+CMD ["python", "/opt/Comfy UI/main.py", "--listen", "value \"quoted\" $cash \\ path", "--port", "8190", "--disable-auto-launch", "--preview-method", "auto", "--cpu"]
 """
 
 
@@ -662,7 +662,9 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
     config.comfyui.cli_version = "2.0"
     config.comfyui.version = "v1.2.3"
     config.comfyui.install_manager = True
-    config.comfyui.launch_args = ["--listen", 'value "quoted" $cash \\ path']
+    config.comfyui.listen = 'value "quoted" $cash \\ path'
+    config.comfyui.port = 8190
+    config.comfyui.extra_args = ["--preview-method", "auto", "--cpu"]
     config.comfyui.custom_nodes = [
         RegistryCustomNodeConfig.model_validate(
             {
@@ -695,6 +697,16 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
     assert rendered.endswith(
         f"WORKDIR {serialize_dockerfile_word(config.system.workspace)}\n"
         f"CMD {json.dumps(list(plan.comfyui.launch_command), ensure_ascii=False)}\n"
+    )
+    assert plan.comfyui.launch_command[-8:] == (
+        "--listen",
+        'value "quoted" $cash \\ path',
+        "--port",
+        "8190",
+        "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
     )
 
     ordered_fragments = [

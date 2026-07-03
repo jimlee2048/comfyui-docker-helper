@@ -79,6 +79,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.comfyui.launch_arguments == (
         "--listen",
         "0.0.0.0",
+        "--port",
+        "8188",
         "--disable-auto-launch",
     )
     assert plan.comfyui.launch_command == (
@@ -86,6 +88,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
         "/workspace/ComfyUI/main.py",
         "--listen",
         "0.0.0.0",
+        "--port",
+        "8188",
         "--disable-auto-launch",
     )
     assert plan.custom_nodes.items == ()
@@ -184,7 +188,7 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     config.comfyui.version = "v1.2.3"
     config.comfyui.listen = "127.0.0.1"
     config.comfyui.port = 8190
-    config.comfyui.extra_args = ["--cpu"]
+    config.comfyui.extra_args = ["--preview-method", "auto", "--cpu"]
 
     plan = build_render_plan(config)
 
@@ -211,18 +215,28 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     assert plan.comfyui.version == "1.2.3"
     assert plan.comfyui.listen == "127.0.0.1"
     assert plan.comfyui.port == 8190
-    assert plan.comfyui.extra_arguments == ("--cpu",)
+    assert plan.comfyui.extra_arguments == ("--preview-method", "auto", "--cpu")
     assert plan.comfyui.launch_arguments == (
         "--listen",
-        "0.0.0.0",
+        "127.0.0.1",
+        "--port",
+        "8190",
         "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
     )
     assert plan.comfyui.launch_command == (
         "python",
         "/opt/custom/ComfyUI/main.py",
         "--listen",
-        "0.0.0.0",
+        "127.0.0.1",
+        "--port",
+        "8190",
         "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
     )
     assert plan.layers[5] is Layer.PYTHON_EXTRAS
 

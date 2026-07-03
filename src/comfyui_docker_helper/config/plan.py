@@ -348,7 +348,14 @@ def _build_comfyui_plan(
         install_arguments = (*install_arguments, "--skip-manager")
 
     extra_arguments = tuple(config.comfyui.extra_args)
-    launch_arguments = ("--listen", "0.0.0.0", "--disable-auto-launch")
+    launch_arguments = (
+        "--listen",
+        config.comfyui.listen,
+        "--port",
+        str(config.comfyui.port),
+        "--disable-auto-launch",
+        *extra_arguments,
+    )
     return ComfyUIPlan(
         cli_version=cli_version,
         cli_requirement=(

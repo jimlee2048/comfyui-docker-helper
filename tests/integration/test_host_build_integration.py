@@ -110,7 +110,9 @@ SAFE_VALUE = 'space $cash "quote" \\ backtick` ;'
 
 [comfyui]
 version = "latest"
-launch_args = ["--listen", 'value "quoted" $cash \\ path']
+listen = 'value "quoted" $cash \\ path'
+port = 8190
+extra_args = ["--preview-method", "auto", "--cpu"]
 
 [cdh]
 default_downloader = "httpx"
@@ -289,6 +291,12 @@ def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
                 "/work dir/Comfy UI/main.py",
                 "--listen",
                 'value "quoted" $cash \\ path',
+                "--port",
+                "8190",
+                "--disable-auto-launch",
+                "--preview-method",
+                "auto",
+                "--cpu",
             ],
             ensure_ascii=False,
         )

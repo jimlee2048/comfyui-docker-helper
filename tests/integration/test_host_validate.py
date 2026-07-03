@@ -599,7 +599,7 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             ),
             (
                 "  Launch command: python, /workspace/ComfyUI/main.py, "
-                "--listen, 0.0.0.0, --disable-auto-launch"
+                "--listen, 0.0.0.0, --port, 8188, --disable-auto-launch"
             ),
             "",
             "Environment:",

@@ -99,6 +99,8 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \\
       --index-url https://pypi.org/simple \\
       -- /tmp/cdh/packages/cdh
 
+COPY runtime/config.toml /opt/cdh/runtime/config.toml
+
 WORKDIR /workspace
 CMD ["python", "/workspace/ComfyUI/main.py", "--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch"]
 """
@@ -203,6 +205,8 @@ RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
     uv pip install --python "$VIRTUAL_ENV/bin/python" \
       --index-url https://pypi.org/simple \
       -- /tmp/cdh/packages/cdh
+
+COPY runtime/config.toml /opt/cdh/runtime/config.toml
 
 RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
     --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
@@ -746,7 +750,7 @@ def test_manager_off_adds_skip_manager_to_comfy_install() -> None:
 
 
 def test_build_only_inputs_are_never_persistently_copied() -> None:
-    """Use bind mounts for every generated input and COPY only official uv binaries."""
+    """Use bind mounts for build inputs and only COPY uv plus runtime defaults."""
     config = make_config()
     rendered = render_dockerfile(
         build_render_plan(config),
@@ -754,8 +758,11 @@ def test_build_only_inputs_are_never_persistently_copied() -> None:
     )
 
     copy_lines = [line for line in rendered.splitlines() if line.startswith("COPY ")]
-    assert copy_lines == ["COPY --from=uv /uv /uvx /bin/"]
-    assert "/opt/cdh/" not in rendered
+    assert copy_lines == [
+        "COPY --from=uv /uv /uvx /bin/",
+        "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
+    ]
+    assert "/opt/cdh/runtime/config.toml" in rendered
     assert "COPY packages" not in rendered
     assert "COPY config" not in rendered
     assert "COPY scripts" not in rendered

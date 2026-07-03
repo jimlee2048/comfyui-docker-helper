@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from comfyui_docker_helper.config import (
     RegistryInstallMetadata,
     RegistryVersionCandidate,
     SourceResolvers,
+    load_validate_plan_result,
     parse_lockfile_toml,
 )
 from comfyui_docker_helper.host.buildx import BuildxBuildError, BuildxBuildResult
@@ -198,10 +200,93 @@ def test_build_renders_default_context_and_invokes_buildx(
     assert result.exit_code == 0
     context = tmp_path / ".cdh" / "build" / "current"
     assert has_valid_context_marker(context)
-    assert (context / "Dockerfile").is_file()
     assert calls == [(("demo:dev",), "load", Path(".cdh/build/current"), tmp_path)]
     assert "Build context: .cdh/build/current" in result.stdout
     assert "fake buildx loaded demo:dev" in result.stdout
+
+
+def test_build_uses_one_validated_config_snapshot_for_tags_output_and_render(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not reload config after tags/output have been resolved."""
+    config = write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+listen = "127.0.0.1"
+
+[build]
+tags = ["demo:from-first-load"]
+output = "push"
+""",
+    )
+    context = tmp_path / "context"
+    real_load_validate_plan_result = load_validate_plan_result
+    load_calls = 0
+    build_calls: list[tuple[tuple[str, ...], str]] = []
+
+    def mutating_load(*args, **kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        result = real_load_validate_plan_result(*args, **kwargs)
+        config.write_text("not valid toml = [\n", encoding="utf-8")
+        return result
+
+    def fake_buildx(
+        *,
+        image_tags: tuple[str, ...],
+        output: str,
+        context_dir: Path,
+        cwd: Path,
+        log,
+    ) -> BuildxBuildResult:
+        del context_dir, cwd, log
+        build_calls.append((image_tags, output))
+        return BuildxBuildResult(
+            argv=("docker", "buildx", "build", "--push", *image_tags),
+            context_dir=context,
+            image_tags=image_tags,
+            output=output,
+        )
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.load_validate_plan_result",
+        mutating_load,
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.create_default_source_resolvers",
+        lambda: SourceResolvers(
+            comfyui=BuildWorkflowComfyUIProvider(),
+            comfy_cli=BuildWorkflowComfyCliProvider(),
+            registry=FailingRegistryProvider(),
+            git=FailingGitProvider(),
+        ),
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        fake_buildx,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(context),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert load_calls == 1
+    assert build_calls == [(("demo:from-first-load",), "push")]
+    runtime_config = tomllib.loads((context / "runtime" / "config.toml").read_text())
+    assert runtime_config["comfyui"]["listen"] == "127.0.0.1"
+    assert (context / "Dockerfile").is_file()
 
 
 def test_build_uses_custom_context_dir(

@@ -17,6 +17,10 @@ from comfyui_docker_helper.config.plan import (
     OutputArtifact,
     RenderPlan,
 )
+from comfyui_docker_helper.config.runtime_projection import (
+    RuntimeConfigProjection,
+    project_runtime_config,
+)
 from comfyui_docker_helper.rendering.dockerfile import render_dockerfile
 
 _DEFERRED_MARKER_PATH = PurePosixPath(".cdh-rendered")
@@ -63,6 +67,7 @@ def write_build_context(
     *,
     config: Config | None = None,
     lockfile: Lockfile | None = None,
+    runtime_config: RuntimeConfigProjection | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
     config_file: ConfigInput | None = None,
@@ -94,7 +99,13 @@ def write_build_context(
     try:
         overwrite_existing = _validate_destination_state(output, overwrite=overwrite)
         staging = _create_sibling_directory(output, "staging")
-        materialize_build_context(plan, staging, config=config, lockfile=lockfile)
+        materialize_build_context(
+            plan,
+            staging,
+            config=config,
+            lockfile=lockfile,
+            runtime_config=runtime_config,
+        )
         _write_marker(staging)
         _replace_destination(staging, output, overwrite_existing=overwrite_existing)
     except BaseException:
@@ -130,6 +141,7 @@ def materialize_build_context(
     *,
     config: Config | None = None,
     lockfile: Lockfile | None = None,
+    runtime_config: RuntimeConfigProjection | None = None,
 ) -> None:
     """Populate a caller-owned, existing, empty staging directory.
 
@@ -150,6 +162,11 @@ def materialize_build_context(
         if config is not None and lockfile is not None:
             _write_bytes(destination / "config.toml", serialize_config_toml(config))
             _write_text(destination / "config.lock.toml", dump_lockfile_toml(lockfile))
+            runtime_projection = runtime_config or project_runtime_config(config, {})
+            _write_bytes(
+                destination / "runtime" / "config.toml",
+                runtime_projection.to_toml_bytes(),
+            )
         else:
             raise MaterializationError(
                 "root config and lock artifacts are required for Dockerfile rendering"
@@ -185,6 +202,7 @@ def materialize_expected_build_context(
     *,
     config: Config,
     lockfile: Lockfile,
+    runtime_config: RuntimeConfigProjection | None = None,
 ) -> Iterator[Path]:
     """Yield a temporary marked context containing the expected render output."""
     parent = _resolve_existing_directory(Path(parent_directory), "check parent")
@@ -201,6 +219,7 @@ def materialize_expected_build_context(
                 expected,
                 config=config,
                 lockfile=lockfile,
+                runtime_config=runtime_config,
             )
             _write_marker(expected)
             yield expected

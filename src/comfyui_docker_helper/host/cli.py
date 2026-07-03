@@ -269,6 +269,7 @@ def build(
             lock_options=LockOptions(locked=locked, upgrade_lock=upgrade_lock),
             overwrite=True,
             working_directory=Path.cwd(),
+            configuration_result=validated,
         )
     except (ConfigurationServiceError, HostRenderServiceError) as error:
         render_configuration_diagnostics(

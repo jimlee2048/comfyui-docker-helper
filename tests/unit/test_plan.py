@@ -148,6 +148,7 @@ def test_minimal_manifest_contains_only_always_present_artifacts() -> None:
     assert manifest.always == (
         OutputArtifact("Dockerfile", ArtifactKind.FILE),
         OutputArtifact(".cdh-rendered", ArtifactKind.FILE),
+        OutputArtifact("runtime/config.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/pyproject.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/src", ArtifactKind.TREE),
     )

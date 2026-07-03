@@ -20,6 +20,10 @@ from comfyui_docker_helper.config.plan import (
     RenderPlanValidationError,
     build_render_plan,
 )
+from comfyui_docker_helper.config.runtime_projection import (
+    RuntimeConfigProjection,
+    project_runtime_config,
+)
 
 _CUSTOM_NODE_BRANCHES = frozenset({"git", "registry"})
 type ConfigPath = str | Path
@@ -31,6 +35,8 @@ class ConfigurationResult:
 
     config: Config
     plan: RenderPlan
+    raw_document: dict[str, Any]
+    runtime_config: RuntimeConfigProjection
     warnings: tuple[Diagnostic, ...] = ()
 
 
@@ -70,7 +76,14 @@ def load_validate_plan_result(
         plan = build_render_plan(config, scripts_dir=scripts_dir)
     except RenderPlanValidationError as error:
         raise ConfigurationServiceError(error.diagnostics) from error
-    return ConfigurationResult(config=config, plan=plan, warnings=warnings)
+    runtime_config = project_runtime_config(config, document)
+    return ConfigurationResult(
+        config=config,
+        plan=plan,
+        raw_document=document,
+        runtime_config=runtime_config,
+        warnings=warnings,
+    )
 
 
 def _coerce_config_paths(

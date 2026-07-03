@@ -522,6 +522,7 @@ def _build_output_manifest(
     always = (
         OutputArtifact("Dockerfile", ArtifactKind.FILE),
         OutputArtifact(".cdh-rendered", ArtifactKind.FILE),
+        OutputArtifact("runtime/config.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/pyproject.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/src", ArtifactKind.TREE),
     )

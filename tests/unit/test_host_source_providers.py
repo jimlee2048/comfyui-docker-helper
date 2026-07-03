@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -134,6 +135,110 @@ def test_git_ref_resolution_keeps_lightweight_tag_commit(
     assert commit == COMMIT_A
 
 
+def test_run_git_disables_interactive_prompts_and_sets_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git subprocesses run with non-interactive credential settings."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del args
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(
+            ("git", "ls-remote"),
+            0,
+            stdout=f"{COMMIT_A}\tHEAD\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(provider_module.subprocess, "run", fake_run)
+
+    output = provider_module._run_git("git", "ls-remote", "https://example.com")
+
+    assert output == f"{COMMIT_A}\tHEAD\n"
+    assert calls[0]["timeout"] == provider_module._GIT_TIMEOUT_SECONDS
+    assert calls[0]["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert calls[0]["env"]["GIT_ASKPASS"] == ""
+    assert calls[0]["env"]["GCM_INTERACTIVE"] == "never"
+    assert calls[0]["env"]["SSH_ASKPASS"] == ""
+
+
+def test_run_git_wraps_timeout_as_upstream_response_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git timeouts become user-readable resolver diagnostics."""
+
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        raise subprocess.TimeoutExpired(("git", "ls-remote"), timeout=30)
+
+    monkeypatch.setattr(provider_module.subprocess, "run", fake_run)
+
+    with pytest.raises(UpstreamResponseError) as error:
+        provider_module._run_git("git", "ls-remote", "https://example.com")
+
+    assert error.value.source == "git"
+    assert "timed out" in error.value.reason
+
+
+def test_git_head_resolution_rejects_empty_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEAD resolution reports empty ls-remote output instead of indexing it."""
+    monkeypatch.setattr(provider_module, "_run_git", lambda *args: "")
+
+    with pytest.raises(UpstreamResponseError) as nightly_error:
+        GitRemoteProvider().get_nightly_commit()
+    with pytest.raises(UpstreamResponseError) as default_error:
+        GitRemoteProvider().resolve_default_branch_head("https://example.com/repo.git")
+
+    assert nightly_error.value.source == "git ls-remote"
+    assert "no remote ref matched" in nightly_error.value.reason
+    assert default_error.value.source == "git ls-remote"
+    assert "no remote ref matched" in default_error.value.reason
+
+
+def test_git_shorthand_ref_rejects_branch_tag_ambiguity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shorthand branch/tag collision requires a full ref selector."""
+    refs = "\n".join(
+        [
+            f"{COMMIT_A}\trefs/heads/release",
+            f"{COMMIT_1}\trefs/tags/release",
+            f"{COMMIT_2}\trefs/tags/release^{{}}",
+        ]
+    )
+    monkeypatch.setattr(provider_module, "_run_git", lambda *args: refs)
+
+    with pytest.raises(UpstreamResponseError) as error:
+        GitRemoteProvider().resolve_ref("https://example.com/repo.git", "release")
+
+    assert error.value.source == "git ls-remote"
+    assert "ambiguous remote ref" in error.value.reason
+    assert "refs/heads/name" in error.value.reason
+
+
+def test_git_full_tag_ref_keeps_annotated_tag_peeled_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full tag refs can disambiguate and still use annotated tag peeled commits."""
+    refs = "\n".join(
+        [
+            f"{COMMIT_1}\trefs/tags/release",
+            f"{COMMIT_2}\trefs/tags/release^{{}}",
+        ]
+    )
+    monkeypatch.setattr(provider_module, "_run_git", lambda *args: refs)
+
+    commit = GitRemoteProvider().resolve_ref(
+        "https://example.com/repo.git",
+        "refs/tags/release",
+    )
+
+    assert commit == COMMIT_2
+
+
 def test_pypi_provider_wraps_http_request_errors() -> None:
     """HTTP transport failures become resolver diagnostics."""
     client = FakeHttpClient(
@@ -258,6 +363,67 @@ def test_registry_provider_prefers_version_node_id_over_uuid_id() -> None:
 
     assert versions[0].node_id == "comfyui-custom-scripts"
     assert versions[0].version == "1.2.5"
+
+
+def test_registry_provider_accepts_explicit_boolean_fields() -> None:
+    """Registry boolean fields preserve concrete bool response values."""
+    client = FakeHttpClient(
+        response=FakeResponse(
+            data={
+                "id": "node",
+                "version": "1.0.0",
+                "active": False,
+                "installable": False,
+                "deprecated": True,
+            }
+        )
+    )
+
+    metadata = HttpRegistryProvider(client).get_install_metadata("node")
+
+    assert metadata.active is False
+    assert metadata.installable is False
+    assert metadata.deprecated is True
+
+
+@pytest.mark.parametrize("value", ["false", 0, [], {}])
+@pytest.mark.parametrize("field", ["active", "installable", "deprecated"])
+def test_registry_install_rejects_malformed_boolean_fields(
+    field: str,
+    value: object,
+) -> None:
+    """Registry install bool fields must be booleans, not truthy-cast values."""
+    client = FakeHttpClient(
+        response=FakeResponse(data={"id": "node", "version": "1.0.0", field: value})
+    )
+
+    with pytest.raises(UpstreamResponseError) as error:
+        HttpRegistryProvider(client).get_install_metadata("node")
+
+    assert error.value.source == "Comfy Registry install"
+    assert field in error.value.reason
+    assert "boolean" in error.value.reason
+
+
+@pytest.mark.parametrize("value", ["false", 0, [], {}])
+@pytest.mark.parametrize("field", ["active", "installable", "deprecated"])
+def test_registry_versions_reject_malformed_boolean_fields(
+    field: str,
+    value: object,
+) -> None:
+    """Registry version bool fields must be booleans, not truthy-cast values."""
+    client = FakeHttpClient(
+        response=FakeResponse(
+            data={"versions": [{"id": "node", "version": "1.0.0", field: value}]}
+        )
+    )
+
+    with pytest.raises(UpstreamResponseError) as error:
+        HttpRegistryProvider(client).list_versions("node")
+
+    assert error.value.source == "Comfy Registry versions"
+    assert field in error.value.reason
+    assert "boolean" in error.value.reason
 
 
 def test_registry_provider_rejects_invalid_install_shape() -> None:

@@ -483,6 +483,29 @@ def test_check_mode_reports_stale_file_under_scripts_when_hooks_are_present(
         )
 
 
+def test_check_mode_reports_stale_scripts_tree_when_hooks_are_removed(
+    tmp_path: Path,
+) -> None:
+    """Check mode catches a previously managed scripts tree after hooks are removed."""
+    output = tmp_path / "context"
+    render_context(tmp_path, output=output)
+    stale_scripts = output / "scripts"
+    stale_scripts.mkdir()
+    (stale_scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(
+            tmp_path,
+            output=output,
+            options=LockOptions(check=True),
+        )
+    assert [
+        diagnostic.path
+        for diagnostic in error.value.diagnostics
+        if diagnostic.code == "render.check_changed"
+    ] == [("scripts",)]
+
+
 def test_check_mode_reports_symlink_script_when_hooks_are_present(
     tmp_path: Path,
 ) -> None:

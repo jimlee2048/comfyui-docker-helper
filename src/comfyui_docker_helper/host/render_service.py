@@ -248,8 +248,12 @@ def _actual_only_managed_artifact_diagnostics(
     output_dir: Path,
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
-    for root in _expected_managed_tree_roots(expected_dir):
+    for root in _managed_tree_roots():
         actual_root = output_dir / root
+        if not (expected_dir / root).exists():
+            if actual_root.exists() or actual_root.is_symlink():
+                diagnostics.append(_changed_artifact_diagnostic(root))
+            continue
         if (
             not actual_root.exists()
             or actual_root.is_symlink()
@@ -268,12 +272,8 @@ def _actual_only_managed_artifact_diagnostics(
     return diagnostics
 
 
-def _expected_managed_tree_roots(expected_dir: Path) -> tuple[str, ...]:
-    roots = list(_ALWAYS_MANAGED_TREES)
-    for root in _CONDITIONAL_MANAGED_TREES:
-        if (expected_dir / root).exists():
-            roots.append(root)
-    return tuple(roots)
+def _managed_tree_roots() -> tuple[str, ...]:
+    return (*_ALWAYS_MANAGED_TREES, *_CONDITIONAL_MANAGED_TREES)
 
 
 def _walk_actual_artifacts(root: Path) -> tuple[Path, ...]:

@@ -88,6 +88,7 @@ def run_argv(
     cwd: str | Path,
     env: Mapping[str, str],
     description: str = "command",
+    start_new_session: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an argv subprocess with inherited stdout/stderr and strict failure."""
 
@@ -96,13 +97,15 @@ def run_argv(
         raise ContainerCommandError(f"{description} argv must not be empty")
 
     try:
-        result = subprocess.run(
-            command,
-            cwd=os.fspath(cwd),
-            env=dict(env),
-            shell=False,
-            check=False,
-        )
+        run_kwargs: dict[str, object] = {
+            "cwd": os.fspath(cwd),
+            "env": dict(env),
+            "shell": False,
+            "check": False,
+        }
+        if start_new_session:
+            run_kwargs["start_new_session"] = True
+        result = subprocess.run(command, **run_kwargs)
     except FileNotFoundError as error:
         raise ContainerCommandError(
             f"{description} executable not found: {command[0]}"
@@ -120,6 +123,39 @@ def run_argv(
             exit_code=exit_code,
         )
     return result
+
+
+def start_argv(
+    argv: Sequence[str | os.PathLike[str]],
+    *,
+    cwd: str | Path,
+    env: Mapping[str, str],
+    description: str = "command",
+    start_new_session: bool = False,
+) -> subprocess.Popen[bytes]:
+    """Start an argv subprocess with inherited stdout/stderr."""
+
+    command = [os.fspath(argument) for argument in argv]
+    if not command:
+        raise ContainerCommandError(f"{description} argv must not be empty")
+
+    try:
+        popen_kwargs: dict[str, object] = {
+            "cwd": os.fspath(cwd),
+            "env": dict(env),
+            "shell": False,
+        }
+        if start_new_session:
+            popen_kwargs["start_new_session"] = True
+        return subprocess.Popen(command, **popen_kwargs)
+    except FileNotFoundError as error:
+        raise ContainerCommandError(
+            f"{description} executable not found: {command[0]}"
+        ) from error
+    except OSError as error:
+        raise ContainerCommandError(
+            f"{description} failed to start: {error}"
+        ) from error
 
 
 def run_hook(

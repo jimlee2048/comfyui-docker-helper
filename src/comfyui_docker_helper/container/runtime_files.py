@@ -12,6 +12,19 @@ from pydantic import ValidationError
 
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.container.download_files import (
+    Aria2Downloader,
+    Aria2DownloaderFactory,
+    Aria2DownloadSettings,
+    DownloadBackend,
+    DownloaderSettings,
+    DownloadStatus,
+    FileDownloadItem,
+    HttpxDownloader,
+    HttpxDownloadSettings,
+    Logger,
+)
 
 type RuntimeFilePath = tuple[str | int, ...]
 
@@ -38,6 +51,16 @@ class RuntimeFilePlan:
     items: tuple[RuntimeFilePlanItem, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeFileDownloadResult:
+    """One runtime file backend transfer result."""
+
+    item: RuntimeFilePlanItem
+    backend: Literal["aria2", "httpx"]
+    staging_target: Path
+    status: DownloadStatus
+
+
 class RuntimeFilePlanError(ValueError):
     """Runtime file planning failure represented by stable diagnostics."""
 
@@ -46,6 +69,16 @@ class RuntimeFilePlanError(ValueError):
             raise ValueError("runtime file plan errors require diagnostics")
         self.diagnostics = diagnostics
         super().__init__("runtime file plan is invalid")
+
+
+class RuntimeFileDownloadError(ValueError):
+    """Runtime file download failure represented by stable diagnostics."""
+
+    def __init__(self, diagnostics: tuple[Diagnostic, ...]) -> None:
+        if not diagnostics:
+            raise ValueError("runtime file download errors require diagnostics")
+        self.diagnostics = diagnostics
+        super().__init__("runtime file download is invalid")
 
 
 class _RuntimeFilePatch(ConfigModel):
@@ -119,6 +152,122 @@ def build_runtime_file_plan(
     return RuntimeFilePlan(items=tuple(items))
 
 
+def process_runtime_file_downloads(
+    plan: RuntimeFilePlan,
+    *,
+    config: RuntimeConfig,
+    backends: Mapping[str, DownloadBackend],
+    log: Logger = print,
+) -> tuple[RuntimeFileDownloadResult, ...]:
+    """Transfer runtime files to cdh-owned staging targets."""
+    settings = runtime_downloader_settings(config)
+    results: list[RuntimeFileDownloadResult] = []
+
+    for index, item in enumerate(plan.items, 1):
+        backend_name = _effective_downloader(item, config)
+        staging_target = _runtime_staging_target(item)
+        if item.action == "skip_existing":
+            log(f"Skipping existing runtime file: {item.target}")
+            results.append(
+                RuntimeFileDownloadResult(
+                    item=item,
+                    backend=backend_name,
+                    staging_target=staging_target,
+                    status=DownloadStatus.SKIPPED,
+                )
+            )
+            continue
+
+        try:
+            backend = backends[backend_name]
+        except KeyError as error:
+            raise RuntimeFileDownloadError(
+                (
+                    Diagnostic(
+                        path=("files", index - 1, "downloader"),
+                        code="runtime_file.downloader_unavailable",
+                        message=f"download backend is not configured: {backend_name}",
+                    ),
+                )
+            ) from error
+
+        staging_item = _runtime_staging_download_item(item, backend_name)
+        try:
+            staging_item.target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise RuntimeFileDownloadError(
+                (
+                    Diagnostic(
+                        path=("files", index - 1, "target"),
+                        code="runtime_file.staging_parent_failed",
+                        message=f"staging parent could not be created: {error}",
+                    ),
+                )
+            ) from error
+
+        log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
+        backend.download(staging_item, settings)
+        results.append(
+            RuntimeFileDownloadResult(
+                item=item,
+                backend=backend_name,
+                staging_target=staging_item.target,
+                status=DownloadStatus.DOWNLOADED,
+            )
+        )
+
+    return tuple(results)
+
+
+def download_runtime_files(
+    plan: RuntimeFilePlan,
+    *,
+    config: RuntimeConfig,
+    httpx_downloader: DownloadBackend | None = None,
+    aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
+    log: Logger = print,
+) -> tuple[RuntimeFileDownloadResult, ...]:
+    """Download runtime file plan items through existing backend adapters."""
+    httpx_backend = httpx_downloader or HttpxDownloader(log=log)
+    backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
+
+    if not any(_effective_downloader(item, config) == "aria2" for item in plan.items):
+        return process_runtime_file_downloads(
+            plan,
+            config=config,
+            backends=backends,
+            log=log,
+        )
+
+    with aria2_downloader_factory(log=log) as aria2_backend:
+        backends["aria2"] = aria2_backend
+        return process_runtime_file_downloads(
+            plan,
+            config=config,
+            backends=backends,
+            log=log,
+        )
+
+
+def runtime_downloader_settings(config: RuntimeConfig) -> DownloaderSettings:
+    """Build backend settings from effective runtime config."""
+    downloader = config.cdh.downloader
+    return DownloaderSettings(
+        default=config.cdh.default_downloader,
+        aria2=Aria2DownloadSettings(
+            rpc_port=downloader.aria2.rpc_port,
+            split=downloader.aria2.split,
+            max_connection_per_server=downloader.aria2.max_connection_per_server,
+            min_split_size=downloader.aria2.min_split_size,
+            resume_download=downloader.aria2.resume_download,
+        ),
+        httpx=HttpxDownloadSettings(
+            timeout=downloader.httpx.timeout,
+            retries=downloader.httpx.retries,
+        ),
+    )
+
+
 def merge_runtime_file_items(
     documents: Iterable[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
@@ -163,6 +312,31 @@ def _files_only_document(document: Mapping[str, Any]) -> dict[str, Any]:
     if "files" not in document:
         return {}
     return {"files": document["files"]}
+
+
+def _effective_downloader(
+    item: RuntimeFilePlanItem,
+    config: RuntimeConfig,
+) -> Literal["aria2", "httpx"]:
+    return item.downloader or config.cdh.default_downloader
+
+
+def _runtime_staging_download_item(
+    item: RuntimeFilePlanItem,
+    downloader: Literal["aria2", "httpx"],
+) -> FileDownloadItem:
+    return FileDownloadItem(
+        url=item.url,
+        directory=item.directory,
+        filename=item.filename,
+        target=_runtime_staging_target(item),
+        overwrite=True,
+        downloader=downloader,
+    )
+
+
+def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:
+    return item.target.with_name(f".{item.target.name}.cdh-download")
 
 
 def _merge_key(

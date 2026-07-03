@@ -321,6 +321,30 @@ filename = "model.bin"
     )
 
 
+def test_runtime_file_non_http_url_fails_runtime_validation(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "ftp://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "url"), "runtime_file.invalid_url")
+    ]
+
+
 def test_runtime_file_unsupported_download_mode_fails_schema_validation(
     tmp_path: Path,
 ) -> None:

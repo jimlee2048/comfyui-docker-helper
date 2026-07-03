@@ -16,6 +16,7 @@ from comfyui_docker_helper.config.models import (
     GitCustomNodeConfig,
     RegistryCustomNodeConfig,
 )
+from comfyui_docker_helper.config.url_validation import is_http_url
 
 _CUDA_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
 _SEMVER_PATTERN = re.compile(
@@ -720,7 +721,7 @@ def _validate_dockerfile_source_strings(
 def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
     for index, file in enumerate(config.files):
         file_path: DiagnosticPath = ("files", index)
-        if not _is_http_url(file.url):
+        if not is_http_url(file.url):
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "url"),
@@ -838,21 +839,6 @@ def _is_torch_requirement(package: str) -> bool:
     except InvalidRequirement:
         return package.strip().casefold() == "torch"
     return canonicalize_name(requirement.name) == "torch"
-
-
-def _is_http_url(url: str) -> bool:
-    try:
-        parsed = urlsplit(url)
-        hostname = parsed.hostname
-        _ = parsed.port
-    except ValueError:
-        return False
-    return (
-        parsed.scheme.casefold() in {"http", "https"}
-        and bool(hostname)
-        and "\\" not in parsed.netloc
-        and not any(character.isspace() for character in parsed.netloc)
-    )
 
 
 def _require_http_index_url(

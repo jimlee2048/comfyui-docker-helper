@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.config.models import ConfigModel
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloaderFactory,
@@ -121,6 +122,9 @@ def build_runtime_file_plan(
             config = _RuntimeFileConfig.model_validate(item)
         except ValidationError as error:
             diagnostics.extend(_diagnostics_from_validation_error(error, path))
+            continue
+
+        if not _validate_runtime_file_url(config.url, (*path, "url"), diagnostics):
             continue
 
         normalized = _normalize_runtime_file_path(config, path, diagnostics)
@@ -289,9 +293,15 @@ def merge_runtime_file_items(
             continue
 
         for item in parsed.files:
+            path: RuntimeFilePath = ("files", len(merged))
             item_document = item.model_dump(mode="json", exclude_none=True)
-            key = _merge_key(item, ("files", len(merged)), diagnostics)
-            if key is None:
+            has_valid_url = _validate_runtime_file_url(
+                item.url,
+                (*path, "url"),
+                diagnostics,
+            )
+            key = _merge_key(item, path, diagnostics)
+            if key is None or not has_valid_url:
                 continue
             if key in indexes:
                 merged[indexes[key]] = {**merged[indexes[key]], **item_document}
@@ -302,6 +312,23 @@ def merge_runtime_file_items(
     if diagnostics:
         raise RuntimeFilePlanError(tuple(diagnostics))
     return tuple(merged)
+
+
+def _validate_runtime_file_url(
+    value: str | None,
+    path: RuntimeFilePath,
+    diagnostics: list[Diagnostic],
+) -> bool:
+    if value is None or is_http_url(value):
+        return True
+    diagnostics.append(
+        Diagnostic(
+            path,
+            "runtime_file.invalid_url",
+            "must be an HTTP(S) URL with a host",
+        )
+    )
+    return False
 
 
 def _files_only_document(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -360,7 +387,37 @@ def _prepare_staging_parent(
             )
         ) from error
 
+    _validate_staging_parent(staging_parent, path)
     _cleanup_stale_staging_files(staging_parent)
+
+
+def _validate_staging_parent(
+    staging_parent: Path,
+    path: RuntimeFilePath,
+) -> None:
+    try:
+        mode = staging_parent.lstat().st_mode
+    except OSError as error:
+        raise RuntimeFileDownloadError(
+            (
+                Diagnostic(
+                    path=(*path, "target"),
+                    code="runtime_file.staging_parent_inspect_failed",
+                    message=f"staging parent could not be inspected: {error}",
+                ),
+            )
+        ) from error
+
+    if not stat.S_ISDIR(mode):
+        raise RuntimeFileDownloadError(
+            (
+                Diagnostic(
+                    path=(*path, "target"),
+                    code="runtime_file.staging_parent_invalid",
+                    message="staging parent must be a real directory",
+                ),
+            )
+        )
 
 
 def _place_staged_runtime_file(
@@ -368,16 +425,9 @@ def _place_staged_runtime_file(
     staging_target: Path,
     path: RuntimeFilePath,
 ) -> None:
-    if not staging_target.is_file():
-        raise RuntimeFileDownloadError(
-            (
-                Diagnostic(
-                    path=(*path, "target"),
-                    code="runtime_file.staging_missing",
-                    message="download backend did not produce a regular staging file",
-                ),
-            )
-        )
+    staging_error = _validate_staging_target(staging_target, path)
+    if staging_error is not None:
+        raise RuntimeFileDownloadError((staging_error,))
 
     existing_error = _validate_final_target_before_replace(item, path)
     if existing_error is not None:
@@ -395,6 +445,34 @@ def _place_staged_runtime_file(
                 ),
             )
         ) from error
+
+
+def _validate_staging_target(
+    staging_target: Path,
+    path: RuntimeFilePath,
+) -> Diagnostic | None:
+    try:
+        mode = staging_target.lstat().st_mode
+    except FileNotFoundError:
+        return Diagnostic(
+            path=(*path, "target"),
+            code="runtime_file.staging_missing",
+            message="download backend did not produce a regular staging file",
+        )
+    except OSError as error:
+        return Diagnostic(
+            path=(*path, "target"),
+            code="runtime_file.staging_inspect_failed",
+            message=f"staging file could not be inspected: {error}",
+        )
+
+    if not stat.S_ISREG(mode):
+        return Diagnostic(
+            path=(*path, "target"),
+            code="runtime_file.non_regular_staging",
+            message="download backend did not produce a regular staging file",
+        )
+    return None
 
 
 def _validate_final_target_before_replace(
@@ -428,6 +506,9 @@ def _validate_final_target_before_replace(
 
 
 def _cleanup_stale_staging_files(staging_parent: Path) -> None:
+    if not _is_real_directory(staging_parent):
+        return
+
     try:
         entries = tuple(staging_parent.iterdir())
     except FileNotFoundError:
@@ -446,6 +527,9 @@ def _cleanup_stale_staging_files(staging_parent: Path) -> None:
 
 
 def _cleanup_current_staging(staging_target: Path) -> None:
+    if not _is_real_directory(staging_target.parent):
+        return
+
     for path in (
         staging_target,
         staging_target.with_name(f"{staging_target.name}.tmp"),
@@ -468,6 +552,14 @@ def _is_cdh_staging_artifact(path: Path) -> bool:
         or path.name.endswith(".cdh-download.tmp")
         or path.name.endswith(".cdh-download.aria2")
     )
+
+
+def _is_real_directory(path: Path) -> bool:
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISDIR(mode)
 
 
 def _merge_key(

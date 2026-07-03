@@ -18,6 +18,7 @@ from comfyui_docker_helper.config.diagnostics import (
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import ConfigModel
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.url_validation import is_http_url
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
@@ -345,13 +346,15 @@ def _merge_runtime_file_items(
             continue
 
         for item in parsed.files:
+            path: RuntimeFilePath = ("files", len(merged))
             item_document = item.model_dump(mode="json", exclude_none=True)
-            key = _runtime_file_merge_key(
-                item,
-                ("files", len(merged)),
+            has_valid_url = _validate_runtime_file_url(
+                item.url,
+                (*path, "url"),
                 diagnostics,
             )
-            if key is None:
+            key = _runtime_file_merge_key(item, path, diagnostics)
+            if key is None or not has_valid_url:
                 continue
             if key in indexes:
                 merged[indexes[key]] = {**merged[indexes[key]], **item_document}
@@ -362,6 +365,23 @@ def _merge_runtime_file_items(
     if diagnostics:
         raise RuntimeConfigurationError(tuple(diagnostics))
     return tuple(merged)
+
+
+def _validate_runtime_file_url(
+    value: str | None,
+    path: RuntimeFilePath,
+    diagnostics: list[Diagnostic],
+) -> bool:
+    if value is None or is_http_url(value):
+        return True
+    diagnostics.append(
+        Diagnostic(
+            path,
+            "runtime_file.invalid_url",
+            "must be an HTTP(S) URL with a host",
+        )
+    )
+    return False
 
 
 def _runtime_file_merge_key(

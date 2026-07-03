@@ -826,6 +826,105 @@ def test_runtime_file_download_cleans_only_cdh_owned_staging_files(
     assert (comfyui / "models" / "a.bin").read_bytes() == b"new"
 
 
+def test_runtime_file_download_rejects_symlinked_staging_parent(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    outside = tmp_path / "outside"
+    models = comfyui / "models"
+    models.mkdir(parents=True)
+    outside.mkdir()
+    (models / ".cdh-staging").symlink_to(outside, target_is_directory=True)
+    outside_artifact = outside / "old.bin.cdh-download"
+    outside_artifact.write_bytes(b"keep")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FakeDownloadBackend(payload=b"new")
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.staging_parent_invalid")
+    ]
+    assert backend.calls == []
+    assert outside_artifact.read_bytes() == b"keep"
+    assert not (models / "a.bin").exists()
+
+
+def test_runtime_file_download_rejects_symlinked_staging_file(
+    tmp_path: Path,
+) -> None:
+    class SymlinkBackend(FakeDownloadBackend):
+        def __init__(self, outside_target: Path) -> None:
+            super().__init__()
+            self._outside_target = outside_target
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.symlink_to(self._outside_target)
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = SymlinkBackend(outside)
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.non_regular_staging")
+    ]
+    assert outside.read_bytes() == b"outside"
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not backend.calls[0][0].target.exists()
+
+
 @pytest.mark.parametrize(
     ("directory", "code"),
     [
@@ -886,6 +985,28 @@ def test_runtime_file_plan_rejects_unsafe_filenames(
 
     assert _identities(error.value) == [
         (("files", 0, "filename"), "runtime_file.invalid_filename")
+    ]
+
+
+def test_runtime_file_plan_rejects_non_http_url(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "file:///tmp/a.bin",
+                            "dir": "models",
+                            "filename": "a.bin",
+                        }
+                    ]
+                }
+            ],
+            comfyui_path=tmp_path / "ComfyUI",
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "url"), "runtime_file.invalid_url")
     ]
 
 

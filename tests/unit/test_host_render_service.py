@@ -381,7 +381,7 @@ def test_check_mode_reports_runtime_config_drift(tmp_path: Path) -> None:
     output = tmp_path / "context"
     render_context(tmp_path, output=output)
     (output / "runtime" / "config.toml").write_text(
-        "[comfyui]\nlisten = \"127.0.0.1\"\n",
+        '[comfyui]\nlisten = "127.0.0.1"\n',
         encoding="utf-8",
     )
 

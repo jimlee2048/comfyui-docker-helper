@@ -29,6 +29,15 @@ from comfyui_docker_helper.container.runtime_files import (
     build_runtime_file_plan,
     download_runtime_files,
 )
+from comfyui_docker_helper.container.runtime_hooks import (
+    BAKED_RUNTIME_HOOKS_PATH,
+    MOUNTED_RUNTIME_HOOKS_PATH,
+    RuntimeHookError,
+    RuntimeHookPlan,
+    RuntimeHookResult,
+    discover_runtime_hooks,
+    run_runtime_hooks,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 
@@ -71,14 +80,31 @@ class RuntimeDownloadRunner(Protocol):
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
 
 
+class RuntimeHookRunner(Protocol):
+    """Runtime hook phase runner callable used during startup."""
+
+    def __call__(
+        self,
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]: ...
+
+
 def run_entrypoint(
     *,
     runtime: ContainerRuntime,
     baked_config_path: str | Path = BAKED_RUNTIME_CONFIG_PATH,
     mounted_config_path: str | Path = MOUNTED_RUNTIME_CONFIG_PATH,
+    baked_hooks_path: str | Path = BAKED_RUNTIME_HOOKS_PATH,
+    mounted_hooks_path: str | Path = MOUNTED_RUNTIME_HOOKS_PATH,
     environ: Mapping[str, str] | None = None,
     runner: EntrypointRunner = subprocess.Popen,
     runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
+    runtime_hook_runner: RuntimeHookRunner = run_runtime_hooks,
 ) -> int:
     """Load runtime config, run ComfyUI, and return the child exit code."""
     source_env = os.environ if environ is None else environ
@@ -94,10 +120,20 @@ def run_entrypoint(
         ) from error
 
     _render_runtime_config_warnings(result.warnings)
+    hook_plan = _discover_runtime_hooks(
+        baked_hooks_path=baked_hooks_path,
+        mounted_hooks_path=mounted_hooks_path,
+    )
     _run_runtime_downloads(
         result,
         runtime=runtime,
         runtime_downloader=runtime_downloader,
+    )
+    _run_pre_start_hooks(
+        hook_plan,
+        runtime=runtime,
+        source_env=source_env,
+        runtime_hook_runner=runtime_hook_runner,
     )
 
     argv = build_comfyui_argv(runtime=runtime, config=result.config)
@@ -114,6 +150,25 @@ def run_entrypoint(
         raise EntrypointError(f"ComfyUI failed to start: {error}") from error
 
     return _normalize_child_exit_code(_wait_with_signal_forwarding(completed))
+
+
+def _discover_runtime_hooks(
+    *,
+    baked_hooks_path: str | Path,
+    mounted_hooks_path: str | Path,
+) -> RuntimeHookPlan:
+    try:
+        return discover_runtime_hooks(
+            baked_hooks_path=baked_hooks_path,
+            mounted_hooks_path=mounted_hooks_path,
+        )
+    except RuntimeHookError as error:
+        raise EntrypointError(
+            _format_diagnostics(
+                "runtime hook configuration is invalid",
+                error.diagnostics,
+            )
+        ) from error
 
 
 def build_comfyui_argv(
@@ -162,6 +217,29 @@ def _run_runtime_downloads(
         ) from error
     except ApplicationError as error:
         raise EntrypointError(f"runtime download failed: {error}") from error
+
+
+def _run_pre_start_hooks(
+    hook_plan: RuntimeHookPlan,
+    *,
+    runtime: ContainerRuntime,
+    source_env: Mapping[str, str],
+    runtime_hook_runner: RuntimeHookRunner,
+) -> None:
+    if not hook_plan.for_phase("pre-start"):
+        return
+    try:
+        runtime_hook_runner(
+            hook_plan,
+            "pre-start",
+            runtime=runtime,
+            env=source_env,
+            log=print,
+        )
+    except RuntimeHookError as error:
+        raise EntrypointError(
+            _format_diagnostics("runtime hook failed", error.diagnostics)
+        ) from error
 
 
 def _wait_with_signal_forwarding(child: ChildProcess) -> int:

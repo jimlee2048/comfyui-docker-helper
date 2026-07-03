@@ -15,6 +15,11 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
+from comfyui_docker_helper.container.runtime_hooks import (
+    RuntimeHookError,
+    RuntimeHookPlan,
+    RuntimeHookResult,
+)
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -27,6 +32,14 @@ def _runtime(tmp_path: Path) -> ContainerRuntime:
 
 def _write(path: Path, document: str) -> Path:
     path.write_text(document, encoding="utf-8")
+    return path
+
+
+def _write_hook(root: Path, phase_dir: str, filename: str) -> Path:
+    phase = root / phase_dir
+    phase.mkdir(parents=True, exist_ok=True)
+    path = phase / filename
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
     return path
 
 
@@ -389,6 +402,232 @@ filename = "model.bin"
     )
     assert download_calls[0].items[0].action == "download"
     assert spawn_calls
+
+
+def test_runtime_hook_validation_happens_before_downloads_and_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "notes.txt")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+        )
+
+    assert events == []
+    assert "runtime hook configuration is invalid" in str(error.value)
+    assert "[hooks.mounted.post-start.notes.txt]" in str(error.value)
+    assert "runtime_hook.unsupported_extension" in str(error.value)
+
+
+def test_pre_start_hooks_run_after_downloads_and_before_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        assert events == []
+        events.append("download")
+        return ()
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del runtime, env, log
+        assert phase == "pre-start"
+        assert [hook.filename for hook in plan.for_phase("pre-start")] == ["10-pre.sh"]
+        assert events == ["download"]
+        events.append("pre-start")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+        == 0
+    )
+
+    assert events == ["download", "pre-start", "spawn"]
+
+
+def test_pre_start_hook_failure_prevents_spawn(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log
+        events.append("pre-start")
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "pre-start", "10-pre.sh"),
+                    code="runtime_hook.execution_failed",
+                    message="hook failed in test",
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+
+    assert events == ["pre-start"]
+    assert "runtime hook failed" in str(error.value)
+    assert "[hooks.mounted.pre-start.10-pre.sh]" in str(error.value)
+
+
+def test_absent_hook_roots_do_not_execute_hook_runner(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    calls: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        calls.append("spawn")
+        return FakeChild(0)
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log
+        calls.append("hook")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={},
+            runner=runner,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+        == 0
+    )
+
+    assert calls == ["spawn"]
 
 
 def test_runtime_download_failure_prevents_spawn(tmp_path: Path) -> None:

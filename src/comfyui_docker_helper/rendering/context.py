@@ -50,6 +50,8 @@ _PACKAGE_CACHE_DIRECTORIES = frozenset(
 )
 _PACKAGE_CACHE_SUFFIXES = (".pyc", ".pyo")
 _PACKAGE_METADATA_SUFFIXES = (".dist-info", ".egg-info")
+_RUNTIME_HOOK_PHASE_DIRECTORIES = frozenset({"pre-start.d", "post-start.d", "stop.d"})
+_RUNTIME_HOOK_SUFFIXES = frozenset({".sh", ".py"})
 type ConfigInput = str | Path | Iterable[str | Path]
 
 
@@ -85,14 +87,17 @@ def write_build_context(
     output = _resolve_output_path(Path(output_directory), base)
     config_files = _resolve_config_inputs(config_file, base)
     scripts_source = plan.custom_nodes.scripts_source_dir
+    runtime_hooks_source = plan.runtime_hooks.source_dir
 
     _validate_output_path(
         output,
         working_directory=base,
         config_files=config_files,
         scripts_source=scripts_source,
+        runtime_hooks_source=runtime_hooks_source,
     )
     _validate_scripts_source_tree(plan)
+    _validate_runtime_hooks_source_tree(plan)
     created_parent_directories = _ensure_output_parent(output)
 
     staging: Path | None = None
@@ -153,6 +158,8 @@ def materialize_build_context(
     """
     destination = Path(staging_directory)
     _require_empty_staging_directory(destination)
+    _validate_scripts_source_tree(plan)
+    _validate_runtime_hooks_source_tree(plan)
 
     try:
         if (config is None) != (lockfile is None):
@@ -186,6 +193,18 @@ def materialize_build_context(
                 )
             _copy_plain_tree(scripts_source, destination / "scripts", "scripts")
 
+        if plan.runtime_hooks.has_hooks:
+            hooks_source = plan.runtime_hooks.source_dir
+            if hooks_source is None:
+                raise MaterializationError(
+                    "render plan enables runtime hooks without a hooks source directory"
+                )
+            _copy_plain_tree(
+                hooks_source,
+                destination / "runtime" / "hooks",
+                "runtime hooks",
+            )
+
         _reconcile_manifest(
             destination,
             _root_artifacts(config, lockfile) + plan.output_manifest.all,
@@ -207,6 +226,7 @@ def materialize_expected_build_context(
     """Yield a temporary marked context containing the expected render output."""
     parent = _resolve_existing_directory(Path(parent_directory), "check parent")
     _validate_scripts_source_tree(plan)
+    _validate_runtime_hooks_source_tree(plan)
     try:
         with tempfile.TemporaryDirectory(
             prefix=".cdh-check-",
@@ -297,6 +317,7 @@ def _validate_output_path(
     working_directory: Path,
     config_files: tuple[Path, ...],
     scripts_source: Path | None,
+    runtime_hooks_source: Path | None,
 ) -> None:
     if output == Path(output.anchor):
         raise ContextWriteError("output directory must not be the filesystem root")
@@ -310,6 +331,10 @@ def _validate_output_path(
         )
     if scripts_source is not None:
         protected_paths.append(("scripts source", scripts_source.resolve(strict=False)))
+    if runtime_hooks_source is not None:
+        protected_paths.append(
+            ("runtime hooks source", runtime_hooks_source.resolve(strict=False))
+        )
 
     for label, protected in protected_paths:
         if _is_equal_or_ancestor(output, protected):
@@ -322,6 +347,12 @@ def _validate_output_path(
         if scripts in output.parents:
             raise ContextWriteError(
                 "output directory must not be nested inside the scripts source"
+            )
+    if runtime_hooks_source is not None:
+        runtime_hooks = runtime_hooks_source.resolve(strict=False)
+        if runtime_hooks in output.parents:
+            raise ContextWriteError(
+                "output directory must not be nested inside the runtime hooks source"
             )
 
 
@@ -423,6 +454,58 @@ def _validate_plain_tree(source: Path, label: str) -> None:
         elif not child.is_file():
             raise ContextWriteError(
                 f"{label} tree contains a special file: {child.name}"
+            )
+
+
+def _validate_runtime_hooks_source_tree(plan: RenderPlan) -> None:
+    if not plan.runtime_hooks.has_hooks:
+        return
+    source = plan.runtime_hooks.source_dir
+    if source is None:
+        raise ContextWriteError(
+            "render plan enables runtime hooks without a hooks source directory"
+        )
+    if source.is_symlink() or not source.is_dir():
+        raise ContextWriteError("runtime hooks source must be a real directory")
+    for child in sorted(source.iterdir(), key=lambda item: item.name):
+        if child.is_symlink():
+            raise ContextWriteError(
+                f"runtime hooks source contains a symlink: {child.name}"
+            )
+        if not child.is_dir() and not child.is_file():
+            raise ContextWriteError(
+                f"runtime hooks source contains a special file: {child.name}"
+            )
+        if child.name not in _RUNTIME_HOOK_PHASE_DIRECTORIES:
+            raise ContextWriteError(
+                "runtime hooks source may only contain pre-start.d, "
+                "post-start.d, and stop.d directories"
+            )
+        if not child.is_dir():
+            raise ContextWriteError(
+                f"runtime hook phase entry must be a directory: {child.name}"
+            )
+        _validate_runtime_hook_phase_tree(child, child.name)
+
+
+def _validate_runtime_hook_phase_tree(phase: Path, phase_name: str) -> None:
+    for child in sorted(phase.iterdir(), key=lambda item: item.name):
+        relative = f"{phase_name}/{child.name}"
+        if child.is_symlink():
+            raise ContextWriteError(
+                f"runtime hooks source contains a symlink: {relative}"
+            )
+        if child.is_dir():
+            raise ContextWriteError(
+                f"runtime hook phase entry must be a regular file: {relative}"
+            )
+        if not child.is_file():
+            raise ContextWriteError(
+                f"runtime hooks source contains a special file: {relative}"
+            )
+        if child.suffix not in _RUNTIME_HOOK_SUFFIXES:
+            raise ContextWriteError(
+                f"runtime hook files must end in .sh or .py: {relative}"
             )
 
 

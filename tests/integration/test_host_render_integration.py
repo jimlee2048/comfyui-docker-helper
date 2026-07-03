@@ -232,6 +232,19 @@ def _write_config(root: Path, document: str) -> Path:
     return path
 
 
+def _write_runtime_hooks(root: Path) -> Path:
+    (root / "pre-start.d").mkdir(parents=True)
+    (root / "post-start.d").mkdir()
+    (root / "stop.d").mkdir()
+    (root / "pre-start.d" / "10-pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "post-start.d" / "20-post.py").write_text(
+        "print('post')\n",
+        encoding="utf-8",
+    )
+    (root / "stop.d" / "30-stop.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return root
+
+
 def _parse_toml(path: Path) -> dict[str, object]:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
@@ -469,6 +482,40 @@ def test_host_render_representative_contexts_write_root_artifacts(
         assert files.items[0].downloader == "httpx"
         assert runtime_config["files"][0]["url"] == files.items[0].url
         assert runtime_config["files"][0]["downloader"] == "httpx"
+
+
+def test_host_render_hooks_dir_option_copies_runtime_hooks(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The render CLI copies active runtime hook sources into the context."""
+    _install_resolvers(monkeypatch, _resolvers())
+    config = _write_config(tmp_path, MINIMAL_CONFIG)
+    hooks = _write_runtime_hooks(tmp_path / "runtime-hooks")
+    context = tmp_path / "context"
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(context),
+            "--hooks-dir",
+            str(hooks),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == ""
+    assert (context / "runtime" / "hooks" / "pre-start.d" / "10-pre.sh").read_text(
+        encoding="utf-8"
+    ) == "#!/bin/sh\n"
+    dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
 
 
 def _write_registry_latest_config(tmp_path: Path) -> Path:

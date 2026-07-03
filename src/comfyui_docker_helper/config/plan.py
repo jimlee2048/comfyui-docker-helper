@@ -54,6 +54,7 @@ class ArtifactCondition(StrEnum):
     CUSTOM_NODES = "custom-nodes"
     FILES = "files"
     HOOKS = "hooks"
+    RUNTIME_HOOKS = "runtime-hooks"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +198,14 @@ class FilesPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeHooksPlan:
+    """Host runtime hook source selected for baked image defaults."""
+
+    has_hooks: bool
+    source_dir: Path | None
+
+
+@dataclass(frozen=True, slots=True)
 class BuildArgument:
     """One Docker build argument in specification order."""
 
@@ -239,6 +248,7 @@ class RenderPlan:
     comfyui: ComfyUIPlan
     custom_nodes: CustomNodesPlan
     files: FilesPlan
+    runtime_hooks: RuntimeHooksPlan
     build_arguments: tuple[BuildArgument, ...]
     layers: tuple[Layer, ...]
     output_manifest: OutputManifest
@@ -304,6 +314,7 @@ def build_render_plan(
     )
     custom_nodes = _build_custom_nodes_plan(config, scripts_dir)
     files = _build_files_plan(config, comfyui_path)
+    runtime_hooks = RuntimeHooksPlan(has_hooks=False, source_dir=None)
     build_arguments = _build_arguments(
         config,
         cuda_image_tag,
@@ -325,9 +336,32 @@ def build_render_plan(
         comfyui=comfyui,
         custom_nodes=custom_nodes,
         files=files,
+        runtime_hooks=runtime_hooks,
         build_arguments=build_arguments,
         layers=_build_layers(config),
-        output_manifest=_build_output_manifest(custom_nodes, files),
+        output_manifest=_build_output_manifest(custom_nodes, runtime_hooks),
+    )
+
+
+def with_runtime_hooks_plan(
+    plan: RenderPlan,
+    runtime_hooks: RuntimeHooksPlan,
+) -> RenderPlan:
+    """Return a render plan with host runtime hook materialization attached."""
+    return RenderPlan(
+        base_image=plan.base_image,
+        paths=plan.paths,
+        os_packages=plan.os_packages,
+        environment=plan.environment,
+        python=plan.python,
+        pytorch=plan.pytorch,
+        comfyui=plan.comfyui,
+        custom_nodes=plan.custom_nodes,
+        files=plan.files,
+        runtime_hooks=runtime_hooks,
+        build_arguments=plan.build_arguments,
+        layers=plan.layers,
+        output_manifest=_build_output_manifest(plan.custom_nodes, runtime_hooks),
     )
 
 
@@ -517,7 +551,7 @@ def _build_layers(config: Config) -> tuple[Layer, ...]:
 
 def _build_output_manifest(
     custom_nodes: CustomNodesPlan,
-    files: FilesPlan,
+    runtime_hooks: RuntimeHooksPlan,
 ) -> OutputManifest:
     always = (
         OutputArtifact("Dockerfile", ArtifactKind.FILE),
@@ -533,6 +567,14 @@ def _build_output_manifest(
                 "scripts",
                 ArtifactKind.TREE,
                 ArtifactCondition.HOOKS,
+            )
+        )
+    if runtime_hooks.has_hooks:
+        conditional.append(
+            OutputArtifact(
+                "runtime/hooks",
+                ArtifactKind.TREE,
+                ArtifactCondition.RUNTIME_HOOKS,
             )
         )
     return OutputManifest(always=always, conditional=tuple(conditional))

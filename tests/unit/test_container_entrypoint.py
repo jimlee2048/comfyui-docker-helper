@@ -8,12 +8,18 @@ import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
+from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
     RuntimeFileDownloadError,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
+)
+from comfyui_docker_helper.container.runtime_hooks import (
+    RuntimeHookError,
+    RuntimeHookPlan,
+    RuntimeHookResult,
 )
 
 
@@ -30,6 +36,14 @@ def _write(path: Path, document: str) -> Path:
     return path
 
 
+def _write_hook(root: Path, phase_dir: str, filename: str) -> Path:
+    phase = root / phase_dir
+    phase.mkdir(parents=True, exist_ok=True)
+    path = phase / filename
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    return path
+
+
 class FakeChild:
     """Minimal fake Popen-compatible child process."""
 
@@ -37,13 +51,20 @@ class FakeChild:
         self.returncode: int | None = None
         self._wait_returncode = returncode
         self.signals: list[signal.Signals] = []
+        self.terminated = False
 
     def wait(self) -> int:
         self.returncode = self._wait_returncode
         return self._wait_returncode
 
+    def poll(self) -> int | None:
+        return self.returncode
+
     def send_signal(self, sig: signal.Signals) -> None:
         self.signals.append(sig)
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 def test_default_argv_uses_runtime_defaults_and_venv_python(tmp_path: Path) -> None:
@@ -389,6 +410,646 @@ filename = "model.bin"
     )
     assert download_calls[0].items[0].action == "download"
     assert spawn_calls
+
+
+def test_runtime_hook_validation_happens_before_downloads_and_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "notes.txt")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+        )
+
+    assert events == []
+    assert "runtime hook configuration is invalid" in str(error.value)
+    assert "[hooks.mounted.post-start.notes.txt]" in str(error.value)
+    assert "runtime_hook.unsupported_extension" in str(error.value)
+
+
+def test_pre_start_hooks_run_after_downloads_and_before_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        assert events == []
+        events.append("download")
+        return ()
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del runtime, env, log
+        assert phase == "pre-start"
+        assert [hook.filename for hook in plan.for_phase("pre-start")] == ["10-pre.sh"]
+        assert events == ["download"]
+        events.append("pre-start")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+        == 0
+    )
+
+    assert events == ["download", "pre-start", "spawn"]
+
+
+def test_pre_start_hook_failure_prevents_spawn(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log
+        events.append("pre-start")
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "pre-start", "10-pre.sh"),
+                    code="runtime_hook.execution_failed",
+                    message="hook failed in test",
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+
+    assert events == ["pre-start"]
+    assert "runtime hook failed" in str(error.value)
+    assert "[hooks.mounted.pre-start.10-pre.sh]" in str(error.value)
+
+
+def test_absent_hook_roots_do_not_execute_hook_runner(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    calls: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        calls.append("spawn")
+        return FakeChild(0)
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log
+        calls.append("hook")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={},
+            runner=runner,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+        == 0
+    )
+
+    assert calls == ["spawn"]
+
+
+def test_readiness_is_skipped_without_post_start_hooks(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    calls: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        calls.append("spawn")
+        return FakeChild(0)
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log
+        calls.append("pre-start")
+        return ()
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port, child
+        raise AssertionError("readiness should not run without post-start hooks")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_hook_runner=runtime_hook_runner,
+            readiness_waiter=readiness_waiter,
+        )
+        == 0
+    )
+
+    assert calls == ["pre-start", "spawn"]
+
+
+def test_readiness_runs_after_spawn_when_post_start_hooks_exist(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted_config = _write(
+        tmp_path / "mounted.toml",
+        """
+[comfyui]
+port = 8299
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        assert port == 8299
+        assert child.poll() is None
+        assert events == ["spawn"]
+        events.append("readiness")
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del runtime, env, log
+        assert phase == "post-start"
+        assert [hook.filename for hook in plan.for_phase("post-start")] == [
+            "10-post.sh"
+        ]
+        assert events == ["spawn", "readiness"]
+        events.append("post-start")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted_config,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+        == 0
+    )
+
+    assert events == ["spawn", "readiness", "post-start"]
+
+
+def test_post_start_hooks_run_once_after_readiness_internal_retries(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    readiness_calls: list[list[str]] = []
+    post_start_calls: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return FakeChild(0)
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        assert port == 8188
+        assert child.poll() is None
+        readiness_calls.append(["failed-poll", "failed-poll", "ready"])
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log
+        post_start_calls.append(phase)
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+        == 0
+    )
+
+    assert readiness_calls == [["failed-poll", "failed-poll", "ready"]]
+    assert post_start_calls == ["post-start"]
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_child_exit_before_readiness_is_startup_failure(
+    tmp_path: Path,
+    returncode: int,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    child = FakeChild(returncode)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        child.returncode = returncode
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        raise ReadinessError(
+            (
+                Diagnostic(
+                    path=("readiness",),
+                    code="readiness.child_exited",
+                    message=(
+                        "ComfyUI exited before readiness succeeded "
+                        f"with code {child.poll()}"
+                    ),
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+        )
+
+    assert not child.terminated
+    assert "ComfyUI readiness failed" in str(error.value)
+    assert "readiness.child_exited" in str(error.value)
+    assert f"code {returncode}" in str(error.value)
+
+
+def test_readiness_failure_terminates_child_and_prevents_normal_wait(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    child = FakeChild(0)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        events.append("readiness")
+        assert child.poll() is None
+        raise ReadinessError(
+            (
+                Diagnostic(
+                    path=("readiness",),
+                    code="readiness.timeout",
+                    message="ComfyUI did not become ready before timeout",
+                ),
+            )
+        )
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log
+        events.append("post-start")
+        return ()
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+
+    assert events == ["spawn", "readiness"]
+    assert child.terminated is True
+    assert child.returncode is None
+    assert "readiness.timeout" in str(error.value)
+
+
+def test_post_start_hook_failure_terminates_child_and_prevents_normal_wait(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-fail.sh")
+    child = FakeChild(0)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        assert child.poll() is None
+        events.append("readiness")
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log
+        assert phase == "post-start"
+        events.append("post-start")
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "post-start", "10-fail.sh"),
+                    code="runtime_hook.execution_failed",
+                    message="post hook failed in test",
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+
+    assert events == ["spawn", "readiness", "post-start"]
+    assert child.terminated is True
+    assert child.returncode is None
+    assert "runtime hook failed" in str(error.value)
+    assert "[hooks.mounted.post-start.10-fail.sh]" in str(error.value)
+
+
+def test_post_start_success_returns_natural_child_exit(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    child = FakeChild(17)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        assert child.poll() is None
+        events.append("readiness")
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log
+        assert phase == "post-start"
+        assert events == ["spawn", "readiness"]
+        events.append("post-start")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+        )
+        == 17
+    )
+
+    assert events == ["spawn", "readiness", "post-start"]
+    assert child.terminated is False
 
 
 def test_runtime_download_failure_prevents_spawn(tmp_path: Path) -> None:

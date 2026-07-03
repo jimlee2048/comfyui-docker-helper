@@ -101,6 +101,14 @@ def render(
             metavar="DIR",
         ),
     ] = _DEFAULT_SCRIPTS_DIR,
+    hooks_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--hooks-dir",
+            help="Directory containing runtime lifecycle hook files.",
+            metavar="DIR",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -151,6 +159,7 @@ def render(
             config_files,
             output_dir,
             scripts_dir=scripts_dir,
+            hooks_dir=hooks_dir,
             resolvers=create_default_source_resolvers(),
             lock_options=lock_options,
             overwrite=overwrite,
@@ -218,6 +227,14 @@ def build(
             metavar="DIR",
         ),
     ] = _DEFAULT_SCRIPTS_DIR,
+    hooks_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--hooks-dir",
+            help="Directory containing runtime lifecycle hook files.",
+            metavar="DIR",
+        ),
+    ] = None,
     context_dir: Annotated[
         Path,
         typer.Option(
@@ -265,6 +282,7 @@ def build(
             config_files,
             context_dir,
             scripts_dir=scripts_dir,
+            hooks_dir=hooks_dir,
             resolvers=create_default_source_resolvers(),
             lock_options=LockOptions(locked=locked, upgrade_lock=upgrade_lock),
             overwrite=True,

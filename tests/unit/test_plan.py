@@ -18,7 +18,9 @@ from comfyui_docker_helper.config import (
     RegistryCustomNodeConfig,
     RegistryCustomNodePlan,
     RenderPlanValidationError,
+    RuntimeHooksPlan,
     build_render_plan,
+    with_runtime_hooks_plan,
 )
 
 
@@ -97,6 +99,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.custom_nodes.has_hooks is False
     assert plan.custom_nodes.scripts_source_dir is None
     assert plan.files.items == ()
+    assert plan.runtime_hooks.has_hooks is False
+    assert plan.runtime_hooks.source_dir is None
     assert plan.files.downloader.default == "aria2"
     assert plan.files.downloader.aria2.rpc_port == 6800
     assert plan.files.downloader.aria2.split == 16
@@ -463,6 +467,22 @@ def test_nodes_without_hooks_omit_scripts_artifact() -> None:
     manifest = build_render_plan(config).output_manifest
 
     assert manifest.conditional == ()
+
+
+def test_runtime_hooks_manifest_is_conditional() -> None:
+    """Runtime hook sources add only the managed runtime/hooks tree."""
+    plan = with_runtime_hooks_plan(
+        build_render_plan(make_config()),
+        RuntimeHooksPlan(has_hooks=True, source_dir=Path("/tmp/hooks")),
+    )
+
+    assert plan.output_manifest.conditional == (
+        OutputArtifact(
+            "runtime/hooks",
+            ArtifactKind.TREE,
+            ArtifactCondition.RUNTIME_HOOKS,
+        ),
+    )
 
 
 def test_plan_construction_is_deterministic_and_detached_from_public_mutation() -> None:

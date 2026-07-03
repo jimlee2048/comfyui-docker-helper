@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tomllib
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
@@ -180,6 +181,7 @@ def render_context(
     working_directory: Path | None = None,
     config_content: str = CONFIG,
     scripts_dir: Path | None = None,
+    hooks_dir: Path | None = None,
     resolvers: FakeResolvers | None = None,
     options: LockOptions | None = None,
     overwrite: bool = False,
@@ -191,6 +193,7 @@ def render_context(
         write_config(work, config_content),
         output or tmp_path / "context",
         scripts_dir=scripts_dir or work / "scripts",
+        hooks_dir=hooks_dir,
         resolvers=providers.source_resolvers(),
         lock_options=options,
         overwrite=overwrite,
@@ -237,8 +240,10 @@ def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
         }
     ]
     assert "custom_nodes" not in runtime_data["comfyui"]
+    assert not (output / "runtime" / "hooks").exists()
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
     assert "comfy-cli==1.5.0" in dockerfile
+    assert "COPY runtime/hooks /opt/cdh/runtime/hooks" not in dockerfile
     assert "      --version \\\n      0.26.0 \\" in dockerfile
     expected_verify = (
         'RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && '
@@ -539,6 +544,211 @@ def test_check_mode_reports_stale_scripts_tree_when_hooks_are_removed(
     ] == [("scripts",)]
 
 
+def test_omitted_runtime_hooks_dir_is_copied_when_default_exists(
+    tmp_path: Path,
+) -> None:
+    """An omitted --hooks-dir activates ./hooks when the tree exists."""
+    output = tmp_path / "context"
+    hooks = write_runtime_hook_tree(tmp_path / "hooks")
+
+    render_context(tmp_path, output=output)
+
+    assert (output / "runtime" / "hooks" / "pre-start.d" / "10-pre.sh").read_text(
+        encoding="utf-8"
+    ) == "#!/bin/sh\n"
+    assert (output / "runtime" / "hooks" / "post-start.d" / "20-post.py").read_text(
+        encoding="utf-8"
+    ) == "print('post')\n"
+    assert (output / "runtime" / "hooks" / "stop.d" / "30-stop.sh").is_file()
+    dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
+    assert hooks.resolve() != (output / "runtime" / "hooks").resolve()
+
+
+def test_explicit_runtime_hooks_dir_must_exist(tmp_path: Path) -> None:
+    """An explicit --hooks-dir fails when the source path is missing."""
+    missing = tmp_path / "missing-hooks"
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=missing)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir",), "runtime_hooks.source_not_directory")
+    ]
+
+
+def test_runtime_hooks_reject_unknown_top_level_entries(tmp_path: Path) -> None:
+    """Active runtime hook sources are a closed top-level phase directory set."""
+    hooks = tmp_path / "runtime-hooks"
+    hooks.mkdir()
+    (hooks / "README.md").write_text("not a phase\n", encoding="utf-8")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir", "README.md"), "runtime_hooks.unknown_top_level")
+    ]
+
+
+def test_runtime_hooks_reject_phase_name_as_file(tmp_path: Path) -> None:
+    """Known runtime hook phase entries must be directories."""
+    hooks = tmp_path / "runtime-hooks"
+    hooks.mkdir()
+    (hooks / "pre-start.d").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir", "pre-start.d"), "runtime_hooks.phase_not_directory")
+    ]
+
+
+def test_runtime_hooks_reject_symlinks(tmp_path: Path) -> None:
+    """Runtime hook source trees must not contain symlinks."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported on this platform")
+    hooks = tmp_path / "runtime-hooks"
+    hooks.mkdir()
+    real_phase = tmp_path / "real-pre-start"
+    real_phase.mkdir()
+    (hooks / "pre-start.d").symlink_to(real_phase, target_is_directory=True)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir", "pre-start.d"), "runtime_hooks.symlink")
+    ]
+
+
+def test_runtime_hooks_reject_special_files(tmp_path: Path) -> None:
+    """Runtime hook phase entries must be regular files."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("fifo special files are not supported on this platform")
+    hooks = tmp_path / "runtime-hooks"
+    phase = hooks / "pre-start.d"
+    phase.mkdir(parents=True)
+    os.mkfifo(phase / "pipe.sh")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir", "pre-start.d", "pipe.sh"), "runtime_hooks.special_file")
+    ]
+
+
+def test_runtime_hooks_reject_phase_subdirectories(tmp_path: Path) -> None:
+    """Runtime hook phase entries must not contain nested directories."""
+    hooks = tmp_path / "runtime-hooks"
+    nested = hooks / "pre-start.d" / "nested"
+    nested.mkdir(parents=True)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir", "pre-start.d", "nested"), "runtime_hooks.entry_not_file")
+    ]
+
+
+def test_runtime_hooks_reject_unsupported_extensions(tmp_path: Path) -> None:
+    """Runtime hook phase files must be shell or Python scripts."""
+    hooks = tmp_path / "runtime-hooks"
+    phase = hooks / "pre-start.d"
+    phase.mkdir(parents=True)
+    (phase / "note.txt").write_text("nope\n", encoding="utf-8")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (
+            ("hooks_dir", "pre-start.d", "note.txt"),
+            "runtime_hooks.unsupported_extension",
+        )
+    ]
+
+
+def test_runtime_hooks_reject_output_nested_inside_source(tmp_path: Path) -> None:
+    """Render output must not be nested inside the runtime hook source."""
+    hooks = write_runtime_hook_tree(tmp_path / "runtime-hooks")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, output=hooks / "context", hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("render",), "render.context_write_failed")
+    ]
+    assert "runtime hooks source" in error.value.diagnostics[0].message
+
+
+def test_check_mode_reports_stale_runtime_hooks_tree_when_hooks_are_removed(
+    tmp_path: Path,
+) -> None:
+    """Check mode catches a previously managed runtime hook tree after removal."""
+    output = tmp_path / "context"
+    hooks = write_runtime_hook_tree(tmp_path / "hooks")
+    render_context(tmp_path, output=output)
+    shutil.rmtree(hooks)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, output=output, options=LockOptions(check=True))
+
+    changed_paths = [
+        diagnostic.path
+        for diagnostic in error.value.diagnostics
+        if diagnostic.code == "render.check_changed"
+    ]
+    assert ("runtime", "hooks") in changed_paths
+
+
+def test_check_mode_rejects_runtime_hooks_source_inside_output(
+    tmp_path: Path,
+) -> None:
+    """Check mode must not derive expected hooks from the rendered output."""
+    output = tmp_path / "context"
+    hooks = write_runtime_hook_tree(tmp_path / "hooks")
+    render_context(tmp_path, output=output, hooks_dir=hooks)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(
+            tmp_path,
+            output=output,
+            hooks_dir=output / "runtime" / "hooks",
+            options=LockOptions(check=True),
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("render",), "render.context_write_failed")
+    ]
+    assert "ancestor of runtime hooks source" in error.value.diagnostics[0].message
+
+
+def test_dry_run_rejects_output_nested_inside_runtime_hooks_source(
+    tmp_path: Path,
+) -> None:
+    """Early-return render modes still enforce hook source ancestry safety."""
+    hooks = write_runtime_hook_tree(tmp_path / "hooks")
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(
+            tmp_path,
+            output=hooks / "pre-start.d" / "context",
+            hooks_dir=hooks,
+            options=LockOptions(dry_run=True),
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("render",), "render.context_write_failed")
+    ]
+    assert (
+        "nested inside the runtime hooks source" in error.value.diagnostics[0].message
+    )
+
+
 def test_check_mode_reports_symlink_script_when_hooks_are_present(
     tmp_path: Path,
 ) -> None:
@@ -771,6 +981,27 @@ def file_contents(root: Path) -> dict[str, bytes]:
 def check_temp_dirs(parent: Path) -> list[Path]:
     """Return leaked render-check temporary context directories."""
     return sorted(parent.glob(".cdh-check-*"))
+
+
+def write_runtime_hook_tree(root: Path) -> Path:
+    """Write a valid runtime hook source tree and return its root."""
+    (root / "pre-start.d").mkdir(parents=True)
+    (root / "post-start.d").mkdir()
+    (root / "stop.d").mkdir()
+    (root / "pre-start.d" / "10-pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "post-start.d" / "20-post.py").write_text(
+        "print('post')\n",
+        encoding="utf-8",
+    )
+    (root / "stop.d" / "30-stop.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return root
+
+
+def locations_and_codes(
+    error: HostRenderServiceError,
+) -> list[tuple[tuple[object, ...], str]]:
+    """Return diagnostic paths and codes for concise assertions."""
+    return [(diagnostic.path, diagnostic.code) for diagnostic in error.diagnostics]
 
 
 class pytest_raises_host_error(AbstractContextManager[None]):

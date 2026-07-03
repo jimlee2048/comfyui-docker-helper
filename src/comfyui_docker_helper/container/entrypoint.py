@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -68,6 +69,8 @@ def run_entrypoint(
         raise EntrypointError(
             _format_runtime_config_error(error.diagnostics)
         ) from error
+
+    _render_runtime_config_warnings(result.warnings)
 
     argv = build_comfyui_argv(runtime=runtime, config=result.config)
     try:
@@ -136,6 +139,19 @@ def _format_runtime_config_error(diagnostics: tuple[Diagnostic, ...]) -> str:
             f"{diagnostic.message} ({diagnostic.code})"
         )
     return "\n".join(lines)
+
+
+def _render_runtime_config_warnings(diagnostics: tuple[Diagnostic, ...]) -> None:
+    if not diagnostics:
+        return
+    print("Runtime configuration warnings:", file=sys.stderr)
+    for diagnostic in diagnostics:
+        print(
+            f"[{_format_path(diagnostic.path)}] "
+            f"{diagnostic.message} "
+            f"({diagnostic.code}; severity={diagnostic.severity})",
+            file=sys.stderr,
+        )
 
 
 def _format_path(path: tuple[str | int, ...]) -> str:

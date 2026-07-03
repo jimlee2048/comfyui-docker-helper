@@ -136,6 +136,53 @@ extra_args = ["--cpu"]
     ]
 
 
+def test_runtime_config_warnings_are_printed_before_spawn(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system]
+workspace = "/srv"
+
+[comfyui]
+listen = "127.0.0.1"
+""",
+    )
+    calls: list[list[str]] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        calls.append(list(argv))
+        return FakeChild(0)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert calls
+    assert captured.out == ""
+    assert "Runtime configuration warnings:" in captured.err
+    assert "[system]" in captured.err
+    assert "runtime.host_only_ignored" in captured.err
+    assert "severity=warning" in captured.err
+
+
 @pytest.mark.parametrize("returncode", [0, 17, -15])
 def test_child_exit_code_is_returned(tmp_path: Path, returncode: int) -> None:
     runtime = _runtime(tmp_path)

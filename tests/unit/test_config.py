@@ -96,7 +96,9 @@ output = "push"
 version = "latest"
 cli_version = "latest"
 install_manager = true
-launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+listen = "127.0.0.1"
+port = 8190
+extra_args = ["--cpu"]
 
 [[comfyui.custom_nodes]]
 type = "registry"
@@ -187,7 +189,9 @@ def test_minimal_config_expands_static_defaults(
         "version": "latest",
         "cli_version": "latest",
         "install_manager": True,
-        "launch_args": ["--listen", "0.0.0.0", "--disable-auto-launch"],
+        "listen": "0.0.0.0",
+        "port": 8188,
+        "extra_args": [],
         "custom_nodes": [],
     }
     assert config.files == []
@@ -212,6 +216,9 @@ def test_complete_config_covers_every_top_level_block(
     assert config.pytorch.index_base_url == "https://mirror.example.com/pytorch/whl"
     assert config.python.extra_packages == ["xformers"]
     assert config.pytorch.extra_packages == ["torchvision", "torchaudio"]
+    assert config.comfyui.listen == "127.0.0.1"
+    assert config.comfyui.port == 8190
+    assert config.comfyui.extra_args == ["--cpu"]
     assert isinstance(config.comfyui.custom_nodes[0], RegistryCustomNodeConfig)
     assert isinstance(config.comfyui.custom_nodes[1], GitCustomNodeConfig)
     assert config.comfyui.custom_nodes[1].target_dir == "ComfyUI-Example"
@@ -223,17 +230,13 @@ def test_complete_config_covers_every_top_level_block(
 def test_semantic_lists_preserve_input_order(
     write_config: Callable[[str], Path],
 ) -> None:
-    """Preserve package, launch, node, hook, and file declaration order."""
+    """Preserve package, extra-arg, node, hook, and file declaration order."""
     config = load_config(write_config(COMPLETE_CONFIG))
 
     assert config.system.extra_packages == ["ffmpeg", "libgl1"]
     assert config.python.extra_packages == ["xformers"]
     assert config.pytorch.extra_packages == ["torchvision", "torchaudio"]
-    assert config.comfyui.launch_args == [
-        "--listen",
-        "0.0.0.0",
-        "--disable-auto-launch",
-    ]
+    assert config.comfyui.extra_args == ["--cpu"]
     assert [node.type for node in config.comfyui.custom_nodes] == [
         "registry",
         "git",
@@ -255,16 +258,12 @@ def test_default_factories_do_not_share_mutable_state(
     first.system.extra_packages.append("ffmpeg")
     first.system.env["A"] = "B"
     first.cdh.downloader.aria2.split = 8
-    first.comfyui.launch_args.append("--cpu")
+    first.comfyui.extra_args.append("--cpu")
 
     assert second.system.extra_packages == []
     assert second.system.env == {}
     assert second.cdh.downloader.aria2.split == 16
-    assert second.comfyui.launch_args == [
-        "--listen",
-        "0.0.0.0",
-        "--disable-auto-launch",
-    ]
+    assert second.comfyui.extra_args == []
 
 
 def test_item_models_expand_only_static_defaults(
@@ -363,6 +362,30 @@ default_downloader = "httpx"
     assert config.cdh.default_downloader == "httpx"
 
 
+def test_load_config_replaces_extra_args_during_merge(tmp_path: Path) -> None:
+    """Use ordinary array replacement for ComfyUI passthrough arguments."""
+    base = tmp_path / "base.toml"
+    profile = tmp_path / "profile.toml"
+    base.write_text(
+        MINIMAL_CONFIG
+        + """
+extra_args = ["--cpu", "--verbose"]
+""",
+        encoding="utf-8",
+    )
+    profile.write_text(
+        """
+[comfyui]
+extra_args = ["--preview-method", "auto"]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config([base, profile])
+
+    assert config.comfyui.extra_args == ["--preview-method", "auto"]
+
+
 @pytest.mark.parametrize(
     "model",
     [
@@ -434,6 +457,25 @@ default = "aria2"
 
     assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
         (("downloader",), "extra_forbidden")
+    }
+
+
+def test_old_comfyui_launch_args_is_an_ordinary_unknown_field(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Reject the removed startup field through the generic extra path."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+launch_args = ["--cpu"]
+"""
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        load_config(write_config(document))
+
+    assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
+        (("comfyui", "launch_args"), "extra_forbidden")
     }
 
 

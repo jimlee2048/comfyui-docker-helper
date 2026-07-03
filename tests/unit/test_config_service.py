@@ -209,7 +209,9 @@ EXTRA = "yes"
 extra_packages = ["profile-python"]
 
 [comfyui]
-launch_args = ["--cpu"]
+listen = "127.0.0.1"
+port = 8190
+extra_args = ["--cpu"]
 
 [[comfyui.custom_nodes]]
 type = "registry"
@@ -253,7 +255,9 @@ retries = 7
         ("EXTRA", "yes"),
     ]
     assert plan.python.extra_packages == ("profile-python",)
-    assert plan.comfyui.launch_arguments == ("--cpu",)
+    assert plan.comfyui.listen == "127.0.0.1"
+    assert plan.comfyui.port == 8190
+    assert plan.comfyui.extra_arguments == ("--cpu",)
     assert [(node.type, node.target) for node in plan.custom_nodes.items] == [
         ("registry", "same-registry@2.0.0"),
         ("git", "https://example.com/same.git@old"),
@@ -358,6 +362,40 @@ dir = "models"
         load_validate_plan([base, override])
 
     assert _identities(raised.value) == [(("files", 0, "filename"), "schema.missing")]
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "--listen",
+        "--listen=127.0.0.1",
+        "--port",
+        "--port=8190",
+        "--auto-launch",
+        "--auto-launch=true",
+        "--disable-auto-launch",
+        "--disable-auto-launch=true",
+    ],
+)
+def test_service_rejects_cdh_controlled_comfyui_extra_args(
+    write_config: Callable[[str], Path],
+    argument: str,
+) -> None:
+    """Return stable user-facing diagnostics for cdh-owned startup flags."""
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+extra_args = ["--cpu", "{argument}"]
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan(write_config(document))
+
+    assert _identities(raised.value) == [
+        (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
+    ]
+    assert argument.split("=", maxsplit=1)[0] in raised.value.diagnostics[0].message
 
 
 @pytest.mark.parametrize(

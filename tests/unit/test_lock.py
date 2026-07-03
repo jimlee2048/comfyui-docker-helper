@@ -368,8 +368,8 @@ def test_lockfile_rejects_duplicate_git_urls() -> None:
             id="comfyui-install-manager",
         ),
         pytest.param(
-            lambda config: setattr(config.comfyui, "launch_args", ["--cpu"]),
-            id="comfyui-launch-args",
+            lambda config: setattr(config.comfyui, "extra_args", ["--cpu"]),
+            id="comfyui-extra-args",
         ),
         pytest.param(
             lambda config: setattr(

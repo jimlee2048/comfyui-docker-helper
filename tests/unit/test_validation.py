@@ -251,7 +251,8 @@ def test_environment_names_reject_non_identifiers(name: str) -> None:
         ("pytorch_package", ("pytorch", "extra_packages", 0)),
         ("comfy_cli_version", ("comfyui", "cli_version")),
         ("comfyui_version", ("comfyui", "version")),
-        ("launch_argument", ("comfyui", "launch_args", 0)),
+        ("listen", ("comfyui", "listen")),
+        ("extra_argument", ("comfyui", "extra_args", 0)),
     ],
 )
 def test_dockerfile_bound_strings_reject_source_line_controls(
@@ -326,10 +327,41 @@ def _set_dockerfile_bound_value(
     if field == "comfyui_version":
         config.comfyui.version = value
         return ("comfyui", "version")
-    if field == "launch_argument":
-        config.comfyui.launch_args = [value]
-        return ("comfyui", "launch_args", 0)
+    if field == "listen":
+        config.comfyui.listen = value
+        return ("comfyui", "listen")
+    if field == "extra_argument":
+        config.comfyui.extra_args = [value]
+        return ("comfyui", "extra_args", 0)
     raise AssertionError(f"unknown test field: {field}")
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "--listen",
+        "--listen=127.0.0.1",
+        "--port",
+        "--port=8190",
+        "--auto-launch",
+        "--auto-launch=true",
+        "--disable-auto-launch",
+        "--disable-auto-launch=true",
+    ],
+)
+def test_comfyui_extra_args_reject_cdh_controlled_startup_flags(
+    argument: str,
+) -> None:
+    """Keep cdh-owned startup flags out of passthrough ComfyUI arguments."""
+    config = make_config()
+    config.comfyui.extra_args = ["--cpu", argument]
+
+    diagnostics = validate_config(config)
+
+    assert locations_and_codes(diagnostics) == [
+        (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
+    ]
+    assert argument.split("=", maxsplit=1)[0] in diagnostics[0].message
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ import pytest
 
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
 from comfyui_docker_helper.container.download_files import (
+    DownloadCancelled,
     DownloaderSettings,
     DownloadFilesError,
     FileDownloadItem,
@@ -94,6 +95,24 @@ class FakeManagedDownloadBackend(FakeDownloadBackend):
     ) -> None:
         del exc_type, exc_value, traceback
         self.exited = True
+
+
+class FakeCancellableDownloadBackend(FakeDownloadBackend):
+    def __init__(self, payload: bytes = b"downloaded") -> None:
+        super().__init__(payload=payload)
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class FakeCancellableManagedDownloadBackend(FakeManagedDownloadBackend):
+    def __init__(self, payload: bytes = b"downloaded") -> None:
+        super().__init__(payload=payload)
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
 
 class FakeAria2Factory:
@@ -924,6 +943,337 @@ def test_runtime_file_download_selects_explicit_backend_before_default(
     assert aria2_backend.calls[0][0].target == _staging_target(plan.items[1])
     assert httpx_backend.calls[0][0].target != results[0].item.target
     assert aria2_backend.calls[0][0].target != results[1].item.target
+
+
+def test_runtime_file_cancel_before_first_attempt_leaves_backend_and_state_untouched(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FakeCancellableDownloadBackend()
+    observed_states: list[str] = []
+    observed_backends: list[object] = []
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": backend},
+        log=lambda message: None,
+        state_observer=lambda item, status, error=None: observed_states.append(status),
+        cancel_requested=lambda: True,
+        backend_observer=observed_backends.append,
+    )
+
+    assert results == ()
+    assert backend.calls == []
+    assert observed_states == []
+    assert observed_backends == []
+    assert not (comfyui / "models" / "a.bin").exists()
+
+
+def test_runtime_file_cancel_after_downloading_begins_does_not_exhaust(
+    tmp_path: Path,
+) -> None:
+    class CancellingBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            raise DownloadCancelled("cancelled in test")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = CancellingBackend()
+    observed_states: list[str] = []
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": backend},
+        log=lambda message: None,
+        state_observer=lambda item, status, error=None: observed_states.append(status),
+    )
+
+    assert results == ()
+    assert observed_states == ["downloading"]
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not _staging_target(plan.items[0]).exists()
+
+
+def test_runtime_file_httpx_style_cancel_error_does_not_fail_or_exhaust(
+    tmp_path: Path,
+) -> None:
+    class HttpxInterruptedBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            nonlocal cancel_requested
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            cancel_requested = True
+            raise TransferDownloadFilesError("transport closed during cancellation")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    cancel_requested = False
+    backend = HttpxInterruptedBackend()
+    observed_states: list[str] = []
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate(
+            {
+                "cdh": {
+                    "default_downloader": "httpx",
+                    "download_max_attempts": 2,
+                }
+            }
+        ),
+        backends={"httpx": backend},
+        log=lambda message: None,
+        state_observer=lambda item, status, error=None: observed_states.append(status),
+        cancel_requested=lambda: cancel_requested,
+    )
+
+    assert results == ()
+    assert observed_states == ["downloading"]
+    assert [call[0].filename for call in backend.calls] == ["a.bin"]
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not _staging_target(plan.items[0]).exists()
+
+
+def test_runtime_file_aria2_style_cancel_error_does_not_exhaust(
+    tmp_path: Path,
+) -> None:
+    class Aria2InterruptedBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            nonlocal cancel_requested
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            cancel_requested = True
+            raise DownloadFilesError("aria2 RPC disconnected during cancellation")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "downloader": "aria2",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    cancel_requested = False
+    backend = Aria2InterruptedBackend()
+    observed_states: list[str] = []
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate(
+            {
+                "cdh": {
+                    "download_max_attempts": 2,
+                    "download_failure_policy": "fail",
+                }
+            }
+        ),
+        backends={"aria2": backend},
+        log=lambda message: None,
+        state_observer=lambda item, status, error=None: observed_states.append(status),
+        cancel_requested=lambda: cancel_requested,
+    )
+
+    assert results == ()
+    assert observed_states == ["downloading"]
+    assert [call[0].filename for call in backend.calls] == ["a.bin"]
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not _staging_target(plan.items[0]).exists()
+
+
+def test_runtime_file_cancel_after_transfer_before_final_placement_cleans_staging(
+    tmp_path: Path,
+) -> None:
+    class CancelAfterTransferBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            nonlocal cancel_after_transfer
+            super().download(item, settings)
+            cancel_after_transfer = True
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    cancel_after_transfer = False
+    backend = CancelAfterTransferBackend(payload=b"downloaded")
+    observed_states: list[str] = []
+
+    def state_observer(
+        item: RuntimeFilePlanItem,
+        status: str,
+        *,
+        error: object | None = None,
+    ) -> None:
+        del item, error
+        observed_states.append(status)
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": backend},
+        log=lambda message: None,
+        state_observer=state_observer,
+        cancel_requested=lambda: cancel_after_transfer,
+    )
+
+    assert results == ()
+    assert observed_states == ["downloading"]
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not _staging_target(plan.items[0]).exists()
+
+
+def test_download_runtime_files_observes_cancellable_httpx_backend(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "downloader": "httpx",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FakeCancellableDownloadBackend()
+    observed_backends: list[object] = []
+
+    download_runtime_files(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        httpx_downloader=backend,
+        log=lambda message: None,
+        backend_observer=observed_backends.append,
+    )
+
+    assert observed_backends == [backend]
+
+
+def test_download_runtime_files_observes_cancellable_aria2_backend(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "downloader": "aria2",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    httpx_backend = FakeCancellableDownloadBackend()
+    aria2_backend = FakeCancellableManagedDownloadBackend()
+    factory = FakeAria2Factory(aria2_backend)
+    observed_backends: list[object] = []
+
+    download_runtime_files(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        httpx_downloader=httpx_backend,
+        aria2_downloader_factory=factory,
+        log=lambda message: None,
+        backend_observer=observed_backends.append,
+    )
+
+    assert observed_backends == [httpx_backend, aria2_backend]
 
 
 def test_runtime_file_download_uses_runtime_downloader_settings(

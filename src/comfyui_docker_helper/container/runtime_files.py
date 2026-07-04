@@ -31,6 +31,7 @@ from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloadBackend,
     DownloadBackendPreparer,
+    DownloadCancelled,
     DownloaderSettings,
     DownloadStatus,
     FileDownloadItem,
@@ -53,6 +54,8 @@ _CDH_STAGING_ARTIFACT_RE = re.compile(r"^cdh-[0-9a-f]{64}\.part(?:\..+)?$")
 type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeStagingClock = Callable[[], float]
 type RuntimeDownloadStartupObserver = Callable[[], None]
+type RuntimeDownloadCancelRequested = Callable[[], bool]
+type RuntimeDownloadBackendObserver = Callable[[DownloadBackend], None]
 type RuntimeDownloadObservedStatus = Literal[
     "downloading",
     "failed",
@@ -148,6 +151,10 @@ class RuntimeFileDownloadError(ValueError):
         super().__init__("runtime file download is invalid")
 
 
+class RuntimeFileDownloadCancelled(Exception):
+    """Runtime download work stopped after a cooperative cancellation request."""
+
+
 class _RuntimeFilePatch(ConfigModel):
     dir: str
     filename: str
@@ -231,15 +238,20 @@ def process_runtime_file_downloads(
     log: Logger = print,
     staging_cleanup_clock: RuntimeStagingClock = time.time,
     state_observer: RuntimeDownloadStateObserver | None = None,
+    cancel_requested: RuntimeDownloadCancelRequested | None = None,
+    backend_observer: RuntimeDownloadBackendObserver | None = None,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Transfer runtime files to cdh-owned staging targets."""
     settings = runtime_downloader_settings(config)
+    is_cancelled = cancel_requested or _runtime_download_not_cancelled
     results: list[RuntimeFileDownloadResult] = []
     current_staging_targets = tuple(
         _runtime_staging_target(item) for item in plan.items
     )
 
     for index, item in enumerate(plan.items, 1):
+        if is_cancelled():
+            break
         backend_name = _effective_downloader(item, config)
         staging_target = _runtime_staging_target(item)
         if item.action == "skip_existing":
@@ -282,6 +294,7 @@ def process_runtime_file_downloads(
         log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
         transfer_completed = False
         try:
+            _observe_cancellable_runtime_backend(backend, backend_observer)
             _download_runtime_file_with_policy(
                 item,
                 staging_item,
@@ -291,8 +304,10 @@ def process_runtime_file_downloads(
                 config=config,
                 log=log,
                 state_observer=state_observer,
+                cancel_requested=is_cancelled,
             )
             transfer_completed = True
+            _raise_if_runtime_download_cancelled(is_cancelled)
             _place_staged_runtime_file(item, staging_item.target, ("files", index - 1))
             if not item.target.is_file() or item.target.is_symlink():
                 raise RuntimeFileDownloadError(
@@ -312,6 +327,10 @@ def process_runtime_file_downloads(
             _cleanup_current_staging(staging_item.target)
             _remove_empty_staging_parent(staging_item.target.parent)
             continue
+        except RuntimeFileDownloadCancelled:
+            _cleanup_current_staging(staging_item.target)
+            _remove_empty_staging_parent(staging_item.target.parent)
+            break
         except Exception as error:
             if transfer_completed:
                 _notify_runtime_download_state(
@@ -513,12 +532,21 @@ def download_runtime_files(
     staging_cleanup_clock: RuntimeStagingClock = time.time,
     state_observer: RuntimeDownloadStateObserver | None = None,
     startup_observer: RuntimeDownloadStartupObserver | None = None,
+    cancel_requested: RuntimeDownloadCancelRequested | None = None,
+    backend_observer: RuntimeDownloadBackendObserver | None = None,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
+    is_cancelled = cancel_requested or _runtime_download_not_cancelled
+    observed_backend_ids: set[int] = set()
+    observe_backend = _runtime_backend_observer_once(
+        backend_observer,
+        observed_backend_ids,
+    )
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 
     if not _requires_aria2_backend(plan, config):
+        _observe_cancellable_runtime_backend(httpx_backend, observe_backend)
         if startup_observer is not None:
             _prepare_runtime_download_backends(plan, config=config, backends=backends)
         _notify_runtime_download_startup(startup_observer)
@@ -529,10 +557,14 @@ def download_runtime_files(
             log=log,
             staging_cleanup_clock=staging_cleanup_clock,
             state_observer=state_observer,
+            cancel_requested=is_cancelled,
+            backend_observer=observe_backend,
         )
 
     with aria2_downloader_factory(log=log) as aria2_backend:
         backends["aria2"] = aria2_backend
+        _observe_cancellable_runtime_backend(httpx_backend, observe_backend)
+        _observe_cancellable_runtime_backend(aria2_backend, observe_backend)
         if startup_observer is not None:
             _prepare_runtime_download_backends(plan, config=config, backends=backends)
         _notify_runtime_download_startup(startup_observer)
@@ -543,6 +575,8 @@ def download_runtime_files(
             log=log,
             staging_cleanup_clock=staging_cleanup_clock,
             state_observer=state_observer,
+            cancel_requested=is_cancelled,
+            backend_observer=observe_backend,
         )
 
 
@@ -609,10 +643,12 @@ def _download_runtime_file_with_policy(
     config: RuntimeConfig,
     log: Logger,
     state_observer: RuntimeDownloadStateObserver | None,
+    cancel_requested: RuntimeDownloadCancelRequested,
 ) -> None:
     attempt_settings = _single_runtime_attempt_settings(settings)
     attempts = config.cdh.download_max_attempts
     for attempt in range(1, attempts + 1):
+        _raise_if_runtime_download_cancelled(cancel_requested)
         if _runtime_attempt_requires_clean_staging(staging_item, settings):
             _cleanup_current_staging(staging_item.target)
         if _runtime_resume_state_blocks_backend(staging_item, settings):
@@ -627,9 +663,16 @@ def _download_runtime_file_with_policy(
             )
         try:
             _notify_runtime_download_state(state_observer, item, "downloading")
+            _raise_if_runtime_download_cancelled(cancel_requested)
             backend.download(staging_item, attempt_settings)
+            _raise_if_runtime_download_cancelled(cancel_requested)
             return
+        except RuntimeFileDownloadCancelled:
+            raise
+        except DownloadCancelled as error:
+            raise RuntimeFileDownloadCancelled from error
         except TransferDownloadFilesError as error:
+            _raise_if_runtime_download_cancelled(cancel_requested)
             if attempt < attempts:
                 _notify_runtime_download_state(
                     state_observer,
@@ -667,6 +710,7 @@ def _download_runtime_file_with_policy(
                 )
             ) from error
         except Exception as error:
+            _raise_if_runtime_download_cancelled(cancel_requested)
             _notify_runtime_download_state(
                 state_observer,
                 item,
@@ -674,6 +718,43 @@ def _download_runtime_file_with_policy(
                 error=error,
             )
             raise
+
+
+def _runtime_download_not_cancelled() -> bool:
+    return False
+
+
+def _raise_if_runtime_download_cancelled(
+    cancel_requested: RuntimeDownloadCancelRequested,
+) -> None:
+    if cancel_requested():
+        raise RuntimeFileDownloadCancelled
+
+
+def _observe_cancellable_runtime_backend(
+    backend: DownloadBackend,
+    backend_observer: RuntimeDownloadBackendObserver | None,
+) -> None:
+    if backend_observer is None or not callable(getattr(backend, "cancel", None)):
+        return
+    backend_observer(backend)
+
+
+def _runtime_backend_observer_once(
+    backend_observer: RuntimeDownloadBackendObserver | None,
+    observed_backend_ids: set[int],
+) -> RuntimeDownloadBackendObserver | None:
+    if backend_observer is None:
+        return None
+
+    def observe(backend: DownloadBackend) -> None:
+        identity = id(backend)
+        if identity in observed_backend_ids:
+            return
+        observed_backend_ids.add(identity)
+        backend_observer(backend)
+
+    return observe
 
 
 def _notify_runtime_download_state(

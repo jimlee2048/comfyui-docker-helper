@@ -71,6 +71,8 @@ from comfyui_docker_helper.errors import ApplicationError
 
 CHILD_TERMINATION_REAP_GRACE_SECONDS = 2.0
 CHILD_REAP_POLL_INTERVAL_SECONDS = 0.1
+ASYNC_QUEUE_STOP_TIMEOUT_SECONDS = 5.0
+ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS = 0.05
 
 
 class EntrypointError(ApplicationError):
@@ -128,7 +130,19 @@ class RuntimeAsyncQueueStarter(Protocol):
         runtime: ContainerRuntime,
         runtime_state_path: Path,
         log: Logger,
-    ) -> object | None: ...
+    ) -> RuntimeAsyncDownloadQueueHandle | None: ...
+
+
+class RuntimeAsyncDownloadQueueHandle(Protocol):
+    """Async runtime download queue handle used during shutdown."""
+
+    def request_stop(self) -> None: ...
+
+    def terminate_backends(self) -> None: ...
+
+    def join(self, timeout: float | None = None) -> None: ...
+
+    def is_alive(self) -> bool: ...
 
 
 class RuntimeHookRunner(Protocol):
@@ -187,9 +201,27 @@ class _RuntimeAsyncDownloadQueueHandle:
 
     thread: threading.Thread
     accepted: threading.Event
+    stop_requested: threading.Event
+    backends: list[object]
+    backends_lock: threading.Lock
+
+    def request_stop(self) -> None:
+        self.stop_requested.set()
+
+    def terminate_backends(self) -> None:
+        with self.backends_lock:
+            backends = tuple(self.backends)
+        for backend in backends:
+            cancel = getattr(backend, "cancel", None)
+            if callable(cancel):
+                with suppress(Exception):
+                    cancel()
 
     def join(self, timeout: float | None = None) -> None:
         self.thread.join(timeout)
+
+    def is_alive(self) -> bool:
+        return self.thread.is_alive()
 
 
 def start_runtime_async_download_queue(
@@ -210,11 +242,19 @@ def start_runtime_async_download_queue(
 
     state_writer = _RuntimeDownloadStateWriter(runtime_state_path, state)
     accepted = threading.Event()
+    stop_requested = threading.Event()
     startup_finished = threading.Event()
     startup_error: list[BaseException] = []
+    backends: list[object] = []
+    backends_lock = threading.Lock()
 
     def accept_queue() -> None:
         accepted.set()
+
+    def observe_backend(backend: object) -> None:
+        with backends_lock:
+            if not any(registered is backend for registered in backends):
+                backends.append(backend)
 
     def worker() -> None:
         try:
@@ -224,6 +264,8 @@ def start_runtime_async_download_queue(
                 log=log,
                 state_observer=state_writer,
                 startup_observer=accept_queue,
+                cancel_requested=stop_requested.is_set,
+                backend_observer=observe_backend,
             )
         except Exception as error:
             if not accepted.is_set():
@@ -250,7 +292,13 @@ def start_runtime_async_download_queue(
         error = startup_error[0] if startup_error else RuntimeError("worker exited")
         raise RuntimeAsyncQueueStartupError(str(error)) from error
 
-    return _RuntimeAsyncDownloadQueueHandle(thread=thread, accepted=accepted)
+    return _RuntimeAsyncDownloadQueueHandle(
+        thread=thread,
+        accepted=accepted,
+        stop_requested=stop_requested,
+        backends=backends,
+        backends_lock=backends_lock,
+    )
 
 
 def _validate_async_download_state_entries(
@@ -303,6 +351,7 @@ def run_entrypoint(
     )
     startup_shutdown = _StartupShutdownState()
     with _startup_shutdown_signal_handlers(startup_shutdown):
+        async_handle: RuntimeAsyncDownloadQueueHandle | None = None
         try:
             download_queues = _run_runtime_downloads(
                 result,
@@ -321,7 +370,7 @@ def run_entrypoint(
             )
             if startup_shutdown.requested_signal is not None:
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
-            _start_runtime_async_download_queue(
+            async_handle = _start_runtime_async_download_queue(
                 download_queues.async_plan,
                 config=result.config,
                 runtime=runtime,
@@ -329,8 +378,16 @@ def run_entrypoint(
                 runtime_async_queue_starter=runtime_async_queue_starter,
             )
             if startup_shutdown.requested_signal is not None:
+                _stop_runtime_async_download_queue_for_startup(
+                    async_handle,
+                    startup_shutdown=startup_shutdown,
+                )
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
         except _StartupShutdownRequested as request:
+            _stop_runtime_async_download_queue_for_startup(
+                async_handle,
+                startup_shutdown=startup_shutdown,
+            )
             return _normalize_signal_exit_code(request.sig)
 
         completed: ChildProcess | None = None
@@ -338,11 +395,19 @@ def run_entrypoint(
             startup_shutdown.raise_on_signal = False
             try:
                 if startup_shutdown.requested_signal is not None:
+                    _stop_runtime_async_download_queue_for_startup(
+                        async_handle,
+                        startup_shutdown=startup_shutdown,
+                    )
                     return _normalize_signal_exit_code(
                         startup_shutdown.requested_signal
                     )
                 argv = build_comfyui_argv(runtime=runtime, config=result.config)
                 if startup_shutdown.requested_signal is not None:
+                    _stop_runtime_async_download_queue_for_startup(
+                        async_handle,
+                        startup_shutdown=startup_shutdown,
+                    )
                     return _normalize_signal_exit_code(
                         startup_shutdown.requested_signal
                     )
@@ -355,6 +420,10 @@ def run_entrypoint(
                     )
                 except FileNotFoundError as error:
                     if startup_shutdown.requested_signal is not None:
+                        _stop_runtime_async_download_queue_for_startup(
+                            async_handle,
+                            startup_shutdown=startup_shutdown,
+                        )
                         return _normalize_signal_exit_code(
                             startup_shutdown.requested_signal
                         )
@@ -363,6 +432,10 @@ def run_entrypoint(
                     ) from error
                 except OSError as error:
                     if startup_shutdown.requested_signal is not None:
+                        _stop_runtime_async_download_queue_for_startup(
+                            async_handle,
+                            startup_shutdown=startup_shutdown,
+                        )
                         return _normalize_signal_exit_code(
                             startup_shutdown.requested_signal
                         )
@@ -370,6 +443,10 @@ def run_entrypoint(
                         f"ComfyUI failed to start: {error}"
                     ) from error
                 if startup_shutdown.requested_signal is not None:
+                    _stop_runtime_async_download_queue_for_startup(
+                        async_handle,
+                        startup_shutdown=startup_shutdown,
+                    )
                     return _forward_startup_shutdown_to_child(
                         completed,
                         startup_shutdown.requested_signal,
@@ -378,6 +455,10 @@ def run_entrypoint(
                 startup_shutdown.raise_on_signal = True
 
             if startup_shutdown.requested_signal is not None:
+                _stop_runtime_async_download_queue_for_startup(
+                    async_handle,
+                    startup_shutdown=startup_shutdown,
+                )
                 return _forward_startup_shutdown_to_child(
                     completed,
                     startup_shutdown.requested_signal,
@@ -397,13 +478,25 @@ def run_entrypoint(
                 startup_shutdown=startup_shutdown,
             )
             if startup_shutdown.requested_signal is not None:
+                _stop_runtime_async_download_queue_for_startup(
+                    async_handle,
+                    startup_shutdown=startup_shutdown,
+                )
                 return _forward_startup_shutdown_to_child(
                     completed,
                     startup_shutdown.requested_signal,
                 )
         except _StartupShutdownRequested as request:
             if completed is None:
+                _stop_runtime_async_download_queue_for_startup(
+                    async_handle,
+                    startup_shutdown=startup_shutdown,
+                )
                 return _normalize_signal_exit_code(request.sig)
+            _stop_runtime_async_download_queue_for_startup(
+                async_handle,
+                startup_shutdown=startup_shutdown,
+            )
             return _forward_startup_shutdown_to_child(completed, request.sig)
 
     assert completed is not None
@@ -414,6 +507,7 @@ def run_entrypoint(
             runtime=runtime,
             source_env=source_env,
             runtime_stop_hook_runner=runtime_stop_hook_runner,
+            async_handle=async_handle,
         )
     )
 
@@ -566,11 +660,11 @@ def _start_runtime_async_download_queue(
     runtime: ContainerRuntime,
     runtime_state_path: Path,
     runtime_async_queue_starter: RuntimeAsyncQueueStarter,
-) -> None:
+) -> RuntimeAsyncDownloadQueueHandle | None:
     if not plan.items:
-        return
+        return None
     try:
-        runtime_async_queue_starter(
+        return runtime_async_queue_starter(
             plan,
             config=config,
             runtime=runtime,
@@ -581,6 +675,51 @@ def _start_runtime_async_download_queue(
         raise EntrypointError(
             f"async runtime download queue failed to start: {error}"
         ) from error
+
+
+def _stop_runtime_async_download_queue(
+    handle: RuntimeAsyncDownloadQueueHandle | None,
+    *,
+    cancel_requested: Callable[[], bool],
+    timeout: float = ASYNC_QUEUE_STOP_TIMEOUT_SECONDS,
+    poll_interval: float = ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], object] = time.sleep,
+) -> bool:
+    if handle is None or not handle.is_alive():
+        return True
+
+    handle.request_stop()
+    deadline = monotonic() + timeout
+    while handle.is_alive():
+        if cancel_requested():
+            handle.terminate_backends()
+            return False
+        now = monotonic()
+        if now >= deadline:
+            print("WARNING: async runtime download worker did not stop in time")
+            handle.terminate_backends()
+            return False
+        handle.join(timeout=min(poll_interval, deadline - now))
+        if handle.is_alive():
+            sleep(0)
+    return True
+
+
+def _stop_runtime_async_download_queue_for_startup(
+    handle: RuntimeAsyncDownloadQueueHandle | None,
+    *,
+    startup_shutdown: _StartupShutdownState,
+) -> bool:
+    previous_raise_on_signal = startup_shutdown.raise_on_signal
+    startup_shutdown.raise_on_signal = False
+    try:
+        return _stop_runtime_async_download_queue(
+            handle,
+            cancel_requested=startup_shutdown.repeated_signal_requested,
+        )
+    finally:
+        startup_shutdown.raise_on_signal = previous_raise_on_signal
 
 
 def _call_runtime_downloader(
@@ -799,16 +938,22 @@ class _StartupShutdownState:
 
     def __init__(self) -> None:
         self.requested_signal: signal.Signals | None = None
+        self.repeated_signal = False
         self.raise_on_signal = True
 
     def request_shutdown(self, sig: signal.Signals) -> None:
         if self.requested_signal is None:
             self.requested_signal = sig
+        else:
+            self.repeated_signal = True
         if self.raise_on_signal:
             raise _StartupShutdownRequested(self.requested_signal)
 
     def cancel_requested(self) -> bool:
         return self.requested_signal is not None
+
+    def repeated_signal_requested(self) -> bool:
+        return self.repeated_signal
 
 
 @contextmanager
@@ -874,6 +1019,7 @@ def _wait_with_signal_forwarding(
     runtime: ContainerRuntime,
     source_env: Mapping[str, str],
     runtime_stop_hook_runner: RuntimeStopHookRunner,
+    async_handle: RuntimeAsyncDownloadQueueHandle | None = None,
 ) -> int:
     previous_handlers = {
         sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
@@ -896,13 +1042,18 @@ def _wait_with_signal_forwarding(
         try:
             return child.wait()
         except _ShutdownRequested as request:
-            _run_stop_hooks_before_signal(
-                hook_plan,
-                runtime=runtime,
-                source_env=source_env,
-                runtime_stop_hook_runner=runtime_stop_hook_runner,
+            _stop_runtime_async_download_queue(
+                async_handle,
                 cancel_requested=shutdown_state.stop_hooks_cancelled,
             )
+            if not shutdown_state.stop_hooks_cancelled():
+                _run_stop_hooks_before_signal(
+                    hook_plan,
+                    runtime=runtime,
+                    source_env=source_env,
+                    runtime_stop_hook_runner=runtime_stop_hook_runner,
+                    cancel_requested=shutdown_state.stop_hooks_cancelled,
+                )
             if child.poll() is None:
                 child.send_signal(request.sig)
             return child.wait()

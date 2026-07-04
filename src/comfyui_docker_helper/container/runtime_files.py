@@ -1,4 +1,4 @@
-"""Internal runtime file download planning for future entrypoint phases."""
+"""Internal runtime file download planning for the container entrypoint."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ type RuntimeFilePath = tuple[str | int, ...]
 
 @dataclass(frozen=True, slots=True)
 class RuntimeFilePlanItem:
-    """One normalized runtime file target for later download execution."""
+    """One normalized runtime file target for download execution."""
 
     url: str
     directory: str

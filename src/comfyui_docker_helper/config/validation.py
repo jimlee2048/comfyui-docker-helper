@@ -149,7 +149,7 @@ def _normalize_version_constraint(
     *,
     allow_local_versions: bool = True,
 ) -> str:
-    """Validate supported PEP 440 comparison syntax for future stable resolution."""
+    """Validate supported PEP 440 comparison syntax for stable resolution."""
     if any(token in version for token in _UNSUPPORTED_VERSION_CONSTRAINT_TOKENS):
         raise ValueError("must use only ==, !=, <, <=, >, >= comparison constraints")
     if "*" in version:

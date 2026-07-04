@@ -109,12 +109,12 @@ def test_missing_roots_have_no_hooks(tmp_path: Path) -> None:
     assert plan.for_phase("pre-start") == ()
 
 
-def test_unknown_root_entries_and_future_phase_dirs_are_ignored(tmp_path: Path) -> None:
+def test_unknown_root_entries_and_phase_dirs_are_ignored(tmp_path: Path) -> None:
     baked = tmp_path / "baked"
     baked.mkdir()
     (baked / "README.md").write_text("ignored\n", encoding="utf-8")
-    (baked / "future-start.d").mkdir()
-    (baked / "future-start.d" / "bad.txt").write_text("ignored\n", encoding="utf-8")
+    (baked / "unknown-start.d").mkdir()
+    (baked / "unknown-start.d" / "bad.txt").write_text("ignored\n", encoding="utf-8")
     _write_hook(baked, "pre-start.d", "10-pre.sh")
 
     plan = discover_runtime_hooks(

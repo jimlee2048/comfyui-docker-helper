@@ -14,8 +14,7 @@ app = typer.Typer(
     cls=ApplicationGroup,
     name="cdh",
     help=(
-        "Choose whether cdh commands run on the host machine or inside Docker "
-        "build containers."
+        "Choose whether cdh commands run on the host machine or inside ComfyUI images."
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -48,5 +47,5 @@ app.add_typer(host_app, name="host", help="commands executed on the host machine
 app.add_typer(
     container_app,
     name="container",
-    help="helpers executed inside Docker build containers",
+    help="helpers executed inside ComfyUI images",
 )

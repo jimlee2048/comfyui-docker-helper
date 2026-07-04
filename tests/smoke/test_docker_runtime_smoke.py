@@ -43,18 +43,18 @@ CONTAINER_STOP_TIMEOUT_SECONDS = 120.0
 COMFYUI_NIGHTLY_COMMIT = "77917ed3a6291689e5c2ee8ccbdd6708e85a53a6"
 
 
-def test_v03_image_entrypoint_readiness_hooks_and_sigterm(tmp_path: Path) -> None:
+def test_runtime_entrypoint_readiness_hooks_and_sigterm(tmp_path: Path) -> None:
     """Build and run a minimal image through the real cdh PID 1 entrypoint."""
     _require_command("docker")
 
     suffix = uuid.uuid4().hex[:12]
     image_tag = os.environ.get(
         "CDH_DOCKER_SMOKE_TAG",
-        f"cdh-m6-t3-smoke:{suffix}",
+        f"cdh-runtime-entrypoint-smoke:{suffix}",
     )
     container_name = os.environ.get(
         "CDH_DOCKER_SMOKE_CONTAINER",
-        f"cdh-m6-t3-smoke-{suffix}",
+        f"cdh-runtime-entrypoint-smoke-{suffix}",
     )
     _validate_smoke_resource_names(image_tag, container_name)
     context_dir = tmp_path / "context"
@@ -183,11 +183,13 @@ extra_args = ["--cpu"]
 
 
 def _validate_smoke_resource_names(image_tag: str, container_name: str) -> None:
-    if not image_tag.startswith("cdh-m6-t3-smoke:"):
-        raise AssertionError("CDH_DOCKER_SMOKE_TAG must start with 'cdh-m6-t3-smoke:'")
-    if not container_name.startswith("cdh-m6-t3-smoke-"):
+    if not image_tag.startswith("cdh-runtime-entrypoint-smoke:"):
         raise AssertionError(
-            "CDH_DOCKER_SMOKE_CONTAINER must start with 'cdh-m6-t3-smoke-'"
+            "CDH_DOCKER_SMOKE_TAG must start with 'cdh-runtime-entrypoint-smoke:'"
+        )
+    if not container_name.startswith("cdh-runtime-entrypoint-smoke-"):
+        raise AssertionError(
+            "CDH_DOCKER_SMOKE_CONTAINER must start with 'cdh-runtime-entrypoint-smoke-'"
         )
 
 

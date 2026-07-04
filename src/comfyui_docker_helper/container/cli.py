@@ -15,7 +15,7 @@ from comfyui_docker_helper.container.runners import ContainerRuntime
 
 app = typer.Typer(
     name="container",
-    help="Run build-time helpers inside the image build container.",
+    help="Run image-internal build and runtime helpers.",
     no_args_is_help=True,
     add_completion=False,
     context_settings=HELP_CONTEXT_SETTINGS,
@@ -54,7 +54,7 @@ def install_custom_nodes_command(
         ),
     ] = None,
 ) -> None:
-    """Install configured custom nodes inside the build container."""
+    """Install configured custom nodes during image build."""
 
     install_custom_nodes(
         config,
@@ -83,7 +83,7 @@ def download_files_command(
         ),
     ],
 ) -> None:
-    """Download configured files inside the build container."""
+    """Download configured files during image build."""
 
     runtime = ContainerRuntime.from_env()
     download_files(config, lock, comfyui_path=runtime.comfyui_path)

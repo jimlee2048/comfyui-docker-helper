@@ -7,8 +7,11 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
+from inspect import Parameter, signature
 from pathlib import Path
 from types import FrameType
 from typing import Protocol
@@ -29,12 +32,17 @@ from comfyui_docker_helper.container.readiness import (
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
+    RuntimeDownloadObservedStatus,
+    RuntimeDownloadStateObserver,
     RuntimeFileDownloadError,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
     RuntimeFilePlanError,
+    RuntimeFilePlanItem,
     build_runtime_file_plan,
     download_runtime_files,
+    reconcile_runtime_file_plan,
+    runtime_file_identity_digest,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     BAKED_RUNTIME_HOOKS_PATH,
@@ -45,6 +53,16 @@ from comfyui_docker_helper.container.runtime_hooks import (
     discover_runtime_hooks,
     run_runtime_startup_hooks,
     run_runtime_stop_hooks,
+)
+from comfyui_docker_helper.container.runtime_state import (
+    RUNTIME_STATE_PATH,
+    RuntimeDownloadEntry,
+    RuntimeDownloadsState,
+    RuntimeState,
+    RuntimeStateError,
+    failed_runtime_download_entry,
+    prepare_runtime_state_for_start,
+    write_runtime_state,
 )
 from comfyui_docker_helper.errors import ApplicationError
 
@@ -92,6 +110,7 @@ class RuntimeDownloadRunner(Protocol):
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
 
 
@@ -148,6 +167,7 @@ def run_entrypoint(
     runtime_hook_runner: RuntimeHookRunner = run_runtime_startup_hooks,
     runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
+    runtime_state_path: str | Path = RUNTIME_STATE_PATH,
 ) -> int:
     """Load runtime config, run ComfyUI, and return the child exit code."""
     source_env = os.environ if environ is None else environ
@@ -174,6 +194,7 @@ def run_entrypoint(
                 result,
                 runtime=runtime,
                 runtime_downloader=runtime_downloader,
+                runtime_state_path=runtime_state_path,
             )
             if startup_shutdown.requested_signal is not None:
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
@@ -317,6 +338,7 @@ def _run_runtime_downloads(
     *,
     runtime: ContainerRuntime,
     runtime_downloader: RuntimeDownloadRunner,
+    runtime_state_path: str | Path,
 ) -> None:
     if not result.files:
         return
@@ -326,19 +348,170 @@ def _run_runtime_downloads(
             ({"files": list(result.files)},),
             comfyui_path=runtime.comfyui_path,
         )
-        runtime_downloader(plan, config=result.config, log=print)
+        _activate_runtime_file_plan(
+            plan,
+            config=result.config,
+            runtime=runtime,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=Path(runtime_state_path),
+        )
     except RuntimeFilePlanError as error:
         raise EntrypointError(
             _format_diagnostics(
                 "runtime file configuration is invalid", error.diagnostics
             )
         ) from error
+    except RuntimeStateError as error:
+        raise EntrypointError(f"runtime state failed: {error}") from error
     except RuntimeFileDownloadError as error:
         raise EntrypointError(
             _format_diagnostics("runtime download failed", error.diagnostics)
         ) from error
     except ApplicationError as error:
         raise EntrypointError(f"runtime download failed: {error}") from error
+
+
+def _activate_runtime_file_plan(
+    plan: RuntimeFilePlan,
+    *,
+    config: RuntimeConfig,
+    runtime: ContainerRuntime,
+    runtime_downloader: RuntimeDownloadRunner,
+    runtime_state_path: Path,
+) -> None:
+    if not plan.items:
+        return
+
+    now = datetime.now(UTC)
+    state = prepare_runtime_state_for_start(
+        runtime_state_path,
+        active_downloads=True,
+        run_id=str(uuid.uuid4()),
+        now=now,
+    )
+    assert state is not None
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        state,
+        now=now,
+        comfyui_path=runtime.comfyui_path,
+    )
+    write_runtime_state(runtime_state_path, reconciliation.state)
+
+    sync_plan = RuntimeFilePlan(
+        items=tuple(
+            item
+            for item in reconciliation.download_plan.items
+            if item.download_mode == "sync"
+        )
+    )
+    if not sync_plan.items:
+        return
+
+    state_writer = _RuntimeDownloadStateWriter(
+        runtime_state_path,
+        reconciliation.state,
+    )
+    _call_runtime_downloader(
+        runtime_downloader,
+        sync_plan,
+        config=config,
+        log=print,
+        state_observer=state_writer,
+    )
+
+
+def _call_runtime_downloader(
+    runtime_downloader: RuntimeDownloadRunner,
+    plan: RuntimeFilePlan,
+    *,
+    config: RuntimeConfig,
+    log: Logger,
+    state_observer: RuntimeDownloadStateObserver,
+) -> tuple[RuntimeFileDownloadResult, ...]:
+    if _runtime_downloader_accepts_state_observer(runtime_downloader):
+        return runtime_downloader(
+            plan,
+            config=config,
+            log=log,
+            state_observer=state_observer,
+        )
+    return runtime_downloader(plan, config=config, log=log)
+
+
+def _runtime_downloader_accepts_state_observer(
+    runtime_downloader: RuntimeDownloadRunner,
+) -> bool:
+    try:
+        parameters = signature(runtime_downloader).parameters
+    except (TypeError, ValueError):
+        return True
+    return "state_observer" in parameters or any(
+        parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
+class _RuntimeDownloadStateWriter:
+    """Persist sync runtime download state transitions."""
+
+    def __init__(self, path: Path, state: RuntimeState) -> None:
+        self._path = path
+        self._state = state
+
+    def __call__(
+        self,
+        item: RuntimeFilePlanItem,
+        status: RuntimeDownloadObservedStatus,
+        *,
+        error: object | None = None,
+    ) -> None:
+        digest = runtime_file_identity_digest(item)
+        try:
+            entry = self._state.downloads.entries[digest]
+        except KeyError as missing:
+            raise RuntimeStateError(
+                f"runtime download state entry is missing for {item.relative_target}"
+            ) from missing
+
+        now = datetime.now(UTC)
+        if status == "downloading":
+            updated_entry = RuntimeDownloadEntry.model_validate(
+                {
+                    **entry.model_dump(),
+                    "status": "downloading",
+                    "attempts": entry.attempts + 1,
+                    "attempt_run_id": self._state.run_id,
+                    "last_error": None,
+                    "updated_at": now,
+                }
+            )
+        elif status in ("failed", "exhausted"):
+            updated_entry = failed_runtime_download_entry(
+                entry,
+                status=status,
+                last_error=error,
+                updated_at=now,
+            )
+        else:
+            updated_entry = RuntimeDownloadEntry.model_validate(
+                {
+                    **entry.model_dump(),
+                    "status": "completed",
+                    "last_error": None,
+                    "updated_at": now,
+                }
+            )
+
+        entries = dict(self._state.downloads.entries)
+        entries[digest] = updated_entry
+        self._state = RuntimeState(
+            schema_version=self._state.schema_version,
+            updated_at=now,
+            run_id=self._state.run_id,
+            downloads=RuntimeDownloadsState(entries=entries),
+        )
+        write_runtime_state(self._path, self._state)
 
 
 def _run_pre_start_hooks(

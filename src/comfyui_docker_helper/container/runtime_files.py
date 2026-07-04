@@ -12,7 +12,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
@@ -51,6 +51,24 @@ _CDH_STAGING_ARTIFACT_RE = re.compile(r"^cdh-[0-9a-f]{64}\.part(?:\..+)?$")
 
 type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeStagingClock = Callable[[], float]
+type RuntimeDownloadObservedStatus = Literal[
+    "downloading",
+    "failed",
+    "exhausted",
+    "completed",
+]
+
+
+class RuntimeDownloadStateObserver(Protocol):
+    """Optional observer for persisting runtime download state transitions."""
+
+    def __call__(
+        self,
+        item: RuntimeFilePlanItem,
+        status: RuntimeDownloadObservedStatus,
+        *,
+        error: object | None = None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +227,7 @@ def process_runtime_file_downloads(
     backends: Mapping[str, DownloadBackend],
     log: Logger = print,
     staging_cleanup_clock: RuntimeStagingClock = time.time,
+    state_observer: RuntimeDownloadStateObserver | None = None,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Transfer runtime files to cdh-owned staging targets."""
     settings = runtime_downloader_settings(config)
@@ -258,6 +277,7 @@ def process_runtime_file_downloads(
         )
 
         log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
+        transfer_completed = False
         try:
             _download_runtime_file_with_policy(
                 item,
@@ -267,14 +287,36 @@ def process_runtime_file_downloads(
                 ("files", index - 1),
                 config=config,
                 log=log,
+                state_observer=state_observer,
             )
+            transfer_completed = True
             _place_staged_runtime_file(item, staging_item.target, ("files", index - 1))
+            if not item.target.is_file() or item.target.is_symlink():
+                raise RuntimeFileDownloadError(
+                    (
+                        Diagnostic(
+                            path=("files", index - 1, "target"),
+                            code="runtime_file.final_target_not_regular",
+                            message=(
+                                "final target is not a regular file after placement"
+                            ),
+                        ),
+                    )
+                )
+            _notify_runtime_download_state(state_observer, item, "completed")
             _remove_empty_staging_parent(staging_item.target.parent)
         except _RuntimeDownloadContinued:
             _cleanup_current_staging(staging_item.target)
             _remove_empty_staging_parent(staging_item.target.parent)
             continue
-        except Exception:
+        except Exception as error:
+            if transfer_completed:
+                _notify_runtime_download_state(
+                    state_observer,
+                    item,
+                    "exhausted",
+                    error=error,
+                )
             _cleanup_current_staging(staging_item.target)
             _remove_empty_staging_parent(staging_item.target.parent)
             raise
@@ -466,6 +508,7 @@ def download_runtime_files(
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
     staging_cleanup_clock: RuntimeStagingClock = time.time,
+    state_observer: RuntimeDownloadStateObserver | None = None,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
@@ -478,6 +521,7 @@ def download_runtime_files(
             backends=backends,
             log=log,
             staging_cleanup_clock=staging_cleanup_clock,
+            state_observer=state_observer,
         )
 
     with aria2_downloader_factory(log=log) as aria2_backend:
@@ -488,6 +532,7 @@ def download_runtime_files(
             backends=backends,
             log=log,
             staging_cleanup_clock=staging_cleanup_clock,
+            state_observer=state_observer,
         )
 
 
@@ -523,6 +568,7 @@ def _download_runtime_file_with_policy(
     *,
     config: RuntimeConfig,
     log: Logger,
+    state_observer: RuntimeDownloadStateObserver | None,
 ) -> None:
     attempt_settings = _single_runtime_attempt_settings(settings)
     attempts = config.cdh.download_max_attempts
@@ -540,15 +586,28 @@ def _download_runtime_file_with_policy(
                 )
             )
         try:
+            _notify_runtime_download_state(state_observer, item, "downloading")
             backend.download(staging_item, attempt_settings)
             return
         except TransferDownloadFilesError as error:
             if attempt < attempts:
+                _notify_runtime_download_state(
+                    state_observer,
+                    item,
+                    "failed",
+                    error=error,
+                )
                 log(
                     "Retrying runtime file download after attempt "
                     f"{attempt}/{attempts} failed: {item.target}: {error}"
                 )
                 continue
+            _notify_runtime_download_state(
+                state_observer,
+                item,
+                "exhausted",
+                error=error,
+            )
             if config.cdh.download_failure_policy == "continue":
                 log(
                     "WARNING: runtime file download failed after "
@@ -567,6 +626,26 @@ def _download_runtime_file_with_policy(
                     ),
                 )
             ) from error
+        except Exception as error:
+            _notify_runtime_download_state(
+                state_observer,
+                item,
+                "exhausted",
+                error=error,
+            )
+            raise
+
+
+def _notify_runtime_download_state(
+    state_observer: RuntimeDownloadStateObserver | None,
+    item: RuntimeFilePlanItem,
+    status: RuntimeDownloadObservedStatus,
+    *,
+    error: object | None = None,
+) -> None:
+    if state_observer is None:
+        return
+    state_observer(item, status, error=error)
 
 
 def _single_runtime_attempt_settings(

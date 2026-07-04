@@ -136,6 +136,8 @@ def load_runtime_state(path: Path = RUNTIME_STATE_PATH) -> RuntimeState:
         return RuntimeState.model_validate_json(payload)
     except FileNotFoundError:
         raise
+    except OSError as error:
+        raise RuntimeStateError(f"failed to read runtime state: {path}") from error
     except json.JSONDecodeError as error:
         raise RuntimeStateError(f"runtime state is not valid JSON: {path}") from error
     except ValidationError as error:
@@ -144,7 +146,13 @@ def load_runtime_state(path: Path = RUNTIME_STATE_PATH) -> RuntimeState:
 
 def write_runtime_state(path: Path, state: RuntimeState) -> None:
     """Atomically write runtime state as deterministic JSON."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeStateError(
+            f"failed to create runtime state parent: {path}"
+        ) from error
+
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     payload = _runtime_state_json(state)
 
@@ -175,9 +183,9 @@ def prepare_runtime_state_for_start(
     if not run_id:
         raise RuntimeStateError("run_id must be non-empty")
 
-    if path.exists():
+    try:
         state = load_runtime_state(path)
-    else:
+    except FileNotFoundError:
         state = RuntimeState(
             schema_version=RUNTIME_STATE_SCHEMA_VERSION,
             updated_at=now,

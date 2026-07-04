@@ -77,6 +77,10 @@ class FakeManagedDownloadBackend(FakeDownloadBackend):
         super().__init__(payload=payload)
         self.entered = False
         self.exited = False
+        self.prepare_calls: list[DownloaderSettings] = []
+
+    def prepare(self, settings: DownloaderSettings) -> None:
+        self.prepare_calls.append(settings)
 
     def __enter__(self) -> FakeManagedDownloadBackend:
         self.entered = True
@@ -1545,8 +1549,68 @@ def test_runtime_file_aria2_factory_is_used_only_when_needed(
     assert len(factory.calls) == 1
     assert aria2_backend.entered is True
     assert aria2_backend.exited is True
+    assert aria2_backend.prepare_calls == []
     assert aria2_backend.calls[0][0].target == _staging_target(aria2_plan.items[0])
     assert results[0].staging_target == aria2_backend.calls[0][0].target
+
+
+def test_download_runtime_files_startup_observer_runs_before_transfer(
+    tmp_path: Path,
+) -> None:
+    class OrderingBackend(FakeManagedDownloadBackend):
+        def __enter__(self) -> OrderingBackend:
+            events.append("enter")
+            return super().__enter__()
+
+        def prepare(self, settings: DownloaderSettings) -> None:
+            del settings
+            events.append("prepare")
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            del settings
+            events.append("download")
+            item.target.write_bytes(b"downloaded")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "downloader": "aria2",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    events: list[str] = []
+    backend = OrderingBackend()
+
+    class OrderingFactory(FakeAria2Factory):
+        def __call__(self, *, log: Logger) -> FakeManagedDownloadBackend:
+            events.append("factory")
+            return super().__call__(log=log)
+
+    factory = OrderingFactory(backend)
+
+    download_runtime_files(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        aria2_downloader_factory=factory,
+        log=lambda message: None,
+        startup_observer=lambda: events.append("startup"),
+    )
+
+    assert events == ["factory", "enter", "prepare", "startup", "download"]
 
 
 def test_runtime_file_download_reports_unavailable_backend(tmp_path: Path) -> None:

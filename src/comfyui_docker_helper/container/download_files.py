@@ -122,6 +122,12 @@ class DownloadBackend(Protocol):
     ) -> None: ...
 
 
+class DownloadBackendPreparer(Protocol):
+    """Optional backend hook for startup work before downloads begin."""
+
+    def prepare(self, settings: DownloaderSettings) -> None: ...
+
+
 class HttpxDownloader:
     """HTTPX streaming downloader with retries and temporary-file replacement."""
 
@@ -252,6 +258,9 @@ class Aria2Downloader:
     ) -> None:
         del exc_type, exc_value, traceback
         self.close()
+
+    def prepare(self, settings: DownloaderSettings) -> None:
+        self._ensure_started(settings)
 
     def download(
         self,

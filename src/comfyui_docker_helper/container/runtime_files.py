@@ -30,6 +30,7 @@ from comfyui_docker_helper.container.download_files import (
     Aria2DownloaderFactory,
     Aria2DownloadSettings,
     DownloadBackend,
+    DownloadBackendPreparer,
     DownloaderSettings,
     DownloadStatus,
     FileDownloadItem,
@@ -51,6 +52,7 @@ _CDH_STAGING_ARTIFACT_RE = re.compile(r"^cdh-[0-9a-f]{64}\.part(?:\..+)?$")
 
 type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeStagingClock = Callable[[], float]
+type RuntimeDownloadStartupObserver = Callable[[], None]
 type RuntimeDownloadObservedStatus = Literal[
     "downloading",
     "failed",
@@ -510,12 +512,16 @@ def download_runtime_files(
     log: Logger = print,
     staging_cleanup_clock: RuntimeStagingClock = time.time,
     state_observer: RuntimeDownloadStateObserver | None = None,
+    startup_observer: RuntimeDownloadStartupObserver | None = None,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 
     if not _requires_aria2_backend(plan, config):
+        if startup_observer is not None:
+            _prepare_runtime_download_backends(plan, config=config, backends=backends)
+        _notify_runtime_download_startup(startup_observer)
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -527,6 +533,9 @@ def download_runtime_files(
 
     with aria2_downloader_factory(log=log) as aria2_backend:
         backends["aria2"] = aria2_backend
+        if startup_observer is not None:
+            _prepare_runtime_download_backends(plan, config=config, backends=backends)
+        _notify_runtime_download_startup(startup_observer)
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -535,6 +544,36 @@ def download_runtime_files(
             staging_cleanup_clock=staging_cleanup_clock,
             state_observer=state_observer,
         )
+
+
+def _prepare_runtime_download_backends(
+    plan: RuntimeFilePlan,
+    *,
+    config: RuntimeConfig,
+    backends: Mapping[str, DownloadBackend],
+) -> None:
+    settings = runtime_downloader_settings(config)
+    prepared: set[DownloaderName] = set()
+    for item in plan.items:
+        if item.action == "skip_existing":
+            continue
+        backend_name = _effective_downloader(item, config)
+        if backend_name in prepared:
+            continue
+        backend = backends[backend_name]
+        prepare = getattr(backend, "prepare", None)
+        if prepare is not None:
+            preparer: DownloadBackendPreparer = backend
+            preparer.prepare(settings)
+        prepared.add(backend_name)
+
+
+def _notify_runtime_download_startup(
+    startup_observer: RuntimeDownloadStartupObserver | None,
+) -> None:
+    if startup_observer is None:
+        return
+    startup_observer()
 
 
 def runtime_downloader_settings(config: RuntimeConfig) -> DownloaderSettings:

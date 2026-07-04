@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -62,6 +63,7 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeState,
     RuntimeStateError,
     failed_runtime_download_entry,
+    load_runtime_state,
     prepare_runtime_state_for_start,
     write_runtime_state,
 )
@@ -126,7 +128,7 @@ class RuntimeAsyncQueueStarter(Protocol):
         runtime: ContainerRuntime,
         runtime_state_path: Path,
         log: Logger,
-    ) -> None: ...
+    ) -> object | None: ...
 
 
 class RuntimeHookRunner(Protocol):
@@ -179,6 +181,17 @@ class RuntimeAsyncQueueStartupError(RuntimeError):
     """Async queue infrastructure failed before accepting planned work."""
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeAsyncDownloadQueueHandle:
+    """Internal handle for the single async runtime download worker."""
+
+    thread: threading.Thread
+    accepted: threading.Event
+
+    def join(self, timeout: float | None = None) -> None:
+        self.thread.join(timeout)
+
+
 def start_runtime_async_download_queue(
     plan: RuntimeFilePlan,
     *,
@@ -186,9 +199,70 @@ def start_runtime_async_download_queue(
     runtime: ContainerRuntime,
     runtime_state_path: Path,
     log: Logger,
+) -> _RuntimeAsyncDownloadQueueHandle:
+    """Start one cdh-managed background queue for async runtime files."""
+    del runtime
+    try:
+        state = load_runtime_state(runtime_state_path)
+        _validate_async_download_state_entries(plan, state)
+    except Exception as error:
+        raise RuntimeAsyncQueueStartupError(str(error)) from error
+
+    state_writer = _RuntimeDownloadStateWriter(runtime_state_path, state)
+    accepted = threading.Event()
+    startup_finished = threading.Event()
+    startup_error: list[BaseException] = []
+
+    def accept_queue() -> None:
+        accepted.set()
+
+    def worker() -> None:
+        try:
+            download_runtime_files(
+                plan,
+                config=config,
+                log=log,
+                state_observer=state_writer,
+                startup_observer=accept_queue,
+            )
+        except Exception as error:
+            if not accepted.is_set():
+                startup_error.append(error)
+            else:
+                log(f"WARNING: async runtime download worker failed: {error}")
+        finally:
+            startup_finished.set()
+
+    try:
+        thread = threading.Thread(
+            target=worker,
+            name="cdh-runtime-async-downloads",
+            daemon=True,
+        )
+        thread.start()
+    except Exception as error:
+        raise RuntimeAsyncQueueStartupError(str(error)) from error
+
+    while not accepted.is_set():
+        if startup_finished.wait(0.01):
+            break
+    if not accepted.is_set():
+        error = startup_error[0] if startup_error else RuntimeError("worker exited")
+        raise RuntimeAsyncQueueStartupError(str(error)) from error
+
+    return _RuntimeAsyncDownloadQueueHandle(thread=thread, accepted=accepted)
+
+
+def _validate_async_download_state_entries(
+    plan: RuntimeFilePlan,
+    state: RuntimeState,
 ) -> None:
-    """Accept async runtime file work without executing it in T2."""
-    del plan, config, runtime, runtime_state_path, log
+    for item in plan.items:
+        digest = runtime_file_identity_digest(item)
+        if digest not in state.downloads.entries:
+            raise RuntimeStateError(
+                f"runtime download state entry is missing for {item.relative_target}"
+            )
 
 
 def run_entrypoint(
@@ -540,7 +614,7 @@ def _runtime_downloader_accepts_state_observer(
 
 
 class _RuntimeDownloadStateWriter:
-    """Persist sync runtime download state transitions."""
+    """Persist runtime download state transitions."""
 
     def __init__(self, path: Path, state: RuntimeState) -> None:
         self._path = path

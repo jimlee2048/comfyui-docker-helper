@@ -7,6 +7,10 @@ from typing import Literal
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.models import Config, GitCustomNodeConfig
+from comfyui_docker_helper.config.url_validation import (
+    DownloaderName,
+    require_downloader_name,
+)
 from comfyui_docker_helper.config.validation import (
     normalize_comfy_cli_version,
     normalize_comfyui_version,
@@ -172,7 +176,7 @@ class HttpxPlan:
 class DownloaderPlan:
     """Normalized downloader selection and both backend settings."""
 
-    default: Literal["aria2", "httpx"]
+    default: DownloaderName
     aria2: Aria2Plan
     httpx: HttpxPlan
 
@@ -186,7 +190,7 @@ class FilePlan:
     filename: str
     target: str
     overwrite: bool
-    downloader: Literal["aria2", "httpx"]
+    downloader: DownloaderName
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,7 +481,7 @@ def _build_custom_nodes_plan(
 
 def _build_files_plan(config: Config, comfyui_path: str) -> FilesPlan:
     downloader = DownloaderPlan(
-        default=config.cdh.default_downloader,
+        default=require_downloader_name(config.cdh.default_downloader),
         aria2=Aria2Plan(
             rpc_port=config.cdh.downloader.aria2.rpc_port,
             split=config.cdh.downloader.aria2.split,
@@ -494,7 +498,11 @@ def _build_files_plan(config: Config, comfyui_path: str) -> FilesPlan:
     )
     items: list[FilePlan] = []
     for file in config.files:
-        effective_downloader = file.downloader or downloader.default
+        effective_downloader = (
+            require_downloader_name(file.downloader)
+            if file.downloader is not None
+            else downloader.default
+        )
         target = str(PurePosixPath(comfyui_path) / file.dir / file.filename)
         items.append(
             FilePlan(

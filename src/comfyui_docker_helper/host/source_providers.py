@@ -6,6 +6,7 @@ import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any
 
 import httpx
@@ -146,15 +147,46 @@ class HttpRegistryProvider:
         return [_registry_version_candidate(item, node_id) for item in items]
 
 
-def create_default_source_resolvers() -> SourceResolvers:
+@dataclass(slots=True)
+class DefaultSourceResolvers:
+    """Default live source resolvers plus their owned HTTP client."""
+
+    resolvers: SourceResolvers
+    client: httpx.Client
+    _closed: bool = False
+
+    def __enter__(self) -> SourceResolvers:
+        return self.resolvers
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc_value, traceback
+        self.close()
+
+    def close(self) -> None:
+        """Close the owned HTTP client exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        self.client.close()
+
+
+def create_default_source_resolvers() -> DefaultSourceResolvers:
     """Return concrete source providers used by host render/build commands."""
     client = httpx.Client(timeout=30.0, follow_redirects=True)
     git = GitRemoteProvider()
-    return SourceResolvers(
-        comfyui=git,
-        comfy_cli=PyPIComfyCliProvider(client),
-        registry=HttpRegistryProvider(client),
-        git=git,
+    return DefaultSourceResolvers(
+        resolvers=SourceResolvers(
+            comfyui=git,
+            comfy_cli=PyPIComfyCliProvider(client),
+            registry=HttpRegistryProvider(client),
+            git=git,
+        ),
+        client=client,
     )
 
 

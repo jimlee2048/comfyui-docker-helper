@@ -16,6 +16,7 @@ from comfyui_docker_helper.host.source_providers import (
     GitRemoteProvider,
     HttpRegistryProvider,
     PyPIComfyCliProvider,
+    create_default_source_resolvers,
 )
 
 COMMIT_1 = "1" * 40
@@ -66,6 +67,16 @@ class FakeHttpClient:
         return self.response
 
 
+class FakeClosableHttpClient:
+    """Minimal close-tracking client for resolver owner tests."""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 def test_comfyui_release_listing_uses_peeled_ref_for_annotated_tags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -85,6 +96,23 @@ def test_comfyui_release_listing_uses_peeled_ref_for_annotated_tags(
     assert releases[0].commit == COMMIT_2
     assert releases[1].version == "v0.2.0"
     assert releases[1].commit == COMMIT_A
+
+
+def test_default_source_resolver_owner_closes_http_client_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default live resolver owner closes its shared HTTP client explicitly."""
+    client = FakeClosableHttpClient()
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda **kwargs: client)
+
+    owner = create_default_source_resolvers()
+
+    assert owner.resolvers.comfy_cli.client is client
+    with owner as resolvers:
+        assert resolvers is owner.resolvers
+    owner.close()
+
+    assert client.close_calls == 1
 
 
 def test_comfyui_release_listing_keeps_lightweight_tag_commit(

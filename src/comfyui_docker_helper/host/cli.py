@@ -1,5 +1,7 @@
 """Host command group."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -9,6 +11,7 @@ from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
     LockOptions,
+    SourceResolvers,
     load_validate_plan_result,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutput, build_image_with_buildx
@@ -155,16 +158,17 @@ def render(
         dry_run=dry_run,
     )
     try:
-        prepared = prepare_render_context(
-            config_files,
-            output_dir,
-            scripts_dir=scripts_dir,
-            hooks_dir=hooks_dir,
-            resolvers=create_default_source_resolvers(),
-            lock_options=lock_options,
-            overwrite=overwrite,
-            working_directory=Path.cwd(),
-        )
+        with _default_source_resolvers() as resolvers:
+            prepared = prepare_render_context(
+                config_files,
+                output_dir,
+                scripts_dir=scripts_dir,
+                hooks_dir=hooks_dir,
+                resolvers=resolvers,
+                lock_options=lock_options,
+                overwrite=overwrite,
+                working_directory=Path.cwd(),
+            )
     except (ConfigurationServiceError, HostRenderServiceError) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
@@ -278,17 +282,18 @@ def build(
     effective_output = cli_output or validated.config.build.output
 
     try:
-        prepared = prepare_render_context(
-            config_files,
-            context_dir,
-            scripts_dir=scripts_dir,
-            hooks_dir=hooks_dir,
-            resolvers=create_default_source_resolvers(),
-            lock_options=LockOptions(locked=locked, upgrade_lock=upgrade_lock),
-            overwrite=True,
-            working_directory=Path.cwd(),
-            configuration_result=validated,
-        )
+        with _default_source_resolvers() as resolvers:
+            prepared = prepare_render_context(
+                config_files,
+                context_dir,
+                scripts_dir=scripts_dir,
+                hooks_dir=hooks_dir,
+                resolvers=resolvers,
+                lock_options=LockOptions(locked=locked, upgrade_lock=upgrade_lock),
+                overwrite=True,
+                working_directory=Path.cwd(),
+                configuration_result=validated,
+            )
     except (ConfigurationServiceError, HostRenderServiceError) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
@@ -365,6 +370,17 @@ def _validate_cli_image_tags(tags: list[str]) -> None:
                 "or control characters",
                 param_hint="--tag/-t",
             )
+
+
+@contextmanager
+def _default_source_resolvers() -> Iterator[SourceResolvers]:
+    """Yield default source resolvers and close owned resources when present."""
+    created = create_default_source_resolvers()
+    if hasattr(created, "__enter__"):
+        with created as resolvers:
+            yield resolvers
+        return
+    yield created
 
 
 def _format_config_files(config_files: list[Path]) -> str | Path:

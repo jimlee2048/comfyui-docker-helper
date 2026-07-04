@@ -13,14 +13,20 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import TracebackType
-from typing import Literal, Protocol
-from urllib.parse import urlparse
+from typing import Protocol
 
 import aria2p
 import httpx
 from pydantic import Field, ValidationError
 
 from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.url_validation import (
+    DownloaderName,
+    is_http_url,
+    require_downloader_name,
+    validate_file_name,
+    validate_relative_file_directory,
+)
 from comfyui_docker_helper.container.root_config import (
     ContainerRootConfigError,
     files_document,
@@ -67,7 +73,7 @@ class HttpxDownloadSettings:
 class DownloaderSettings:
     """Normalized downloader settings for both backends."""
 
-    default: Literal["aria2", "httpx"]
+    default: DownloaderName
     aria2: Aria2DownloadSettings
     httpx: HttpxDownloadSettings
 
@@ -81,7 +87,7 @@ class FileDownloadItem:
     filename: str
     target: Path
     overwrite: bool
-    downloader: Literal["aria2", "httpx"]
+    downloader: DownloaderName
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,7 +405,7 @@ class _HttpxConfig(ConfigModel):
 
 
 class _DownloaderConfig(ConfigModel):
-    default: Literal["aria2", "httpx"]
+    default: DownloaderName
     aria2: _Aria2Config
     httpx: _HttpxConfig
 
@@ -409,7 +415,7 @@ class _FileConfig(ConfigModel):
     dir: str
     filename: str
     overwrite: bool
-    downloader: Literal["aria2", "httpx"]
+    downloader: DownloaderName
 
 
 class _FilesConfig(ConfigModel):
@@ -448,7 +454,7 @@ def build_file_download_plan(
         ) from error
 
     downloader = DownloaderSettings(
-        default=config.downloader.default,
+        default=require_downloader_name(config.downloader.default),
         aria2=Aria2DownloadSettings(
             rpc_port=config.downloader.aria2.rpc_port,
             split=config.downloader.aria2.split,
@@ -655,7 +661,7 @@ def _build_file_item(
         filename=file.filename,
         target=comfyui_path.joinpath(*directory.parts, filename.name),
         overwrite=file.overwrite,
-        downloader=file.downloader,
+        downloader=require_downloader_name(file.downloader),
     )
 
 
@@ -753,29 +759,31 @@ def _resolve_comfyui_path(comfyui_path: str | Path | None) -> Path:
 
 
 def _validate_url(value: str) -> None:
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise DownloadFilesConfigError(f"url must be HTTP(S): {value}")
+    if not is_http_url(value):
+        raise DownloadFilesConfigError(
+            f"url must be an HTTP(S) URL with a host: {value}"
+        )
 
 
 def _validate_relative_path(value: str, *, field: str) -> PurePosixPath:
-    path = PurePosixPath(value)
-    if path.is_absolute():
+    result = validate_relative_file_directory(value)
+    if result.path is not None:
+        return result.path
+    if result.code == "absolute_directory":
         raise DownloadFilesConfigError(f"{field} must be relative: {value}")
-    if ".." in path.parts:
+    if result.code == "parent_directory_segment":
         raise DownloadFilesConfigError(f"{field} must not contain '..': {value}")
-    if not path.parts or path == PurePosixPath("."):
-        raise DownloadFilesConfigError(f"{field} must not be empty")
-    return path
+    message = result.message or "must be a valid relative path"
+    raise DownloadFilesConfigError(f"{field} {message}: {value}")
 
 
 def _validate_filename(value: str) -> PurePosixPath:
-    if "\\" in value:
-        raise DownloadFilesConfigError(f"filename must not contain '\\': {value}")
-    path = PurePosixPath(value)
-    if path.is_absolute() or len(path.parts) != 1 or path.name in {"", ".", ".."}:
+    result = validate_file_name(value)
+    if result.filename is None:
+        if "\\" in value:
+            raise DownloadFilesConfigError(f"filename must not contain '\\': {value}")
         raise DownloadFilesConfigError(f"filename must be one path component: {value}")
-    return path
+    return PurePosixPath(result.filename)
 
 
 def _raise_for_http_status(response: httpx.Response) -> None:

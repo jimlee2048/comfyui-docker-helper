@@ -16,7 +16,12 @@ from comfyui_docker_helper.config.models import (
     GitCustomNodeConfig,
     RegistryCustomNodeConfig,
 )
-from comfyui_docker_helper.config.url_validation import is_http_url
+from comfyui_docker_helper.config.url_validation import (
+    DOWNLOADERS,
+    is_http_url,
+    validate_file_name,
+    validate_relative_file_directory,
+)
 
 _CUDA_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
 _SEMVER_PATTERN = re.compile(
@@ -56,7 +61,6 @@ _MANAGED_ENV_KEYS = frozenset(
         "UV_PYTHON_CACHE_DIR",
     }
 )
-_DOWNLOADERS = frozenset({"aria2", "httpx"})
 _HOOK_SUFFIXES = frozenset({".py", ".sh"})
 _COMFYUI_CONTROLLED_LAUNCH_FLAGS = frozenset(
     {"--listen", "--port", "--auto-launch", "--disable-auto-launch"}
@@ -590,7 +594,7 @@ def _validate_hook(
 def _validate_downloader(config: Config, diagnostics: list[Diagnostic]) -> None:
     _require_allowed(
         config.cdh.default_downloader,
-        _DOWNLOADERS,
+        DOWNLOADERS,
         ("cdh", "default_downloader"),
         "cdh.unsupported_default_downloader",
         "must be aria2 or httpx",
@@ -730,53 +734,27 @@ def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
                 )
             )
 
-        skip_segment_checks = False
-        if file.dir.startswith("/"):
+        directory_result = validate_relative_file_directory(file.dir)
+        if directory_result.code is not None:
+            code = directory_result.code
+            if code == "absolute_directory":
+                diagnostic_code = "file.absolute_directory"
+                message = "must be relative to COMFYUI_PATH"
+            elif code == "parent_directory_segment":
+                diagnostic_code = "file.directory_traversal"
+                message = directory_result.message or "must not contain '..'"
+            else:
+                diagnostic_code = f"file.{code}"
+                message = directory_result.message or "must be a valid directory"
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "dir"),
-                    "file.absolute_directory",
-                    "must be relative to COMFYUI_PATH",
+                    diagnostic_code,
+                    message,
                 )
             )
-            skip_segment_checks = True
-        if file.dir.endswith("/"):
-            diagnostics.append(
-                Diagnostic(
-                    (*file_path, "dir"),
-                    "file.trailing_slash",
-                    "must not end with a slash",
-                )
-            )
-            skip_segment_checks = True
-        if not skip_segment_checks:
-            directory_parts = file.dir.split("/")
-            if not file.dir or any(part == "" for part in directory_parts):
-                diagnostics.append(
-                    Diagnostic(
-                        (*file_path, "dir"),
-                        "file.empty_directory_segment",
-                        "must not contain empty path segments",
-                    )
-                )
-            if any(part == "." for part in directory_parts):
-                diagnostics.append(
-                    Diagnostic(
-                        (*file_path, "dir"),
-                        "file.current_directory_segment",
-                        "must not contain '.'",
-                    )
-                )
-            if any(part == ".." for part in directory_parts):
-                diagnostics.append(
-                    Diagnostic(
-                        (*file_path, "dir"),
-                        "file.directory_traversal",
-                        "must not contain '..'",
-                    )
-                )
 
-        if not _is_safe_filename(file.filename):
+        if validate_file_name(file.filename).code is not None:
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "filename"),
@@ -788,7 +766,7 @@ def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
         if file.downloader is not None:
             _require_allowed(
                 file.downloader,
-                _DOWNLOADERS,
+                DOWNLOADERS,
                 (*file_path, "downloader"),
                 "file.unsupported_downloader",
                 "must be aria2 or httpx",
@@ -867,11 +845,3 @@ def _require_http_index_url(
 
     if parsed.username is not None or parsed.password is not None:
         diagnostics.append(Diagnostic(path, code, "must not include URL userinfo"))
-
-
-def _is_safe_filename(filename: str) -> bool:
-    return (
-        bool(filename)
-        and filename not in {".", ".."}
-        and not any(separator in filename for separator in ("/", "\\"))
-    )

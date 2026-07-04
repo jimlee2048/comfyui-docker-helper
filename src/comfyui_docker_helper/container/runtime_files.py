@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import stat
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -14,7 +13,12 @@ from pydantic import ValidationError
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.config.models import ConfigModel
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
-from comfyui_docker_helper.config.url_validation import is_http_url
+from comfyui_docker_helper.config.url_validation import (
+    DownloaderName,
+    is_http_url,
+    validate_file_name,
+    validate_relative_file_directory,
+)
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloaderFactory,
@@ -42,7 +46,7 @@ class RuntimeFilePlanItem:
     target: Path
     overwrite: bool
     download_mode: Literal["sync"]
-    downloader: Literal["aria2", "httpx"] | None
+    downloader: DownloaderName | None
     action: Literal["download", "skip_existing", "overwrite_existing"]
 
 
@@ -58,7 +62,7 @@ class RuntimeFileDownloadResult:
     """One runtime file backend transfer result."""
 
     item: RuntimeFilePlanItem
-    backend: Literal["aria2", "httpx"]
+    backend: DownloaderName
     staging_target: Path
     status: DownloadStatus
 
@@ -88,7 +92,7 @@ class _RuntimeFilePatch(ConfigModel):
     filename: str
     url: str | None = None
     overwrite: bool | None = None
-    downloader: Literal["aria2", "httpx"] | None = None
+    downloader: DownloaderName | None = None
     download_mode: Literal["sync"] | None = None
 
 
@@ -101,7 +105,7 @@ class _RuntimeFileConfig(ConfigModel):
     filename: str
     url: str
     overwrite: bool = False
-    downloader: Literal["aria2", "httpx"] | None = None
+    downloader: DownloaderName | None = None
     download_mode: Literal["sync"] = "sync"
 
 
@@ -340,7 +344,7 @@ def _files_only_document(document: Mapping[str, Any]) -> dict[str, Any]:
 def _effective_downloader(
     item: RuntimeFilePlanItem,
     config: RuntimeConfig,
-) -> Literal["aria2", "httpx"]:
+) -> DownloaderName:
     return item.downloader or config.cdh.default_downloader
 
 
@@ -354,7 +358,7 @@ def _requires_aria2_backend(plan: RuntimeFilePlan, config: RuntimeConfig) -> boo
 
 def _runtime_staging_download_item(
     item: RuntimeFilePlanItem,
-    downloader: Literal["aria2", "httpx"],
+    downloader: DownloaderName,
 ) -> FileDownloadItem:
     return FileDownloadItem(
         url=item.url,
@@ -591,57 +595,17 @@ def _normalize_directory(
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
 ) -> PurePosixPath | None:
-    if value.startswith("/"):
-        diagnostics.append(
-            Diagnostic(path, "runtime_file.absolute_directory", "must be relative")
+    result = validate_relative_file_directory(value)
+    if result.path is not None:
+        return result.path
+    diagnostics.append(
+        Diagnostic(
+            path,
+            f"runtime_file.{result.code}",
+            result.message or "must be a valid relative directory",
         )
-        return None
-    if value.endswith("/"):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.trailing_slash",
-                "must not end with a slash",
-            )
-        )
-        return None
-
-    parts = value.split("/")
-    if not value or any(part == "" for part in parts):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.empty_directory_segment",
-                "must not contain empty path segments",
-            )
-        )
-        return None
-    if any(part == "." for part in parts):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.current_directory_segment",
-                "must not contain '.'",
-            )
-        )
-        return None
-    if any(part == ".." for part in parts):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.parent_directory_segment",
-                "must not contain '..'",
-            )
-        )
-        return None
-
-    normalized = PurePosixPath(os.path.normpath(value))
-    if normalized == PurePosixPath("."):
-        diagnostics.append(
-            Diagnostic(path, "runtime_file.empty_directory", "must not be empty")
-        )
-        return None
-    return normalized
+    )
+    return None
 
 
 def _normalize_filename(
@@ -649,7 +613,8 @@ def _normalize_filename(
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
 ) -> str | None:
-    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+    result = validate_file_name(value)
+    if result.filename is None:
         diagnostics.append(
             Diagnostic(
                 path,
@@ -658,7 +623,7 @@ def _normalize_filename(
             )
         )
         return None
-    return value
+    return result.filename
 
 
 def _target_action(

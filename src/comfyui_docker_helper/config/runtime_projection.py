@@ -20,7 +20,7 @@ type ConfigPath = tuple[str | int, ...]
 
 
 class RuntimeComfyUIConfig(ConfigModel):
-    """ComfyUI startup fields supported by the v0.3 runtime config."""
+    """ComfyUI startup fields supported by the runtime config."""
 
     listen: str = "0.0.0.0"
     port: int = Field(default=8188, ge=1, le=65535)
@@ -80,7 +80,7 @@ def project_runtime_config(
     config: Config,
     raw_document: dict[str, Any],
 ) -> RuntimeConfigProjection:
-    """Project the effective host config onto the v0.3 runtime-supported schema."""
+    """Project the effective host config onto the runtime-supported schema."""
     document = {
         "comfyui": {
             "listen": config.comfyui.listen,

@@ -138,7 +138,7 @@ filename = "model.bin"
 def test_unsupported_host_file_download_mode_fails_before_runtime_projection(
     write_config: Callable[[str], Path],
 ) -> None:
-    """Keep v0.3 runtime file download mode limited to sync."""
+    """Keep runtime file download mode limited to currently executable modes."""
     document = (
         MINIMAL_CONFIG
         + """

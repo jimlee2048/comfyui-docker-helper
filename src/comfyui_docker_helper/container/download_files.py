@@ -43,6 +43,10 @@ class DownloadFilesError(ApplicationError):
     """A user-facing file-download processing failure."""
 
 
+class TransferDownloadFilesError(DownloadFilesError):
+    """A source or transport download failure eligible for retry/continue policy."""
+
+
 class DownloadStatus(StrEnum):
     """Common per-item processing result."""
 
@@ -154,7 +158,7 @@ class HttpxDownloader:
             except _RetryableDownloadError as error:
                 _cleanup_tmp(tmp_path)
                 if attempt + 1 >= attempts:
-                    raise DownloadFilesError(str(error)) from error
+                    raise TransferDownloadFilesError(str(error)) from error
                 delay = _backoff_delay(attempt)
                 self._log(
                     f"Retrying HTTP download in {delay}s after failure: {item.url}"
@@ -373,10 +377,12 @@ class Aria2Downloader:
                 self._log(f"aria2 download complete: {item.target}")
                 return
             if download.is_removed or status == "removed":
-                raise DownloadFilesError(f"aria2 download was removed: {item.url}")
+                raise TransferDownloadFilesError(
+                    f"aria2 download was removed: {item.url}"
+                )
             if status == "error":
                 message = download.error_message or "unknown aria2 error"
-                raise DownloadFilesError(
+                raise TransferDownloadFilesError(
                     f"aria2 download failed for {item.url}: {message}"
                 )
 
@@ -520,7 +526,7 @@ def process_file_downloads(
                 plan,
                 log=log,
             )
-        except DownloadFilesError as error:
+        except TransferDownloadFilesError as error:
             if plan.download_failure_policy == "fail":
                 raise
             _cleanup_failed_target(item, log=log)
@@ -707,7 +713,7 @@ def _download_with_policy(
         try:
             backend.download(item, settings)
             return
-        except DownloadFilesError as error:
+        except TransferDownloadFilesError as error:
             _cleanup_failed_target(item, log=log)
             if attempt >= attempts:
                 raise
@@ -715,6 +721,9 @@ def _download_with_policy(
                 f"Retrying file download after attempt {attempt}/{attempts} failed: "
                 f"{item.target}: {error}"
             )
+        except DownloadFilesError:
+            _cleanup_failed_target(item, log=log)
+            raise
 
 
 def _single_host_attempt_settings(settings: DownloaderSettings) -> DownloaderSettings:
@@ -868,7 +877,7 @@ def _raise_for_http_status(response: httpx.Response) -> None:
             f"HTTP download got retryable status {status}: {response.url}"
         )
     if 400 <= status <= 599:
-        raise DownloadFilesError(
+        raise TransferDownloadFilesError(
             f"HTTP download got non-retryable status {status}: {response.url}"
         )
 

@@ -11,9 +11,11 @@ import pytest
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
 from comfyui_docker_helper.container.download_files import (
     DownloaderSettings,
+    DownloadFilesError,
     FileDownloadItem,
     HttpxDownloader,
     Logger,
+    TransferDownloadFilesError,
 )
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
@@ -360,7 +362,260 @@ def test_runtime_file_download_uses_runtime_downloader_settings(
     assert settings.aria2.min_split_size == "2M"
     assert settings.aria2.resume_download is False
     assert settings.httpx.timeout == 12.5
-    assert settings.httpx.retries == 1
+    assert settings.httpx.retries == 0
+
+
+def test_runtime_file_download_retries_then_succeeds(tmp_path: Path) -> None:
+    class FlakyBackend(FakeDownloadBackend):
+        def __init__(self) -> None:
+            super().__init__(payload=b"eventual")
+            self.second_attempt_staging_bytes: bytes | None = None
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            if len(self.calls) == 1:
+                item.target.write_bytes(b"partial")
+                raise TransferDownloadFilesError("temporary transfer failure")
+            self.second_attempt_staging_bytes = item.target.read_bytes()
+            item.target.write_bytes(self.payload)
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FlakyBackend()
+    messages: list[str] = []
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate(
+            {
+                "cdh": {
+                    "default_downloader": "httpx",
+                    "download_max_attempts": 2,
+                    "download_failure_policy": "fail",
+                    "downloader": {"httpx": {"retries": 5}},
+                }
+            }
+        ),
+        backends={"httpx": backend},
+        log=messages.append,
+    )
+
+    assert len(backend.calls) == 2
+    assert backend.second_attempt_staging_bytes == b"partial"
+    assert {call[0].overwrite for call in backend.calls} == {False}
+    assert {call[1].httpx.retries for call in backend.calls} == {0}
+    assert (comfyui / "models" / "a.bin").read_bytes() == b"eventual"
+    assert results[0].status.value == "downloaded"
+    assert any(
+        "Retrying runtime file download after attempt 1/2" in message
+        for message in messages
+    )
+
+
+def test_runtime_file_download_exhausted_fail_stops_later_files(
+    tmp_path: Path,
+) -> None:
+    class FailingBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            raise TransferDownloadFilesError("transfer failed")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    },
+                    {
+                        "url": "https://example.com/b.bin",
+                        "dir": "models",
+                        "filename": "b.bin",
+                    },
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FailingBackend()
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {
+                    "cdh": {
+                        "default_downloader": "httpx",
+                        "download_max_attempts": 2,
+                        "download_failure_policy": "fail",
+                    }
+                }
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert len(backend.calls) == 2
+    assert [call[0].url for call in backend.calls] == [
+        "https://example.com/a.bin",
+        "https://example.com/a.bin",
+    ]
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.download_failed")
+    ]
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not backend.calls[0][0].target.exists()
+    assert not (comfyui / "models" / "b.bin").exists()
+
+
+def test_runtime_file_download_exhausted_continue_omits_failed_and_continues(
+    tmp_path: Path,
+) -> None:
+    class FirstFileFailingBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            if item.filename == "a.bin":
+                item.target.write_bytes(b"partial")
+                raise TransferDownloadFilesError("transfer failed")
+            item.target.write_bytes(b"later")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    },
+                    {
+                        "url": "https://example.com/b.bin",
+                        "dir": "models",
+                        "filename": "b.bin",
+                    },
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FirstFileFailingBackend()
+    messages: list[str] = []
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate(
+            {
+                "cdh": {
+                    "default_downloader": "httpx",
+                    "download_max_attempts": 2,
+                    "download_failure_policy": "continue",
+                }
+            }
+        ),
+        backends={"httpx": backend},
+        log=messages.append,
+    )
+
+    assert [result.item.filename for result in results] == ["b.bin"]
+    assert [call[0].url for call in backend.calls] == [
+        "https://example.com/a.bin",
+        "https://example.com/a.bin",
+        "https://example.com/b.bin",
+    ]
+    failed_staging = comfyui / "models" / ".cdh-staging" / "a.bin.cdh-download"
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not failed_staging.exists()
+    assert (comfyui / "models" / "b.bin").read_bytes() == b"later"
+    assert any(
+        "WARNING: runtime file download failed after 2 attempt(s), continuing"
+        in message
+        for message in messages
+    )
+
+
+def test_runtime_file_download_continue_policy_keeps_plain_download_error_fatal(
+    tmp_path: Path,
+) -> None:
+    class FailingBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            raise DownloadFilesError("local setup failed")
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FailingBackend()
+
+    with pytest.raises(DownloadFilesError, match="local setup failed"):
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {
+                    "cdh": {
+                        "default_downloader": "httpx",
+                        "download_max_attempts": 2,
+                        "download_failure_policy": "continue",
+                    }
+                }
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert len(backend.calls) == 1
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not backend.calls[0][0].target.exists()
 
 
 def test_runtime_file_httpx_download_places_staged_bytes_at_final_target(
@@ -781,6 +1036,58 @@ def test_runtime_file_download_rejects_racing_final_when_overwrite_false(
         (("files", 0, "target"), "runtime_file.final_target_exists")
     ]
     assert final_target.read_bytes() == b"raced"
+    assert not backend.calls[0][0].target.exists()
+
+
+def test_runtime_file_download_continue_policy_keeps_atomic_place_error_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FakeDownloadBackend(payload=b"new")
+    original_replace = Path.replace
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        if self.name == "a.bin.cdh-download":
+            raise OSError("replace failed in test")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {
+                    "cdh": {
+                        "default_downloader": "httpx",
+                        "download_failure_policy": "continue",
+                    }
+                }
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.final_replace_failed")
+    ]
+    assert not (comfyui / "models" / "a.bin").exists()
     assert not backend.calls[0][0].target.exists()
 
 

@@ -13,6 +13,7 @@ from comfyui_docker_helper.container.download_files import (
     DownloadFilesError,
     DownloadStatus,
     FileDownloadItem,
+    TransferDownloadFilesError,
     download_files,
 )
 
@@ -35,7 +36,7 @@ class RecordingBackend:
         del settings
         self.events.append(f"{self.name}:{item.filename}")
         if item.filename == self.fail_on:
-            raise DownloadFilesError(f"{self.name} failed: {item.filename}")
+            raise TransferDownloadFilesError(f"{self.name} failed: {item.filename}")
         item.target.write_bytes(f"{self.name}:{item.filename}".encode())
 
 

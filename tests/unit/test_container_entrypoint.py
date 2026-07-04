@@ -22,6 +22,7 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
+    RuntimeFilePlanItem,
     process_runtime_file_downloads,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
@@ -30,6 +31,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
     run_runtime_startup_hooks,
 )
+from comfyui_docker_helper.container.runtime_state import load_runtime_state
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -872,6 +874,7 @@ filename = "model.bin"
         runner=runner,
         runtime_downloader=runtime_downloader,
         runtime_stop_hook_runner=runtime_stop_hook_runner,
+        runtime_state_path=tmp_path / "state.json",
     ) == 128 + int(forwarded)
 
     assert events == ["download"]
@@ -1364,6 +1367,7 @@ filename = "model.bin"
             environ={},
             runner=runner,
             runtime_downloader=runtime_downloader,
+            runtime_state_path=tmp_path / "state.json",
         )
         == 0
     )
@@ -1424,6 +1428,7 @@ filename = "model.bin"
             environ={},
             runner=runner,
             runtime_downloader=runtime_downloader,
+            runtime_state_path=tmp_path / "state.json",
         )
 
     assert events == []
@@ -1499,6 +1504,7 @@ filename = "model.bin"
             runner=runner,
             runtime_downloader=runtime_downloader,
             runtime_hook_runner=runtime_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
         )
         == 0
     )
@@ -2160,12 +2166,366 @@ filename = "model.bin"
             environ={},
             runner=runner,
             runtime_downloader=runtime_downloader,
+            runtime_state_path=tmp_path / "state.json",
         )
 
     assert spawn_calls == []
     assert "runtime download failed" in str(error.value)
     assert "[files.0.target]" in str(error.value)
     assert "runtime_file.test_failure" in str(error.value)
+
+
+def test_no_runtime_files_ignore_invalid_state_and_spawn(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{not-json", encoding="utf-8")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
+        )
+        == 0
+    )
+
+    assert events == ["spawn"]
+    assert state_path.read_text(encoding="utf-8") == "{not-json"
+
+
+def test_active_corrupt_runtime_state_fails_before_download_hooks_and_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{not-json", encoding="utf-8")
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log, cancel_requested
+        events.append("hook")
+        return ()
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_state_path=state_path,
+        )
+
+    assert events == []
+    assert "runtime state failed" in str(error.value)
+    assert "not valid JSON" in str(error.value)
+
+
+def test_active_unwritable_runtime_state_fails_before_download_hooks_and_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    state_path = tmp_path / "state.json"
+    state_path.mkdir()
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
+        )
+
+    assert events == []
+    assert "runtime state failed" in str(error.value)
+
+
+def test_existing_final_file_persists_skipped_and_avoids_downloader(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    final_target = runtime.comfyui_path / "models" / "model.bin"
+    final_target.parent.mkdir(parents=True)
+    final_target.write_bytes(b"existing")
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+overwrite = false
+""",
+    )
+    state_path = tmp_path / "state.json"
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
+        )
+        == 0
+    )
+
+    state = load_runtime_state(state_path)
+    entry = next(iter(state.downloads.entries.values()))
+    assert events == ["spawn"]
+    assert entry.status == "skipped"
+    assert entry.attempts == 0
+
+
+def test_scheduled_sync_file_downloads_with_state_observer_completed(
+    tmp_path: Path,
+) -> None:
+    class Backend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[FileDownloadItem, DownloaderSettings]] = []
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"downloaded")
+
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_downloader = "httpx"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    backend = Backend()
+    state_path = tmp_path / "state.json"
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        return process_runtime_file_downloads(
+            plan,
+            config=config,
+            backends={"httpx": backend},
+            log=log,
+            state_observer=state_observer,
+        )
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
+        )
+        == 0
+    )
+
+    assert (runtime.comfyui_path / "models" / "model.bin").read_bytes() == b"downloaded"
+    state = load_runtime_state(state_path)
+    entry = next(iter(state.downloads.entries.values()))
+    assert entry.status == "completed"
+    assert entry.attempts == 1
+    assert entry.attempt_run_id == state.run_id
+    assert entry.last_error is None
+    assert backend.calls[0][0].url == "https://example.com/model.bin"
+
+
+def test_internal_async_plan_exercises_active_state_gate_without_download(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state.json"
+    item = RuntimeFilePlanItem(
+        url="https://example.com/async.bin",
+        directory="models",
+        filename="async.bin",
+        relative_target="models/async.bin",
+        target=runtime.comfyui_path / "models" / "async.bin",
+        overwrite=False,
+        download_mode="async",
+        downloader=None,
+        action="download",
+    )
+    events: list[str] = []
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    entrypoint_module._activate_runtime_file_plan(
+        RuntimeFilePlan(items=(item,)),
+        config=RuntimeConfig.model_validate({}),
+        runtime=runtime,
+        runtime_downloader=runtime_downloader,
+        runtime_state_path=state_path,
+    )
+
+    state = load_runtime_state(state_path)
+    assert events == []
+    entry = next(iter(state.downloads.entries.values()))
+    assert entry.target == "models/async.bin"
+    assert entry.download_mode == "async"
+    assert entry.status == "pending"
 
 
 def test_runtime_download_policy_fail_prevents_spawn_after_exhausted_transfer(
@@ -2223,14 +2583,17 @@ filename = "b.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         return process_runtime_file_downloads(
             plan,
             config=config,
             backends={"httpx": backend},
             log=log,
+            state_observer=state_observer,
         )
 
+    state_path = tmp_path / "state.json"
     with pytest.raises(EntrypointError) as error:
         run_entrypoint(
             runtime=runtime,
@@ -2239,6 +2602,7 @@ filename = "b.bin"
             environ={},
             runner=runner,
             runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
         )
 
     assert spawn_calls == []
@@ -2250,6 +2614,18 @@ filename = "b.bin"
     assert "runtime_file.download_failed" in str(error.value)
     assert not (runtime.comfyui_path / "models" / "a.bin").exists()
     assert not (runtime.comfyui_path / "models" / "b.bin").exists()
+    state = load_runtime_state(state_path)
+    digest = next(
+        digest
+        for digest, entry in state.downloads.entries.items()
+        if entry.target == "models/a.bin"
+    )
+    entry = state.downloads.entries[digest]
+    assert entry.status == "exhausted"
+    assert entry.attempts == 2
+    assert entry.attempt_run_id == state.run_id
+    assert entry.last_error is not None
+    assert "failed in test" in entry.last_error
 
 
 def test_runtime_download_policy_continue_spawns_after_exhausted_file_then_later_file(
@@ -2309,14 +2685,17 @@ filename = "b.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         return process_runtime_file_downloads(
             plan,
             config=config,
             backends={"httpx": backend},
             log=log,
+            state_observer=state_observer,
         )
 
+    state_path = tmp_path / "state.json"
     assert (
         run_entrypoint(
             runtime=runtime,
@@ -2325,6 +2704,7 @@ filename = "b.bin"
             environ={},
             runner=runner,
             runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
         )
         == 0
     )
@@ -2337,6 +2717,11 @@ filename = "b.bin"
     ]
     assert not (runtime.comfyui_path / "models" / "a.bin").exists()
     assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
+    state = load_runtime_state(state_path)
+    statuses = {
+        entry.target: entry.status for entry in state.downloads.entries.values()
+    }
+    assert statuses == {"models/a.bin": "exhausted", "models/b.bin": "completed"}
 
 
 def test_runtime_staging_file_is_not_treated_as_completed_final_file(
@@ -2386,6 +2771,7 @@ filename = "model.bin"
             environ={},
             runner=runner,
             runtime_downloader=runtime_downloader,
+            runtime_state_path=tmp_path / "state.json",
         )
         == 0
     )
@@ -2447,6 +2833,7 @@ download_mode = "sync"
             environ={"CDH_DEFAULT_DOWNLOADER": "httpx"},
             runner=runner,
             runtime_downloader=runtime_downloader,
+            runtime_state_path=tmp_path / "state.json",
         )
         == 0
     )

@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from inspect import Parameter, signature
 from pathlib import Path
@@ -114,6 +115,20 @@ class RuntimeDownloadRunner(Protocol):
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
 
 
+class RuntimeAsyncQueueStarter(Protocol):
+    """Async runtime download queue starter used before ComfyUI spawn."""
+
+    def __call__(
+        self,
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> None: ...
+
+
 class RuntimeHookRunner(Protocol):
     """Runtime hook phase runner callable used during startup."""
 
@@ -154,6 +169,28 @@ class ReadinessWaiter(Protocol):
     ) -> object: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeDownloadQueues:
+    sync_plan: RuntimeFilePlan
+    async_plan: RuntimeFilePlan
+
+
+class RuntimeAsyncQueueStartupError(RuntimeError):
+    """Async queue infrastructure failed before accepting planned work."""
+
+
+def start_runtime_async_download_queue(
+    plan: RuntimeFilePlan,
+    *,
+    config: RuntimeConfig,
+    runtime: ContainerRuntime,
+    runtime_state_path: Path,
+    log: Logger,
+) -> None:
+    """Accept async runtime file work without executing it in T2."""
+    del plan, config, runtime, runtime_state_path, log
+
+
 def run_entrypoint(
     *,
     runtime: ContainerRuntime,
@@ -164,6 +201,9 @@ def run_entrypoint(
     environ: Mapping[str, str] | None = None,
     runner: EntrypointRunner = subprocess.Popen,
     runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
+    runtime_async_queue_starter: RuntimeAsyncQueueStarter = (
+        start_runtime_async_download_queue
+    ),
     runtime_hook_runner: RuntimeHookRunner = run_runtime_startup_hooks,
     runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
@@ -190,7 +230,7 @@ def run_entrypoint(
     startup_shutdown = _StartupShutdownState()
     with _startup_shutdown_signal_handlers(startup_shutdown):
         try:
-            _run_runtime_downloads(
+            download_queues = _run_runtime_downloads(
                 result,
                 runtime=runtime,
                 runtime_downloader=runtime_downloader,
@@ -204,6 +244,15 @@ def run_entrypoint(
                 source_env=source_env,
                 runtime_hook_runner=runtime_hook_runner,
                 startup_shutdown=startup_shutdown,
+            )
+            if startup_shutdown.requested_signal is not None:
+                return _normalize_signal_exit_code(startup_shutdown.requested_signal)
+            _start_runtime_async_download_queue(
+                download_queues.async_plan,
+                config=result.config,
+                runtime=runtime,
+                runtime_state_path=Path(runtime_state_path),
+                runtime_async_queue_starter=runtime_async_queue_starter,
             )
             if startup_shutdown.requested_signal is not None:
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
@@ -339,9 +388,9 @@ def _run_runtime_downloads(
     runtime: ContainerRuntime,
     runtime_downloader: RuntimeDownloadRunner,
     runtime_state_path: str | Path,
-) -> None:
+) -> _RuntimeDownloadQueues:
     if not result.files:
-        return
+        return _empty_runtime_download_queues()
 
     try:
         plan = build_runtime_file_plan(
@@ -349,7 +398,7 @@ def _run_runtime_downloads(
             comfyui_path=runtime.comfyui_path,
             default_download_mode=result.config.cdh.default_download_mode,
         )
-        _activate_runtime_file_plan(
+        return _activate_runtime_file_plan(
             plan,
             config=result.config,
             runtime=runtime,
@@ -379,9 +428,9 @@ def _activate_runtime_file_plan(
     runtime: ContainerRuntime,
     runtime_downloader: RuntimeDownloadRunner,
     runtime_state_path: Path,
-) -> None:
+) -> _RuntimeDownloadQueues:
     if not plan.items:
-        return
+        return _empty_runtime_download_queues()
 
     now = datetime.now(UTC)
     state = prepare_runtime_state_for_start(
@@ -400,15 +449,9 @@ def _activate_runtime_file_plan(
     )
     write_runtime_state(runtime_state_path, reconciliation.state)
 
-    sync_plan = RuntimeFilePlan(
-        items=tuple(
-            item
-            for item in reconciliation.download_plan.items
-            if item.download_mode == "sync"
-        )
-    )
-    if not sync_plan.items:
-        return
+    queues = _split_runtime_download_queues(reconciliation.download_plan)
+    if not queues.sync_plan.items:
+        return queues
 
     state_writer = _RuntimeDownloadStateWriter(
         runtime_state_path,
@@ -416,11 +459,54 @@ def _activate_runtime_file_plan(
     )
     _call_runtime_downloader(
         runtime_downloader,
-        sync_plan,
+        queues.sync_plan,
         config=config,
         log=print,
         state_observer=state_writer,
     )
+    return queues
+
+
+def _empty_runtime_download_queues() -> _RuntimeDownloadQueues:
+    empty_plan = RuntimeFilePlan(items=())
+    return _RuntimeDownloadQueues(sync_plan=empty_plan, async_plan=empty_plan)
+
+
+def _split_runtime_download_queues(
+    plan: RuntimeFilePlan,
+) -> _RuntimeDownloadQueues:
+    return _RuntimeDownloadQueues(
+        sync_plan=RuntimeFilePlan(
+            items=tuple(item for item in plan.items if item.download_mode == "sync")
+        ),
+        async_plan=RuntimeFilePlan(
+            items=tuple(item for item in plan.items if item.download_mode == "async")
+        ),
+    )
+
+
+def _start_runtime_async_download_queue(
+    plan: RuntimeFilePlan,
+    *,
+    config: RuntimeConfig,
+    runtime: ContainerRuntime,
+    runtime_state_path: Path,
+    runtime_async_queue_starter: RuntimeAsyncQueueStarter,
+) -> None:
+    if not plan.items:
+        return
+    try:
+        runtime_async_queue_starter(
+            plan,
+            config=config,
+            runtime=runtime,
+            runtime_state_path=runtime_state_path,
+            log=print,
+        )
+    except RuntimeAsyncQueueStartupError as error:
+        raise EntrypointError(
+            f"async runtime download queue failed to start: {error}"
+        ) from error
 
 
 def _call_runtime_downloader(

@@ -2512,7 +2512,7 @@ def test_internal_async_plan_exercises_active_state_gate_without_download(
         events.append("download")
         return ()
 
-    entrypoint_module._activate_runtime_file_plan(
+    queues = entrypoint_module._activate_runtime_file_plan(
         RuntimeFilePlan(items=(item,)),
         config=RuntimeConfig.model_validate({}),
         runtime=runtime,
@@ -2520,6 +2520,8 @@ def test_internal_async_plan_exercises_active_state_gate_without_download(
         runtime_state_path=state_path,
     )
 
+    assert queues.sync_plan.items == ()
+    assert queues.async_plan.items == (item,)
     state = load_runtime_state(state_path)
     assert events == []
     entry = next(iter(state.downloads.entries.values()))
@@ -2546,6 +2548,92 @@ filename = "async.bin"
     )
     state_path = tmp_path / "state.json"
     events: list[str] = []
+    async_plans: list[RuntimeFilePlan] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        assert events == ["async-start"]
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> None:
+        del config, runtime, log
+        assert runtime_state_path == state_path
+        assert events == []
+        events.append("async-start")
+        async_plans.append(plan)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_state_path=state_path,
+        )
+        == 0
+    )
+
+    state = load_runtime_state(state_path)
+    entry = next(iter(state.downloads.entries.values()))
+    assert events == ["async-start", "spawn"]
+    assert len(async_plans) == 1
+    assert [item.relative_target for item in async_plans[0].items] == [
+        "models/async.bin"
+    ]
+    assert entry.target == "models/async.bin"
+    assert entry.download_mode == "async"
+    assert entry.status == "pending"
+
+
+def test_sync_and_async_runtime_file_ordering_before_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/sync.bin"
+dir = "models"
+filename = "sync.bin"
+download_mode = "sync"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
 
     def runner(
         argv: Sequence[str],
@@ -2564,8 +2652,126 @@ filename = "async.bin"
         config: RuntimeConfig,
         log: Logger,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del config, log
+        assert [item.relative_target for item in plan.items] == ["models/sync.bin"]
+        events.append("download")
+        return ()
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log, cancel_requested
+        events.append("pre-start")
+        return ()
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> None:
+        del config, runtime, runtime_state_path, log
+        assert [item.relative_target for item in plan.items] == ["models/async.bin"]
+        events.append("async-start")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 0
+    )
+
+    assert events == ["download", "pre-start", "async-start", "spawn"]
+
+
+def test_async_queue_acceptance_does_not_block_readiness_or_post_start(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    child = FakeChild(0)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
         del plan, config, log
         events.append("download")
+        return ()
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> None:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        assert child.poll() is None
+        events.append("readiness")
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        assert phase == "post-start"
+        events.append("post-start")
         return ()
 
     assert (
@@ -2573,19 +2779,103 @@ filename = "async.bin"
             runtime=runtime,
             baked_config_path=tmp_path / "missing-baked.toml",
             mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
             runner=runner,
             runtime_downloader=runtime_downloader,
-            runtime_state_path=state_path,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
         )
         == 0
     )
 
-    state = load_runtime_state(state_path)
-    entry = next(iter(state.downloads.entries.values()))
-    assert events == ["spawn"]
-    assert entry.target == "models/async.bin"
-    assert entry.download_mode == "async"
-    assert entry.status == "pending"
+    assert events == ["async-start", "spawn", "readiness", "post-start"]
+
+
+def test_async_queue_infrastructure_failure_prevents_spawn(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        events.append(phase)
+        return ()
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> None:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        raise entrypoint_module.RuntimeAsyncQueueStartupError(
+            "queue socket unavailable"
+        )
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port, child
+        events.append("readiness")
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
+        )
+
+    assert events == ["pre-start", "async-start"]
+    assert "async runtime download queue failed to start" in str(error.value)
+    assert "queue socket unavailable" in str(error.value)
 
 
 def test_runtime_download_policy_fail_prevents_spawn_after_exhausted_transfer(

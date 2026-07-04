@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import TracebackType
-from typing import Protocol
+from typing import Literal, Protocol
 
 import aria2p
 import httpx
@@ -96,6 +96,8 @@ class FileDownloadPlan:
 
     downloader: DownloaderSettings
     items: tuple[FileDownloadItem, ...]
+    download_max_attempts: int = 3
+    download_failure_policy: Literal["continue", "fail"] = "fail"
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +412,11 @@ class _DownloaderConfig(ConfigModel):
     httpx: _HttpxConfig
 
 
+class _CdhConfig(ConfigModel):
+    download_max_attempts: int = Field(default=3, ge=1)
+    download_failure_policy: Literal["continue", "fail"] = "fail"
+
+
 class _FileConfig(ConfigModel):
     url: str
     dir: str
@@ -419,6 +426,7 @@ class _FileConfig(ConfigModel):
 
 
 class _FilesConfig(ConfigModel):
+    cdh: _CdhConfig = Field(default_factory=_CdhConfig)
     downloader: _DownloaderConfig
     files: list[_FileConfig]
 
@@ -474,7 +482,12 @@ def build_file_download_plan(
         _build_file_item(file, comfyui_path=resolved_comfyui_path)
         for file in config.files
     )
-    return FileDownloadPlan(downloader=downloader, items=items)
+    return FileDownloadPlan(
+        downloader=downloader,
+        items=items,
+        download_max_attempts=config.cdh.download_max_attempts,
+        download_failure_policy=config.cdh.download_failure_policy,
+    )
 
 
 def process_file_downloads(
@@ -500,7 +513,23 @@ def process_file_downloads(
             ) from error
 
         log(f"Downloading file with {item.downloader}: {item.url}")
-        backend.download(item, plan.downloader)
+        try:
+            _download_with_policy(
+                item,
+                backend,
+                plan,
+                log=log,
+            )
+        except DownloadFilesError as error:
+            if plan.download_failure_policy == "fail":
+                raise
+            _cleanup_failed_target(item, log=log)
+            log(
+                "WARNING: download failed after "
+                f"{plan.download_max_attempts} attempt(s), continuing: "
+                f"{item.target}: {error}"
+            )
+            continue
         log(f"Downloaded file: {item.target}")
         results.append(DownloadResult(item=item, status=DownloadStatus.DOWNLOADED))
 
@@ -663,6 +692,52 @@ def _build_file_item(
         overwrite=file.overwrite,
         downloader=require_downloader_name(file.downloader),
     )
+
+
+def _download_with_policy(
+    item: FileDownloadItem,
+    backend: DownloadBackend,
+    plan: FileDownloadPlan,
+    *,
+    log: Logger,
+) -> None:
+    settings = _single_host_attempt_settings(plan.downloader)
+    attempts = plan.download_max_attempts
+    for attempt in range(1, attempts + 1):
+        try:
+            backend.download(item, settings)
+            return
+        except DownloadFilesError as error:
+            _cleanup_failed_target(item, log=log)
+            if attempt >= attempts:
+                raise
+            log(
+                f"Retrying file download after attempt {attempt}/{attempts} failed: "
+                f"{item.target}: {error}"
+            )
+
+
+def _single_host_attempt_settings(settings: DownloaderSettings) -> DownloaderSettings:
+    """Keep host build policy attempts from multiplying backend HTTPX retries."""
+    return DownloaderSettings(
+        default=settings.default,
+        aria2=settings.aria2,
+        httpx=HttpxDownloadSettings(
+            timeout=settings.httpx.timeout,
+            retries=0,
+        ),
+    )
+
+
+def _cleanup_failed_target(item: FileDownloadItem, *, log: Logger) -> None:
+    try:
+        if item.target.exists() or item.target.is_symlink():
+            item.target.unlink()
+    except OSError as error:
+        log(
+            "WARNING: failed download target could not be removed: "
+            f"{item.target}: {error}"
+        )
 
 
 def _preflight_file(item: FileDownloadItem, *, log: Logger) -> bool:

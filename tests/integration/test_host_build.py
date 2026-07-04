@@ -461,6 +461,55 @@ default_download_mode = "sync"
     assert calls == [("demo:warning",)]
 
 
+def test_build_time_downloads_do_not_require_runtime_state(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host build file downloads render without v0.4 runtime state wiring."""
+    config = write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    context = tmp_path / "context"
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        lambda **kwargs: BuildxBuildResult(
+            argv=("docker",),
+            context_dir=kwargs["context_dir"],
+            image_tags=kwargs["image_tags"],
+            output=kwargs["output"],
+        ),
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "demo:files",
+            "--context-dir",
+            str(context),
+        ],
+    )
+
+    assert result.exit_code == 0
+    dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
+    assert "cdh container download-files" in dockerfile
+    assert "/var/lib/cdh/runtime/state.json" not in dockerfile
+    assert ".cdh-staging" not in dockerfile
+
+
 def test_build_uses_config_tags_when_cli_tags_are_absent(
     cli_runner: CliRunner,
     tmp_path: Path,

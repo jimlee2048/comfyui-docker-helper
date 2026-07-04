@@ -7,6 +7,7 @@ import pytest
 
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
+    DiagnosticSeverity,
     RenderPlan,
     load_validate_plan,
     load_validate_plan_result,
@@ -95,6 +96,43 @@ default_download_mode = "sync"
     )
 
     assert isinstance(load_validate_plan(write_config(document)), RenderPlan)
+
+
+@pytest.mark.parametrize(
+    ("cdh_fragment", "expected_warning"),
+    [
+        ("", False),
+        ('download_failure_policy = "fail"\n', False),
+        ('download_failure_policy = "continue"\n', True),
+    ],
+)
+def test_explicit_continue_failure_policy_warns_for_build_time_files(
+    write_config: Callable[[str], Path],
+    cdh_fragment: str,
+    expected_warning: bool,
+) -> None:
+    """Warn only when explicit continue policy can affect build-time files."""
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+[cdh]
+{cdh_fragment}
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+"""
+    )
+
+    result = load_validate_plan_result(write_config(document))
+
+    assert bool(result.warnings) is expected_warning
+    if expected_warning:
+        warning = result.warnings[0]
+        assert warning.path == ("cdh", "download_failure_policy")
+        assert warning.code == "host_build.download_failure_policy_continue"
+        assert warning.severity == DiagnosticSeverity.WARNING
 
 
 def test_unsupported_host_file_download_mode_fails_before_runtime_projection(

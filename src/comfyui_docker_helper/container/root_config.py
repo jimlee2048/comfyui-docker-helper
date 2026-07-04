@@ -80,6 +80,10 @@ def files_document(config: Config) -> dict[str, object]:
     downloader = config.cdh.downloader
     default_downloader = config.cdh.default_downloader
     return {
+        "cdh": {
+            "download_max_attempts": config.cdh.download_max_attempts,
+            "download_failure_policy": config.cdh.download_failure_policy,
+        },
         "downloader": {
             "default": default_downloader,
             "aria2": downloader.aria2.model_dump(mode="json"),

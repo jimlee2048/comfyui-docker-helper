@@ -201,6 +201,34 @@ download_mode = "sync"
     assert result.stderr == ""
 
 
+def test_validate_renders_explicit_continue_build_file_warning(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Render host-context warnings without failing validation."""
+    path = _write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[cdh]
+download_failure_policy = "continue"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    result = cli_runner.invoke(app, ["host", "validate", "-f", str(path)])
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "Configuration has warnings:" in result.stderr
+    assert "[cdh.download_failure_policy]" in result.stderr
+    assert "host_build.download_failure_policy_continue" in result.stderr
+
+
 def test_render_with_runtime_download_mode_writes_context(
     cli_runner: CliRunner, tmp_path: Path
 ) -> None:

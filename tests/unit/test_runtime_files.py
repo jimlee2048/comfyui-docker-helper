@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
@@ -19,12 +21,26 @@ from comfyui_docker_helper.container.download_files import (
 )
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
+    RuntimeFilePlan,
     RuntimeFilePlanError,
     build_runtime_file_plan,
+    canonical_runtime_file_identity_bytes,
     download_runtime_files,
     merge_runtime_file_items,
     process_runtime_file_downloads,
+    reconcile_runtime_file_plan,
+    runtime_file_identity_digest,
+    runtime_file_staging_target,
 )
+from comfyui_docker_helper.container.runtime_state import (
+    RuntimeDownloadEntry,
+    RuntimeDownloadsState,
+    RuntimeState,
+    write_runtime_state,
+)
+
+NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+LATER = datetime(2026, 1, 2, 4, 5, 6, tzinfo=UTC)
 
 
 def _identities(error: RuntimeFilePlanError) -> list[tuple[tuple, str]]:
@@ -75,6 +91,41 @@ class FakeAria2Factory:
         return self.backend
 
 
+def _runtime_state(
+    *,
+    entries: dict[str, RuntimeDownloadEntry] | None = None,
+    run_id: str = "run-1",
+    updated_at: datetime = NOW,
+) -> RuntimeState:
+    return RuntimeState(
+        schema_version=1,
+        updated_at=updated_at,
+        run_id=run_id,
+        downloads=RuntimeDownloadsState(entries=entries or {}),
+    )
+
+
+def _runtime_entry(
+    *,
+    target: str = "models/checkpoints/a.bin",
+    status: str = "pending",
+    attempts: int = 0,
+    attempt_run_id: str = "run-1",
+    download_mode: str = "sync",
+    updated_at: datetime = NOW,
+    last_error: str | None = None,
+) -> RuntimeDownloadEntry:
+    return RuntimeDownloadEntry(
+        target=target,
+        download_mode=download_mode,
+        status=status,
+        attempts=attempts,
+        attempt_run_id=attempt_run_id,
+        last_error=last_error,
+        updated_at=updated_at,
+    )
+
+
 # Staging tests protect atomic replacement, skip/overwrite decisions, and cleanup
 # so interrupted downloads cannot expose partial or unrelated files as complete.
 def test_runtime_file_plan_derives_targets_keys_and_first_seen_order(
@@ -114,6 +165,534 @@ def test_runtime_file_plan_derives_targets_keys_and_first_seen_order(
     ]
     assert [item.download_mode for item in plan.items] == ["sync", "sync"]
     assert [item.action for item in plan.items] == ["download", "download"]
+
+
+def test_runtime_file_identity_uses_exact_canonical_bytes_and_digest_vectors(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    item = plan.items[0]
+
+    assert canonical_runtime_file_identity_bytes(item) == (
+        b'{"schema_version":1,"source":"https://example.com/a.bin",'
+        b'"source_type":"url","target":"models/checkpoints/a.bin"}'
+    )
+    assert runtime_file_identity_digest(item) == (
+        "sha256:37b76480b800c01b144b9e94323a269e43922d3caeb00bb2f3fd15dd62ed1960"
+    )
+    assert (
+        runtime_file_identity_digest(
+            replace(item, url="https://EXAMPLE.com/a.bin?b=2&a=1#frag")
+        )
+        == "sha256:2c623e23733041c71ed64736fecf65a3cec7008afb8e04093fecd6b346646395"
+    )
+    assert (
+        runtime_file_identity_digest(replace(item, url="https://example.com/a2.bin"))
+        == "sha256:59feb9dc7065c3de93aa5e3dc5093b4ad90117542f99def28f5a7a10198bf9fc"
+    )
+    assert (
+        runtime_file_identity_digest(
+            replace(
+                item,
+                directory="models/loras",
+                relative_target="models/loras/a.bin",
+                target=comfyui / "models" / "loras" / "a.bin",
+            )
+        )
+        == "sha256:194706c20260303bf7bf1c9b47409cd1a45aef3522c008ee1780c64c1b5f5c4f"
+    )
+
+
+def test_runtime_file_identity_ignores_non_identity_execution_fields(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    item = build_runtime_file_plan(
+        [
+            {
+                "cdh": {
+                    "download_max_attempts": 9,
+                    "download_failure_policy": "continue",
+                },
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                        "overwrite": False,
+                        "downloader": "httpx",
+                    }
+                ],
+            }
+        ],
+        comfyui_path=comfyui,
+    ).items[0]
+
+    assert {
+        runtime_file_identity_digest(
+            replace(
+                item,
+                downloader=downloader,
+                download_mode=download_mode,
+                overwrite=overwrite,
+                action=action,
+            )
+        )
+        for downloader in (None, "httpx", "aria2")
+        for download_mode in ("sync", "async")
+        for overwrite in (False, True)
+        for action in ("download", "skip_existing", "overwrite_existing")
+    } == {runtime_file_identity_digest(item)}
+
+
+def test_reconcile_schedules_missing_non_overwrite_file_and_writes_state(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        _runtime_state(),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+    state_path = tmp_path / "state.json"
+    write_runtime_state(state_path, reconciliation.state)
+
+    digest = runtime_file_identity_digest(plan.items[0])
+    assert [item.digest for item in reconciliation.items] == [digest]
+    assert [item.status for item in reconciliation.items] == ["pending"]
+    assert [item.scheduled for item in reconciliation.items] == [True]
+    assert reconciliation.download_plan.items == plan.items
+    assert reconciliation.items[0].staging_target == runtime_file_staging_target(
+        plan.items[0],
+        digest,
+    )
+    assert reconciliation.state.downloads.entries[digest] == _runtime_entry(
+        status="pending",
+        updated_at=LATER,
+    )
+    assert state_path.exists()
+
+
+def test_reconcile_runtime_file_plan_skips_existing_non_overwrite_file(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    target_parent = comfyui / "models" / "checkpoints"
+    target_parent.mkdir(parents=True)
+    (target_parent / "a.bin").write_bytes(b"already-there")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        _runtime_state(),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+    digest = runtime_file_identity_digest(plan.items[0])
+
+    assert reconciliation.download_plan.items == ()
+    assert reconciliation.items[0].status == "skipped"
+    assert reconciliation.items[0].scheduled is False
+    assert reconciliation.state.downloads.entries[digest].status == "skipped"
+
+
+def test_reconcile_scheduled_removed_non_overwrite_file_downloads(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    target_parent = comfyui / "models" / "checkpoints"
+    target_parent.mkdir(parents=True)
+    final_target = target_parent / "a.bin"
+    final_target.write_bytes(b"removed-after-plan")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    assert plan.items[0].action == "skip_existing"
+    final_target.unlink()
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        _runtime_state(),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+
+    assert reconciliation.items[0].status == "pending"
+    assert reconciliation.items[0].scheduled is True
+    assert reconciliation.download_plan.items[0].action == "download"
+
+    backend = FakeDownloadBackend(payload=b"downloaded-after-removal")
+    process_runtime_file_downloads(
+        reconciliation.download_plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": backend},
+        log=lambda message: None,
+    )
+
+    assert len(backend.calls) == 1
+    assert final_target.read_bytes() == b"downloaded-after-removal"
+
+
+def test_reconcile_completes_overwrite_when_current_completed_and_final_exists(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    target_parent = comfyui / "models" / "checkpoints"
+    target_parent.mkdir(parents=True)
+    (target_parent / "a.bin").write_bytes(b"complete")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                        "overwrite": True,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    digest = runtime_file_identity_digest(plan.items[0])
+    previous_entry = _runtime_entry(
+        status="completed",
+        attempts=3,
+        attempt_run_id="previous-run",
+        last_error="ignored",
+    )
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        _runtime_state(entries={digest: previous_entry}),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+
+    assert reconciliation.download_plan.items == ()
+    assert reconciliation.items[0].previous_entry == previous_entry
+    assert reconciliation.items[0].status == "completed"
+    assert reconciliation.state.downloads.entries[digest] == _runtime_entry(
+        status="completed",
+        attempts=3,
+        attempt_run_id="previous-run",
+        updated_at=LATER,
+    )
+
+
+@pytest.mark.parametrize("previous_status", [None, "pending", "failed", "completed"])
+def test_reconcile_runtime_file_plan_schedules_overwrite_unless_completed_with_final(
+    tmp_path: Path,
+    previous_status: str | None,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                        "overwrite": True,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    digest = runtime_file_identity_digest(plan.items[0])
+    entries = (
+        {}
+        if previous_status is None
+        else {
+            digest: _runtime_entry(
+                status=previous_status,
+                attempts=2,
+                attempt_run_id="same-digest-run",
+                last_error="old error",
+            )
+        }
+    )
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        _runtime_state(entries=entries),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+
+    assert reconciliation.download_plan.items[0] == replace(
+        plan.items[0],
+        action="overwrite_existing",
+    )
+    assert reconciliation.items[0].status == "pending"
+    entry = reconciliation.state.downloads.entries[digest]
+    assert entry.status == "pending"
+    assert entry.last_error is None
+    assert entry.attempts == (0 if previous_status is None else 2)
+    assert entry.attempt_run_id == (
+        "run-1" if previous_status is None else "same-digest-run"
+    )
+
+
+def test_reconcile_runtime_file_plan_reports_stale_entries_and_staging_without_deleting(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    stale_digest = "sha256:" + ("a" * 64)
+    stale_staging = (
+        comfyui
+        / "models"
+        / "old"
+        / ".cdh-staging"
+        / f"cdh-{stale_digest.removeprefix('sha256:')}.part"
+    )
+    stale_staging.parent.mkdir(parents=True)
+    stale_staging.write_bytes(b"partial")
+    (comfyui / "models" / "checkpoints").mkdir(parents=True)
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        _runtime_state(
+            entries={
+                stale_digest: _runtime_entry(
+                    target="models/old/removed.bin",
+                    status="downloading",
+                )
+            }
+        ),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+
+    assert reconciliation.stale_entry_digests == frozenset({stale_digest})
+    assert reconciliation.stale_staging_candidates == (stale_staging,)
+    assert stale_staging.read_bytes() == b"partial"
+    assert stale_digest not in reconciliation.state.downloads.entries
+
+
+def test_reconcile_empty_plan_reports_absolute_stale_candidate_without_deleting(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    stale_digest = "sha256:" + ("b" * 64)
+    stale_staging = (
+        comfyui
+        / "models"
+        / "reset"
+        / ".cdh-staging"
+        / f"cdh-{stale_digest.removeprefix('sha256:')}.part"
+    )
+    stale_staging.parent.mkdir(parents=True)
+    stale_staging.write_bytes(b"old-partial")
+
+    reconciliation = reconcile_runtime_file_plan(
+        RuntimeFilePlan(items=()),
+        _runtime_state(
+            entries={
+                stale_digest: _runtime_entry(
+                    target="models/reset/removed.bin",
+                    status="pending",
+                )
+            }
+        ),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+
+    assert reconciliation.stale_entry_digests == frozenset({stale_digest})
+    assert reconciliation.download_plan.items == ()
+    assert reconciliation.items == ()
+    assert reconciliation.state.downloads.entries == {}
+    assert reconciliation.stale_staging_candidates == (stale_staging,)
+    assert reconciliation.stale_staging_candidates[0].is_absolute()
+    assert stale_staging.read_bytes() == b"old-partial"
+
+
+def test_reconcile_removed_config_entry_reports_absolute_stale_candidate(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    stale_digest = "sha256:" + ("c" * 64)
+    stale_staging = (
+        comfyui
+        / "models"
+        / "old"
+        / ".cdh-staging"
+        / f"cdh-{stale_digest.removeprefix('sha256:')}.part"
+    )
+    stale_staging.parent.mkdir(parents=True)
+    stale_staging.write_bytes(b"old-partial")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/current.bin",
+                        "dir": "models/current",
+                        "filename": "current.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    reconciliation = reconcile_runtime_file_plan(
+        plan,
+        _runtime_state(
+            entries={
+                stale_digest: _runtime_entry(
+                    target="models/old/removed.bin",
+                    status="downloading",
+                )
+            }
+        ),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+
+    assert reconciliation.stale_entry_digests == frozenset({stale_digest})
+    assert reconciliation.stale_staging_candidates == (stale_staging,)
+    assert reconciliation.stale_staging_candidates[0].is_absolute()
+    assert stale_staging.read_bytes() == b"old-partial"
+    assert stale_digest not in reconciliation.state.downloads.entries
+
+
+def test_reconcile_runtime_file_plan_accepts_internal_async_items(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    item = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    ).items[0]
+    async_plan = replace(item, download_mode="async")
+
+    reconciliation = reconcile_runtime_file_plan(
+        replace(build_runtime_file_plan([], comfyui_path=comfyui), items=(async_plan,)),
+        _runtime_state(),
+        now=LATER,
+        comfyui_path=comfyui,
+    )
+
+    digest = runtime_file_identity_digest(async_plan)
+    assert reconciliation.download_plan.items == (async_plan,)
+    assert reconciliation.state.downloads.entries[digest].download_mode == "async"
+
+
+def test_build_runtime_file_plan_rejects_public_async_download_mode(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/a.bin",
+                            "dir": "models/checkpoints",
+                            "filename": "a.bin",
+                            "download_mode": "async",
+                        }
+                    ]
+                }
+            ],
+            comfyui_path=comfyui,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "download_mode"), "schema.literal_error")
+    ]
 
 
 def test_runtime_file_same_key_merge_and_reset_behavior() -> None:

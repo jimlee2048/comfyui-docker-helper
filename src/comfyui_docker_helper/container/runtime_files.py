@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import stat
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -32,6 +35,14 @@ from comfyui_docker_helper.container.download_files import (
     Logger,
     TransferDownloadFilesError,
 )
+from comfyui_docker_helper.container.runtime_state import (
+    RuntimeDownloadDigestKey,
+    RuntimeDownloadEntry,
+    RuntimeDownloadsState,
+    RuntimeState,
+)
+
+RUNTIME_FILE_IDENTITY_SCHEMA_VERSION = 1
 
 type RuntimeFilePath = tuple[str | int, ...]
 
@@ -46,7 +57,7 @@ class RuntimeFilePlanItem:
     relative_target: str
     target: Path
     overwrite: bool
-    download_mode: Literal["sync"]
+    download_mode: Literal["sync", "async"]
     downloader: DownloaderName | None
     action: Literal["download", "skip_existing", "overwrite_existing"]
 
@@ -66,6 +77,29 @@ class RuntimeFileDownloadResult:
     backend: DownloaderName
     staging_target: Path
     status: DownloadStatus
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeFileReconciliationItem:
+    """One runtime file item reconciled against filesystem and state."""
+
+    item: RuntimeFilePlanItem
+    digest: RuntimeDownloadDigestKey
+    status: Literal["pending", "completed", "skipped"]
+    scheduled: bool
+    staging_target: Path
+    previous_entry: RuntimeDownloadEntry | None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeFileReconciliation:
+    """Pure runtime file reconciliation result for state and execution planning."""
+
+    state: RuntimeState
+    download_plan: RuntimeFilePlan
+    items: tuple[RuntimeFileReconciliationItem, ...]
+    stale_entry_digests: frozenset[str]
+    stale_staging_candidates: tuple[Path, ...]
 
 
 class RuntimeFilePlanError(ValueError):
@@ -237,6 +271,173 @@ def process_runtime_file_downloads(
         )
 
     return tuple(results)
+
+
+def canonical_runtime_file_identity_bytes(item: RuntimeFilePlanItem) -> bytes:
+    """Return canonical runtime file identity bytes for digesting."""
+    payload = {
+        "schema_version": RUNTIME_FILE_IDENTITY_SCHEMA_VERSION,
+        "source": item.url,
+        "source_type": "url",
+        "target": item.relative_target,
+    }
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def runtime_file_identity_digest(
+    item: RuntimeFilePlanItem,
+) -> RuntimeDownloadDigestKey:
+    """Return the stable source-target identity digest for a runtime file item."""
+    digest = hashlib.sha256(canonical_runtime_file_identity_bytes(item)).hexdigest()
+    return f"sha256:{digest}"
+
+
+def runtime_file_staging_target(item: RuntimeFilePlanItem, digest: str) -> Path:
+    """Return the digest-named target-local staging path for reconciliation."""
+    digest_suffix = digest.removeprefix("sha256:")
+    return item.target.parent / ".cdh-staging" / f"cdh-{digest_suffix}.part"
+
+
+def reconcile_runtime_file_plan(
+    plan: RuntimeFilePlan,
+    state: RuntimeState,
+    *,
+    now: datetime,
+    comfyui_path: str | Path,
+) -> RuntimeFileReconciliation:
+    """Reconcile desired runtime files against final files and persisted state."""
+    root = Path(comfyui_path)
+    current_digests = {runtime_file_identity_digest(item): item for item in plan.items}
+    current_targets = {item.relative_target: item for item in plan.items}
+    stale_entry_digests = frozenset(
+        digest for digest in state.downloads.entries if digest not in current_digests
+    )
+
+    items: list[RuntimeFileReconciliationItem] = []
+    scheduled_items: list[RuntimeFilePlanItem] = []
+    entries: dict[RuntimeDownloadDigestKey, RuntimeDownloadEntry] = {}
+
+    for item in plan.items:
+        digest = runtime_file_identity_digest(item)
+        previous_entry = state.downloads.entries.get(digest)
+        final_exists = item.target.is_file() and not item.target.is_symlink()
+
+        if not item.overwrite:
+            scheduled = not final_exists
+            status: Literal["pending", "completed", "skipped"] = (
+                "pending" if scheduled else "skipped"
+            )
+        else:
+            status = (
+                "completed"
+                if previous_entry is not None
+                and previous_entry.status == "completed"
+                and final_exists
+                else "pending"
+            )
+            scheduled = status == "pending"
+
+        if scheduled:
+            scheduled_items.append(_runtime_file_scheduled_item(item))
+
+        entry = _runtime_download_entry_for_reconciliation(
+            item,
+            previous_entry,
+            status=status,
+            state=state,
+            now=now,
+        )
+        entries[digest] = entry
+        items.append(
+            RuntimeFileReconciliationItem(
+                item=item,
+                digest=digest,
+                status=status,
+                scheduled=scheduled,
+                staging_target=runtime_file_staging_target(item, digest),
+                previous_entry=previous_entry,
+            )
+        )
+
+    reconciled_state = RuntimeState(
+        schema_version=state.schema_version,
+        updated_at=now,
+        run_id=state.run_id,
+        downloads=RuntimeDownloadsState(entries=entries),
+    )
+    return RuntimeFileReconciliation(
+        state=reconciled_state,
+        download_plan=RuntimeFilePlan(items=tuple(scheduled_items)),
+        items=tuple(items),
+        stale_entry_digests=stale_entry_digests,
+        stale_staging_candidates=tuple(
+            _stale_runtime_file_staging_candidates(
+                state,
+                stale_entry_digests=stale_entry_digests,
+                current_targets=current_targets,
+                root=root,
+            )
+        ),
+    )
+
+
+def _runtime_download_entry_for_reconciliation(
+    item: RuntimeFilePlanItem,
+    previous_entry: RuntimeDownloadEntry | None,
+    *,
+    status: Literal["pending", "completed", "skipped"],
+    state: RuntimeState,
+    now: datetime,
+) -> RuntimeDownloadEntry:
+    attempts = previous_entry.attempts if previous_entry is not None else 0
+    attempt_run_id = (
+        previous_entry.attempt_run_id if previous_entry is not None else state.run_id
+    )
+    return RuntimeDownloadEntry(
+        target=item.relative_target,
+        download_mode=item.download_mode,
+        status=status,
+        attempts=attempts,
+        attempt_run_id=attempt_run_id,
+        last_error=None,
+        updated_at=now,
+    )
+
+
+def _runtime_file_scheduled_item(item: RuntimeFilePlanItem) -> RuntimeFilePlanItem:
+    return replace(
+        item,
+        action="overwrite_existing" if item.overwrite else "download",
+    )
+
+
+def _stale_runtime_file_staging_candidates(
+    state: RuntimeState,
+    *,
+    stale_entry_digests: frozenset[str],
+    current_targets: Mapping[str, RuntimeFilePlanItem],
+    root: Path,
+) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for digest in sorted(stale_entry_digests):
+        entry = state.downloads.entries[digest]
+        target_item = current_targets.get(entry.target)
+        if target_item is not None:
+            candidates.append(runtime_file_staging_target(target_item, digest))
+            continue
+
+        target = root.joinpath(*PurePosixPath(entry.target).parts)
+        candidates.append(
+            target.parent
+            / ".cdh-staging"
+            / f"cdh-{digest.removeprefix('sha256:')}.part"
+        )
+    return tuple(candidates)
 
 
 def download_runtime_files(

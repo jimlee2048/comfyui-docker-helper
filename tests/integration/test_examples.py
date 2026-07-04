@@ -10,8 +10,6 @@ import pytest
 
 from comfyui_docker_helper.config import load_validate_plan, load_validate_plan_result
 
-pytestmark = pytest.mark.integration
-
 EXAMPLES = Path("examples")
 EXPECTED_FULL_KEYS = {
     "compute_platform": {"type", "cuda"},

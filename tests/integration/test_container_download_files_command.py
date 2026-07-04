@@ -13,6 +13,7 @@ from comfyui_docker_helper.container.download_files import (
     DownloadFilesError,
     DownloadStatus,
     FileDownloadItem,
+    TransferDownloadFilesError,
     download_files,
 )
 
@@ -35,7 +36,7 @@ class RecordingBackend:
         del settings
         self.events.append(f"{self.name}:{item.filename}")
         if item.filename == self.fail_on:
-            raise DownloadFilesError(f"{self.name} failed: {item.filename}")
+            raise TransferDownloadFilesError(f"{self.name} failed: {item.filename}")
         item.target.write_bytes(f"{self.name}:{item.filename}".encode())
 
 
@@ -56,6 +57,8 @@ def write_files_config(
     *,
     files: list[dict[str, object]],
     default: str = "httpx",
+    download_max_attempts: int = 3,
+    download_failure_policy: str = "fail",
 ) -> Path:
     """Write root config and lock artifacts for download tests."""
     lines = [
@@ -64,6 +67,8 @@ def write_files_config(
         "",
         "[cdh]",
         f'default_downloader = "{default}"',
+        f"download_max_attempts = {download_max_attempts}",
+        f'download_failure_policy = "{download_failure_policy}"',
         "",
         "[cdh.downloader.aria2]",
         "rpc_port = 6811",
@@ -217,7 +222,13 @@ def test_download_files_stops_on_failure_and_cleans_up_aria2(
             log=lambda _: None,
         )
 
-    assert events == ["aria2:enter", "aria2:a.bin", "aria2:exit"]
+    assert events == [
+        "aria2:enter",
+        "aria2:a.bin",
+        "aria2:a.bin",
+        "aria2:a.bin",
+        "aria2:exit",
+    ]
     assert not (comfyui_path / "models" / "b.bin").exists()
 
 

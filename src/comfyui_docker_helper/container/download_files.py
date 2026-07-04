@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import TracebackType
-from typing import Protocol
+from typing import Literal, Protocol
 
 import aria2p
 import httpx
@@ -41,6 +41,10 @@ class DownloadFilesConfigError(ApplicationError):
 
 class DownloadFilesError(ApplicationError):
     """A user-facing file-download processing failure."""
+
+
+class TransferDownloadFilesError(DownloadFilesError):
+    """A source or transport download failure eligible for retry/continue policy."""
 
 
 class DownloadStatus(StrEnum):
@@ -96,6 +100,8 @@ class FileDownloadPlan:
 
     downloader: DownloaderSettings
     items: tuple[FileDownloadItem, ...]
+    download_max_attempts: int = 3
+    download_failure_policy: Literal["continue", "fail"] = "fail"
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +158,7 @@ class HttpxDownloader:
             except _RetryableDownloadError as error:
                 _cleanup_tmp(tmp_path)
                 if attempt + 1 >= attempts:
-                    raise DownloadFilesError(str(error)) from error
+                    raise TransferDownloadFilesError(str(error)) from error
                 delay = _backoff_delay(attempt)
                 self._log(
                     f"Retrying HTTP download in {delay}s after failure: {item.url}"
@@ -371,10 +377,12 @@ class Aria2Downloader:
                 self._log(f"aria2 download complete: {item.target}")
                 return
             if download.is_removed or status == "removed":
-                raise DownloadFilesError(f"aria2 download was removed: {item.url}")
+                raise TransferDownloadFilesError(
+                    f"aria2 download was removed: {item.url}"
+                )
             if status == "error":
                 message = download.error_message or "unknown aria2 error"
-                raise DownloadFilesError(
+                raise TransferDownloadFilesError(
                     f"aria2 download failed for {item.url}: {message}"
                 )
 
@@ -410,6 +418,11 @@ class _DownloaderConfig(ConfigModel):
     httpx: _HttpxConfig
 
 
+class _CdhConfig(ConfigModel):
+    download_max_attempts: int = Field(default=3, ge=1)
+    download_failure_policy: Literal["continue", "fail"] = "fail"
+
+
 class _FileConfig(ConfigModel):
     url: str
     dir: str
@@ -419,6 +432,7 @@ class _FileConfig(ConfigModel):
 
 
 class _FilesConfig(ConfigModel):
+    cdh: _CdhConfig = Field(default_factory=_CdhConfig)
     downloader: _DownloaderConfig
     files: list[_FileConfig]
 
@@ -474,7 +488,12 @@ def build_file_download_plan(
         _build_file_item(file, comfyui_path=resolved_comfyui_path)
         for file in config.files
     )
-    return FileDownloadPlan(downloader=downloader, items=items)
+    return FileDownloadPlan(
+        downloader=downloader,
+        items=items,
+        download_max_attempts=config.cdh.download_max_attempts,
+        download_failure_policy=config.cdh.download_failure_policy,
+    )
 
 
 def process_file_downloads(
@@ -500,7 +519,23 @@ def process_file_downloads(
             ) from error
 
         log(f"Downloading file with {item.downloader}: {item.url}")
-        backend.download(item, plan.downloader)
+        try:
+            _download_with_policy(
+                item,
+                backend,
+                plan,
+                log=log,
+            )
+        except TransferDownloadFilesError as error:
+            if plan.download_failure_policy == "fail":
+                raise
+            _cleanup_failed_target(item, log=log)
+            log(
+                "WARNING: download failed after "
+                f"{plan.download_max_attempts} attempt(s), continuing: "
+                f"{item.target}: {error}"
+            )
+            continue
         log(f"Downloaded file: {item.target}")
         results.append(DownloadResult(item=item, status=DownloadStatus.DOWNLOADED))
 
@@ -665,6 +700,58 @@ def _build_file_item(
     )
 
 
+def _download_with_policy(
+    item: FileDownloadItem,
+    backend: DownloadBackend,
+    plan: FileDownloadPlan,
+    *,
+    log: Logger,
+) -> None:
+    settings = _single_host_attempt_settings(plan.downloader)
+    attempts = plan.download_max_attempts
+    for attempt in range(1, attempts + 1):
+        try:
+            backend.download(item, settings)
+            return
+        except TransferDownloadFilesError as error:
+            _cleanup_failed_target(item, log=log)
+            if attempt >= attempts:
+                raise
+            log(
+                f"Retrying file download after attempt {attempt}/{attempts} failed: "
+                f"{item.target}: {error}"
+            )
+        except DownloadFilesError:
+            _cleanup_failed_target(item, log=log)
+            raise
+
+
+def _single_host_attempt_settings(settings: DownloaderSettings) -> DownloaderSettings:
+    """Keep host build policy attempts from multiplying backend HTTPX retries."""
+    return DownloaderSettings(
+        default=settings.default,
+        aria2=settings.aria2,
+        httpx=HttpxDownloadSettings(
+            timeout=settings.httpx.timeout,
+            retries=0,
+        ),
+    )
+
+
+def _cleanup_failed_target(item: FileDownloadItem, *, log: Logger) -> None:
+    _cleanup_failed_path(item.target, log=log)
+    if item.downloader == "aria2":
+        _cleanup_failed_path(_aria2_control_path(item.target), log=log)
+
+
+def _cleanup_failed_path(path: Path, *, log: Logger) -> None:
+    try:
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    except OSError as error:
+        log(f"WARNING: failed download artifact could not be removed: {path}: {error}")
+
+
 def _preflight_file(item: FileDownloadItem, *, log: Logger) -> bool:
     _validate_existing_target_parent_contained(item)
     try:
@@ -793,7 +880,7 @@ def _raise_for_http_status(response: httpx.Response) -> None:
             f"HTTP download got retryable status {status}: {response.url}"
         )
     if 400 <= status <= 599:
-        raise DownloadFilesError(
+        raise TransferDownloadFilesError(
             f"HTTP download got non-retryable status {status}: {response.url}"
         )
 

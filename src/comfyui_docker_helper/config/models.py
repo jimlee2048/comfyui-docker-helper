@@ -81,6 +81,8 @@ class CdhConfig(ConfigModel):
 
     default_downloader: str = "aria2"
     default_download_mode: Literal["sync"] = "sync"
+    download_max_attempts: int = Field(default=3, ge=1)
+    download_failure_policy: Literal["continue", "fail"] = "fail"
     downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
 
 

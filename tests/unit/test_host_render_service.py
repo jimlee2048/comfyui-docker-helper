@@ -230,6 +230,7 @@ def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
     }
     assert runtime_data["cdh"]["default_downloader"] == "aria2"
     assert runtime_data["cdh"]["default_download_mode"] == "sync"
+    assert "download_failure_policy" not in runtime_data["cdh"]
     assert "downloader" in runtime_data["cdh"]
     assert runtime_data["files"] == [
         {
@@ -250,6 +251,36 @@ def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
         f'test "$comfyui_commit" = {COMMIT_1}'
     )
     assert expected_verify in dockerfile
+
+
+@pytest.mark.parametrize(
+    ("cdh_fields", "expected_policy"),
+    [
+        ("", None),
+        ('download_failure_policy = "fail"\n', "fail"),
+        ('download_failure_policy = "continue"\n', "continue"),
+    ],
+)
+def test_rendered_runtime_config_preserves_authored_failure_policy_only(
+    tmp_path: Path,
+    cdh_fields: str,
+    expected_policy: str | None,
+) -> None:
+    """Render runtime TOML from the service path with host/runtime provenance."""
+    output = tmp_path / "context"
+    config = CONFIG.replace(
+        "[[files]]",
+        f"[cdh]\n{cdh_fields}\n[[files]]",
+        1,
+    )
+
+    render_context(tmp_path, output=output, config_content=config)
+
+    runtime_data = tomllib.loads((output / "runtime" / "config.toml").read_text())
+    if expected_policy is None:
+        assert "download_failure_policy" not in runtime_data["cdh"]
+    else:
+        assert runtime_data["cdh"]["download_failure_policy"] == expected_policy
 
 
 def test_root_artifacts_omitted_during_dry_run(tmp_path: Path) -> None:

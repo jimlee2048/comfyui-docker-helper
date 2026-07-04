@@ -275,6 +275,8 @@ def test_environment_overrides_mounted_and_baked_runtime_config(
         + """
 [cdh]
 default_downloader = "aria2"
+download_max_attempts = 4
+download_failure_policy = "continue"
 
 [comfyui]
 version = "latest"
@@ -293,6 +295,8 @@ filename = "model.bin"
         """
 [cdh]
 default_downloader = "aria2"
+download_max_attempts = 5
+download_failure_policy = "fail"
 
 [comfyui]
 listen = "127.0.0.20"
@@ -342,6 +346,8 @@ extra_args = ["--preview-method", "auto"]
             "CDH_COMFYUI_EXTRA_ARGS": '--preview-method "latent2rgb" --fast',
             "CDH_DEFAULT_DOWNLOADER": "httpx",
             "CDH_DEFAULT_DOWNLOAD_MODE": "sync",
+            "CDH_DOWNLOAD_MAX_ATTEMPTS": "6",
+            "CDH_DOWNLOAD_FAILURE_POLICY": "continue",
         },
         runner=runner,
         runtime_downloader=runtime_downloader,
@@ -359,6 +365,8 @@ extra_args = ["--preview-method", "auto"]
     ]
     assert downloader_configs[0].cdh.default_downloader == "httpx"
     assert downloader_configs[0].cdh.default_download_mode == "sync"
+    assert downloader_configs[0].cdh.download_max_attempts == 6
+    assert downloader_configs[0].cdh.download_failure_policy == "continue"
     assert downloader_plans[0].items[0].target == (
         runtime.comfyui_path / "models" / "checkpoints" / "model.bin"
     )
@@ -432,6 +440,43 @@ port = 0
     assert calls == []
     assert "runtime configuration is invalid" in str(error.value)
     assert "[comfyui.port]" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("environ", "expected_path"),
+    [
+        (
+            {"CDH_DOWNLOAD_MAX_ATTEMPTS": "0"},
+            "[env.CDH_DOWNLOAD_MAX_ATTEMPTS]",
+        ),
+        (
+            {"CDH_DOWNLOAD_FAILURE_POLICY": "skip"},
+            "[cdh.download_failure_policy]",
+        ),
+    ],
+)
+def test_invalid_env_runtime_config_fails_before_spawn(
+    tmp_path: Path,
+    environ: dict[str, str],
+    expected_path: str,
+) -> None:
+    runtime = _runtime(tmp_path)
+    calls: list[SpawnCall] = []
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=_missing_baked_config(tmp_path),
+            mounted_config_path=_missing_mounted_config(tmp_path),
+            baked_hooks_path=_missing_baked_hooks(tmp_path),
+            mounted_hooks_path=_missing_mounted_hooks(tmp_path),
+            environ={"PATH": "/usr/bin", **environ},
+            runner=_recording_runner(calls),
+        )
+
+    assert calls == []
+    assert "runtime configuration is invalid" in str(error.value)
+    assert expected_path in str(error.value)
 
 
 def test_unknown_runtime_config_fields_fail_before_spawn(tmp_path: Path) -> None:

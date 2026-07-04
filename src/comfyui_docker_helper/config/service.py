@@ -8,7 +8,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticPath
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticPath,
+    DiagnosticSeverity,
+)
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import Config
 from comfyui_docker_helper.config.plan import (
@@ -174,8 +178,27 @@ def _validate_structure(document: Mapping[str, Any]) -> Config:
 
 def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...]:
     """Collect host command warnings for cross-context fields."""
-    del document
-    return ()
+    warnings: list[Diagnostic] = []
+    cdh = document.get("cdh")
+    files = document.get("files")
+    if (
+        isinstance(cdh, Mapping)
+        and cdh.get("download_failure_policy") == "continue"
+        and isinstance(files, list)
+        and files
+    ):
+        warnings.append(
+            Diagnostic(
+                path=("cdh", "download_failure_policy"),
+                code="host_build.download_failure_policy_continue",
+                message=(
+                    'host build download_failure_policy = "continue" can build an '
+                    "image without every configured build-time file present"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
+    return tuple(warnings)
 
 
 def _with_source(message: str, path: Path, include_source: bool) -> str:

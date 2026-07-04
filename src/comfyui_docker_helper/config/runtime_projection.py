@@ -20,7 +20,7 @@ type ConfigPath = tuple[str | int, ...]
 
 
 class RuntimeComfyUIConfig(ConfigModel):
-    """ComfyUI startup fields supported by the v0.3 runtime config."""
+    """ComfyUI startup fields supported by the runtime config."""
 
     listen: str = "0.0.0.0"
     port: int = Field(default=8188, ge=1, le=65535)
@@ -32,6 +32,8 @@ class RuntimeCdhConfig(ConfigModel):
 
     default_downloader: DownloaderName = "aria2"
     default_download_mode: Literal["sync"] = "sync"
+    download_max_attempts: int = Field(default=3, ge=1)
+    download_failure_policy: Literal["continue", "fail"] = "continue"
     downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
 
 
@@ -67,14 +69,18 @@ class RuntimeConfigProjection:
 
     def to_toml_bytes(self) -> bytes:
         """Serialize the effective runtime defaults deterministically."""
-        return serialize_runtime_config_toml(self.config, files=self.files)
+        return serialize_runtime_config_toml(
+            self.config,
+            files=self.files,
+            explicit_paths=self.explicit_paths,
+        )
 
 
 def project_runtime_config(
     config: Config,
     raw_document: dict[str, Any],
 ) -> RuntimeConfigProjection:
-    """Project the effective host config onto the v0.3 runtime-supported schema."""
+    """Project the effective host config onto the runtime-supported schema."""
     document = {
         "comfyui": {
             "listen": config.comfyui.listen,
@@ -86,6 +92,7 @@ def project_runtime_config(
                 config.cdh.default_downloader
             ),
             "default_download_mode": config.cdh.default_download_mode,
+            "download_max_attempts": config.cdh.download_max_attempts,
             "downloader": config.cdh.downloader.model_dump(mode="json"),
         },
         "files": [
@@ -105,13 +112,17 @@ def project_runtime_config(
         ],
     }
     files = tuple(RuntimeFileConfig.model_validate(item) for item in document["files"])
-    runtime_config = RuntimeConfig.model_validate(
-        {key: value for key, value in document.items() if key != "files"}
-    )
+    explicit_paths = _runtime_explicit_paths(raw_document)
+    runtime_document = {key: value for key, value in document.items() if key != "files"}
+    if ("cdh", "download_failure_policy") in explicit_paths:
+        runtime_document["cdh"]["download_failure_policy"] = (
+            config.cdh.download_failure_policy
+        )
+    runtime_config = RuntimeConfig.model_validate(runtime_document)
     return RuntimeConfigProjection(
         config=runtime_config,
         files=files,
-        explicit_paths=_runtime_explicit_paths(raw_document),
+        explicit_paths=explicit_paths,
     )
 
 
@@ -119,9 +130,12 @@ def serialize_runtime_config_toml(
     config: RuntimeConfig,
     *,
     files: tuple[RuntimeFileConfig, ...] = (),
+    explicit_paths: frozenset[ConfigPath] = frozenset(),
 ) -> bytes:
     """Serialize a runtime-supported config as deterministic TOML bytes."""
     document = config.model_dump(mode="json")
+    if ("cdh", "download_failure_policy") not in explicit_paths:
+        document["cdh"].pop("download_failure_policy", None)
     if files:
         document["files"] = [
             file.model_dump(mode="json", exclude_none=True) for file in files
@@ -167,7 +181,12 @@ def _is_runtime_supported_path(path: ConfigPath) -> bool:
     if path[0] == "cdh":
         if len(path) == 1:
             return True
-        if path[1] in {"default_downloader", "default_download_mode"}:
+        if path[1] in {
+            "default_downloader",
+            "default_download_mode",
+            "download_max_attempts",
+            "download_failure_policy",
+        }:
             return len(path) == 2
         return path[1] == "downloader"
     return False

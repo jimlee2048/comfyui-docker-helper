@@ -151,6 +151,8 @@ def test_minimal_config_expands_static_defaults(
     assert config.cdh.model_dump() == {
         "default_downloader": "aria2",
         "default_download_mode": "sync",
+        "download_max_attempts": 3,
+        "download_failure_policy": "fail",
         "downloader": {
             "aria2": {
                 "rpc_port": 6800,
@@ -225,6 +227,69 @@ def test_complete_config_covers_every_top_level_block(
     assert config.files[0].filename == "first.safetensors"
     assert config.files[1].filename == "second.safetensors"
     assert config.files[1].downloader is None
+
+
+def test_host_download_policy_defaults_and_explicit_values(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Apply host-specific download retry and failure-policy defaults."""
+    default_config = load_config(write_config(MINIMAL_CONFIG))
+    explicit_continue = load_config(
+        write_config(
+            MINIMAL_CONFIG
+            + """
+[cdh]
+download_max_attempts = 5
+download_failure_policy = "continue"
+"""
+        )
+    )
+    explicit_fail = load_config(
+        write_config(
+            MINIMAL_CONFIG
+            + """
+[cdh]
+download_failure_policy = "fail"
+"""
+        )
+    )
+
+    assert default_config.cdh.download_max_attempts == 3
+    assert default_config.cdh.download_failure_policy == "fail"
+    assert explicit_continue.cdh.download_max_attempts == 5
+    assert explicit_continue.cdh.download_failure_policy == "continue"
+    assert explicit_fail.cdh.download_failure_policy == "fail"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_type"),
+    [
+        ("download_max_attempts", "0", "greater_than_equal"),
+        ("download_max_attempts", "-1", "greater_than_equal"),
+        ("download_failure_policy", '"skip"', "literal_error"),
+    ],
+)
+def test_host_download_policy_invalid_values_are_rejected(
+    write_config: Callable[[str], Path],
+    field: str,
+    value: str,
+    error_type: str,
+) -> None:
+    """Reject invalid host retry and failure-policy values by schema."""
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+[cdh]
+{field} = {value}
+"""
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        load_config(write_config(document))
+
+    assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
+        (("cdh", field), error_type)
+    }
 
 
 def test_semantic_lists_preserve_input_order(

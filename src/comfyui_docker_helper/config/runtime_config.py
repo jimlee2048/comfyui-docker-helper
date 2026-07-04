@@ -84,6 +84,8 @@ class _RuntimeDownloaderConfigPatch(ConfigModel):
 class _RuntimeCdhConfigPatch(ConfigModel):
     default_downloader: DownloaderName | None = None
     default_download_mode: Literal["sync"] | None = None
+    download_max_attempts: int | None = Field(default=None, ge=1)
+    download_failure_policy: Literal["continue", "fail"] | None = None
     downloader: _RuntimeDownloaderConfigPatch | None = None
 
 
@@ -185,8 +187,42 @@ def _runtime_env_document(environ: Mapping[str, str]) -> dict[str, Any]:
         document.setdefault("cdh", {})["default_download_mode"] = environ[
             "CDH_DEFAULT_DOWNLOAD_MODE"
         ]
+    if "CDH_DOWNLOAD_MAX_ATTEMPTS" in environ:
+        document.setdefault("cdh", {})["download_max_attempts"] = (
+            _parse_env_download_max_attempts(environ["CDH_DOWNLOAD_MAX_ATTEMPTS"])
+        )
+    if "CDH_DOWNLOAD_FAILURE_POLICY" in environ:
+        document.setdefault("cdh", {})["download_failure_policy"] = environ[
+            "CDH_DOWNLOAD_FAILURE_POLICY"
+        ]
 
     return document
+
+
+def _parse_env_download_max_attempts(value: str) -> int:
+    try:
+        max_attempts = int(value, 10)
+    except ValueError as error:
+        raise RuntimeConfigurationError(
+            (
+                Diagnostic(
+                    path=("env", "CDH_DOWNLOAD_MAX_ATTEMPTS"),
+                    code="env.invalid_download_max_attempts",
+                    message="must be a positive integer",
+                ),
+            )
+        ) from error
+    if max_attempts < 1:
+        raise RuntimeConfigurationError(
+            (
+                Diagnostic(
+                    path=("env", "CDH_DOWNLOAD_MAX_ATTEMPTS"),
+                    code="env.invalid_download_max_attempts",
+                    message="must be a positive integer",
+                ),
+            )
+        )
+    return max_attempts
 
 
 def _parse_env_port(value: str) -> int:

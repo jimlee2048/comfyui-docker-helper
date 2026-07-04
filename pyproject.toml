@@ -72,7 +72,6 @@ addopts = [
 ]
 markers = [
     "unit: fast tests for isolated units",
-    "integration: tests that exercise interactions across modules or CLI boundaries",
     "smoke: lightweight smoke checks or smoke fixture validation",
     "docker: tests that require Docker",
     "network: tests that require network access",

@@ -30,6 +30,7 @@ from comfyui_docker_helper.container.download_files import (
     HttpxDownloader,
     HttpxDownloadSettings,
     Logger,
+    TransferDownloadFilesError,
 )
 
 type RuntimeFilePath = tuple[str | int, ...]
@@ -200,13 +201,28 @@ def process_runtime_file_downloads(
                 )
             ) from error
 
-        staging_item = _runtime_staging_download_item(item, backend_name)
+        staging_item = _runtime_staging_download_item(
+            item,
+            backend_name,
+            settings=settings,
+        )
         _prepare_staging_parent(staging_item.target.parent, ("files", index - 1))
 
         log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
         try:
-            backend.download(staging_item, settings)
+            _download_runtime_file_with_policy(
+                item,
+                staging_item,
+                backend,
+                settings,
+                ("files", index - 1),
+                config=config,
+                log=log,
+            )
             _place_staged_runtime_file(item, staging_item.target, ("files", index - 1))
+        except _RuntimeDownloadContinued:
+            _cleanup_current_staging(staging_item.target)
+            continue
         except Exception:
             _cleanup_current_staging(staging_item.target)
             raise
@@ -270,6 +286,73 @@ def runtime_downloader_settings(config: RuntimeConfig) -> DownloaderSettings:
             retries=downloader.httpx.retries,
         ),
     )
+
+
+class _RuntimeDownloadContinued(Exception):
+    """Internal marker for exhausted transfer failures handled by continue."""
+
+
+def _download_runtime_file_with_policy(
+    item: RuntimeFilePlanItem,
+    staging_item: FileDownloadItem,
+    backend: DownloadBackend,
+    settings: DownloaderSettings,
+    path: RuntimeFilePath,
+    *,
+    config: RuntimeConfig,
+    log: Logger,
+) -> None:
+    attempt_settings = _single_runtime_attempt_settings(settings)
+    attempts = config.cdh.download_max_attempts
+    for attempt in range(1, attempts + 1):
+        try:
+            backend.download(staging_item, attempt_settings)
+            return
+        except TransferDownloadFilesError as error:
+            if attempt < attempts:
+                log(
+                    "Retrying runtime file download after attempt "
+                    f"{attempt}/{attempts} failed: {item.target}: {error}"
+                )
+                if _runtime_retry_requires_clean_staging(staging_item):
+                    _cleanup_current_staging(staging_item.target)
+                continue
+            if config.cdh.download_failure_policy == "continue":
+                log(
+                    "WARNING: runtime file download failed after "
+                    f"{attempts} attempt(s), continuing: {item.target}: {error}"
+                )
+                raise _RuntimeDownloadContinued from error
+            raise RuntimeFileDownloadError(
+                (
+                    Diagnostic(
+                        path=(*path, "target"),
+                        code="runtime_file.download_failed",
+                        message=(
+                            "runtime file download failed after "
+                            f"{attempts} attempt(s): {error}"
+                        ),
+                    ),
+                )
+            ) from error
+
+
+def _single_runtime_attempt_settings(
+    settings: DownloaderSettings,
+) -> DownloaderSettings:
+    """Keep runtime policy attempts from multiplying backend HTTPX retries."""
+    return DownloaderSettings(
+        default=settings.default,
+        aria2=settings.aria2,
+        httpx=HttpxDownloadSettings(
+            timeout=settings.httpx.timeout,
+            retries=0,
+        ),
+    )
+
+
+def _runtime_retry_requires_clean_staging(item: FileDownloadItem) -> bool:
+    return item.downloader == "aria2" and item.overwrite
 
 
 def merge_runtime_file_items(
@@ -359,15 +442,24 @@ def _requires_aria2_backend(plan: RuntimeFilePlan, config: RuntimeConfig) -> boo
 def _runtime_staging_download_item(
     item: RuntimeFilePlanItem,
     downloader: DownloaderName,
+    *,
+    settings: DownloaderSettings,
 ) -> FileDownloadItem:
     return FileDownloadItem(
         url=item.url,
         directory=item.directory,
         filename=item.filename,
         target=_runtime_staging_target(item),
-        overwrite=True,
+        overwrite=_runtime_staging_overwrite(downloader, settings),
         downloader=downloader,
     )
+
+
+def _runtime_staging_overwrite(
+    downloader: DownloaderName,
+    settings: DownloaderSettings,
+) -> bool:
+    return downloader == "aria2" and not settings.aria2.resume_download
 
 
 def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:

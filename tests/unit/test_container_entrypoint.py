@@ -9,6 +9,11 @@ import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
 from comfyui_docker_helper.container import entrypoint as entrypoint_module
+from comfyui_docker_helper.container.download_files import (
+    DownloaderSettings,
+    FileDownloadItem,
+    TransferDownloadFilesError,
+)
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -17,6 +22,7 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
+    process_runtime_file_downloads,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
@@ -2160,6 +2166,177 @@ filename = "model.bin"
     assert "runtime download failed" in str(error.value)
     assert "[files.0.target]" in str(error.value)
     assert "runtime_file.test_failure" in str(error.value)
+
+
+def test_runtime_download_policy_fail_prevents_spawn_after_exhausted_transfer(
+    tmp_path: Path,
+) -> None:
+    class FailingBackend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[FileDownloadItem, DownloaderSettings]] = []
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            raise TransferDownloadFilesError("failed in test")
+
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_downloader = "httpx"
+download_max_attempts = 2
+download_failure_policy = "fail"
+
+[[files]]
+url = "https://example.com/a.bin"
+dir = "models"
+filename = "a.bin"
+
+[[files]]
+url = "https://example.com/b.bin"
+dir = "models"
+filename = "b.bin"
+""",
+    )
+    backend = FailingBackend()
+    spawn_calls: list[list[str]] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del cwd, env, shell
+        spawn_calls.append(list(argv))
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        return process_runtime_file_downloads(
+            plan,
+            config=config,
+            backends={"httpx": backend},
+            log=log,
+        )
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+        )
+
+    assert spawn_calls == []
+    assert [call[0].url for call in backend.calls] == [
+        "https://example.com/a.bin",
+        "https://example.com/a.bin",
+    ]
+    assert "runtime download failed" in str(error.value)
+    assert "runtime_file.download_failed" in str(error.value)
+    assert not (runtime.comfyui_path / "models" / "a.bin").exists()
+    assert not (runtime.comfyui_path / "models" / "b.bin").exists()
+
+
+def test_runtime_download_policy_continue_spawns_after_exhausted_file_then_later_file(
+    tmp_path: Path,
+) -> None:
+    class FirstFileFailingBackend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[FileDownloadItem, DownloaderSettings]] = []
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            if item.filename == "a.bin":
+                item.target.write_bytes(b"partial")
+                raise TransferDownloadFilesError("failed in test")
+            item.target.write_bytes(b"later")
+
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_downloader = "httpx"
+download_max_attempts = 2
+download_failure_policy = "continue"
+
+[[files]]
+url = "https://example.com/a.bin"
+dir = "models"
+filename = "a.bin"
+
+[[files]]
+url = "https://example.com/b.bin"
+dir = "models"
+filename = "b.bin"
+""",
+    )
+    backend = FirstFileFailingBackend()
+    spawn_calls: list[list[str]] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del cwd, env, shell
+        spawn_calls.append(list(argv))
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        return process_runtime_file_downloads(
+            plan,
+            config=config,
+            backends={"httpx": backend},
+            log=log,
+        )
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+        )
+        == 0
+    )
+
+    assert len(spawn_calls) == 1
+    assert [call[0].url for call in backend.calls] == [
+        "https://example.com/a.bin",
+        "https://example.com/a.bin",
+        "https://example.com/b.bin",
+    ]
+    assert not (runtime.comfyui_path / "models" / "a.bin").exists()
+    assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
 
 
 def test_runtime_staging_file_is_not_treated_as_completed_final_file(

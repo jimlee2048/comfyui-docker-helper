@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import threading
@@ -398,6 +399,9 @@ def test_real_aria2_smoke_when_available(
     local_http_server: tuple[str, RecordingHttpServer],
 ) -> None:
     """Smoke real aria2c when the binary is available on the host."""
+    if os.environ.get("CDH_RUN_ARIA2_SMOKE") != "1":
+        pytest.skip("set CDH_RUN_ARIA2_SMOKE=1 to run the real aria2 smoke")
+
     if shutil.which("aria2c") is None:
         pytest.skip("real aria2 smoke skipped because aria2c is not installed")
 

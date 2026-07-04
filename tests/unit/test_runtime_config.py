@@ -155,6 +155,8 @@ extra_args = ["--cpu"]
 [cdh]
 default_downloader = "httpx"
 default_download_mode = "sync"
+download_max_attempts = 4
+download_failure_policy = "continue"
 """,
     )
     mounted = _write(
@@ -168,6 +170,8 @@ extra_args = ["--preview-method", "auto"]
 [cdh]
 default_downloader = "aria2"
 default_download_mode = "sync"
+download_max_attempts = 5
+download_failure_policy = "fail"
 """,
     )
 
@@ -180,6 +184,8 @@ default_download_mode = "sync"
             "CDH_COMFYUI_EXTRA_ARGS": '--preview-method "latent2rgb" --cpu',
             "CDH_DEFAULT_DOWNLOADER": "httpx",
             "CDH_DEFAULT_DOWNLOAD_MODE": "sync",
+            "CDH_DOWNLOAD_MAX_ATTEMPTS": "6",
+            "CDH_DOWNLOAD_FAILURE_POLICY": "continue",
         },
     )
 
@@ -192,6 +198,37 @@ default_download_mode = "sync"
     ]
     assert result.config.cdh.default_downloader == "httpx"
     assert result.config.cdh.default_download_mode == "sync"
+    assert result.config.cdh.download_max_attempts == 6
+    assert result.config.cdh.download_failure_policy == "continue"
+
+
+@pytest.mark.parametrize(
+    ("value", "mounted_value"),
+    [
+        ("continue", "fail"),
+        ("fail", "continue"),
+    ],
+)
+def test_env_download_failure_policy_valid_values_override_runtime_config(
+    tmp_path: Path,
+    value: str,
+    mounted_value: str,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f"""
+[cdh]
+download_failure_policy = "{mounted_value}"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=mounted,
+        environ={"CDH_DOWNLOAD_FAILURE_POLICY": value},
+    )
+
+    assert result.config.cdh.download_failure_policy == value
 
 
 # Host-only build-time settings may appear in mounted files but must not affect
@@ -633,6 +670,23 @@ def test_invalid_env_port_values_fail_runtime_validation(
     ]
 
 
+@pytest.mark.parametrize("value", ["", "0", "-1", "3.5", "abc"])
+def test_invalid_env_download_max_attempts_values_fail_runtime_validation(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={"CDH_DOWNLOAD_MAX_ATTEMPTS": value},
+        )
+
+    assert _identities(error.value) == [
+        (("env", "CDH_DOWNLOAD_MAX_ATTEMPTS"), "env.invalid_download_max_attempts")
+    ]
+
+
 @pytest.mark.parametrize(
     ("name", "value", "expected"),
     [
@@ -645,6 +699,11 @@ def test_invalid_env_port_values_fail_runtime_validation(
             "CDH_DEFAULT_DOWNLOAD_MODE",
             "async",
             (("cdh", "default_download_mode"), "schema.literal_error"),
+        ),
+        (
+            "CDH_DOWNLOAD_FAILURE_POLICY",
+            "skip",
+            (("cdh", "download_failure_policy"), "schema.literal_error"),
         ),
     ],
 )

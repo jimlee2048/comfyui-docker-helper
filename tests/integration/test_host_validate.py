@@ -175,7 +175,7 @@ def test_valid_input_is_silent_and_writes_nothing(
     assert {item.name: item.read_bytes() for item in tmp_path.iterdir()} == before
 
 
-def test_valid_runtime_download_mode_input_is_silent(
+def test_valid_runtime_download_mode_input_warns_for_build_time_files(
     cli_runner: CliRunner, tmp_path: Path
 ) -> None:
     """Runtime download-mode fields are valid host inputs for baked defaults."""
@@ -184,13 +184,13 @@ def test_valid_runtime_download_mode_input_is_silent(
         MINIMAL_CONFIG
         + """
 [cdh]
-default_download_mode = "sync"
+default_download_mode = "async"
 
 [[files]]
 url = "https://example.com/model.bin"
 dir = "models"
 filename = "model.bin"
-download_mode = "sync"
+download_mode = "async"
 """,
     )
 
@@ -198,7 +198,11 @@ download_mode = "sync"
 
     assert result.exit_code == 0
     assert result.stdout == ""
-    assert result.stderr == ""
+    assert "Configuration has warnings:" in result.stderr
+    assert "[cdh.default_download_mode]" in result.stderr
+    assert "[files.0.download_mode]" in result.stderr
+    assert "host_build.download_scheduling_ignored" in result.stderr
+    assert "downloads run synchronously" in result.stderr
 
 
 def test_validate_renders_explicit_continue_build_file_warning(
@@ -241,7 +245,7 @@ def test_render_with_runtime_download_mode_writes_context(
 url = "https://example.com/model.bin"
 dir = "models"
 filename = "model.bin"
-download_mode = "sync"
+download_mode = "async"
 """,
     )
     output = tmp_path / "context"
@@ -253,12 +257,12 @@ download_mode = "sync"
 
     assert result.exit_code == 0
     assert result.stdout == ""
-    assert result.stderr == ""
+    assert "host_build.download_scheduling_ignored" in result.stderr
     assert has_valid_context_marker(output)
     rendered_runtime = tomllib.loads(
         (output / "runtime" / "config.toml").read_text(encoding="utf-8")
     )
-    assert rendered_runtime["files"][0]["download_mode"] == "sync"
+    assert rendered_runtime["files"][0]["download_mode"] == "async"
 
 
 def test_invalid_input_renders_every_diagnostic_to_stderr(

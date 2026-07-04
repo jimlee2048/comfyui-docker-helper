@@ -678,32 +678,60 @@ def test_reconcile_runtime_file_plan_accepts_internal_async_items(
     assert reconciliation.state.downloads.entries[digest].download_mode == "async"
 
 
-def test_build_runtime_file_plan_rejects_public_async_download_mode(
+def test_build_runtime_file_plan_accepts_public_async_download_mode(
     tmp_path: Path,
 ) -> None:
     comfyui = tmp_path / "ComfyUI"
     comfyui.mkdir()
 
-    with pytest.raises(RuntimeFilePlanError) as error:
-        build_runtime_file_plan(
-            [
-                {
-                    "files": [
-                        {
-                            "url": "https://example.com/a.bin",
-                            "dir": "models/checkpoints",
-                            "filename": "a.bin",
-                            "download_mode": "async",
-                        }
-                    ]
-                }
-            ],
-            comfyui_path=comfyui,
-        )
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                        "download_mode": "async",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
 
-    assert _identities(error.value) == [
-        (("files", 0, "download_mode"), "schema.literal_error")
-    ]
+    assert plan.items[0].download_mode == "async"
+
+
+def test_build_runtime_file_plan_applies_default_mode_with_per_file_precedence(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/default.bin",
+                        "dir": "models",
+                        "filename": "default.bin",
+                    },
+                    {
+                        "url": "https://example.com/sync.bin",
+                        "dir": "models",
+                        "filename": "sync.bin",
+                        "download_mode": "sync",
+                    },
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+        default_download_mode="async",
+    )
+
+    assert [item.download_mode for item in plan.items] == ["async", "sync"]
 
 
 def test_runtime_file_same_key_merge_and_reset_behavior() -> None:
@@ -833,7 +861,7 @@ def test_runtime_file_merge_ignores_full_runtime_keys_but_validates_files() -> N
                             "url": "https://example.com/a.bin",
                             "dir": "models",
                             "filename": "a.bin",
-                            "download_mode": "async",
+                            "download_mode": "parallel",
                         }
                     ],
                 }
@@ -2261,7 +2289,7 @@ def test_runtime_file_plan_rejects_unsupported_download_mode(tmp_path: Path) -> 
                             "url": "https://example.com/a.bin",
                             "dir": "models",
                             "filename": "a.bin",
-                            "download_mode": "async",
+                            "download_mode": "parallel",
                         }
                     ]
                 }

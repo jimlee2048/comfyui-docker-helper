@@ -48,7 +48,7 @@ tags = ["example:dev"]
 
 [cdh]
 default_downloader = "httpx"
-default_download_mode = "sync"
+default_download_mode = "async"
 download_max_attempts = 4
 download_failure_policy = "continue"
 
@@ -69,7 +69,7 @@ dir = "models"
 filename = "model.bin"
 overwrite = true
 downloader = "httpx"
-download_mode = "sync"
+download_mode = "async"
 """,
         encoding="utf-8",
     )
@@ -88,7 +88,7 @@ download_mode = "sync"
         },
         "cdh": {
             "default_downloader": "httpx",
-            "default_download_mode": "sync",
+            "default_download_mode": "async",
             "download_max_attempts": 4,
             "download_failure_policy": "continue",
             "downloader": {
@@ -109,7 +109,7 @@ download_mode = "sync"
                 "filename": "model.bin",
                 "overwrite": True,
                 "downloader": "httpx",
-                "download_mode": "sync",
+                "download_mode": "async",
             }
         ],
     }

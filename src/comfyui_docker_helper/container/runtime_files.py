@@ -152,7 +152,7 @@ class _RuntimeFilePatch(ConfigModel):
     url: str | None = None
     overwrite: bool | None = None
     downloader: DownloaderName | None = None
-    download_mode: Literal["sync"] | None = None
+    download_mode: Literal["sync", "async"] | None = None
 
 
 class _RuntimeFilesDocument(ConfigModel):
@@ -165,13 +165,14 @@ class _RuntimeFileConfig(ConfigModel):
     url: str
     overwrite: bool = False
     downloader: DownloaderName | None = None
-    download_mode: Literal["sync"] = "sync"
+    download_mode: Literal["sync", "async"] | None = None
 
 
 def build_runtime_file_plan(
     documents: Iterable[Mapping[str, Any]],
     *,
     comfyui_path: str | Path,
+    default_download_mode: Literal["sync", "async"] = "sync",
 ) -> RuntimeFilePlan:
     """Merge runtime file documents and derive safe target paths."""
     merged_items = merge_runtime_file_items(documents)
@@ -209,7 +210,7 @@ def build_runtime_file_plan(
                 relative_target=relative_target,
                 target=target,
                 overwrite=config.overwrite,
-                download_mode=config.download_mode,
+                download_mode=config.download_mode or default_download_mode,
                 downloader=config.downloader,
                 action=action,
             )

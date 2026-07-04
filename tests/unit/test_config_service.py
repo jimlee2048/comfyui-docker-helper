@@ -57,7 +57,7 @@ def test_minimal_config_returns_complete_normalized_plan(
     assert plan.files.downloader.default == "aria2"
 
 
-def test_result_bakes_host_download_mode_without_warnings(
+def test_result_bakes_host_async_download_mode_with_scheduling_warnings(
     write_config: Callable[[str], Path],
 ) -> None:
     """Runtime download-mode fields are now part of baked runtime defaults."""
@@ -65,22 +65,35 @@ def test_result_bakes_host_download_mode_without_warnings(
         MINIMAL_CONFIG
         + """
 [cdh]
-default_download_mode = "sync"
+default_download_mode = "async"
 
 [[files]]
 url = "https://example.com/model.bin"
 dir = "models"
 filename = "model.bin"
-download_mode = "sync"
+download_mode = "async"
 """
     )
 
     result = load_validate_plan_result(write_config(document))
 
     assert isinstance(result.plan, RenderPlan)
-    assert result.warnings == ()
-    assert result.runtime_config.files[0].download_mode == "sync"
-    assert result.runtime_config.config.cdh.default_download_mode == "sync"
+    assert [
+        (warning.path, warning.code, warning.severity) for warning in result.warnings
+    ] == [
+        (
+            ("cdh", "default_download_mode"),
+            "host_build.download_scheduling_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("files", 0, "download_mode"),
+            "host_build.download_scheduling_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+    ]
+    assert result.runtime_config.files[0].download_mode == "async"
+    assert result.runtime_config.config.cdh.default_download_mode == "async"
 
 
 def test_plan_only_loader_accepts_host_download_mode_fields(
@@ -91,7 +104,7 @@ def test_plan_only_loader_accepts_host_download_mode_fields(
         MINIMAL_CONFIG
         + """
 [cdh]
-default_download_mode = "sync"
+default_download_mode = "async"
 """
     )
 
@@ -135,10 +148,10 @@ filename = "model.bin"
         assert warning.severity == DiagnosticSeverity.WARNING
 
 
-def test_unsupported_host_file_download_mode_fails_before_runtime_projection(
+def test_invalid_host_file_download_mode_fails_before_runtime_projection(
     write_config: Callable[[str], Path],
 ) -> None:
-    """Keep runtime file download mode limited to currently executable modes."""
+    """Keep runtime file download mode limited to supported enum values."""
     document = (
         MINIMAL_CONFIG
         + """
@@ -146,7 +159,7 @@ def test_unsupported_host_file_download_mode_fails_before_runtime_projection(
 url = "https://example.com/model.bin"
 dir = "models"
 filename = "model.bin"
-download_mode = "async"
+download_mode = "parallel"
 """
     )
 

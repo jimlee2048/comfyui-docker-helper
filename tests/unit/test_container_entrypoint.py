@@ -2528,6 +2528,66 @@ def test_internal_async_plan_exercises_active_state_gate_without_download(
     assert entry.status == "pending"
 
 
+def test_public_async_runtime_file_records_pending_without_sync_download(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    state_path = tmp_path / "state.json"
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        events.append("download")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
+        )
+        == 0
+    )
+
+    state = load_runtime_state(state_path)
+    entry = next(iter(state.downloads.entries.values()))
+    assert events == ["spawn"]
+    assert entry.target == "models/async.bin"
+    assert entry.download_mode == "async"
+    assert entry.status == "pending"
+
+
 def test_runtime_download_policy_fail_prevents_spawn_after_exhausted_transfer(
     tmp_path: Path,
 ) -> None:

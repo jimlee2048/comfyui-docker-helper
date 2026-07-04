@@ -347,6 +347,7 @@ def _run_runtime_downloads(
         plan = build_runtime_file_plan(
             ({"files": list(result.files)},),
             comfyui_path=runtime.comfyui_path,
+            default_download_mode=result.config.cdh.default_download_mode,
         )
         _activate_runtime_file_plan(
             plan,

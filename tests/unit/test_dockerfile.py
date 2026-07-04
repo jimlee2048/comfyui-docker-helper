@@ -242,6 +242,8 @@ def make_config() -> Config:
     )
 
 
+# Dockerfile snapshots and feature-layer tests protect layer order, bind mounts,
+# copy boundaries, quoting, and the entrypoint shape.
 def test_minimal_dockerfile_matches_complete_deterministic_snapshot() -> None:
     """Render every fixed minimal instruction exactly once and in spec order."""
     config = make_config()

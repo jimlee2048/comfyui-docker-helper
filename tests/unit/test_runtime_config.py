@@ -20,6 +20,8 @@ def _identities(error: RuntimeConfigurationError) -> list[tuple[tuple, str]]:
     return [(diagnostic.path, diagnostic.code) for diagnostic in error.diagnostics]
 
 
+# Runtime config precedence is code defaults, baked config, mounted config, then
+# explicit environment overrides.
 def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
     tmp_path: Path,
 ) -> None:
@@ -182,6 +184,8 @@ default_download_mode = "sync"
     assert result.config.cdh.default_download_mode == "sync"
 
 
+# Host-only build-time settings may appear in mounted files but must not affect
+# container runtime state.
 def test_known_host_only_runtime_config_warns_and_is_ignored(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
@@ -285,6 +289,8 @@ unexpected = "value"
     ]
 
 
+# Runtime file merge tests preserve baked/mounted ordering and same-target
+# override behavior before the downloader plan consumes entries.
 def test_runtime_file_entries_are_accepted_and_recorded(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
@@ -490,6 +496,7 @@ filename = "baked.bin"
     assert result.files == ()
 
 
+# Downloader validation keeps runtime-only backend tuning strict at load time.
 def test_invalid_baked_aria2_backend_values_fail_runtime_validation(
     tmp_path: Path,
 ) -> None:
@@ -650,6 +657,8 @@ def test_backend_tuning_env_vars_are_not_applied(tmp_path: Path) -> None:
     assert result.config.cdh.downloader.httpx.timeout == 60
 
 
+# ComfyUI process ownership stays with the entrypoint for listen, port, and
+# auto-launch flags even when extra args come from runtime config or env.
 @pytest.mark.parametrize(
     "argument",
     [

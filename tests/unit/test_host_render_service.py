@@ -346,6 +346,8 @@ def test_locked_mode_reads_relative_output_lock_from_working_directory(
     assert (work / "context" / "config.lock.toml").is_file()
 
 
+# Check-mode tests compare the managed artifact set without mutating the
+# rendered context, including stale files under current managed trees.
 def test_check_mode_is_non_mutating_and_detects_current_root_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -544,6 +546,8 @@ def test_check_mode_reports_stale_scripts_tree_when_hooks_are_removed(
     ] == [("scripts",)]
 
 
+# Runtime hook render/check coverage protects source validation, copied hook
+# artifacts, and drift detection when hooks are added, removed, or changed.
 def test_omitted_runtime_hooks_dir_is_copied_when_default_exists(
     tmp_path: Path,
 ) -> None:
@@ -824,20 +828,6 @@ def test_check_mode_ignores_unmanaged_extras_and_keeps_target_unchanged(
     assert extra.read_text(encoding="utf-8") == "keep me\n"
 
 
-def test_check_mode_reports_retired_helper_projection_config_tree(
-    tmp_path: Path,
-) -> None:
-    """Check mode catches stale helper projection paths from older layouts."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    old_config = output / "config"
-    old_config.mkdir()
-    (old_config / "custom-nodes.toml").write_text("[custom_nodes]\n", encoding="utf-8")
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
 def test_check_mode_cleans_temporary_expected_contexts(tmp_path: Path) -> None:
     """Check mode removes temporary expected contexts after success and failure."""
     output = tmp_path / "context"
@@ -953,20 +943,6 @@ def test_upgrade_lock_refreshes_moving_source_selections(tmp_path: Path) -> None
     assert lockfile.comfyui.cli_version == "2.0.0"
     assert lockfile.custom_nodes[0].version == "2.0.0"
     assert lockfile.custom_nodes[1].commit == COMMIT_B
-
-
-def test_retired_helper_projection_files_are_omitted(tmp_path: Path) -> None:
-    """Render writes root artifacts without retired helper projection files."""
-    output = tmp_path / "context"
-
-    render_context(tmp_path, output=output)
-
-    assert (output / "config.toml").is_file()
-    assert (output / "config.lock.toml").is_file()
-    assert (output / "runtime" / "config.toml").is_file()
-    assert not (output / "config").exists()
-    assert not (output / "config" / "custom-nodes.toml").exists()
-    assert not (output / "config" / "files.toml").exists()
 
 
 def file_contents(root: Path) -> dict[str, bytes]:

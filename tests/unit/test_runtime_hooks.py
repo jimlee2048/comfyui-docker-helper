@@ -74,6 +74,8 @@ class FakeHookProcess:
         return self.returncode
 
 
+# Discovery and validation define the allowed runtime hook tree shape and the
+# baked-before-mounted execution order.
 def test_discovery_order_is_baked_then_mounted_lexical_and_allows_duplicates(
     tmp_path: Path,
 ) -> None:
@@ -187,6 +189,8 @@ def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:
     ]
 
 
+# Startup hook execution tests pin interpreter selection, environment shaping,
+# ordering, logging, and failure reporting before ComfyUI starts.
 def test_run_pre_start_hooks_uses_suffix_mapping_env_cwd_and_logs(
     tmp_path: Path,
 ) -> None:
@@ -301,6 +305,8 @@ def test_pre_start_hook_failure_stops_phase(tmp_path: Path) -> None:
     ]
 
 
+# Stop-hook cleanup is bounded: cancellation and timeouts must terminate the
+# process group, reap finished hooks, and skip later hooks when shutdown is over.
 def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     baked = tmp_path / "baked"

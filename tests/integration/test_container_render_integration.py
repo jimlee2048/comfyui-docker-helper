@@ -76,7 +76,7 @@ def _assert_rendered_custom_node_context(output: Path) -> None:
     assert has_valid_context_marker(output)
     assert (output / "config.toml").is_file()
     assert (output / "config.lock.toml").is_file()
-    assert not (output / "config" / "custom-nodes.toml").exists()
+    assert not (output / "config").exists()
     assert (output / "scripts" / "pre.sh").is_file()
     assert (output / "scripts" / "post.py").is_file()
 
@@ -87,7 +87,7 @@ def _assert_rendered_custom_node_context(output: Path) -> None:
     assert 'git -C "$COMFYUI_PATH" rev-parse HEAD' in dockerfile
     assert "source=config.toml" in dockerfile
     assert "source=config.lock.toml" in dockerfile
-    assert "source=config/custom-nodes.toml" not in dockerfile
+    assert "source=config/" not in dockerfile
     assert "source=scripts,target=/tmp/cdh/scripts" in dockerfile
     assert "cdh container install-custom-nodes" in dockerfile
 

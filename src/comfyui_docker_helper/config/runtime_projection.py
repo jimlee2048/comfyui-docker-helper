@@ -11,6 +11,10 @@ from comfyui_docker_helper.config.models import (
     Config,
     ConfigModel,
 )
+from comfyui_docker_helper.config.url_validation import (
+    DownloaderName,
+    require_downloader_name,
+)
 
 type ConfigPath = tuple[str | int, ...]
 
@@ -26,7 +30,7 @@ class RuntimeComfyUIConfig(ConfigModel):
 class RuntimeCdhConfig(ConfigModel):
     """cdh-owned runtime downloader defaults and backend settings."""
 
-    default_downloader: Literal["aria2", "httpx"] = "aria2"
+    default_downloader: DownloaderName = "aria2"
     default_download_mode: Literal["sync"] = "sync"
     downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
 
@@ -45,7 +49,7 @@ class RuntimeFileConfig(ConfigModel):
     dir: str
     filename: str
     overwrite: bool = False
-    downloader: Literal["aria2", "httpx"] | None = None
+    downloader: DownloaderName | None = None
     download_mode: Literal["sync"] | None = None
 
 
@@ -78,7 +82,9 @@ def project_runtime_config(
             "extra_args": list(config.comfyui.extra_args),
         },
         "cdh": {
-            "default_downloader": config.cdh.default_downloader,
+            "default_downloader": require_downloader_name(
+                config.cdh.default_downloader
+            ),
             "default_download_mode": config.cdh.default_download_mode,
             "downloader": config.cdh.downloader.model_dump(mode="json"),
         },
@@ -88,7 +94,11 @@ def project_runtime_config(
                 "dir": file.dir,
                 "filename": file.filename,
                 "overwrite": file.overwrite,
-                **({"downloader": file.downloader} if file.downloader else {}),
+                **(
+                    {"downloader": require_downloader_name(file.downloader)}
+                    if file.downloader
+                    else {}
+                ),
                 **({"download_mode": file.download_mode} if file.download_mode else {}),
             }
             for file in config.files

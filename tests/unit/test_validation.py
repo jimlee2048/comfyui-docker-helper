@@ -1042,7 +1042,7 @@ def test_global_downloader_enum_and_numeric_ranges_are_validated() -> None:
 
 
 def test_async_download_mode_is_rejected_by_public_schema() -> None:
-    """Reject future runtime async mode before host warning logic can run."""
+    """Reject unsupported runtime async mode before host warning logic can run."""
     with pytest.raises(ValidationError) as raised:
         Config.model_validate(
             {

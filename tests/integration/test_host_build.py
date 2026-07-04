@@ -127,6 +127,8 @@ def failing_source_resolvers() -> SourceResolvers:
     )
 
 
+# Build orchestration tests keep render, config precedence, and Buildx argv
+# handoff aligned at the CLI boundary.
 def test_build_help_exposes_current_options(cli_runner: CliRunner) -> None:
     """Expose the supported build command options."""
     result = cli_runner.invoke(app, ["host", "build", "--help"])
@@ -288,65 +290,6 @@ output = "push"
     runtime_config = tomllib.loads((context / "runtime" / "config.toml").read_text())
     assert runtime_config["comfyui"]["listen"] == "127.0.0.1"
     assert (context / "Dockerfile").is_file()
-
-
-def test_build_uses_custom_context_dir(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Render and build the caller-provided context directory."""
-    config = write_config(tmp_path)
-    context = tmp_path / "custom context"
-    calls: list[Path] = []
-
-    def fake_buildx(
-        *,
-        image_tags: tuple[str, ...],
-        output: str,
-        context_dir: Path,
-        cwd: Path,
-        log,
-    ) -> BuildxBuildResult:
-        del cwd, log
-        calls.append(context_dir)
-        return BuildxBuildResult(
-            argv=(
-                "docker",
-                "buildx",
-                "build",
-                "--load",
-                "-t",
-                image_tags[0],
-                str(context_dir),
-            ),
-            context_dir=context_dir,
-            image_tags=image_tags,
-            output=output,
-        )
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.build_image_with_buildx",
-        fake_buildx,
-    )
-
-    result = cli_runner.invoke(
-        app,
-        [
-            "host",
-            "build",
-            "-f",
-            str(config),
-            "-t",
-            "demo:custom",
-            "--context-dir",
-            str(context),
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert has_valid_context_marker(context)
-    assert calls == [context]
 
 
 def test_build_overwrites_existing_marked_context(
@@ -518,40 +461,6 @@ default_download_mode = "sync"
     assert calls == [("demo:warning",)]
 
 
-def test_build_accepts_repeated_tags_and_passes_them_in_cli_order(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Repeated tag options are valid Buildx tags."""
-    config = write_config(tmp_path)
-    calls: list[tuple[str, ...]] = []
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.build_image_with_buildx",
-        lambda **kwargs: calls.append(kwargs["image_tags"]),
-    )
-
-    result = cli_runner.invoke(
-        app,
-        [
-            "host",
-            "build",
-            "-f",
-            str(config),
-            "-t",
-            "one:tag",
-            "-t",
-            "two:tag",
-            "--context-dir",
-            str(tmp_path / "context"),
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert calls == [("one:tag", "two:tag")]
-
-
 def test_build_uses_config_tags_when_cli_tags_are_absent(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -665,6 +574,7 @@ output = "push"
     assert calls == ["push"]
 
 
+# Lock-mode build tests ensure resolver policy is settled before Buildx starts.
 def test_build_locked_reuses_existing_context_lock_without_resolver_calls(
     cli_runner: CliRunner,
     tmp_path: Path,

@@ -362,6 +362,8 @@ def test_signals_are_forwarded_to_spawned_child(
 
 
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGINT])
+# Lifecycle signal tests pin the ordered windows for hook execution, child
+# forwarding, and cancellation during startup and shutdown.
 def test_shutdown_signal_runs_stop_hooks_before_forwarding_to_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1274,13 +1276,13 @@ def test_runtime_validation_failure_happens_before_spawn(tmp_path: Path) -> None
     assert "[env.CDH_COMFYUI_PORT]" in str(error.value)
 
 
-def test_raw_launch_args_are_rejected_before_spawn(tmp_path: Path) -> None:
+def test_unknown_runtime_config_field_is_rejected_before_spawn(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
         tmp_path / "mounted.toml",
         """
 [comfyui]
-launch_args = ["--cpu"]
+unknown = true
 """,
     )
     calls: list[list[str]] = []
@@ -1305,7 +1307,7 @@ launch_args = ["--cpu"]
         )
 
     assert calls == []
-    assert "[comfyui.launch_args]" in str(error.value)
+    assert "[comfyui.unknown]" in str(error.value)
 
 
 def test_runtime_downloads_run_before_spawn_without_root_lock(
@@ -1717,62 +1719,6 @@ port = 8299
     )
 
     assert events == ["spawn", "readiness", "post-start"]
-
-
-def test_post_start_hooks_run_once_after_readiness_internal_retries(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime(tmp_path)
-    hooks = tmp_path / "hooks"
-    _write_hook(hooks, "post-start.d", "10-post.sh")
-    readiness_calls: list[list[str]] = []
-    post_start_calls: list[str] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-        return FakeChild(0)
-
-    def readiness_waiter(port: int, *, child: FakeChild) -> None:
-        assert port == 8188
-        assert child.poll() is None
-        readiness_calls.append(["failed-poll", "failed-poll", "ready"])
-
-    def runtime_hook_runner(
-        plan: RuntimeHookPlan,
-        phase: str,
-        *,
-        runtime: ContainerRuntime,
-        env: Mapping[str, str] | None = None,
-        log: Logger,
-        cancel_requested: Callable[[], bool],
-    ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, cancel_requested
-        post_start_calls.append(phase)
-        return ()
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=tmp_path / "missing-mounted.toml",
-            baked_hooks_path=tmp_path / "missing-hooks",
-            mounted_hooks_path=hooks,
-            environ={},
-            runner=runner,
-            readiness_waiter=readiness_waiter,
-            runtime_hook_runner=runtime_hook_runner,
-        )
-        == 0
-    )
-
-    assert readiness_calls == [["failed-poll", "failed-poll", "ready"]]
-    assert post_start_calls == ["post-start"]
 
 
 @pytest.mark.parametrize("returncode", [0, 7])

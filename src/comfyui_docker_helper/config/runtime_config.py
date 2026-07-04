@@ -18,7 +18,7 @@ from comfyui_docker_helper.config.diagnostics import (
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import ConfigModel
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
-from comfyui_docker_helper.config.url_validation import is_http_url
+from comfyui_docker_helper.config.url_validation import DownloaderName, is_http_url
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
@@ -82,7 +82,7 @@ class _RuntimeDownloaderConfigPatch(ConfigModel):
 
 
 class _RuntimeCdhConfigPatch(ConfigModel):
-    default_downloader: Literal["aria2", "httpx"] | None = None
+    default_downloader: DownloaderName | None = None
     default_download_mode: Literal["sync"] | None = None
     downloader: _RuntimeDownloaderConfigPatch | None = None
 
@@ -98,7 +98,7 @@ class _RuntimeFilePatch(ConfigModel):
     dir: str
     filename: str
     overwrite: bool | None = None
-    downloader: Literal["aria2", "httpx"] | None = None
+    downloader: DownloaderName | None = None
     download_mode: Literal["sync"] | None = None
 
 

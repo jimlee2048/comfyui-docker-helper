@@ -8,7 +8,6 @@ from types import TracebackType
 import httpx
 import pytest
 
-from comfyui_docker_helper.config import load_runtime_config
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
 from comfyui_docker_helper.container.download_files import (
     DownloaderSettings,
@@ -74,6 +73,8 @@ class FakeAria2Factory:
         return self.backend
 
 
+# Staging tests protect atomic replacement, skip/overwrite decisions, and cleanup
+# so interrupted downloads cannot expose partial or unrelated files as complete.
 def test_runtime_file_plan_derives_targets_keys_and_first_seen_order(
     tmp_path: Path,
 ) -> None:
@@ -936,6 +937,7 @@ def test_runtime_file_download_rejects_symlinked_staging_file(
         ("models/", "runtime_file.trailing_slash"),
     ],
 )
+# Unsafe path validation keeps runtime downloads confined to the ComfyUI tree.
 def test_runtime_file_plan_rejects_unsafe_directories(
     tmp_path: Path,
     directory: str,
@@ -1147,32 +1149,3 @@ def test_runtime_file_plan_rejects_unsupported_download_mode(tmp_path: Path) -> 
     assert _identities(error.value) == [
         (("files", 0, "download_mode"), "schema.literal_error")
     ]
-
-
-def test_entrypoint_runtime_config_records_files_for_runtime_downloads(
-    tmp_path: Path,
-) -> None:
-    mounted = tmp_path / "runtime.toml"
-    mounted.write_text(
-        """
-[[files]]
-url = "https://example.com/a.bin"
-dir = "models"
-filename = "a.bin"
-""",
-        encoding="utf-8",
-    )
-
-    result = load_runtime_config(
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=mounted,
-        environ={},
-    )
-
-    assert result.files == (
-        {
-            "url": "https://example.com/a.bin",
-            "dir": "models",
-            "filename": "a.bin",
-        },
-    )

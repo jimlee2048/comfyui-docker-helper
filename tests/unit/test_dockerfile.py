@@ -242,6 +242,8 @@ def make_config() -> Config:
     )
 
 
+# Dockerfile snapshots and feature-layer tests protect layer order, bind mounts,
+# copy boundaries, quoting, and the entrypoint shape.
 def test_minimal_dockerfile_matches_complete_deterministic_snapshot() -> None:
     """Render every fixed minimal instruction exactly once and in spec order."""
     config = make_config()
@@ -567,8 +569,7 @@ def test_renderer_rejects_missing_locked_comfyui_fields(
             "node",
             _NODE_ONLY_LAYER.rstrip(),
             (
-                "source=config/custom-nodes.toml",
-                "source=config/files.toml",
+                "source=config/",
                 "source=scripts",
                 "--scripts-dir",
             ),
@@ -578,8 +579,7 @@ def test_renderer_rejects_missing_locked_comfyui_fields(
             "file",
             _FILE_ONLY_LAYER.rstrip(),
             (
-                "source=config/custom-nodes.toml",
-                "source=config/files.toml",
+                "source=config/",
                 "source=scripts",
                 "--scripts-dir",
             ),
@@ -588,7 +588,7 @@ def test_renderer_rejects_missing_locked_comfyui_fields(
         pytest.param(
             "hook",
             _HOOK_LAYER.rstrip(),
-            ("source=config/custom-nodes.toml", "source=config/files.toml"),
+            ("source=config/",),
             id="hook-only",
         ),
     ],

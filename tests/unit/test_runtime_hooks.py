@@ -74,6 +74,8 @@ class FakeHookProcess:
         return self.returncode
 
 
+# Discovery and validation define the allowed runtime hook tree shape and the
+# baked-before-mounted execution order.
 def test_discovery_order_is_baked_then_mounted_lexical_and_allows_duplicates(
     tmp_path: Path,
 ) -> None:
@@ -109,12 +111,12 @@ def test_missing_roots_have_no_hooks(tmp_path: Path) -> None:
     assert plan.for_phase("pre-start") == ()
 
 
-def test_unknown_root_entries_and_future_phase_dirs_are_ignored(tmp_path: Path) -> None:
+def test_unknown_root_entries_and_phase_dirs_are_ignored(tmp_path: Path) -> None:
     baked = tmp_path / "baked"
     baked.mkdir()
     (baked / "README.md").write_text("ignored\n", encoding="utf-8")
-    (baked / "future-start.d").mkdir()
-    (baked / "future-start.d" / "bad.txt").write_text("ignored\n", encoding="utf-8")
+    (baked / "unknown-start.d").mkdir()
+    (baked / "unknown-start.d" / "bad.txt").write_text("ignored\n", encoding="utf-8")
     _write_hook(baked, "pre-start.d", "10-pre.sh")
 
     plan = discover_runtime_hooks(
@@ -187,6 +189,8 @@ def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:
     ]
 
 
+# Startup hook execution tests pin interpreter selection, environment shaping,
+# ordering, logging, and failure reporting before ComfyUI starts.
 def test_run_pre_start_hooks_uses_suffix_mapping_env_cwd_and_logs(
     tmp_path: Path,
 ) -> None:
@@ -301,6 +305,8 @@ def test_pre_start_hook_failure_stops_phase(tmp_path: Path) -> None:
     ]
 
 
+# Stop-hook cleanup is bounded: cancellation and timeouts must terminate the
+# process group, reap finished hooks, and skip later hooks when shutdown is over.
 def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     baked = tmp_path / "baked"

@@ -251,7 +251,7 @@ for real Docker builds:
 | --- | --- |
 | minimal config | base render/build/load path |
 | custom node registry install | Manager registry path and cache update |
-| custom node git install with hooks | hook copy/mount and subprocess behavior |
+| custom node git install with hooks | hook copy/mount and hook runner behavior |
 | httpx file download | local/remote file download path |
 | aria2 file download | real aria2 daemon path |
 | full config | combined nodes, hooks, files, env, entrypoint, and startup args |
@@ -261,7 +261,8 @@ network, disk, Docker cache, and CUDA base image requirements are acceptable for
 your machine. The lightweight fixture validation lives in `tests/smoke/` and
 does not run Docker.
 
-Record which checks used real upstream services and which used local fixtures.
+When recording smoke results, note which checks used real upstream services and
+which used local fixtures so failures can be classified consistently.
 
 ## Development
 

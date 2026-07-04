@@ -169,12 +169,31 @@ overwrite = true
             lambda doc: doc["files"][0].__setitem__("dir", "/absolute"),
             "dir must be relative",
         ),
+        (
+            lambda doc: doc["files"][0].__setitem__("dir", "models/"),
+            "dir must not end with a slash",
+        ),
+        (
+            lambda doc: doc["files"][0].__setitem__("dir", "models/."),
+            "dir must not contain '.'",
+        ),
+        (
+            lambda doc: doc["files"][0].__setitem__("dir", "models//a"),
+            "dir must not contain empty path segments",
+        ),
         (lambda doc: doc["files"][0].__setitem__("filename", "a/b"), "filename must"),
         (
             lambda doc: doc["files"][0].__setitem__("filename", "a\\b"),
             "filename must not contain",
         ),
         (lambda doc: doc["files"][0].__setitem__("url", "ftp://example.com/a"), "HTTP"),
+        (
+            lambda doc: doc["files"][0].__setitem__(
+                "url",
+                "https://example.com:bad/a",
+            ),
+            "HTTP",
+        ),
         (lambda doc: doc["files"][0].__setitem__("extra", "bad"), "validation failed"),
         (lambda doc: doc.__setitem__("target", "/malicious"), "validation failed"),
         (

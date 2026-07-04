@@ -247,6 +247,7 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
     assert (
         run_entrypoint(
             runtime=runtime,
+            runtime_state_path=tmp_path / "state.json",
             baked_config_path=config,
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
             baked_hooks_path=baked_hooks,
@@ -329,6 +330,7 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
     with pytest.raises(EntrypointError) as error:
         run_entrypoint(
             runtime=runtime,
+            runtime_state_path=tmp_path / "state.json",
             baked_config_path=config,
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
             baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
@@ -517,6 +519,7 @@ def test_startup_shutdown_during_download_prevents_spawn_and_stop_hooks(
     assert (
         run_entrypoint(
             runtime=runtime,
+            runtime_state_path=tmp_path / "state.json",
             baked_config_path=config,
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
             baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),

@@ -335,6 +335,7 @@ extra_args = ["--preview-method", "auto"]
 
     exit_code = run_entrypoint(
         runtime=runtime,
+        runtime_state_path=tmp_path / "state.json",
         baked_config_path=context / "runtime" / "config.toml",
         mounted_config_path=mounted,
         baked_hooks_path=_missing_baked_hooks(tmp_path),

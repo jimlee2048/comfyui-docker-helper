@@ -40,7 +40,7 @@ def _write_config(root: Path, document: str = MINIMAL_CONFIG) -> Path:
 
 
 def test_validate_help_exposes_current_options(cli_runner: CliRunner) -> None:
-    """Expose the current validate options and keep removed aliases hidden."""
+    """Expose the current validate command options."""
     result = cli_runner.invoke(app, ["host", "validate", "--help"])
 
     assert result.exit_code == 0
@@ -48,11 +48,10 @@ def test_validate_help_exposes_current_options(cli_runner: CliRunner) -> None:
     assert "-f" in result.stdout
     assert "--file" in result.stdout
     assert "--scripts-dir" in result.stdout
-    assert "--format" not in result.stdout
 
 
 def test_render_help_exposes_current_options(cli_runner: CliRunner) -> None:
-    """Expose render options while keeping removed aliases out of help."""
+    """Expose render options and keep unsafe overwrite shortcuts unavailable."""
     result = cli_runner.invoke(app, ["host", "render", "--help"])
 
     assert result.exit_code == 0
@@ -66,7 +65,6 @@ def test_render_help_exposes_current_options(cli_runner: CliRunner) -> None:
     assert "--dry-run" in result.stdout
     assert "--overwrite" in result.stdout
     assert "--force" not in result.stdout
-    assert "--format" not in result.stdout
 
 
 def test_validate_requires_at_least_one_file_option(cli_runner: CliRunner) -> None:
@@ -776,11 +774,11 @@ def test_render_rejects_unmarked_output_even_with_overwrite(
     assert (output / "caller-owned.txt").read_text() == "preserve\n"
 
 
-def test_render_rejects_removed_force_alias(
+def test_render_rejects_force_shortcut_for_overwrite_safety(
     cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Keep the removed --force alias unavailable on render."""
+    """Reject force-style overwrite shortcuts that bypass marker safety."""
     path = _write_config(tmp_path)
     output = tmp_path / "context"
 

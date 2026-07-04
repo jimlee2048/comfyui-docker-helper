@@ -567,8 +567,7 @@ def test_renderer_rejects_missing_locked_comfyui_fields(
             "node",
             _NODE_ONLY_LAYER.rstrip(),
             (
-                "source=config/custom-nodes.toml",
-                "source=config/files.toml",
+                "source=config/",
                 "source=scripts",
                 "--scripts-dir",
             ),
@@ -578,8 +577,7 @@ def test_renderer_rejects_missing_locked_comfyui_fields(
             "file",
             _FILE_ONLY_LAYER.rstrip(),
             (
-                "source=config/custom-nodes.toml",
-                "source=config/files.toml",
+                "source=config/",
                 "source=scripts",
                 "--scripts-dir",
             ),
@@ -588,7 +586,7 @@ def test_renderer_rejects_missing_locked_comfyui_fields(
         pytest.param(
             "hook",
             _HOOK_LAYER.rstrip(),
-            ("source=config/custom-nodes.toml", "source=config/files.toml"),
+            ("source=config/",),
             id="hook-only",
         ),
     ],

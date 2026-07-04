@@ -38,13 +38,6 @@ version = "latest"
 
 def write_file_root_artifacts(tmp_path: Path, body: str) -> tuple[Path, Path]:
     """Write file-download root config and lock artifacts from a compact body."""
-    root_body = (
-        body.lstrip()
-        .replace("[downloader]", "[cdh]")
-        .replace("[downloader.aria2]", "[cdh.downloader.aria2]")
-        .replace("[downloader.httpx]", "[cdh.downloader.httpx]")
-        .replace('default = "', 'default_downloader = "')
-    )
     return write_root_artifacts(
         tmp_path,
         """
@@ -52,7 +45,7 @@ def write_file_root_artifacts(tmp_path: Path, body: str) -> tuple[Path, Path]:
 version = "latest"
 
 """
-        + root_body,
+        + body.lstrip(),
     )
 
 
@@ -272,17 +265,17 @@ def test_download_files_overwrites_and_preserves_request_order(
     config, lock = write_file_root_artifacts(
         tmp_path,
         f"""
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 8
 max_connection_per_server = 4
 min_split_size = "2M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -324,17 +317,17 @@ def test_download_files_aria2_overwrite_removes_target_and_control_file(
     config, lock = write_file_root_artifacts(
         tmp_path,
         """
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 8
 max_connection_per_server = 4
 min_split_size = "2M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -377,17 +370,17 @@ def test_download_files_rejects_tampered_paths_without_writing_outside(
     config, lock = write_file_root_artifacts(
         tmp_path,
         """
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 8
 max_connection_per_server = 4
 min_split_size = "2M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -416,17 +409,17 @@ def test_download_files_cleans_up_aria2_context_on_interruption(
     config, lock = write_file_root_artifacts(
         tmp_path,
         """
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 8
 max_connection_per_server = 4
 min_split_size = "2M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -470,17 +463,17 @@ def test_real_aria2_smoke_when_available(
     config, lock = write_file_root_artifacts(
         tmp_path,
         f"""
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = {rpc_port}
 split = 1
 max_connection_per_server = 1
 min_split_size = "1M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 

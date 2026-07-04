@@ -440,45 +440,6 @@ def test_unknown_fields_are_rejected_at_any_depth(
         load_config(write_config(document))
 
 
-def test_old_top_level_downloader_is_an_ordinary_unknown_section(
-    write_config: Callable[[str], Path],
-) -> None:
-    """Reject the removed downloader table through the generic extra path."""
-    document = (
-        MINIMAL_CONFIG
-        + """
-[downloader]
-default = "aria2"
-"""
-    )
-
-    with pytest.raises(ValidationError) as raised:
-        load_config(write_config(document))
-
-    assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
-        (("downloader",), "extra_forbidden")
-    }
-
-
-def test_old_comfyui_launch_args_is_an_ordinary_unknown_field(
-    write_config: Callable[[str], Path],
-) -> None:
-    """Reject the removed startup field through the generic extra path."""
-    document = (
-        MINIMAL_CONFIG
-        + """
-launch_args = ["--cpu"]
-"""
-    )
-
-    with pytest.raises(ValidationError) as raised:
-        load_config(write_config(document))
-
-    assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
-        (("comfyui", "launch_args"), "extra_forbidden")
-    }
-
-
 @pytest.mark.parametrize(
     ("document", "error_type"),
     [

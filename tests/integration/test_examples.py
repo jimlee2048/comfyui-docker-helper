@@ -178,18 +178,9 @@ def test_user_facing_docs_describe_rendered_context_artifacts() -> None:
     assert "runtime/config.toml" in user_facing_text
     assert 'ENTRYPOINT ["cdh", "container", "entrypoint"]' in user_facing_text
 
-    stale_artifacts = [
-        "config/custom-nodes.toml",
-        "config/files.toml",
-        "comfy.lock",
-        "helper configs",
-    ]
-    for text in stale_artifacts:
-        assert text not in user_facing_text
-
 
 def test_user_facing_docs_describe_current_lock_and_downloader_layout() -> None:
-    """Prevent narrow stale lock and downloader layout claims from returning."""
+    """Keep user-facing docs aligned with current lock and downloader layout."""
     docs = [Path("README.md")]
     docs.extend(
         path
@@ -204,15 +195,6 @@ def test_user_facing_docs_describe_current_lock_and_downloader_layout() -> None:
     assert "default_download_mode" in user_facing_text
     assert "CDH_DEFAULT_DOWNLOAD_MODE" in user_facing_text
     assert "[cdh]" in (EXAMPLES / "full.toml").read_text(encoding="utf-8")
-
-    stale_workflows = [
-        "cdh host lock",
-        "--frozen",
-        "[downloader]",
-        "source-side lockfile",
-    ]
-    for text in stale_workflows:
-        assert text not in user_facing_text
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

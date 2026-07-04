@@ -1274,13 +1274,13 @@ def test_runtime_validation_failure_happens_before_spawn(tmp_path: Path) -> None
     assert "[env.CDH_COMFYUI_PORT]" in str(error.value)
 
 
-def test_raw_launch_args_are_rejected_before_spawn(tmp_path: Path) -> None:
+def test_unknown_runtime_config_field_is_rejected_before_spawn(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
         tmp_path / "mounted.toml",
         """
 [comfyui]
-launch_args = ["--cpu"]
+unknown = true
 """,
     )
     calls: list[list[str]] = []
@@ -1305,7 +1305,7 @@ launch_args = ["--cpu"]
         )
 
     assert calls == []
-    assert "[comfyui.launch_args]" in str(error.value)
+    assert "[comfyui.unknown]" in str(error.value)
 
 
 def test_runtime_downloads_run_before_spawn_without_root_lock(

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import stat
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -43,8 +46,11 @@ from comfyui_docker_helper.container.runtime_state import (
 )
 
 RUNTIME_FILE_IDENTITY_SCHEMA_VERSION = 1
+RUNTIME_STAGING_STALE_SECONDS = 24 * 60 * 60
+_CDH_STAGING_ARTIFACT_RE = re.compile(r"^cdh-[0-9a-f]{64}\.part(?:\..+)?$")
 
 type RuntimeFilePath = tuple[str | int, ...]
+type RuntimeStagingClock = Callable[[], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,10 +208,14 @@ def process_runtime_file_downloads(
     config: RuntimeConfig,
     backends: Mapping[str, DownloadBackend],
     log: Logger = print,
+    staging_cleanup_clock: RuntimeStagingClock = time.time,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Transfer runtime files to cdh-owned staging targets."""
     settings = runtime_downloader_settings(config)
     results: list[RuntimeFileDownloadResult] = []
+    current_staging_targets = tuple(
+        _runtime_staging_target(item) for item in plan.items
+    )
 
     for index, item in enumerate(plan.items, 1):
         backend_name = _effective_downloader(item, config)
@@ -240,7 +250,12 @@ def process_runtime_file_downloads(
             backend_name,
             settings=settings,
         )
-        _prepare_staging_parent(staging_item.target.parent, ("files", index - 1))
+        _prepare_staging_parent(
+            staging_item.target.parent,
+            ("files", index - 1),
+            current_staging_targets=current_staging_targets,
+            clock=staging_cleanup_clock,
+        )
 
         log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
         try:
@@ -254,11 +269,14 @@ def process_runtime_file_downloads(
                 log=log,
             )
             _place_staged_runtime_file(item, staging_item.target, ("files", index - 1))
+            _remove_empty_staging_parent(staging_item.target.parent)
         except _RuntimeDownloadContinued:
             _cleanup_current_staging(staging_item.target)
+            _remove_empty_staging_parent(staging_item.target.parent)
             continue
         except Exception:
             _cleanup_current_staging(staging_item.target)
+            _remove_empty_staging_parent(staging_item.target.parent)
             raise
 
         results.append(
@@ -447,6 +465,7 @@ def download_runtime_files(
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
+    staging_cleanup_clock: RuntimeStagingClock = time.time,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
@@ -458,6 +477,7 @@ def download_runtime_files(
             config=config,
             backends=backends,
             log=log,
+            staging_cleanup_clock=staging_cleanup_clock,
         )
 
     with aria2_downloader_factory(log=log) as aria2_backend:
@@ -467,6 +487,7 @@ def download_runtime_files(
             config=config,
             backends=backends,
             log=log,
+            staging_cleanup_clock=staging_cleanup_clock,
         )
 
 
@@ -506,6 +527,18 @@ def _download_runtime_file_with_policy(
     attempt_settings = _single_runtime_attempt_settings(settings)
     attempts = config.cdh.download_max_attempts
     for attempt in range(1, attempts + 1):
+        if _runtime_attempt_requires_clean_staging(staging_item, settings):
+            _cleanup_current_staging(staging_item.target)
+        if _runtime_resume_state_blocks_backend(staging_item, settings):
+            raise RuntimeFileDownloadError(
+                (
+                    Diagnostic(
+                        path=(*path, "target"),
+                        code="runtime_file.invalid_resume_staging",
+                        message="invalid staged resume state could not be cleaned",
+                    ),
+                )
+            )
         try:
             backend.download(staging_item, attempt_settings)
             return
@@ -515,8 +548,6 @@ def _download_runtime_file_with_policy(
                     "Retrying runtime file download after attempt "
                     f"{attempt}/{attempts} failed: {item.target}: {error}"
                 )
-                if _runtime_retry_requires_clean_staging(staging_item):
-                    _cleanup_current_staging(staging_item.target)
                 continue
             if config.cdh.download_failure_policy == "continue":
                 log(
@@ -552,8 +583,64 @@ def _single_runtime_attempt_settings(
     )
 
 
-def _runtime_retry_requires_clean_staging(item: FileDownloadItem) -> bool:
-    return item.downloader == "aria2" and item.overwrite
+def _runtime_attempt_requires_clean_staging(
+    item: FileDownloadItem,
+    settings: DownloaderSettings,
+) -> bool:
+    if item.downloader == "httpx":
+        return True
+    if item.downloader != "aria2":
+        return False
+    if not settings.aria2.resume_download:
+        return True
+    return not _runtime_resume_state_is_valid_or_absent(item.target)
+
+
+def _runtime_resume_state_is_valid_or_absent(staging_target: Path) -> bool:
+    try:
+        mode = staging_target.lstat().st_mode
+    except FileNotFoundError:
+        return not _current_staging_sidecars_exist(staging_target)
+    except OSError:
+        return False
+    if not stat.S_ISREG(mode):
+        return False
+    try:
+        with staging_target.open("rb") as staged_file:
+            staged_file.read(0)
+    except OSError:
+        return False
+    return True
+
+
+def _current_staging_sidecars_exist(staging_target: Path) -> bool:
+    if not _is_real_cdh_staging_directory(staging_target.parent):
+        return False
+
+    staging_prefix = _cdh_staging_prefix(staging_target)
+    if staging_prefix is None:
+        return False
+
+    try:
+        entries = tuple(staging_target.parent.iterdir())
+    except OSError:
+        return True
+
+    return any(
+        path != staging_target and _cdh_staging_prefix(path) == staging_prefix
+        for path in entries
+    )
+
+
+def _runtime_resume_state_blocks_backend(
+    item: FileDownloadItem,
+    settings: DownloaderSettings,
+) -> bool:
+    return (
+        item.downloader == "aria2"
+        and settings.aria2.resume_download
+        and not _runtime_resume_state_is_valid_or_absent(item.target)
+    )
 
 
 def merge_runtime_file_items(
@@ -664,12 +751,15 @@ def _runtime_staging_overwrite(
 
 
 def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:
-    return item.target.parent / ".cdh-staging" / f"{item.target.name}.cdh-download"
+    return runtime_file_staging_target(item, runtime_file_identity_digest(item))
 
 
 def _prepare_staging_parent(
     staging_parent: Path,
     path: RuntimeFilePath,
+    *,
+    current_staging_targets: Iterable[Path],
+    clock: RuntimeStagingClock,
 ) -> None:
     try:
         staging_parent.mkdir(parents=True, exist_ok=True)
@@ -685,7 +775,11 @@ def _prepare_staging_parent(
         ) from error
 
     _validate_staging_parent(staging_parent, path)
-    _cleanup_stale_staging_files(staging_parent)
+    _cleanup_stale_staging_files(
+        staging_parent,
+        current_staging_targets=current_staging_targets,
+        clock=clock,
+    )
 
 
 def _validate_staging_parent(
@@ -802,8 +896,13 @@ def _validate_final_target_before_replace(
     return None
 
 
-def _cleanup_stale_staging_files(staging_parent: Path) -> None:
-    if not _is_real_directory(staging_parent):
+def _cleanup_stale_staging_files(
+    staging_parent: Path,
+    *,
+    current_staging_targets: Iterable[Path],
+    clock: RuntimeStagingClock,
+) -> None:
+    if not _is_real_cdh_staging_directory(staging_parent):
         return
 
     try:
@@ -813,30 +912,50 @@ def _cleanup_stale_staging_files(staging_parent: Path) -> None:
     except OSError:
         return
 
+    current_prefixes = {
+        _cdh_staging_prefix(path) for path in current_staging_targets
+    } - {None}
+    stale_before = clock() - RUNTIME_STAGING_STALE_SECONDS
+
     for entry in entries:
         if not _is_cdh_staging_artifact(entry):
             continue
+        if _cdh_staging_prefix(entry) in current_prefixes:
+            continue
         try:
-            if entry.is_file() or entry.is_symlink():
-                entry.unlink()
+            stat_result = entry.lstat()
         except OSError:
-            pass
+            continue
+        if not stat.S_ISREG(stat_result.st_mode):
+            continue
+        if stat_result.st_mtime >= stale_before:
+            continue
+        with suppress(OSError):
+            entry.unlink()
 
 
 def _cleanup_current_staging(staging_target: Path) -> None:
-    if not _is_real_directory(staging_target.parent):
+    if not _is_real_cdh_staging_directory(staging_target.parent):
         return
 
-    for path in (
-        staging_target,
-        staging_target.with_name(f"{staging_target.name}.tmp"),
-        Path(f"{staging_target}.aria2"),
-    ):
-        if not _is_cdh_staging_artifact(path):
+    staging_prefix = _cdh_staging_prefix(staging_target)
+    if staging_prefix is None:
+        return
+
+    try:
+        entries = tuple(staging_target.parent.iterdir())
+    except OSError:
+        return
+
+    for path in entries:
+        if _cdh_staging_prefix(path) != staging_prefix:
             continue
         try:
-            if path.is_file() or path.is_symlink():
+            mode = path.lstat().st_mode
+            if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
                 path.unlink()
+            elif stat.S_ISDIR(mode):
+                path.rmdir()
         except OSError:
             pass
 
@@ -844,11 +963,24 @@ def _cleanup_current_staging(staging_target: Path) -> None:
 def _is_cdh_staging_artifact(path: Path) -> bool:
     if path.parent.name != ".cdh-staging":
         return False
-    return (
-        path.name.endswith(".cdh-download")
-        or path.name.endswith(".cdh-download.tmp")
-        or path.name.endswith(".cdh-download.aria2")
-    )
+    return _CDH_STAGING_ARTIFACT_RE.fullmatch(path.name) is not None
+
+
+def _cdh_staging_prefix(path: Path) -> str | None:
+    if not _is_cdh_staging_artifact(path):
+        return None
+    return path.name[: len("cdh-") + 64 + len(".")]
+
+
+def _remove_empty_staging_parent(staging_parent: Path) -> None:
+    if not _is_real_cdh_staging_directory(staging_parent):
+        return
+    with suppress(OSError):
+        staging_parent.rmdir()
+
+
+def _is_real_cdh_staging_directory(path: Path) -> bool:
+    return path.name == ".cdh-staging" and _is_real_directory(path)
 
 
 def _is_real_directory(path: Path) -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
     RuntimeFilePlan,
     RuntimeFilePlanError,
+    RuntimeFilePlanItem,
     build_runtime_file_plan,
     canonical_runtime_file_identity_bytes,
     download_runtime_files,
@@ -41,6 +43,15 @@ from comfyui_docker_helper.container.runtime_state import (
 
 NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 LATER = datetime(2026, 1, 2, 4, 5, 6, tzinfo=UTC)
+STALE_CLEANUP_NOW = 2_000_000.0
+
+
+def _staging_target(item: RuntimeFilePlanItem) -> Path:
+    return runtime_file_staging_target(item, runtime_file_identity_digest(item))
+
+
+def _touch_mtime(path: Path, mtime: float) -> None:
+    os.utime(path, (mtime, mtime), follow_symlinks=False)
 
 
 def _identities(error: RuntimeFilePlanError) -> list[tuple[tuple, str]]:
@@ -877,12 +888,8 @@ def test_runtime_file_download_selects_explicit_backend_before_default(
     assert [call[0].url for call in aria2_backend.calls] == [
         "https://example.com/default.bin"
     ]
-    assert httpx_backend.calls[0][0].target == (
-        comfyui / "models" / ".cdh-staging" / "httpx.bin.cdh-download"
-    )
-    assert aria2_backend.calls[0][0].target == (
-        comfyui / "models" / ".cdh-staging" / "default.bin.cdh-download"
-    )
+    assert httpx_backend.calls[0][0].target == _staging_target(plan.items[0])
+    assert aria2_backend.calls[0][0].target == _staging_target(plan.items[1])
     assert httpx_backend.calls[0][0].target != results[0].item.target
     assert aria2_backend.calls[0][0].target != results[1].item.target
 
@@ -959,7 +966,9 @@ def test_runtime_file_download_retries_then_succeeds(tmp_path: Path) -> None:
             if len(self.calls) == 1:
                 item.target.write_bytes(b"partial")
                 raise TransferDownloadFilesError("temporary transfer failure")
-            self.second_attempt_staging_bytes = item.target.read_bytes()
+            self.second_attempt_staging_bytes = (
+                item.target.read_bytes() if item.target.exists() else None
+            )
             item.target.write_bytes(self.payload)
 
     comfyui = tmp_path / "ComfyUI"
@@ -998,7 +1007,7 @@ def test_runtime_file_download_retries_then_succeeds(tmp_path: Path) -> None:
     )
 
     assert len(backend.calls) == 2
-    assert backend.second_attempt_staging_bytes == b"partial"
+    assert backend.second_attempt_staging_bytes is None
     assert {call[0].overwrite for call in backend.calls} == {False}
     assert {call[1].httpx.retries for call in backend.calls} == {0}
     assert (comfyui / "models" / "a.bin").read_bytes() == b"eventual"
@@ -1021,6 +1030,8 @@ def test_runtime_file_aria2_staging_overwrite_tracks_resume_setting(
     class FlakyAria2Backend(FakeDownloadBackend):
         def __init__(self) -> None:
             super().__init__()
+            self.first_attempt_staging_exists: bool | None = None
+            self.first_attempt_control_exists: bool | None = None
             self.second_attempt_staging_exists: bool | None = None
             self.second_attempt_control_exists: bool | None = None
             self.second_attempt_staging_bytes: bytes | None = None
@@ -1032,14 +1043,19 @@ def test_runtime_file_aria2_staging_overwrite_tracks_resume_setting(
         ) -> None:
             self.calls.append((item, settings))
             if len(self.calls) == 1:
+                self.first_attempt_staging_exists = item.target.exists()
+                self.first_attempt_control_exists = Path(
+                    f"{item.target}.aria2"
+                ).exists()
                 item.target.write_bytes(b"partial")
                 Path(f"{item.target}.aria2").write_bytes(b"control")
                 raise TransferDownloadFilesError("temporary transfer failure")
             control_path = Path(f"{item.target}.aria2")
             self.second_attempt_staging_exists = item.target.exists()
             self.second_attempt_control_exists = control_path.exists()
-            if item.target.exists():
-                self.second_attempt_staging_bytes = item.target.read_bytes()
+            self.second_attempt_staging_bytes = (
+                item.target.read_bytes() if item.target.exists() else None
+            )
             item.target.write_bytes(self.payload)
 
     comfyui = tmp_path / "ComfyUI"
@@ -1060,6 +1076,10 @@ def test_runtime_file_aria2_staging_overwrite_tracks_resume_setting(
         comfyui_path=comfyui,
     )
     backend = FlakyAria2Backend()
+    staging_target = _staging_target(plan.items[0])
+    staging_target.parent.mkdir(parents=True)
+    staging_target.write_bytes(b"restart-partial")
+    Path(f"{staging_target}.aria2").write_bytes(b"restart-control")
 
     process_runtime_file_downloads(
         plan,
@@ -1085,11 +1105,98 @@ def test_runtime_file_aria2_staging_overwrite_tracks_resume_setting(
         resume_download,
         resume_download,
     ]
+    assert backend.first_attempt_staging_exists is resume_download
+    assert backend.first_attempt_control_exists is resume_download
     assert backend.second_attempt_staging_exists is resume_download
     assert backend.second_attempt_control_exists is resume_download
     assert backend.second_attempt_staging_bytes == (
         b"partial" if resume_download else None
     )
+
+
+@pytest.mark.parametrize(
+    "invalid_resume_state",
+    ["symlink-part", "orphan-sidecar", "unreadable-part"],
+)
+def test_runtime_file_aria2_resume_cleans_invalid_current_staging_before_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_resume_state: str,
+) -> None:
+    class ObservingAria2Backend(FakeDownloadBackend):
+        def __init__(self) -> None:
+            super().__init__(payload=b"downloaded")
+            self.first_attempt_target_exists: bool | None = None
+            self.first_attempt_target_is_symlink: bool | None = None
+            self.first_attempt_control_exists: bool | None = None
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            self.first_attempt_target_exists = item.target.exists()
+            self.first_attempt_target_is_symlink = item.target.is_symlink()
+            self.first_attempt_control_exists = Path(f"{item.target}.aria2").exists()
+            item.target.write_bytes(self.payload)
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "downloader": "aria2",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    staging_target = _staging_target(plan.items[0])
+    staging_target.parent.mkdir(parents=True)
+    outside_target = tmp_path / "outside.bin"
+    outside_target.write_bytes(b"outside")
+    if invalid_resume_state == "symlink-part":
+        staging_target.symlink_to(outside_target)
+    elif invalid_resume_state == "orphan-sidecar":
+        Path(f"{staging_target}.aria2").write_bytes(b"orphan-control")
+    else:
+        staging_target.write_bytes(b"unreadable-partial")
+        original_open = Path.open
+
+        def open_with_unreadable_staging(
+            self: Path,
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            mode = str(args[0] if args else kwargs.get("mode", "r"))
+            if self == staging_target and "r" in mode:
+                raise OSError("staging file cannot be read in test")
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_with_unreadable_staging)
+    backend = ObservingAria2Backend()
+
+    process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate(
+            {"cdh": {"downloader": {"aria2": {"resume_download": True}}}}
+        ),
+        backends={"aria2": backend},
+        log=lambda message: None,
+    )
+
+    assert backend.first_attempt_target_exists is False
+    assert backend.first_attempt_target_is_symlink is False
+    assert backend.first_attempt_control_exists is False
+    assert outside_target.read_bytes() == b"outside"
+    assert (comfyui / "models" / "a.bin").read_bytes() == b"downloaded"
 
 
 def test_runtime_file_download_exhausted_fail_stops_later_files(
@@ -1217,7 +1324,7 @@ def test_runtime_file_download_exhausted_continue_omits_failed_and_continues(
         "https://example.com/a.bin",
         "https://example.com/b.bin",
     ]
-    failed_staging = comfyui / "models" / ".cdh-staging" / "a.bin.cdh-download"
+    failed_staging = _staging_target(plan.items[0])
     assert not (comfyui / "models" / "a.bin").exists()
     assert not failed_staging.exists()
     assert (comfyui / "models" / "b.bin").read_bytes() == b"later"
@@ -1315,10 +1422,11 @@ def test_runtime_file_httpx_download_places_staged_bytes_at_final_target(
     )
 
     final_target = comfyui / "models" / "a.bin"
-    staging_target = comfyui / "models" / ".cdh-staging" / "a.bin.cdh-download"
+    staging_target = _staging_target(plan.items[0])
     assert results[0].staging_target == staging_target
     assert final_target.read_bytes() == b"runtime-bytes"
     assert not staging_target.exists()
+    assert not staging_target.parent.exists()
 
 
 def test_runtime_file_aria2_factory_is_used_only_when_needed(
@@ -1409,9 +1517,7 @@ def test_runtime_file_aria2_factory_is_used_only_when_needed(
     assert len(factory.calls) == 1
     assert aria2_backend.entered is True
     assert aria2_backend.exited is True
-    assert aria2_backend.calls[0][0].target == (
-        comfyui / "models" / ".cdh-staging" / "aria2.bin.cdh-download"
-    )
+    assert aria2_backend.calls[0][0].target == _staging_target(aria2_plan.items[0])
     assert results[0].staging_target == aria2_backend.calls[0][0].target
 
 
@@ -1478,9 +1584,7 @@ def test_runtime_file_download_places_successful_transfer_at_final_target(
 
     final_target = comfyui / "models" / "a.bin"
     assert final_target.read_bytes() == b"final-bytes"
-    assert results[0].staging_target == (
-        comfyui / "models" / ".cdh-staging" / "a.bin.cdh-download"
-    )
+    assert results[0].staging_target == _staging_target(plan.items[0])
     assert backend.calls[0][0].target == results[0].staging_target
     assert not results[0].staging_target.exists()
 
@@ -1725,7 +1829,7 @@ def test_runtime_file_download_continue_policy_keeps_atomic_place_error_fatal(
     original_replace = Path.replace
 
     def failing_replace(self: Path, target: Path) -> Path:
-        if self.name == "a.bin.cdh-download":
+        if self == _staging_target(plan.items[0]):
             raise OSError("replace failed in test")
         return original_replace(self, target)
 
@@ -1753,19 +1857,13 @@ def test_runtime_file_download_continue_policy_keeps_atomic_place_error_fatal(
     assert not backend.calls[0][0].target.exists()
 
 
-def test_runtime_file_download_cleans_only_cdh_owned_staging_files(
+def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     comfyui = tmp_path / "ComfyUI"
     staging_dir = comfyui / "models" / ".cdh-staging"
     staging_dir.mkdir(parents=True)
-    stale = staging_dir / "old.bin.cdh-download"
-    stale_tmp = staging_dir / "old.bin.cdh-download.tmp"
-    stale_control = staging_dir / "old.bin.cdh-download.aria2"
-    user_file = staging_dir / "user-file.txt"
-    outside = comfyui / "models" / "outside.bin.cdh-download"
-    for path in (stale, stale_tmp, stale_control, user_file, outside):
-        path.write_bytes(b"keep-or-clean")
     plan = build_runtime_file_plan(
         [
             {
@@ -1780,18 +1878,74 @@ def test_runtime_file_download_cleans_only_cdh_owned_staging_files(
         ],
         comfyui_path=comfyui,
     )
+    current_control = Path(f"{_staging_target(plan.items[0])}.aria2")
+    old_digest = "a" * 64
+    fresh_digest = "b" * 64
+    unreadable_digest = "c" * 64
+    stale = staging_dir / f"cdh-{old_digest}.part"
+    stale_tmp = staging_dir / f"cdh-{old_digest}.part.tmp"
+    stale_control = staging_dir / f"cdh-{old_digest}.part.aria2"
+    fresh = staging_dir / f"cdh-{fresh_digest}.part"
+    unreadable_mtime = staging_dir / f"cdh-{unreadable_digest}.part"
+    symlink_artifact = staging_dir / f"cdh-{'d' * 64}.part"
+    user_file = staging_dir / "user-file.txt"
+    old_v03 = staging_dir / "old.bin.cdh-download"
+    outside = comfyui / "models" / f"cdh-{'e' * 64}.part"
+    for path in (
+        current_control,
+        stale,
+        stale_tmp,
+        stale_control,
+        fresh,
+        unreadable_mtime,
+        user_file,
+        old_v03,
+        outside,
+    ):
+        path.write_bytes(b"keep-or-clean")
+    symlink_artifact.symlink_to(outside)
+    old_mtime = STALE_CLEANUP_NOW - (25 * 60 * 60)
+    fresh_mtime = STALE_CLEANUP_NOW - (23 * 60 * 60)
+    for path in (
+        current_control,
+        stale,
+        stale_tmp,
+        stale_control,
+        unreadable_mtime,
+        symlink_artifact,
+        user_file,
+        old_v03,
+        outside,
+    ):
+        _touch_mtime(path, old_mtime)
+    _touch_mtime(fresh, fresh_mtime)
+
+    original_lstat = Path.lstat
+
+    def lstat_with_unreadable_mtime(self: Path) -> os.stat_result:
+        if self == unreadable_mtime:
+            raise OSError("mtime unavailable in test")
+        return original_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_unreadable_mtime)
 
     process_runtime_file_downloads(
         plan,
-        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
-        backends={"httpx": FakeDownloadBackend(payload=b"new")},
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "aria2"}}),
+        backends={"aria2": FakeDownloadBackend(payload=b"new")},
         log=lambda message: None,
+        staging_cleanup_clock=lambda: STALE_CLEANUP_NOW,
     )
 
     assert not stale.exists()
     assert not stale_tmp.exists()
     assert not stale_control.exists()
+    assert not current_control.exists()
+    assert fresh.read_bytes() == b"keep-or-clean"
+    assert unreadable_mtime.name in {path.name for path in staging_dir.iterdir()}
+    assert symlink_artifact.is_symlink()
     assert user_file.read_bytes() == b"keep-or-clean"
+    assert old_v03.read_bytes() == b"keep-or-clean"
     assert outside.read_bytes() == b"keep-or-clean"
     assert (comfyui / "models" / "a.bin").read_bytes() == b"new"
 
@@ -1805,7 +1959,7 @@ def test_runtime_file_download_rejects_symlinked_staging_parent(
     models.mkdir(parents=True)
     outside.mkdir()
     (models / ".cdh-staging").symlink_to(outside, target_is_directory=True)
-    outside_artifact = outside / "old.bin.cdh-download"
+    outside_artifact = outside / f"cdh-{'f' * 64}.part"
     outside_artifact.write_bytes(b"keep")
     plan = build_runtime_file_plan(
         [

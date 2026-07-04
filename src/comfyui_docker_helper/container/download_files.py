@@ -739,14 +739,17 @@ def _single_host_attempt_settings(settings: DownloaderSettings) -> DownloaderSet
 
 
 def _cleanup_failed_target(item: FileDownloadItem, *, log: Logger) -> None:
+    _cleanup_failed_path(item.target, log=log)
+    if item.downloader == "aria2":
+        _cleanup_failed_path(_aria2_control_path(item.target), log=log)
+
+
+def _cleanup_failed_path(path: Path, *, log: Logger) -> None:
     try:
-        if item.target.exists() or item.target.is_symlink():
-            item.target.unlink()
+        if path.exists() or path.is_symlink():
+            path.unlink()
     except OSError as error:
-        log(
-            "WARNING: failed download target could not be removed: "
-            f"{item.target}: {error}"
-        )
+        log(f"WARNING: failed download artifact could not be removed: {path}: {error}")
 
 
 def _preflight_file(item: FileDownloadItem, *, log: Logger) -> bool:

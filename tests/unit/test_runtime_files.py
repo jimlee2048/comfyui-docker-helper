@@ -430,6 +430,89 @@ def test_runtime_file_download_retries_then_succeeds(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("resume_download", "expected_overwrite"),
+    [(True, False), (False, True)],
+)
+def test_runtime_file_aria2_staging_overwrite_tracks_resume_setting(
+    tmp_path: Path,
+    resume_download: bool,
+    expected_overwrite: bool,
+) -> None:
+    class FlakyAria2Backend(FakeDownloadBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.second_attempt_staging_exists: bool | None = None
+            self.second_attempt_control_exists: bool | None = None
+            self.second_attempt_staging_bytes: bytes | None = None
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            if len(self.calls) == 1:
+                item.target.write_bytes(b"partial")
+                Path(f"{item.target}.aria2").write_bytes(b"control")
+                raise TransferDownloadFilesError("temporary transfer failure")
+            control_path = Path(f"{item.target}.aria2")
+            self.second_attempt_staging_exists = item.target.exists()
+            self.second_attempt_control_exists = control_path.exists()
+            if item.target.exists():
+                self.second_attempt_staging_bytes = item.target.read_bytes()
+            item.target.write_bytes(self.payload)
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "downloader": "aria2",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FlakyAria2Backend()
+
+    process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate(
+            {
+                "cdh": {
+                    "download_max_attempts": 2,
+                    "downloader": {
+                        "aria2": {"resume_download": resume_download},
+                    },
+                }
+            }
+        ),
+        backends={"aria2": backend},
+        log=lambda message: None,
+    )
+
+    assert [call[0].overwrite for call in backend.calls] == [
+        expected_overwrite,
+        expected_overwrite,
+    ]
+    assert [call[1].aria2.resume_download for call in backend.calls] == [
+        resume_download,
+        resume_download,
+    ]
+    assert backend.second_attempt_staging_exists is resume_download
+    assert backend.second_attempt_control_exists is resume_download
+    assert backend.second_attempt_staging_bytes == (
+        b"partial" if resume_download else None
+    )
+
+
 def test_runtime_file_download_exhausted_fail_stops_later_files(
     tmp_path: Path,
 ) -> None:

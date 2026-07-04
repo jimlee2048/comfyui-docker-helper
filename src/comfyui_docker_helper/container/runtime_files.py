@@ -201,7 +201,11 @@ def process_runtime_file_downloads(
                 )
             ) from error
 
-        staging_item = _runtime_staging_download_item(item, backend_name)
+        staging_item = _runtime_staging_download_item(
+            item,
+            backend_name,
+            settings=settings,
+        )
         _prepare_staging_parent(staging_item.target.parent, ("files", index - 1))
 
         log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
@@ -310,6 +314,8 @@ def _download_runtime_file_with_policy(
                     "Retrying runtime file download after attempt "
                     f"{attempt}/{attempts} failed: {item.target}: {error}"
                 )
+                if _runtime_retry_requires_clean_staging(staging_item):
+                    _cleanup_current_staging(staging_item.target)
                 continue
             if config.cdh.download_failure_policy == "continue":
                 log(
@@ -343,6 +349,10 @@ def _single_runtime_attempt_settings(
             retries=0,
         ),
     )
+
+
+def _runtime_retry_requires_clean_staging(item: FileDownloadItem) -> bool:
+    return item.downloader == "aria2" and item.overwrite
 
 
 def merge_runtime_file_items(
@@ -432,15 +442,24 @@ def _requires_aria2_backend(plan: RuntimeFilePlan, config: RuntimeConfig) -> boo
 def _runtime_staging_download_item(
     item: RuntimeFilePlanItem,
     downloader: DownloaderName,
+    *,
+    settings: DownloaderSettings,
 ) -> FileDownloadItem:
     return FileDownloadItem(
         url=item.url,
         directory=item.directory,
         filename=item.filename,
         target=_runtime_staging_target(item),
-        overwrite=False,
+        overwrite=_runtime_staging_overwrite(downloader, settings),
         downloader=downloader,
     )
+
+
+def _runtime_staging_overwrite(
+    downloader: DownloaderName,
+    settings: DownloaderSettings,
+) -> bool:
+    return downloader == "aria2" and not settings.aria2.resume_download
 
 
 def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:

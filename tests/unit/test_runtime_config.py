@@ -35,6 +35,8 @@ def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
     assert result.config.comfyui.extra_args == []
     assert result.config.cdh.default_downloader == "aria2"
     assert result.config.cdh.default_download_mode == "sync"
+    assert result.config.cdh.download_max_attempts == 3
+    assert result.config.cdh.download_failure_policy == "continue"
     assert result.files == ()
     assert result.file_documents == ()
     assert result.warnings == ()
@@ -71,6 +73,8 @@ extra_args = ["--cpu"]
 [cdh]
 default_downloader = "httpx"
 default_download_mode = "sync"
+download_max_attempts = 5
+download_failure_policy = "fail"
 
 [cdh.downloader.httpx]
 timeout = 15
@@ -88,6 +92,8 @@ retries = 4
     assert result.config.comfyui.extra_args == ["--cpu"]
     assert result.config.cdh.default_downloader == "httpx"
     assert result.config.cdh.default_download_mode == "sync"
+    assert result.config.cdh.download_max_attempts == 5
+    assert result.config.cdh.download_failure_policy == "fail"
     assert result.config.cdh.downloader.httpx.timeout == 15
     assert result.config.cdh.downloader.httpx.retries == 4
 
@@ -118,6 +124,8 @@ extra_args = ["--preview-method", "auto"]
 
 [cdh]
 default_downloader = "aria2"
+download_max_attempts = 6
+download_failure_policy = "continue"
 
 [cdh.downloader.aria2]
 split = 8
@@ -130,6 +138,8 @@ split = 8
     assert result.config.comfyui.port == 8288
     assert result.config.comfyui.extra_args == ["--preview-method", "auto"]
     assert result.config.cdh.default_downloader == "aria2"
+    assert result.config.cdh.download_max_attempts == 6
+    assert result.config.cdh.download_failure_policy == "continue"
     assert result.config.cdh.downloader.aria2.split == 8
 
 
@@ -374,6 +384,37 @@ download_mode = "async"
     assert _identities(error.value) == [
         (("files", 0, "download_mode"), "schema.literal_error")
     ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("download_max_attempts", "0", "schema.greater_than_equal"),
+        ("download_max_attempts", "-1", "schema.greater_than_equal"),
+        ("download_failure_policy", '"skip"', "schema.literal_error"),
+    ],
+)
+def test_invalid_runtime_download_policy_values_fail_schema_validation(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    code: str,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f"""
+[cdh]
+{field} = {value}
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [(("cdh", field), code)]
 
 
 def test_runtime_file_unknown_field_fails_schema_validation(tmp_path: Path) -> None:

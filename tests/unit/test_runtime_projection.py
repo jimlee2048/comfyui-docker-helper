@@ -49,6 +49,8 @@ tags = ["example:dev"]
 [cdh]
 default_downloader = "httpx"
 default_download_mode = "sync"
+download_max_attempts = 4
+download_failure_policy = "continue"
 
 [cdh.downloader.aria2]
 split = 8
@@ -87,6 +89,8 @@ download_mode = "sync"
         "cdh": {
             "default_downloader": "httpx",
             "default_download_mode": "sync",
+            "download_max_attempts": 4,
+            "download_failure_policy": "continue",
             "downloader": {
                 "aria2": {
                     "rpc_port": 6800,
@@ -136,6 +140,7 @@ extra_args = []
 [cdh]
 default_downloader = "aria2"
 default_download_mode = "sync"
+download_max_attempts = 3
 
 [cdh.downloader.aria2]
 rpc_port = 6800
@@ -152,6 +157,7 @@ rpc_port = 6800
     assert not omitted_projection.is_explicit(("comfyui", "extra_args"))
     assert not omitted_projection.is_explicit(("cdh", "default_downloader"))
     assert not omitted_projection.is_explicit(("cdh", "default_download_mode"))
+    assert not omitted_projection.is_explicit(("cdh", "download_max_attempts"))
     assert not omitted_projection.is_explicit(
         ("cdh", "downloader", "aria2", "rpc_port")
     )
@@ -160,4 +166,49 @@ rpc_port = 6800
     assert explicit_projection.is_explicit(("comfyui", "extra_args"))
     assert explicit_projection.is_explicit(("cdh", "default_downloader"))
     assert explicit_projection.is_explicit(("cdh", "default_download_mode"))
+    assert explicit_projection.is_explicit(("cdh", "download_max_attempts"))
     assert explicit_projection.is_explicit(("cdh", "downloader", "aria2", "rpc_port"))
+
+
+def test_runtime_projection_omits_implicit_host_failure_policy(tmp_path) -> None:
+    """Do not bake the host-only failure-policy default into runtime config."""
+    omitted = tmp_path / "omitted.toml"
+    explicit_fail = tmp_path / "explicit-fail.toml"
+    explicit_continue = tmp_path / "explicit-continue.toml"
+    omitted.write_text(MINIMAL_CONFIG, encoding="utf-8")
+    explicit_fail.write_text(
+        MINIMAL_CONFIG
+        + """
+[cdh]
+download_failure_policy = "fail"
+""",
+        encoding="utf-8",
+    )
+    explicit_continue.write_text(
+        MINIMAL_CONFIG
+        + """
+[cdh]
+download_failure_policy = "continue"
+""",
+        encoding="utf-8",
+    )
+
+    omitted_projection = load_validate_plan_result(omitted).runtime_config
+    explicit_fail_projection = load_validate_plan_result(explicit_fail).runtime_config
+    explicit_continue_projection = load_validate_plan_result(
+        explicit_continue
+    ).runtime_config
+    omitted_document = tomllib.loads(omitted_projection.to_toml_bytes().decode("utf-8"))
+    explicit_fail_document = tomllib.loads(
+        explicit_fail_projection.to_toml_bytes().decode("utf-8")
+    )
+    explicit_continue_document = tomllib.loads(
+        explicit_continue_projection.to_toml_bytes().decode("utf-8")
+    )
+
+    assert "download_failure_policy" not in omitted_document["cdh"]
+    assert explicit_fail_document["cdh"]["download_failure_policy"] == "fail"
+    assert explicit_continue_document["cdh"]["download_failure_policy"] == "continue"
+    assert not omitted_projection.is_explicit(("cdh", "download_failure_policy"))
+    assert explicit_fail_projection.is_explicit(("cdh", "download_failure_policy"))
+    assert explicit_continue_projection.is_explicit(("cdh", "download_failure_policy"))

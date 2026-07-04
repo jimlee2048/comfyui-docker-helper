@@ -84,6 +84,8 @@ class _RuntimeDownloaderConfigPatch(ConfigModel):
 class _RuntimeCdhConfigPatch(ConfigModel):
     default_downloader: DownloaderName | None = None
     default_download_mode: Literal["sync"] | None = None
+    download_max_attempts: int | None = Field(default=None, ge=1)
+    download_failure_policy: Literal["continue", "fail"] | None = None
     downloader: _RuntimeDownloaderConfigPatch | None = None
 
 

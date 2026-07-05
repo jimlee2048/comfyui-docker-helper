@@ -51,7 +51,17 @@ def test_example_configs_validate(name: str) -> None:
     plan = result.plan
 
     assert plan.output_manifest.always
-    assert result.warnings == ()
+    if name == "minimal.toml":
+        assert result.warnings == ()
+    else:
+        assert {(warning.path, warning.code) for warning in result.warnings} == {
+            (
+                ("cdh", "default_download_mode"),
+                "host_build.download_scheduling_ignored",
+            ),
+            (("files", 0, "download_mode"), "host_build.download_scheduling_ignored"),
+            (("files", 1, "download_mode"), "host_build.download_scheduling_ignored"),
+        }
 
 
 def test_full_example_references_existing_hook_scripts() -> None:

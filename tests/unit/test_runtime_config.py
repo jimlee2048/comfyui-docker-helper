@@ -183,7 +183,7 @@ download_failure_policy = "fail"
             "CDH_COMFYUI_PORT": "8388",
             "CDH_COMFYUI_EXTRA_ARGS": '--preview-method "latent2rgb" --cpu',
             "CDH_DEFAULT_DOWNLOADER": "httpx",
-            "CDH_DEFAULT_DOWNLOAD_MODE": "sync",
+            "CDH_DEFAULT_DOWNLOAD_MODE": "async",
             "CDH_DOWNLOAD_MAX_ATTEMPTS": "6",
             "CDH_DOWNLOAD_FAILURE_POLICY": "continue",
         },
@@ -197,7 +197,7 @@ download_failure_policy = "fail"
         "--cpu",
     ]
     assert result.config.cdh.default_downloader == "httpx"
-    assert result.config.cdh.default_download_mode == "sync"
+    assert result.config.cdh.default_download_mode == "async"
     assert result.config.cdh.download_max_attempts == 6
     assert result.config.cdh.download_failure_policy == "continue"
 
@@ -398,7 +398,7 @@ filename = "model.bin"
     ]
 
 
-def test_runtime_file_unsupported_download_mode_fails_schema_validation(
+def test_runtime_file_async_download_mode_is_accepted(
     tmp_path: Path,
 ) -> None:
     mounted = _write(
@@ -409,6 +409,28 @@ url = "https://example.com/model.bin"
 dir = "models"
 filename = "model.bin"
 download_mode = "async"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=mounted,
+    )
+
+    assert result.files[0]["download_mode"] == "async"
+
+
+def test_runtime_file_invalid_download_mode_fails_schema_validation(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "parallel"
 """,
     )
 
@@ -697,7 +719,7 @@ def test_invalid_env_download_max_attempts_values_fail_runtime_validation(
         ),
         (
             "CDH_DEFAULT_DOWNLOAD_MODE",
-            "async",
+            "parallel",
             (("cdh", "default_download_mode"), "schema.literal_error"),
         ),
         (

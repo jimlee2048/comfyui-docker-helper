@@ -79,9 +79,9 @@ The render writes `runtime/config.toml` into the build context and bakes it to
 `/opt/cdh/runtime/config.toml`. That runtime config contains only startup
 fields (`[comfyui].listen`, `[comfyui].port`, `[comfyui].extra_args`),
 downloader defaults/settings, and `[[files]]` entries.
-Use `[cdh].default_download_mode = "sync"` or per-file
-`download_mode = "sync"` when you want the current runtime file mode to be
-explicit in configuration.
+Use `[cdh].default_download_mode = "sync"` or `"async"`, or per-file
+`download_mode = "sync"` or `"async"`, when you want the runtime file mode to
+be explicit in configuration.
 
 At container startup, mount `/etc/cdh/runtime/config.toml` to override baked
 runtime defaults. The supported startup environment overrides are
@@ -89,14 +89,14 @@ runtime defaults. The supported startup environment overrides are
 `CDH_DEFAULT_DOWNLOADER`, and `CDH_DEFAULT_DOWNLOAD_MODE`.
 
 `[[files]]` entries are downloaded during image build and are processed again
-at startup from the effective runtime config. Startup downloads run
-synchronously before ComfyUI starts, and existing targets are skipped unless
+at startup from the effective runtime config. Startup downloads use the
+effective runtime scheduling mode, and existing targets are skipped unless
 `overwrite = true`.
 
 Runtime lifecycle hooks are supplied with `--hooks-dir`. The hook root may
 contain `pre-start.d/`, `post-start.d/`, and `stop.d/` directories with regular
-`.sh` or `.py` files. Pre-start hooks run after runtime downloads and before
-ComfyUI starts. Post-start hooks run only after ComfyUI responds on
+`.sh` or `.py` files. Pre-start hooks run after synchronous runtime downloads
+and before ComfyUI starts. Post-start hooks run only after ComfyUI responds on
 `/system_stats`. Stop hooks run during graceful shutdown before the original
 signal is forwarded to ComfyUI.
 

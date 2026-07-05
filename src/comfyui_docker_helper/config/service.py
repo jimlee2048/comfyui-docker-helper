@@ -181,11 +181,11 @@ def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...
     warnings: list[Diagnostic] = []
     cdh = document.get("cdh")
     files = document.get("files")
+    has_build_time_files = isinstance(files, list) and bool(files)
     if (
         isinstance(cdh, Mapping)
         and cdh.get("download_failure_policy") == "continue"
-        and isinstance(files, list)
-        and files
+        and has_build_time_files
     ):
         warnings.append(
             Diagnostic(
@@ -198,6 +198,37 @@ def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...
                 severity=DiagnosticSeverity.WARNING,
             )
         )
+    if (
+        isinstance(cdh, Mapping)
+        and "default_download_mode" in cdh
+        and has_build_time_files
+    ):
+        warnings.append(
+            Diagnostic(
+                path=("cdh", "default_download_mode"),
+                code="host_build.download_scheduling_ignored",
+                message=(
+                    "host build downloads run synchronously and ignore runtime "
+                    "download scheduling mode"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
+    if isinstance(files, list):
+        for index, item in enumerate(files):
+            if not isinstance(item, Mapping) or "download_mode" not in item:
+                continue
+            warnings.append(
+                Diagnostic(
+                    path=("files", index, "download_mode"),
+                    code="host_build.download_scheduling_ignored",
+                    message=(
+                        "host build downloads run synchronously and ignore runtime "
+                        "download scheduling mode"
+                    ),
+                    severity=DiagnosticSeverity.WARNING,
+                )
+            )
     return tuple(warnings)
 
 

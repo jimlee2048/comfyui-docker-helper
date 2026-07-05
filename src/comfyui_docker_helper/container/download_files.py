@@ -6,6 +6,7 @@ import os
 import secrets
 import stat
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -45,6 +46,10 @@ class DownloadFilesError(ApplicationError):
 
 class TransferDownloadFilesError(DownloadFilesError):
     """A source or transport download failure eligible for retry/continue policy."""
+
+
+class DownloadCancelled(DownloadFilesError):
+    """A cooperative download cancellation request was observed."""
 
 
 class DownloadStatus(StrEnum):
@@ -122,6 +127,12 @@ class DownloadBackend(Protocol):
     ) -> None: ...
 
 
+class DownloadBackendPreparer(Protocol):
+    """Optional backend hook for startup work before downloads begin."""
+
+    def prepare(self, settings: DownloaderSettings) -> None: ...
+
+
 class HttpxDownloader:
     """HTTPX streaming downloader with retries and temporary-file replacement."""
 
@@ -140,21 +151,30 @@ class HttpxDownloader:
         self._sleep = sleep
         self._monotonic = monotonic
         self._log = log
+        self._cancel_requested = threading.Event()
+        self._client_lock = threading.Lock()
+        self._active_client: httpx.Client | None = None
 
     def download(
         self,
         item: FileDownloadItem,
         settings: DownloaderSettings,
     ) -> None:
+        self._raise_if_cancelled()
         tmp_path = _tmp_path(item.target)
         _remove_stale_tmp(tmp_path)
 
         attempts = settings.httpx.retries + 1
         for attempt in range(attempts):
+            self._raise_if_cancelled()
             try:
                 self._download_once(item, settings, tmp_path)
+                self._raise_if_cancelled()
                 tmp_path.replace(item.target)
                 return
+            except DownloadCancelled:
+                _cleanup_tmp(tmp_path)
+                raise
             except _RetryableDownloadError as error:
                 _cleanup_tmp(tmp_path)
                 if attempt + 1 >= attempts:
@@ -181,26 +201,36 @@ class HttpxDownloader:
     ) -> None:
         timeout = httpx.Timeout(settings.httpx.timeout)
         try:
-            with (
-                httpx.Client(
-                    follow_redirects=True,
-                    timeout=timeout,
-                    transport=self._transport,
-                ) as client,
-                client.stream("GET", item.url) as response,
-            ):
-                _raise_for_http_status(response)
-                self._write_response(response, tmp_path)
+            with httpx.Client(
+                follow_redirects=True,
+                timeout=timeout,
+                transport=self._transport,
+            ) as client:
+                self._set_active_client(client)
+                with client.stream("GET", item.url) as response:
+                    self._raise_if_cancelled()
+                    _raise_for_http_status(response)
+                    self._write_response(response, tmp_path)
+        except DownloadCancelled:
+            raise
         except (httpx.TimeoutException, httpx.TransportError) as error:
+            self._raise_if_cancelled()
             raise _RetryableDownloadError(
                 f"HTTP download failed for {item.url}: {error}"
             ) from error
+        finally:
+            self._set_active_client(None)
+
+    def _set_active_client(self, client: httpx.Client | None) -> None:
+        with self._client_lock:
+            self._active_client = client
 
     def _write_response(self, response: httpx.Response, tmp_path: Path) -> None:
         downloaded = 0
         last_log = self._monotonic()
         with tmp_path.open("wb") as output:
             for chunk in response.iter_bytes(chunk_size=self.chunk_size):
+                self._raise_if_cancelled()
                 if not chunk:
                     continue
                 output.write(chunk)
@@ -209,6 +239,18 @@ class HttpxDownloader:
                 if now - last_log >= self.progress_interval_seconds:
                     self._log(f"Downloaded {downloaded} bytes to {tmp_path}")
                     last_log = now
+
+    def cancel(self) -> None:
+        self._cancel_requested.set()
+        with self._client_lock:
+            client = self._active_client
+        if client is not None:
+            with suppress(Exception):
+                client.close()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_requested.is_set():
+            raise DownloadCancelled("download cancelled")
 
 
 class Aria2Downloader:
@@ -240,6 +282,7 @@ class Aria2Downloader:
         self._process: Aria2Process | None = None
         self._client: Aria2Client | None = None
         self._api: Aria2Api | None = None
+        self._cancel_requested = threading.Event()
 
     def __enter__(self) -> Aria2Downloader:
         return self
@@ -253,11 +296,16 @@ class Aria2Downloader:
         del exc_type, exc_value, traceback
         self.close()
 
+    def prepare(self, settings: DownloaderSettings) -> None:
+        self._raise_if_cancelled()
+        self._ensure_started(settings)
+
     def download(
         self,
         item: FileDownloadItem,
         settings: DownloaderSettings,
     ) -> None:
+        self._raise_if_cancelled()
         api = self._ensure_started(settings)
         _remove_aria2_control_file(item)
         options = _aria2_options(item, settings.aria2)
@@ -307,6 +355,10 @@ class Aria2Downloader:
         except Exception:
             pass
 
+    def cancel(self) -> None:
+        self._cancel_requested.set()
+        self.close()
+
     def _ensure_started(self, settings: DownloaderSettings) -> Aria2Api:
         if self._api is not None:
             return self._api
@@ -344,6 +396,7 @@ class Aria2Downloader:
         last_error: Exception | None = None
 
         while True:
+            self._raise_if_cancelled()
             self._fail_if_daemon_exited("before RPC became ready")
             try:
                 client.get_version()
@@ -364,6 +417,7 @@ class Aria2Downloader:
         item: FileDownloadItem,
     ) -> None:
         while True:
+            self._raise_if_cancelled()
             self._fail_if_daemon_exited(f"while downloading {item.url}")
             try:
                 download.update()
@@ -397,6 +451,10 @@ class Aria2Downloader:
             raise DownloadFilesError(
                 f"aria2 daemon exited with code {returncode} {detail}"
             )
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_requested.is_set():
+            raise DownloadCancelled("download cancelled")
 
 
 class _Aria2Config(ConfigModel):

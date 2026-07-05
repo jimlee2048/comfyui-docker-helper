@@ -1041,8 +1041,34 @@ def test_global_downloader_enum_and_numeric_ranges_are_validated() -> None:
     ]
 
 
-def test_async_download_mode_is_rejected_by_public_schema() -> None:
-    """Reject unsupported runtime async mode before host warning logic can run."""
+def test_async_download_mode_is_accepted_by_public_schema() -> None:
+    """Accept v0.4 runtime async scheduling fields in public config."""
+    config = Config.model_validate(
+        {
+            "compute_platform": {
+                "type": "cuda",
+                "cuda": {"version": "12.9.2"},
+            },
+            "pytorch": {"version": "2.10"},
+            "cdh": {"default_download_mode": "async"},
+            "comfyui": {"version": "latest"},
+            "files": [
+                {
+                    "url": "https://example.com/model.bin",
+                    "dir": "models",
+                    "filename": "model.bin",
+                    "download_mode": "async",
+                }
+            ],
+        }
+    )
+
+    assert config.cdh.default_download_mode == "async"
+    assert config.files[0].download_mode == "async"
+
+
+def test_invalid_download_mode_is_rejected_by_public_schema() -> None:
+    """Reject ordinary invalid runtime scheduling enum values."""
     with pytest.raises(ValidationError) as raised:
         Config.model_validate(
             {
@@ -1051,14 +1077,14 @@ def test_async_download_mode_is_rejected_by_public_schema() -> None:
                     "cuda": {"version": "12.9.2"},
                 },
                 "pytorch": {"version": "2.10"},
-                "cdh": {"default_download_mode": "async"},
+                "cdh": {"default_download_mode": "parallel"},
                 "comfyui": {"version": "latest"},
                 "files": [
                     {
                         "url": "https://example.com/model.bin",
                         "dir": "models",
                         "filename": "model.bin",
-                        "download_mode": "async",
+                        "download_mode": "deferred",
                     }
                 ],
             }

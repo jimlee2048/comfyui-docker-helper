@@ -80,7 +80,7 @@ class CdhConfig(ConfigModel):
     """cdh-owned helper settings."""
 
     default_downloader: str = "aria2"
-    default_download_mode: Literal["sync"] = "sync"
+    default_download_mode: Literal["sync", "async"] = "sync"
     download_max_attempts: int = Field(default=3, ge=1)
     download_failure_policy: Literal["continue", "fail"] = "fail"
     downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
@@ -143,7 +143,7 @@ class FileConfig(ConfigModel):
     filename: str
     overwrite: bool = False
     downloader: str | None = None
-    download_mode: Literal["sync"] | None = None
+    download_mode: Literal["sync", "async"] | None = None
 
 
 class Config(ConfigModel):

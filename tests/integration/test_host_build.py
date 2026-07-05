@@ -403,13 +403,19 @@ def test_build_with_runtime_download_mode_renders_and_invokes_buildx(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bake runtime download-mode defaults without warning or blocking build."""
+    """Bake async runtime scheduling while warning that host downloads are sync."""
     config = write_config(
         tmp_path,
         MINIMAL_CONFIG
         + """
 [cdh]
-default_download_mode = "sync"
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "async"
 """,
     )
     context = tmp_path / "context"
@@ -452,12 +458,14 @@ default_download_mode = "sync"
     )
 
     assert result.exit_code == 0
-    assert result.stderr == ""
+    assert "host_build.download_scheduling_ignored" in result.stderr
+    assert "downloads run synchronously" in result.stderr
     assert has_valid_context_marker(context)
     runtime_config = tomllib.loads(
         (context / "runtime" / "config.toml").read_text(encoding="utf-8")
     )
-    assert runtime_config["cdh"]["default_download_mode"] == "sync"
+    assert runtime_config["cdh"]["default_download_mode"] == "async"
+    assert runtime_config["files"][0]["download_mode"] == "async"
     assert calls == [("demo:warning",)]
 
 

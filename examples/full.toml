@@ -52,7 +52,7 @@ extra_packages = ["torchvision", "torchaudio"]
 # Default: "aria2". Supported: "aria2", "httpx".
 # Per-file downloader values override this default.
 default_downloader = "aria2"
-# Default: "sync". Currently supported: "sync".
+# Default: "sync". Supported: "sync", "async".
 # Per-file download_mode values override this default.
 default_download_mode = "sync"
 
@@ -135,7 +135,7 @@ filename = "comfyui-readme-aria2.md"
 overwrite = false
 # Default: cdh.default_downloader. Supported: "aria2", "httpx".
 downloader = "aria2"
-# Default: cdh.default_download_mode. Supported: "sync".
+# Default: cdh.default_download_mode. Supported: "sync", "async".
 download_mode = "sync"
 
 [[files]]

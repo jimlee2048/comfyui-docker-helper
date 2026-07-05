@@ -181,38 +181,68 @@ def test_examples_readme_documents_host_build_workflow() -> None:
     ) in readme
 
 
-def test_user_facing_docs_describe_rendered_context_artifacts() -> None:
-    """Keep docs centered on the current root rendered-context artifacts."""
-    docs = [Path("README.md")]
-    docs.extend(
-        path
-        for path in sorted(EXAMPLES.rglob("*"))
-        if path.is_file() and path.suffix in {".md", ".toml", ".sh"}
+def test_root_readme_documents_rendered_context_artifacts() -> None:
+    """Keep the root rendered-context artifact list aligned with output layout."""
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "- `config.toml`, the validated configuration used for the render;" in readme
+    assert (
+        "- `config.lock.toml`, the resolved source and lock selections used by"
+        in readme
     )
-    user_facing_text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
-
-    assert "config.toml" in user_facing_text
-    assert "config.lock.toml" in user_facing_text
-    assert "runtime/config.toml" in user_facing_text
-    assert 'ENTRYPOINT ["cdh", "container", "entrypoint"]' in user_facing_text
-
-
-def test_user_facing_docs_describe_current_lock_and_downloader_layout() -> None:
-    """Keep user-facing docs aligned with current lock and downloader layout."""
-    docs = [Path("README.md")]
-    docs.extend(
-        path
-        for path in sorted(EXAMPLES.rglob("*"))
-        if path.is_file() and path.suffix in {".md", ".toml", ".sh"}
+    assert (
+        "- `runtime/config.toml`, the runtime-supported defaults baked into the image;"
+        in readme
     )
-    user_facing_text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
+    assert 'ENTRYPOINT ["cdh", "container", "entrypoint"]' in readme
 
-    assert "--locked" in user_facing_text
-    assert "--upgrade-lock" in user_facing_text
-    assert "[cdh]" in user_facing_text
-    assert "default_download_mode" in user_facing_text
-    assert "CDH_DEFAULT_DOWNLOAD_MODE" in user_facing_text
-    assert "[cdh]" in (EXAMPLES / "full.toml").read_text(encoding="utf-8")
+
+def test_examples_readme_documents_rendered_context_artifacts() -> None:
+    """Keep example docs aligned with the inspectable rendered-context files."""
+    readme = (EXAMPLES / "README.md").read_text(encoding="utf-8")
+
+    assert "inspect generated files such as `Dockerfile`, `config.toml`," in readme
+    assert (
+        "`config.lock.toml`, `runtime/config.toml`, and copied `scripts/` content."
+        in readme
+    )
+    assert (
+        'Rendered images start through `ENTRYPOINT ["cdh", "container", '
+        '"entrypoint"]`.' in readme
+    )
+
+
+def test_root_readme_documents_current_lock_and_downloader_layout() -> None:
+    """Keep root docs aligned with current lock and downloader layout."""
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert (
+        "Use `--locked` to render from an existing context `config.lock.toml`" in readme
+    )
+    assert (
+        "`--upgrade-lock` to refresh moving selectors before writing a new lock file."
+        in readme
+    )
+    assert (
+        "Set the default downloader under `[cdh]`, and override it per file with"
+        in readme
+    )
+    assert 'Set `default_download_mode = "sync"` or `"async"` under `[cdh]`' in readme
+    assert "`CDH_DEFAULT_DOWNLOAD_MODE`, `CDH_DOWNLOAD_MAX_ATTEMPTS`" in readme
+
+
+def test_examples_readme_documents_current_lock_and_downloader_layout() -> None:
+    """Keep example docs aligned with current lock and downloader layout."""
+    readme = (EXAMPLES / "README.md").read_text(encoding="utf-8")
+
+    assert "Use `--locked` to rebuild from an existing `config.lock.toml`" in readme
+    assert (
+        "`--upgrade-lock` to refresh moving selectors before rendering and building"
+        in readme
+    )
+    assert "`full.toml` demonstrates `[cdh]` downloader defaults" in readme
+    assert 'Use `[cdh].default_download_mode = "sync"` or `"async"`' in readme
+    assert "`CDH_DEFAULT_DOWNLOADER`, `CDH_DEFAULT_DOWNLOAD_MODE`," in readme
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

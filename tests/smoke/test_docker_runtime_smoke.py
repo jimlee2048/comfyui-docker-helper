@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -50,6 +51,7 @@ DOWNLOAD_TIMEOUT_SECONDS = 180.0
 SSH_TIMEOUT_SECONDS = 90.0
 COMFYUI_NIGHTLY_COMMIT = "77917ed3a6291689e5c2ee8ccbdd6708e85a53a6"
 ASYNC_PAYLOAD = b"cdh docker smoke async payload\n" * 1024
+ASYNC_TARGET = "models/checkpoints/smoke-async.bin"
 SSH_PASSWORD = "cdh-smoke-root-password"
 REDACTED_SECRET = "<redacted>"
 
@@ -172,11 +174,21 @@ def test_runtime_entrypoint_async_restart_and_ssh_smoke(tmp_path: Path) -> None:
 
             first_logs = _docker_logs(container_name)
             _assert_no_secret_leak(first_logs, "first container logs")
-            assert "Async runtime download queue accepted: items=1" in first_logs
-            assert "Runtime download reconcile: mode=async" in first_logs
-            assert "Runtime download state persisted" in first_logs
-            assert "target=models/checkpoints/smoke-async.bin status=downloading" in (
-                first_logs
+            _assert_log_event(
+                first_logs,
+                "Async runtime download queue accepted",
+                "items=1",
+            )
+            _assert_log_event(
+                first_logs,
+                "Runtime download reconcile",
+                "mode=async",
+            )
+            _assert_log_event(first_logs, "Runtime download state persisted")
+            _assert_log_event(
+                first_logs,
+                "target=models/checkpoints/smoke-async.bin",
+                "status=downloading",
             )
 
             _remove_container(container_name)
@@ -224,20 +236,43 @@ def test_runtime_entrypoint_async_restart_and_ssh_smoke(tmp_path: Path) -> None:
             assert "stop" in final_hook_log
             logs = _docker_logs(container_name)
             _assert_no_secret_leak(logs, "restart container logs")
-            assert "Runtime download reconcile: mode=async" in logs
-            assert (
-                "target=models/checkpoints/smoke-async.bin status=pending "
-                "scheduled=true"
-            ) in logs
-            assert (
-                "Runtime download reconciliation persisted: entries=1 "
-                "async_scheduled=1 async_skipped=0"
-            ) in logs
-            assert "stale_staging=0" in logs
-            assert "Async runtime download queue finished: items=1" in logs
-            assert "target=models/checkpoints/smoke-async.bin status=completed" in logs
-            assert "Running runtime hook source=baked phase=post-start" in logs
-            assert "Running runtime hook source=baked phase=stop" in logs
+            _assert_log_event(logs, "Runtime download reconcile", "mode=async")
+            _assert_log_event(
+                logs,
+                "target=models/checkpoints/smoke-async.bin",
+                "status=pending",
+                "scheduled=true",
+            )
+            _assert_log_event(
+                logs,
+                "Runtime download reconciliation persisted",
+                "entries=1",
+                "async_scheduled=1",
+                "async_skipped=0",
+            )
+            _assert_log_event(logs, "stale_staging=0")
+            _assert_log_event(
+                logs,
+                "Async runtime download queue finished",
+                "items=1",
+            )
+            _assert_log_event(
+                logs,
+                "target=models/checkpoints/smoke-async.bin",
+                "status=completed",
+            )
+            _assert_log_event(
+                logs,
+                "Running runtime hook",
+                "source=baked",
+                "phase=post-start",
+            )
+            _assert_log_event(
+                logs,
+                "Running runtime hook",
+                "source=baked",
+                "phase=stop",
+            )
         finally:
             download_server.release_first_request()
             _remove_container(container_name)
@@ -522,13 +557,48 @@ def _assert_runtime_state_status(path: Path, status: str) -> None:
     deadline = time.monotonic() + DOWNLOAD_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if path.exists():
-            content = path.read_text(encoding="utf-8")
-            if f'"status":"{status}"' in content:
+            state = _read_runtime_state(path)
+            actual = _runtime_state_entry_status(state, ASYNC_TARGET)
+            if actual == status:
                 print(f"runtime state status observed: {status}", flush=True)
                 return
         time.sleep(1.0)
     actual = path.read_text(encoding="utf-8") if path.exists() else "<missing>"
     raise AssertionError(f"runtime state did not reach {status}: {actual}")
+
+
+def _read_runtime_state(path: Path) -> object:
+    content = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+
+def _runtime_state_entry_status(state: object, target: str) -> str | None:
+    if not isinstance(state, dict):
+        return None
+    downloads = state.get("downloads")
+    if not isinstance(downloads, dict):
+        return None
+    entries = downloads.get("entries")
+    if not isinstance(entries, dict):
+        return None
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("target") == target and isinstance(entry.get("status"), str):
+            return entry["status"]
+    return None
+
+
+def _assert_log_event(logs: str, *tokens: str) -> None:
+    if not tokens:
+        raise AssertionError("log assertion requires at least one token")
+    for line in logs.splitlines():
+        if all(token in line for token in tokens):
+            return
+    raise AssertionError(f"log line with tokens was not found: {tokens!r}")
 
 
 def _assert_current_staging_exists(model_state_dir: Path) -> Path:

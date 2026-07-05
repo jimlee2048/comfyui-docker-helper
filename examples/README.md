@@ -86,7 +86,13 @@ be explicit in configuration.
 At container startup, mount `/etc/cdh/runtime/config.toml` to override baked
 runtime defaults. The supported startup environment overrides are
 `CDH_COMFYUI_LISTEN`, `CDH_COMFYUI_PORT`, `CDH_COMFYUI_EXTRA_ARGS`,
-`CDH_DEFAULT_DOWNLOADER`, and `CDH_DEFAULT_DOWNLOAD_MODE`.
+`CDH_DEFAULT_DOWNLOADER`, `CDH_DEFAULT_DOWNLOAD_MODE`, `SSH_ENABLE`,
+`SSH_PORT`, `SSH_PASSWORD`, and `SSH_PUB_KEY`.
+
+SSH is disabled by default. When enabled, SSH credentials are runtime-only:
+`SSH_PASSWORD` sets the root password at container startup, and `SSH_PUB_KEY`
+appends one OpenSSH public key line to root's `authorized_keys`. Do not bake
+real SSH passwords or private credentials into image configuration.
 
 `[[files]]` entries are downloaded during image build and are processed again
 at startup from the effective runtime config. Startup downloads use the

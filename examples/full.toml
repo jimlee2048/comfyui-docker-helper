@@ -29,6 +29,18 @@ extra_packages = ["ffmpeg", "libgl1"]
 COMFYUI_PORT = "8188"
 EXAMPLE_PROFILE = "full"
 
+[system.ssh]
+# Default: false. Enable at runtime with SSH_ENABLE=true when SSH access is
+# required. Host keys are generated when the container starts.
+enable = false
+# Default: 22. Override with SSH_PORT at container startup.
+port = 22
+# Leave empty in image config. SSH_PASSWORD can set a runtime-only root password.
+password = ""
+# Public keys must be single OpenSSH authorized_keys lines. SSH_PUB_KEY can
+# append one runtime-only public key.
+pub_keys = []
+
 [python]
 # Default: "3.12". Passed to uv's Python installation workflow.
 version = "3.12"

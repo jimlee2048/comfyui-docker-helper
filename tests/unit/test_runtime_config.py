@@ -10,6 +10,13 @@ from comfyui_docker_helper.config import (
     load_runtime_config,
 )
 
+VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "test@example"
+)
+TRUNCATED_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 truncated"
+
 
 def _write(path: Path, document: str) -> Path:
     path.write_text(document, encoding="utf-8")
@@ -37,6 +44,10 @@ def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
     assert result.config.cdh.default_download_mode == "sync"
     assert result.config.cdh.download_max_attempts == 3
     assert result.config.cdh.download_failure_policy == "continue"
+    assert result.config.system.ssh.enable is False
+    assert result.config.system.ssh.port == 22
+    assert result.config.system.ssh.password == ""
+    assert result.config.system.ssh.pub_keys == []
     assert result.files == ()
     assert result.file_documents == ()
     assert result.warnings == ()
@@ -112,6 +123,12 @@ default_downloader = "httpx"
 
 [cdh.downloader.aria2]
 split = 4
+
+[system.ssh]
+enable = true
+port = 2222
+password = "baked-secret"
+pub_keys = ["{VALID_SSH_KEY}"]
 """,
     )
     mounted = _write(
@@ -129,6 +146,12 @@ download_failure_policy = "continue"
 
 [cdh.downloader.aria2]
 split = 8
+
+[system.ssh]
+enable = false
+port = 2200
+password = ""
+pub_keys = []
 """,
     )
 
@@ -141,6 +164,10 @@ split = 8
     assert result.config.cdh.download_max_attempts == 6
     assert result.config.cdh.download_failure_policy == "continue"
     assert result.config.cdh.downloader.aria2.split == 8
+    assert result.config.system.ssh.enable is False
+    assert result.config.system.ssh.port == 2200
+    assert result.config.system.ssh.password == ""
+    assert result.config.system.ssh.pub_keys == []
 
 
 def test_env_overrides_mounted_and_baked_runtime_config(tmp_path: Path) -> None:
@@ -200,6 +227,261 @@ download_failure_policy = "fail"
     assert result.config.cdh.default_download_mode == "async"
     assert result.config.cdh.download_max_attempts == 6
     assert result.config.cdh.download_failure_policy == "continue"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (" true ", True),
+        ("1", True),
+        ("YES", True),
+        ("on", True),
+        (" false ", False),
+        ("0", False),
+        ("No", False),
+        ("OFF", False),
+    ],
+)
+def test_ssh_enable_env_parses_supported_booleans(
+    tmp_path: Path,
+    value: str,
+    expected: bool,
+) -> None:
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={"SSH_ENABLE": value},
+    )
+
+    assert result.config.system.ssh.enable is expected
+
+
+@pytest.mark.parametrize("value", ["", " ", "maybe", "2"])
+def test_invalid_ssh_enable_env_fails(tmp_path: Path, value: str) -> None:
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={"SSH_ENABLE": value},
+        )
+
+    assert _identities(raised.value) == [
+        (("env", "SSH_ENABLE"), "env.invalid_ssh_enable")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(" 2222 ", 2222), ("1", 1), ("65535", 65535)]
+)
+def test_ssh_port_env_trims_and_validates_range(
+    tmp_path: Path,
+    value: str,
+    expected: int,
+) -> None:
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={"SSH_PORT": value},
+    )
+
+    assert result.config.system.ssh.port == expected
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "not-a-port", ""])
+def test_invalid_ssh_port_env_fails(tmp_path: Path, value: str) -> None:
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={"SSH_PORT": value},
+        )
+
+    assert _identities(raised.value) == [(("env", "SSH_PORT"), "env.invalid_ssh_port")]
+
+
+def test_ssh_env_overrides_and_pub_key_append_after_config_merge(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        f"""
+[system.ssh]
+enable = true
+port = 2222
+password = "baked-secret"
+pub_keys = ["{VALID_SSH_KEY}"]
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+port = 2200
+password = "mounted-secret"
+pub_keys = []
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+        environ={
+            "SSH_ENABLE": " false ",
+            "SSH_PORT": " 2022 ",
+            "SSH_PASSWORD": " env secret with spaces ",
+            "SSH_PUB_KEY": f"  {VALID_SSH_KEY}  ",
+        },
+    )
+
+    assert result.config.system.ssh.enable is False
+    assert result.config.system.ssh.port == 2022
+    assert result.config.system.ssh.password == " env secret with spaces "
+    assert result.config.system.ssh.pub_keys == [VALID_SSH_KEY]
+
+
+def test_ssh_pub_key_env_empty_appends_none_and_exact_duplicate_is_deduped(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        f"""
+[system.ssh]
+pub_keys = ["", "{VALID_SSH_KEY}"]
+""",
+    )
+
+    duplicate = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={"SSH_PUB_KEY": VALID_SSH_KEY},
+    )
+    empty = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={"SSH_PUB_KEY": "  "},
+    )
+
+    assert duplicate.config.system.ssh.pub_keys == [VALID_SSH_KEY]
+    assert empty.config.system.ssh.pub_keys == [VALID_SSH_KEY]
+
+
+def test_invalid_ssh_public_keys_fail_without_leaking_password(tmp_path: Path) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+password = "super-secret"
+pub_keys = ["not-a-key"]
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload
+
+
+def test_truncated_base64_valid_ssh_public_key_fails(tmp_path: Path) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f"""
+[system.ssh]
+pub_keys = ["{TRUNCATED_SSH_KEY}"]
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(raised.value) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+
+
+def test_embedded_newline_ssh_public_key_fails_without_leaking_key(
+    tmp_path: Path,
+) -> None:
+    injected = f"{VALID_SSH_KEY}\nssh-ed25519 injected"
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f'''
+[system.ssh]
+password = "super-secret"
+pub_keys = ["""{injected}"""]
+''',
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload
+    assert VALID_SSH_KEY not in payload
+    assert "injected" not in payload
+
+
+def test_nul_ssh_pub_key_env_fails_without_leaking_key(tmp_path: Path) -> None:
+    injected = f"{VALID_SSH_KEY}\x00comment"
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={
+                "SSH_PASSWORD": "env-super-secret",
+                "SSH_PUB_KEY": injected,
+            },
+        )
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("env", "SSH_PUB_KEY"), "env.invalid_ssh_pub_key")
+    ]
+    assert "env-super-secret" not in payload
+    assert VALID_SSH_KEY not in payload
+
+
+def test_invalid_ssh_pub_key_env_fails_without_leaking_password(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={
+                "SSH_PASSWORD": "env-super-secret",
+                "SSH_PUB_KEY": TRUNCATED_SSH_KEY,
+            },
+        )
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("env", "SSH_PUB_KEY"), "env.invalid_ssh_pub_key")
+    ]
+    assert "env-super-secret" not in payload
 
 
 @pytest.mark.parametrize(
@@ -279,7 +561,11 @@ id = "node"
             "runtime.host_only_ignored",
             DiagnosticSeverity.WARNING,
         ),
-        (("system",), "runtime.host_only_ignored", DiagnosticSeverity.WARNING),
+        (
+            ("system", "workspace"),
+            "runtime.host_only_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
         (("python",), "runtime.host_only_ignored", DiagnosticSeverity.WARNING),
         (("pytorch",), "runtime.host_only_ignored", DiagnosticSeverity.WARNING),
         (("build",), "runtime.host_only_ignored", DiagnosticSeverity.WARNING),
@@ -306,6 +592,7 @@ id = "node"
     ]
     assert result.is_explicit(("comfyui", "listen"))
     assert not result.is_explicit(("comfyui", "version"))
+    assert not result.is_explicit(("system", "workspace"))
 
 
 def test_unknown_runtime_sections_and_fields_fail(tmp_path: Path) -> None:

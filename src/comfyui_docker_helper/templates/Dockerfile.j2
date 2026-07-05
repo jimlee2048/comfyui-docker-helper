@@ -25,13 +25,17 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update \
+    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+ && chmod +x /usr/sbin/policy-rc.d \
+ && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- \
 {% for package in plan.os_packages %}
     {{ package | shell_argument }}{% if not loop.last %} \
 {% endif %}
-{% endfor %}
-
+{% endfor %} \
+ && rm -f /etc/ssh/ssh_host_* \
+ && rm -f /usr/sbin/policy-rc.d \
+ && test -x /usr/sbin/sshd{{ "\n" }}
 RUN mkdir -p -- \
 {% for directory in plan.paths.preinstall_directories %}
     {{ directory | shell_argument }}{% if not loop.last %} \

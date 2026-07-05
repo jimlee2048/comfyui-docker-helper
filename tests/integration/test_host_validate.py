@@ -610,7 +610,10 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             "  Virtualenv: /opt/venv",
             "",
             "OS packages:",
-            "  bash, ca-certificates, curl, git, build-essential, aria2",
+            (
+                "  bash, ca-certificates, curl, git, build-essential, aria2, "
+                "openssh-server"
+            ),
             "",
             "Python:",
             "  Version: 3.12",

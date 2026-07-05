@@ -42,6 +42,7 @@ from comfyui_docker_helper.config.models import (
     PyTorchConfig,
     RegistryCustomNodeConfig,
     SystemConfig,
+    SystemSshConfig,
 )
 from comfyui_docker_helper.config.plan import (
     Aria2Plan,
@@ -111,6 +112,8 @@ from comfyui_docker_helper.config.runtime_projection import (
     RuntimeConfig,
     RuntimeConfigProjection,
     RuntimeFileConfig,
+    RuntimeSystemConfig,
+    RuntimeSystemSshConfig,
     project_runtime_config,
     serialize_runtime_config_toml,
 )
@@ -120,6 +123,7 @@ from comfyui_docker_helper.config.service import (
     load_validate_plan,
     load_validate_plan_result,
 )
+from comfyui_docker_helper.config.ssh_keys import SshPublicKeyValidationError
 from comfyui_docker_helper.config.validation import (
     normalize_comfy_cli_version,
     normalize_comfyui_version,
@@ -205,8 +209,12 @@ __all__ = [
     "RuntimeConfigurationResult",
     "RuntimeFileConfig",
     "RuntimeHooksPlan",
+    "RuntimeSystemConfig",
+    "RuntimeSystemSshConfig",
     "SourceResolvers",
+    "SshPublicKeyValidationError",
     "SystemConfig",
+    "SystemSshConfig",
     "UpstreamResponseError",
     "build_render_plan",
     "compute_git_custom_nodes_input_digest",

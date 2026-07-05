@@ -26,13 +26,23 @@ class ComputePlatformConfig(ConfigModel):
     cuda: CudaConfig
 
 
+class SystemSshConfig(ConfigModel):
+    """SSH runtime defaults accepted from host build configuration."""
+
+    enable: bool = False
+    port: int = Field(default=22, ge=1, le=65535)
+    password: str = ""
+    pub_keys: list[str] = Field(default_factory=list)
+
+
 class SystemConfig(ConfigModel):
-    """Container workspace, OS packages, and environment settings."""
+    """Container workspace, OS packages, environment, and SSH runtime defaults."""
 
     workspace: str = "/workspace"
     comfyui_path: str | None = None
     extra_packages: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    ssh: SystemSshConfig = Field(default_factory=SystemSshConfig)
 
 
 class PythonConfig(ConfigModel):

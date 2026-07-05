@@ -83,6 +83,91 @@ class FakeChild:
         self.terminated = True
 
 
+class FakeSshdProcess:
+    """Minimal fake sshd process for entrypoint monitoring tests."""
+
+    def __init__(
+        self,
+        returncode: int | None = None,
+        *,
+        wait_returncode: int | None = None,
+        events: list[str] | None = None,
+        name: str = "ssh",
+        exit_on_terminate: bool = True,
+    ) -> None:
+        self.returncode = returncode
+        self.wait_returncode = wait_returncode
+        self.waited = entrypoint_module.threading.Event()
+        self.release = entrypoint_module.threading.Event()
+        self.events = events
+        self.name = name
+        self.exit_on_terminate = exit_on_terminate
+
+    def wait(self) -> int:
+        if self.wait_returncode is None:
+            self.release.wait()
+            self.returncode = 0 if self.returncode is None else self.returncode
+        else:
+            self.returncode = self.wait_returncode
+        self.waited.set()
+        return self.returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        if self.events is not None:
+            self.events.append(f"{self.name}-terminate")
+        if self.exit_on_terminate:
+            self.returncode = 0
+            self.release.set()
+
+    def kill(self) -> None:
+        if self.events is not None:
+            self.events.append(f"{self.name}-kill")
+        self.returncode = -int(signal.SIGKILL)
+        self.release.set()
+
+
+class PollingSshdProcess:
+    """Fake sshd process with scripted poll results."""
+
+    def __init__(self, poll_results: Sequence[int | None]) -> None:
+        self.returncode: int | None = None
+        self._poll_results = list(poll_results)
+
+    def wait(self) -> int:
+        self.returncode = 0 if self.returncode is None else self.returncode
+        return self.returncode
+
+    def poll(self) -> int | None:
+        if self._poll_results:
+            self.returncode = self._poll_results.pop(0)
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -int(signal.SIGKILL)
+
+
+class SignalOnPollSshdProcess(FakeSshdProcess):
+    """Fake sshd process that raises a startup signal on the first poll."""
+
+    def __init__(self, trigger: Callable[[], object], events: list[str]) -> None:
+        super().__init__(events=events)
+        self.trigger = trigger
+        self._triggered = False
+
+    def poll(self) -> int | None:
+        if not self._triggered:
+            self._triggered = True
+            self.events.append("ssh-poll")
+            self.trigger()
+        return self.returncode
+
+
 class FakeHookProcess:
     """Minimal hook process for entrypoint startup cancellation tests."""
 
@@ -396,9 +481,72 @@ listen = "127.0.0.1"
     assert calls
     assert captured.out == ""
     assert "Runtime configuration warnings:" in captured.err
-    assert "[system]" in captured.err
+    assert "[system.workspace]" in captured.err
     assert "runtime.host_only_ignored" in captured.err
     assert "severity=warning" in captured.err
+
+
+def test_ssh_disabled_does_not_call_ssh_starter(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del cwd, env, shell
+        calls.append(list(argv))
+        return FakeChild(0)
+
+    def runtime_ssh_starter(*_args, **_kwargs) -> None:
+        raise AssertionError("disabled SSH must not call starter")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+        )
+        == 0
+    )
+
+    assert len(calls) == 1
+
+
+def test_ssh_enabled_without_credentials_warns_and_continues(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+""",
+    )
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=lambda *_args, **_kwargs: FakeChild(0),
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "WARNING: SSH is enabled but no root SSH credentials are configured" in (
+        captured.out
+    )
 
 
 @pytest.mark.parametrize("returncode", [0, 17, -15])
@@ -738,6 +886,130 @@ filename = "async.bin"
     ]
 
 
+def test_shutdown_after_startup_stops_async_then_ssh_before_hooks_and_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop.d", "10-stop.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class ShutdownChild(FakeChild):
+        def __init__(self) -> None:
+            super().__init__(-int(signal.SIGTERM))
+            self.wait_calls = 0
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("shutdown signal handler should interrupt wait")
+            events.append("wait")
+            self.returncode = self._wait_returncode
+            return self._wait_returncode
+
+        def send_signal(self, sig: signal.Signals) -> None:
+            events.append(f"signal:{sig.name}")
+            super().send_signal(sig)
+
+    child = ShutdownChild()
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        return FakeAsyncHandle(events)
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log
+        assert cancel_requested() is False
+        events.append("stop")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 143
+    )
+
+    assert events == [
+        "ssh-start",
+        "async-start",
+        "spawn",
+        "async-stop",
+        "async-join",
+        "ssh-terminate",
+        "stop",
+        "signal:SIGTERM",
+        "wait",
+    ]
+
+
 def test_stop_hook_failure_is_logged_and_signal_still_forwards(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -832,6 +1104,71 @@ def test_stop_hook_failure_is_logged_and_signal_still_forwards(
     assert "Runtime stop hook failed:" in captured.err
     assert "[hooks.mounted.stop.10-fail.sh]" in captured.err
     assert "runtime_hook.execution_failed" in captured.err
+
+
+def test_ssh_stop_failure_logs_warning_without_overriding_comfyui_exit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    password = "secret-password"
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f"""
+[system.ssh]
+enable = true
+password = "{password}"
+""",
+    )
+    events: list[str] = []
+
+    class FailingTerminateSshd(FakeSshdProcess):
+        def terminate(self) -> None:
+            events.append("ssh-terminate-failed")
+            raise OSError("simulated sshd terminate failure")
+
+    class ExitingChild(FakeChild):
+        def wait(self) -> int:
+            events.append("wait")
+            return super().wait()
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FailingTerminateSshd:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FailingTerminateSshd(events=events)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return ExitingChild(7)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+        )
+        == 7
+    )
+
+    captured = capsys.readouterr()
+    assert events == ["ssh-start", "spawn", "wait", "ssh-terminate-failed", "ssh-kill"]
+    assert "WARNING: SSH runtime service terminate failed" in captured.err
+    assert password not in captured.err
 
 
 def test_stop_hook_failure_does_not_override_child_exit_result(
@@ -1132,6 +1469,171 @@ filename = "async.bin"
         "signal:SIGTERM",
         "wait",
     ]
+
+
+def test_second_shutdown_signal_kills_ssh_and_skips_stop_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop.d", "10-stop.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class ShutdownChild(FakeChild):
+        def __init__(self) -> None:
+            super().__init__(-int(signal.SIGTERM))
+            self.wait_calls = 0
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("shutdown signal handler should interrupt wait")
+            events.append("wait")
+            self.returncode = self._wait_returncode
+            return self._wait_returncode
+
+        def send_signal(self, sig: signal.Signals) -> None:
+            events.append(f"signal:{sig.name}")
+            super().send_signal(sig)
+
+    child = ShutdownChild()
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events, exit_on_terminate=False)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+
+        def second_signal() -> None:
+            handler = handlers[signal.SIGINT]
+            assert callable(handler)
+            handler(signal.SIGINT, None)
+
+        events.append("async-start")
+        return FakeAsyncHandle(
+            events,
+            complete_on_join=False,
+            on_join=second_signal,
+        )
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        raise AssertionError("stop hooks should be skipped after second signal")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 143
+    )
+
+    assert events == [
+        "ssh-start",
+        "async-start",
+        "spawn",
+        "async-stop",
+        "async-join",
+        "async-terminate",
+        "ssh-terminate",
+        "ssh-kill",
+        "signal:SIGTERM",
+        "wait",
+    ]
+
+
+def test_ssh_stop_timeout_kills_sshd_and_returns_false(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[str] = []
+    sshd = FakeSshdProcess(events=events, exit_on_terminate=False)
+    shutdown_requested = entrypoint_module.threading.Event()
+    now = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds if seconds > 0 else 0.1
+
+    stopped = entrypoint_module._stop_sshd_runtime_service(
+        sshd,
+        cancel_requested=lambda: False,
+        shutdown_requested=shutdown_requested,
+        timeout=0.2,
+        poll_interval=0.1,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+
+    captured = capsys.readouterr()
+    assert stopped is False
+    assert shutdown_requested.is_set()
+    assert events == ["ssh-terminate", "ssh-kill"]
+    assert "WARNING: SSH runtime service did not stop in 0.2s" in captured.err
 
 
 def test_async_stop_timeout_is_bounded(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1653,6 +2155,98 @@ filename = "async.bin"
     ]
 
 
+def test_shutdown_signal_during_readiness_stops_ssh_before_child_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    _write_hook(hooks, "stop.d", "10-stop.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class OrderingChild(FakeChild):
+        def send_signal(self, sig: signal.Signals) -> None:
+            events.append(f"signal:{sig.name}")
+            super().send_signal(sig)
+
+    child = OrderingChild(-int(signal.SIGINT))
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events)
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port, child
+        events.append("readiness")
+        handler = handlers[signal.SIGINT]
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+        raise AssertionError("shutdown handler should interrupt readiness")
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        events.append("stop")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+            readiness_waiter=readiness_waiter,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+        )
+        == 130
+    )
+
+    assert events == [
+        "ssh-start",
+        "spawn",
+        "readiness",
+        "ssh-terminate",
+        "signal:SIGINT",
+    ]
+
+
 def test_second_startup_signal_during_async_stop_terminates_and_forwards_first(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1984,6 +2578,120 @@ filename = "async.bin"
         "post-start",
         "async-stop",
         "async-join",
+        "signal:SIGTERM",
+    ]
+
+
+def test_shutdown_signal_during_post_start_stops_ssh_before_child_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    _write_hook(hooks, "stop.d", "10-stop.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class OrderingChild(FakeChild):
+        def send_signal(self, sig: signal.Signals) -> None:
+            events.append(f"signal:{sig.name}")
+            super().send_signal(sig)
+
+    child = OrderingChild(-int(signal.SIGTERM))
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events)
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port, child
+        events.append("readiness")
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, phase, runtime, env, log, cancel_requested
+        events.append("post-start")
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "post-start", "10-post.sh"),
+                    code="runtime_hook.cancelled",
+                    message="post-start cancelled in test",
+                ),
+            )
+        )
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        events.append("stop")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+        )
+        == 143
+    )
+
+    assert events == [
+        "ssh-start",
+        "spawn",
+        "readiness",
+        "post-start",
+        "ssh-terminate",
         "signal:SIGTERM",
     ]
 
@@ -3539,6 +4247,414 @@ filename = "async.bin"
     assert events == ["async-start", "spawn", "readiness", "post-start"]
 
 
+def test_ssh_starts_after_sync_downloads_and_pre_start_before_async_and_comfyui(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[[files]]
+url = "https://example.com/sync.bin"
+dir = "models"
+filename = "sync.bin"
+download_mode = "sync"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del config, log
+        assert [item.filename for item in plan.items] == ["sync.bin"]
+        events.append("sync-download")
+        return ()
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        assert phase == "pre-start"
+        assert events == ["sync-download"]
+        events.append("pre-start")
+        return ()
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del runtime, log
+        assert config.system.ssh.enable is True
+        assert events == ["sync-download", "pre-start"]
+        events.append("ssh-start")
+        return FakeSshdProcess()
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del config, runtime, runtime_state_path, log
+        assert [item.filename for item in plan.items] == ["async.bin"]
+        assert events == ["sync-download", "pre-start", "ssh-start"]
+        events.append("async-start")
+        return FakeAsyncHandle(events, alive=False)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        assert events == ["sync-download", "pre-start", "ssh-start", "async-start"]
+        events.append("spawn")
+        return FakeChild(0)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 0
+    )
+
+    assert events == ["sync-download", "pre-start", "ssh-start", "async-start", "spawn"]
+
+
+def test_ssh_start_failure_prevents_comfyui_spawn(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> None:
+        del config, runtime, log
+        events.append("ssh-start")
+        raise entrypoint_module.SshdStartupError("host keys unavailable")
+
+    with pytest.raises(EntrypointError) as raised:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+        )
+
+    assert events == ["ssh-start"]
+    assert "SSH runtime service failed to start" in str(raised.value)
+    assert "host keys unavailable" in str(raised.value)
+
+
+def test_async_queue_start_failure_stops_started_ssh_without_spawning(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    events: list[str] = []
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        raise entrypoint_module.RuntimeAsyncQueueStartupError("queue refused")
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    with pytest.raises(EntrypointError) as raised:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+
+    assert "async runtime download queue failed to start: queue refused" in str(
+        raised.value
+    )
+    assert events == ["ssh-start", "async-start", "ssh-terminate"]
+
+
+def test_shutdown_signal_inside_ssh_starter_terminates_returned_sshd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop.d", "10-stop.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        return FakeSshdProcess(events=events)
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        events.append("stop")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+        )
+        == 143
+    )
+
+    assert events == ["ssh-start", "ssh-terminate"]
+
+
+def test_ssh_exit_after_async_start_stops_queue_before_raising(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    events: list[str] = []
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> PollingSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return PollingSshdProcess([None, 44])
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del config, runtime, runtime_state_path, log
+        assert [item.filename for item in plan.items] == ["async.bin"]
+        events.append("async-start")
+        return FakeAsyncHandle(events)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    with pytest.raises(EntrypointError) as raised:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+
+    assert "SSH runtime service exited before ComfyUI: 44" in str(raised.value)
+    assert events == ["ssh-start", "async-start", "async-stop", "async-join"]
+
+
+def test_unexpected_sshd_exit_is_logged_without_changing_comfyui_exit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    sshd = FakeSshdProcess(wait_returncode=23)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=lambda *_args, **_kwargs: FakeChild(7),
+            runtime_ssh_starter=lambda *_args, **_kwargs: sshd,
+        )
+        == 7
+    )
+
+    assert sshd.waited.wait(timeout=1)
+    captured = capsys.readouterr()
+    assert "WARNING: SSH runtime service exited unexpectedly: returncode=23" in (
+        captured.err
+    )
+
+
 # Verifies accepted async work is cancelled on natural child exit without
 # running graceful-shutdown hooks.
 def test_normal_child_exit_stops_accepted_async_queue(tmp_path: Path) -> None:
@@ -3843,6 +4959,273 @@ filename = "async.bin"
     )
 
     assert events == ["async-start", "async-stop", "async-join"]
+
+
+def test_startup_signal_after_ssh_start_terminates_ssh_without_spawn_or_stop_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop.d", "10-stop.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> SignalOnPollSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+
+        def trigger() -> None:
+            handler = handlers[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+
+        return SignalOnPollSshdProcess(trigger, events)
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        events.append("stop")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+        )
+        == 143
+    )
+
+    assert events == ["ssh-start", "ssh-poll", "ssh-terminate"]
+
+
+def test_startup_signal_after_async_acceptance_stops_async_and_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+        with suppress(entrypoint_module._StartupShutdownRequested):
+            handler(signal.SIGTERM, None)
+        return FakeAsyncHandle(events)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 143
+    )
+
+    assert events == [
+        "ssh-start",
+        "async-start",
+        "async-stop",
+        "async-join",
+        "ssh-terminate",
+    ]
+
+
+def test_second_startup_signal_after_async_stop_still_kills_ssh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop.d", "10-stop.sh")
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events, exit_on_terminate=False)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+
+        def second_signal() -> None:
+            handler = handlers[signal.SIGINT]
+            assert callable(handler)
+            handler(signal.SIGINT, None)
+
+        events.append("async-start")
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+        with suppress(entrypoint_module._StartupShutdownRequested):
+            handler(signal.SIGTERM, None)
+        return FakeAsyncHandle(events, on_join=second_signal)
+
+    def runtime_stop_hook_runner(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        events.append("stop")
+        return ()
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 143
+    )
+
+    assert events == [
+        "ssh-start",
+        "async-start",
+        "async-stop",
+        "async-join",
+        "ssh-terminate",
+        "ssh-kill",
+    ]
 
 
 def test_async_queue_infrastructure_failure_prevents_spawn(

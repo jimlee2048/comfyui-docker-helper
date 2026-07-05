@@ -2,7 +2,14 @@
 
 import tomllib
 
-from comfyui_docker_helper.config import load_validate_plan_result
+import pytest
+
+from comfyui_docker_helper.config import (
+    Config,
+    SshPublicKeyValidationError,
+    load_validate_plan_result,
+    project_runtime_config,
+)
 
 MINIMAL_CONFIG = """\
 [compute_platform]
@@ -17,6 +24,12 @@ version = "2.10"
 [comfyui]
 version = "latest"
 """
+VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "test@example"
+)
+TRUNCATED_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 truncated"
 
 
 def test_runtime_projection_writes_deterministic_startup_and_downloader_defaults(
@@ -26,7 +39,7 @@ def test_runtime_projection_writes_deterministic_startup_and_downloader_defaults
     path = tmp_path / "config.toml"
     path.write_text(
         MINIMAL_CONFIG
-        + """
+        + f"""
 listen = "127.0.0.1"
 port = 8190
 extra_args = ["--preview-method", "auto", "--cpu"]
@@ -39,6 +52,12 @@ extra_packages = ["ffmpeg"]
 
 [system.env]
 HF_HOME = "/srv/cache"
+
+[system.ssh]
+enable = true
+port = 2222
+password = "build-secret"
+pub_keys = ["", "{VALID_SSH_KEY}"]
 
 [python]
 extra_packages = ["httpx"]
@@ -102,6 +121,14 @@ download_mode = "async"
                 "httpx": {"timeout": 30, "retries": 5},
             },
         },
+        "system": {
+            "ssh": {
+                "enable": True,
+                "port": 2222,
+                "password": "build-secret",
+                "pub_keys": [VALID_SSH_KEY],
+            },
+        },
         "files": [
             {
                 "url": "https://example.com/model.bin",
@@ -113,7 +140,7 @@ download_mode = "async"
             }
         ],
     }
-    assert "system" not in document
+    assert set(document["system"]) == {"ssh"}
     assert "python" not in document
     assert "pytorch" not in document
     assert "build" not in document
@@ -123,6 +150,7 @@ download_mode = "async"
     assert "custom_nodes" not in document["comfyui"]
     assert projection.is_explicit(("files", 0, "url"))
     assert projection.is_explicit(("files", 0, "download_mode"))
+    assert projection.is_explicit(("system", "ssh", "password"))
 
 
 def test_runtime_projection_tracks_only_user_explicit_runtime_fields(tmp_path) -> None:
@@ -144,6 +172,12 @@ download_max_attempts = 3
 
 [cdh.downloader.aria2]
 rpc_port = 6800
+
+[system.ssh]
+enable = false
+port = 22
+password = ""
+pub_keys = []
 """,
         encoding="utf-8",
     )
@@ -161,6 +195,8 @@ rpc_port = 6800
     assert not omitted_projection.is_explicit(
         ("cdh", "downloader", "aria2", "rpc_port")
     )
+    assert not omitted_projection.is_explicit(("system", "ssh", "enable"))
+    assert not omitted_projection.is_explicit(("system", "ssh", "pub_keys"))
     assert explicit_projection.is_explicit(("comfyui", "listen"))
     assert explicit_projection.is_explicit(("comfyui", "port"))
     assert explicit_projection.is_explicit(("comfyui", "extra_args"))
@@ -168,6 +204,8 @@ rpc_port = 6800
     assert explicit_projection.is_explicit(("cdh", "default_download_mode"))
     assert explicit_projection.is_explicit(("cdh", "download_max_attempts"))
     assert explicit_projection.is_explicit(("cdh", "downloader", "aria2", "rpc_port"))
+    assert explicit_projection.is_explicit(("system", "ssh", "enable"))
+    assert explicit_projection.is_explicit(("system", "ssh", "pub_keys"))
 
 
 def test_runtime_projection_omits_implicit_host_failure_policy(tmp_path) -> None:
@@ -212,3 +250,33 @@ download_failure_policy = "continue"
     assert not omitted_projection.is_explicit(("cdh", "download_failure_policy"))
     assert explicit_fail_projection.is_explicit(("cdh", "download_failure_policy"))
     assert explicit_continue_projection.is_explicit(("cdh", "download_failure_policy"))
+
+
+def test_runtime_projection_direct_invalid_ssh_key_uses_diagnostic_error() -> None:
+    config = Config.model_validate(
+        {
+            "compute_platform": {
+                "type": "cuda",
+                "cuda": {"version": "12.9.2"},
+            },
+            "pytorch": {"version": "2.10"},
+            "comfyui": {"version": "latest"},
+            "system": {
+                "ssh": {
+                    "password": "super-secret",
+                    "pub_keys": [TRUNCATED_SSH_KEY],
+                }
+            },
+        }
+    )
+
+    with pytest.raises(SshPublicKeyValidationError) as raised:
+        project_runtime_config(config, {})
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert [(item.path, item.code) for item in raised.value.diagnostics] == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload

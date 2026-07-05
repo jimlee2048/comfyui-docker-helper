@@ -122,6 +122,7 @@ class OwnershipRecorder:
         Path(path).chmod(mode)
 
 
+# Credential tests protect no-op paths, side effects, and secret redaction.
 def test_no_credentials_prepare_no_files_or_commands(tmp_path: Path) -> None:
     runner = RecordingRunner()
     ownership = OwnershipRecorder()
@@ -373,6 +374,7 @@ def test_password_command_failure_does_not_leak_credential_material(
     assert runner.calls[0].input_data == b"root:top-secret-password\n"
 
 
+# sshd argument tests lock down the effective auth mode passed to OpenSSH.
 def test_build_sshd_argv_enforces_effective_config_without_credentials() -> None:
     status = RootSshCredentialPreparationStatus(
         ssh_enabled=True,
@@ -406,6 +408,7 @@ def test_build_sshd_argv_enforces_effective_config_without_credentials() -> None
     ]
 
 
+# Startup tests protect host-key generation, foreground argv, and redaction.
 def test_start_sshd_if_enabled_with_no_credentials_warns_without_start(
     tmp_path: Path,
 ) -> None:

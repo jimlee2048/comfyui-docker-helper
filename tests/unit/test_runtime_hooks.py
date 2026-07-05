@@ -74,8 +74,8 @@ class FakeHookProcess:
         return self.returncode
 
 
-# Discovery and validation define the allowed runtime hook tree shape and the
-# baked-before-mounted execution order.
+# Discovery and validation define the allowed runtime hook tree shape, diagnostic
+# locations, and baked-before-mounted execution order.
 def test_discovery_order_is_baked_then_mounted_lexical_and_allows_duplicates(
     tmp_path: Path,
 ) -> None:
@@ -216,7 +216,7 @@ def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:
     ]
 
 
-# Startup hook execution tests pin interpreter selection, environment shaping,
+# Startup hook process tests pin interpreter selection, environment shaping,
 # ordering, logging, and failure reporting before ComfyUI starts.
 def test_run_pre_start_hooks_uses_suffix_mapping_env_cwd_and_logs(
     tmp_path: Path,

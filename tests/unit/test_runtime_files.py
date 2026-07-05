@@ -668,6 +668,8 @@ def test_reconcile_removed_config_entry_reports_absolute_stale_candidate(
     assert stale_digest not in reconciliation.state.downloads.entries
 
 
+# Runtime file async mode and merge behavior stays paired with runtime_config:
+# config validates user-authored files.N, this module preserves execution intent.
 def test_reconcile_runtime_file_plan_accepts_internal_async_items(
     tmp_path: Path,
 ) -> None:
@@ -896,6 +898,8 @@ def test_runtime_file_merge_ignores_full_runtime_keys_but_validates_files() -> N
     ]
 
 
+# Authored-index diagnostics must report the file position from the source layer
+# that contributed the surviving item, not the merged output position.
 def test_runtime_file_plan_invalid_mounted_after_baked_reports_authored_index(
     tmp_path: Path,
 ) -> None:
@@ -2449,6 +2453,8 @@ def test_runtime_file_download_rejects_racing_final_when_overwrite_false(
     assert not backend.calls[0][0].target.exists()
 
 
+# Containment race tests cover symlink swaps between planning, staging mkdir,
+# backend completion, and final replacement; keep these with the positive case.
 def test_runtime_file_download_rejects_parent_symlink_inserted_after_planning(
     tmp_path: Path,
 ) -> None:

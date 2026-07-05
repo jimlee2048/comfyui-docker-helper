@@ -16,6 +16,7 @@ from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entr
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
+    RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
@@ -143,6 +144,8 @@ def _missing_mounted_hooks(tmp_path: Path) -> Path:
     return tmp_path / "missing-mounted-hooks"
 
 
+# Runtime config startup coverage pins the default argv/env contract and the
+# baked-to-mounted config precedence used by container entrypoint startup.
 def test_entrypoint_starts_with_defaults_without_runtime_config(
     tmp_path: Path,
 ) -> None:
@@ -264,6 +267,8 @@ extra_args = ["--preview-method", "auto"]
     ]
 
 
+# Environment override coverage keeps CLI-facing knobs wired through both
+# ComfyUI argv generation and runtime downloader configuration.
 def test_environment_overrides_mounted_and_baked_runtime_config(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -327,8 +332,10 @@ extra_args = ["--preview-method", "auto"]
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del log
+        del log, state_observer, extra_protected_staging_targets
         events.append("download")
         downloader_plans.append(plan)
         downloader_configs.append(config)
@@ -374,6 +381,8 @@ extra_args = ["--preview-method", "auto"]
     )
 
 
+# Runtime-only validation coverage documents tolerated host-only fields and
+# blocks invalid mounted/env/unknown fields before spawning ComfyUI.
 def test_runtime_cross_context_fields_warn_and_do_not_block_startup(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

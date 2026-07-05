@@ -365,213 +365,8 @@ def _runtime_file_staging_target(item: RuntimeFilePlanItem) -> Path:
     )
 
 
-def test_default_argv_uses_runtime_defaults_and_venv_python(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    calls: list[tuple[list[str], str, dict[str, str]]] = []
-    child = FakeChild(0)
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append((list(argv), cwd, dict(env)))
-        return child
-
-    exit_code = run_entrypoint(
-        runtime=runtime,
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=tmp_path / "missing-mounted.toml",
-        environ={"PATH": "/usr/bin"},
-        runner=runner,
-    )
-
-    assert exit_code == 0
-    assert calls == [
-        (
-            [
-                str(runtime.python),
-                str(runtime.comfyui_path / "main.py"),
-                "--listen",
-                "0.0.0.0",
-                "--port",
-                "8188",
-                "--disable-auto-launch",
-            ],
-            str(runtime.comfyui_path),
-            {
-                "PATH": f"{runtime.virtual_env / 'bin'}:/usr/bin",
-                "WORKSPACE": str(runtime.workspace),
-                "COMFYUI_PATH": str(runtime.comfyui_path),
-                "VIRTUAL_ENV": str(runtime.virtual_env),
-            },
-        )
-    ]
-
-
-def test_mounted_config_and_env_overrides_affect_argv(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[comfyui]
-listen = "127.0.0.1"
-port = 8190
-extra_args = ["--cpu"]
-""",
-    )
-    calls: list[list[str]] = []
-    child = FakeChild(0)
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return child
-
-    exit_code = run_entrypoint(
-        runtime=runtime,
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=mounted,
-        environ={
-            "CDH_COMFYUI_PORT": "8288",
-            "CDH_COMFYUI_EXTRA_ARGS": '--preview-method "latent2rgb"',
-        },
-        runner=runner,
-    )
-
-    assert exit_code == 0
-    assert calls == [
-        [
-            str(runtime.python),
-            str(runtime.comfyui_path / "main.py"),
-            "--listen",
-            "127.0.0.1",
-            "--port",
-            "8288",
-            "--disable-auto-launch",
-            "--preview-method",
-            "latent2rgb",
-        ]
-    ]
-
-
-def test_runtime_config_warnings_are_printed_before_spawn(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system]
-workspace = "/srv"
-
-[comfyui]
-listen = "127.0.0.1"
-""",
-    )
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=runner,
-        )
-        == 0
-    )
-
-    captured = capsys.readouterr()
-    assert calls
-    assert captured.out == ""
-    assert "Runtime configuration warnings:" in captured.err
-    assert "[system.workspace]" in captured.err
-    assert "runtime.host_only_ignored" in captured.err
-    assert "severity=warning" in captured.err
-
-
-def test_ssh_disabled_does_not_call_ssh_starter(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del cwd, env, shell
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    def runtime_ssh_starter(*_args, **_kwargs) -> None:
-        raise AssertionError("disabled SSH must not call starter")
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=tmp_path / "missing-mounted.toml",
-            environ={},
-            runner=runner,
-            runtime_ssh_starter=runtime_ssh_starter,
-        )
-        == 0
-    )
-
-    assert len(calls) == 1
-
-
-def test_ssh_enabled_without_credentials_warns_and_continues(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-""",
-    )
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=lambda *_args, **_kwargs: FakeChild(0),
-        )
-        == 0
-    )
-
-    captured = capsys.readouterr()
-    assert "WARNING: SSH is enabled but no root SSH credentials are configured" in (
-        captured.out
-    )
-
-
+# Exit and signal tests protect the entrypoint's child-process status mapping
+# and forwarded shutdown behavior.
 @pytest.mark.parametrize("returncode", [0, 17, -15])
 def test_child_exit_code_is_returned(tmp_path: Path, returncode: int) -> None:
     runtime = _runtime(tmp_path)
@@ -715,8 +510,8 @@ def test_forwarded_shutdown_signal_ignored_by_child_escalates_to_kill(
 
 
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGINT])
-# Lifecycle signal tests pin the ordered windows for hook execution, child
-# forwarding, and cancellation during startup and shutdown.
+# Shutdown-ordering tests pin cleanup order across async queues, SSH, hooks, and
+# child signal forwarding.
 def test_shutdown_signal_runs_stop_hooks_before_forwarding_to_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1815,6 +1610,8 @@ def test_async_stop_interrupted_terminates_backends(
     ) in output
 
 
+# Startup-interruption tests cover signals that arrive before the normal child
+# wait loop begins: downloads, hooks, spawn handoff, readiness, and post-start.
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGINT])
 def test_shutdown_signal_during_runtime_downloads_exits_without_spawn_or_stop_hooks(
     tmp_path: Path,
@@ -2802,68 +2599,6 @@ password = "secret"
         "ssh-terminate",
         "signal:SIGTERM",
     ]
-
-
-def test_runtime_validation_failure_happens_before_spawn(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    with pytest.raises(EntrypointError) as error:
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=tmp_path / "missing-mounted.toml",
-            environ={"CDH_COMFYUI_PORT": "0"},
-            runner=runner,
-        )
-
-    assert calls == []
-    assert "runtime configuration is invalid" in str(error.value)
-    assert "[env.CDH_COMFYUI_PORT]" in str(error.value)
-
-
-def test_unknown_runtime_config_field_is_rejected_before_spawn(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[comfyui]
-unknown = true
-""",
-    )
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    with pytest.raises(EntrypointError) as error:
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=runner,
-        )
-
-    assert calls == []
-    assert "[comfyui.unknown]" in str(error.value)
 
 
 def test_runtime_downloads_run_before_spawn_without_root_lock(
@@ -4051,6 +3786,8 @@ filename = "model.bin"
     assert backend.calls[0][0].url == "https://example.com/model.bin"
 
 
+# Typed downloader boundary tests protect the T3 injection contract between the
+# entrypoint and runtime file processing.
 def test_runtime_downloader_injection_receives_typed_boundary_kwargs(
     tmp_path: Path,
 ) -> None:
@@ -4473,169 +4210,6 @@ filename = "async.bin"
     assert events == ["async-start", "spawn", "readiness", "post-start"]
 
 
-def test_ssh_starts_after_sync_downloads_and_pre_start_before_async_and_comfyui(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-password = "secret"
-
-[[files]]
-url = "https://example.com/sync.bin"
-dir = "models"
-filename = "sync.bin"
-download_mode = "sync"
-
-[[files]]
-url = "https://example.com/async.bin"
-dir = "models"
-filename = "async.bin"
-download_mode = "async"
-""",
-    )
-    hooks = tmp_path / "hooks"
-    _write_hook(hooks, "pre-start.d", "10-pre.sh")
-    events: list[str] = []
-
-    def runtime_downloader(
-        plan: RuntimeFilePlan,
-        *,
-        config: RuntimeConfig,
-        log: Logger,
-        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
-        extra_protected_staging_targets: tuple[Path, ...] = (),
-    ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log, state_observer, extra_protected_staging_targets
-        assert [item.filename for item in plan.items] == ["sync.bin"]
-        events.append("sync-download")
-        return ()
-
-    def runtime_hook_runner(
-        plan: RuntimeHookPlan,
-        phase: str,
-        *,
-        runtime: ContainerRuntime,
-        env: Mapping[str, str] | None = None,
-        log: Logger,
-        cancel_requested: Callable[[], bool],
-    ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, cancel_requested
-        assert phase == "pre-start"
-        assert events == ["sync-download"]
-        events.append("pre-start")
-        return ()
-
-    def runtime_ssh_starter(
-        config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
-    ) -> FakeSshdProcess:
-        del runtime, log
-        assert config.system.ssh.enable is True
-        assert events == ["sync-download", "pre-start"]
-        events.append("ssh-start")
-        return FakeSshdProcess()
-
-    def runtime_async_queue_starter(
-        plan: RuntimeFilePlan,
-        *,
-        config: RuntimeConfig,
-        runtime: ContainerRuntime,
-        runtime_state_path: Path,
-        log: Logger,
-    ) -> FakeAsyncHandle:
-        del config, runtime, runtime_state_path, log
-        assert [item.filename for item in plan.items] == ["async.bin"]
-        assert events == ["sync-download", "pre-start", "ssh-start"]
-        events.append("async-start")
-        return FakeAsyncHandle(events, alive=False)
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-        assert events == ["sync-download", "pre-start", "ssh-start", "async-start"]
-        events.append("spawn")
-        return FakeChild(0)
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            mounted_hooks_path=hooks,
-            environ={},
-            runner=runner,
-            runtime_downloader=runtime_downloader,
-            runtime_hook_runner=runtime_hook_runner,
-            runtime_async_queue_starter=runtime_async_queue_starter,
-            runtime_ssh_starter=runtime_ssh_starter,
-            runtime_state_path=tmp_path / "state.json",
-        )
-        == 0
-    )
-
-    assert events == ["sync-download", "pre-start", "ssh-start", "async-start", "spawn"]
-
-
-def test_ssh_start_failure_prevents_comfyui_spawn(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-password = "secret"
-""",
-    )
-    events: list[str] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-        events.append("spawn")
-        return FakeChild(0)
-
-    def runtime_ssh_starter(
-        config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
-    ) -> None:
-        del config, runtime, log
-        events.append("ssh-start")
-        raise entrypoint_module.SshdStartupError("host keys unavailable")
-
-    with pytest.raises(EntrypointError) as raised:
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=runner,
-            runtime_ssh_starter=runtime_ssh_starter,
-        )
-
-    assert events == ["ssh-start"]
-    assert "SSH runtime service failed to start" in str(raised.value)
-    assert "host keys unavailable" in str(raised.value)
-
-
 def test_async_queue_start_failure_stops_started_ssh_without_spawning(
     tmp_path: Path,
 ) -> None:
@@ -4849,42 +4423,8 @@ download_mode = "async"
     assert events == ["ssh-start", "async-start", "async-stop", "async-join"]
 
 
-def test_unexpected_sshd_exit_is_logged_without_changing_comfyui_exit(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-password = "secret"
-""",
-    )
-    sshd = FakeSshdProcess(wait_returncode=23)
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=lambda *_args, **_kwargs: FakeChild(7),
-            runtime_ssh_starter=lambda *_args, **_kwargs: sshd,
-        )
-        == 7
-    )
-
-    assert sshd.waited.wait(timeout=1)
-    captured = capsys.readouterr()
-    assert "WARNING: SSH runtime service exited unexpectedly: returncode=23" in (
-        captured.err
-    )
-
-
-# Verifies accepted async work is cancelled on natural child exit without
-# running graceful-shutdown hooks.
+# Async starter injection tests cover lifecycle coordination with ComfyUI and SSH
+# without running the real queue worker.
 def test_normal_child_exit_stops_accepted_async_queue(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
@@ -6044,109 +5584,6 @@ def test_async_overwrite_preserves_old_final_until_atomic_replacement(
 
     assert not handle.thread.is_alive()
     assert final_target.read_bytes() == b"new"
-
-
-def test_async_exhausted_continue_records_failure_and_completes_later_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    state_path = tmp_path / "state.json"
-    first = _async_item(runtime, "a.bin")
-    second = _async_item(runtime, "b.bin")
-    plan = _activate_async_plan(runtime, state_path, first, second)
-    backend = AsyncBackend()
-    backend.failures["a.bin"] = None
-    backend.payloads["b.bin"] = b"later"
-    _install_async_backend(monkeypatch, backend)
-    messages: list[str] = []
-
-    handle = entrypoint_module.start_runtime_async_download_queue(
-        plan,
-        config=RuntimeConfig.model_validate(
-            {
-                "cdh": {
-                    "default_downloader": "httpx",
-                    "download_max_attempts": 2,
-                    "download_failure_policy": "continue",
-                }
-            }
-        ),
-        runtime=runtime,
-        runtime_state_path=state_path,
-        log=messages.append,
-    )
-    handle.join(timeout=1)
-
-    state = load_runtime_state(state_path)
-    entries = {entry.target: entry for entry in state.downloads.entries.values()}
-    assert [call[0].filename for call in backend.calls] == ["a.bin", "a.bin", "b.bin"]
-    assert entries["models/a.bin"].status == "exhausted"
-    assert entries["models/a.bin"].attempts == 2
-    assert not first.target.exists()
-    assert not _runtime_file_staging_target(first).exists()
-    assert entries["models/b.bin"].status == "completed"
-    assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
-    assert any(
-        "WARNING: Runtime download exhausted: mode=async target=models/a.bin "
-        "backend=httpx attempts=2/2 policy=continue status=exhausted" in message
-        for message in messages
-    )
-    assert not any(
-        "Async runtime download queue stopping: reason=download_exhausted" in message
-        for message in messages
-    )
-
-
-def test_async_exhausted_fail_records_failure_and_leaves_later_file_pending(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    state_path = tmp_path / "state.json"
-    first = _async_item(runtime, "a.bin")
-    second = _async_item(runtime, "b.bin")
-    plan = _activate_async_plan(runtime, state_path, first, second)
-    backend = AsyncBackend()
-    backend.failures["a.bin"] = None
-    _install_async_backend(monkeypatch, backend)
-    messages: list[str] = []
-
-    handle = entrypoint_module.start_runtime_async_download_queue(
-        plan,
-        config=RuntimeConfig.model_validate(
-            {
-                "cdh": {
-                    "default_downloader": "httpx",
-                    "download_max_attempts": 2,
-                    "download_failure_policy": "fail",
-                }
-            }
-        ),
-        runtime=runtime,
-        runtime_state_path=state_path,
-        log=messages.append,
-    )
-    handle.join(timeout=1)
-
-    state = load_runtime_state(state_path)
-    entries = {entry.target: entry for entry in state.downloads.entries.values()}
-    assert [call[0].filename for call in backend.calls] == ["a.bin", "a.bin"]
-    assert entries["models/a.bin"].status == "exhausted"
-    assert entries["models/a.bin"].attempts == 2
-    assert not first.target.exists()
-    assert not _runtime_file_staging_target(first).exists()
-    assert entries["models/b.bin"].status == "pending"
-    assert not (runtime.comfyui_path / "models" / "b.bin").exists()
-    assert any(
-        "WARNING: Async runtime download queue stopping: "
-        "reason=download_exhausted policy=fail target=models/a.bin pending=1" in message
-        for message in messages
-    )
-    assert any(
-        "WARNING: async runtime download worker failed: reason=" in message
-        for message in messages
-    )
 
 
 def test_async_file_level_failure_after_acceptance_does_not_prevent_spawn(

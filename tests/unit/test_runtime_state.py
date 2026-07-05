@@ -67,6 +67,8 @@ def _state(
     )
 
 
+# Schema and persistence tests pin the on-disk contract used across container
+# restarts and async download resumes.
 def test_write_runtime_state_serializes_deterministic_json_shape(
     tmp_path: Path,
 ) -> None:
@@ -105,6 +107,8 @@ def test_load_runtime_state_rejects_unsupported_schema_version(tmp_path: Path) -
         load_runtime_state(path)
 
 
+# Status and identity validation keep async queue bookkeeping strict before it is
+# written to the shared runtime state file.
 def test_runtime_download_entry_rejects_unknown_status() -> None:
     with pytest.raises(ValidationError):
         _entry(status="unknown")
@@ -146,6 +150,8 @@ def test_runtime_download_entry_rejects_invalid_target_paths(target: str) -> Non
         _entry(target=target)
 
 
+# Runtime state must only retain sanitized failure details for failed/exhausted
+# downloads; all non-error statuses clear stale messages.
 @pytest.mark.parametrize("status", ["pending", "downloading", "completed", "skipped"])
 def test_runtime_download_entry_clears_last_error_for_non_error_statuses(
     status: str,
@@ -208,6 +214,8 @@ def test_failed_runtime_download_entry_accepts_exception_last_error() -> None:
     assert "[REDACTED_PATH]" in entry.last_error
 
 
+# Atomic writes protect the state file from partial updates and re-normalize any
+# mutated entries before persistence.
 def test_atomic_write_replaces_file(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text("old\n", encoding="utf-8")
@@ -255,6 +263,8 @@ def test_atomic_write_preserves_old_file_on_replace_failure(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+# Startup preparation creates or refreshes active state while leaving disabled
+# async-download state untouched.
 def test_prepare_runtime_state_creates_missing_active_state_and_writes_it(
     tmp_path: Path,
 ) -> None:
@@ -354,6 +364,8 @@ def test_prepare_runtime_state_resets_attempts_for_new_run_and_preserves_same_ru
     assert prepared.downloads.entries[OTHER_DIGEST_KEY].updated_at == old_updated_at
 
 
+# Redaction helpers keep diagnostics useful without leaking URLs, credentials,
+# backend details, or container paths.
 def test_sanitize_last_error_redacts_and_truncates() -> None:
     raw = (
         "failed\n"

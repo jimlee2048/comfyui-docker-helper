@@ -15,6 +15,7 @@ from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
+    RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
@@ -177,6 +178,8 @@ def _hook_names(plan: RuntimeHookPlan, phase: str) -> list[str]:
     return [hook.filename for hook in plan.for_phase(phase)]
 
 
+# Happy-path lifecycle coverage pins the entrypoint order from downloads through
+# startup hooks, readiness, and normal child wait.
 def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
     tmp_path: Path,
 ) -> None:
@@ -195,8 +198,10 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         assert len(plan.items) == 1
         assert plan.items[0].target == (
             runtime.comfyui_path / "models" / "checkpoints" / "model.bin"
@@ -287,6 +292,8 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
     ]
 
 
+# Startup failure coverage ensures failed pre-start, readiness, and post-start
+# phases stop later phases and surface actionable diagnostics.
 def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
     tmp_path: Path,
 ) -> None:
@@ -303,8 +310,10 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -496,6 +505,8 @@ def test_post_start_failure_after_readiness_terminates_child_as_startup_failure(
     assert "[hooks.mounted.post-start.10-fail.sh]" in str(error.value)
 
 
+# Startup shutdown coverage protects cancellation behavior before ComfyUI is
+# fully running, including skipped stop hooks during partial startup.
 def test_startup_shutdown_during_download_prevents_spawn_and_stop_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -512,8 +523,10 @@ def test_startup_shutdown_during_download_prevents_spawn_and_stop_hooks(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         handler = handlers[signal.SIGTERM]
         assert callable(handler)
@@ -756,6 +769,8 @@ def test_startup_shutdown_during_readiness_kills_child_that_ignores_signal(
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
 
+# Post-readiness shutdown coverage keeps signal forwarding, hook cancellation,
+# stop-hook ordering, and child exit-code precedence stable.
 @pytest.mark.parametrize(
     "sig", [signal.SIGTERM, signal.SIGINT], ids=lambda sig: sig.name
 )

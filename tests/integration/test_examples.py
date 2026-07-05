@@ -19,7 +19,13 @@ EXPECTED_FULL_KEYS = {
     "system.ssh": {"enable", "port", "password", "pub_keys"},
     "python": {"version", "uv_version", "index_url", "extra_packages"},
     "pytorch": {"version", "index_base_url", "extra_packages"},
-    "cdh": {"default_downloader", "default_download_mode", "downloader"},
+    "cdh": {
+        "default_downloader",
+        "default_download_mode",
+        "download_max_attempts",
+        "download_failure_policy",
+        "downloader",
+    },
     "cdh.downloader.httpx": {"timeout", "retries"},
     "cdh.downloader.aria2": {
         "rpc_port",
@@ -148,6 +154,8 @@ def test_full_example_documents_host_build_defaults() -> None:
     ]
     assert document["build"]["output"] == "load"
     assert document["cdh"]["default_download_mode"] == "sync"
+    assert document["cdh"]["download_max_attempts"] == 3
+    assert document["cdh"]["download_failure_policy"] == "fail"
     assert document["python"]["index_url"] == "https://pypi.org/simple"
     assert document["pytorch"]["index_base_url"] == "https://download.pytorch.org/whl"
 

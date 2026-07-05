@@ -19,8 +19,8 @@ configuration.
 - BuildKit support for Dockerfile `RUN --mount=type=bind`.
 - Network access during Docker builds for base images, Python packages, ComfyUI,
   custom nodes, and configured files. Container startup may also need network
-  access when effective runtime file downloads target missing files or set
-  `overwrite = true`.
+  access when effective runtime file downloads target missing files or need to
+  refresh changed `overwrite = true` sources.
 
 The rendered image installs `aria2` inside the build container. A host-side
 `aria2c` binary is not required unless you are running the optional local smoke
@@ -168,9 +168,10 @@ At container startup, the entrypoint loads runtime defaults in this order:
 
 The baked runtime config contains only runtime-supported fields: `[comfyui]`
 startup values (`listen`, `port`, and `extra_args`), `[cdh]` downloader
-defaults/backend settings, and any `[[files]]` defaults. Host-only build fields
-such as base image, Python, PyTorch, image tags, ComfyUI version selection, and
-custom-node sources are not written into the runtime config.
+defaults/backend settings, retry and failure-policy settings, `[system.ssh]`,
+and any `[[files]]` defaults. Host-only build fields such as base image,
+Python, PyTorch, image tags, ComfyUI version selection, and custom-node sources
+are not written into the runtime config.
 
 The entrypoint starts ComfyUI with the effective runtime values:
 
@@ -179,17 +180,23 @@ python "$COMFYUI_PATH/main.py" --listen "$LISTEN" --port "$PORT" --disable-auto-
 ```
 
 Supported startup environment overrides are `CDH_COMFYUI_LISTEN`,
-`CDH_COMFYUI_PORT`, `CDH_COMFYUI_EXTRA_ARGS`, `CDH_DEFAULT_DOWNLOADER`, and
-`CDH_DEFAULT_DOWNLOAD_MODE`. Environment overrides replace the corresponding
-runtime defaults; they do not rewrite explicit per-file values.
+`CDH_COMFYUI_PORT`, `CDH_COMFYUI_EXTRA_ARGS`, `CDH_DEFAULT_DOWNLOADER`,
+`CDH_DEFAULT_DOWNLOAD_MODE`, `CDH_DOWNLOAD_MAX_ATTEMPTS`,
+`CDH_DOWNLOAD_FAILURE_POLICY`, `SSH_ENABLE`, `SSH_PORT`, `SSH_PASSWORD`, and
+`SSH_PUB_KEY`. Environment overrides replace the corresponding runtime
+defaults; downloader and mode overrides do not rewrite explicit per-file
+values.
 
 ## Files and downloaders
 
 Host `[[files]]` entries are downloaded into the image during Docker build and
-are also baked as runtime defaults. At container startup, effective runtime
-files are processed synchronously before pre-start hooks and before ComfyUI is
-spawned. Existing targets are skipped unless `overwrite = true`; a download
-failure stops the queue and prevents startup.
+are also baked as runtime defaults. Host build downloads always run
+synchronously, even when runtime configuration sets `download_mode = "async"`.
+At container startup, effective runtime files use their configured mode:
+`sync` files run before pre-start hooks and before ComfyUI is spawned, while
+`async` files are accepted into a cdh-managed background queue and do not block
+ComfyUI startup, readiness checks, or post-start hooks after the queue has
+started.
 
 The available download backends are:
 
@@ -197,15 +204,64 @@ The available download backends are:
 - `aria2` for RPC-controlled downloads with per-file serialization.
 
 Files are processed in configuration order, one active item at a time. Existing
-targets are skipped unless `overwrite = true`. Each file entry must declare an
-explicit `filename`; download targets are not inferred from URLs. Set the
-default downloader under `[cdh]`, and override it per file with `downloader`.
-Set `default_download_mode = "sync"` under `[cdh]` or `download_mode = "sync"`
-per file when you want to be explicit; `sync` is the supported mode. Mounted
-runtime configs merge file entries by normalized target path, with later
-same-target entries taking priority; `files = []` clears earlier runtime file
-defaults. Configure package indexes with `python.index_url` and
+targets are skipped unless `overwrite = true`. With `overwrite = true`, cdh
+does not redownload on every start once runtime state records the current
+source as completed and the final file still exists. Each file entry must
+declare an explicit `filename`; download targets are not inferred from URLs.
+Set the default downloader under `[cdh]`, and override it per file with
+`downloader`. Set `default_download_mode = "sync"` or `"async"` under `[cdh]`,
+and override it per file with `download_mode`.
+
+Runtime downloads use `download_max_attempts` as a per-file, per-container-start
+attempt budget. `download_failure_policy = "continue"` records exhausted
+failures and continues with later files; `download_failure_policy = "fail"`
+fails startup for exhausted sync downloads, and stops scheduling later async
+files for the current start without terminating an already-running ComfyUI
+process. Attempt budgets reset on the next container start.
+
+Runtime download state is stored at `/var/lib/cdh/runtime/state.json`. Use a
+persistent volume for `/var/lib/cdh/runtime` when you want restart
+reconciliation, completed-source tracking, and retry state to survive container
+replacement. Missing state is treated as a first run. Corrupt or unsupported
+state prevents startup only when runtime downloads are configured.
+
+Incomplete runtime downloads are kept out of final target paths. cdh stages
+downloads beside the target under a target-local `.cdh-staging/` directory,
+using cdh-owned filenames, and only removes cdh-owned stale staging files after
+the safety window. It does not delete unrecognized staging files or files
+outside cdh-owned staging directories.
+
+Mounted runtime configs merge file entries by normalized target path, with
+later same-target entries taking priority; `files = []` clears earlier runtime
+file defaults. Configure package indexes with `python.index_url` and
 `pytorch.index_base_url`.
+
+## SSH runtime access
+
+Rendered images include OpenSSH server capability, but SSH is disabled by
+default and cdh starts `sshd` only when effective runtime config enables it and
+at least one valid credential exists. Configure baked defaults with
+`[system.ssh]`, override them with `/etc/cdh/runtime/config.toml`, or use
+runtime environment variables:
+
+```text
+SSH_ENABLE=true
+SSH_PORT=22
+SSH_PASSWORD=...
+SSH_PUB_KEY="ssh-ed25519 ..."
+```
+
+SSH login is for `root`. Password and public-key authentication can both be
+enabled when both credentials are present. Root SSH access is powerful; protect
+runtime configs, rendered contexts, images, registries, environment variables,
+and logs accordingly. Prefer runtime environment variables or mounted runtime
+config for real credentials, not baked image config.
+
+cdh controls only the container-internal `sshd` port. Docker host port
+publication and network exposure are deployment responsibilities, for example
+`docker run -p 2222:22 ...`. Dockerfile `EXPOSE` metadata, when present, does
+not publish a host port. ComfyUI authentication and any reverse-proxy or Docker
+network access controls are also outside cdh's scope.
 
 ## Runtime Lifecycle Hooks
 
@@ -256,10 +312,10 @@ for real Docker builds:
 | aria2 file download | real aria2 daemon path |
 | full config | combined nodes, hooks, files, env, entrypoint, and startup args |
 
-These commands are resource-heavy. Run them deliberately after checking that
-network, disk, Docker cache, and CUDA base image requirements are acceptable for
-your machine. The lightweight fixture validation lives in `tests/smoke/` and
-does not run Docker.
+These commands are opt-in and resource-heavy. Run them deliberately after
+checking that network, disk, Docker cache, and CUDA base image requirements are
+acceptable for your machine. The lightweight fixture validation lives in
+`tests/smoke/` and does not run Docker.
 
 When recording smoke results, note which checks used real upstream services and
 which used local fixtures so failures can be classified consistently.

@@ -85,6 +85,8 @@ CHILD_TERMINATION_REAP_GRACE_SECONDS = 2.0
 CHILD_REAP_POLL_INTERVAL_SECONDS = 0.1
 ASYNC_QUEUE_STOP_TIMEOUT_SECONDS = 5.0
 ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS = 0.05
+SSHD_STOP_TIMEOUT_SECONDS = 5.0
+SSHD_STOP_POLL_INTERVAL_SECONDS = 0.05
 
 
 class EntrypointError(ApplicationError):
@@ -384,6 +386,24 @@ def run_entrypoint(
     with _startup_shutdown_signal_handlers(startup_shutdown):
         async_handle: RuntimeAsyncDownloadQueueHandle | None = None
         sshd_handle: SshdProcess | None = None
+        sshd_shutdown_requested = threading.Event()
+
+        def stop_startup_auxiliary_services() -> None:
+            previous_raise_on_signal = startup_shutdown.raise_on_signal
+            startup_shutdown.raise_on_signal = False
+            try:
+                _stop_runtime_async_download_queue_for_startup(
+                    async_handle,
+                    startup_shutdown=startup_shutdown,
+                )
+                _stop_sshd_runtime_service_for_startup(
+                    sshd_handle,
+                    startup_shutdown=startup_shutdown,
+                    shutdown_requested=sshd_shutdown_requested,
+                )
+            finally:
+                startup_shutdown.raise_on_signal = previous_raise_on_signal
+
         try:
             download_queues = _run_runtime_downloads(
                 result,
@@ -392,6 +412,7 @@ def run_entrypoint(
                 runtime_state_path=runtime_state_path,
             )
             if startup_shutdown.requested_signal is not None:
+                stop_startup_auxiliary_services()
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
             _run_pre_start_hooks(
                 hook_plan,
@@ -401,13 +422,20 @@ def run_entrypoint(
                 startup_shutdown=startup_shutdown,
             )
             if startup_shutdown.requested_signal is not None:
+                stop_startup_auxiliary_services()
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
-            sshd_handle = _start_ssh_runtime_service(
-                result.config,
-                runtime=runtime,
-                runtime_ssh_starter=runtime_ssh_starter,
-            )
+            previous_raise_on_signal = startup_shutdown.raise_on_signal
+            startup_shutdown.raise_on_signal = False
+            try:
+                sshd_handle = _start_ssh_runtime_service(
+                    result.config,
+                    runtime=runtime,
+                    runtime_ssh_starter=runtime_ssh_starter,
+                )
+            finally:
+                startup_shutdown.raise_on_signal = previous_raise_on_signal
             if startup_shutdown.requested_signal is not None:
+                stop_startup_auxiliary_services()
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
             _ensure_sshd_still_running_before_comfyui(sshd_handle)
             async_handle = _start_runtime_async_download_queue(
@@ -418,16 +446,10 @@ def run_entrypoint(
                 runtime_async_queue_starter=runtime_async_queue_starter,
             )
             if startup_shutdown.requested_signal is not None:
-                _stop_runtime_async_download_queue_for_startup(
-                    async_handle,
-                    startup_shutdown=startup_shutdown,
-                )
+                stop_startup_auxiliary_services()
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
         except _StartupShutdownRequested as request:
-            _stop_runtime_async_download_queue_for_startup(
-                async_handle,
-                startup_shutdown=startup_shutdown,
-            )
+            stop_startup_auxiliary_services()
             return _normalize_signal_exit_code(request.sig)
 
         completed: ChildProcess | None = None
@@ -435,27 +457,18 @@ def run_entrypoint(
             startup_shutdown.raise_on_signal = False
             try:
                 if startup_shutdown.requested_signal is not None:
-                    _stop_runtime_async_download_queue_for_startup(
-                        async_handle,
-                        startup_shutdown=startup_shutdown,
-                    )
+                    stop_startup_auxiliary_services()
                     return _normalize_signal_exit_code(
                         startup_shutdown.requested_signal
                     )
                 try:
                     _ensure_sshd_still_running_before_comfyui(sshd_handle)
                 except EntrypointError:
-                    _stop_runtime_async_download_queue_for_startup(
-                        async_handle,
-                        startup_shutdown=startup_shutdown,
-                    )
+                    stop_startup_auxiliary_services()
                     raise
                 argv = build_comfyui_argv(runtime=runtime, config=result.config)
                 if startup_shutdown.requested_signal is not None:
-                    _stop_runtime_async_download_queue_for_startup(
-                        async_handle,
-                        startup_shutdown=startup_shutdown,
-                    )
+                    stop_startup_auxiliary_services()
                     return _normalize_signal_exit_code(
                         startup_shutdown.requested_signal
                     )
@@ -468,54 +481,39 @@ def run_entrypoint(
                     )
                 except FileNotFoundError as error:
                     if startup_shutdown.requested_signal is not None:
-                        _stop_runtime_async_download_queue_for_startup(
-                            async_handle,
-                            startup_shutdown=startup_shutdown,
-                        )
+                        stop_startup_auxiliary_services()
                         return _normalize_signal_exit_code(
                             startup_shutdown.requested_signal
                         )
-                    _stop_runtime_async_download_queue_for_startup(
-                        async_handle,
-                        startup_shutdown=startup_shutdown,
-                    )
+                    stop_startup_auxiliary_services()
                     raise EntrypointError(
                         f"ComfyUI executable not found: {argv[0]}"
                     ) from error
                 except OSError as error:
                     if startup_shutdown.requested_signal is not None:
-                        _stop_runtime_async_download_queue_for_startup(
-                            async_handle,
-                            startup_shutdown=startup_shutdown,
-                        )
+                        stop_startup_auxiliary_services()
                         return _normalize_signal_exit_code(
                             startup_shutdown.requested_signal
                         )
-                    _stop_runtime_async_download_queue_for_startup(
-                        async_handle,
-                        startup_shutdown=startup_shutdown,
-                    )
+                    stop_startup_auxiliary_services()
                     raise EntrypointError(
                         f"ComfyUI failed to start: {error}"
                     ) from error
                 if startup_shutdown.requested_signal is not None:
-                    _stop_runtime_async_download_queue_for_startup(
-                        async_handle,
-                        startup_shutdown=startup_shutdown,
-                    )
+                    stop_startup_auxiliary_services()
                     return _forward_startup_shutdown_to_child(
                         completed,
                         startup_shutdown.requested_signal,
                     )
-                _monitor_sshd_after_comfyui_start(sshd_handle)
+                _monitor_sshd_after_comfyui_start(
+                    sshd_handle,
+                    shutdown_requested=sshd_shutdown_requested,
+                )
             finally:
                 startup_shutdown.raise_on_signal = True
 
             if startup_shutdown.requested_signal is not None:
-                _stop_runtime_async_download_queue_for_startup(
-                    async_handle,
-                    startup_shutdown=startup_shutdown,
-                )
+                stop_startup_auxiliary_services()
                 return _forward_startup_shutdown_to_child(
                     completed,
                     startup_shutdown.requested_signal,
@@ -536,31 +534,19 @@ def run_entrypoint(
                     startup_shutdown=startup_shutdown,
                 )
             except EntrypointError:
-                _stop_runtime_async_download_queue_for_startup(
-                    async_handle,
-                    startup_shutdown=startup_shutdown,
-                )
+                stop_startup_auxiliary_services()
                 raise
             if startup_shutdown.requested_signal is not None:
-                _stop_runtime_async_download_queue_for_startup(
-                    async_handle,
-                    startup_shutdown=startup_shutdown,
-                )
+                stop_startup_auxiliary_services()
                 return _forward_startup_shutdown_to_child(
                     completed,
                     startup_shutdown.requested_signal,
                 )
         except _StartupShutdownRequested as request:
             if completed is None:
-                _stop_runtime_async_download_queue_for_startup(
-                    async_handle,
-                    startup_shutdown=startup_shutdown,
-                )
+                stop_startup_auxiliary_services()
                 return _normalize_signal_exit_code(request.sig)
-            _stop_runtime_async_download_queue_for_startup(
-                async_handle,
-                startup_shutdown=startup_shutdown,
-            )
+            stop_startup_auxiliary_services()
             return _forward_startup_shutdown_to_child(completed, request.sig)
 
     assert completed is not None
@@ -572,6 +558,8 @@ def run_entrypoint(
             source_env=source_env,
             runtime_stop_hook_runner=runtime_stop_hook_runner,
             async_handle=async_handle,
+            sshd_handle=sshd_handle,
+            sshd_shutdown_requested=sshd_shutdown_requested,
         )
     )
 
@@ -814,7 +802,11 @@ def _ensure_sshd_still_running_before_comfyui(
         )
 
 
-def _monitor_sshd_after_comfyui_start(sshd_handle: SshdProcess | None) -> None:
+def _monitor_sshd_after_comfyui_start(
+    sshd_handle: SshdProcess | None,
+    *,
+    shutdown_requested: threading.Event,
+) -> None:
     if sshd_handle is None:
         return
 
@@ -822,11 +814,15 @@ def _monitor_sshd_after_comfyui_start(sshd_handle: SshdProcess | None) -> None:
         try:
             returncode = sshd_handle.wait()
         except Exception as error:
+            if shutdown_requested.is_set():
+                return
             print(
                 "WARNING: SSH runtime service monitor failed: "
                 f"reason={runtime_error_reason(error)}",
                 file=sys.stderr,
             )
+            return
+        if shutdown_requested.is_set():
             return
         print(
             "WARNING: SSH runtime service exited unexpectedly: "
@@ -839,6 +835,84 @@ def _monitor_sshd_after_comfyui_start(sshd_handle: SshdProcess | None) -> None:
         name="cdh-sshd-monitor",
         daemon=True,
     ).start()
+
+
+def _stop_sshd_runtime_service(
+    sshd_handle: SshdProcess | None,
+    *,
+    cancel_requested: Callable[[], bool],
+    shutdown_requested: threading.Event,
+    timeout: float = SSHD_STOP_TIMEOUT_SECONDS,
+    poll_interval: float = SSHD_STOP_POLL_INTERVAL_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], object] = time.sleep,
+) -> bool:
+    if sshd_handle is None or sshd_handle.poll() is not None:
+        return True
+
+    shutdown_requested.set()
+    print("SSH runtime service stop requested")
+    try:
+        sshd_handle.terminate()
+    except Exception as error:
+        print(
+            "WARNING: SSH runtime service terminate failed: "
+            f"reason={runtime_error_reason(error)}",
+            file=sys.stderr,
+        )
+        _kill_sshd_runtime_service(sshd_handle)
+        return False
+
+    deadline = monotonic() + timeout
+    while sshd_handle.poll() is None:
+        if cancel_requested():
+            print(
+                "WARNING: SSH runtime service stop interrupted; killing sshd",
+                file=sys.stderr,
+            )
+            _kill_sshd_runtime_service(sshd_handle)
+            return False
+        now = monotonic()
+        if now >= deadline:
+            print(
+                "WARNING: SSH runtime service did not stop in "
+                f"{timeout:.1f}s; killing sshd",
+                file=sys.stderr,
+            )
+            _kill_sshd_runtime_service(sshd_handle)
+            return False
+        sleep(min(poll_interval, deadline - now))
+    print("SSH runtime service stopped")
+    return True
+
+
+def _kill_sshd_runtime_service(sshd_handle: SshdProcess) -> None:
+    try:
+        sshd_handle.kill()
+    except Exception as error:
+        print(
+            "WARNING: SSH runtime service kill failed: "
+            f"reason={runtime_error_reason(error)}",
+            file=sys.stderr,
+        )
+
+
+def _stop_sshd_runtime_service_for_startup(
+    sshd_handle: SshdProcess | None,
+    *,
+    startup_shutdown: _StartupShutdownState,
+    shutdown_requested: threading.Event,
+) -> bool:
+    previous_raise_on_signal = startup_shutdown.raise_on_signal
+    startup_shutdown.raise_on_signal = False
+    try:
+        return _stop_sshd_runtime_service(
+            sshd_handle,
+            cancel_requested=startup_shutdown.repeated_signal_requested,
+            shutdown_requested=shutdown_requested,
+        )
+    finally:
+        startup_shutdown.raise_on_signal = previous_raise_on_signal
 
 
 def _stop_runtime_async_download_queue(
@@ -1215,6 +1289,8 @@ def _wait_with_signal_forwarding(
     source_env: Mapping[str, str],
     runtime_stop_hook_runner: RuntimeStopHookRunner,
     async_handle: RuntimeAsyncDownloadQueueHandle | None = None,
+    sshd_handle: SshdProcess | None = None,
+    sshd_shutdown_requested: threading.Event | None = None,
 ) -> int:
     previous_handlers = {
         sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
@@ -1240,11 +1316,29 @@ def _wait_with_signal_forwarding(
                 async_handle,
                 cancel_requested=shutdown_state.stop_hooks_cancelled,
             )
+            _stop_sshd_runtime_service(
+                sshd_handle,
+                cancel_requested=shutdown_state.stop_hooks_cancelled,
+                shutdown_requested=(
+                    threading.Event()
+                    if sshd_shutdown_requested is None
+                    else sshd_shutdown_requested
+                ),
+            )
             return exit_code
         except _ShutdownRequested as request:
             _stop_runtime_async_download_queue(
                 async_handle,
                 cancel_requested=shutdown_state.stop_hooks_cancelled,
+            )
+            _stop_sshd_runtime_service(
+                sshd_handle,
+                cancel_requested=shutdown_state.stop_hooks_cancelled,
+                shutdown_requested=(
+                    threading.Event()
+                    if sshd_shutdown_requested is None
+                    else sshd_shutdown_requested
+                ),
             )
             if not shutdown_state.stop_hooks_cancelled():
                 _run_stop_hooks_before_signal(

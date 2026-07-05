@@ -59,6 +59,10 @@ class SshdProcess(Protocol):
 
     def poll(self) -> int | None: ...
 
+    def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
+
 
 class SshdProcessStarter(Protocol):
     """Start foreground sshd and return its child process handle."""

@@ -2546,6 +2546,63 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
     assert (comfyui / "models" / "a.bin").read_bytes() == b"new"
 
 
+# Verifies sync cleanup preserves active async resumable staging artifacts.
+def test_runtime_file_sync_cleanup_protects_current_async_staging(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/sync.bin",
+                        "dir": "models",
+                        "filename": "sync.bin",
+                        "download_mode": "sync",
+                    },
+                    {
+                        "url": "https://example.com/async.bin",
+                        "dir": "models",
+                        "filename": "async.bin",
+                        "download_mode": "async",
+                    },
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    sync_item, async_item = plan.items
+    sync_plan = RuntimeFilePlan(items=(sync_item,))
+    async_staging = _staging_target(async_item)
+    async_control = Path(f"{async_staging}.aria2")
+    stale_staging = async_staging.parent / f"cdh-{'a' * 64}.part"
+    async_staging.parent.mkdir(parents=True)
+    async_staging.write_bytes(b"async-partial")
+    async_control.write_bytes(b"async-control")
+    stale_staging.write_bytes(b"stale")
+    old_mtime = STALE_CLEANUP_NOW - (25 * 60 * 60)
+    for path in (async_staging, async_control, stale_staging):
+        _touch_mtime(path, old_mtime)
+    backend = FakeDownloadBackend(payload=b"sync")
+
+    process_runtime_file_downloads(
+        sync_plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": backend},
+        log=lambda message: None,
+        staging_cleanup_clock=lambda: STALE_CLEANUP_NOW,
+        extra_protected_staging_targets=(async_staging,),
+    )
+
+    assert [call[0].target for call in backend.calls] == [_staging_target(sync_item)]
+    assert (comfyui / "models" / "sync.bin").read_bytes() == b"sync"
+    assert not stale_staging.exists()
+    assert async_staging.read_bytes() == b"async-partial"
+    assert async_control.read_bytes() == b"async-control"
+    assert not (comfyui / "models" / "async.bin").exists()
+
+
 def test_runtime_file_download_rejects_symlinked_staging_parent(
     tmp_path: Path,
 ) -> None:

@@ -3539,6 +3539,232 @@ filename = "async.bin"
     assert events == ["async-start", "spawn", "readiness", "post-start"]
 
 
+# Verifies accepted async work is cancelled on natural child exit without
+# running graceful-shutdown hooks.
+def test_normal_child_exit_stops_accepted_async_queue(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(7)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        return FakeAsyncHandle(events)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 7
+    )
+
+    assert events == ["async-start", "spawn", "async-stop", "async-join"]
+
+
+# Verifies accepted async work is cancelled when ComfyUI cannot be spawned.
+def test_spawn_failure_after_async_acceptance_stops_async_queue(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        raise FileNotFoundError("missing executable")
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        return FakeAsyncHandle(events)
+
+    with pytest.raises(EntrypointError) as error:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+
+    assert events == ["async-start", "spawn", "async-stop", "async-join"]
+    assert "ComfyUI executable not found" in str(error.value)
+
+
+# Verifies accepted async work is cancelled when startup gates fail.
+@pytest.mark.parametrize("failure_phase", ["readiness", "post-start"])
+def test_startup_failure_after_async_acceptance_stops_async_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start.d", "10-post.sh")
+    clock = FakeClock()
+    monkeypatch.setattr(entrypoint_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(entrypoint_module.time, "sleep", clock.sleep)
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        return FakeAsyncHandle(events)
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        assert child.poll() is None
+        events.append("readiness")
+        if failure_phase == "readiness":
+            raise ReadinessError(
+                (
+                    Diagnostic(
+                        path=("readiness",),
+                        code="readiness.timeout",
+                        message="ComfyUI did not become ready before timeout",
+                    ),
+                )
+            )
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        assert phase == "post-start"
+        events.append("post-start")
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "post-start", "10-post.sh"),
+                    code="runtime_hook.execution_failed",
+                    message="post-start failed in test",
+                ),
+            )
+        )
+
+    with pytest.raises(EntrypointError):
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            readiness_waiter=readiness_waiter,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_state_path=tmp_path / "state.json",
+        )
+
+    expected = ["async-start", "spawn", "readiness"]
+    if failure_phase == "post-start":
+        expected.append("post-start")
+    assert events == [*expected, "async-stop", "async-join"]
+
+
 def test_async_accepted_then_startup_signal_before_spawn_stops_async_without_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4339,7 +4565,13 @@ filename = "fail.bin"
     ) -> FakeChild:
         del argv, cwd, env, shell
         events.append("spawn")
-        return FakeChild(0)
+
+        class Child(FakeChild):
+            def wait(self) -> int:
+                assert backend.entered.wait(timeout=1)
+                return super().wait()
+
+        return Child(0)
 
     def runtime_async_queue_starter(
         plan: RuntimeFilePlan,
@@ -4374,7 +4606,6 @@ filename = "fail.bin"
 
     assert events == ["spawn"]
     assert len(handles) == 1
-    assert backend.entered.wait(timeout=1)
     handles[0].join(timeout=1)
     assert [call[0].filename for call in backend.calls] == ["fail.bin"]
 

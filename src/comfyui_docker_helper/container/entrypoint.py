@@ -51,6 +51,7 @@ from comfyui_docker_helper.container.runtime_files import (
     download_runtime_files,
     reconcile_runtime_file_plan,
     runtime_file_identity_digest,
+    runtime_file_staging_target,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     BAKED_RUNTIME_HOOKS_PATH,
@@ -122,6 +123,7 @@ class RuntimeDownloadRunner(Protocol):
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
 
 
@@ -438,6 +440,10 @@ def run_entrypoint(
                         return _normalize_signal_exit_code(
                             startup_shutdown.requested_signal
                         )
+                    _stop_runtime_async_download_queue_for_startup(
+                        async_handle,
+                        startup_shutdown=startup_shutdown,
+                    )
                     raise EntrypointError(
                         f"ComfyUI executable not found: {argv[0]}"
                     ) from error
@@ -450,6 +456,10 @@ def run_entrypoint(
                         return _normalize_signal_exit_code(
                             startup_shutdown.requested_signal
                         )
+                    _stop_runtime_async_download_queue_for_startup(
+                        async_handle,
+                        startup_shutdown=startup_shutdown,
+                    )
                     raise EntrypointError(
                         f"ComfyUI failed to start: {error}"
                     ) from error
@@ -474,20 +484,27 @@ def run_entrypoint(
                     completed,
                     startup_shutdown.requested_signal,
                 )
-            _wait_for_readiness_if_required(
-                hook_plan,
-                config=result.config,
-                child=completed,
-                readiness_waiter=readiness_waiter,
-            )
-            _run_post_start_hooks_if_required(
-                hook_plan,
-                runtime=runtime,
-                source_env=source_env,
-                child=completed,
-                runtime_hook_runner=runtime_hook_runner,
-                startup_shutdown=startup_shutdown,
-            )
+            try:
+                _wait_for_readiness_if_required(
+                    hook_plan,
+                    config=result.config,
+                    child=completed,
+                    readiness_waiter=readiness_waiter,
+                )
+                _run_post_start_hooks_if_required(
+                    hook_plan,
+                    runtime=runtime,
+                    source_env=source_env,
+                    child=completed,
+                    runtime_hook_runner=runtime_hook_runner,
+                    startup_shutdown=startup_shutdown,
+                )
+            except EntrypointError:
+                _stop_runtime_async_download_queue_for_startup(
+                    async_handle,
+                    startup_shutdown=startup_shutdown,
+                )
+                raise
             if startup_shutdown.requested_signal is not None:
                 _stop_runtime_async_download_queue_for_startup(
                     async_handle,
@@ -645,6 +662,10 @@ def _activate_runtime_file_plan(
         config=config,
         log=print,
         state_observer=state_writer,
+        extra_protected_staging_targets=tuple(
+            runtime_file_staging_target(item, runtime_file_identity_digest(item))
+            for item in queues.async_plan.items
+        ),
     )
     return queues
 
@@ -786,25 +807,33 @@ def _call_runtime_downloader(
     config: RuntimeConfig,
     log: Logger,
     state_observer: RuntimeDownloadStateObserver,
+    extra_protected_staging_targets: tuple[Path, ...] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
-    if _runtime_downloader_accepts_state_observer(runtime_downloader):
-        return runtime_downloader(
-            plan,
-            config=config,
-            log=log,
-            state_observer=state_observer,
-        )
-    return runtime_downloader(plan, config=config, log=log)
+    kwargs: dict[str, object] = {"config": config, "log": log}
+    if _runtime_downloader_accepts_keyword(runtime_downloader, "state_observer"):
+        kwargs["state_observer"] = state_observer
+    if _runtime_downloader_accepts_keyword(
+        runtime_downloader, "extra_protected_staging_targets"
+    ):
+        kwargs["extra_protected_staging_targets"] = extra_protected_staging_targets
+    return runtime_downloader(plan, **kwargs)
 
 
 def _runtime_downloader_accepts_state_observer(
     runtime_downloader: RuntimeDownloadRunner,
 ) -> bool:
+    return _runtime_downloader_accepts_keyword(runtime_downloader, "state_observer")
+
+
+def _runtime_downloader_accepts_keyword(
+    runtime_downloader: RuntimeDownloadRunner,
+    name: str,
+) -> bool:
     try:
         parameters = signature(runtime_downloader).parameters
     except (TypeError, ValueError):
         return True
-    return "state_observer" in parameters or any(
+    return name in parameters or any(
         parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
 
@@ -1111,7 +1140,12 @@ def _wait_with_signal_forwarding(
         signal.signal(signal.SIGTERM, forward)
         signal.signal(signal.SIGINT, forward)
         try:
-            return child.wait()
+            exit_code = child.wait()
+            _stop_runtime_async_download_queue(
+                async_handle,
+                cancel_requested=shutdown_state.stop_hooks_cancelled,
+            )
+            return exit_code
         except _ShutdownRequested as request:
             _stop_runtime_async_download_queue(
                 async_handle,

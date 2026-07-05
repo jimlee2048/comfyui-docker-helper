@@ -245,6 +245,7 @@ def process_runtime_file_downloads(
     state_observer: RuntimeDownloadStateObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
+    extra_protected_staging_targets: Iterable[Path] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Transfer runtime files to cdh-owned staging targets."""
     settings = runtime_downloader_settings(config)
@@ -252,7 +253,7 @@ def process_runtime_file_downloads(
     results: list[RuntimeFileDownloadResult] = []
     current_staging_targets = tuple(
         _runtime_staging_target(item) for item in plan.items
-    )
+    ) + tuple(extra_protected_staging_targets)
 
     for index, item in enumerate(plan.items, 1):
         if is_cancelled():
@@ -555,6 +556,7 @@ def download_runtime_files(
     startup_observer: RuntimeDownloadStartupObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
+    extra_protected_staging_targets: Iterable[Path] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
     is_cancelled = cancel_requested or _runtime_download_not_cancelled
@@ -580,6 +582,7 @@ def download_runtime_files(
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
+            extra_protected_staging_targets=extra_protected_staging_targets,
         )
 
     with aria2_downloader_factory(log=log) as aria2_backend:
@@ -598,6 +601,7 @@ def download_runtime_files(
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
+            extra_protected_staging_targets=extra_protected_staging_targets,
         )
 
 

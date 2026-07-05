@@ -25,6 +25,7 @@ _DEFAULT_OS_PACKAGES = (
     "git",
     "build-essential",
     "aria2",
+    "openssh-server",
 )
 
 

@@ -54,6 +54,7 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
         "git",
         "build-essential",
         "aria2",
+        "openssh-server",
     )
     assert plan.environment == ()
     assert plan.python.version == "3.12"

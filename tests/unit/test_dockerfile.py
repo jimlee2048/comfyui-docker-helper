@@ -61,14 +61,20 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \\
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     --mount=type=cache,target=/var/lib/apt,sharing=locked \\
-    apt-get update \\
+    printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d \\
+ && chmod +x /usr/sbin/policy-rc.d \\
+ && apt-get update \\
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- \\
     bash \\
     ca-certificates \\
     curl \\
     git \\
     build-essential \\
-    aria2
+    aria2 \\
+    openssh-server \\
+ && rm -f /usr/sbin/policy-rc.d \\
+ && test -x /usr/sbin/sshd
+
 RUN mkdir -p -- \\
     /workspace
 
@@ -157,7 +163,9 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update \
+    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+ && chmod +x /usr/sbin/policy-rc.d \
+ && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- \
     bash \
     ca-certificates \
@@ -165,8 +173,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     git \
     build-essential \
     aria2 \
+    openssh-server \
     --option-like \
-    'lib'"'"'special'
+    'lib'"'"'special' \
+ && rm -f /usr/sbin/policy-rc.d \
+ && test -x /usr/sbin/sshd
+
 RUN mkdir -p -- \
     '/work dir/$cash/"quote"/back\slash' \
     /opt
@@ -268,6 +280,25 @@ def test_minimal_dockerfile_matches_complete_deterministic_snapshot() -> None:
     assert "rm -rf /var/lib/apt/lists" not in first
     assert "readonly" not in first
     assert "normalized.toml" not in first
+
+
+def test_openssh_server_capability_is_installed_without_default_startup() -> None:
+    """Install sshd capability while keeping runtime activation out of Dockerfile."""
+    rendered = render_dockerfile(
+        build_render_plan(make_config()),
+        lockfile=make_lockfile(make_config()),
+    )
+
+    assert "    openssh-server \\\n" in rendered
+    assert " && test -x /usr/sbin/sshd\n" in rendered
+    assert "policy-rc.d" in rendered
+    assert "EXPOSE" not in rendered
+    assert "systemctl" not in rendered
+    assert "service ssh" not in rendered
+    assert "service sshd" not in rendered
+    assert "sshd -D" not in rendered
+    assert "/usr/sbin/sshd -D" not in rendered
+    assert "/usr/sbin/sshd" in rendered
 
 
 def test_stable_comfyui_and_cli_replay_use_locked_versions() -> None:

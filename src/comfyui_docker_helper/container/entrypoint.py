@@ -32,6 +32,11 @@ from comfyui_docker_helper.container.readiness import (
     wait_for_comfyui_readiness,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_diagnostics import (
+    runtime_error_reason,
+    runtime_source_host,
+    short_runtime_identity,
+)
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
     RuntimeDownloadObservedStatus,
@@ -41,6 +46,7 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFilePlan,
     RuntimeFilePlanError,
     RuntimeFilePlanItem,
+    RuntimeFileReconciliation,
     build_runtime_file_plan,
     download_runtime_files,
     reconcile_runtime_file_plan,
@@ -240,7 +246,7 @@ def start_runtime_async_download_queue(
     except Exception as error:
         raise RuntimeAsyncQueueStartupError(str(error)) from error
 
-    state_writer = _RuntimeDownloadStateWriter(runtime_state_path, state)
+    state_writer = _RuntimeDownloadStateWriter(runtime_state_path, state, log=log)
     accepted = threading.Event()
     stop_requested = threading.Event()
     startup_finished = threading.Event()
@@ -267,11 +273,15 @@ def start_runtime_async_download_queue(
                 cancel_requested=stop_requested.is_set,
                 backend_observer=observe_backend,
             )
+            log(f"Async runtime download queue finished: items={len(plan.items)}")
         except Exception as error:
             if not accepted.is_set():
                 startup_error.append(error)
             else:
-                log(f"WARNING: async runtime download worker failed: {error}")
+                log(
+                    "WARNING: async runtime download worker failed: "
+                    f"reason={runtime_error_reason(error)}"
+                )
         finally:
             startup_finished.set()
 
@@ -292,6 +302,7 @@ def start_runtime_async_download_queue(
         error = startup_error[0] if startup_error else RuntimeError("worker exited")
         raise RuntimeAsyncQueueStartupError(str(error)) from error
 
+    log(f"Async runtime download queue accepted: items={len(plan.items)}")
     return _RuntimeAsyncDownloadQueueHandle(
         thread=thread,
         accepted=accepted,
@@ -615,7 +626,9 @@ def _activate_runtime_file_plan(
         now=now,
         comfyui_path=runtime.comfyui_path,
     )
+    _log_runtime_download_reconciliation(reconciliation)
     write_runtime_state(runtime_state_path, reconciliation.state)
+    _log_runtime_download_reconciliation_persisted(reconciliation)
 
     queues = _split_runtime_download_queues(reconciliation.download_plan)
     if not queues.sync_plan.items:
@@ -624,6 +637,7 @@ def _activate_runtime_file_plan(
     state_writer = _RuntimeDownloadStateWriter(
         runtime_state_path,
         reconciliation.state,
+        log=print,
     )
     _call_runtime_downloader(
         runtime_downloader,
@@ -638,6 +652,36 @@ def _activate_runtime_file_plan(
 def _empty_runtime_download_queues() -> _RuntimeDownloadQueues:
     empty_plan = RuntimeFilePlan(items=())
     return _RuntimeDownloadQueues(sync_plan=empty_plan, async_plan=empty_plan)
+
+
+def _log_runtime_download_reconciliation(
+    reconciliation: RuntimeFileReconciliation,
+) -> None:
+    for item in reconciliation.items:
+        print(
+            "Runtime download reconcile: "
+            f"mode={item.item.download_mode} target={item.item.relative_target} "
+            f"status={item.status} scheduled={str(item.scheduled).lower()} "
+            f"source_host={runtime_source_host(item.item.url)} "
+            f"identity={short_runtime_identity(item.digest)}"
+        )
+
+
+def _log_runtime_download_reconciliation_persisted(
+    reconciliation: RuntimeFileReconciliation,
+) -> None:
+    async_items = [
+        item for item in reconciliation.items if item.item.download_mode == "async"
+    ]
+    async_scheduled = sum(1 for item in async_items if item.scheduled)
+    async_skipped = len(async_items) - async_scheduled
+    print(
+        "Runtime download reconciliation persisted: "
+        f"entries={len(reconciliation.state.downloads.entries)} "
+        f"async_scheduled={async_scheduled} async_skipped={async_skipped} "
+        f"stale_entries={len(reconciliation.stale_entry_digests)} "
+        f"stale_staging={len(reconciliation.stale_staging_candidates)}"
+    )
 
 
 def _split_runtime_download_queues(
@@ -663,6 +707,10 @@ def _start_runtime_async_download_queue(
 ) -> RuntimeAsyncDownloadQueueHandle | None:
     if not plan.items:
         return None
+    print(
+        "Async runtime download queue scheduled: "
+        f"items={len(plan.items)} policy={config.cdh.download_failure_policy}"
+    )
     try:
         return runtime_async_queue_starter(
             plan,
@@ -689,20 +737,29 @@ def _stop_runtime_async_download_queue(
     if handle is None or not handle.is_alive():
         return True
 
+    print("Async runtime download queue stop requested")
     handle.request_stop()
     deadline = monotonic() + timeout
     while handle.is_alive():
         if cancel_requested():
+            print(
+                "WARNING: Async runtime download queue stop interrupted; "
+                "terminating backends"
+            )
             handle.terminate_backends()
             return False
         now = monotonic()
         if now >= deadline:
-            print("WARNING: async runtime download worker did not stop in time")
+            print(
+                "WARNING: Async runtime download queue did not stop in "
+                f"{timeout:.1f}s; terminating backends"
+            )
             handle.terminate_backends()
             return False
         handle.join(timeout=min(poll_interval, deadline - now))
         if handle.is_alive():
             sleep(0)
+    print("Async runtime download queue stopped")
     return True
 
 
@@ -755,9 +812,16 @@ def _runtime_downloader_accepts_state_observer(
 class _RuntimeDownloadStateWriter:
     """Persist runtime download state transitions."""
 
-    def __init__(self, path: Path, state: RuntimeState) -> None:
+    def __init__(
+        self,
+        path: Path,
+        state: RuntimeState,
+        *,
+        log: Logger | None = None,
+    ) -> None:
         self._path = path
         self._state = state
+        self._log = log
 
     def __call__(
         self,
@@ -812,6 +876,13 @@ class _RuntimeDownloadStateWriter:
             downloads=RuntimeDownloadsState(entries=entries),
         )
         write_runtime_state(self._path, self._state)
+        if self._log is not None:
+            self._log(
+                "Runtime download state persisted: "
+                f"mode={item.download_mode} target={item.relative_target} "
+                f"status={updated_entry.status} attempts={updated_entry.attempts} "
+                f"identity={short_runtime_identity(digest)}"
+            )
 
 
 def _run_pre_start_hooks(

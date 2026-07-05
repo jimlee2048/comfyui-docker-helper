@@ -11,6 +11,11 @@ import pytest
 from pydantic import ValidationError
 
 from comfyui_docker_helper.container import runtime_state
+from comfyui_docker_helper.container.runtime_diagnostics import (
+    runtime_error_reason,
+    runtime_source_host,
+    short_runtime_identity,
+)
 from comfyui_docker_helper.container.runtime_state import (
     RUNTIME_STATE_SCHEMA_VERSION,
     RuntimeDownloadEntry,
@@ -373,6 +378,39 @@ def test_sanitize_last_error_redacts_and_truncates() -> None:
     assert "/var/lib/cdh/runtime/staging" not in sanitized
     assert len(sanitized) == 80
     assert sanitized.endswith("...")
+
+
+def test_runtime_diagnostics_source_host_and_short_identity_are_safe() -> None:
+    assert (
+        runtime_source_host(
+            "https://user:password@example.com:8443/path/file.bin?token=secret#frag"
+        )
+        == "example.com"
+    )
+    assert runtime_source_host("not a url") == "unknown"
+    assert (
+        short_runtime_identity(
+            "sha256:37b76480b800111122223333444455556666777788889999aaaabbbbccccdddd"
+        )
+        == "sha256:37b76480b800"
+    )
+
+
+def test_runtime_error_reason_redacts_known_secret_values() -> None:
+    reason = runtime_error_reason(
+        "failed https://user:pass@example.com/a.bin?token=url-secret "
+        "SSH_PASSWORD=hunter2 password=plain token:abc123 "
+        "Authorization: Bearer bearer-secret"
+    )
+
+    assert reason.startswith('"')
+    assert reason.endswith('"')
+    assert "https://user:pass@example.com" not in reason
+    assert "url-secret" not in reason
+    assert "hunter2" not in reason
+    assert "plain" not in reason
+    assert "abc123" not in reason
+    assert "bearer-secret" not in reason
 
 
 def test_state_json_does_not_serialize_source_urls_credentials_or_absolute_paths(

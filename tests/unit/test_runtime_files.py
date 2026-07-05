@@ -1398,6 +1398,22 @@ def test_runtime_file_download_retries_then_succeeds(tmp_path: Path) -> None:
         "Retrying runtime file download after attempt 1/2" in message
         for message in messages
     )
+    assert any(
+        "Runtime download attempt: mode=sync target=models/a.bin "
+        "backend=httpx attempt=1/2 status=downloading "
+        "source_host=example.com identity=sha256:" in message
+        for message in messages
+    )
+    assert any(
+        "Runtime download attempt failed: mode=sync target=models/a.bin "
+        "backend=httpx attempt=1/2 status=failed" in message
+        for message in messages
+    )
+    assert any(
+        "Runtime download completed: mode=sync target=models/a.bin "
+        "backend=httpx attempts=2 status=completed" in message
+        for message in messages
+    )
 
 
 @pytest.mark.parametrize(
@@ -1616,6 +1632,7 @@ def test_runtime_file_download_exhausted_fail_stops_later_files(
         comfyui_path=comfyui,
     )
     backend = FailingBackend()
+    messages: list[str] = []
 
     with pytest.raises(RuntimeFileDownloadError) as error:
         process_runtime_file_downloads(
@@ -1630,7 +1647,7 @@ def test_runtime_file_download_exhausted_fail_stops_later_files(
                 }
             ),
             backends={"httpx": backend},
-            log=lambda message: None,
+            log=messages.append,
         )
 
     assert len(backend.calls) == 2
@@ -1644,6 +1661,11 @@ def test_runtime_file_download_exhausted_fail_stops_later_files(
     assert not (comfyui / "models" / "a.bin").exists()
     assert not backend.calls[0][0].target.exists()
     assert not (comfyui / "models" / "b.bin").exists()
+    assert any(
+        "WARNING: Runtime download exhausted: mode=sync target=models/a.bin "
+        "backend=httpx attempts=2/2 policy=fail status=exhausted" in message
+        for message in messages
+    )
 
 
 def test_runtime_file_download_exhausted_continue_omits_failed_and_continues(
@@ -1715,6 +1737,75 @@ def test_runtime_file_download_exhausted_continue_omits_failed_and_continues(
         in message
         for message in messages
     )
+    assert any(
+        "WARNING: Runtime download exhausted: mode=sync target=models/a.bin "
+        "backend=httpx attempts=2/2 policy=continue status=exhausted" in message
+        for message in messages
+    )
+
+
+def test_runtime_file_download_diagnostics_do_not_leak_url_or_secret_values(
+    tmp_path: Path,
+) -> None:
+    class SecretFailingBackend(FakeDownloadBackend):
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(b"partial")
+            raise TransferDownloadFilesError(
+                "failed https://example.com/a.bin?token=raw-token "
+                "password=hunter2 Authorization: Bearer bearer-secret"
+            )
+
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": (
+                            "https://user:source-password@example.com/a.bin"
+                            "?token=source-token#fragment"
+                        ),
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    messages: list[str] = []
+
+    with pytest.raises(RuntimeFileDownloadError):
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {
+                    "cdh": {
+                        "default_downloader": "httpx",
+                        "download_max_attempts": 1,
+                        "download_failure_policy": "fail",
+                    }
+                }
+            ),
+            backends={"httpx": SecretFailingBackend()},
+            log=messages.append,
+        )
+
+    output = "\n".join(messages)
+    assert "source_host=example.com" in output
+    assert "https://user:source-password@example.com" not in output
+    assert "source-password" not in output
+    assert "source-token" not in output
+    assert "fragment" not in output
+    assert "raw-token" not in output
+    assert "hunter2" not in output
+    assert "bearer-secret" not in output
 
 
 def test_runtime_file_download_continue_policy_keeps_plain_download_error_fatal(
@@ -2295,6 +2386,69 @@ def test_runtime_file_download_continue_policy_keeps_atomic_place_error_fatal(
     assert [(item.path, item.code) for item in error.value.diagnostics] == [
         (("files", 0, "target"), "runtime_file.final_replace_failed")
     ]
+    assert not (comfyui / "models" / "a.bin").exists()
+    assert not backend.calls[0][0].target.exists()
+
+
+def test_runtime_file_download_post_transfer_runtime_error_observes_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                        "download_mode": "async",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = FakeDownloadBackend(payload=b"new")
+    messages: list[str] = []
+    observed_states: list[str] = []
+    original_replace = Path.replace
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        if self == _staging_target(plan.items[0]):
+            raise OSError("replace failed in test")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {
+                    "cdh": {
+                        "default_downloader": "httpx",
+                        "download_failure_policy": "fail",
+                    }
+                }
+            ),
+            backends={"httpx": backend},
+            log=messages.append,
+            state_observer=lambda item, status, error=None: observed_states.append(
+                status
+            ),
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.final_replace_failed")
+    ]
+    assert observed_states == ["downloading", "exhausted"]
+    assert not any(
+        "Async runtime download queue stopping: reason=download_exhausted" in message
+        for message in messages
+    )
     assert not (comfyui / "models" / "a.bin").exists()
     assert not backend.calls[0][0].target.exists()
 

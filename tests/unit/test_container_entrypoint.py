@@ -1134,7 +1134,7 @@ filename = "async.bin"
     ]
 
 
-def test_async_stop_timeout_is_bounded() -> None:
+def test_async_stop_timeout_is_bounded(capsys: pytest.CaptureFixture[str]) -> None:
     events: list[str] = []
     handle = FakeAsyncHandle(events, complete_on_join=False)
     now = 0.0
@@ -1163,6 +1163,48 @@ def test_async_stop_timeout_is_bounded() -> None:
         "async-terminate",
     ]
     assert now == pytest.approx(0.2)
+    output = capsys.readouterr().out
+    assert "Async runtime download queue stop requested" in output
+    assert (
+        "WARNING: Async runtime download queue did not stop in 0.2s; "
+        "terminating backends"
+    ) in output
+
+
+def test_async_stop_logs_stopped(capsys: pytest.CaptureFixture[str]) -> None:
+    events: list[str] = []
+    handle = FakeAsyncHandle(events)
+
+    stopped = entrypoint_module._stop_runtime_async_download_queue(
+        handle,
+        cancel_requested=lambda: False,
+    )
+
+    assert stopped is True
+    assert events == ["async-stop", "async-join"]
+    output = capsys.readouterr().out
+    assert "Async runtime download queue stop requested" in output
+    assert "Async runtime download queue stopped" in output
+
+
+def test_async_stop_interrupted_terminates_backends(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[str] = []
+    handle = FakeAsyncHandle(events, complete_on_join=False)
+
+    stopped = entrypoint_module._stop_runtime_async_download_queue(
+        handle,
+        cancel_requested=lambda: True,
+    )
+
+    assert stopped is False
+    assert events == ["async-stop", "async-terminate"]
+    output = capsys.readouterr().out
+    assert "Async runtime download queue stop requested" in output
+    assert (
+        "WARNING: Async runtime download queue stop interrupted; terminating backends"
+    ) in output
 
 
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGINT])
@@ -3175,6 +3217,7 @@ filename = "model.bin"
 
 def test_internal_async_plan_exercises_active_state_gate_without_download(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     runtime = _runtime(tmp_path)
     state_path = tmp_path / "state.json"
@@ -3217,10 +3260,20 @@ def test_internal_async_plan_exercises_active_state_gate_without_download(
     assert entry.target == "models/async.bin"
     assert entry.download_mode == "async"
     assert entry.status == "pending"
+    output = capsys.readouterr().out
+    assert (
+        "Runtime download reconcile: mode=async target=models/async.bin "
+        "status=pending scheduled=true source_host=example.com identity=sha256:"
+    ) in output
+    assert (
+        "Runtime download reconciliation persisted: entries=1 async_scheduled=1 "
+        "async_skipped=0 stale_entries=0 stale_staging=0"
+    ) in output
 
 
 def test_public_async_runtime_file_records_pending_without_sync_download(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
@@ -3295,6 +3348,8 @@ filename = "async.bin"
     assert [item.relative_target for item in async_plans[0].items] == [
         "models/async.bin"
     ]
+    output = capsys.readouterr().out
+    assert "Async runtime download queue scheduled: items=1 policy=continue" in output
     assert entry.target == "models/async.bin"
     assert entry.download_mode == "async"
     assert entry.status == "pending"
@@ -3972,13 +4027,14 @@ def test_default_async_queue_successful_download_updates_state_and_final_file(
     backend = AsyncBackend()
     backend.payloads["model.bin"] = b"async-bytes"
     _install_async_backend(monkeypatch, backend)
+    messages: list[str] = []
 
     handle = entrypoint_module.start_runtime_async_download_queue(
         plan,
         config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
         runtime=runtime,
         runtime_state_path=state_path,
-        log=lambda message: None,
+        log=messages.append,
     )
     handle.join(timeout=1)
 
@@ -3991,6 +4047,24 @@ def test_default_async_queue_successful_download_updates_state_and_final_file(
     assert entry.status == "completed"
     assert entry.attempts == 1
     assert entry.last_error is None
+    assert any(
+        "Async runtime download queue accepted: items=1" in message
+        for message in messages
+    )
+    assert any(
+        "Runtime download completed: mode=async target=models/model.bin "
+        "backend=httpx attempts=1 status=completed" in message
+        for message in messages
+    )
+    assert any(
+        "Async runtime download queue finished: items=1" in message
+        for message in messages
+    )
+    assert any(
+        "Runtime download state persisted: mode=async target=models/model.bin "
+        "status=completed attempts=1 identity=sha256:" in message
+        for message in messages
+    )
 
 
 def test_async_retry_success_records_attempts_and_completion(
@@ -4140,6 +4214,7 @@ def test_async_exhausted_continue_records_failure_and_completes_later_file(
     backend.failures["a.bin"] = None
     backend.payloads["b.bin"] = b"later"
     _install_async_backend(monkeypatch, backend)
+    messages: list[str] = []
 
     handle = entrypoint_module.start_runtime_async_download_queue(
         plan,
@@ -4154,7 +4229,7 @@ def test_async_exhausted_continue_records_failure_and_completes_later_file(
         ),
         runtime=runtime,
         runtime_state_path=state_path,
-        log=lambda message: None,
+        log=messages.append,
     )
     handle.join(timeout=1)
 
@@ -4167,6 +4242,15 @@ def test_async_exhausted_continue_records_failure_and_completes_later_file(
     assert not _runtime_file_staging_target(first).exists()
     assert entries["models/b.bin"].status == "completed"
     assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
+    assert any(
+        "WARNING: Runtime download exhausted: mode=async target=models/a.bin "
+        "backend=httpx attempts=2/2 policy=continue status=exhausted" in message
+        for message in messages
+    )
+    assert not any(
+        "Async runtime download queue stopping: reason=download_exhausted" in message
+        for message in messages
+    )
 
 
 def test_async_exhausted_fail_records_failure_and_leaves_later_file_pending(
@@ -4210,7 +4294,13 @@ def test_async_exhausted_fail_records_failure_and_leaves_later_file_pending(
     assert entries["models/b.bin"].status == "pending"
     assert not (runtime.comfyui_path / "models" / "b.bin").exists()
     assert any(
-        "async runtime download worker failed" in message for message in messages
+        "WARNING: Async runtime download queue stopping: "
+        "reason=download_exhausted policy=fail target=models/a.bin pending=1" in message
+        for message in messages
+    )
+    assert any(
+        "WARNING: async runtime download worker failed: reason=" in message
+        for message in messages
     )
 
 

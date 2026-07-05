@@ -474,7 +474,7 @@ def test_build_time_downloads_do_not_require_runtime_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Host build file downloads render without v0.4 runtime state wiring."""
+    """Host build file downloads render without runtime state wiring."""
     config = write_config(
         tmp_path,
         MINIMAL_CONFIG

@@ -28,7 +28,7 @@ tests that explicitly use it.
 
 ## Install for local use
 
-After a release is available on PyPI, install the CLI with one of:
+Install the CLI from PyPI-compatible package indexes with one of:
 
 ```bash
 uv tool install comfyui-docker-helper

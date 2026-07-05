@@ -64,7 +64,7 @@ def test_minimal_config_returns_complete_normalized_plan(
 def test_result_bakes_host_async_download_mode_with_scheduling_warnings(
     write_config: Callable[[str], Path],
 ) -> None:
-    """Runtime download-mode fields are now part of baked runtime defaults."""
+    """Runtime download-mode fields are baked into runtime defaults."""
     document = (
         MINIMAL_CONFIG
         + """

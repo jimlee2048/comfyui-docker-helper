@@ -3,7 +3,7 @@
 # minimal.toml usually have defaults, but they are included here for reference.
 
 [compute_platform]
-# Required. Currently only "cuda" is supported.
+# Required. Supported: "cuda".
 type = "cuda"
 
 [compute_platform.cuda]

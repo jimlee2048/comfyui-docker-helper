@@ -86,7 +86,7 @@ def test_full_example_references_existing_hook_scripts() -> None:
 
 
 def test_full_example_covers_all_public_config_fields() -> None:
-    """Document every currently supported top-level config field in full.toml."""
+    """Document every public top-level config field in full.toml."""
     document = _read_toml(EXAMPLES / "full.toml")
 
     assert set(document) == {

@@ -398,7 +398,7 @@ def test_real_aria2_smoke_when_available(
     monkeypatch: pytest.MonkeyPatch,
     local_http_server: tuple[str, RecordingHttpServer],
 ) -> None:
-    """Opt-in evidence that the real aria2 binary works end to end."""
+    """Opt-in smoke coverage for the real aria2 binary end to end."""
     if os.environ.get("CDH_RUN_ARIA2_SMOKE") != "1":
         pytest.skip("set CDH_RUN_ARIA2_SMOKE=1 to run the real aria2 smoke")
 

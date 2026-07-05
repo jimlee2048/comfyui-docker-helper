@@ -1095,7 +1095,7 @@ def test_global_downloader_enum_and_numeric_ranges_are_validated() -> None:
 
 
 def test_async_download_mode_is_accepted_by_public_schema() -> None:
-    """Accept v0.4 runtime async scheduling fields in public config."""
+    """Accept runtime async scheduling fields in public config."""
     config = Config.model_validate(
         {
             "compute_platform": {

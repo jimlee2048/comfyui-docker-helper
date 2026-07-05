@@ -220,7 +220,7 @@ class _RuntimeDownloadQueues:
 
 
 class RuntimeAsyncQueueStartupError(RuntimeError):
-    """Async queue infrastructure failed before accepting planned work."""
+    """Async queue infrastructure failed before accepting downloads."""
 
 
 @dataclass(frozen=True, slots=True)

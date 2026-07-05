@@ -2796,7 +2796,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
     unreadable_mtime = staging_dir / f"cdh-{unreadable_digest}.part"
     symlink_artifact = staging_dir / f"cdh-{'d' * 64}.part"
     user_file = staging_dir / "user-file.txt"
-    old_v03 = staging_dir / "old.bin.cdh-download"
+    unrecognized_staging_artifact = staging_dir / "old.bin.cdh-download"
     outside = comfyui / "models" / f"cdh-{'e' * 64}.part"
     for path in (
         current_control,
@@ -2806,7 +2806,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
         fresh,
         unreadable_mtime,
         user_file,
-        old_v03,
+        unrecognized_staging_artifact,
         outside,
     ):
         path.write_bytes(b"keep-or-clean")
@@ -2821,7 +2821,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
         unreadable_mtime,
         symlink_artifact,
         user_file,
-        old_v03,
+        unrecognized_staging_artifact,
         outside,
     ):
         _touch_mtime(path, old_mtime)
@@ -2852,7 +2852,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
     assert unreadable_mtime.name in {path.name for path in staging_dir.iterdir()}
     assert symlink_artifact.is_symlink()
     assert user_file.read_bytes() == b"keep-or-clean"
-    assert old_v03.read_bytes() == b"keep-or-clean"
+    assert unrecognized_staging_artifact.read_bytes() == b"keep-or-clean"
     assert outside.read_bytes() == b"keep-or-clean"
     assert (comfyui / "models" / "a.bin").read_bytes() == b"new"
 

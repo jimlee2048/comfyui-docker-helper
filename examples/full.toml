@@ -67,6 +67,11 @@ default_downloader = "aria2"
 # Default: "sync". Supported: "sync", "async".
 # Per-file download_mode values override this default.
 default_download_mode = "sync"
+# Default: 3. Total attempts per file for each host build or container start.
+download_max_attempts = 3
+# Host build default: "fail". Runtime default: "continue".
+# Supported: "continue", "fail".
+download_failure_policy = "fail"
 
 [cdh.downloader.httpx]
 # Default: 60. Seconds for each HTTPX request attempt.

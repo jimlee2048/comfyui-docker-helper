@@ -1,8 +1,8 @@
 # ComfyUI Build Smoke Fixtures
 
-These fixtures define reusable ComfyUI build smoke scenarios. They use real
-Docker Buildx, real comfy-cli behavior, and real ComfyUI-Manager behavior when
-executed. They do not require private tokens.
+These fixtures define reusable, opt-in ComfyUI build smoke scenarios. They use
+real Docker Buildx, real comfy-cli behavior, and real ComfyUI-Manager behavior
+when executed. They do not require private tokens.
 
 The TOML fixture files are safe to validate locally with the lightweight tests in
 `tests/smoke/`; those tests do not run Docker. The `cdh host build` commands
@@ -43,6 +43,12 @@ Concrete smoke inputs live under `tests/fixtures/comfyui-build/`.
 | S8 | httpx files | `tests/fixtures/comfyui-build/configs/httpx-files.toml` |
 | S9 | aria2 files | `tests/fixtures/comfyui-build/configs/aria2-files.toml` |
 | S10 | full workflow | `tests/fixtures/comfyui-build/configs/full.toml` |
+
+The default fixture configs are build-focused. Runtime download behavior,
+including async queueing, `/var/lib/cdh/runtime/state.json`, target-local
+`.cdh-staging/`, retry/failure policy, and optional SSH activation, should be
+verified by startup smoke runs against a built image when those behaviors are
+in scope.
 
 ## Canonical Build Commands
 
@@ -123,6 +129,22 @@ cdh host build -f tests/fixtures/comfyui-build/configs/full.toml -t cdh-smoke:fu
 | S8 | httpx downloader | local public/small HTTP server or small public asset, redirect, overwrite, skip | S8 command | build log, target file contents/path, request log, overwrite/skip details | Real httpx backend covers download, redirect, overwrite, skip, and target path. |
 | S9 | aria2 downloader | local public/small HTTP asset through aria2 backend | S9 command | aria2 RPC log, process cleanup check, target file, no secret in logs | Real aria2 backend succeeds; no persistent RPC config/process remains; secret is absent from captured logs/config. |
 | S10 | mixed full workflow | nodes, hooks, httpx, aria2, custom env, entrypoint startup | S10 command | full build log, context/image inspection, startup check | Combined workflow succeeds; serial order and backend override details are captured; image starts configured ComfyUI from `WORKSPACE` through the cdh entrypoint. |
+
+## Runtime Startup Smoke Notes
+
+Startup smoke checks are opt-in because they run containers and may require
+host port publishing, network access, persistent volumes, and an SSH client.
+When checking runtime downloads, mount a persistent volume or directory at
+`/var/lib/cdh/runtime` to preserve `state.json` across restart scenarios, and
+inspect target-local `.cdh-staging/` directories only for cdh-owned partial
+files. Async downloads should not block ComfyUI readiness or post-start hooks
+after the queue starts.
+
+When checking SSH, enable it with runtime config or environment variables and
+provide a password or public key. Login is for `root`, and Docker host port
+publishing is explicit deployment configuration such as `-p 2222:22`; cdh does
+not publish host ports. Do not record real passwords, private keys, or private
+tokens in smoke notes.
 
 ## Resource And Cleanup Guidance
 

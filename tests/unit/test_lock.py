@@ -40,7 +40,7 @@ def make_config() -> Config:
 
 
 def make_lockfile() -> Lockfile:
-    """Return a representative resolved lockfile."""
+    """Return a representative resolved lockfile with both lock digests present."""
     return Lockfile(
         schema_version=1,
         manifest=LockManifest(
@@ -71,7 +71,7 @@ def make_lockfile() -> Lockfile:
 
 
 def test_lockfile_round_trips_through_deterministic_toml(tmp_path: Path) -> None:
-    """Round-trip the public lockfile shape through bytes and path helpers."""
+    """Round-trip the public model shape, including manifest digest fields."""
     lockfile = make_lockfile()
     document = dump_lockfile_toml(lockfile)
     path = tmp_path / "config.lock.toml"
@@ -104,7 +104,7 @@ def test_nightly_lockfile_omits_stable_comfyui_version() -> None:
 
 
 def test_lockfile_serialization_is_deterministic() -> None:
-    """Emit stable TOML field order and array-table shape."""
+    """Emit stable TOML field order for reproducible lockfile diffs."""
     assert dump_lockfile_toml(make_lockfile()) == (
         "schema_version = 1\n"
         "\n"
@@ -612,7 +612,7 @@ def test_lock_domain_helper_rejects_duplicate_git_urls() -> None:
 
 
 def test_lock_input_digest_rejects_duplicates_before_hashing() -> None:
-    """Fail deterministically instead of hashing an ambiguous minimal lock domain."""
+    """Reject ambiguous lock-domain keys before producing a stable digest."""
     config = make_config()
     config.comfyui.custom_nodes = [
         RegistryCustomNodeConfig.model_validate({"type": "registry", "id": "same"}),

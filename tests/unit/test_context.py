@@ -252,6 +252,8 @@ def test_materialized_directories_ignore_process_umask(tmp_path: Path) -> None:
     assert directory_modes["packages/cdh/src/comfyui_docker_helper"] == 0o755
 
 
+# Marker and overwrite tests guard the boundary between CDH-managed
+# contexts and caller-owned filesystem content.
 def test_write_build_context_recursively_creates_parent_and_marker(
     tmp_path: Path,
 ) -> None:
@@ -473,6 +475,8 @@ def test_write_build_context_rejects_script_source_symlinks_before_mutation(
     assert not (tmp_path / "missing").exists()
 
 
+# Hook traversal diagnostics must stay wrapped as context errors, including
+# time-of-check/time-of-use changes after plan validation.
 def test_write_build_context_wraps_missing_hook_after_plan_validation(
     tmp_path: Path,
 ) -> None:
@@ -531,6 +535,8 @@ def test_write_build_context_wraps_runtime_hook_lstat_error(
     assert not (tmp_path / "missing").exists()
 
 
+# Keep materialization aligned with the host preflight contract for allowed
+# runtime hook file extensions.
 def test_write_build_context_rejects_unsupported_runtime_hook_extension(
     tmp_path: Path,
 ) -> None:
@@ -631,6 +637,8 @@ def test_materialize_build_context_wraps_runtime_hook_copy_lstat_error(
         )
 
 
+# Rollback and temporary-backup tests protect failed renders from replacing
+# the previous valid context or leaking recovery state.
 def test_expected_context_cleans_temp_dir_when_materialization_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -836,6 +844,8 @@ def test_feature_artifacts_are_materialized_conditionally(
     assert optional == expected
 
 
+# Packaging smoke coverage verifies the projected package works when treated
+# as the artifact Docker builds and installs.
 def test_generated_package_builds_and_installs_as_a_wheel(tmp_path: Path) -> None:
     """The projected package is independently buildable and installable."""
     uv = shutil.which("uv")

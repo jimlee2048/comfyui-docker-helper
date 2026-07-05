@@ -187,7 +187,7 @@ def test_rendered_files_context_downloads_from_local_http(
     monkeypatch: pytest.MonkeyPatch,
     local_http_server: tuple[str, RecordingHttpServer],
 ) -> None:
-    """Render public config, then consume root artifacts with HTTPX."""
+    """Cover render-to-container artifacts and HTTPX download integration."""
     base_url, server = local_http_server
     server.routes = {
         "/first.bin": b"new-first",
@@ -253,7 +253,7 @@ def test_download_files_aria2_overwrite_removes_target_and_control_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify aria2 overwrite cleanup through the download-files entry point."""
+    """Cover aria2 overwrite cleanup through the download-files entry point."""
     comfyui_path = tmp_path / "ComfyUI"
     target = comfyui_path / "models" / "model.bin"
     target.parent.mkdir(parents=True)
@@ -311,7 +311,7 @@ def test_download_files_rejects_tampered_paths_without_writing_outside(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep root config containment even if file paths are tampered."""
+    """Keep container file writes contained even if artifacts are tampered."""
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
     config, lock = write_file_root_artifacts(
@@ -350,7 +350,7 @@ def test_download_files_cleans_up_aria2_context_on_interruption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run aria2 cleanup even when processing is interrupted."""
+    """Container integration keeps aria2 cleanup on interruption."""
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
     config, lock = write_file_root_artifacts(
@@ -398,7 +398,7 @@ def test_real_aria2_smoke_when_available(
     monkeypatch: pytest.MonkeyPatch,
     local_http_server: tuple[str, RecordingHttpServer],
 ) -> None:
-    """Smoke real aria2c when the binary is available on the host."""
+    """Opt-in evidence that the real aria2 binary works end to end."""
     if os.environ.get("CDH_RUN_ARIA2_SMOKE") != "1":
         pytest.skip("set CDH_RUN_ARIA2_SMOKE=1 to run the real aria2 smoke")
 

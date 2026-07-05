@@ -1,7 +1,5 @@
 """Tests for safe deterministic Dockerfile rendering."""
 
-# ruff: noqa: E501 -- Exact Dockerfile snapshots contain required long instructions.
-
 import json
 import subprocess
 from collections.abc import Callable
@@ -33,213 +31,35 @@ from comfyui_docker_helper.rendering import (
     serialize_posix_shell_argument,
 )
 
-MINIMAL_DOCKERFILE = """# syntax=docker/dockerfile:1.7
-
-ARG UV_IMAGE_TAG=latest
-ARG CUDA_IMAGE_TAG=12.9.2-cudnn-devel-ubuntu24.04
-FROM ghcr.io/astral-sh/uv:${UV_IMAGE_TAG} AS uv
-FROM nvidia/cuda:${CUDA_IMAGE_TAG}
-
-COPY --from=uv /uv /uvx /bin/
-
-ARG PYTHON_VERSION=3.12
-ARG PYTORCH_VERSION=2.10
-ARG PYTORCH_WHEEL_TAG=cu129
-ARG COMFY_CLI_VERSION=latest
-ARG COMFYUI_VERSION=latest
-ARG UV_LINK_MODE=copy
-ARG UV_PYTHON_CACHE_DIR=/root/.cache/uv/python
-
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="/opt/venv/bin:${PATH}"
-ENV WORKSPACE=/workspace
-ENV COMFYUI_PATH=/workspace/ComfyUI
-
-# Keep APT downloads so BuildKit cache mounts can retain and reuse them.
-RUN rm -f /etc/apt/apt.conf.d/docker-clean \\
- && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \\
-    printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d \\
- && chmod +x /usr/sbin/policy-rc.d \\
- && apt-get update \\
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- \\
-    bash \\
-    ca-certificates \\
-    curl \\
-    git \\
-    build-essential \\
-    aria2 \\
-    openssh-server \\
- && rm -f /etc/ssh/ssh_host_* \\
- && rm -f /usr/sbin/policy-rc.d \\
- && test -x /usr/sbin/sshd
-
-RUN mkdir -p -- \\
-    /workspace
-
-RUN --mount=type=cache,target=/root/.cache/uv \\
-    uv python install -- "${PYTHON_VERSION}" \\
- && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed \\
-      --index-url https://pypi.org/simple
-
-RUN --mount=type=cache,target=/root/.cache/uv \\
-    uv pip install --python "$VIRTUAL_ENV/bin/python" \\
-      --index-url https://download.pytorch.org/whl/${PYTORCH_WHEEL_TAG} \\
-      -- \\
-      "torch==${PYTORCH_VERSION}"
-RUN --mount=type=cache,target=/root/.cache/uv \\
-    uv pip install --python "$VIRTUAL_ENV/bin/python" \\
-      --index-url https://pypi.org/simple \\
-      -- comfy-cli==1.5.0
-
-RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install \\
-      --nvidia \\
-      --version \\
-      0.26.0 \\
-      --skip-torch-or-directml \\
-      --fast-deps
-RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_commit" = 1111111111111111111111111111111111111111
-
-RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \\
-    --mount=type=cache,target=/root/.cache/uv \\
-    uv pip install --python "$VIRTUAL_ENV/bin/python" \\
-      --index-url https://pypi.org/simple \\
-      -- /tmp/cdh/packages/cdh
-
-COPY runtime/config.toml /opt/cdh/runtime/config.toml
-
-WORKDIR /workspace
-ENTRYPOINT ["cdh", "container", "entrypoint"]
-"""
-
-_NODE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
-    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
-    cdh container install-custom-nodes \
-      --config /tmp/cdh/config.toml \
-      --lock /tmp/cdh/config.lock.toml
-"""
-_FILE_ONLY_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
-    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
-    cdh container download-files \
-      --config /tmp/cdh/config.toml \
-      --lock /tmp/cdh/config.lock.toml
-"""
-_HOOK_LAYER = r"""RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
-    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
-    --mount=type=bind,source=scripts,target=/tmp/cdh/scripts \
-    cdh container install-custom-nodes \
-      --config /tmp/cdh/config.toml \
-      --lock /tmp/cdh/config.lock.toml \
-      --scripts-dir /tmp/cdh/scripts
-"""
-
-FULL_DOCKERFILE = r"""# syntax=docker/dockerfile:1.7
-
-ARG UV_IMAGE_TAG=0.11.23
-ARG CUDA_IMAGE_TAG=12.9.2-cudnn-devel-ubuntu24.04
-FROM ghcr.io/astral-sh/uv:${UV_IMAGE_TAG} AS uv
-FROM nvidia/cuda:${CUDA_IMAGE_TAG}
-
-COPY --from=uv /uv /uvx /bin/
-
-ARG PYTHON_VERSION="3.13 rc"
-ARG PYTORCH_VERSION=2.11
-ARG PYTORCH_WHEEL_TAG=cu129
-ARG COMFY_CLI_VERSION=2.0
-ARG COMFYUI_VERSION=1.2.3
-ARG UV_LINK_MODE=copy
-ARG UV_PYTHON_CACHE_DIR=/root/.cache/uv/python
-
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="/opt/venv/bin:${PATH}"
-ENV WORKSPACE="/work dir/\$cash/\"quote\"/back\\slash"
-ENV COMFYUI_PATH="/opt/Comfy UI"
-ENV SAFE_VALUE="space \$cash \"quote\" \\ backtick` ;"
-
-# Keep APT downloads so BuildKit cache mounts can retain and reuse them.
-RUN rm -f /etc/apt/apt.conf.d/docker-clean \
- && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
- && chmod +x /usr/sbin/policy-rc.d \
- && apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- \
-    bash \
-    ca-certificates \
-    curl \
-    git \
-    build-essential \
-    aria2 \
-    openssh-server \
-    --option-like \
-    'lib'"'"'special' \
- && rm -f /etc/ssh/ssh_host_* \
- && rm -f /usr/sbin/policy-rc.d \
- && test -x /usr/sbin/sshd
-
-RUN mkdir -p -- \
-    '/work dir/$cash/"quote"/back\slash' \
-    /opt
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv python install -- "${PYTHON_VERSION}" \
- && uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed \
-      --index-url https://pypi.org/simple
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" \
-      --index-url https://download.pytorch.org/whl/${PYTORCH_WHEEL_TAG} \
-      -- \
-      "torch==${PYTORCH_VERSION}" \
-      --pre \
-      torchvision==1
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" \
-      --index-url https://pypi.org/simple \
-      -- \
-      --index-url=https://example.invalid \
-      'a'"'"'b'
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" \
-      --index-url https://pypi.org/simple \
-      -- comfy-cli==1.5.0
-
-RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install \
-      --nvidia \
-      --version \
-      0.26.0 \
-      --skip-torch-or-directml \
-      --fast-deps
-RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_commit" = 1111111111111111111111111111111111111111
-
-RUN --mount=type=bind,source=packages/cdh,target=/tmp/cdh/packages/cdh \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" \
-      --index-url https://pypi.org/simple \
-      -- /tmp/cdh/packages/cdh
-
-COPY runtime/config.toml /opt/cdh/runtime/config.toml
-
-RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
-    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
-    --mount=type=bind,source=scripts,target=/tmp/cdh/scripts \
-    cdh container install-custom-nodes \
-      --config /tmp/cdh/config.toml \
-      --lock /tmp/cdh/config.lock.toml \
-      --scripts-dir /tmp/cdh/scripts
-RUN --mount=type=bind,source=config.toml,target=/tmp/cdh/config.toml \
-    --mount=type=bind,source=config.lock.toml,target=/tmp/cdh/config.lock.toml \
-    cdh container download-files \
-      --config /tmp/cdh/config.toml \
-      --lock /tmp/cdh/config.lock.toml
-
-WORKDIR "/work dir/\$cash/\"quote\"/back\\slash"
-ENTRYPOINT ["cdh", "container", "entrypoint"]
-"""
+_NODE_ONLY_LAYER = (
+    "RUN --mount=type=bind,source=config.toml,"
+    "target=/tmp/cdh/config.toml \\\n"
+    "    --mount=type=bind,source=config.lock.toml,"
+    "target=/tmp/cdh/config.lock.toml \\\n"
+    "    cdh container install-custom-nodes \\\n"
+    "      --config /tmp/cdh/config.toml \\\n"
+    "      --lock /tmp/cdh/config.lock.toml\n"
+)
+_FILE_ONLY_LAYER = (
+    "RUN --mount=type=bind,source=config.toml,"
+    "target=/tmp/cdh/config.toml \\\n"
+    "    --mount=type=bind,source=config.lock.toml,"
+    "target=/tmp/cdh/config.lock.toml \\\n"
+    "    cdh container download-files \\\n"
+    "      --config /tmp/cdh/config.toml \\\n"
+    "      --lock /tmp/cdh/config.lock.toml\n"
+)
+_HOOK_LAYER = (
+    "RUN --mount=type=bind,source=config.toml,"
+    "target=/tmp/cdh/config.toml \\\n"
+    "    --mount=type=bind,source=config.lock.toml,"
+    "target=/tmp/cdh/config.lock.toml \\\n"
+    "    --mount=type=bind,source=scripts,target=/tmp/cdh/scripts \\\n"
+    "    cdh container install-custom-nodes \\\n"
+    "      --config /tmp/cdh/config.toml \\\n"
+    "      --lock /tmp/cdh/config.lock.toml \\\n"
+    "      --scripts-dir /tmp/cdh/scripts\n"
+)
 
 
 def make_config() -> Config:
@@ -256,10 +76,19 @@ def make_config() -> Config:
     )
 
 
-# Dockerfile snapshots and feature-layer tests protect layer order, bind mounts,
-# copy boundaries, quoting, and the entrypoint shape.
-def test_minimal_dockerfile_matches_complete_deterministic_snapshot() -> None:
-    """Render every fixed minimal instruction exactly once and in spec order."""
+def assert_fragments_in_order(rendered: str, fragments: list[str]) -> None:
+    """Assert each fragment appears after the previous matching fragment."""
+    position = 0
+    for fragment in fragments:
+        next_position = rendered.find(fragment, position)
+        assert next_position >= 0, fragment
+        position = next_position + len(fragment)
+
+
+# Dockerfile tests target layer order, bind mounts, copy boundaries, quoting, and
+# the runtime entrypoint shape without pinning the whole rendered file.
+def test_minimal_dockerfile_has_deterministic_fragments_and_order() -> None:
+    """Render the minimal Dockerfile deterministically with required layers."""
     config = make_config()
     plan = build_render_plan(config)
 
@@ -268,8 +97,61 @@ def test_minimal_dockerfile_matches_complete_deterministic_snapshot() -> None:
     first = render_dockerfile(plan, lockfile=lockfile)
     second = render_dockerfile(plan, lockfile=lockfile)
 
-    assert first == MINIMAL_DOCKERFILE
     assert second == first
+    assert first.startswith(
+        "# syntax=docker/dockerfile:1.7\n\n"
+        "ARG UV_IMAGE_TAG=latest\n"
+        "ARG CUDA_IMAGE_TAG=12.9.2-cudnn-devel-ubuntu24.04\n"
+        "FROM ghcr.io/astral-sh/uv:${UV_IMAGE_TAG} AS uv\n"
+        "FROM nvidia/cuda:${CUDA_IMAGE_TAG}\n"
+    )
+    assert "COPY --from=uv /uv /uvx /bin/" in first
+    assert "ARG PYTHON_VERSION=3.12" in first
+    assert "ARG PYTORCH_VERSION=2.10" in first
+    assert "ARG COMFY_CLI_VERSION=latest" in first
+    assert "ARG COMFYUI_VERSION=latest" in first
+    assert "ENV VIRTUAL_ENV=/opt/venv" in first
+    assert 'ENV PATH="/opt/venv/bin:${PATH}"' in first
+    assert "ENV WORKSPACE=/workspace" in first
+    assert "ENV COMFYUI_PATH=/workspace/ComfyUI" in first
+    assert 'Binary::apt::APT::Keep-Downloaded-Packages "true";' in first
+    assert "    openssh-server \\\n" in first
+    assert "RUN mkdir -p -- \\\n    /workspace\n" in first
+    assert 'uv venv "$VIRTUAL_ENV" --python "${PYTHON_VERSION}" --seed' in first
+    assert '"torch==${PYTORCH_VERSION}"' in first
+    assert "      -- comfy-cli==1.5.0" in first
+    assert 'RUN comfy --skip-prompt --workspace "$COMFYUI_PATH" install' in first
+    assert f'test "$comfyui_commit" = {COMMIT_1}' in first
+    assert "source=packages/cdh,target=/tmp/cdh/packages/cdh" in first
+    assert "COPY runtime/config.toml /opt/cdh/runtime/config.toml" in first
+    assert first.endswith(
+        'WORKDIR /workspace\nENTRYPOINT ["cdh", "container", "entrypoint"]\n'
+    )
+
+    # Preserve the minimal layer sequence while allowing unrelated formatting
+    # changes inside individual instructions.
+    assert_fragments_in_order(
+        first,
+        [
+            "FROM ghcr.io/astral-sh/uv:${UV_IMAGE_TAG} AS uv",
+            "FROM nvidia/cuda:${CUDA_IMAGE_TAG}",
+            "COPY --from=uv /uv /uvx /bin/",
+            "ARG PYTHON_VERSION=3.12",
+            "ENV COMFYUI_PATH=/workspace/ComfyUI",
+            "Keep-Downloaded-Packages",
+            "apt-get update",
+            "RUN mkdir -p",
+            "uv python install",
+            '"torch==${PYTORCH_VERSION}"',
+            "comfy-cli==1.5.0",
+            "RUN comfy --skip-prompt",
+            "git -C",
+            "source=packages/cdh",
+            "COPY runtime/config.toml",
+            "WORKDIR /workspace",
+            'ENTRYPOINT ["cdh", "container", "entrypoint"]',
+        ],
+    )
     assert first.count("--mount=type=cache,target=/root/.cache/uv") == 4
     assert "WORKSPACE" not in {item.name for item in plan.build_arguments}
     assert "COMFYUI_PATH" not in {item.name for item in plan.build_arguments}
@@ -326,10 +208,11 @@ def test_stable_comfyui_and_cli_replay_use_locked_versions() -> None:
         in rendered
     )
     assert "      --version \\\n      0.26.0 \\" in rendered
-    assert (
-        f'RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_commit" = {COMMIT_1}'
-        in rendered
+    expected_commit_check = (
+        'RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" '
+        f'&& test "$comfyui_commit" = {COMMIT_1}'
     )
+    assert expected_commit_check in rendered
     assert (
         'uv pip install --python "$VIRTUAL_ENV/bin/python" -- comfy-cli;'
         not in rendered
@@ -338,7 +221,7 @@ def test_stable_comfyui_and_cli_replay_use_locked_versions() -> None:
 
 
 def test_custom_package_indexes_are_wired_to_their_own_install_layers() -> None:
-    """Use the Python index for cdh-managed Python installs and PyTorch index for torch."""
+    """Use each package index for its own install layer."""
     config = make_config()
     config.python.index_url = "https://python.example.com/simple"
     config.python.extra_packages = ["httpx"]
@@ -473,8 +356,10 @@ def test_nightly_comfyui_replay_uses_locked_commit_without_stable_verify() -> No
     )
 
     assert (
-        "      --version \\\n      nightly \\\n      --commit \\\n      1111111111111111111111111111111111111111 \\"
-        in rendered
+        "      --version \\\n"
+        "      nightly \\\n"
+        "      --commit \\\n"
+        "      1111111111111111111111111111111111111111 \\" in rendered
     )
     assert "rev-parse HEAD" not in rendered
 
@@ -490,9 +375,11 @@ def _rendered_stable_commit_verification_shell_command() -> str:
         if 'git -C "$COMFYUI_PATH" rev-parse HEAD' in line
     ]
 
-    assert lines == [
-        f'RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && test "$comfyui_commit" = {COMMIT_1}'
-    ]
+    expected_line = (
+        'RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" '
+        f'&& test "$comfyui_commit" = {COMMIT_1}'
+    )
+    assert lines == [expected_line]
     return lines[0].removeprefix("RUN ")
 
 
@@ -731,13 +618,23 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
     plan = build_render_plan(config, scripts_dir=tmp_path)
     rendered = render_dockerfile(plan, lockfile=make_lockfile(config))
 
-    assert rendered == FULL_DOCKERFILE
     assert rendered == render_dockerfile(plan, lockfile=make_lockfile(config))
+
+    # User-controlled Dockerfile words and shell arguments must stay quoted at
+    # their respective parser boundaries.
     assert 'ENV WORKSPACE="/work dir/\\$cash/\\"quote\\"/back\\\\slash"' in rendered
+    assert 'ENV COMFYUI_PATH="/opt/Comfy UI"' in rendered
     assert 'ENV SAFE_VALUE="space \\$cash \\"quote\\" \\\\ backtick` ;"' in rendered
+    assert 'ARG PYTHON_VERSION="3.13 rc"' in rendered
+    assert "ARG UV_IMAGE_TAG=0.11.23" in rendered
     assert "'--option-like'" not in rendered
     assert "    --option-like \\\n" in rendered
     assert "    'lib'\"'\"'special'" in rendered
+    assert (
+        "RUN mkdir -p -- \\\n"
+        "    '/work dir/$cash/\"quote\"/back\\slash' \\\n"
+        "    /opt\n" in rendered
+    )
     assert "      --index-url=https://example.invalid \\\n" in rendered
     assert "      'a'\"'\"'b'" in rendered
     assert "      --pre \\\n" in rendered
@@ -761,26 +658,59 @@ def test_full_dockerfile_quotes_user_values_and_preserves_layer_order(
         "--cpu",
     )
 
-    ordered_fragments = [
-        "FROM nvidia/cuda:${CUDA_IMAGE_TAG}",
-        "apt-get install",
-        "RUN mkdir -p",
-        "uv python install",
-        "--index-url https://pypi.org/simple",
-        '"torch==${PYTORCH_VERSION}"',
-        "--index-url=https://example.invalid",
-        "comfy-cli==1.5.0",
-        "RUN comfy --skip-prompt",
-        "git -C",
-        "source=packages/cdh",
-        "source=config.toml",
-        "source=config.lock.toml",
-        "WORKDIR",
-        "ENTRYPOINT",
+    # Build inputs stay bind-mounted; only runtime artifacts cross the COPY
+    # boundary into the image.
+    copy_lines = [line for line in rendered.splitlines() if line.startswith("COPY ")]
+    assert copy_lines == [
+        "COPY --from=uv /uv /uvx /bin/",
+        "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
     ]
-    positions = [rendered.index(fragment) for fragment in ordered_fragments]
-    assert positions == sorted(positions)
+    assert rendered.count("source=config.toml,target=/tmp/cdh/config.toml") == 2
+    assert (
+        rendered.count("source=config.lock.toml,target=/tmp/cdh/config.lock.toml") == 2
+    )
+    assert rendered.count("source=scripts,target=/tmp/cdh/scripts") == 1
+    assert rendered.count("source=packages/cdh,target=/tmp/cdh/packages/cdh") == 1
+    assert "COPY packages" not in rendered
+    assert "COPY config" not in rendered
+    assert "COPY scripts" not in rendered
+
+    assert rendered.count("--index-url https://pypi.org/simple") == 4
+    assert rendered.count("--index-url=https://example.invalid") == 1
+    assert (
+        rendered.count(
+            "--index-url https://download.pytorch.org/whl/${PYTORCH_WHEEL_TAG}"
+        )
+        == 1
+    )
     assert rendered.count("--mount=type=cache,target=/root/.cache/uv") == 5
+
+    # Optional feature layers must remain after core installs and before the
+    # runtime entrypoint.
+    assert_fragments_in_order(
+        rendered,
+        [
+            "FROM nvidia/cuda:${CUDA_IMAGE_TAG}",
+            "apt-get install",
+            "RUN mkdir -p",
+            "uv python install",
+            "--index-url https://pypi.org/simple",
+            '"torch==${PYTORCH_VERSION}"',
+            "--index-url=https://example.invalid",
+            "comfy-cli==1.5.0",
+            "RUN comfy --skip-prompt",
+            "git -C",
+            "source=packages/cdh",
+            "COPY runtime/config.toml",
+            "source=config.toml",
+            "source=config.lock.toml",
+            "source=scripts",
+            "cdh container install-custom-nodes",
+            "cdh container download-files",
+            "WORKDIR",
+            "ENTRYPOINT",
+        ],
+    )
 
 
 def test_manager_off_adds_skip_manager_to_comfy_install() -> None:

@@ -141,6 +141,7 @@ def write_config(tmp_path: Path) -> Callable[[str], Path]:
     return write
 
 
+# Config defaults: minimal documents expand stable public defaults.
 def test_minimal_config_expands_static_defaults(
     write_config: Callable[[str], Path],
 ) -> None:
@@ -205,6 +206,7 @@ def test_minimal_config_expands_static_defaults(
     assert config.files == []
 
 
+# Complete config coverage keeps every top-level block and variant wired.
 def test_complete_config_covers_every_top_level_block(
     write_config: Callable[[str], Path],
 ) -> None:
@@ -374,6 +376,7 @@ filename = "model.safetensors"
     assert config.files[0].downloader is None
 
 
+# Merge behavior: later TOML layers replace arrays and override mappings.
 def test_load_config_merges_partial_files_before_structural_validation(
     tmp_path: Path,
 ) -> None:
@@ -457,6 +460,7 @@ extra_args = ["--preview-method", "auto"]
     assert config.comfyui.extra_args == ["--preview-method", "auto"]
 
 
+# Strict schema tests reject typos, missing required fields, and coercion.
 @pytest.mark.parametrize(
     "model",
     [

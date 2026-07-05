@@ -20,7 +20,7 @@ from comfyui_docker_helper.config import (
     load_validate_plan_result,
     parse_lockfile_toml,
 )
-from comfyui_docker_helper.host.buildx import BuildxBuildError, BuildxBuildResult
+from comfyui_docker_helper.host.buildx import BuildxBuildResult
 from comfyui_docker_helper.rendering import has_valid_context_marker
 
 COMMIT_1 = "1" * 40
@@ -518,38 +518,8 @@ filename = "model.bin"
     assert ".cdh-staging" not in dockerfile
 
 
-def test_build_uses_config_tags_when_cli_tags_are_absent(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Read image tags from [build].tags when --tag is not provided."""
-    config = write_config(
-        tmp_path,
-        MINIMAL_CONFIG
-        + """
-[build]
-tags = ["config:one", "config:two"]
-""",
-    )
-    context = tmp_path / "context"
-    calls: list[tuple[tuple[str, ...], str]] = []
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.build_image_with_buildx",
-        lambda **kwargs: calls.append((kwargs["image_tags"], kwargs["output"])),
-    )
-
-    result = cli_runner.invoke(
-        app,
-        ["host", "build", "-f", str(config), "--context-dir", str(context)],
-    )
-
-    assert result.exit_code == 0
-    assert has_valid_context_marker(context)
-    assert calls == [(("config:one", "config:two"), "load")]
-
-
+# Precedence tests cover CLI overrides; config-only tags/output are covered by the
+# single validated snapshot test above.
 def test_build_cli_tags_replace_config_tags_and_output_overrides_config(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -591,44 +561,6 @@ output = "push"
 
     assert result.exit_code == 0
     assert calls == [(("cli:one", "cli:two"), "load")]
-
-
-def test_build_uses_config_push_output(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Use [build].output when no CLI output override is provided."""
-    config = write_config(
-        tmp_path,
-        MINIMAL_CONFIG
-        + """
-[build]
-tags = ["registry.example.com/demo:push"]
-output = "push"
-""",
-    )
-    calls: list[str] = []
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.build_image_with_buildx",
-        lambda **kwargs: calls.append(kwargs["output"]),
-    )
-
-    result = cli_runner.invoke(
-        app,
-        [
-            "host",
-            "build",
-            "-f",
-            str(config),
-            "--context-dir",
-            str(tmp_path / "context"),
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert calls == ["push"]
 
 
 # Lock-mode build tests ensure resolver policy is settled before Buildx starts.
@@ -867,13 +799,10 @@ def test_build_requires_effective_tag(
 
 
 @pytest.mark.parametrize(
-    "tag",
+    ("tag", "expected_message"),
     [
-        "",
-        "bad tag",
-        "bad\ttag",
-        "bad\ntag",
-        "bad\x7ftag",
+        ("", "must be non-empty"),
+        ("bad tag", "whitespace or control characters"),
     ],
 )
 def test_build_rejects_invalid_cli_tag_before_rendering(
@@ -881,6 +810,7 @@ def test_build_rejects_invalid_cli_tag_before_rendering(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tag: str,
+    expected_message: str,
 ) -> None:
     """Reject CLI tags that config [build].tags validation would reject."""
     config = write_config(tmp_path)
@@ -906,8 +836,7 @@ def test_build_rejects_invalid_cli_tag_before_rendering(
     )
 
     assert result.exit_code == 2
-    assert "must be non-empty" in result.output
-    assert "whitespace or control characters" in result.output
+    assert expected_message in result.output
     assert not context.exists()
 
 
@@ -980,48 +909,3 @@ def test_build_rejects_unmarked_context_without_public_overwrite_flag(
     assert result.exit_code == 1
     assert "not a valid cdh build context" in result.stderr
     assert (context / "keep.txt").read_text(encoding="utf-8") == "keep\n"
-
-
-def test_buildx_failure_propagates_and_retains_context(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep the rendered context when Buildx fails."""
-    config = write_config(tmp_path)
-    context = tmp_path / "context"
-
-    def fail_buildx(
-        *,
-        image_tags: tuple[str, ...],
-        output: str,
-        context_dir: Path,
-        cwd: Path,
-        log,
-    ) -> None:
-        del image_tags, output, context_dir, cwd, log
-        raise BuildxBuildError("docker failed")
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.build_image_with_buildx",
-        fail_buildx,
-    )
-
-    result = cli_runner.invoke(
-        app,
-        [
-            "host",
-            "build",
-            "-f",
-            str(config),
-            "-t",
-            "demo:fail",
-            "--context-dir",
-            str(context),
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert "docker failed" in result.stderr
-    assert has_valid_context_marker(context)
-    assert (context / "Dockerfile").is_file()

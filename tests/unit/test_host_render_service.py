@@ -317,6 +317,8 @@ def test_root_artifacts_are_deterministic_across_repeated_renders(
     ) == first
 
 
+# Lock reuse tests keep normal, locked, and relative-output modes from
+# resolving sources when a compatible artifact lock already exists.
 def test_default_render_reuses_existing_lock_without_provider_calls(
     tmp_path: Path,
 ) -> None:
@@ -377,7 +379,7 @@ def test_locked_mode_reads_relative_output_lock_from_working_directory(
     assert (work / "context" / "config.lock.toml").is_file()
 
 
-# Check-mode tests compare the managed artifact set without mutating the
+# Render-check tests compare the managed artifact set without mutating the
 # rendered context, including stale files under current managed trees.
 def test_check_mode_is_non_mutating_and_detects_current_root_artifacts(
     tmp_path: Path,
@@ -577,7 +579,7 @@ def test_check_mode_reports_stale_scripts_tree_when_hooks_are_removed(
     ] == [("scripts",)]
 
 
-# Runtime hook render/check coverage protects source validation, copied hook
+# Runtime hook source-safety coverage protects validation diagnostics, copied hook
 # artifacts, and drift detection when hooks are added, removed, or changed.
 def test_omitted_runtime_hooks_dir_is_copied_when_default_exists(
     tmp_path: Path,

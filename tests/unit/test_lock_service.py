@@ -179,7 +179,7 @@ def make_config(
 
 
 def make_lockfile(config: Config, *, digest: str | None = None) -> Lockfile:
-    """Return a compatible representative lockfile for ``config``."""
+    """Return a compatible lockfile whose manifest digests match ``config``."""
     return Lockfile(
         schema_version=1,
         manifest=LockManifest(
@@ -241,7 +241,7 @@ def test_default_resolves_full_lockfile_without_existing_lock() -> None:
 
 
 def test_default_reuses_compatible_existing_entries_with_zero_provider_calls() -> None:
-    """Compatible lock entries are reused in default mode without provider calls."""
+    """Default mode treats compatible concrete locks as reusable local state."""
     config = full_config()
     existing = make_lockfile(config)
     providers = FakeProviders()
@@ -254,7 +254,7 @@ def test_default_reuses_compatible_existing_entries_with_zero_provider_calls() -
 
 
 def test_default_rewrites_digest_when_new_selector_accepts_existing_lock() -> None:
-    """Digest metadata changes even when compatible concrete entries are reused."""
+    """Compatibility can reuse entries while still updating selector digest metadata."""
     config = make_config(comfyui_version=">=0.25,<0.27", cli_version=">=1.4,<2")
     existing = make_lockfile(config, digest="sha256:" + "0" * 64)
     existing.custom_nodes = []
@@ -272,7 +272,7 @@ def test_default_rewrites_digest_when_new_selector_accepts_existing_lock() -> No
 
 
 def test_default_reuses_same_moving_git_ref_when_unrelated_selector_changed() -> None:
-    """Digest drift from another selector does not refresh a compatible Git ref."""
+    """Only Git-selector digest drift refreshes moving Git refs in default mode."""
     old_config = make_config(
         custom_nodes=[
             {"type": "registry", "id": "node"},
@@ -307,7 +307,7 @@ def test_default_reuses_same_moving_git_ref_when_unrelated_selector_changed() ->
 
 
 def test_default_resolves_moving_git_ref_when_git_selector_changed() -> None:
-    """Moving Git ref changes re-resolve even when an old commit is compatible."""
+    """Git selector digest changes force moving refs through the provider boundary."""
     old_config = make_config(
         custom_nodes=[{"type": "git", "url": GIT_URL, "ref": "main"}]
     )
@@ -406,7 +406,7 @@ def test_locked_fails_when_lockfile_is_missing() -> None:
 
 
 def test_locked_fails_on_digest_mismatch_with_zero_provider_calls() -> None:
-    """Strict locked mode rejects digest drift even when entries are compatible."""
+    """Strict locked mode requires exact selector digest compatibility."""
     config = full_config()
     existing = make_lockfile(config, digest="sha256:" + "0" * 64)
     providers = FakeProviders()
@@ -428,7 +428,7 @@ def test_locked_fails_on_digest_mismatch_with_zero_provider_calls() -> None:
 def test_locked_fails_on_missing_or_incompatible_entries_without_provider_calls() -> (
     None
 ):
-    """Strict locked mode reports local lock incompatibility and does not resolve."""
+    """Strict locked mode reports local incompatibility without resolver fallback."""
     config = make_config(
         cli_version="1.5.0",
         custom_nodes=[
@@ -482,7 +482,7 @@ def test_locked_ignores_extra_entries_when_required_entries_are_compatible() -> 
 
 
 def test_upgrade_lock_refreshes_moving_selectors_and_constraints() -> None:
-    """Upgrade mode re-resolves latest, constraints, and moving Git refs."""
+    """Upgrade mode refreshes non-exact selectors through resolver providers."""
     config = make_config(
         comfyui_version="latest",
         cli_version=">=1,<3",
@@ -514,7 +514,7 @@ def test_upgrade_lock_refreshes_moving_selectors_and_constraints() -> None:
 
 
 def test_upgrade_lock_keeps_exact_full_git_commit_stable() -> None:
-    """Upgrade mode does not re-resolve exact full Git commit inputs."""
+    """Upgrade mode keeps exact full Git commits as already locked selectors."""
     config = make_config(
         comfyui_version="0.26.0",
         cli_version="1.5.0",
@@ -538,7 +538,7 @@ def test_upgrade_lock_keeps_exact_full_git_commit_stable() -> None:
 
 
 def test_upgrade_lock_reuses_exact_concrete_non_git_selectors() -> None:
-    """Upgrade mode does not refresh exact concrete ComfyUI, cli, or registry locks."""
+    """Upgrade mode reuses exact concrete ComfyUI, cli, and registry locks."""
     config = make_config(
         comfyui_version="0.26.0",
         cli_version="1.5.0",
@@ -611,7 +611,7 @@ def test_check_and_dry_run_report_changed_without_mutating_existing(
 
 
 def test_check_combined_with_locked_uses_strict_no_resolution_behavior() -> None:
-    """Check plus locked applies the strict no-provider locked policy."""
+    """Check plus locked still applies the strict no-provider policy."""
     config = full_config()
     existing = make_lockfile(config, digest="sha256:" + "0" * 64)
     providers = FakeProviders()

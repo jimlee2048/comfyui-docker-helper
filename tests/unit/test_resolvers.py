@@ -41,7 +41,7 @@ GIT_URL = "https://example.com/custom-node.git"
 
 @dataclass(slots=True)
 class FakeComfyUIProvider:
-    """In-memory provider that records resolver boundary calls."""
+    """In-memory ComfyUI provider with observable resolver boundary calls."""
 
     releases: Sequence[ComfyUIReleaseCandidate]
     nightly_commit: str = COMMIT_5
@@ -59,7 +59,7 @@ class FakeComfyUIProvider:
 
 @dataclass(slots=True)
 class FakeComfyCliProvider:
-    """In-memory package provider that records resolver boundary calls."""
+    """In-memory package provider with observable resolver boundary calls."""
 
     versions: Sequence[ComfyCliVersionCandidate]
     calls: int = 0
@@ -71,7 +71,7 @@ class FakeComfyCliProvider:
 
 @dataclass(slots=True)
 class FakeRegistryProvider:
-    """In-memory registry provider that records resolver boundary calls."""
+    """In-memory registry provider with install/list boundary call tracking."""
 
     install_metadata: RegistryInstallMetadata
     versions: Sequence[RegistryVersionCandidate] = ()
@@ -106,7 +106,7 @@ class FakeRegistryProvider:
 
 @dataclass(slots=True)
 class FakeGitProvider:
-    """In-memory Git provider that records resolver boundary calls."""
+    """In-memory Git provider with default/ref boundary call tracking."""
 
     default_commit: str | Exception = COMMIT_A
     refs: dict[str, str | Exception] = field(default_factory=dict)
@@ -370,7 +370,7 @@ def test_comfy_cli_no_match_reports_selector_and_source() -> None:
 
 
 def test_registry_latest_uses_install_endpoint_without_listing_versions() -> None:
-    """Resolve omitted/latest registry selectors through the install endpoint only."""
+    """Omitted/latest registry selectors use install metadata, not version listing."""
     provider = FakeRegistryProvider(registry_install("1.2.3"))
 
     omitted = resolve_registry_custom_node("node", None, provider)
@@ -408,7 +408,7 @@ def test_registry_exact_prerelease_preserves_registry_identity() -> None:
 
 
 def test_registry_constraint_selects_highest_stable_active_installable_match() -> None:
-    """Enumerate registry versions, then resolve the chosen exact candidate."""
+    """Constraint selectors list versions, then resolve the chosen exact candidate."""
     provider = FakeRegistryProvider(
         registry_install("1.5.0"),
         versions=[
@@ -564,7 +564,7 @@ def test_registry_deprecated_response_warns_but_resolves() -> None:
 
 
 def test_git_omitted_ref_uses_default_branch_boundary_and_normalizes_commit() -> None:
-    """Resolve omitted Git refs through the default branch boundary."""
+    """Omitted Git refs use the default-branch boundary and normalize SHA casing."""
     provider = FakeGitProvider(default_commit=UPPER_COMMIT_A)
 
     resolved = resolve_git_custom_node(GIT_URL, None, provider)
@@ -577,7 +577,7 @@ def test_git_omitted_ref_uses_default_branch_boundary_and_normalizes_commit() ->
 
 @pytest.mark.parametrize("ref", ["main", "v1.2.3", "HEAD"])
 def test_git_explicit_moving_ref_uses_explicit_boundary(ref: str) -> None:
-    """Resolve branch, tag, and symbolic refs through the explicit ref boundary."""
+    """Branch, tag, and symbolic refs use the explicit ref provider boundary."""
     provider = FakeGitProvider(refs={ref: COMMIT_B})
 
     resolved = resolve_git_custom_node(GIT_URL, ref, provider)
@@ -588,7 +588,7 @@ def test_git_explicit_moving_ref_uses_explicit_boundary(ref: str) -> None:
 
 
 def test_git_full_commit_input_returns_directly_without_provider_call() -> None:
-    """Treat exact full commit selectors as stable lock inputs."""
+    """Full commit selectors are already concrete and bypass provider calls."""
     provider = FakeGitProvider(default_commit=LookupError("should not be called"))
 
     resolved = resolve_git_custom_node(GIT_URL, UPPER_COMMIT_A, provider)
@@ -645,7 +645,7 @@ def test_git_resolved_custom_node_to_locked_output() -> None:
 
 
 def test_locked_git_reuse_checks_selector_without_provider_calls() -> None:
-    """Strict locked mode can check Git selectors without provider calls."""
+    """Locked Git compatibility is URL/selector logic with no provider calls."""
     provider = FakeGitProvider(default_commit=COMMIT_C, refs={"main": COMMIT_C})
     locked = GitLockedCustomNode(type="git", url=GIT_URL, commit=COMMIT_A)
 
@@ -682,7 +682,7 @@ def test_locked_git_malformed_commit_is_incompatible() -> None:
 
 
 def test_locked_registry_reuse_checks_selector_without_provider_calls() -> None:
-    """Strict locked mode can check registry selectors without provider calls."""
+    """Locked registry compatibility is local selector logic with no provider calls."""
     provider = FakeRegistryProvider(registry_install("9.9.9"))
     locked = RegistryLockedCustomNode(type="registry", id="node", version="1.5.0")
 
@@ -763,7 +763,7 @@ def test_locked_registry_malformed_version_is_incompatible() -> None:
 
 
 def test_locked_comfyui_reuse_checks_selector_without_provider_calls() -> None:
-    """Strict locked mode can decide compatibility without network boundaries."""
+    """Locked ComfyUI compatibility is local selector logic with no provider calls."""
     provider = FakeComfyUIProvider(comfyui_candidates())
     locked = LockedComfyUI(
         repo=COMFYUI_REPO_URL,
@@ -798,7 +798,7 @@ def test_locked_comfyui_malformed_version_is_incompatible() -> None:
 
 
 def test_locked_comfy_cli_reuse_checks_selector_without_provider_calls() -> None:
-    """Strict locked mode can check comfy-cli selectors without listing packages."""
+    """Locked comfy-cli compatibility avoids package listing provider calls."""
     provider = FakeComfyCliProvider(comfy_cli_candidates())
 
     assert locked_comfy_cli_satisfies_selector("1.5.0", ">=1.4,<2") is True

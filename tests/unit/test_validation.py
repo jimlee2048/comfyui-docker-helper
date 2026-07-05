@@ -50,6 +50,7 @@ def locations_and_codes(
     return [(diagnostic.path, diagnostic.code) for diagnostic in diagnostics]
 
 
+# Validation business basics: defaults, supported CUDA image shape, paths, and env.
 def test_minimal_config_is_business_valid_without_host_or_network_checks() -> None:
     """Accept defaults without probing container paths, Docker, or the network."""
     config = make_config()
@@ -260,6 +261,7 @@ def test_environment_values_remain_strict_structural_strings() -> None:
     }
 
 
+# Dockerfile-bound strings must stay safe to render into Dockerfile source lines.
 @pytest.mark.parametrize("name", ["A", "_PRIVATE", "mixed_Case_123"])
 def test_environment_names_accept_dockerfile_identifiers(name: str) -> None:
     """Accept environment names supported by the Dockerfile contract."""
@@ -447,6 +449,7 @@ def test_required_pytorch_version_remains_structural() -> None:
     }
 
 
+# Selector validation keeps accepted version ranges precise and normalized.
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -888,6 +891,7 @@ def test_git_effective_target_dirs_must_be_unique_for_different_urls() -> None:
     ]
 
 
+# Hook validation covers conditional scripts-dir use and hook path safety.
 def test_no_hooks_do_not_require_or_validate_scripts_dir(tmp_path: Path) -> None:
     """Ignore scripts-dir entirely when no hook is referenced."""
     config = make_config()
@@ -1045,6 +1049,7 @@ def test_node_diagnostics_follow_node_and_field_order(tmp_path: Path) -> None:
     ]
 
 
+# Downloader, build, and file validation protect host/runtime transfer settings.
 @pytest.mark.parametrize("downloader", ["aria2", "httpx"])
 def test_supported_global_downloaders_are_valid(downloader: str) -> None:
     """Accept both configured downloader backends."""

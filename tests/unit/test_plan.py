@@ -38,6 +38,7 @@ def make_config() -> Config:
     )
 
 
+# Minimal plan tests pin the fully resolved renderer contract from defaults.
 def test_minimal_plan_resolves_every_effective_default() -> None:
     """Resolve minimal public config into complete renderer input."""
     plan = build_render_plan(make_config())
@@ -112,6 +113,7 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.files.downloader.httpx.retries == 3
 
 
+# Build args expose the small ordered scalar interface consumed by Docker.
 def test_minimal_build_arguments_have_exact_names_values_and_order() -> None:
     """Expose only the nine scalar build arguments from spec section 6."""
     plan = build_render_plan(make_config())
@@ -146,6 +148,7 @@ def test_minimal_layers_omit_empty_feature_layers() -> None:
     )
 
 
+# Manifest tests protect the rendered context allowlist and conditional trees.
 def test_minimal_manifest_contains_only_always_present_artifacts() -> None:
     """Describe the fixed allowlisted context without conditional directories."""
     manifest = build_render_plan(make_config()).output_manifest
@@ -258,6 +261,7 @@ def test_manager_disabled_adds_only_skip_manager_install_flag() -> None:
     assert plan.comfyui.install_arguments[-1] == "--skip-manager"
 
 
+# Custom node plans preserve target order, hook metadata, and cache decisions.
 def test_custom_node_targets_order_cache_and_omitted_versions(
     tmp_path: Path,
 ) -> None:
@@ -360,6 +364,7 @@ def test_duplicate_git_target_dirs_are_refused_before_plan_construction() -> Non
     ]
 
 
+# File plans resolve downloader settings, targets, and feature layers.
 def test_files_resolve_defaults_targets_order_and_downloader_settings() -> None:
     """Materialize every dependent file default and both backend settings."""
     config = make_config()
@@ -486,6 +491,7 @@ def test_runtime_hooks_manifest_is_conditional() -> None:
     )
 
 
+# Immutability guards keep built plans deterministic and validation-gated.
 def test_plan_construction_is_deterministic_and_detached_from_public_mutation() -> None:
     """Build equal plans and freeze ordered collections independently of config."""
     config = make_config()

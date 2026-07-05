@@ -19,7 +19,7 @@ from comfyui_docker_helper.container.download_files import (
 
 
 class RecordingBackend:
-    """Fake download backend recording serial calls."""
+    """Fake backend recording CLI-level dispatch across downloader choices."""
 
     def __init__(
         self,
@@ -41,7 +41,7 @@ class RecordingBackend:
 
 
 class ManagedRecordingBackend(RecordingBackend):
-    """Fake managed backend recording context cleanup."""
+    """Fake managed backend recording aria2 lifecycle boundaries."""
 
     def __enter__(self) -> ManagedRecordingBackend:
         self.events.append(f"{self.name}:enter")
@@ -119,7 +119,7 @@ def test_download_files_uses_httpx_without_starting_aria2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Do not construct aria2 when all items use HTTPX."""
+    """Keep HTTPX-only plans from crossing the aria2 process boundary."""
     comfyui_path = tmp_path / "ComfyUI"
     comfyui_path.mkdir()
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
@@ -147,7 +147,7 @@ def test_download_files_processes_mixed_backends_serially(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Process mixed backend items one at a time in config order."""
+    """Orchestrate mixed backends serially while aria2 is managed once."""
     comfyui_path = tmp_path / "ComfyUI"
     comfyui_path.mkdir()
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
@@ -237,7 +237,7 @@ def test_cli_exposes_download_files_and_passes_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Invoke the supported container helper and pass --config through."""
+    """CLI boundary passes explicit config/lock and container COMFYUI_PATH."""
     calls: list[tuple[Path, Path, Path | None]] = []
 
     def fake_download_files(

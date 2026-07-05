@@ -20,7 +20,7 @@ from comfyui_docker_helper.container.download_files import (
 
 
 class RecordingBackend:
-    """Test backend recording ordered download calls."""
+    """Fake backend that records orchestration order and retry settings."""
 
     def __init__(self, *, fail_on: str | None = None, fail_times: int = 0) -> None:
         self.fail_on = fail_on
@@ -243,7 +243,7 @@ def test_build_file_download_plan_defensively_rejects_invalid_config(
     message: str,
     tmp_path: Path,
 ) -> None:
-    """Reject malformed file-download helper data before processing."""
+    """Reject malformed paths and downloader settings before filesystem writes."""
     document = make_document()
     mutation(document)
 
@@ -254,7 +254,7 @@ def test_build_file_download_plan_defensively_rejects_invalid_config(
 def test_process_file_downloads_selects_backends_and_preserves_order(
     tmp_path: Path,
 ) -> None:
-    """Create target parents and call selected backends one item at a time."""
+    """Create target parents and dispatch to selected backends in file order."""
     plan = build_file_download_plan(make_document(), comfyui_path=tmp_path)
     httpx = RecordingBackend()
     aria2 = RecordingBackend()
@@ -465,7 +465,7 @@ def test_process_file_downloads_wraps_overwrite_removal_failures(
 
 
 def test_process_file_downloads_stops_on_backend_failure(tmp_path: Path) -> None:
-    """Exhaust default fail-policy attempts and stop before later files."""
+    """Fail policy exhausts attempts, removes partials, and stops later files."""
     plan = build_file_download_plan(make_document(), comfyui_path=tmp_path)
     httpx = RecordingBackend(fail_on="first.bin", fail_times=3)
     aria2 = RecordingBackend()
@@ -514,7 +514,7 @@ def test_process_file_downloads_retries_until_success(tmp_path: Path) -> None:
 def test_process_file_downloads_continue_policy_logs_and_processes_later_files(
     tmp_path: Path,
 ) -> None:
-    """Continue policy omits the failed item result and processes later files."""
+    """Continue policy drops failed results but preserves later file processing."""
     document = make_document()
     document["cdh"]["download_max_attempts"] = 2
     document["cdh"]["download_failure_policy"] = "continue"

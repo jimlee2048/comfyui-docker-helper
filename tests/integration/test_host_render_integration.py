@@ -299,6 +299,8 @@ def _assert_lock_uses_resolved_source_schema(lock_data: dict[str, object]) -> No
     assert _collect_schema_keys(lock_data).isdisjoint(forbidden_keys)
 
 
+# CLI render fixture cases cover representative config groups: minimal,
+# registry, git, constrained selectors, and the full mixed-artifact path.
 RENDER_FIXTURE_CASES = (
     # Matrix covers selector forms while keeping all resolver inputs deterministic.
     RenderFixtureCase(
@@ -557,6 +559,8 @@ def _render_registry_context(
     return config, context, first_lock, first_dockerfile
 
 
+# CLI mode tests protect lock reuse, render-check non-mutation, upgrades,
+# dry-runs, and user-facing diagnostics at the command boundary.
 def test_host_render_locked_reuses_existing_lock_without_resolution(
     cli_runner: CliRunner,
     tmp_path: Path,

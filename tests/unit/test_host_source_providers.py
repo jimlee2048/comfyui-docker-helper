@@ -44,7 +44,7 @@ class FakeResponse:
 
 @dataclass(slots=True)
 class FakeHttpClient:
-    """Minimal httpx client double for provider tests."""
+    """Minimal httpx client double that records requested URLs and params."""
 
     response: FakeResponse | None = None
     request_error: httpx.RequestError | None = None
@@ -80,7 +80,7 @@ class FakeClosableHttpClient:
 def test_comfyui_release_listing_uses_peeled_ref_for_annotated_tags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Annotated tags lock the target commit from the peeled ``^{}`` ref."""
+    """Release listing locks annotated tags to the peeled target commit."""
     refs = "\n".join(
         [
             f"{COMMIT_1}\trefs/tags/v0.1.0",
@@ -118,7 +118,7 @@ def test_default_source_resolver_owner_closes_http_client_once(
 def test_comfyui_release_listing_keeps_lightweight_tag_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lightweight tags have no peeled ref and lock their tag commit directly."""
+    """Release listing keeps lightweight tags at their single returned commit."""
     monkeypatch.setattr(
         provider_module,
         "_run_git",
@@ -134,7 +134,7 @@ def test_comfyui_release_listing_keeps_lightweight_tag_commit(
 def test_git_ref_resolution_uses_peeled_ref_for_annotated_tags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Annotated tags resolve to their target commit, not the tag object."""
+    """Explicit tag refs prefer peeled annotated-tag targets over tag objects."""
     refs = "\n".join(
         [
             f"{COMMIT_1}\trefs/tags/v0.1.0",
@@ -151,7 +151,7 @@ def test_git_ref_resolution_uses_peeled_ref_for_annotated_tags(
 def test_git_ref_resolution_keeps_lightweight_tag_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lightweight tags resolve to their single returned commit."""
+    """Explicit lightweight tags resolve to their single returned commit."""
     monkeypatch.setattr(
         provider_module,
         "_run_git",
@@ -339,7 +339,7 @@ def test_registry_provider_wraps_json_decode_failures() -> None:
 
 
 def test_registry_provider_uses_api_base_url_by_default() -> None:
-    """Registry provider defaults to the public API host, not the web UI host."""
+    """Registry install URLs default to the public API host, not the web UI."""
     client = FakeHttpClient(
         response=FakeResponse(data={"id": "node", "version": "1.0.0"})
     )
@@ -352,7 +352,7 @@ def test_registry_provider_uses_api_base_url_by_default() -> None:
 
 
 def test_registry_provider_prefers_install_node_id_over_uuid_id() -> None:
-    """Registry install responses can include both UUID ``id`` and slug ``node_id``."""
+    """Install metadata prefers slug ``node_id`` over registry UUID ``id``."""
     client = FakeHttpClient(
         response=FakeResponse(
             data={
@@ -372,7 +372,7 @@ def test_registry_provider_prefers_install_node_id_over_uuid_id() -> None:
 
 
 def test_registry_provider_prefers_version_node_id_over_uuid_id() -> None:
-    """Registry version responses can include both UUID ``id`` and slug ``node_id``."""
+    """Version listing prefers slug ``node_id`` over registry UUID ``id``."""
     client = FakeHttpClient(
         response=FakeResponse(
             data={

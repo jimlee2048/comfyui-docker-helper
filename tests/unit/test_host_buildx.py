@@ -11,6 +11,7 @@ from comfyui_docker_helper.host.buildx import (
 )
 
 
+# Buildx ordering tests lock down the exact Docker argv and log handoff.
 def test_buildx_invocation_uses_required_argv_and_cwd(tmp_path: Path) -> None:
     """Call exactly docker buildx build --load with repeated tags and no fallback."""
     calls: list[tuple[tuple[str, ...], Path | None, bool]] = []
@@ -117,6 +118,8 @@ def test_buildx_invocation_uses_inherited_output_streams(tmp_path: Path) -> None
     )
 
 
+# Buildx failure tests keep process startup/exit errors user-facing without
+# swallowing explicit user interruption.
 def test_buildx_missing_docker_is_user_facing(tmp_path: Path) -> None:
     """Report a missing Docker executable as a user-facing build failure."""
 

@@ -411,7 +411,7 @@ listen = "127.0.0.40"
         _expected_argv(runtime, listen="127.0.0.40", port=8188)
     ]
     assert "Runtime configuration warnings:" in captured.err
-    assert "[system]" in captured.err
+    assert "[system.workspace]" in captured.err
     assert "[compute_platform]" in captured.err
     assert "[comfyui.version]" in captured.err
     assert "runtime.host_only_ignored" in captured.err

@@ -18,6 +18,10 @@ from comfyui_docker_helper.config.diagnostics import (
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import ConfigModel
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.ssh_keys import (
+    normalize_ssh_public_key,
+    normalize_ssh_public_keys,
+)
 from comfyui_docker_helper.config.url_validation import DownloaderName, is_http_url
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
@@ -27,8 +31,9 @@ type RuntimeConfigPath = str | Path
 type RuntimePath = tuple[str, ...]
 type RuntimeFilePath = tuple[str | int, ...]
 
-_HOST_ONLY_ROOT_SECTIONS = frozenset(
-    {"compute_platform", "system", "python", "pytorch", "build"}
+_HOST_ONLY_ROOT_SECTIONS = frozenset({"compute_platform", "python", "pytorch", "build"})
+_HOST_ONLY_SYSTEM_FIELDS = frozenset(
+    {"workspace", "comfyui_path", "extra_packages", "env"}
 )
 _HOST_ONLY_COMFYUI_FIELDS = frozenset(
     {"version", "cli_version", "install_manager", "custom_nodes"}
@@ -95,6 +100,17 @@ class _RuntimeComfyUIConfigPatch(ConfigModel):
     extra_args: list[str] | None = None
 
 
+class _RuntimeSystemSshConfigPatch(ConfigModel):
+    enable: bool | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    password: str | None = None
+    pub_keys: list[str] | None = None
+
+
+class _RuntimeSystemConfigPatch(ConfigModel):
+    ssh: _RuntimeSystemSshConfigPatch | None = None
+
+
 class _RuntimeFilePatch(ConfigModel):
     url: str | None = None
     dir: str
@@ -107,6 +123,7 @@ class _RuntimeFilePatch(ConfigModel):
 class _RuntimeConfigPatch(ConfigModel):
     comfyui: _RuntimeComfyUIConfigPatch | None = None
     cdh: _RuntimeCdhConfigPatch | None = None
+    system: _RuntimeSystemConfigPatch | None = None
     files: list[_RuntimeFilePatch] | None = None
 
 
@@ -139,14 +156,23 @@ def load_runtime_config(
         if source == "mounted":
             explicit_paths.update(_runtime_explicit_paths(document))
 
-    env_document = _runtime_env_document(os.environ if environ is None else environ)
+    env_document, env_pub_key = _runtime_env_document(
+        os.environ if environ is None else environ
+    )
     if env_document:
         _validate_runtime_patch(env_document)
         documents.append(env_document)
 
     files = _merge_runtime_file_items(file_documents)
     merged = merge_toml_documents(documents)
+    _normalize_merged_ssh_public_keys(merged)
+    if env_pub_key is not None:
+        ssh = merged.setdefault("system", {}).setdefault("ssh", {})
+        pub_keys = ssh.setdefault("pub_keys", [])
+        if env_pub_key not in pub_keys:
+            pub_keys.append(env_pub_key)
     config = _validate_effective_runtime_config(merged)
+    _validate_runtime_ssh(config)
     _validate_runtime_downloader(config)
     _validate_runtime_extra_args(config)
     return RuntimeConfigurationResult(
@@ -166,8 +192,11 @@ def _runtime_config_document(document: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in document.items() if key != "files"}
 
 
-def _runtime_env_document(environ: Mapping[str, str]) -> dict[str, Any]:
+def _runtime_env_document(
+    environ: Mapping[str, str],
+) -> tuple[dict[str, Any], str | None]:
     document: dict[str, Any] = {}
+    ssh_pub_key: str | None = None
 
     if "CDH_COMFYUI_LISTEN" in environ:
         document.setdefault("comfyui", {})["listen"] = environ["CDH_COMFYUI_LISTEN"]
@@ -195,8 +224,74 @@ def _runtime_env_document(environ: Mapping[str, str]) -> dict[str, Any]:
         document.setdefault("cdh", {})["download_failure_policy"] = environ[
             "CDH_DOWNLOAD_FAILURE_POLICY"
         ]
+    if "SSH_ENABLE" in environ:
+        document.setdefault("system", {}).setdefault("ssh", {})["enable"] = (
+            _parse_env_ssh_enable(environ["SSH_ENABLE"])
+        )
+    if "SSH_PORT" in environ:
+        document.setdefault("system", {}).setdefault("ssh", {})["port"] = (
+            _parse_env_ssh_port(environ["SSH_PORT"])
+        )
+    if "SSH_PASSWORD" in environ:
+        document.setdefault("system", {}).setdefault("ssh", {})["password"] = environ[
+            "SSH_PASSWORD"
+        ]
+    if "SSH_PUB_KEY" in environ:
+        ssh_pub_key, diagnostic = normalize_ssh_public_key(
+            environ["SSH_PUB_KEY"],
+            path=("env", "SSH_PUB_KEY"),
+            code="env.invalid_ssh_pub_key",
+        )
+        if diagnostic is not None:
+            raise RuntimeConfigurationError((diagnostic,))
 
-    return document
+    return document, ssh_pub_key
+
+
+def _parse_env_ssh_enable(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise RuntimeConfigurationError(
+        (
+            Diagnostic(
+                path=("env", "SSH_ENABLE"),
+                code="env.invalid_ssh_enable",
+                message=(
+                    "must be true, false, 1, 0, yes, no, on, or off "
+                    "after trimming whitespace"
+                ),
+            ),
+        )
+    )
+
+
+def _parse_env_ssh_port(value: str) -> int:
+    try:
+        port = int(value.strip(), 10)
+    except ValueError as error:
+        raise RuntimeConfigurationError(
+            (
+                Diagnostic(
+                    path=("env", "SSH_PORT"),
+                    code="env.invalid_ssh_port",
+                    message="must be an integer TCP port in range 1..65535",
+                ),
+            )
+        ) from error
+    if not 1 <= port <= 65535:
+        raise RuntimeConfigurationError(
+            (
+                Diagnostic(
+                    path=("env", "SSH_PORT"),
+                    code="env.invalid_ssh_port",
+                    message="must be an integer TCP port in range 1..65535",
+                ),
+            )
+        )
+    return port
 
 
 def _parse_env_download_max_attempts(value: str) -> int:
@@ -314,12 +409,28 @@ def _prepare_runtime_document(
         if key in _HOST_ONLY_ROOT_SECTIONS:
             diagnostics.append(_host_only_warning((key,)))
             continue
+        if key == "system" and isinstance(value, Mapping):
+            prepared[key] = _prepare_system_document(value, diagnostics)
+            continue
         if key == "comfyui" and isinstance(value, Mapping):
             prepared[key] = _prepare_comfyui_document(value, diagnostics)
             continue
         prepared[key] = value
 
     return prepared, tuple(diagnostics)
+
+
+def _prepare_system_document(
+    document: Mapping[str, Any],
+    diagnostics: list[Diagnostic],
+) -> dict[str, Any]:
+    prepared: dict[str, Any] = {}
+    for key, value in document.items():
+        if key in _HOST_ONLY_SYSTEM_FIELDS:
+            diagnostics.append(_host_only_warning(("system", key)))
+            continue
+        prepared[key] = value
+    return prepared
 
 
 def _prepare_comfyui_document(
@@ -358,6 +469,39 @@ def _validate_effective_runtime_config(document: Mapping[str, Any]) -> RuntimeCo
     except ValidationError as error:
         diagnostics = _diagnostics_from_validation_error(error)
         raise RuntimeConfigurationError(diagnostics) from error
+
+
+def _normalize_merged_ssh_public_keys(document: dict[str, Any]) -> None:
+    system = document.get("system")
+    if not isinstance(system, dict):
+        return
+    ssh = system.get("ssh")
+    if not isinstance(ssh, dict) or "pub_keys" not in ssh:
+        return
+    pub_keys = ssh["pub_keys"]
+    if not isinstance(pub_keys, list) or not all(
+        isinstance(item, str) for item in pub_keys
+    ):
+        return
+    normalized, diagnostics = normalize_ssh_public_keys(
+        pub_keys,
+        path=("system", "ssh", "pub_keys"),
+        code="ssh.invalid_public_key",
+    )
+    if diagnostics:
+        raise RuntimeConfigurationError(diagnostics)
+    ssh["pub_keys"] = list(normalized)
+
+
+def _validate_runtime_ssh(config: RuntimeConfig) -> None:
+    normalized, diagnostics = normalize_ssh_public_keys(
+        config.system.ssh.pub_keys,
+        path=("system", "ssh", "pub_keys"),
+        code="ssh.invalid_public_key",
+    )
+    if diagnostics:
+        raise RuntimeConfigurationError(diagnostics)
+    config.system.ssh.pub_keys[:] = list(normalized)
 
 
 def _merge_runtime_file_items(

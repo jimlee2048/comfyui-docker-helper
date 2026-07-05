@@ -16,6 +16,7 @@ from comfyui_docker_helper.config.models import (
     GitCustomNodeConfig,
     RegistryCustomNodeConfig,
 )
+from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.url_validation import (
     DOWNLOADERS,
     is_http_url,
@@ -234,6 +235,7 @@ def validate_config(
 
     _validate_compute_platform(config, diagnostics)
     _validate_system(config, diagnostics)
+    _validate_ssh(config, diagnostics)
     _validate_package_indexes(config, diagnostics)
     _validate_pytorch(config, diagnostics)
     _validate_unsupported_version_constraints(config, diagnostics)
@@ -323,6 +325,15 @@ def _validate_system(config: Config, diagnostics: list[Diagnostic]) -> None:
                     message="name must match [A-Za-z_][A-Za-z0-9_]*",
                 )
             )
+
+
+def _validate_ssh(config: Config, diagnostics: list[Diagnostic]) -> None:
+    _, key_diagnostics = normalize_ssh_public_keys(
+        config.system.ssh.pub_keys,
+        path=("system", "ssh", "pub_keys"),
+        code="ssh.invalid_public_key",
+    )
+    diagnostics.extend(key_diagnostics)
 
 
 def _validate_pytorch(config: Config, diagnostics: list[Diagnostic]) -> None:

@@ -396,7 +396,7 @@ listen = "127.0.0.1"
     assert calls
     assert captured.out == ""
     assert "Runtime configuration warnings:" in captured.err
-    assert "[system]" in captured.err
+    assert "[system.workspace]" in captured.err
     assert "runtime.host_only_ignored" in captured.err
     assert "severity=warning" in captured.err
 

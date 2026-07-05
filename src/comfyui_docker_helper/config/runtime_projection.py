@@ -11,6 +11,10 @@ from comfyui_docker_helper.config.models import (
     Config,
     ConfigModel,
 )
+from comfyui_docker_helper.config.ssh_keys import (
+    SshPublicKeyValidationError,
+    normalize_ssh_public_keys,
+)
 from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
     require_downloader_name,
@@ -37,11 +41,27 @@ class RuntimeCdhConfig(ConfigModel):
     downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
 
 
+class RuntimeSystemSshConfig(ConfigModel):
+    """SSH runtime desired state."""
+
+    enable: bool = False
+    port: int = Field(default=22, ge=1, le=65535)
+    password: str = ""
+    pub_keys: list[str] = Field(default_factory=list)
+
+
+class RuntimeSystemConfig(ConfigModel):
+    """Runtime-supported subset of system configuration."""
+
+    ssh: RuntimeSystemSshConfig = Field(default_factory=RuntimeSystemSshConfig)
+
+
 class RuntimeConfig(ConfigModel):
     """Strict private schema for fields baked into runtime/config.toml."""
 
     comfyui: RuntimeComfyUIConfig = Field(default_factory=RuntimeComfyUIConfig)
     cdh: RuntimeCdhConfig = Field(default_factory=RuntimeCdhConfig)
+    system: RuntimeSystemConfig = Field(default_factory=RuntimeSystemConfig)
 
 
 class RuntimeFileConfig(ConfigModel):
@@ -95,6 +115,14 @@ def project_runtime_config(
             "download_max_attempts": config.cdh.download_max_attempts,
             "downloader": config.cdh.downloader.model_dump(mode="json"),
         },
+        "system": {
+            "ssh": {
+                "enable": config.system.ssh.enable,
+                "port": config.system.ssh.port,
+                "password": config.system.ssh.password,
+                "pub_keys": list(config.system.ssh.pub_keys),
+            },
+        },
         "files": [
             {
                 "url": file.url,
@@ -118,6 +146,14 @@ def project_runtime_config(
         runtime_document["cdh"]["download_failure_policy"] = (
             config.cdh.download_failure_policy
         )
+    normalized_pub_keys, diagnostics = normalize_ssh_public_keys(
+        runtime_document["system"]["ssh"]["pub_keys"],
+        path=("system", "ssh", "pub_keys"),
+        code="ssh.invalid_public_key",
+    )
+    if diagnostics:
+        raise SshPublicKeyValidationError(diagnostics)
+    runtime_document["system"]["ssh"]["pub_keys"] = list(normalized_pub_keys)
     runtime_config = RuntimeConfig.model_validate(runtime_document)
     return RuntimeConfigProjection(
         config=runtime_config,
@@ -189,6 +225,12 @@ def _is_runtime_supported_path(path: ConfigPath) -> bool:
         }:
             return len(path) == 2
         return path[1] == "downloader"
+    if path[0] == "system":
+        if len(path) == 1:
+            return True
+        if path[1] == "ssh":
+            return len(path) <= 3 and (len(path) == 2 or path[2] in _SSH_FIELDS)
+        return False
     return False
 
 
@@ -196,3 +238,4 @@ _COMFYUI_FIELDS = frozenset({"listen", "port", "extra_args"})
 _FILE_FIELDS = frozenset(
     {"url", "dir", "filename", "overwrite", "downloader", "download_mode"}
 )
+_SSH_FIELDS = frozenset({"enable", "port", "password", "pub_keys"})

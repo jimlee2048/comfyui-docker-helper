@@ -21,6 +21,13 @@ from comfyui_docker_helper.config.validation import (
     resolve_git_target_dir,
 )
 
+VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "test@example"
+)
+TRUNCATED_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 truncated"
+
 
 def make_config() -> Config:
     """Return a fresh minimal structurally valid configuration."""
@@ -50,6 +57,47 @@ def test_minimal_config_is_business_valid_without_host_or_network_checks() -> No
     config.system.comfyui_path = "/another/nonexistent/container/path"
 
     assert validate_config(config) == ()
+
+
+def test_system_ssh_defaults_are_public_config_defaults() -> None:
+    config = make_config()
+
+    assert config.system.ssh.enable is False
+    assert config.system.ssh.port == 22
+    assert config.system.ssh.password == ""
+    assert config.system.ssh.pub_keys == []
+
+
+def test_valid_system_ssh_public_key_is_accepted() -> None:
+    config = make_config()
+    config.system.ssh.pub_keys = ["", VALID_SSH_KEY]
+
+    assert validate_config(config) == ()
+
+
+def test_invalid_system_ssh_public_key_fails_without_leaking_password() -> None:
+    config = make_config()
+    config.system.ssh.password = "super-secret"
+    config.system.ssh.pub_keys = ["not-a-key"]
+
+    diagnostics = validate_config(config)
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in diagnostics
+    )
+
+    assert locations_and_codes(diagnostics) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload
+
+
+def test_truncated_base64_valid_system_ssh_public_key_fails() -> None:
+    config = make_config()
+    config.system.ssh.pub_keys = [TRUNCATED_SSH_KEY]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
 
 
 def test_diagnostics_and_result_are_immutable() -> None:

@@ -26,6 +26,7 @@ version = "2.10"
 [comfyui]
 version = "latest"
 """
+TRUNCATED_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 truncated"
 
 
 @pytest.fixture
@@ -146,6 +147,58 @@ filename = "model.bin"
         assert warning.path == ("cdh", "download_failure_policy")
         assert warning.code == "host_build.download_failure_policy_continue"
         assert warning.severity == DiagnosticSeverity.WARNING
+
+
+def test_non_empty_host_ssh_password_warns_without_leaking_password(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Warn that baked SSH passwords can be exposed without printing the value."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[system.ssh]
+password = "super-secret"
+"""
+    )
+
+    result = load_validate_plan_result(write_config(document))
+
+    assert [(item.path, item.code, item.severity) for item in result.warnings] == [
+        (
+            ("system", "ssh", "password"),
+            "host_build.ssh_password_baked",
+            DiagnosticSeverity.WARNING,
+        )
+    ]
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in result.warnings
+    )
+    assert "super-secret" not in payload
+    assert result.runtime_config.config.system.ssh.password == "super-secret"
+
+
+def test_invalid_host_ssh_public_key_fails_with_stable_diagnostic_no_password_leak(
+    write_config: Callable[[str], Path],
+) -> None:
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+[system.ssh]
+password = "super-secret"
+pub_keys = ["{TRUNCATED_SSH_KEY}"]
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan_result(write_config(document))
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload
 
 
 def test_invalid_host_file_download_mode_fails_before_runtime_projection(

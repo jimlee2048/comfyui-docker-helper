@@ -24,6 +24,7 @@ from comfyui_docker_helper.config.runtime_projection import (
     RuntimeConfigProjection,
     project_runtime_config,
 )
+from comfyui_docker_helper.config.ssh_keys import SshPublicKeyValidationError
 
 _CUSTOM_NODE_BRANCHES = frozenset({"git", "registry"})
 type ConfigPath = str | Path
@@ -76,7 +77,10 @@ def load_validate_plan_result(
         plan = build_render_plan(config, scripts_dir=scripts_dir)
     except RenderPlanValidationError as error:
         raise ConfigurationServiceError(error.diagnostics) from error
-    runtime_config = project_runtime_config(config, document)
+    try:
+        runtime_config = project_runtime_config(config, document)
+    except SshPublicKeyValidationError as error:
+        raise ConfigurationServiceError(error.diagnostics) from error
     return ConfigurationResult(
         config=config,
         plan=plan,
@@ -229,6 +233,20 @@ def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...
                     severity=DiagnosticSeverity.WARNING,
                 )
             )
+    system = document.get("system")
+    ssh = system.get("ssh") if isinstance(system, Mapping) else None
+    if isinstance(ssh, Mapping) and ssh.get("password"):
+        warnings.append(
+            Diagnostic(
+                path=("system", "ssh", "password"),
+                code="host_build.ssh_password_baked",
+                message=(
+                    "non-empty SSH password can be written into rendered contexts "
+                    "and image artifacts"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
     return tuple(warnings)
 
 

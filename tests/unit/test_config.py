@@ -174,6 +174,12 @@ def test_minimal_config_expands_static_defaults(
         "comfyui_path": None,
         "extra_packages": [],
         "env": {},
+        "ssh": {
+            "enable": False,
+            "port": 22,
+            "password": "",
+            "pub_keys": [],
+        },
     }
     assert config.python.model_dump() == {
         "version": "3.12",

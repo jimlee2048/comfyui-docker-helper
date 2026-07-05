@@ -531,6 +531,35 @@ def test_write_build_context_wraps_runtime_hook_lstat_error(
     assert not (tmp_path / "missing").exists()
 
 
+def test_write_build_context_rejects_unsupported_runtime_hook_extension(
+    tmp_path: Path,
+) -> None:
+    """Materialization validates runtime hook files against the shared contract."""
+    hooks = tmp_path / "hooks"
+    phase = hooks / "pre-start.d"
+    phase.mkdir(parents=True)
+    (phase / "note.txt").write_text("nope\n", encoding="utf-8")
+    config = make_config()
+    plan = with_runtime_hooks_plan(
+        build_render_plan(config),
+        RuntimeHooksPlan(has_hooks=True, source_dir=hooks),
+    )
+
+    with pytest.raises(
+        ContextWriteError,
+        match=r"runtime hook files must end in \.sh or \.py: pre-start\.d/note\.txt",
+    ):
+        write_build_context(
+            plan,
+            tmp_path / "missing" / "parent" / "context",
+            config=config,
+            lockfile=make_lockfile(config),
+            working_directory=tmp_path,
+        )
+
+    assert not (tmp_path / "missing").exists()
+
+
 def test_write_build_context_cleans_created_parents_when_materialization_fails(
     tmp_path: Path,
 ) -> None:

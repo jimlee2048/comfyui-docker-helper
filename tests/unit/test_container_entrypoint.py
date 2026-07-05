@@ -326,11 +326,22 @@ def _activate_async_plan(
     *items: RuntimeFilePlanItem,
     config: RuntimeConfig | None = None,
 ) -> RuntimeFilePlan:
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log, state_observer, extra_protected_staging_targets
+        return ()
+
     queues = entrypoint_module._activate_runtime_file_plan(
         RuntimeFilePlan(items=items),
         config=config or RuntimeConfig.model_validate({}),
         runtime=runtime,
-        runtime_downloader=lambda plan, *, config, log: (),
+        runtime_downloader=runtime_downloader,
         runtime_state_path=state_path,
     )
     assert queues.sync_plan.items == ()
@@ -1841,8 +1852,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         handler = handlers[forwarded]
         assert callable(handler)
@@ -2885,8 +2898,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         assert spawn_calls == []
         download_calls.append(plan)
         return ()
@@ -2947,8 +2962,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3004,8 +3021,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         assert events == []
         events.append("download")
         return ()
@@ -3682,8 +3701,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         raise RuntimeFileDownloadError(
             (
                 Diagnostic(
@@ -3733,8 +3754,10 @@ def test_no_runtime_files_ignore_invalid_state_and_spawn(tmp_path: Path) -> None
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3790,8 +3813,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3860,8 +3885,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3916,8 +3943,10 @@ overwrite = false
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3988,7 +4017,9 @@ filename = "model.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del extra_protected_staging_targets
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -4020,6 +4051,96 @@ filename = "model.bin"
     assert backend.calls[0][0].url == "https://example.com/model.bin"
 
 
+def test_runtime_downloader_injection_receives_typed_boundary_kwargs(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state.json"
+    sync_item = RuntimeFilePlanItem(
+        url="https://example.com/sync.bin",
+        directory="models",
+        filename="sync.bin",
+        relative_target="models/sync.bin",
+        target=runtime.comfyui_path / "models" / "sync.bin",
+        overwrite=False,
+        download_mode="sync",
+        downloader=None,
+        action="download",
+    )
+    async_item = _async_item(runtime, "async.bin")
+    observed_state_observers: list[
+        entrypoint_module.RuntimeDownloadStateObserver | None
+    ] = []
+    observed_protected_targets: list[tuple[Path, ...]] = []
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del config, log
+        assert plan.items == (sync_item,)
+        observed_state_observers.append(state_observer)
+        observed_protected_targets.append(extra_protected_staging_targets)
+        return ()
+
+    queues = entrypoint_module._activate_runtime_file_plan(
+        RuntimeFilePlan(items=(sync_item, async_item)),
+        config=RuntimeConfig.model_validate({}),
+        runtime=runtime,
+        runtime_downloader=runtime_downloader,
+        runtime_state_path=state_path,
+    )
+
+    expected_protected_target = entrypoint_module.runtime_file_staging_target(
+        async_item,
+        entrypoint_module.runtime_file_identity_digest(async_item),
+    )
+    assert queues.sync_plan.items == (sync_item,)
+    assert queues.async_plan.items == (async_item,)
+    assert observed_state_observers and observed_state_observers[0] is not None
+    assert observed_protected_targets == [(expected_protected_target,)]
+
+
+def test_stale_short_signature_runtime_downloader_injection_fails(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state.json"
+    item = RuntimeFilePlanItem(
+        url="https://example.com/model.bin",
+        directory="models",
+        filename="model.bin",
+        relative_target="models/model.bin",
+        target=runtime.comfyui_path / "models" / "model.bin",
+        overwrite=False,
+        download_mode="sync",
+        downloader=None,
+        action="download",
+    )
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        return ()
+
+    with pytest.raises(TypeError, match="state_observer"):
+        entrypoint_module._activate_runtime_file_plan(
+            RuntimeFilePlan(items=(item,)),
+            config=RuntimeConfig.model_validate({}),
+            runtime=runtime,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
+        )
+
+
 def test_internal_async_plan_exercises_active_state_gate_without_download(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -4044,8 +4165,10 @@ def test_internal_async_plan_exercises_active_state_gate_without_download(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -4114,8 +4237,10 @@ filename = "async.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -4200,8 +4325,10 @@ download_mode = "async"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         assert [item.relative_target for item in plan.items] == ["models/sync.bin"]
         events.append("download")
         return ()
@@ -4288,8 +4415,10 @@ filename = "async.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -4377,8 +4506,10 @@ download_mode = "async"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         assert [item.filename for item in plan.items] == ["sync.bin"]
         events.append("sync-download")
         return ()
@@ -5464,7 +5595,9 @@ filename = "b.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del extra_protected_staging_targets
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -5566,7 +5699,9 @@ filename = "b.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del extra_protected_staging_targets
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -5638,8 +5773,10 @@ filename = "model.bin"
         *,
         config: object,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         actions.extend(item.action for item in plan.items)
         return ()
 
@@ -5699,8 +5836,10 @@ download_mode = "sync"
         *,
         config: object,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del log
+        del log, state_observer, extra_protected_staging_targets
         default_downloader.append(config.cdh.default_downloader)
         seen.extend((item.downloader, item.download_mode) for item in plan.items)
         return ()

@@ -13,7 +13,6 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from inspect import Parameter, signature
 from pathlib import Path
 from types import FrameType
 from typing import Protocol
@@ -1042,32 +1041,12 @@ def _call_runtime_downloader(
     state_observer: RuntimeDownloadStateObserver,
     extra_protected_staging_targets: tuple[Path, ...] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
-    kwargs: dict[str, object] = {"config": config, "log": log}
-    if _runtime_downloader_accepts_keyword(runtime_downloader, "state_observer"):
-        kwargs["state_observer"] = state_observer
-    if _runtime_downloader_accepts_keyword(
-        runtime_downloader, "extra_protected_staging_targets"
-    ):
-        kwargs["extra_protected_staging_targets"] = extra_protected_staging_targets
-    return runtime_downloader(plan, **kwargs)
-
-
-def _runtime_downloader_accepts_state_observer(
-    runtime_downloader: RuntimeDownloadRunner,
-) -> bool:
-    return _runtime_downloader_accepts_keyword(runtime_downloader, "state_observer")
-
-
-def _runtime_downloader_accepts_keyword(
-    runtime_downloader: RuntimeDownloadRunner,
-    name: str,
-) -> bool:
-    try:
-        parameters = signature(runtime_downloader).parameters
-    except (TypeError, ValueError):
-        return True
-    return name in parameters or any(
-        parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()
+    return runtime_downloader(
+        plan,
+        config=config,
+        log=log,
+        state_observer=state_observer,
+        extra_protected_staging_targets=extra_protected_staging_targets,
     )
 
 

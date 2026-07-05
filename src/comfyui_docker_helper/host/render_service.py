@@ -23,6 +23,11 @@ from comfyui_docker_helper.config import (
     resolve_lockfile,
     with_runtime_hooks_plan,
 )
+from comfyui_docker_helper.config.runtime_hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
+    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+    runtime_hook_phase_directory_list,
+)
 from comfyui_docker_helper.rendering import (
     ContextWriteError,
     MaterializationError,
@@ -36,8 +41,6 @@ _ALWAYS_MANAGED_TREES = ("packages/cdh/src",)
 _CONDITIONAL_MANAGED_TREES = ("scripts", "runtime/hooks")
 _RETIRED_HELPER_PROJECTION_ROOTS = ("config",)
 _DEFAULT_RUNTIME_HOOKS_DIR = Path("./hooks")
-_RUNTIME_HOOK_PHASE_DIRS = frozenset({"pre-start.d", "post-start.d", "stop.d"})
-_RUNTIME_HOOK_SUFFIXES = frozenset({".sh", ".py"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,14 +303,14 @@ def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
                 )
             )
             continue
-        if child.name not in _RUNTIME_HOOK_PHASE_DIRS:
+        if child.name not in RUNTIME_HOOK_PHASE_DIRECTORY_NAMES:
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
                     code="runtime_hooks.unknown_top_level",
                     message=(
-                        "runtime hook source may only contain pre-start.d, "
-                        "post-start.d, and stop.d directories"
+                        "runtime hook source may only contain "
+                        f"{runtime_hook_phase_directory_list()} directories"
                     ),
                 )
             )
@@ -373,7 +376,7 @@ def _validate_runtime_hook_phase(
                 )
             )
             continue
-        if child.suffix not in _RUNTIME_HOOK_SUFFIXES:
+        if child.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
             diagnostics.append(
                 Diagnostic(
                     path=child_path,

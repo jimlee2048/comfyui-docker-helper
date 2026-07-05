@@ -18,6 +18,11 @@ from comfyui_docker_helper.config.plan import (
     OutputArtifact,
     RenderPlan,
 )
+from comfyui_docker_helper.config.runtime_hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
+    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+    runtime_hook_phase_directory_list,
+)
 from comfyui_docker_helper.config.runtime_projection import (
     RuntimeConfigProjection,
     project_runtime_config,
@@ -51,8 +56,6 @@ _PACKAGE_CACHE_DIRECTORIES = frozenset(
 )
 _PACKAGE_CACHE_SUFFIXES = (".pyc", ".pyo")
 _PACKAGE_METADATA_SUFFIXES = (".dist-info", ".egg-info")
-_RUNTIME_HOOK_PHASE_DIRECTORIES = frozenset({"pre-start.d", "post-start.d", "stop.d"})
-_RUNTIME_HOOK_SUFFIXES = frozenset({".sh", ".py"})
 type ConfigInput = str | Path | Iterable[str | Path]
 
 
@@ -491,10 +494,10 @@ def _validate_runtime_hooks_source_tree(plan: RenderPlan) -> None:
             raise ContextWriteError(
                 f"runtime hooks source contains a special file: {child.name}"
             )
-        if child.name not in _RUNTIME_HOOK_PHASE_DIRECTORIES:
+        if child.name not in RUNTIME_HOOK_PHASE_DIRECTORY_NAMES:
             raise ContextWriteError(
-                "runtime hooks source may only contain pre-start.d, "
-                "post-start.d, and stop.d directories"
+                "runtime hooks source may only contain "
+                f"{runtime_hook_phase_directory_list()} directories"
             )
         if not stat.S_ISDIR(child_mode):
             raise ContextWriteError(
@@ -525,7 +528,7 @@ def _validate_runtime_hook_phase_tree(phase: Path, phase_name: str) -> None:
             raise ContextWriteError(
                 f"runtime hooks source contains a special file: {relative}"
             )
-        if child.suffix not in _RUNTIME_HOOK_SUFFIXES:
+        if child.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
             raise ContextWriteError(
                 f"runtime hook files must end in .sh or .py: {relative}"
             )

@@ -685,6 +685,66 @@ filename = "model.bin"
     ]
 
 
+def test_invalid_mounted_runtime_file_after_baked_reports_authored_index(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/baked.bin"
+dir = "models"
+filename = "baked.bin"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "ftp://example.com/mounted.bin"
+dir = "models"
+filename = "mounted.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+
+    assert _identities(error.value) == [
+        (("files", 0, "url"), "runtime_file.invalid_url")
+    ]
+
+
+def test_multiple_invalid_runtime_file_items_keep_authored_indexes(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/a.bin"
+dir = "/models"
+filename = "a.bin"
+
+[[files]]
+url = "https://example.com/b.bin"
+dir = "models"
+filename = "nested/b.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "dir"), "runtime_file.absolute_directory"),
+        (("files", 1, "filename"), "runtime_file.invalid_filename"),
+    ]
+
+
 def test_runtime_file_async_download_mode_is_accepted(
     tmp_path: Path,
 ) -> None:

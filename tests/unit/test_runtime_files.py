@@ -896,6 +896,117 @@ def test_runtime_file_merge_ignores_full_runtime_keys_but_validates_files() -> N
     ]
 
 
+def test_runtime_file_plan_invalid_mounted_after_baked_reports_authored_index(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/baked.bin",
+                            "dir": "models",
+                            "filename": "baked.bin",
+                        }
+                    ]
+                },
+                {
+                    "files": [
+                        {
+                            "url": "ftp://example.com/mounted.bin",
+                            "dir": "models",
+                            "filename": "mounted.bin",
+                        }
+                    ]
+                },
+            ],
+            comfyui_path=comfyui,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "url"), "runtime_file.invalid_url")
+    ]
+
+
+def test_runtime_file_plan_multiple_invalid_items_keep_authored_indexes(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/a.bin",
+                            "dir": "/models",
+                            "filename": "a.bin",
+                        },
+                        {
+                            "url": "https://example.com/b.bin",
+                            "dir": "models",
+                            "filename": "nested/b.bin",
+                        },
+                    ]
+                }
+            ],
+            comfyui_path=comfyui,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "dir"), "runtime_file.absolute_directory"),
+        (("files", 1, "filename"), "runtime_file.invalid_filename"),
+    ]
+
+
+def test_runtime_file_plan_override_target_error_uses_override_source_index(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    target = comfyui / "models" / "overridden.bin"
+    target.mkdir(parents=True)
+
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/first.bin",
+                            "dir": "models",
+                            "filename": "first.bin",
+                        },
+                        {
+                            "url": "https://example.com/baked.bin",
+                            "dir": "models",
+                            "filename": "overridden.bin",
+                        },
+                    ]
+                },
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/mounted.bin",
+                            "dir": "models",
+                            "filename": "overridden.bin",
+                        }
+                    ]
+                },
+            ],
+            comfyui_path=comfyui,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "target"), "runtime_file.non_regular_target")
+    ]
+
+
 def test_runtime_file_download_selects_explicit_backend_before_default(
     tmp_path: Path,
 ) -> None:

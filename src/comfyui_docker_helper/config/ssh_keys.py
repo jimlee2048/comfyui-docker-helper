@@ -20,6 +20,7 @@ _ECDSA_CURVES = {
     "ecdsa-sha2-nistp384": b"nistp384",
     "ecdsa-sha2-nistp521": b"nistp521",
 }
+_AUTHORIZED_KEYS_FORBIDDEN_CHARACTERS = frozenset({"\n", "\r", "\x00"})
 
 
 class SshPublicKeyValidationError(ValueError):
@@ -79,6 +80,9 @@ def normalize_ssh_public_key(
 
 
 def _validate_ssh_public_key(value: str) -> str | None:
+    if any(character in value for character in _AUTHORIZED_KEYS_FORBIDDEN_CHARACTERS):
+        return "must be a single authorized_keys line without newline or NUL characters"
+
     parts = value.split(maxsplit=2)
     if len(parts) < 2:
         return (

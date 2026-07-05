@@ -14,8 +14,9 @@ EXAMPLES = Path("examples")
 EXPECTED_FULL_KEYS = {
     "compute_platform": {"type", "cuda"},
     "compute_platform.cuda": {"version", "image_flavor", "image_distro"},
-    "system": {"workspace", "comfyui_path", "extra_packages", "env"},
+    "system": {"workspace", "comfyui_path", "extra_packages", "env", "ssh"},
     "system.env": {"COMFYUI_PORT", "EXAMPLE_PROFILE"},
+    "system.ssh": {"enable", "port", "password", "pub_keys"},
     "python": {"version", "uv_version", "index_url", "extra_packages"},
     "pytorch": {"version", "index_base_url", "extra_packages"},
     "cdh": {"default_downloader", "default_download_mode", "downloader"},
@@ -99,6 +100,7 @@ def test_full_example_covers_all_public_config_fields() -> None:
     )
     assert set(document["system"]) == EXPECTED_FULL_KEYS["system"]
     assert set(document["system"]["env"]) == EXPECTED_FULL_KEYS["system.env"]
+    assert set(document["system"]["ssh"]) == EXPECTED_FULL_KEYS["system.ssh"]
     assert set(document["python"]) == EXPECTED_FULL_KEYS["python"]
     assert set(document["pytorch"]) == EXPECTED_FULL_KEYS["pytorch"]
     assert set(document["cdh"]) == EXPECTED_FULL_KEYS["cdh"]

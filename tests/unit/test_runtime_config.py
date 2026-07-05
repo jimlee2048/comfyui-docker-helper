@@ -411,6 +411,59 @@ pub_keys = ["{TRUNCATED_SSH_KEY}"]
     ]
 
 
+def test_embedded_newline_ssh_public_key_fails_without_leaking_key(
+    tmp_path: Path,
+) -> None:
+    injected = f"{VALID_SSH_KEY}\nssh-ed25519 injected"
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f'''
+[system.ssh]
+password = "super-secret"
+pub_keys = ["""{injected}"""]
+''',
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload
+    assert VALID_SSH_KEY not in payload
+    assert "injected" not in payload
+
+
+def test_nul_ssh_pub_key_env_fails_without_leaking_key(tmp_path: Path) -> None:
+    injected = f"{VALID_SSH_KEY}\x00comment"
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={
+                "SSH_PASSWORD": "env-super-secret",
+                "SSH_PUB_KEY": injected,
+            },
+        )
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("env", "SSH_PUB_KEY"), "env.invalid_ssh_pub_key")
+    ]
+    assert "env-super-secret" not in payload
+    assert VALID_SSH_KEY not in payload
+
+
 def test_invalid_ssh_pub_key_env_fails_without_leaking_password(tmp_path: Path) -> None:
     with pytest.raises(RuntimeConfigurationError) as raised:
         load_runtime_config(

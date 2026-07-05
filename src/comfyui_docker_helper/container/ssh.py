@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from comfyui_docker_helper.config import RuntimeConfig, RuntimeSystemSshConfig
+from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.errors import ApplicationError
 
@@ -180,7 +181,7 @@ def prepare_root_ssh_credentials(
     if ssh.password:
         _validate_password_for_chpasswd(ssh.password)
 
-    public_keys = tuple(key.strip() for key in ssh.pub_keys if key.strip())
+    public_keys = _normalize_runtime_public_keys(ssh.pub_keys)
     authorized_keys_path = None
     if public_keys:
         authorized_keys_path = _write_authorized_keys(
@@ -323,6 +324,17 @@ def _write_authorized_keys(
             "failed to prepare root SSH authorized keys"
         ) from error
     return authorized_keys
+
+
+def _normalize_runtime_public_keys(values: list[str]) -> tuple[str, ...]:
+    public_keys, diagnostics = normalize_ssh_public_keys(
+        values,
+        path=("system", "ssh", "pub_keys"),
+        code="ssh.invalid_public_key",
+    )
+    if diagnostics:
+        raise SshCredentialPreparationError(diagnostics[0].message)
+    return public_keys
 
 
 def _set_root_password(password: str, runner: SensitiveCommandRunner) -> None:

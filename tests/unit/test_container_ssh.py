@@ -624,6 +624,36 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
     assert not runtime_dir.exists()
 
 
+@pytest.mark.parametrize(
+    ("public_key", "leaked_fragment"),
+    [
+        (f"{VALID_SSH_KEY}\nssh-ed25519 injected", "injected"),
+        (f"{VALID_SSH_KEY}\x00comment", "comment"),
+    ],
+)
+def test_prepare_root_ssh_credentials_rejects_control_public_key_before_write(
+    tmp_path: Path,
+    public_key: str,
+    leaked_fragment: str,
+) -> None:
+    root_home = tmp_path / "root"
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        prepare_root_ssh_credentials(
+            RuntimeSystemSshConfig(
+                enable=True,
+                pub_keys=[public_key],
+            ),
+            root_home=root_home,
+        )
+
+    error = str(raised.value)
+    assert "single authorized_keys line" in error
+    assert VALID_SSH_KEY not in error
+    assert leaked_fragment not in error
+    assert not (root_home / ".ssh" / "authorized_keys").exists()
+
+
 def test_start_sshd_if_enabled_fails_when_sshd_exits_during_startup(
     tmp_path: Path,
 ) -> None:

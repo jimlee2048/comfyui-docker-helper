@@ -4408,6 +4408,77 @@ password = "secret"
     assert "host keys unavailable" in str(raised.value)
 
 
+def test_async_queue_start_failure_stops_started_ssh_without_spawning(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    events: list[str] = []
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return FakeSshdProcess(events=events)
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del plan, config, runtime, runtime_state_path, log
+        events.append("async-start")
+        raise entrypoint_module.RuntimeAsyncQueueStartupError("queue refused")
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    with pytest.raises(EntrypointError) as raised:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+
+    assert "async runtime download queue failed to start: queue refused" in str(
+        raised.value
+    )
+    assert events == ["ssh-start", "async-start", "ssh-terminate"]
+
+
 def test_shutdown_signal_inside_ssh_starter_terminates_returned_sshd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

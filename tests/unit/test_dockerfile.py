@@ -72,6 +72,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     build-essential \\
     aria2 \\
     openssh-server \\
+ && rm -f /etc/ssh/ssh_host_* \\
  && rm -f /usr/sbin/policy-rc.d \\
  && test -x /usr/sbin/sshd
 
@@ -176,6 +177,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     openssh-server \
     --option-like \
     'lib'"'"'special' \
+ && rm -f /etc/ssh/ssh_host_* \
  && rm -f /usr/sbin/policy-rc.d \
  && test -x /usr/sbin/sshd
 
@@ -290,6 +292,7 @@ def test_openssh_server_capability_is_installed_without_default_startup() -> Non
     )
 
     assert "    openssh-server \\\n" in rendered
+    assert " && rm -f /etc/ssh/ssh_host_* \\\n" in rendered
     assert " && test -x /usr/sbin/sshd\n" in rendered
     assert "policy-rc.d" in rendered
     assert "EXPOSE" not in rendered
@@ -299,6 +302,12 @@ def test_openssh_server_capability_is_installed_without_default_startup() -> Non
     assert "sshd -D" not in rendered
     assert "/usr/sbin/sshd -D" not in rendered
     assert "/usr/sbin/sshd" in rendered
+    assert rendered.index("openssh-server") < rendered.index(
+        "rm -f /etc/ssh/ssh_host_*"
+    )
+    assert rendered.index("rm -f /etc/ssh/ssh_host_*") < rendered.index(
+        "test -x /usr/sbin/sshd"
+    )
 
 
 def test_stable_comfyui_and_cli_replay_use_locked_versions() -> None:

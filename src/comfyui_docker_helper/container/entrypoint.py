@@ -438,13 +438,17 @@ def run_entrypoint(
                 stop_startup_auxiliary_services()
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
             _ensure_sshd_still_running_before_comfyui(sshd_handle)
-            async_handle = _start_runtime_async_download_queue(
-                download_queues.async_plan,
-                config=result.config,
-                runtime=runtime,
-                runtime_state_path=Path(runtime_state_path),
-                runtime_async_queue_starter=runtime_async_queue_starter,
-            )
+            try:
+                async_handle = _start_runtime_async_download_queue(
+                    download_queues.async_plan,
+                    config=result.config,
+                    runtime=runtime,
+                    runtime_state_path=Path(runtime_state_path),
+                    runtime_async_queue_starter=runtime_async_queue_starter,
+                )
+            except EntrypointError:
+                stop_startup_auxiliary_services()
+                raise
             if startup_shutdown.requested_signal is not None:
                 stop_startup_auxiliary_services()
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)

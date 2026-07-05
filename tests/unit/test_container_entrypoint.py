@@ -3786,7 +3786,7 @@ filename = "model.bin"
     assert backend.calls[0][0].url == "https://example.com/model.bin"
 
 
-# Typed downloader boundary tests protect the T3 injection contract between the
+# Typed downloader boundary tests protect the injection contract between the
 # entrypoint and runtime file processing.
 def test_runtime_downloader_injection_receives_typed_boundary_kwargs(
     tmp_path: Path,

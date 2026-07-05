@@ -777,6 +777,8 @@ def _root_exists(path: Path) -> bool:
         path.lstat()
     except FileNotFoundError:
         return False
+    except OSError:
+        return True
     return True
 
 

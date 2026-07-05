@@ -21,7 +21,9 @@ from comfyui_docker_helper.config import (
     OutputArtifact,
     OutputManifest,
     RegistryCustomNodeConfig,
+    RuntimeHooksPlan,
     build_render_plan,
+    with_runtime_hooks_plan,
 )
 from comfyui_docker_helper.config.plan import ArtifactKind
 from comfyui_docker_helper.rendering import (
@@ -494,6 +496,41 @@ def test_write_build_context_wraps_missing_hook_after_plan_validation(
     assert not (tmp_path / "missing").exists()
 
 
+def test_write_build_context_wraps_runtime_hook_lstat_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime hook source inspection errors are context write failures."""
+    hooks = tmp_path / "hooks"
+    phase = hooks / "pre-start.d"
+    hook = phase / "10-pre.sh"
+    phase.mkdir(parents=True)
+    hook.write_text("#!/bin/sh\n", encoding="utf-8")
+    plan = with_runtime_hooks_plan(
+        build_render_plan(make_config()),
+        RuntimeHooksPlan(has_hooks=True, source_dir=hooks),
+    )
+    original_lstat = Path.lstat
+
+    def fail_hook_lstat(self: Path):
+        if self == hook:
+            raise PermissionError("stat denied")
+        return original_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", fail_hook_lstat)
+
+    with pytest.raises(ContextWriteError, match="could not be inspected"):
+        write_build_context(
+            plan,
+            tmp_path / "missing" / "parent" / "context",
+            config=make_config(),
+            lockfile=make_lockfile(make_config()),
+            working_directory=tmp_path,
+        )
+
+    assert not (tmp_path / "missing").exists()
+
+
 def test_write_build_context_cleans_created_parents_when_materialization_fails(
     tmp_path: Path,
 ) -> None:
@@ -519,6 +556,50 @@ def test_write_build_context_cleans_created_parents_when_materialization_fails(
         )
 
     assert not (tmp_path / "created").exists()
+
+
+def test_materialize_build_context_wraps_runtime_hook_copy_lstat_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime hook copy inspection errors are materialization failures."""
+    hooks = tmp_path / "hooks"
+    phase = hooks / "pre-start.d"
+    hook = phase / "10-pre.sh"
+    phase.mkdir(parents=True)
+    hook.write_text("#!/bin/sh\n", encoding="utf-8")
+    config = make_config()
+    plan = with_runtime_hooks_plan(
+        build_render_plan(config),
+        RuntimeHooksPlan(has_hooks=True, source_dir=hooks),
+    )
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    original_validate = context_module._validate_runtime_hooks_source_tree
+    original_lstat = Path.lstat
+
+    def validate_before_lstat_failure(render_plan) -> None:
+        original_validate(render_plan)
+        monkeypatch.setattr(Path, "lstat", fail_hook_lstat)
+
+    def fail_hook_lstat(self: Path):
+        if self == hook:
+            raise PermissionError("stat denied")
+        return original_lstat(self)
+
+    monkeypatch.setattr(
+        context_module,
+        "_validate_runtime_hooks_source_tree",
+        validate_before_lstat_failure,
+    )
+
+    with pytest.raises(MaterializationError, match="could not be inspected"):
+        materialize_build_context(
+            plan,
+            staging,
+            config=config,
+            lockfile=make_lockfile(config),
+        )
 
 
 def test_expected_context_cleans_temp_dir_when_materialization_fails(
@@ -585,6 +666,66 @@ def test_write_build_context_preserves_marked_destination_when_materialization_f
     assert (output / "old.txt").read_text() == "preserve\n"
     assert not (output / "required-but-unwritten").exists()
     assert not list(tmp_path.glob(".context.cdh-*"))
+
+
+def test_overwrite_restore_failure_retains_previous_context_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If rollback cannot restore the old context, keep the backup for recovery."""
+    output = tmp_path / "context"
+    write_valid_marker(output)
+    (output / "old.txt").write_text("old context\n", encoding="utf-8")
+    staging = tmp_path / ".context.cdh-staging-forced"
+    staging.mkdir()
+    write_valid_marker(staging)
+    (staging / "new.txt").write_text("new context\n", encoding="utf-8")
+    original_replace = Path.replace
+
+    def fail_new_context_and_restore(self: Path, target: Path) -> Path:
+        if self == staging and target == output:
+            raise PermissionError("replace denied")
+        if self.name.startswith(".context.cdh-backup-") and target == output:
+            raise PermissionError("restore denied")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_new_context_and_restore)
+
+    with pytest.raises(ContextWriteError) as error:
+        context_module._replace_destination(
+            staging,
+            output,
+            overwrite_existing=True,
+        )
+
+    backups = sorted(tmp_path.glob(".context.cdh-backup-*"))
+    assert len(backups) == 1
+    assert f"retained backup: {backups[0]}" in str(error.value)
+    assert has_valid_context_marker(backups[0])
+    assert (backups[0] / "old.txt").read_text(encoding="utf-8") == "old context\n"
+    assert not output.exists()
+
+
+def test_overwrite_success_removes_previous_context_backup(tmp_path: Path) -> None:
+    """Successful overwrite cleanup removes the temporary backup directory."""
+    output = tmp_path / "context"
+    write_valid_marker(output)
+    (output / "old.txt").write_text("old context\n", encoding="utf-8")
+    staging = tmp_path / ".context.cdh-staging-forced"
+    staging.mkdir()
+    write_valid_marker(staging)
+    (staging / "new.txt").write_text("new context\n", encoding="utf-8")
+
+    context_module._replace_destination(
+        staging,
+        output,
+        overwrite_existing=True,
+    )
+
+    assert has_valid_context_marker(output)
+    assert (output / "new.txt").read_text(encoding="utf-8") == "new context\n"
+    assert not (output / "old.txt").exists()
+    assert not list(tmp_path.glob(".context.cdh-backup-*"))
 
 
 def test_write_build_context_rejects_script_source_special_files_before_mutation(
@@ -926,4 +1067,30 @@ def test_package_resource_tree_rejects_special_files(tmp_path: Path) -> None:
             tmp_path / "destination",
             "package resource",
             skip_package_cache_entries=True,
+        )
+
+
+def test_copy_plain_tree_wraps_read_permission_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copy failures become materialization errors instead of raw OS errors."""
+    source = tmp_path / "source"
+    source.mkdir()
+    unreadable = source / "hook.sh"
+    unreadable.write_text("#!/bin/sh\n", encoding="utf-8")
+    original_read_bytes = Path.read_bytes
+
+    def fail_read_bytes(self: Path) -> bytes:
+        if self == unreadable:
+            raise PermissionError("read denied")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+    with pytest.raises(MaterializationError, match=r"file could not be read: hook\.sh"):
+        context_module._copy_plain_tree(
+            source,
+            tmp_path / "destination",
+            "runtime hooks",
         )

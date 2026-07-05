@@ -626,6 +626,55 @@ def test_runtime_hooks_reject_unknown_top_level_entries(tmp_path: Path) -> None:
     ]
 
 
+def test_runtime_hooks_wrap_source_traversal_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host hook preflight reports traversal failures as diagnostics."""
+    hooks = tmp_path / "runtime-hooks"
+    hooks.mkdir()
+    original_iterdir = Path.iterdir
+
+    def fail_iterdir(self: Path):
+        if self == hooks:
+            raise PermissionError("list denied")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fail_iterdir)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir",), "runtime_hooks.source_read_failed")
+    ]
+    assert "list denied" in error.value.diagnostics[0].message
+
+
+def test_omitted_runtime_hooks_wrap_default_source_lstat_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default hook auto-detection reports probe failures as diagnostics."""
+    hooks = tmp_path / "hooks"
+    original_lstat = Path.lstat
+
+    def fail_default_hooks_lstat(self: Path):
+        if self == hooks:
+            raise PermissionError("stat denied")
+        return original_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", fail_default_hooks_lstat)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir",), "runtime_hooks.source_inspect_failed")
+    ]
+    assert "stat denied" in error.value.diagnostics[0].message
+
+
 def test_runtime_hooks_reject_phase_name_as_file(tmp_path: Path) -> None:
     """Known runtime hook phase entries must be directories."""
     hooks = tmp_path / "runtime-hooks"

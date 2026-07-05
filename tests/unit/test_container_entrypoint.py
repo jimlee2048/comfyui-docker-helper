@@ -66,21 +66,29 @@ class FakeChild:
         self._wait_returncode = returncode
         self.signals: list[signal.Signals] = []
         self.terminated = False
+        self.killed = False
         self.wait_calls = 0
 
     def wait(self) -> int:
         self.wait_calls += 1
-        self.returncode = self._wait_returncode
-        return self._wait_returncode
+        if self.returncode is None:
+            self.returncode = self._wait_returncode
+        return self.returncode
 
     def poll(self) -> int | None:
         return self.returncode
 
     def send_signal(self, sig: signal.Signals) -> None:
         self.signals.append(sig)
+        if self._wait_returncode == -int(sig):
+            self.returncode = self._wait_returncode
 
     def terminate(self) -> None:
         self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -int(signal.SIGKILL)
 
 
 class FakeSshdProcess:
@@ -269,11 +277,13 @@ class FakeAsyncHandle:
         *,
         alive: bool = True,
         complete_on_join: bool = True,
+        complete_on_terminate: bool = True,
         on_join: Callable[[], object] | None = None,
     ) -> None:
         self.events = events
         self._alive = alive
         self._complete_on_join = complete_on_join
+        self._complete_on_terminate = complete_on_terminate
         self._on_join = on_join
 
     def request_stop(self) -> None:
@@ -281,6 +291,8 @@ class FakeAsyncHandle:
 
     def terminate_backends(self) -> None:
         self.events.append("async-terminate")
+        if self._complete_on_terminate:
+            self._alive = False
 
     def join(self, timeout: float | None = None) -> None:
         del timeout
@@ -625,6 +637,64 @@ def test_signals_are_forwarded_to_spawned_child(
         runner=runner,
     ) == 128 + int(forwarded)
     assert signaling_child.signals == [forwarded]
+    assert restored == [
+        signal.SIGTERM,
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGINT,
+    ]
+
+
+def test_forwarded_shutdown_signal_ignored_by_child_escalates_to_kill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    handlers, restored = _capture_signal_handlers(monkeypatch)
+    monkeypatch.setattr(
+        entrypoint_module,
+        "CHILD_TERMINATION_REAP_GRACE_SECONDS",
+        0.0,
+    )
+
+    class IgnoringShutdownChild(FakeChild):
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("shutdown signal handler should interrupt wait")
+            if self.returncode is None:
+                self.returncode = self._wait_returncode
+            return self.returncode
+
+    child = IgnoringShutdownChild(0)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return child
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={},
+            runner=runner,
+        )
+        == 137
+    )
+
+    assert child.signals == [signal.SIGTERM]
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
     assert restored == [
         signal.SIGTERM,
         signal.SIGINT,
@@ -1633,12 +1703,17 @@ def test_ssh_stop_timeout_kills_sshd_and_returns_false(
     assert stopped is False
     assert shutdown_requested.is_set()
     assert events == ["ssh-terminate", "ssh-kill"]
+    assert sshd.waited.is_set()
     assert "WARNING: SSH runtime service did not stop in 0.2s" in captured.err
 
 
 def test_async_stop_timeout_is_bounded(capsys: pytest.CaptureFixture[str]) -> None:
     events: list[str] = []
-    handle = FakeAsyncHandle(events, complete_on_join=False)
+    handle = FakeAsyncHandle(
+        events,
+        complete_on_join=False,
+        complete_on_terminate=False,
+    )
     now = 0.0
 
     def monotonic() -> float:
@@ -1663,13 +1738,17 @@ def test_async_stop_timeout_is_bounded(capsys: pytest.CaptureFixture[str]) -> No
         "async-join",
         "async-join",
         "async-terminate",
+        "async-join",
     ]
-    assert now == pytest.approx(0.2)
+    assert now == pytest.approx(0.3)
     output = capsys.readouterr().out
     assert "Async runtime download queue stop requested" in output
     assert (
         "WARNING: Async runtime download queue did not stop in 0.2s; "
         "terminating backends"
+    ) in output
+    assert (
+        "WARNING: Async runtime download queue remained alive after backend termination"
     ) in output
 
 
@@ -1693,15 +1772,31 @@ def test_async_stop_interrupted_terminates_backends(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     events: list[str] = []
-    handle = FakeAsyncHandle(events, complete_on_join=False)
+    handle = FakeAsyncHandle(
+        events,
+        complete_on_join=False,
+        complete_on_terminate=False,
+    )
+    now = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds if seconds > 0 else 0.1
 
     stopped = entrypoint_module._stop_runtime_async_download_queue(
         handle,
         cancel_requested=lambda: True,
+        timeout=0.2,
+        poll_interval=0.1,
+        monotonic=monotonic,
+        sleep=sleep,
     )
 
     assert stopped is False
-    assert events == ["async-stop", "async-terminate"]
+    assert events == ["async-stop", "async-terminate", "async-join"]
     output = capsys.readouterr().out
     assert "Async runtime download queue stop requested" in output
     assert (
@@ -3292,7 +3387,8 @@ def test_readiness_failure_terminates_child_and_prevents_normal_wait(
 
     assert events == ["spawn", "readiness"]
     assert child.terminated is True
-    assert child.returncode is None
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
     assert "readiness.timeout" in str(error.value)
 
 
@@ -3429,7 +3525,8 @@ def test_post_start_hook_failure_terminates_child_and_prevents_normal_wait(
 
     assert events == ["spawn", "readiness", "post-start"]
     assert child.terminated is True
-    assert child.returncode is None
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
     assert "runtime hook failed" in str(error.value)
     assert "[hooks.mounted.post-start.10-fail.sh]" in str(error.value)
 

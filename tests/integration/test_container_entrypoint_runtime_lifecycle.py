@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
+from comfyui_docker_helper.container import entrypoint as entrypoint_module
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -40,14 +41,16 @@ class FakeChild:
         self._wait_event = wait_event
         self.signals: list[signal.Signals] = []
         self.terminated = False
+        self.killed = False
         self.wait_calls = 0
 
     def wait(self) -> int:
         self.wait_calls += 1
         if self._wait_event is not None and self._events is not None:
             self._events.append(self._wait_event)
-        self.returncode = self._wait_returncode
-        return self._wait_returncode
+        if self.returncode is None:
+            self.returncode = self._wait_returncode
+        return self.returncode
 
     def poll(self) -> int | None:
         return self.returncode
@@ -56,10 +59,18 @@ class FakeChild:
         self.signals.append(sig)
         if self._events is not None:
             self._events.append(f"forward:{sig.name}")
+        if self._wait_returncode == -int(sig):
+            self.returncode = self._wait_returncode
 
     def terminate(self) -> None:
         self.terminated = True
         self.returncode = self._wait_returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        if self._events is not None:
+            self._events.append("kill")
+        self.returncode = -int(signal.SIGKILL)
 
 
 class SignalOnFirstWaitChild(FakeChild):
@@ -89,6 +100,10 @@ class SignalOnFirstWaitChild(FakeChild):
         self._events.append("wait:final")
         self.returncode = self._final_returncode
         return self._final_returncode
+
+    def send_signal(self, sig: signal.Signals) -> None:
+        super().send_signal(sig)
+        self.returncode = self._final_returncode
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -674,6 +689,70 @@ def test_startup_shutdown_during_readiness_forwards_to_child_and_skips_stop_hook
 
     assert events == ["spawn", "readiness", "forward:SIGINT", "wait"]
     assert child.signals == [signal.SIGINT]
+    assert restored == [signal.SIGTERM, signal.SIGINT]
+
+
+def test_startup_shutdown_during_readiness_kills_child_that_ignores_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start", "10-post.sh")
+    handlers, restored = _capture_signal_handlers(monkeypatch)
+    monkeypatch.setattr(
+        entrypoint_module,
+        "CHILD_TERMINATION_REAP_GRACE_SECONDS",
+        0.0,
+    )
+    events: list[str] = []
+
+    class IgnoringChild(FakeChild):
+        def send_signal(self, sig: signal.Signals) -> None:
+            self.signals.append(sig)
+            if self._events is not None:
+                self._events.append(f"forward:{sig.name}")
+
+    child = IgnoringChild(0, events=events)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        assert child.poll() is None
+        events.append("readiness")
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        raise AssertionError("shutdown handler should interrupt readiness")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
+            mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
+            baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+            mounted_hooks_path=hooks,
+            environ={"PATH": "/usr/bin"},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+        )
+        == 137
+    )
+
+    assert events == ["spawn", "readiness", "forward:SIGTERM", "kill"]
+    assert child.signals == [signal.SIGTERM]
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
 

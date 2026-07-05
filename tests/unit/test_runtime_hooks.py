@@ -170,6 +170,33 @@ def test_strict_validation_rejects_symlinks(tmp_path: Path) -> None:
     ]
 
 
+def test_discovery_wraps_root_inspection_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    original_lstat = Path.lstat
+
+    def fail_lstat(self: Path) -> os.stat_result:
+        if self == mounted:
+            raise PermissionError("inspect denied")
+        return original_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", fail_lstat)
+
+    with pytest.raises(RuntimeHookError) as error:
+        discover_runtime_hooks(
+            baked_hooks_path=tmp_path / "missing-baked",
+            mounted_hooks_path=mounted,
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted"), "runtime_hook.root_inspect_failed")
+    ]
+    assert "inspect denied" in error.value.diagnostics[0].message
+
+
 def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:
     if not hasattr(os, "mkfifo"):
         pytest.skip("fifo special files are not supported on this platform")

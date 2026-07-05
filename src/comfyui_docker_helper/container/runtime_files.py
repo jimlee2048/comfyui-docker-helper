@@ -290,16 +290,20 @@ def process_runtime_file_downloads(
             backend_name,
             settings=settings,
         )
-        _prepare_staging_parent(
-            staging_item.target.parent,
-            ("files", index - 1),
-            current_staging_targets=current_staging_targets,
-            clock=staging_cleanup_clock,
-        )
 
-        log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
         transfer_completed = False
         try:
+            _prepare_staging_parent(
+                item,
+                staging_item.target.parent,
+                ("files", index - 1),
+                current_staging_targets=current_staging_targets,
+                clock=staging_cleanup_clock,
+            )
+            log(
+                f"Downloading runtime file {index}/{len(plan.items)} "
+                f"with {backend_name}"
+            )
             _observe_cancellable_runtime_backend(backend, backend_observer)
             attempts_used = _download_runtime_file_with_policy(
                 item,
@@ -1033,12 +1037,21 @@ def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:
 
 
 def _prepare_staging_parent(
+    item: RuntimeFilePlanItem,
     staging_parent: Path,
     path: RuntimeFilePath,
     *,
     current_staging_targets: Iterable[Path],
     clock: RuntimeStagingClock,
 ) -> None:
+    target_parent_error = _validate_existing_parent_contained(
+        _runtime_item_root(item),
+        PurePosixPath(item.directory),
+        path,
+    )
+    if target_parent_error is not None:
+        raise RuntimeFileDownloadError((target_parent_error,))
+
     try:
         staging_parent.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -1053,6 +1066,9 @@ def _prepare_staging_parent(
         ) from error
 
     _validate_staging_parent(staging_parent, path)
+    target_parent_error = _validate_resolved_target_parent_contained(item, path)
+    if target_parent_error is not None:
+        raise RuntimeFileDownloadError((target_parent_error,))
     _cleanup_stale_staging_files(
         staging_parent,
         current_staging_targets=current_staging_targets,
@@ -1102,6 +1118,10 @@ def _place_staged_runtime_file(
     if existing_error is not None:
         raise RuntimeFileDownloadError((existing_error,))
 
+    target_parent_error = _validate_resolved_target_parent_contained(item, path)
+    if target_parent_error is not None:
+        raise RuntimeFileDownloadError((target_parent_error,))
+
     try:
         staging_target.replace(item.target)
     except OSError as error:
@@ -1142,6 +1162,42 @@ def _validate_staging_target(
             message="download backend did not produce a regular staging file",
         )
     return None
+
+
+def _validate_resolved_target_parent_contained(
+    item: RuntimeFilePlanItem,
+    path: RuntimeFilePath,
+) -> Diagnostic | None:
+    root = _runtime_item_root(item)
+    try:
+        resolved_root = root.resolve(strict=False)
+    except OSError as error:
+        return Diagnostic(
+            (*path, "target"),
+            "runtime_file.root_resolution_failed",
+            f"COMFYUI_PATH cannot be resolved: {error}",
+        )
+
+    try:
+        item.target.parent.resolve(strict=True).relative_to(resolved_root)
+    except ValueError:
+        return Diagnostic(
+            (*path, "target"),
+            "runtime_file.symlink_escape",
+            "target parent must not escape COMFYUI_PATH",
+        )
+    except OSError as error:
+        return Diagnostic(
+            (*path, "target"),
+            "runtime_file.parent_resolution_failed",
+            f"target parent cannot be resolved: {error}",
+        )
+    return None
+
+
+def _runtime_item_root(item: RuntimeFilePlanItem) -> Path:
+    relative_parts = PurePosixPath(item.relative_target).parts
+    return item.target.parents[len(relative_parts) - 1]
 
 
 def _validate_final_target_before_replace(

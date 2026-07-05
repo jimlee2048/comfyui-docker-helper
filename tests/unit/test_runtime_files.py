@@ -2338,6 +2338,200 @@ def test_runtime_file_download_rejects_racing_final_when_overwrite_false(
     assert not backend.calls[0][0].target.exists()
 
 
+def test_runtime_file_download_rejects_parent_symlink_inserted_after_planning(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    outside = tmp_path / "outside"
+    comfyui.mkdir()
+    outside.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    (comfyui / "models").symlink_to(outside, target_is_directory=True)
+    backend = FakeDownloadBackend(payload=b"new")
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.symlink_escape")
+    ]
+    assert backend.calls == []
+    assert not (outside / "a.bin").exists()
+    assert not (outside / ".cdh-staging").exists()
+
+
+def test_runtime_file_download_cleans_staging_parent_after_mkdir_symlink_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    outside = tmp_path / "outside"
+    comfyui.mkdir()
+    outside.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    staging_parent = _staging_target(plan.items[0]).parent
+    original_mkdir = Path.mkdir
+
+    def swap_parent_before_staging_mkdir(
+        self: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if self == staging_parent:
+            (comfyui / "models").symlink_to(outside, target_is_directory=True)
+        original_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", swap_parent_before_staging_mkdir)
+    backend = FakeDownloadBackend(payload=b"new")
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.symlink_escape")
+    ]
+    assert backend.calls == []
+    assert not (outside / "a.bin").exists()
+    assert not (outside / ".cdh-staging").exists()
+
+
+def test_runtime_file_download_rejects_parent_symlink_swap_before_final_replace(
+    tmp_path: Path,
+) -> None:
+    class SwappingBackend(FakeDownloadBackend):
+        def __init__(self, outside_parent: Path) -> None:
+            super().__init__(payload=b"new")
+            self._outside_parent = outside_parent
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(self.payload)
+            outside_staging = self._outside_parent / ".cdh-staging"
+            outside_staging.mkdir()
+            (outside_staging / item.target.name).write_bytes(self.payload)
+            item.target.unlink()
+            item.target.parent.rmdir()
+            item.target.parent.parent.rmdir()
+            item.target.parent.parent.symlink_to(
+                self._outside_parent,
+                target_is_directory=True,
+            )
+
+    comfyui = tmp_path / "ComfyUI"
+    outside = tmp_path / "outside"
+    comfyui.mkdir()
+    outside.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = SwappingBackend(outside)
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.symlink_escape")
+    ]
+    assert not (outside / "a.bin").exists()
+    assert not (comfyui / "models" / "a.bin").exists()
+
+
+def test_runtime_file_download_overwrites_existing_file_under_real_parent(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    final_target = comfyui / "models" / "checkpoints" / "a.bin"
+    final_target.parent.mkdir(parents=True)
+    final_target.write_bytes(b"old")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                        "overwrite": True,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": FakeDownloadBackend(payload=b"new")},
+        log=lambda message: None,
+    )
+
+    assert final_target.read_bytes() == b"new"
+
+
 def test_runtime_file_download_continue_policy_keeps_atomic_place_error_fatal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

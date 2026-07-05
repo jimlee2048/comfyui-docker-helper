@@ -83,6 +83,50 @@ class FakeChild:
         self.terminated = True
 
 
+class FakeSshdProcess:
+    """Minimal fake sshd process for entrypoint monitoring tests."""
+
+    def __init__(
+        self,
+        returncode: int | None = None,
+        *,
+        wait_returncode: int | None = None,
+    ) -> None:
+        self.returncode = returncode
+        self.wait_returncode = wait_returncode
+        self.waited = entrypoint_module.threading.Event()
+        self.release = entrypoint_module.threading.Event()
+
+    def wait(self) -> int:
+        if self.wait_returncode is None:
+            self.release.wait()
+            self.returncode = 0 if self.returncode is None else self.returncode
+        else:
+            self.returncode = self.wait_returncode
+        self.waited.set()
+        return self.returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+class PollingSshdProcess:
+    """Fake sshd process with scripted poll results."""
+
+    def __init__(self, poll_results: Sequence[int | None]) -> None:
+        self.returncode: int | None = None
+        self._poll_results = list(poll_results)
+
+    def wait(self) -> int:
+        self.returncode = 0 if self.returncode is None else self.returncode
+        return self.returncode
+
+    def poll(self) -> int | None:
+        if self._poll_results:
+            self.returncode = self._poll_results.pop(0)
+        return self.returncode
+
+
 class FakeHookProcess:
     """Minimal hook process for entrypoint startup cancellation tests."""
 
@@ -399,6 +443,69 @@ listen = "127.0.0.1"
     assert "[system.workspace]" in captured.err
     assert "runtime.host_only_ignored" in captured.err
     assert "severity=warning" in captured.err
+
+
+def test_ssh_disabled_does_not_call_ssh_starter(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del cwd, env, shell
+        calls.append(list(argv))
+        return FakeChild(0)
+
+    def runtime_ssh_starter(*_args, **_kwargs) -> None:
+        raise AssertionError("disabled SSH must not call starter")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+        )
+        == 0
+    )
+
+    assert len(calls) == 1
+
+
+def test_ssh_enabled_without_credentials_warns_and_continues(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+""",
+    )
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=lambda *_args, **_kwargs: FakeChild(0),
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "WARNING: SSH is enabled but no root SSH credentials are configured" in (
+        captured.out
+    )
 
 
 @pytest.mark.parametrize("returncode", [0, 17, -15])
@@ -3537,6 +3644,271 @@ filename = "async.bin"
     )
 
     assert events == ["async-start", "spawn", "readiness", "post-start"]
+
+
+def test_ssh_starts_after_sync_downloads_and_pre_start_before_async_and_comfyui(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[[files]]
+url = "https://example.com/sync.bin"
+dir = "models"
+filename = "sync.bin"
+download_mode = "sync"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start.d", "10-pre.sh")
+    events: list[str] = []
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del config, log
+        assert [item.filename for item in plan.items] == ["sync.bin"]
+        events.append("sync-download")
+        return ()
+
+    def runtime_hook_runner(
+        plan: RuntimeHookPlan,
+        phase: str,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None = None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested
+        assert phase == "pre-start"
+        assert events == ["sync-download"]
+        events.append("pre-start")
+        return ()
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> FakeSshdProcess:
+        del runtime, log
+        assert config.system.ssh.enable is True
+        assert events == ["sync-download", "pre-start"]
+        events.append("ssh-start")
+        return FakeSshdProcess()
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del config, runtime, runtime_state_path, log
+        assert [item.filename for item in plan.items] == ["async.bin"]
+        assert events == ["sync-download", "pre-start", "ssh-start"]
+        events.append("async-start")
+        return FakeAsyncHandle(events, alive=False)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        assert events == ["sync-download", "pre-start", "ssh-start", "async-start"]
+        events.append("spawn")
+        return FakeChild(0)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={},
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 0
+    )
+
+    assert events == ["sync-download", "pre-start", "ssh-start", "async-start", "spawn"]
+
+
+def test_ssh_start_failure_prevents_comfyui_spawn(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    events: list[str] = []
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> None:
+        del config, runtime, log
+        events.append("ssh-start")
+        raise entrypoint_module.SshdStartupError("host keys unavailable")
+
+    with pytest.raises(EntrypointError) as raised:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_ssh_starter=runtime_ssh_starter,
+        )
+
+    assert events == ["ssh-start"]
+    assert "SSH runtime service failed to start" in str(raised.value)
+    assert "host keys unavailable" in str(raised.value)
+
+
+def test_ssh_exit_after_async_start_stops_queue_before_raising(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+
+[[files]]
+url = "https://example.com/async.bin"
+dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    events: list[str] = []
+
+    def runtime_ssh_starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> PollingSshdProcess:
+        del config, runtime, log
+        events.append("ssh-start")
+        return PollingSshdProcess([None, 44])
+
+    def runtime_async_queue_starter(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        log: Logger,
+    ) -> FakeAsyncHandle:
+        del config, runtime, runtime_state_path, log
+        assert [item.filename for item in plan.items] == ["async.bin"]
+        events.append("async-start")
+        return FakeAsyncHandle(events)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    with pytest.raises(EntrypointError) as raised:
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=runner,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=tmp_path / "state.json",
+        )
+
+    assert "SSH runtime service exited before ComfyUI: 44" in str(raised.value)
+    assert events == ["ssh-start", "async-start", "async-stop", "async-join"]
+
+
+def test_unexpected_sshd_exit_is_logged_without_changing_comfyui_exit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "secret"
+""",
+    )
+    sshd = FakeSshdProcess(wait_returncode=23)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+            runner=lambda *_args, **_kwargs: FakeChild(7),
+            runtime_ssh_starter=lambda *_args, **_kwargs: sshd,
+        )
+        == 7
+    )
+
+    assert sshd.waited.wait(timeout=1)
+    captured = capsys.readouterr()
+    assert "WARNING: SSH runtime service exited unexpectedly: returncode=23" in (
+        captured.err
+    )
 
 
 # Verifies accepted async work is cancelled on natural child exit without

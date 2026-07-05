@@ -74,6 +74,11 @@ from comfyui_docker_helper.container.runtime_state import (
     prepare_runtime_state_for_start,
     write_runtime_state,
 )
+from comfyui_docker_helper.container.ssh import (
+    SshdProcess,
+    SshdStartupError,
+    start_sshd_if_enabled,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 CHILD_TERMINATION_REAP_GRACE_SECONDS = 2.0
@@ -191,6 +196,18 @@ class ReadinessWaiter(Protocol):
         *,
         child: ChildProcess,
     ) -> object: ...
+
+
+class RuntimeSshStarter(Protocol):
+    """SSH runtime service starter used after pre-start hooks."""
+
+    def __call__(
+        self,
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+    ) -> SshdProcess | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +359,7 @@ def run_entrypoint(
     runtime_hook_runner: RuntimeHookRunner = run_runtime_startup_hooks,
     runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
+    runtime_ssh_starter: RuntimeSshStarter = start_sshd_if_enabled,
     runtime_state_path: str | Path = RUNTIME_STATE_PATH,
 ) -> int:
     """Load runtime config, run ComfyUI, and return the child exit code."""
@@ -365,6 +383,7 @@ def run_entrypoint(
     startup_shutdown = _StartupShutdownState()
     with _startup_shutdown_signal_handlers(startup_shutdown):
         async_handle: RuntimeAsyncDownloadQueueHandle | None = None
+        sshd_handle: SshdProcess | None = None
         try:
             download_queues = _run_runtime_downloads(
                 result,
@@ -383,6 +402,14 @@ def run_entrypoint(
             )
             if startup_shutdown.requested_signal is not None:
                 return _normalize_signal_exit_code(startup_shutdown.requested_signal)
+            sshd_handle = _start_ssh_runtime_service(
+                result.config,
+                runtime=runtime,
+                runtime_ssh_starter=runtime_ssh_starter,
+            )
+            if startup_shutdown.requested_signal is not None:
+                return _normalize_signal_exit_code(startup_shutdown.requested_signal)
+            _ensure_sshd_still_running_before_comfyui(sshd_handle)
             async_handle = _start_runtime_async_download_queue(
                 download_queues.async_plan,
                 config=result.config,
@@ -415,6 +442,14 @@ def run_entrypoint(
                     return _normalize_signal_exit_code(
                         startup_shutdown.requested_signal
                     )
+                try:
+                    _ensure_sshd_still_running_before_comfyui(sshd_handle)
+                except EntrypointError:
+                    _stop_runtime_async_download_queue_for_startup(
+                        async_handle,
+                        startup_shutdown=startup_shutdown,
+                    )
+                    raise
                 argv = build_comfyui_argv(runtime=runtime, config=result.config)
                 if startup_shutdown.requested_signal is not None:
                     _stop_runtime_async_download_queue_for_startup(
@@ -472,6 +507,7 @@ def run_entrypoint(
                         completed,
                         startup_shutdown.requested_signal,
                     )
+                _monitor_sshd_after_comfyui_start(sshd_handle)
             finally:
                 startup_shutdown.raise_on_signal = True
 
@@ -744,6 +780,65 @@ def _start_runtime_async_download_queue(
         raise EntrypointError(
             f"async runtime download queue failed to start: {error}"
         ) from error
+
+
+def _start_ssh_runtime_service(
+    config: RuntimeConfig,
+    *,
+    runtime: ContainerRuntime,
+    runtime_ssh_starter: RuntimeSshStarter,
+) -> SshdProcess | None:
+    if not config.system.ssh.enable:
+        return None
+    try:
+        return runtime_ssh_starter(config, runtime=runtime, log=print)
+    except SshdStartupError as error:
+        raise EntrypointError(
+            f"SSH runtime service failed to start: {error}"
+        ) from error
+    except ApplicationError as error:
+        raise EntrypointError(
+            f"SSH runtime service failed to start: {error}"
+        ) from error
+
+
+def _ensure_sshd_still_running_before_comfyui(
+    sshd_handle: SshdProcess | None,
+) -> None:
+    if sshd_handle is None:
+        return
+    returncode = sshd_handle.poll()
+    if returncode is not None:
+        raise EntrypointError(
+            f"SSH runtime service exited before ComfyUI: {returncode}"
+        )
+
+
+def _monitor_sshd_after_comfyui_start(sshd_handle: SshdProcess | None) -> None:
+    if sshd_handle is None:
+        return
+
+    def wait_for_exit() -> None:
+        try:
+            returncode = sshd_handle.wait()
+        except Exception as error:
+            print(
+                "WARNING: SSH runtime service monitor failed: "
+                f"reason={runtime_error_reason(error)}",
+                file=sys.stderr,
+            )
+            return
+        print(
+            "WARNING: SSH runtime service exited unexpectedly: "
+            f"returncode={returncode}",
+            file=sys.stderr,
+        )
+
+    threading.Thread(
+        target=wait_for_exit,
+        name="cdh-sshd-monitor",
+        daemon=True,
+    ).start()
 
 
 def _stop_runtime_async_download_queue(

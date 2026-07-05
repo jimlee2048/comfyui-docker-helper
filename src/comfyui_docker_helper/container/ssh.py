@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from comfyui_docker_helper.config import RuntimeConfig, RuntimeSystemSshConfig
+from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.errors import ApplicationError
 
 _ROOT_UID = 0
@@ -25,6 +26,10 @@ class SshCredentialPreparationError(ApplicationError):
     """A user-facing SSH credential preparation failure."""
 
 
+class SshdStartupError(ApplicationError):
+    """A user-facing sshd startup failure."""
+
+
 class SensitiveCommandRunner(Protocol):
     """Run a command whose sensitive input is provided out-of-band."""
 
@@ -36,6 +41,30 @@ class SensitiveCommandRunner(Protocol):
         description: str,
     ) -> int:
         """Run argv with sensitive stdin bytes and return the process exit code."""
+
+
+class CommandRunner(Protocol):
+    """Run a non-sensitive argv command."""
+
+    def __call__(self, argv: Sequence[str], *, description: str) -> int:
+        """Run argv and return the process exit code."""
+
+
+class SshdProcess(Protocol):
+    """Minimal sshd child process interface used by the entrypoint."""
+
+    returncode: int | None
+
+    def wait(self) -> int: ...
+
+    def poll(self) -> int | None: ...
+
+
+class SshdProcessStarter(Protocol):
+    """Start foreground sshd and return its child process handle."""
+
+    def __call__(self, argv: Sequence[str], *, description: str) -> SshdProcess:
+        """Start argv without shell expansion."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +82,75 @@ class RootSshCredentialPreparationStatus:
     def has_credentials(self) -> bool:
         """Return whether SSH has at least one effective credential."""
         return self.public_key_count > 0 or self.password_configured
+
+
+def start_sshd_if_enabled(
+    config: RuntimeConfig,
+    *,
+    runtime: ContainerRuntime,
+    log: Callable[[str], object] = print,
+    root_home: Path = Path("/root"),
+    runtime_dir: Path = Path("/run/sshd"),
+    credential_command_runner: SensitiveCommandRunner | None = None,
+    credential_chown: Chown | None = None,
+    credential_chmod: Chmod | None = None,
+    command_runner: CommandRunner | None = None,
+    process_starter: SshdProcessStarter | None = None,
+) -> SshdProcess | None:
+    """Prepare and start foreground sshd when effective SSH is active."""
+    del runtime
+    ssh = config.system.ssh
+    if not ssh.enable:
+        return None
+
+    try:
+        status = prepare_root_ssh_credentials(
+            ssh,
+            root_home=root_home,
+            command_runner=credential_command_runner,
+            chown=credential_chown,
+            chmod=credential_chmod,
+        )
+    except SshCredentialPreparationError as error:
+        raise SshdStartupError(f"SSH credential preparation failed: {error}") from error
+
+    if not status.has_credentials:
+        log("WARNING: SSH is enabled but no root SSH credentials are configured")
+        return None
+
+    run_command = _run_command if command_runner is None else command_runner
+    starter = _start_process if process_starter is None else process_starter
+    _ensure_host_keys(run_command)
+    _ensure_sshd_runtime_dir(runtime_dir)
+    argv = build_sshd_argv(ssh, status)
+    child = _start_foreground_sshd(argv, starter)
+    return child
+
+
+def build_sshd_argv(
+    ssh: RuntimeSystemSshConfig,
+    status: RootSshCredentialPreparationStatus,
+) -> list[str]:
+    """Build cdh-controlled foreground sshd argv without credential material."""
+    return [
+        "/usr/sbin/sshd",
+        "-f",
+        "/dev/null",
+        "-D",
+        "-e",
+        "-o",
+        f"Port={ssh.port}",
+        "-o",
+        "PermitRootLogin=yes",
+        "-o",
+        f"PasswordAuthentication={_yes_no(status.password_configured)}",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-o",
+        f"PubkeyAuthentication={_yes_no(status.public_key_count > 0)}",
+        "-o",
+        "AuthorizedKeysFile=/root/.ssh/authorized_keys",
+    ]
 
 
 def prepare_root_ssh_credentials(
@@ -106,12 +204,95 @@ def prepare_root_ssh_credentials(
     )
 
 
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
+def _ensure_host_keys(runner: CommandRunner) -> None:
+    _run_checked_command(
+        ["/usr/bin/ssh-keygen", "-A"],
+        description="generate OpenSSH host keys",
+        runner=runner,
+    )
+
+
+def _ensure_sshd_runtime_dir(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o755, parents=True, exist_ok=True)
+    except OSError as error:
+        raise SshdStartupError("failed to create sshd runtime directory") from error
+
+
+def _start_foreground_sshd(
+    argv: Sequence[str],
+    starter: SshdProcessStarter,
+) -> SshdProcess:
+    try:
+        child = starter(argv, description="start sshd")
+    except SshdStartupError:
+        raise
+    except OSError as error:
+        raise SshdStartupError("sshd failed to start") from error
+    returncode = child.poll()
+    if returncode is not None:
+        raise SshdStartupError(f"sshd exited during startup with code {returncode}")
+    return child
+
+
 def _coerce_ssh_config(
     config: RuntimeConfig | RuntimeSystemSshConfig,
 ) -> RuntimeSystemSshConfig:
     if isinstance(config, RuntimeConfig):
         return config.system.ssh
     return config
+
+
+def _run_checked_command(
+    argv: Sequence[str],
+    *,
+    description: str,
+    runner: CommandRunner,
+) -> None:
+    returncode = runner(argv, description=description)
+    if returncode != 0:
+        exit_code = returncode if returncode > 0 else 1
+        raise SshdStartupError(
+            f"{description} failed with exit code {returncode}: {_format_argv(argv)}",
+            exit_code=exit_code,
+        )
+
+
+def _run_command(argv: Sequence[str], *, description: str) -> int:
+    command = list(argv)
+    if not command:
+        raise SshdStartupError(f"{description} argv must not be empty")
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise SshdStartupError(
+            f"{description} executable not found: {command[0]}"
+        ) from error
+    except OSError as error:
+        raise SshdStartupError(f"{description} failed to start") from error
+    return result.returncode
+
+
+def _start_process(argv: Sequence[str], *, description: str) -> SshdProcess:
+    command = list(argv)
+    if not command:
+        raise SshdStartupError(f"{description} argv must not be empty")
+    try:
+        return subprocess.Popen(command, shell=False)
+    except FileNotFoundError as error:
+        raise SshdStartupError(
+            f"{description} executable not found: {command[0]}"
+        ) from error
+    except OSError as error:
+        raise SshdStartupError(f"{description} failed to start") from error
 
 
 def _write_authorized_keys(

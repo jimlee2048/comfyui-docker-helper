@@ -45,10 +45,15 @@ Use `pytest` for testing:
 - Use spaces for indentation, LF line endings, double quotes.
 - Use English for identifiers, code comments, commit messages, and technical docs.
 - Keep comments simple and useful. Explain intent or non-obvious constraints, not obvious code.
-- Keep CLI-facing errors user-readable.
+- Keep CLI-facing errors, warnings, and information short, user-readable, and actionable; remove noisy or misleading messages instead of adding more logging.
+- Remove dead fallbacks, migration paths, unused options, debug prints, and unreachable code when newer infrastructure makes them obsolete.
+- Pass the narrowest data needed across module boundaries; avoid broad context objects unless the callee owns that responsibility.
 
 ### Python
 - Keep modules, functions, variables, and pytest tests in `snake_case`; use `PascalCase` for classes and Pydantic models.
+- Keep imports at module scope; avoid inline imports unless needed to prevent circular dependencies.
+- Avoid unnecessary `try`/`except` blocks and catch specific exception types.
+- Avoid probing child objects with arbitrary `getattr(..., default)` calls for parent control flow; prefer explicit fields or typed models.
 - Use Pydantic models for structured configuration and validation boundaries.
 - Keep Pydantic models strictly typed; prefer precise field types, `Literal`, and discriminated unions over broad `dict`, `object`, or `Any`.
 - Prefer `pathlib.Path` for filesystem code.

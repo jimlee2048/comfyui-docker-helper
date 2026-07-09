@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
@@ -14,6 +15,13 @@ from comfyui_docker_helper.config.models import (
     Config,
     GitCustomNodeConfig,
     RegistryCustomNodeConfig,
+)
+from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
+from comfyui_docker_helper.config.url_validation import (
+    DOWNLOADERS,
+    is_http_url,
+    validate_file_name,
+    validate_relative_file_directory,
 )
 
 _CUDA_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
@@ -54,11 +62,15 @@ _MANAGED_ENV_KEYS = frozenset(
         "UV_PYTHON_CACHE_DIR",
     }
 )
-_DOWNLOADERS = frozenset({"aria2", "httpx"})
 _HOOK_SUFFIXES = frozenset({".py", ".sh"})
+_COMFYUI_CONTROLLED_LAUNCH_FLAGS = frozenset(
+    {"--listen", "--port", "--auto-launch", "--disable-auto-launch"}
+)
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _GIT_TARGET_DIR_PATTERN = re.compile(r"[A-Za-z0-9._-]+\Z")
 _DOCKERFILE_SOURCE_FORBIDDEN = frozenset({"\0", "\r", "\n"})
+_SUPPORTED_VERSION_CONSTRAINT_OPERATORS = ("==", "!=", "<=", ">=", "<", ">")
+_UNSUPPORTED_VERSION_CONSTRAINT_TOKENS = ("~=", "===", "^", "||")
 
 
 def normalize_comfyui_version(version: str) -> str:
@@ -66,25 +78,115 @@ def normalize_comfyui_version(version: str) -> str:
     if version in {"latest", "nightly"}:
         return version
 
+    if _looks_like_version_constraint(version):
+        return _normalize_version_constraint(version, allow_local_versions=False)
+
     normalized = version.removeprefix("v")
     if not _SEMVER_PATTERN.fullmatch(normalized):
-        raise ValueError("must be latest, nightly, semver, or v-prefixed semver")
+        raise ValueError(
+            "must be latest, nightly, semver, v-prefixed semver, or a supported "
+            "PEP 440 comparison constraint"
+        )
     return normalized
 
 
 def normalize_comfy_cli_version(version: str) -> str:
-    """Validate and canonicalize a comfy-cli public PEP 440 version."""
+    """Validate and canonicalize a comfy-cli public PEP 440 selector."""
     if version == "latest":
         return version
+
+    if _looks_like_version_constraint(version):
+        return _normalize_version_constraint(version, allow_local_versions=False)
 
     try:
         parsed = Version(version)
     except InvalidVersion as error:
-        raise ValueError("must be latest or a PEP 440 public version") from error
+        raise ValueError(
+            "must be latest, a PEP 440 public version, or a supported PEP 440 "
+            "comparison constraint"
+        ) from error
 
     if parsed.local is not None:
         raise ValueError("must not contain a PEP 440 local-version label")
     return parsed.public
+
+
+def normalize_registry_version(version: str) -> str:
+    """Validate a registry custom-node version selector without resolving it."""
+    if version == "latest":
+        return version
+
+    if _looks_like_version_constraint(version):
+        return _normalize_version_constraint(version, allow_local_versions=False)
+
+    normalized = version.removeprefix("v")
+    if not _SEMVER_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            "must be latest, semver, v-prefixed semver, or a supported PEP 440 "
+            "comparison constraint"
+        )
+    return normalized
+
+
+def _looks_like_version_constraint(version: str) -> bool:
+    stripped = version.strip()
+    return stripped.startswith((*_SUPPORTED_VERSION_CONSTRAINT_OPERATORS, "~", "^"))
+
+
+def _has_version_constraint_syntax(value: str) -> bool:
+    """Return whether an arbitrary unsupported field contains constraint syntax."""
+    stripped = value.strip()
+    if _looks_like_version_constraint(stripped):
+        return True
+    if "," in stripped:
+        parts = [part.strip() for part in stripped.split(",")]
+        return len(parts) > 1 and any(
+            _looks_like_version_constraint(part) for part in parts
+        )
+    return any(
+        token in stripped
+        for token in ("===", "==", "!=", "<=", ">=", "<", ">", "~=", "^")
+    )
+
+
+def _normalize_version_constraint(
+    version: str,
+    *,
+    allow_local_versions: bool = True,
+) -> str:
+    """Validate supported PEP 440 comparison syntax for stable resolution."""
+    if any(token in version for token in _UNSUPPORTED_VERSION_CONSTRAINT_TOKENS):
+        raise ValueError("must use only ==, !=, <, <=, >, >= comparison constraints")
+    if "*" in version:
+        raise ValueError("must not use wildcard version constraints")
+
+    parts = [part.strip() for part in version.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("must be a comma-separated list of comparison constraints")
+    if not all(
+        part.startswith(_SUPPORTED_VERSION_CONSTRAINT_OPERATORS) for part in parts
+    ):
+        raise ValueError("must use only ==, !=, <, <=, >, >= comparison constraints")
+
+    try:
+        # Syntax validation accepts semantic version spelling while resolution
+        # filters stable upstream candidates during network-backed enumeration.
+        specifier_set = SpecifierSet(version)
+    except InvalidSpecifier as error:
+        raise ValueError("must be a valid PEP 440 comparison constraint") from error
+
+    if not allow_local_versions:
+        for specifier in specifier_set:
+            try:
+                parsed = Version(specifier.version)
+            except InvalidVersion as error:
+                raise ValueError(
+                    "constraint operands must be public PEP 440 versions"
+                ) from error
+            if parsed.local is not None:
+                raise ValueError("constraint operands must not contain local versions")
+
+    return str(specifier_set)
 
 
 def infer_git_target_dir(url: str) -> str | None:
@@ -133,7 +235,11 @@ def validate_config(
 
     _validate_compute_platform(config, diagnostics)
     _validate_system(config, diagnostics)
+    _validate_ssh(config, diagnostics)
+    _validate_package_indexes(config, diagnostics)
     _validate_pytorch(config, diagnostics)
+    _validate_unsupported_version_constraints(config, diagnostics)
+    _validate_build(config, diagnostics)
     _validate_comfyui(config, scripts_dir, diagnostics)
     _validate_downloader(config, diagnostics)
     _validate_files(config, diagnostics)
@@ -221,6 +327,15 @@ def _validate_system(config: Config, diagnostics: list[Diagnostic]) -> None:
             )
 
 
+def _validate_ssh(config: Config, diagnostics: list[Diagnostic]) -> None:
+    _, key_diagnostics = normalize_ssh_public_keys(
+        config.system.ssh.pub_keys,
+        path=("system", "ssh", "pub_keys"),
+        code="ssh.invalid_public_key",
+    )
+    diagnostics.extend(key_diagnostics)
+
+
 def _validate_pytorch(config: Config, diagnostics: list[Diagnostic]) -> None:
     for index, package in enumerate(config.pytorch.extra_packages):
         if _is_torch_requirement(package):
@@ -229,6 +344,58 @@ def _validate_pytorch(config: Config, diagnostics: list[Diagnostic]) -> None:
                     path=("pytorch", "extra_packages", index),
                     code="pytorch.duplicate_torch",
                     message="must not include the torch package",
+                )
+            )
+
+
+def _validate_package_indexes(config: Config, diagnostics: list[Diagnostic]) -> None:
+    _require_http_index_url(
+        config.python.index_url,
+        ("python", "index_url"),
+        "python.invalid_index_url",
+        diagnostics,
+    )
+    _require_http_index_url(
+        config.pytorch.index_base_url,
+        ("pytorch", "index_base_url"),
+        "pytorch.invalid_index_base_url",
+        diagnostics,
+    )
+
+
+def _validate_unsupported_version_constraints(
+    config: Config,
+    diagnostics: list[Diagnostic],
+) -> None:
+    """Reject selector constraints outside the lock-domain fields."""
+    values: list[tuple[str, DiagnosticPath]] = [
+        (
+            config.compute_platform.cuda.version,
+            ("compute_platform", "cuda", "version"),
+        ),
+        (config.python.version, ("python", "version")),
+        (config.python.uv_version, ("python", "uv_version")),
+        (config.pytorch.version, ("pytorch", "version")),
+    ]
+    values.extend(
+        (package, ("system", "extra_packages", index))
+        for index, package in enumerate(config.system.extra_packages)
+    )
+    values.extend(
+        (file.filename, ("files", index, "filename"))
+        for index, file in enumerate(config.files)
+    )
+
+    for value, path in values:
+        if _has_version_constraint_syntax(value):
+            diagnostics.append(
+                Diagnostic(
+                    path=path,
+                    code="version_constraint.unsupported_field",
+                    message=(
+                        "version constraints are only supported for ComfyUI, "
+                        "comfy-cli, and registry custom-node versions"
+                    ),
                 )
             )
 
@@ -270,6 +437,21 @@ def _validate_comfyui(
                 message="must be true when custom nodes are configured",
             )
         )
+
+    for index, argument in enumerate(comfyui.extra_args):
+        flag = argument.split("=", maxsplit=1)[0]
+        if flag in _COMFYUI_CONTROLLED_LAUNCH_FLAGS:
+            diagnostics.append(
+                Diagnostic(
+                    path=("comfyui", "extra_args", index),
+                    code="comfyui.controlled_extra_arg",
+                    message=(
+                        "must not include --listen, --port, --auto-launch, "
+                        "or --disable-auto-launch because cdh controls these "
+                        "startup flags"
+                    ),
+                )
+            )
 
     hook_paths = tuple(_iter_hooks(config))
     scripts_root = _validate_scripts_dir(hook_paths, scripts_dir, diagnostics)
@@ -316,6 +498,17 @@ def _validate_comfyui(
                     )
                 git_target_dirs.setdefault(git_target_dir, node.url)
         else:
+            if node.version is not None:
+                try:
+                    normalize_registry_version(node.version)
+                except ValueError as error:
+                    diagnostics.append(
+                        Diagnostic(
+                            path=(*node_path, "version"),
+                            code="custom_node.invalid_registry_version",
+                            message=str(error),
+                        )
+                    )
             if node.id in registry_ids:
                 diagnostics.append(
                     Diagnostic(
@@ -411,55 +604,74 @@ def _validate_hook(
 
 def _validate_downloader(config: Config, diagnostics: list[Diagnostic]) -> None:
     _require_allowed(
-        config.downloader.default,
-        _DOWNLOADERS,
-        ("downloader", "default"),
-        "downloader.unsupported_default",
+        config.cdh.default_downloader,
+        DOWNLOADERS,
+        ("cdh", "default_downloader"),
+        "cdh.unsupported_default_downloader",
         "must be aria2 or httpx",
         diagnostics,
     )
-    aria2 = config.downloader.aria2
-    httpx = config.downloader.httpx
+    aria2 = config.cdh.downloader.aria2
+    httpx = config.cdh.downloader.httpx
     _require_range(
         httpx.timeout,
         lambda value: value > 0,
-        ("downloader", "httpx", "timeout"),
-        "downloader.httpx_timeout_not_positive",
+        ("cdh", "downloader", "httpx", "timeout"),
+        "cdh.downloader.httpx_timeout_not_positive",
         "must be greater than 0",
         diagnostics,
     )
     _require_range(
         httpx.retries,
         lambda value: value >= 0,
-        ("downloader", "httpx", "retries"),
-        "downloader.httpx_retries_negative",
+        ("cdh", "downloader", "httpx", "retries"),
+        "cdh.downloader.httpx_retries_negative",
         "must be greater than or equal to 0",
         diagnostics,
     )
     _require_range(
         aria2.rpc_port,
         lambda value: 1 <= value <= 65535,
-        ("downloader", "aria2", "rpc_port"),
-        "downloader.aria2_rpc_port_out_of_range",
+        ("cdh", "downloader", "aria2", "rpc_port"),
+        "cdh.downloader.aria2_rpc_port_out_of_range",
         "must be in range 1..65535",
         diagnostics,
     )
     _require_range(
         aria2.split,
         lambda value: value > 0,
-        ("downloader", "aria2", "split"),
-        "downloader.aria2_split_not_positive",
+        ("cdh", "downloader", "aria2", "split"),
+        "cdh.downloader.aria2_split_not_positive",
         "must be greater than 0",
         diagnostics,
     )
     _require_range(
         aria2.max_connection_per_server,
         lambda value: value > 0,
-        ("downloader", "aria2", "max_connection_per_server"),
-        "downloader.aria2_max_connection_per_server_not_positive",
+        ("cdh", "downloader", "aria2", "max_connection_per_server"),
+        "cdh.downloader.aria2_max_connection_per_server_not_positive",
         "must be greater than 0",
         diagnostics,
     )
+
+
+def _validate_build(config: Config, diagnostics: list[Diagnostic]) -> None:
+    for index, tag in enumerate(config.build.tags):
+        if (
+            not tag
+            or any(character.isspace() for character in tag)
+            or any(ord(character) < 32 or ord(character) == 127 for character in tag)
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    path=("build", "tags", index),
+                    code="build.invalid_tag",
+                    message=(
+                        "must be non-empty and must not contain whitespace "
+                        "or control characters"
+                    ),
+                )
+            )
 
 
 def _validate_dockerfile_source_strings(
@@ -480,7 +692,9 @@ def _validate_dockerfile_source_strings(
         (config.system.workspace, ("system", "workspace")),
         (config.python.version, ("python", "version")),
         (config.python.uv_version, ("python", "uv_version")),
+        (config.python.index_url, ("python", "index_url")),
         (config.pytorch.version, ("pytorch", "version")),
+        (config.pytorch.index_base_url, ("pytorch", "index_base_url")),
         (config.comfyui.cli_version, ("comfyui", "cli_version")),
         (config.comfyui.version, ("comfyui", "version")),
     ]
@@ -502,9 +716,10 @@ def _validate_dockerfile_source_strings(
         (package, ("pytorch", "extra_packages", index))
         for index, package in enumerate(config.pytorch.extra_packages)
     )
+    values.append((config.comfyui.listen, ("comfyui", "listen")))
     values.extend(
-        (argument, ("comfyui", "launch_args", index))
-        for index, argument in enumerate(config.comfyui.launch_args)
+        (argument, ("comfyui", "extra_args", index))
+        for index, argument in enumerate(config.comfyui.extra_args)
     )
 
     for value, path in values:
@@ -521,7 +736,7 @@ def _validate_dockerfile_source_strings(
 def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
     for index, file in enumerate(config.files):
         file_path: DiagnosticPath = ("files", index)
-        if not _is_http_url(file.url):
+        if not is_http_url(file.url):
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "url"),
@@ -530,33 +745,27 @@ def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
                 )
             )
 
-        directory = PurePosixPath(file.dir)
-        if directory.is_absolute():
+        directory_result = validate_relative_file_directory(file.dir)
+        if directory_result.code is not None:
+            code = directory_result.code
+            if code == "absolute_directory":
+                diagnostic_code = "file.absolute_directory"
+                message = "must be relative to COMFYUI_PATH"
+            elif code == "parent_directory_segment":
+                diagnostic_code = "file.directory_traversal"
+                message = directory_result.message or "must not contain '..'"
+            else:
+                diagnostic_code = f"file.{code}"
+                message = directory_result.message or "must be a valid directory"
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "dir"),
-                    "file.absolute_directory",
-                    "must be relative to COMFYUI_PATH",
-                )
-            )
-        if ".." in directory.parts:
-            diagnostics.append(
-                Diagnostic(
-                    (*file_path, "dir"),
-                    "file.directory_traversal",
-                    "must not contain '..'",
-                )
-            )
-        if not directory.parts or directory == PurePosixPath("."):
-            diagnostics.append(
-                Diagnostic(
-                    (*file_path, "dir"),
-                    "file.empty_directory",
-                    "must be a non-empty relative directory",
+                    diagnostic_code,
+                    message,
                 )
             )
 
-        if not _is_safe_filename(file.filename):
+        if validate_file_name(file.filename).code is not None:
             diagnostics.append(
                 Diagnostic(
                     (*file_path, "filename"),
@@ -568,7 +777,7 @@ def _validate_files(config: Config, diagnostics: list[Diagnostic]) -> None:
         if file.downloader is not None:
             _require_allowed(
                 file.downloader,
-                _DOWNLOADERS,
+                DOWNLOADERS,
                 (*file_path, "downloader"),
                 "file.unsupported_downloader",
                 "must be aria2 or httpx",
@@ -621,24 +830,29 @@ def _is_torch_requirement(package: str) -> bool:
     return canonicalize_name(requirement.name) == "torch"
 
 
-def _is_http_url(url: str) -> bool:
+def _require_http_index_url(
+    url: str,
+    path: DiagnosticPath,
+    code: str,
+    diagnostics: list[Diagnostic],
+) -> None:
     try:
         parsed = urlsplit(url)
         hostname = parsed.hostname
         _ = parsed.port
     except ValueError:
-        return False
-    return (
-        parsed.scheme.casefold() in {"http", "https"}
-        and bool(hostname)
-        and "\\" not in parsed.netloc
-        and not any(character.isspace() for character in parsed.netloc)
-    )
+        parsed = None
+        hostname = None
 
+    if (
+        parsed is None
+        or parsed.scheme.casefold() not in {"http", "https"}
+        or not hostname
+        or "\\" in parsed.netloc
+        or any(character.isspace() for character in parsed.netloc)
+    ):
+        diagnostics.append(Diagnostic(path, code, "must be an HTTP(S) URL with a host"))
+        return
 
-def _is_safe_filename(filename: str) -> bool:
-    return (
-        bool(filename)
-        and filename not in {".", ".."}
-        and not any(separator in filename for separator in ("/", "\\"))
-    )
+    if parsed.username is not None or parsed.password is not None:
+        diagnostics.append(Diagnostic(path, code, "must not include URL userinfo"))

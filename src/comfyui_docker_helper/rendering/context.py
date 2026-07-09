@@ -2,21 +2,30 @@
 
 import json
 import shutil
+import stat
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from importlib import metadata, resources
 from pathlib import Path, PurePosixPath
 
 import tomli_w
 
+from comfyui_docker_helper.config.lock import Lockfile, dump_lockfile_toml
+from comfyui_docker_helper.config.models import Config
 from comfyui_docker_helper.config.plan import (
     ArtifactKind,
-    CustomNodesPlan,
-    FilesPlan,
-    GitCustomNodePlan,
     OutputArtifact,
-    RegistryCustomNodePlan,
     RenderPlan,
+)
+from comfyui_docker_helper.config.runtime_hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
+    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+    runtime_hook_phase_directory_list,
+)
+from comfyui_docker_helper.config.runtime_projection import (
+    RuntimeConfigProjection,
+    project_runtime_config,
 )
 from comfyui_docker_helper.rendering.dockerfile import render_dockerfile
 
@@ -62,6 +71,9 @@ def write_build_context(
     plan: RenderPlan,
     output_directory: str | Path,
     *,
+    config: Config | None = None,
+    lockfile: Lockfile | None = None,
+    runtime_config: RuntimeConfigProjection | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
     config_file: ConfigInput | None = None,
@@ -79,21 +91,30 @@ def write_build_context(
     output = _resolve_output_path(Path(output_directory), base)
     config_files = _resolve_config_inputs(config_file, base)
     scripts_source = plan.custom_nodes.scripts_source_dir
+    runtime_hooks_source = plan.runtime_hooks.source_dir
 
     _validate_output_path(
         output,
         working_directory=base,
         config_files=config_files,
         scripts_source=scripts_source,
+        runtime_hooks_source=runtime_hooks_source,
     )
     _validate_scripts_source_tree(plan)
+    _validate_runtime_hooks_source_tree(plan)
     created_parent_directories = _ensure_output_parent(output)
 
     staging: Path | None = None
     try:
         overwrite_existing = _validate_destination_state(output, overwrite=overwrite)
         staging = _create_sibling_directory(output, "staging")
-        materialize_build_context(plan, staging)
+        materialize_build_context(
+            plan,
+            staging,
+            config=config,
+            lockfile=lockfile,
+            runtime_config=runtime_config,
+        )
         _write_marker(staging)
         _replace_destination(staging, output, overwrite_existing=overwrite_existing)
     except BaseException:
@@ -117,85 +138,19 @@ def has_valid_context_marker(directory: str | Path) -> bool:
     return all(payload.get(key) == value for key, value in _MARKER_PAYLOAD.items())
 
 
-def serialize_custom_nodes_toml(plan: CustomNodesPlan) -> bytes:
-    """Serialize normalized custom nodes as deterministic helper TOML bytes."""
-    nodes: list[dict[str, object]] = []
-    for node in plan.items:
-        if isinstance(node, RegistryCustomNodePlan):
-            item = _ordered_mapping(
-                ("type", node.type),
-                ("id", node.id),
-            )
-            if node.version is not None:
-                item["version"] = node.version
-        elif isinstance(node, GitCustomNodePlan):
-            item = _ordered_mapping(
-                ("type", node.type),
-                ("url", node.url),
-            )
-            if node.ref is not None:
-                item["ref"] = node.ref
-            if node.target_dir is not None:
-                item["target_dir"] = node.target_dir
-        else:  # pragma: no cover - frozen plan union is exhaustive
-            raise TypeError(f"unsupported custom-node plan: {type(node).__name__}")
-        item["pre_install_scripts"] = list(node.pre_install_scripts)
-        item["post_install_scripts"] = list(node.post_install_scripts)
-        nodes.append(item)
-
-    document = _ordered_mapping(
-        (
-            "comfyui",
-            _ordered_mapping(("custom_nodes", nodes)),
-        )
-    )
-    return tomli_w.dumps(document).encode("utf-8")
-
-
-def serialize_files_toml(plan: FilesPlan) -> bytes:
-    """Serialize normalized downloader settings and files as helper TOML bytes."""
-    aria2 = plan.downloader.aria2
-    httpx = plan.downloader.httpx
-    downloader = _ordered_mapping(
-        ("default", plan.downloader.default),
-        (
-            "aria2",
-            _ordered_mapping(
-                ("rpc_port", aria2.rpc_port),
-                ("split", aria2.split),
-                ("max_connection_per_server", aria2.max_connection_per_server),
-                ("min_split_size", aria2.min_split_size),
-                ("resume_download", aria2.resume_download),
-            ),
-        ),
-        (
-            "httpx",
-            _ordered_mapping(
-                ("timeout", httpx.timeout),
-                ("retries", httpx.retries),
-            ),
-        ),
-    )
-    files = [
-        _ordered_mapping(
-            ("url", item.url),
-            ("dir", item.directory),
-            ("filename", item.filename),
-            ("overwrite", item.overwrite),
-            ("downloader", item.downloader),
-        )
-        for item in plan.items
-    ]
-    document = _ordered_mapping(
-        ("downloader", downloader),
-        ("files", files),
-    )
+def serialize_config_toml(config: Config) -> bytes:
+    """Serialize the merged effective root config as deterministic TOML bytes."""
+    document = config.model_dump(mode="json", exclude_none=True)
     return tomli_w.dumps(document).encode("utf-8")
 
 
 def materialize_build_context(
     plan: RenderPlan,
     staging_directory: str | Path,
+    *,
+    config: Config | None = None,
+    lockfile: Lockfile | None = None,
+    runtime_config: RuntimeConfigProjection | None = None,
 ) -> None:
     """Populate a caller-owned, existing, empty staging directory.
 
@@ -207,21 +162,33 @@ def materialize_build_context(
     """
     destination = Path(staging_directory)
     _require_empty_staging_directory(destination)
+    _validate_scripts_source_tree(plan)
+    _validate_runtime_hooks_source_tree(plan)
 
     try:
-        _write_text(destination / "Dockerfile", render_dockerfile(plan))
+        if (config is None) != (lockfile is None):
+            raise MaterializationError(
+                "root config and lock artifacts must be rendered together"
+            )
+        if config is not None and lockfile is not None:
+            _write_bytes(destination / "config.toml", serialize_config_toml(config))
+            _write_text(destination / "config.lock.toml", dump_lockfile_toml(lockfile))
+            runtime_projection = runtime_config or project_runtime_config(config, {})
+            _write_bytes(
+                destination / "runtime" / "config.toml",
+                runtime_projection.to_toml_bytes(),
+            )
+        else:
+            raise MaterializationError(
+                "root config and lock artifacts are required for Dockerfile rendering"
+            )
+
+        _write_text(
+            destination / "Dockerfile",
+            render_dockerfile(plan, lockfile=lockfile),
+        )
         _materialize_package_projection(destination / "packages" / "cdh")
 
-        if plan.custom_nodes.items:
-            _write_bytes(
-                destination / "config" / "custom-nodes.toml",
-                serialize_custom_nodes_toml(plan.custom_nodes),
-            )
-        if plan.files.items:
-            _write_bytes(
-                destination / "config" / "files.toml",
-                serialize_files_toml(plan.files),
-            )
         if plan.custom_nodes.has_hooks:
             scripts_source = plan.custom_nodes.scripts_source_dir
             if scripts_source is None:
@@ -230,15 +197,81 @@ def materialize_build_context(
                 )
             _copy_plain_tree(scripts_source, destination / "scripts", "scripts")
 
-        _reconcile_manifest(destination, plan.output_manifest.all)
+        if plan.runtime_hooks.has_hooks:
+            hooks_source = plan.runtime_hooks.source_dir
+            if hooks_source is None:
+                raise MaterializationError(
+                    "render plan enables runtime hooks without a hooks source directory"
+                )
+            _copy_plain_tree(
+                hooks_source,
+                destination / "runtime" / "hooks",
+                "runtime hooks",
+            )
+
+        _reconcile_manifest(
+            destination,
+            _root_artifacts(config, lockfile) + plan.output_manifest.all,
+        )
     except BaseException:
         _clear_staging_contents(destination)
         raise
 
 
+@contextmanager
+def materialize_expected_build_context(
+    plan: RenderPlan,
+    parent_directory: str | Path,
+    *,
+    config: Config,
+    lockfile: Lockfile,
+    runtime_config: RuntimeConfigProjection | None = None,
+) -> Iterator[Path]:
+    """Yield a temporary marked context containing the expected render output."""
+    parent = _resolve_existing_directory(Path(parent_directory), "check parent")
+    _validate_scripts_source_tree(plan)
+    _validate_runtime_hooks_source_tree(plan)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".cdh-check-",
+            dir=parent,
+        ) as temporary:
+            expected = Path(temporary)
+            expected.chmod(_DIRECTORY_MODE)
+            materialize_build_context(
+                plan,
+                expected,
+                config=config,
+                lockfile=lockfile,
+                runtime_config=runtime_config,
+            )
+            _write_marker(expected)
+            yield expected
+    except MaterializationError:
+        raise
+    except OSError as exc:
+        raise ContextWriteError("could not create expected check context") from exc
+
+
 def _ordered_mapping(*items: tuple[str, object]) -> dict[str, object]:
     """Construct a TOML mapping whose insertion order is explicit at the callsite."""
     return dict(items)
+
+
+def _root_artifacts(
+    config: Config | None,
+    lockfile: Lockfile | None,
+) -> tuple[OutputArtifact, ...]:
+    if config is None and lockfile is None:
+        return ()
+    if config is None or lockfile is None:
+        raise MaterializationError(
+            "root config and lock artifacts must be rendered together"
+        )
+    return (
+        OutputArtifact("config.toml", ArtifactKind.FILE),
+        OutputArtifact("config.lock.toml", ArtifactKind.FILE),
+    )
 
 
 def _require_empty_staging_directory(destination: Path) -> None:
@@ -288,6 +321,7 @@ def _validate_output_path(
     working_directory: Path,
     config_files: tuple[Path, ...],
     scripts_source: Path | None,
+    runtime_hooks_source: Path | None,
 ) -> None:
     if output == Path(output.anchor):
         raise ContextWriteError("output directory must not be the filesystem root")
@@ -301,6 +335,10 @@ def _validate_output_path(
         )
     if scripts_source is not None:
         protected_paths.append(("scripts source", scripts_source.resolve(strict=False)))
+    if runtime_hooks_source is not None:
+        protected_paths.append(
+            ("runtime hooks source", runtime_hooks_source.resolve(strict=False))
+        )
 
     for label, protected in protected_paths:
         if _is_equal_or_ancestor(output, protected):
@@ -313,6 +351,12 @@ def _validate_output_path(
         if scripts in output.parents:
             raise ContextWriteError(
                 "output directory must not be nested inside the scripts source"
+            )
+    if runtime_hooks_source is not None:
+        runtime_hooks = runtime_hooks_source.resolve(strict=False)
+        if runtime_hooks in output.parents:
+            raise ContextWriteError(
+                "output directory must not be nested inside the runtime hooks source"
             )
 
 
@@ -387,7 +431,8 @@ def _validate_scripts_source_tree(plan: RenderPlan) -> None:
         raise ContextWriteError(
             "render plan enables hooks without a scripts source directory"
         )
-    if source.is_symlink() or not source.is_dir():
+    source_mode = _context_path_mode(source, "scripts source")
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
         raise ContextWriteError("scripts source must be a real directory")
     root = source.resolve(strict=True)
     _validate_plain_tree(source, "scripts source")
@@ -406,14 +451,86 @@ def _validate_scripts_source_tree(plan: RenderPlan) -> None:
 
 
 def _validate_plain_tree(source: Path, label: str) -> None:
-    for child in sorted(source.iterdir(), key=lambda item: item.name):
-        if child.is_symlink():
+    try:
+        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise ContextWriteError(f"{label} tree could not be read: {source}") from exc
+    for child in children:
+        child_mode = _context_path_mode(child, f"{label} tree entry")
+        if stat.S_ISLNK(child_mode):
             raise ContextWriteError(f"{label} tree contains a symlink: {child.name}")
-        if child.is_dir():
+        if stat.S_ISDIR(child_mode):
             _validate_plain_tree(child, label)
-        elif not child.is_file():
+        elif not stat.S_ISREG(child_mode):
             raise ContextWriteError(
                 f"{label} tree contains a special file: {child.name}"
+            )
+
+
+def _validate_runtime_hooks_source_tree(plan: RenderPlan) -> None:
+    if not plan.runtime_hooks.has_hooks:
+        return
+    source = plan.runtime_hooks.source_dir
+    if source is None:
+        raise ContextWriteError(
+            "render plan enables runtime hooks without a hooks source directory"
+        )
+    source_mode = _context_path_mode(source, "runtime hooks source")
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
+        raise ContextWriteError("runtime hooks source must be a real directory")
+    try:
+        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise ContextWriteError(
+            f"runtime hooks source could not be read: {source}"
+        ) from exc
+    for child in children:
+        child_mode = _context_path_mode(child, "runtime hooks source entry")
+        if stat.S_ISLNK(child_mode):
+            raise ContextWriteError(
+                f"runtime hooks source contains a symlink: {child.name}"
+            )
+        if not stat.S_ISDIR(child_mode) and not stat.S_ISREG(child_mode):
+            raise ContextWriteError(
+                f"runtime hooks source contains a special file: {child.name}"
+            )
+        if child.name not in RUNTIME_HOOK_PHASE_DIRECTORY_NAMES:
+            raise ContextWriteError(
+                "runtime hooks source may only contain "
+                f"{runtime_hook_phase_directory_list()} directories"
+            )
+        if not stat.S_ISDIR(child_mode):
+            raise ContextWriteError(
+                f"runtime hook phase entry must be a directory: {child.name}"
+            )
+        _validate_runtime_hook_phase_tree(child, child.name)
+
+
+def _validate_runtime_hook_phase_tree(phase: Path, phase_name: str) -> None:
+    try:
+        children = tuple(sorted(phase.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise ContextWriteError(
+            f"runtime hook phase directory could not be read: {phase_name}"
+        ) from exc
+    for child in children:
+        relative = f"{phase_name}/{child.name}"
+        child_mode = _context_path_mode(child, "runtime hook phase entry")
+        if stat.S_ISLNK(child_mode):
+            raise ContextWriteError(
+                f"runtime hooks source contains a symlink: {relative}"
+            )
+        if stat.S_ISDIR(child_mode):
+            raise ContextWriteError(
+                f"runtime hook phase entry must be a regular file: {relative}"
+            )
+        if not stat.S_ISREG(child_mode):
+            raise ContextWriteError(
+                f"runtime hooks source contains a special file: {relative}"
+            )
+        if child.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
+            raise ContextWriteError(
+                f"runtime hook files must end in .sh or .py: {relative}"
             )
 
 
@@ -454,11 +571,19 @@ def _replace_destination(
     try:
         output.replace(backup)
         staging.replace(output)
-    except BaseException:
+    except BaseException as exc:
         if not output.exists() and backup.exists():
-            backup.replace(output)
-        raise
-    finally:
+            try:
+                backup.replace(output)
+            except OSError as restore_exc:
+                raise ContextWriteError(
+                    "could not replace output context and could not restore "
+                    f"previous context; retained backup: {backup}"
+                ) from restore_exc
+        if not isinstance(exc, Exception):
+            raise
+        raise ContextWriteError("could not replace output context") from exc
+    else:
         _remove_path(backup)
 
 
@@ -478,7 +603,11 @@ def _materialize_package_projection(destination: Path) -> None:
         ) from exc
 
     with resources.as_file(package_resource) as package_source:
-        if package_source.is_symlink() or not package_source.is_dir():
+        package_source_mode = _materialization_path_mode(
+            package_source,
+            "package resource root",
+        )
+        if stat.S_ISLNK(package_source_mode) or not stat.S_ISDIR(package_source_mode):
             raise MaterializationError(
                 "package resource root must be a real directory: "
                 f"{_PACKAGE_IMPORT_NAME}"
@@ -568,18 +697,24 @@ def _copy_plain_tree(
     *,
     skip_package_cache_entries: bool = False,
 ) -> None:
-    if source.is_symlink() or not source.is_dir():
+    source_mode = _materialization_path_mode(source, f"{label} tree root")
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
         raise MaterializationError(f"{label} tree root must be a real directory")
     _ensure_directory(destination)
-    for child in sorted(source.iterdir(), key=lambda item: item.name):
+    try:
+        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise MaterializationError(f"{label} tree could not be read: {source}") from exc
+    for child in children:
         if skip_package_cache_entries and _should_skip_package_entry(child.name):
             continue
         target = destination / child.name
-        if child.is_symlink():
+        child_mode = _materialization_path_mode(child, f"{label} tree entry")
+        if stat.S_ISLNK(child_mode):
             raise MaterializationError(
                 f"{label} tree contains a symlink: {child.relative_to(source)}"
             )
-        if child.is_dir():
+        if stat.S_ISDIR(child_mode):
             _ensure_directory(target)
             _copy_plain_tree(
                 child,
@@ -587,13 +722,33 @@ def _copy_plain_tree(
                 label,
                 skip_package_cache_entries=skip_package_cache_entries,
             )
-        elif child.is_file():
-            _write_bytes(target, child.read_bytes())
+        elif stat.S_ISREG(child_mode):
+            try:
+                content = child.read_bytes()
+            except OSError as exc:
+                raise MaterializationError(
+                    f"{label} file could not be read: {child.relative_to(source)}"
+                ) from exc
+            _write_bytes(target, content)
             target.chmod(_FILE_MODE)
         else:
             raise MaterializationError(
                 f"{label} tree contains a special file: {child.relative_to(source)}"
             )
+
+
+def _context_path_mode(path: Path, label: str) -> int:
+    try:
+        return path.lstat().st_mode
+    except OSError as exc:
+        raise ContextWriteError(f"{label} could not be inspected: {path}") from exc
+
+
+def _materialization_path_mode(path: Path, label: str) -> int:
+    try:
+        return path.lstat().st_mode
+    except OSError as exc:
+        raise MaterializationError(f"{label} could not be inspected: {path}") from exc
 
 
 def _should_skip_package_entry(name: str) -> bool:

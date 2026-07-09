@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +28,20 @@ version = "2.10"
 """
 
 
+def write_runtime_hooks(root: Path) -> Path:
+    """Write a valid runtime hook tree for build CLI tests."""
+    (root / "pre-start.d").mkdir(parents=True)
+    (root / "post-start.d").mkdir()
+    (root / "stop.d").mkdir()
+    (root / "pre-start.d" / "10-pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "post-start.d" / "20-post.py").write_text(
+        "print('post')\n",
+        encoding="utf-8",
+    )
+    (root / "stop.d" / "30-stop.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return root
+
+
 @dataclass(frozen=True, slots=True)
 class FixtureCase:
     """One host-build integration fixture."""
@@ -41,6 +55,9 @@ class FixtureCase:
 
 
 FIXTURE_CASES = (
+    # Cover the host build surfaces that must render before Docker is invoked:
+    # plain config, custom nodes, file downloads, hook scripts, and quoting-heavy
+    # combined input.
     FixtureCase(
         name="minimal",
         extra_config="""
@@ -69,8 +86,8 @@ version = "latest"
 [comfyui]
 version = "latest"
 
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
 [[files]]
 url = "https://example.com/model.safetensors"
@@ -107,10 +124,12 @@ SAFE_VALUE = 'space $cash "quote" \\ backtick` ;'
 
 [comfyui]
 version = "latest"
-launch_args = ["--listen", 'value "quoted" $cash \\ path']
+listen = 'value "quoted" $cash \\ path'
+port = 8190
+extra_args = ["--preview-method", "auto", "--cpu"]
 
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
 [[comfyui.custom_nodes]]
 type = "registry"
@@ -158,11 +177,12 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
 
-    docker_calls: list[tuple[str, Path, Path]] = []
+    docker_calls: list[tuple[tuple[str, ...], str, Path, Path]] = []
 
     def fake_buildx(
         *,
-        image_tag: str,
+        image_tags: tuple[str, ...],
+        output: str,
         context_dir: Path,
         cwd: Path,
         log,
@@ -170,7 +190,7 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
         del log
         assert has_valid_context_marker(context_dir)
         assert (context_dir / "Dockerfile").is_file()
-        docker_calls.append((image_tag, context_dir, cwd))
+        docker_calls.append((image_tags, output, context_dir, cwd))
         return BuildxBuildResult(
             argv=(
                 "docker",
@@ -178,11 +198,12 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
                 "build",
                 "--load",
                 "-t",
-                image_tag,
+                image_tags[0],
                 str(context_dir),
             ),
             context_dir=context_dir,
-            image_tag=image_tag,
+            image_tags=image_tags,
+            output=output,
         )
 
     monkeypatch.setattr(
@@ -206,33 +227,41 @@ def test_host_build_fixture_matrix_renders_context_before_fake_docker(
     result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 0
-    assert docker_calls == [(f"demo:{case.name}", context, Path.cwd())]
-    assert (context / "config" / "custom-nodes.toml").exists() is (
-        case.expect_custom_nodes
-    )
-    assert (context / "config" / "files.toml").exists() is case.expect_files
+    assert docker_calls == [((f"demo:{case.name}",), "load", context, Path.cwd())]
+    assert (context / "config.toml").is_file()
+    assert (context / "config.lock.toml").is_file()
+    assert not (context / "config" / "custom-nodes.toml").exists()
+    assert not (context / "config" / "files.toml").exists()
     assert (context / "scripts").exists() is case.expect_scripts
 
     if case.expect_custom_nodes:
         custom_nodes = load_custom_nodes_plan(
-            context / "config" / "custom-nodes.toml",
+            context / "config.toml",
+            context / "config.lock.toml",
             scripts_dir=context / "scripts" if case.expect_scripts else None,
         )
         assert custom_nodes.items
     if case.expect_files:
         files = load_file_download_plan(
-            context / "config" / "files.toml",
+            context / "config.toml",
+            context / "config.lock.toml",
             comfyui_path="/work dir/Comfy UI" if case.name == "full" else None,
         )
         assert files.items
+        runtime_config = tomllib.loads(
+            (context / "runtime" / "config.toml").read_text(encoding="utf-8")
+        )
+        assert [item["url"] for item in runtime_config["files"]] == [
+            item.url for item in files.items
+        ]
 
 
-def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
+def test_host_build_full_fixture_preserves_quoting_env_and_entrypoint(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise special env/CMD serialization through host build."""
+    """Exercise special env/entrypoint serialization through host build."""
     case = next(item for item in FIXTURE_CASES if item.name == "full")
     config = tmp_path / "full.toml"
     config.write_text(MINIMAL_CONFIG + case.extra_config, encoding="utf-8")
@@ -248,7 +277,8 @@ def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
         lambda **kwargs: BuildxBuildResult(
             argv=("docker",),
             context_dir=kwargs["context_dir"],
-            image_tag=kwargs["image_tag"],
+            image_tags=kwargs["image_tags"],
+            output=kwargs["output"],
         ),
     )
 
@@ -273,21 +303,187 @@ def test_host_build_full_fixture_preserves_quoting_env_and_cmd(
     safe_value = 'space $cash "quote" \\ backtick` ;'
     assert f"ENV SAFE_VALUE={serialize_dockerfile_word(safe_value)}" in dockerfile
     assert f"WORKDIR {serialize_dockerfile_word('/work dir')}" in dockerfile
-    assert (
-        "CMD "
-        + json.dumps(
-            [
-                "python",
-                "/work dir/Comfy UI/main.py",
-                "--listen",
-                'value "quoted" $cash \\ path',
-            ],
-            ensure_ascii=False,
+    assert 'ENTRYPOINT ["cdh", "container", "entrypoint"]' in dockerfile
+    assert "\nCMD " not in dockerfile
+    assert "/work dir/Comfy UI/main.py" not in dockerfile
+
+
+def test_host_build_hooks_dir_option_copies_runtime_hooks_before_fake_docker(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The build CLI passes --hooks-dir through render before Docker starts."""
+    config = tmp_path / "config.toml"
+    config.write_text(
+        MINIMAL_CONFIG
+        + """
+[comfyui]
+version = "latest"
+""",
+        encoding="utf-8",
+    )
+    context = tmp_path / "context"
+    hooks = write_runtime_hooks(tmp_path / "runtime-hooks")
+    calls: list[Path] = []
+
+    def fake_buildx(
+        *,
+        image_tags: tuple[str, ...],
+        output: str,
+        context_dir: Path,
+        cwd: Path,
+        log,
+    ) -> BuildxBuildResult:
+        del log
+        assert image_tags == ("demo:hooks",)
+        assert output == "load"
+        assert context_dir == context
+        assert cwd == Path.cwd()
+        assert has_valid_context_marker(context_dir)
+        assert (
+            context_dir / "runtime" / "hooks" / "post-start.d" / "20-post.py"
+        ).read_text(encoding="utf-8") == "print('post')\n"
+        assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in (
+            context_dir / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        calls.append(context_dir)
+        return BuildxBuildResult(
+            argv=("docker", "buildx", "build", "--load", "-t", image_tags[0]),
+            context_dir=context_dir,
+            image_tags=image_tags,
+            output=output,
         )
-        in dockerfile
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        fake_buildx,
     )
 
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "demo:hooks",
+            "--context-dir",
+            str(context),
+            "--hooks-dir",
+            str(hooks),
+        ],
+    )
 
+    assert result.exit_code == 0
+    assert calls == [context]
+
+
+# Package index coverage stays here because it needs the rendered Dockerfile
+# layers, but Docker itself is still replaced by fake Buildx.
+def test_host_build_wires_package_indexes_before_fake_docker(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render package index settings before invoking fake Buildx."""
+    python_index_url = "https://python.example.test/simple"
+    pytorch_index_base_url = "https://torch.example.test/whl"
+    config = tmp_path / "indexes.toml"
+    config.write_text(
+        f"""\
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "12.9.2"
+
+[python]
+index_url = "{python_index_url}"
+
+[pytorch]
+version = "2.10"
+index_base_url = "{pytorch_index_base_url}"
+
+[comfyui]
+version = "latest"
+""",
+        encoding="utf-8",
+    )
+    context = tmp_path / "context"
+    calls: list[tuple[tuple[str, ...], str, Path, Path]] = []
+
+    def fake_buildx(
+        *,
+        image_tags: tuple[str, ...],
+        output: str,
+        context_dir: Path,
+        cwd: Path,
+        log,
+    ) -> BuildxBuildResult:
+        del log
+        dockerfile = (context_dir / "Dockerfile").read_text(encoding="utf-8")
+        python_layer_start = dockerfile.index(
+            'uv python install -- "${PYTHON_VERSION}"'
+        )
+        python_install_layer = dockerfile[
+            python_layer_start : dockerfile.index("\n\nRUN ", python_layer_start)
+        ]
+        torch_index = dockerfile.index(
+            f"--index-url {pytorch_index_base_url}/${{PYTORCH_WHEEL_TAG}}"
+        )
+        torch_install_layer = dockerfile[
+            dockerfile.rfind("RUN ", 0, torch_index) : dockerfile.index(
+                "\nRUN ",
+                torch_index,
+            )
+        ]
+
+        assert image_tags == ("demo:indexes",)
+        assert output == "load"
+        assert context_dir == context
+        assert cwd == Path.cwd()
+        assert has_valid_context_marker(context_dir)
+        assert f"--index-url {python_index_url}" in python_install_layer
+        assert f"--index-url {pytorch_index_base_url}/${{PYTORCH_WHEEL_TAG}}" in (
+            torch_install_layer
+        )
+        assert "ARG PYTORCH_WHEEL_TAG=cu129" in dockerfile
+        assert '"torch==${PYTORCH_VERSION}"' in torch_install_layer
+        calls.append((image_tags, output, context_dir, cwd))
+        return BuildxBuildResult(
+            argv=("docker", "buildx", "build", "--load", "-t", image_tags[0]),
+            context_dir=context_dir,
+            image_tags=image_tags,
+            output=output,
+        )
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx",
+        fake_buildx,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "demo:indexes",
+            "--context-dir",
+            str(context),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(("demo:indexes",), "load", context, Path.cwd())]
+
+
+# This is the full-context Buildx failure retention check; narrower host build
+# failure cases should rely on this instead of duplicating minimal coverage.
 def test_host_build_failure_after_context_completion_keeps_full_context(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -307,8 +503,10 @@ def test_host_build_failure_after_context_completion_keeps_full_context(
     def fail_after_context(*, context_dir: Path, **kwargs) -> None:
         del kwargs
         assert has_valid_context_marker(context_dir)
-        assert (context_dir / "config" / "custom-nodes.toml").is_file()
-        assert (context_dir / "config" / "files.toml").is_file()
+        assert (context_dir / "config.toml").is_file()
+        assert (context_dir / "config.lock.toml").is_file()
+        assert not (context_dir / "config" / "custom-nodes.toml").exists()
+        assert not (context_dir / "config" / "files.toml").exists()
         assert (context_dir / "scripts" / "pre.sh").is_file()
         raise BuildxBuildError("fake docker failed after render")
 
@@ -336,6 +534,8 @@ def test_host_build_failure_after_context_completion_keeps_full_context(
     assert result.exit_code == 1
     assert "fake docker failed after render" in result.stderr
     assert has_valid_context_marker(context)
-    assert (context / "config" / "custom-nodes.toml").is_file()
-    assert (context / "config" / "files.toml").is_file()
+    assert (context / "config.toml").is_file()
+    assert (context / "config.lock.toml").is_file()
+    assert not (context / "config" / "custom-nodes.toml").exists()
+    assert not (context / "config" / "files.toml").exists()
     assert (context / "scripts" / "post.py").is_file()

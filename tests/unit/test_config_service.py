@@ -7,8 +7,10 @@ import pytest
 
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
+    DiagnosticSeverity,
     RenderPlan,
     load_validate_plan,
+    load_validate_plan_result,
 )
 
 MINIMAL_CONFIG = """\
@@ -24,6 +26,7 @@ version = "2.10"
 [comfyui]
 version = "latest"
 """
+TRUNCATED_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 truncated"
 
 
 @pytest.fixture
@@ -42,6 +45,9 @@ def _identities(error: ConfigurationServiceError) -> list[tuple[tuple, str]]:
     return [(diagnostic.path, diagnostic.code) for diagnostic in error.diagnostics]
 
 
+# Service warning and runtime projection boundaries.
+
+
 def test_minimal_config_returns_complete_normalized_plan(
     write_config: Callable[[str], Path],
 ) -> None:
@@ -53,6 +59,201 @@ def test_minimal_config_returns_complete_normalized_plan(
     assert plan.paths.comfyui == "/workspace/ComfyUI"
     assert plan.pytorch.wheel_tag == "cu129"
     assert plan.files.downloader.default == "aria2"
+
+
+def test_result_bakes_host_async_download_mode_with_scheduling_warnings(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Runtime download-mode fields are baked into runtime defaults."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "async"
+"""
+    )
+
+    result = load_validate_plan_result(write_config(document))
+
+    assert isinstance(result.plan, RenderPlan)
+    assert [
+        (warning.path, warning.code, warning.severity) for warning in result.warnings
+    ] == [
+        (
+            ("cdh", "default_download_mode"),
+            "host_build.download_scheduling_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("files", 0, "download_mode"),
+            "host_build.download_scheduling_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
+    ]
+    assert result.runtime_config.files[0].download_mode == "async"
+    assert result.runtime_config.config.cdh.default_download_mode == "async"
+
+
+def test_plan_only_loader_accepts_host_download_mode_fields(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Preserve the existing load_validate_plan return contract."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[cdh]
+default_download_mode = "async"
+"""
+    )
+
+    assert isinstance(load_validate_plan(write_config(document)), RenderPlan)
+
+
+@pytest.mark.parametrize(
+    ("cdh_fragment", "expected_warning"),
+    [
+        ("", False),
+        ('download_failure_policy = "fail"\n', False),
+        ('download_failure_policy = "continue"\n', True),
+    ],
+)
+def test_explicit_continue_failure_policy_warns_for_build_time_files(
+    write_config: Callable[[str], Path],
+    cdh_fragment: str,
+    expected_warning: bool,
+) -> None:
+    """Warn only when explicit continue policy can affect build-time files."""
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+[cdh]
+{cdh_fragment}
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+"""
+    )
+
+    result = load_validate_plan_result(write_config(document))
+
+    assert bool(result.warnings) is expected_warning
+    if expected_warning:
+        warning = result.warnings[0]
+        assert warning.path == ("cdh", "download_failure_policy")
+        assert warning.code == "host_build.download_failure_policy_continue"
+        assert warning.severity == DiagnosticSeverity.WARNING
+
+
+def test_non_empty_host_ssh_password_warns_without_leaking_password(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Warn that baked SSH passwords can be exposed without printing the value."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[system.ssh]
+password = "super-secret"
+"""
+    )
+
+    result = load_validate_plan_result(write_config(document))
+
+    assert [(item.path, item.code, item.severity) for item in result.warnings] == [
+        (
+            ("system", "ssh", "password"),
+            "host_build.ssh_password_baked",
+            DiagnosticSeverity.WARNING,
+        )
+    ]
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in result.warnings
+    )
+    assert "super-secret" not in payload
+    assert result.runtime_config.config.system.ssh.password == "super-secret"
+
+
+def test_invalid_host_ssh_public_key_fails_with_stable_diagnostic_no_password_leak(
+    write_config: Callable[[str], Path],
+) -> None:
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+[system.ssh]
+password = "super-secret"
+pub_keys = ["{TRUNCATED_SSH_KEY}"]
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan_result(write_config(document))
+
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in raised.value.diagnostics
+    )
+    assert _identities(raised.value) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload
+
+
+def test_invalid_host_file_download_mode_fails_before_runtime_projection(
+    write_config: Callable[[str], Path],
+) -> None:
+    """Keep runtime file download mode limited to supported enum values."""
+    document = (
+        MINIMAL_CONFIG
+        + """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "parallel"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan_result(write_config(document))
+
+    assert _identities(raised.value) == [
+        (("files", 0, "download_mode"), "schema.literal_error")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("directory", "code"),
+    [
+        ("models/", "file.trailing_slash"),
+        ("models//checkpoints", "file.empty_directory_segment"),
+    ],
+)
+def test_runtime_incompatible_host_file_dirs_fail_before_projection(
+    write_config: Callable[[str], Path],
+    directory: str,
+    code: str,
+) -> None:
+    """Reject host file dirs that would make baked runtime config invalid."""
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+[[files]]
+url = "https://example.com/model.bin"
+dir = "{directory}"
+filename = "model.bin"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan_result(write_config(document))
+
+    assert _identities(raised.value) == [(("files", 0, "dir"), code)]
 
 
 def test_full_config_and_hooks_use_explicit_scripts_directory(
@@ -101,6 +302,9 @@ def test_no_hooks_do_not_require_or_inspect_scripts_directory(
     assert plan.custom_nodes.scripts_source_dir is None
 
 
+# Multi-file merge behavior.
+
+
 def test_multi_file_merge_applies_cli_order_and_keyed_overrides(
     tmp_path: Path,
 ) -> None:
@@ -121,13 +325,13 @@ PROFILE = "base"
 [python]
 extra_packages = ["base-python"]
 
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "same-registry"
-version = "1.0"
+version = "1.0.0"
 pre_install_scripts = ["base.sh"]
 
 [[comfyui.custom_nodes]]
@@ -156,12 +360,14 @@ EXTRA = "yes"
 extra_packages = ["profile-python"]
 
 [comfyui]
-launch_args = ["--cpu"]
+listen = "127.0.0.1"
+port = 8190
+extra_args = ["--cpu"]
 
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "same-registry"
-version = "2.0"
+version = "2.0.0"
 pre_install_scripts = []
 
 [[comfyui.custom_nodes]]
@@ -185,7 +391,7 @@ filename = "extra.bin"
     )
     local.write_text(
         """
-[downloader.httpx]
+[cdh.downloader.httpx]
 retries = 7
 """,
         encoding="utf-8",
@@ -200,9 +406,11 @@ retries = 7
         ("EXTRA", "yes"),
     ]
     assert plan.python.extra_packages == ("profile-python",)
-    assert plan.comfyui.launch_arguments == ("--cpu",)
+    assert plan.comfyui.listen == "127.0.0.1"
+    assert plan.comfyui.port == 8190
+    assert plan.comfyui.extra_arguments == ("--cpu",)
     assert [(node.type, node.target) for node in plan.custom_nodes.items] == [
-        ("registry", "same-registry@2.0"),
+        ("registry", "same-registry@2.0.0"),
         ("git", "https://example.com/same.git@old"),
         ("git", "https://example.com/new.git"),
     ]
@@ -264,12 +472,12 @@ def test_multi_file_merge_preserves_duplicate_custom_node_validation(
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "duplicate"
-version = "1"
+version = "1.0.0"
 
 [[comfyui.custom_nodes]]
 type = "registry"
 id = "duplicate"
-version = "2"
+version = "2.0.0"
 """,
         encoding="utf-8",
     )
@@ -305,6 +513,43 @@ dir = "models"
         load_validate_plan([base, override])
 
     assert _identities(raised.value) == [(("files", 0, "filename"), "schema.missing")]
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "--listen",
+        "--listen=127.0.0.1",
+        "--port",
+        "--port=8190",
+        "--auto-launch",
+        "--auto-launch=true",
+        "--disable-auto-launch",
+        "--disable-auto-launch=true",
+    ],
+)
+def test_service_rejects_cdh_controlled_comfyui_extra_args(
+    write_config: Callable[[str], Path],
+    argument: str,
+) -> None:
+    """Return stable user-facing diagnostics for cdh-owned startup flags."""
+    document = (
+        MINIMAL_CONFIG
+        + f"""
+extra_args = ["--cpu", "{argument}"]
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_plan(write_config(document))
+
+    assert _identities(raised.value) == [
+        (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
+    ]
+    assert argument.split("=", maxsplit=1)[0] in raised.value.diagnostics[0].message
+
+
+# Diagnostic normalization.
 
 
 @pytest.mark.parametrize(

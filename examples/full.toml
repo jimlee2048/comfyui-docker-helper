@@ -3,7 +3,7 @@
 # minimal.toml usually have defaults, but they are included here for reference.
 
 [compute_platform]
-# Required. Currently only "cuda" is supported.
+# Required. Supported: "cuda".
 type = "cuda"
 
 [compute_platform.cuda]
@@ -29,32 +29,57 @@ extra_packages = ["ffmpeg", "libgl1"]
 COMFYUI_PORT = "8188"
 EXAMPLE_PROFILE = "full"
 
+[system.ssh]
+# Default: false. Enable at runtime with SSH_ENABLE=true when SSH access is
+# required. Host keys are generated when the container starts.
+enable = false
+# Default: 22. Override with SSH_PORT at container startup.
+port = 22
+# Leave empty in image config. SSH_PASSWORD can set a runtime-only root password.
+password = ""
+# Public keys must be single OpenSSH authorized_keys lines. SSH_PUB_KEY can
+# append one runtime-only public key.
+pub_keys = []
+
 [python]
 # Default: "3.12". Passed to uv's Python installation workflow.
 version = "3.12"
 # Default: "latest". Used as the ghcr.io/astral-sh/uv image tag.
 uv_version = "latest"
+# Default: "https://pypi.org/simple". Used by cdh-controlled Python package
+# installation steps.
+index_url = "https://pypi.org/simple"
 # Extra Python packages installed into the final virtualenv after PyTorch.
 extra_packages = ["numpy"]
 
 [pytorch]
 # Required. Installs torch==version from the CUDA wheel index inferred from CUDA.
 version = "2.10"
+# Default: "https://download.pytorch.org/whl". Combined with the CUDA wheel tag.
+index_base_url = "https://download.pytorch.org/whl"
 # Additional PyTorch-family packages. Do not include "torch" here.
 extra_packages = ["torchvision", "torchaudio"]
 
-[downloader]
+[cdh]
 # Default: "aria2". Supported: "aria2", "httpx".
 # Per-file downloader values override this default.
-default = "aria2"
+default_downloader = "aria2"
+# Default: "sync". Supported: "sync", "async".
+# Per-file download_mode values override this default.
+default_download_mode = "sync"
+# Default: 3. Total attempts per file for each host build or container start.
+download_max_attempts = 3
+# Host build default: "fail". Runtime default: "continue".
+# Supported: "continue", "fail".
+download_failure_policy = "fail"
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 # Default: 60. Seconds for each HTTPX request attempt.
 timeout = 60
 # Default: 3. Number of retry attempts for HTTPX downloads.
 retries = 3
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 # Default: 6800. Container-local aria2 RPC port used during file downloads.
 rpc_port = 6800
 # Default: 16. aria2 split count.
@@ -66,22 +91,37 @@ min_split_size = "1M"
 # Default: true. Keep aria2 resume support enabled.
 resume_download = true
 
+[build]
+# Optional for render. Required by host build when no CLI -t/--tag is supplied.
+tags = ["my-comfy:dev", "registry.example.com/my-comfy:dev"]
+# Default: "load". Supported: "load", "push".
+output = "load"
+
 [comfyui]
-# Required. Supported: "latest", "nightly", semver, or v-prefixed semver.
+# Required. Supported: "latest", "nightly", semver, v-prefixed semver, or
+# PEP 440-style constraints such as ">=0.3.0,<0.4.0" where accepted upstream.
 version = "latest"
-# Default: "latest". Supported: "latest" or a public PEP 440 comfy-cli version.
+# Default: "latest". Supported: "latest", a public PEP 440 comfy-cli version,
+# or PEP 440-style constraints such as ">=1.4.0,<2.0.0".
 cli_version = "latest"
 # Default: true. Must be true when custom_nodes are configured.
 install_manager = true
-# Default shown below. Passed to ComfyUI's final python main.py command.
-launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch", "--port", "8188"]
+# Default: "0.0.0.0". cdh owns the final ComfyUI --listen argument.
+listen = "0.0.0.0"
+# Default: 8188. cdh owns the final ComfyUI --port argument.
+port = 8188
+# Default: []. Additional ComfyUI CLI arguments appended after cdh-owned
+# startup flags. Do not include --listen, --port, --auto-launch, or
+# --disable-auto-launch here.
+extra_args = []
 
 [[comfyui.custom_nodes]]
 # Registry custom node installed with ComfyUI-Manager.
 type = "registry"
 # Required for registry nodes. Registry IDs must be unique in this file.
 id = "comfyui-custom-scripts"
-# Default: unset. Use "latest" or a registry-supported version selector.
+# Default: unset. Use "latest", a registry-supported version selector, or
+# PEP 440-style constraints such as ">=1.0.0,<2.0.0" where applicable.
 version = "latest"
 # Hook paths are relative to --scripts-dir, must not contain "..", and must end
 # in .sh or .py. Shell hooks run with bash; Python hooks run with the venv Python.
@@ -110,8 +150,10 @@ dir = "models/example-docs"
 filename = "comfyui-readme-aria2.md"
 # Default: false. Existing targets are skipped unless true.
 overwrite = false
-# Default: downloader.default. Supported: "aria2", "httpx".
+# Default: cdh.default_downloader. Supported: "aria2", "httpx".
 downloader = "aria2"
+# Default: cdh.default_download_mode. Supported: "sync", "async".
+download_mode = "sync"
 
 [[files]]
 url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
@@ -119,3 +161,4 @@ dir = "models/example-docs"
 filename = "comfyui-readme-httpx.md"
 overwrite = true
 downloader = "httpx"
+download_mode = "sync"

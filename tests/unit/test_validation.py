@@ -16,7 +16,17 @@ from comfyui_docker_helper.config import (
     normalize_comfyui_version,
     validate_config,
 )
-from comfyui_docker_helper.config.validation import resolve_git_target_dir
+from comfyui_docker_helper.config.validation import (
+    normalize_registry_version,
+    resolve_git_target_dir,
+)
+
+VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "test@example"
+)
+TRUNCATED_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 truncated"
 
 
 def make_config() -> Config:
@@ -40,6 +50,7 @@ def locations_and_codes(
     return [(diagnostic.path, diagnostic.code) for diagnostic in diagnostics]
 
 
+# Validation business basics: defaults, supported CUDA image shape, paths, and env.
 def test_minimal_config_is_business_valid_without_host_or_network_checks() -> None:
     """Accept defaults without probing container paths, Docker, or the network."""
     config = make_config()
@@ -47,6 +58,47 @@ def test_minimal_config_is_business_valid_without_host_or_network_checks() -> No
     config.system.comfyui_path = "/another/nonexistent/container/path"
 
     assert validate_config(config) == ()
+
+
+def test_system_ssh_defaults_are_public_config_defaults() -> None:
+    config = make_config()
+
+    assert config.system.ssh.enable is False
+    assert config.system.ssh.port == 22
+    assert config.system.ssh.password == ""
+    assert config.system.ssh.pub_keys == []
+
+
+def test_valid_system_ssh_public_key_is_accepted() -> None:
+    config = make_config()
+    config.system.ssh.pub_keys = ["", VALID_SSH_KEY]
+
+    assert validate_config(config) == ()
+
+
+def test_invalid_system_ssh_public_key_fails_without_leaking_password() -> None:
+    config = make_config()
+    config.system.ssh.password = "super-secret"
+    config.system.ssh.pub_keys = ["not-a-key"]
+
+    diagnostics = validate_config(config)
+    payload = "\n".join(
+        f"{item.path} {item.code} {item.message}" for item in diagnostics
+    )
+
+    assert locations_and_codes(diagnostics) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
+    assert "super-secret" not in payload
+
+
+def test_truncated_base64_valid_system_ssh_public_key_fails() -> None:
+    config = make_config()
+    config.system.ssh.pub_keys = [TRUNCATED_SSH_KEY]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (("system", "ssh", "pub_keys", 0), "ssh.invalid_public_key")
+    ]
 
 
 def test_diagnostics_and_result_are_immutable() -> None:
@@ -88,7 +140,7 @@ def test_cuda_version_rejects_other_formats(version: str) -> None:
 
 
 def test_only_cuda_platform_is_supported() -> None:
-    """Reject compute platform names outside the v0.1 CUDA contract."""
+    """Reject compute platform names outside the current CUDA-only contract."""
     config = make_config()
     config.compute_platform.type = "rocm"
 
@@ -209,6 +261,7 @@ def test_environment_values_remain_strict_structural_strings() -> None:
     }
 
 
+# Dockerfile-bound strings must stay safe to render into Dockerfile source lines.
 @pytest.mark.parametrize("name", ["A", "_PRIVATE", "mixed_Case_123"])
 def test_environment_names_accept_dockerfile_identifiers(name: str) -> None:
     """Accept environment names supported by the Dockerfile contract."""
@@ -248,7 +301,8 @@ def test_environment_names_reject_non_identifiers(name: str) -> None:
         ("pytorch_package", ("pytorch", "extra_packages", 0)),
         ("comfy_cli_version", ("comfyui", "cli_version")),
         ("comfyui_version", ("comfyui", "version")),
-        ("launch_argument", ("comfyui", "launch_args", 0)),
+        ("listen", ("comfyui", "listen")),
+        ("extra_argument", ("comfyui", "extra_args", 0)),
     ],
 )
 def test_dockerfile_bound_strings_reject_source_line_controls(
@@ -323,10 +377,41 @@ def _set_dockerfile_bound_value(
     if field == "comfyui_version":
         config.comfyui.version = value
         return ("comfyui", "version")
-    if field == "launch_argument":
-        config.comfyui.launch_args = [value]
-        return ("comfyui", "launch_args", 0)
+    if field == "listen":
+        config.comfyui.listen = value
+        return ("comfyui", "listen")
+    if field == "extra_argument":
+        config.comfyui.extra_args = [value]
+        return ("comfyui", "extra_args", 0)
     raise AssertionError(f"unknown test field: {field}")
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "--listen",
+        "--listen=127.0.0.1",
+        "--port",
+        "--port=8190",
+        "--auto-launch",
+        "--auto-launch=true",
+        "--disable-auto-launch",
+        "--disable-auto-launch=true",
+    ],
+)
+def test_comfyui_extra_args_reject_cdh_controlled_startup_flags(
+    argument: str,
+) -> None:
+    """Keep cdh-owned startup flags out of passthrough ComfyUI arguments."""
+    config = make_config()
+    config.comfyui.extra_args = ["--cpu", argument]
+
+    diagnostics = validate_config(config)
+
+    assert locations_and_codes(diagnostics) == [
+        (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
+    ]
+    assert argument.split("=", maxsplit=1)[0] in diagnostics[0].message
 
 
 @pytest.mark.parametrize(
@@ -364,6 +449,72 @@ def test_required_pytorch_version_remains_structural() -> None:
     }
 
 
+# Selector validation keeps accepted version ranges precise and normalized.
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("python_index", "http://mirror.example.com/simple"),
+        ("python_index", "https://mirror.example.com/simple"),
+        ("pytorch_index", "http://mirror.example.com/whl"),
+        ("pytorch_index", "https://mirror.example.com/whl"),
+    ],
+)
+def test_package_index_urls_accept_http_and_https(field: str, value: str) -> None:
+    """Accept package index URLs with an HTTP(S) scheme and host."""
+    config = make_config()
+    if field == "python_index":
+        config.python.index_url = value
+    else:
+        config.pytorch.index_base_url = value
+
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "path", "code"),
+    [
+        (
+            "python_index",
+            "file:///tmp/simple",
+            ("python", "index_url"),
+            "python.invalid_index_url",
+        ),
+        (
+            "python_index",
+            "https://user:token@example.com/simple",
+            ("python", "index_url"),
+            "python.invalid_index_url",
+        ),
+        (
+            "pytorch_index",
+            "ftp://example.com/whl",
+            ("pytorch", "index_base_url"),
+            "pytorch.invalid_index_base_url",
+        ),
+        (
+            "pytorch_index",
+            "https://token@example.com/whl",
+            ("pytorch", "index_base_url"),
+            "pytorch.invalid_index_base_url",
+        ),
+    ],
+)
+def test_package_index_urls_reject_non_http_and_userinfo(
+    field: str,
+    value: str,
+    path: tuple[str | int, ...],
+    code: str,
+) -> None:
+    """Reject non-HTTP(S) indexes and TOML-embedded index credentials."""
+    config = make_config()
+    if field == "python_index":
+        config.python.index_url = value
+    else:
+        config.pytorch.index_base_url = value
+
+    assert locations_and_codes(validate_config(config)) == [(path, code)]
+
+
 @pytest.mark.parametrize(
     ("version", "normalized"),
     [
@@ -372,6 +523,9 @@ def test_required_pytorch_version_remains_structural() -> None:
         ("1.2.3", "1.2.3"),
         ("v1.2.3", "1.2.3"),
         ("1.2.3-rc.1+build.5", "1.2.3-rc.1+build.5"),
+        (">=1.0,<2", "<2,>=1.0"),
+        ("<2", "<2"),
+        ("!=1.2.3", "!=1.2.3"),
     ],
 )
 def test_comfyui_versions_validate_and_normalize(version: str, normalized: str) -> None:
@@ -385,7 +539,23 @@ def test_comfyui_versions_validate_and_normalize(version: str, normalized: str) 
 
 @pytest.mark.parametrize(
     "version",
-    ["1.2", "v1.2", "V1.2.3", "01.2.3", "commit:abc", "https://example.com"],
+    [
+        "1.2",
+        "v1.2",
+        "V1.2.3",
+        "01.2.3",
+        "commit:abc",
+        "https://example.com",
+        "~=1.2",
+        "==1.*",
+        "^1.2.3",
+        "~1.2.3",
+        ">=1 || <2",
+        "===1.2.3",
+        ">=1,,<2",
+        "==1.0+local",
+        "!=1.0+local",
+    ],
 )
 def test_invalid_comfyui_versions_are_rejected(version: str) -> None:
     """Reject non-semver and unsupported ComfyUI install modes."""
@@ -406,6 +576,9 @@ def test_invalid_comfyui_versions_are_rejected(version: str) -> None:
         ("1.0", "1.0"),
         ("v2.0RC1", "2.0rc1"),
         ("1!2.0.post1", "1!2.0.post1"),
+        (">=1.0,<2", "<2,>=1.0"),
+        ("<2", "<2"),
+        ("==1.2.3", "==1.2.3"),
     ],
 )
 def test_comfy_cli_versions_use_packaging_normalization(
@@ -422,15 +595,21 @@ def test_comfy_cli_versions_use_packaging_normalization(
 @pytest.mark.parametrize(
     "version",
     [
-        ">=1.0",
         "1.0+local",
         "https://example.com/package.whl",
         "git+https://example.com/repo.git",
         "nightly",
+        "~=1.2",
+        "==1.*",
+        "^1.2.3",
+        "~1.2.3",
+        ">=1 || <2",
+        "===1.2.3",
+        ">=1,,<2",
     ],
 )
 def test_invalid_comfy_cli_versions_are_rejected(version: str) -> None:
-    """Reject specifiers, local labels, URLs, VCS, and non-latest labels."""
+    """Reject unsupported constraints, local labels, URLs, VCS, and labels."""
     config = make_config()
     config.comfyui.cli_version = version
 
@@ -439,6 +618,114 @@ def test_invalid_comfy_cli_versions_are_rejected(version: str) -> None:
     ]
     with pytest.raises(ValueError):
         normalize_comfy_cli_version(version)
+
+
+@pytest.mark.parametrize(
+    ("version", "normalized"),
+    [
+        ("latest", "latest"),
+        ("1.2.3", "1.2.3"),
+        ("v1.2.3", "1.2.3"),
+        (">=1.0,<2", "<2,>=1.0"),
+        ("<2", "<2"),
+    ],
+)
+def test_registry_versions_validate_and_normalize(
+    version: str,
+    normalized: str,
+) -> None:
+    """Accept latest, exact semver, and supported constraints for registry nodes."""
+    assert normalize_registry_version(version) == normalized
+
+    config = make_config()
+    config.comfyui.custom_nodes = [
+        RegistryCustomNodeConfig.model_validate(
+            {"type": "registry", "id": "node", "version": version}
+        )
+    ]
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["1.2", "channel:beta", "~=1.2", "==1.*", "^1.2.3", ">=1 || <2", "===1.2.3"],
+)
+def test_invalid_registry_versions_are_rejected(version: str) -> None:
+    """Reject arbitrary registry selectors and unsupported constraint syntax."""
+    config = make_config()
+    config.comfyui.custom_nodes = [
+        RegistryCustomNodeConfig.model_validate(
+            {"type": "registry", "id": "node", "version": version}
+        )
+    ]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (
+            ("comfyui", "custom_nodes", 0, "version"),
+            "custom_node.invalid_registry_version",
+        )
+    ]
+    with pytest.raises(ValueError):
+        normalize_registry_version(version)
+
+
+@pytest.mark.parametrize(
+    ("field", "path"),
+    [
+        ("python_version", ("python", "version")),
+        ("uv_version", ("python", "uv_version")),
+        ("pytorch_version", ("pytorch", "version")),
+        ("system_package", ("system", "extra_packages", 0)),
+        ("file_name", ("files", 0, "filename")),
+    ],
+)
+def test_constraints_are_rejected_on_unsupported_fields(
+    field: str,
+    path: tuple[str | int, ...],
+) -> None:
+    """Keep constraints limited to fields with later lock-domain resolution."""
+    config = make_config()
+    if field == "python_version":
+        config.python.version = "3.12,<3.13"
+    elif field == "uv_version":
+        config.python.uv_version = "latest,<1"
+    elif field == "pytorch_version":
+        config.pytorch.version = "2.7.1,<3"
+    elif field == "system_package":
+        config.system.extra_packages = ["curl>=8"]
+    elif field == "file_name":
+        config.files = [
+            FileConfig.model_validate(
+                {
+                    "url": "https://example.com/model.bin",
+                    "dir": "models",
+                    "filename": "model>=1.bin",
+                }
+            )
+        ]
+    else:
+        raise AssertionError(f"unknown test field: {field}")
+
+    assert locations_and_codes(validate_config(config)) == [
+        (path, "version_constraint.unsupported_field")
+    ]
+
+
+def test_cuda_constraints_are_rejected_without_broadening_cuda_versions() -> None:
+    """Keep CUDA on its numeric image-tag contract and reject constraints."""
+    config = make_config()
+    config.compute_platform.cuda.version = ">=12"
+
+    assert locations_and_codes(validate_config(config)) == [
+        (
+            ("compute_platform", "cuda", "version"),
+            "compute_platform.invalid_cuda_version",
+        ),
+        (
+            ("compute_platform", "cuda", "version"),
+            "version_constraint.unsupported_field",
+        ),
+    ]
 
 
 def test_custom_nodes_require_manager() -> None:
@@ -459,10 +746,10 @@ def test_registry_ids_must_be_unique_in_input_order() -> None:
     config = make_config()
     config.comfyui.custom_nodes = [
         RegistryCustomNodeConfig.model_validate(
-            {"type": "registry", "id": "same", "version": "1"}
+            {"type": "registry", "id": "same", "version": "1.0.0"}
         ),
         RegistryCustomNodeConfig.model_validate(
-            {"type": "registry", "id": "same", "version": "2"}
+            {"type": "registry", "id": "same", "version": "2.0.0"}
         ),
         RegistryCustomNodeConfig.model_validate({"type": "registry", "id": "same"}),
     ]
@@ -604,6 +891,7 @@ def test_git_effective_target_dirs_must_be_unique_for_different_urls() -> None:
     ]
 
 
+# Hook validation covers conditional scripts-dir use and hook path safety.
 def test_no_hooks_do_not_require_or_validate_scripts_dir(tmp_path: Path) -> None:
     """Ignore scripts-dir entirely when no hook is referenced."""
     config = make_config()
@@ -761,11 +1049,12 @@ def test_node_diagnostics_follow_node_and_field_order(tmp_path: Path) -> None:
     ]
 
 
+# Downloader, build, and file validation protect host/runtime transfer settings.
 @pytest.mark.parametrize("downloader", ["aria2", "httpx"])
 def test_supported_global_downloaders_are_valid(downloader: str) -> None:
     """Accept both configured downloader backends."""
     config = make_config()
-    config.downloader.default = downloader
+    config.cdh.default_downloader = downloader
 
     assert validate_config(config) == ()
 
@@ -773,42 +1062,171 @@ def test_supported_global_downloaders_are_valid(downloader: str) -> None:
 def test_global_downloader_enum_and_numeric_ranges_are_validated() -> None:
     """Reject unknown backends and impossible downloader numeric settings."""
     config = make_config()
-    config.downloader.default = "curl"
-    config.downloader.aria2.rpc_port = -1
-    config.downloader.aria2.split = 0
-    config.downloader.aria2.max_connection_per_server = 0
-    config.downloader.httpx.timeout = -0.5
-    config.downloader.httpx.retries = -3
+    config.cdh.default_downloader = "curl"
+    config.cdh.downloader.aria2.rpc_port = -1
+    config.cdh.downloader.aria2.split = 0
+    config.cdh.downloader.aria2.max_connection_per_server = 0
+    config.cdh.downloader.httpx.timeout = -0.5
+    config.cdh.downloader.httpx.retries = -3
 
     assert locations_and_codes(validate_config(config)) == [
-        (("downloader", "default"), "downloader.unsupported_default"),
+        (("cdh", "default_downloader"), "cdh.unsupported_default_downloader"),
         (
-            ("downloader", "httpx", "timeout"),
-            "downloader.httpx_timeout_not_positive",
+            ("cdh", "downloader", "httpx", "timeout"),
+            "cdh.downloader.httpx_timeout_not_positive",
         ),
         (
-            ("downloader", "httpx", "retries"),
-            "downloader.httpx_retries_negative",
+            ("cdh", "downloader", "httpx", "retries"),
+            "cdh.downloader.httpx_retries_negative",
         ),
         (
-            ("downloader", "aria2", "rpc_port"),
-            "downloader.aria2_rpc_port_out_of_range",
+            ("cdh", "downloader", "aria2", "rpc_port"),
+            "cdh.downloader.aria2_rpc_port_out_of_range",
         ),
-        (("downloader", "aria2", "split"), "downloader.aria2_split_not_positive"),
         (
-            ("downloader", "aria2", "max_connection_per_server"),
-            "downloader.aria2_max_connection_per_server_not_positive",
+            ("cdh", "downloader", "aria2", "split"),
+            "cdh.downloader.aria2_split_not_positive",
+        ),
+        (
+            ("cdh", "downloader", "aria2", "max_connection_per_server"),
+            "cdh.downloader.aria2_max_connection_per_server_not_positive",
         ),
     ]
+
+
+def test_async_download_mode_is_accepted_by_public_schema() -> None:
+    """Accept runtime async scheduling fields in public config."""
+    config = Config.model_validate(
+        {
+            "compute_platform": {
+                "type": "cuda",
+                "cuda": {"version": "12.9.2"},
+            },
+            "pytorch": {"version": "2.10"},
+            "cdh": {"default_download_mode": "async"},
+            "comfyui": {"version": "latest"},
+            "files": [
+                {
+                    "url": "https://example.com/model.bin",
+                    "dir": "models",
+                    "filename": "model.bin",
+                    "download_mode": "async",
+                }
+            ],
+        }
+    )
+
+    assert config.cdh.default_download_mode == "async"
+    assert config.files[0].download_mode == "async"
+
+
+def test_invalid_download_mode_is_rejected_by_public_schema() -> None:
+    """Reject ordinary invalid runtime scheduling enum values."""
+    with pytest.raises(ValidationError) as raised:
+        Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "cdh": {"default_download_mode": "parallel"},
+                "comfyui": {"version": "latest"},
+                "files": [
+                    {
+                        "url": "https://example.com/model.bin",
+                        "dir": "models",
+                        "filename": "model.bin",
+                        "download_mode": "deferred",
+                    }
+                ],
+            }
+        )
+
+    assert {(error["loc"], error["type"]) for error in raised.value.errors()} == {
+        (("cdh", "default_download_mode"), "literal_error"),
+        (("files", 0, "download_mode"), "literal_error"),
+    }
+
+
+def test_unknown_sections_stay_hard_schema_errors() -> None:
+    """Keep extra root sections out of host warning compatibility handling."""
+    with pytest.raises(ValidationError) as raised:
+        Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "comfyui": {"version": "latest"},
+                "runtime": {"download_mode": "sync"},
+            }
+        )
+
+    assert (("runtime",), "extra_forbidden") in {
+        (error["loc"], error["type"]) for error in raised.value.errors()
+    }
 
 
 @pytest.mark.parametrize("port", [1, 65535])
 def test_aria2_rpc_port_accepts_valid_tcp_port_range(port: int) -> None:
     """Allow every valid TCP port, including privileged ports."""
     config = make_config()
-    config.downloader.aria2.rpc_port = port
+    config.cdh.downloader.aria2.rpc_port = port
 
     assert validate_config(config) == ()
+
+
+def test_build_tags_accept_non_empty_image_references() -> None:
+    """Accept one or more configured Docker image tags for host build."""
+    config = make_config()
+    config.build.tags = ["my-comfy:dev", "registry.example.com/team/my-comfy:dev"]
+
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["", " my-comfy:dev", "my-comfy:dev ", "bad tag:dev", "bad\ntag", "bad\x7ftag"],
+)
+def test_build_tags_reject_empty_whitespace_and_control_characters(tag: str) -> None:
+    """Reject tag strings that are obviously not valid CLI tag arguments."""
+    config = make_config()
+    config.build.tags = ["valid:tag", tag]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (("build", "tags", 1), "build.invalid_tag")
+    ]
+
+
+@pytest.mark.parametrize("output", ["load", "push"])
+def test_build_output_accepts_load_and_push(output: str) -> None:
+    """Accept the supported Buildx output modes."""
+    config = make_config()
+    config.build.output = output
+
+    assert validate_config(config) == ()
+
+
+def test_build_output_rejects_unknown_modes_structurally() -> None:
+    """Reject unsupported Buildx output modes in the public schema stage."""
+    with pytest.raises(ValidationError) as raised:
+        Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "build": {"output": "registry"},
+                "comfyui": {"version": "latest"},
+            }
+        )
+
+    assert (("build", "output"), "literal_error") in {
+        (error["loc"], error["type"]) for error in raised.value.errors()
+    }
 
 
 @pytest.mark.parametrize(
@@ -841,8 +1259,8 @@ def test_http_and_https_file_urls_are_valid(url: str) -> None:
     assert validate_config(config) == ()
 
 
-def test_file_directories_are_relative_nonempty_and_non_traversing() -> None:
-    """Reject absolute, empty, dot, and parent-traversing target directories."""
+def test_file_directories_follow_runtime_lexical_rules() -> None:
+    """Reject dirs that runtime config would reject before baking."""
     config = make_config()
     config.files = [
         FileConfig(url="https://example.com/a", dir="/models", filename="a.bin"),
@@ -853,13 +1271,21 @@ def test_file_directories_are_relative_nonempty_and_non_traversing() -> None:
         ),
         FileConfig(url="https://example.com/c", dir="", filename="c.bin"),
         FileConfig(url="https://example.com/d", dir=".", filename="d.bin"),
+        FileConfig(url="https://example.com/e", dir="models/", filename="e.bin"),
+        FileConfig(
+            url="https://example.com/f",
+            dir="models//checkpoints",
+            filename="f.bin",
+        ),
     ]
 
     assert locations_and_codes(validate_config(config)) == [
         (("files", 0, "dir"), "file.absolute_directory"),
         (("files", 1, "dir"), "file.directory_traversal"),
-        (("files", 2, "dir"), "file.empty_directory"),
-        (("files", 3, "dir"), "file.empty_directory"),
+        (("files", 2, "dir"), "file.empty_directory_segment"),
+        (("files", 3, "dir"), "file.current_directory_segment"),
+        (("files", 4, "dir"), "file.trailing_slash"),
+        (("files", 5, "dir"), "file.empty_directory_segment"),
     ]
 
 
@@ -926,8 +1352,8 @@ def test_independent_business_errors_are_aggregated_in_config_order() -> None:
     config.system.env = {"PATH": "override"}
     config.pytorch.extra_packages = ["torch"]
     config.comfyui.version = "bad"
-    config.comfyui.cli_version = ">=1"
-    config.downloader.default = "curl"
+    config.comfyui.cli_version = "~=1"
+    config.cdh.default_downloader = "curl"
     config.files = [
         FileConfig(
             url="ftp://example.com/",
@@ -956,7 +1382,7 @@ def test_independent_business_errors_are_aggregated_in_config_order() -> None:
         (("pytorch", "extra_packages", 0), "pytorch.duplicate_torch"),
         (("comfyui", "version"), "comfyui.invalid_version"),
         (("comfyui", "cli_version"), "comfyui.invalid_cli_version"),
-        (("downloader", "default"), "downloader.unsupported_default"),
+        (("cdh", "default_downloader"), "cdh.unsupported_default_downloader"),
         (("files", 0, "url"), "file.invalid_url"),
         (("files", 0, "dir"), "file.directory_traversal"),
         (("files", 0, "downloader"), "file.unsupported_downloader"),

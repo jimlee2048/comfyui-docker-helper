@@ -18,7 +18,9 @@ from comfyui_docker_helper.config import (
     RegistryCustomNodeConfig,
     RegistryCustomNodePlan,
     RenderPlanValidationError,
+    RuntimeHooksPlan,
     build_render_plan,
+    with_runtime_hooks_plan,
 )
 
 
@@ -36,6 +38,7 @@ def make_config() -> Config:
     )
 
 
+# Minimal plan tests pin the fully resolved renderer contract from defaults.
 def test_minimal_plan_resolves_every_effective_default() -> None:
     """Resolve minimal public config into complete renderer input."""
     plan = build_render_plan(make_config())
@@ -52,10 +55,12 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
         "git",
         "build-essential",
         "aria2",
+        "openssh-server",
     )
     assert plan.environment == ()
     assert plan.python.version == "3.12"
     assert plan.python.uv_version == "latest"
+    assert plan.python.index_url == "https://pypi.org/simple"
     assert plan.python.extra_packages == ()
     assert plan.pytorch.version == "2.10"
     assert plan.pytorch.wheel_tag == "cu129"
@@ -65,6 +70,9 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.comfyui.cli_requirement == "comfy-cli"
     assert plan.comfyui.version == "latest"
     assert plan.comfyui.install_manager is True
+    assert plan.comfyui.listen == "0.0.0.0"
+    assert plan.comfyui.port == 8188
+    assert plan.comfyui.extra_arguments == ()
     assert plan.comfyui.install_arguments == (
         "--nvidia",
         "--version",
@@ -75,6 +83,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.comfyui.launch_arguments == (
         "--listen",
         "0.0.0.0",
+        "--port",
+        "8188",
         "--disable-auto-launch",
     )
     assert plan.comfyui.launch_command == (
@@ -82,6 +92,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
         "/workspace/ComfyUI/main.py",
         "--listen",
         "0.0.0.0",
+        "--port",
+        "8188",
         "--disable-auto-launch",
     )
     assert plan.custom_nodes.items == ()
@@ -89,6 +101,8 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.custom_nodes.has_hooks is False
     assert plan.custom_nodes.scripts_source_dir is None
     assert plan.files.items == ()
+    assert plan.runtime_hooks.has_hooks is False
+    assert plan.runtime_hooks.source_dir is None
     assert plan.files.downloader.default == "aria2"
     assert plan.files.downloader.aria2.rpc_port == 6800
     assert plan.files.downloader.aria2.split == 16
@@ -99,6 +113,7 @@ def test_minimal_plan_resolves_every_effective_default() -> None:
     assert plan.files.downloader.httpx.retries == 3
 
 
+# Build args expose the small ordered scalar interface consumed by Docker.
 def test_minimal_build_arguments_have_exact_names_values_and_order() -> None:
     """Expose only the nine scalar build arguments from spec section 6."""
     plan = build_render_plan(make_config())
@@ -133,6 +148,7 @@ def test_minimal_layers_omit_empty_feature_layers() -> None:
     )
 
 
+# Manifest tests protect the rendered context allowlist and conditional trees.
 def test_minimal_manifest_contains_only_always_present_artifacts() -> None:
     """Describe the fixed allowlisted context without conditional directories."""
     manifest = build_render_plan(make_config()).output_manifest
@@ -140,6 +156,7 @@ def test_minimal_manifest_contains_only_always_present_artifacts() -> None:
     assert manifest.always == (
         OutputArtifact("Dockerfile", ArtifactKind.FILE),
         OutputArtifact(".cdh-rendered", ArtifactKind.FILE),
+        OutputArtifact("runtime/config.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/pyproject.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/src", ArtifactKind.TREE),
     )
@@ -172,12 +189,15 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     config.system.env = {"B": "second", "A": "first"}
     config.python.version = "3.13"
     config.python.uv_version = "0.8.0"
+    config.python.index_url = "https://mirror.example.com/simple"
     config.python.extra_packages = ["one", "two"]
     config.pytorch.version = "2.11"
     config.pytorch.extra_packages = ["torchvision", "torchaudio"]
     config.comfyui.cli_version = "v2.0RC1"
     config.comfyui.version = "v1.2.3"
-    config.comfyui.launch_args = ["--listen", "127.0.0.1"]
+    config.comfyui.listen = "127.0.0.1"
+    config.comfyui.port = 8190
+    config.comfyui.extra_args = ["--preview-method", "auto", "--cpu"]
 
     plan = build_render_plan(config)
 
@@ -191,6 +211,7 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     ]
     assert plan.python.version == "3.13"
     assert plan.python.uv_version == "0.8.0"
+    assert plan.python.index_url == "https://mirror.example.com/simple"
     assert plan.python.extra_packages == ("one", "two")
     assert plan.pytorch.version == "2.11"
     assert plan.pytorch.requirements == (
@@ -201,12 +222,30 @@ def test_explicit_paths_packages_environment_and_versions_preserve_order() -> No
     assert plan.comfyui.cli_version == "2.0rc1"
     assert plan.comfyui.cli_requirement == "comfy-cli==2.0rc1"
     assert plan.comfyui.version == "1.2.3"
-    assert plan.comfyui.launch_arguments == ("--listen", "127.0.0.1")
+    assert plan.comfyui.listen == "127.0.0.1"
+    assert plan.comfyui.port == 8190
+    assert plan.comfyui.extra_arguments == ("--preview-method", "auto", "--cpu")
+    assert plan.comfyui.launch_arguments == (
+        "--listen",
+        "127.0.0.1",
+        "--port",
+        "8190",
+        "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
+    )
     assert plan.comfyui.launch_command == (
         "python",
         "/opt/custom/ComfyUI/main.py",
         "--listen",
         "127.0.0.1",
+        "--port",
+        "8190",
+        "--disable-auto-launch",
+        "--preview-method",
+        "auto",
+        "--cpu",
     )
     assert plan.layers[5] is Layer.PYTHON_EXTRAS
 
@@ -222,6 +261,7 @@ def test_manager_disabled_adds_only_skip_manager_install_flag() -> None:
     assert plan.comfyui.install_arguments[-1] == "--skip-manager"
 
 
+# Custom node plans preserve target order, hook metadata, and cache decisions.
 def test_custom_node_targets_order_cache_and_omitted_versions(
     tmp_path: Path,
 ) -> None:
@@ -324,18 +364,19 @@ def test_duplicate_git_target_dirs_are_refused_before_plan_construction() -> Non
     ]
 
 
+# File plans resolve downloader settings, targets, and feature layers.
 def test_files_resolve_defaults_targets_order_and_downloader_settings() -> None:
     """Materialize every dependent file default and both backend settings."""
     config = make_config()
     config.system.workspace = "/srv"
-    config.downloader.default = "httpx"
-    config.downloader.aria2.rpc_port = 7000
-    config.downloader.aria2.split = 8
-    config.downloader.aria2.max_connection_per_server = 4
-    config.downloader.aria2.min_split_size = "2M"
-    config.downloader.aria2.resume_download = False
-    config.downloader.httpx.timeout = 90.5
-    config.downloader.httpx.retries = 5
+    config.cdh.default_downloader = "httpx"
+    config.cdh.downloader.aria2.rpc_port = 7000
+    config.cdh.downloader.aria2.split = 8
+    config.cdh.downloader.aria2.max_connection_per_server = 4
+    config.cdh.downloader.aria2.min_split_size = "2M"
+    config.cdh.downloader.aria2.resume_download = False
+    config.cdh.downloader.httpx.timeout = 90.5
+    config.cdh.downloader.httpx.retries = 5
     config.files = [
         FileConfig(
             url="https://example.com/first.bin",
@@ -380,7 +421,7 @@ def test_files_resolve_defaults_targets_order_and_downloader_settings() -> None:
 def test_full_feature_layers_and_manifest_are_conditional_and_ordered(
     tmp_path: Path,
 ) -> None:
-    """Activate extras, nodes, files, helper configs, and scripts in spec order."""
+    """Activate extras, nodes, files, root artifacts, and scripts in spec order."""
     (tmp_path / "hook.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     config = make_config()
     config.python.extra_packages = ["xformers"]
@@ -415,16 +456,6 @@ def test_full_feature_layers_and_manifest_are_conditional_and_ordered(
     )
     assert plan.output_manifest.conditional == (
         OutputArtifact(
-            "config/custom-nodes.toml",
-            ArtifactKind.FILE,
-            ArtifactCondition.CUSTOM_NODES,
-        ),
-        OutputArtifact(
-            "config/files.toml",
-            ArtifactKind.FILE,
-            ArtifactCondition.FILES,
-        ),
-        OutputArtifact(
             "scripts",
             ArtifactKind.TREE,
             ArtifactCondition.HOOKS,
@@ -433,7 +464,7 @@ def test_full_feature_layers_and_manifest_are_conditional_and_ordered(
 
 
 def test_nodes_without_hooks_omit_scripts_artifact() -> None:
-    """Emit the node helper config but no scripts tree when hooks are absent."""
+    """Do not emit hook scripts when hooks are absent."""
     config = make_config()
     config.comfyui.custom_nodes = [
         RegistryCustomNodeConfig.model_validate({"type": "registry", "id": "node"})
@@ -441,15 +472,26 @@ def test_nodes_without_hooks_omit_scripts_artifact() -> None:
 
     manifest = build_render_plan(config).output_manifest
 
-    assert manifest.conditional == (
+    assert manifest.conditional == ()
+
+
+def test_runtime_hooks_manifest_is_conditional() -> None:
+    """Runtime hook sources add only the managed runtime/hooks tree."""
+    plan = with_runtime_hooks_plan(
+        build_render_plan(make_config()),
+        RuntimeHooksPlan(has_hooks=True, source_dir=Path("/tmp/hooks")),
+    )
+
+    assert plan.output_manifest.conditional == (
         OutputArtifact(
-            "config/custom-nodes.toml",
-            ArtifactKind.FILE,
-            ArtifactCondition.CUSTOM_NODES,
+            "runtime/hooks",
+            ArtifactKind.TREE,
+            ArtifactCondition.RUNTIME_HOOKS,
         ),
     )
 
 
+# Immutability guards keep built plans deterministic and validation-gated.
 def test_plan_construction_is_deterministic_and_detached_from_public_mutation() -> None:
     """Build equal plans and freeze ordered collections independently of config."""
     config = make_config()

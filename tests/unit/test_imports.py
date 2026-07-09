@@ -10,7 +10,7 @@ import comfyui_docker_helper
 
 
 def package_module_names() -> list[str]:
-    """Return every importable module currently shipped by the package."""
+    """Return every importable module exposed by the package."""
     package_paths = [str(path) for path in comfyui_docker_helper.__path__]
     discovered = sorted(
         module.name

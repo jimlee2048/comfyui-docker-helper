@@ -1,8 +1,8 @@
 # ComfyUI Build Smoke Fixtures
 
-These fixtures define reusable ComfyUI build smoke scenarios. They use real
-Docker Buildx, real comfy-cli behavior, and real ComfyUI-Manager behavior when
-executed. They do not require private tokens.
+These fixtures define reusable, opt-in ComfyUI build smoke scenarios. They use
+real Docker Buildx, real comfy-cli behavior, and real ComfyUI-Manager behavior
+when executed. They do not require private tokens.
 
 The TOML fixture files are safe to validate locally with the lightweight tests in
 `tests/smoke/`; those tests do not run Docker. The `cdh host build` commands
@@ -21,7 +21,7 @@ Notes:
 
 ## Public Node Candidates
 
-| Purpose | Candidate | Evidence |
+| Purpose | Candidate | Notes |
 | --- | --- | --- |
 | default registry node | `comfyui-custom-scripts@latest` | Registry ID `comfyui-custom-scripts`; repository `https://github.com/pythongosssss/ComfyUI-Custom-Scripts`; small public node used for default registry coverage. |
 | fixed-ref git node | `https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git@609f3afaa74b2f88ef9ce8d939626065e3247469` | Pinned public Git ref used for deterministic git install coverage. |
@@ -44,10 +44,16 @@ Concrete smoke inputs live under `tests/fixtures/comfyui-build/`.
 | S9 | aria2 files | `tests/fixtures/comfyui-build/configs/aria2-files.toml` |
 | S10 | full workflow | `tests/fixtures/comfyui-build/configs/full.toml` |
 
+The default fixture configs are build-focused. Runtime download behavior,
+including async queueing, `/var/lib/cdh/runtime/state.json`, target-local
+`.cdh-staging/`, retry/failure policy, and optional SSH activation, should be
+verified by startup smoke runs against a built image when those behaviors are
+in scope.
+
 ## Canonical Build Commands
 
 Run these commands from the repository root. Use the scenario ID when referring
-to a command in evidence or scenario notes.
+to a command in smoke run notes.
 
 ### S1 Pinned Minimal
 
@@ -111,18 +117,34 @@ cdh host build -f tests/fixtures/comfyui-build/configs/full.toml -t cdh-smoke:fu
 
 ## Scenario Matrix
 
-| ID | Scenario | Config intent | Command | Required evidence | Pass criteria |
+| ID | Scenario | Config intent | Command | Run notes | Pass criteria |
 | --- | --- | --- | --- | --- | --- |
-| S1 | pinned minimal | `comfyui.version` pinned or stable, `install_manager=false`, no nodes/files | S1 command | build log, rendered context, image ID, `docker image inspect`, container filesystem checks | Build succeeds; ComfyUI installed under `COMFYUI_PATH`; `/opt/venv` exists; `$COMFYUI_PATH/.venv` absent; final image lacks `/tmp/cdh`, rendered `config`, `scripts`, and `packages/cdh`; `WORKDIR`/`CMD` match config. |
-| S2 | latest ComfyUI | `comfyui.version="latest"`, Manager off | S2 command | comfy-cli install output, ComfyUI git/version evidence | Build succeeds or external conflict is recorded; latest behavior is identified from real install output. |
-| S3 | nightly ComfyUI | `comfyui.version="nightly"`, Manager off | S3 command | comfy-cli install output, ComfyUI git/version evidence | Build succeeds or the conflict is recorded without an undocumented workaround. |
+| S1 | pinned minimal | `comfyui.version` pinned or stable, `install_manager=false`, no nodes/files | S1 command | build log, rendered context, image ID, `docker image inspect`, container filesystem checks | Build succeeds; ComfyUI installed under `COMFYUI_PATH`; `/opt/venv` exists; `$COMFYUI_PATH/.venv` absent; final image does not include build-only context artifacts such as `/tmp/cdh`, `packages/cdh`, `scripts`, or root render artifacts; `WORKDIR` and cdh `ENTRYPOINT` match the rendered Dockerfile. |
+| S2 | latest ComfyUI | `comfyui.version="latest"`, Manager off | S2 command | comfy-cli install output, ComfyUI git/version details | Build succeeds or external conflict is recorded; latest behavior is identified from real install output. |
+| S3 | nightly ComfyUI | `comfyui.version="nightly"`, Manager off | S3 command | comfy-cli install output, ComfyUI git/version details | Build succeeds or the conflict is recorded without an undocumented workaround. |
 | S4 | Manager on, no nodes | `install_manager=true`, no custom nodes | S4 command | `cm_cli` availability, Manager source/version, manager requirements relationship | Manager is available from final venv; Manager source/version assumptions are verified from the final image. |
-| S5 | registry node | default candidate `comfyui-custom-scripts@latest`; optional heavier candidate `comfyui-impact-pack@latest` for broader coverage | S5 command | cache update log, one update invocation, `cm_cli update-cache`, install log, installed custom node path | Clean-cache registry install succeeds; version/source evidence recorded; failure is classified as product, upstream, or network behavior. |
-| S6 | git node | `https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git@609f3afaa74b2f88ef9ce8d939626065e3247469` | S6 command | git ref evidence, install order, installed path | Git URL/ref install succeeds and source/ref are recorded. |
-| S7 | hooks matrix | `.sh` and `.py` hooks in both pre-install and post-install phases | S7 command | hook side-effect files, cwd/env output, log order | All four hook phase/type combinations execute with expected cwd/env; failure behavior is covered by controlled negative or integration evidence. |
-| S8 | httpx downloader | local public/small HTTP server or small public asset, redirect, overwrite, skip | S8 command | build log, target file contents/path, request log, overwrite/skip evidence | Real httpx backend covers download, redirect, overwrite, skip, and target path. |
+| S5 | registry node | default candidate `comfyui-custom-scripts@latest`; optional heavier candidate `comfyui-impact-pack@latest` for broader coverage | S5 command | cache update log, one update invocation, `cm_cli update-cache`, install log, installed custom node path | Clean-cache registry install succeeds; version/source details are recorded; failure is classified as product, upstream, or network behavior. |
+| S6 | git node | `https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git@609f3afaa74b2f88ef9ce8d939626065e3247469` | S6 command | git ref details, install order, installed path | Git URL/ref install succeeds and source/ref are recorded. |
+| S7 | hooks matrix | `.sh` and `.py` hooks in both pre-install and post-install phases | S7 command | hook side-effect files, cwd/env output, log order | All four hook phase/type combinations execute with expected cwd/env; failure behavior is covered by controlled negative or integration checks. |
+| S8 | httpx downloader | local public/small HTTP server or small public asset, redirect, overwrite, skip | S8 command | build log, target file contents/path, request log, overwrite/skip details | Real httpx backend covers download, redirect, overwrite, skip, and target path. |
 | S9 | aria2 downloader | local public/small HTTP asset through aria2 backend | S9 command | aria2 RPC log, process cleanup check, target file, no secret in logs | Real aria2 backend succeeds; no persistent RPC config/process remains; secret is absent from captured logs/config. |
-| S10 | mixed full workflow | nodes, hooks, httpx, aria2, custom env/CMD | S10 command | full build log, context/image inspection, startup check | Combined workflow succeeds; serial order and backend override evidence captured; image starts configured ComfyUI from `WORKSPACE`. |
+| S10 | mixed full workflow | nodes, hooks, httpx, aria2, custom env, entrypoint startup | S10 command | full build log, context/image inspection, startup check | Combined workflow succeeds; serial order and backend override details are captured; image starts configured ComfyUI from `WORKSPACE` through the cdh entrypoint. |
+
+## Runtime Startup Smoke Notes
+
+Startup smoke checks are opt-in because they run containers and may require
+host port publishing, network access, persistent volumes, and an SSH client.
+When checking runtime downloads, mount a persistent volume or directory at
+`/var/lib/cdh/runtime` to preserve `state.json` across restart scenarios, and
+inspect target-local `.cdh-staging/` directories only for cdh-owned partial
+files. Async downloads should not block ComfyUI readiness or post-start hooks
+after the queue starts.
+
+When checking SSH, enable it with runtime config or environment variables and
+provide a password or public key. Login is for `root`, and Docker host port
+publishing is explicit deployment configuration such as `-p 2222:22`; cdh does
+not publish host ports. Do not record real passwords, private keys, or private
+tokens in smoke notes.
 
 ## Resource And Cleanup Guidance
 
@@ -149,9 +171,9 @@ Cleanup guidance:
 - record exact image IDs before cleanup;
 - remove only smoke images/containers created by the fixture run;
 - do not remove unrelated Docker images, volumes, or caches;
-- preserve rendered contexts and evidence logs until they are no longer needed.
+- preserve rendered contexts and smoke run logs until they are no longer needed.
 
-## Evidence Capture Rules
+## Smoke Run Notes
 
 For every executed scenario, record:
 

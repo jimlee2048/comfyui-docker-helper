@@ -1,5 +1,7 @@
 """Host command group."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -8,19 +10,21 @@ import typer
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.config import (
     ConfigurationServiceError,
-    load_validate_plan,
+    LockOptions,
+    SourceResolvers,
+    load_validate_plan_result,
 )
-from comfyui_docker_helper.errors import ApplicationError
-from comfyui_docker_helper.host.buildx import build_image_with_buildx
+from comfyui_docker_helper.host.buildx import BuildxOutput, build_image_with_buildx
 from comfyui_docker_helper.host.diagnostics import (
     render_configuration_diagnostics,
+    render_configuration_warnings,
     render_plan_preview,
 )
-from comfyui_docker_helper.rendering import (
-    ContextWriteError,
-    MaterializationError,
-    write_build_context,
+from comfyui_docker_helper.host.render_service import (
+    HostRenderServiceError,
+    prepare_render_context,
 )
+from comfyui_docker_helper.host.source_providers import create_default_source_resolvers
 
 _DEFAULT_SCRIPTS_DIR = Path("./scripts")
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
@@ -62,13 +66,14 @@ def validate(
     """Validate configuration and build its normalized plan without writing files."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     try:
-        load_validate_plan(config_files, scripts_dir=scripts_dir)
+        result = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    render_configuration_warnings(_format_config_files(config_files), result.warnings)
 
 
 @app.command("render", context_settings=HELP_CONTEXT_SETTINGS)
@@ -99,6 +104,14 @@ def render(
             metavar="DIR",
         ),
     ] = _DEFAULT_SCRIPTS_DIR,
+    hooks_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--hooks-dir",
+            help="Directory containing runtime lifecycle hook files.",
+            metavar="DIR",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -113,33 +126,64 @@ def render(
             help="Replace an existing valid cdh build context.",
         ),
     ] = False,
+    locked: Annotated[
+        bool,
+        typer.Option(
+            "--locked",
+            help="Require the existing context lock without updating it.",
+        ),
+    ] = False,
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--check",
+            help="Validate that root render artifacts are already up to date.",
+        ),
+    ] = False,
+    upgrade_lock: Annotated[
+        bool,
+        typer.Option(
+            "--upgrade-lock",
+            help="Re-resolve moving source selectors and update the context lock.",
+        ),
+    ] = False,
 ) -> None:
     """Render a Docker build context from configuration file(s)."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
+    lock_options = LockOptions(
+        locked=locked,
+        check=check,
+        upgrade_lock=upgrade_lock,
+        dry_run=dry_run,
+    )
     try:
-        plan = load_validate_plan(config_files, scripts_dir=scripts_dir)
-    except ConfigurationServiceError as error:
+        with _default_source_resolvers() as resolvers:
+            prepared = prepare_render_context(
+                config_files,
+                output_dir,
+                scripts_dir=scripts_dir,
+                hooks_dir=hooks_dir,
+                resolvers=resolvers,
+                lock_options=lock_options,
+                overwrite=overwrite,
+                working_directory=Path.cwd(),
+            )
+    except (ConfigurationServiceError, HostRenderServiceError) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
 
     if dry_run:
-        render_plan_preview(plan)
-        return
-
-    try:
-        write_build_context(
-            plan,
-            output_dir,
-            overwrite=overwrite,
-            working_directory=Path.cwd(),
-            config_file=config_files,
+        render_plan_preview(
+            prepared.plan,
+            lock_result=prepared.lock_result,
+            lock_options=lock_options,
         )
-    except (ContextWriteError, MaterializationError) as error:
-        raise ApplicationError(str(error)) from error
+        return
 
 
 @app.command("build", context_settings=HELP_CONTEXT_SETTINGS)
@@ -154,14 +198,31 @@ def build(
         ),
     ],
     image_tags: Annotated[
-        list[str],
+        list[str] | None,
         typer.Option(
             "--tag",
             "-t",
-            help="Docker image tag to load.",
+            help=(
+                "Docker image tag to build. May be repeated; replaces config "
+                "build tags when provided."
+            ),
             metavar="IMAGE:TAG",
         ),
-    ],
+    ] = None,
+    load: Annotated[
+        bool,
+        typer.Option(
+            "--load",
+            help="Load the built image into the local Docker image store.",
+        ),
+    ] = False,
+    push: Annotated[
+        bool,
+        typer.Option(
+            "--push",
+            help="Push the built image tags to their registry.",
+        ),
+    ] = False,
     scripts_dir: Annotated[
         Path,
         typer.Option(
@@ -170,6 +231,14 @@ def build(
             metavar="DIR",
         ),
     ] = _DEFAULT_SCRIPTS_DIR,
+    hooks_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--hooks-dir",
+            help="Directory containing runtime lifecycle hook files.",
+            metavar="DIR",
+        ),
+    ] = None,
     context_dir: Annotated[
         Path,
         typer.Option(
@@ -178,34 +247,65 @@ def build(
             metavar="DIR",
         ),
     ] = _DEFAULT_CONTEXT_DIR,
+    locked: Annotated[
+        bool,
+        typer.Option(
+            "--locked",
+            help="Require the existing context lock without updating it.",
+        ),
+    ] = False,
+    upgrade_lock: Annotated[
+        bool,
+        typer.Option(
+            "--upgrade-lock",
+            help="Re-resolve moving source selectors and update the context lock.",
+        ),
+    ] = False,
 ) -> None:
     """Render a build context and build it with Docker Buildx."""
     config_files = _require_at_least_one(config_files, "--file/-f")
-    image_tag = _require_exactly_one(image_tags, "--tag/-t")
+    cli_tags = image_tags or []
+    cli_output = _resolve_cli_build_output(load=load, push=push)
 
     try:
-        plan = load_validate_plan(config_files, scripts_dir=scripts_dir)
+        validated = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    effective_tags = _resolve_effective_image_tags(
+        cli_tags=cli_tags,
+        config_tags=validated.config.build.tags,
+    )
+    effective_output = cli_output or validated.config.build.output
 
     try:
-        write_build_context(
-            plan,
-            context_dir,
-            overwrite=True,
-            working_directory=Path.cwd(),
-            config_file=config_files,
+        with _default_source_resolvers() as resolvers:
+            prepared = prepare_render_context(
+                config_files,
+                context_dir,
+                scripts_dir=scripts_dir,
+                hooks_dir=hooks_dir,
+                resolvers=resolvers,
+                lock_options=LockOptions(locked=locked, upgrade_lock=upgrade_lock),
+                overwrite=True,
+                working_directory=Path.cwd(),
+                configuration_result=validated,
+            )
+    except (ConfigurationServiceError, HostRenderServiceError) as error:
+        render_configuration_diagnostics(
+            _format_config_files(config_files),
+            error.diagnostics,
         )
-    except (ContextWriteError, MaterializationError) as error:
-        raise ApplicationError(str(error)) from error
+        raise typer.Exit(code=1) from error
+    render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
 
     typer.echo(f"Build context: {context_dir}")
     build_image_with_buildx(
-        image_tag=image_tag,
+        image_tags=effective_tags,
+        output=effective_output,
         context_dir=context_dir,
         cwd=Path.cwd(),
         log=typer.echo,
@@ -228,6 +328,59 @@ def _require_exactly_one[T](values: list[T], param_hint: str) -> T:
             param_hint=param_hint,
         )
     return values[0]
+
+
+def _resolve_cli_build_output(*, load: bool, push: bool) -> BuildxOutput | None:
+    if load and push:
+        raise typer.BadParameter(
+            "must not be used together",
+            param_hint="--load/--push",
+        )
+    if push:
+        return "push"
+    if load:
+        return "load"
+    return None
+
+
+def _resolve_effective_image_tags(
+    *,
+    cli_tags: list[str],
+    config_tags: list[str],
+) -> tuple[str, ...]:
+    _validate_cli_image_tags(cli_tags)
+    tags = tuple(cli_tags or config_tags)
+    if not tags:
+        raise typer.BadParameter(
+            "must provide at least one image tag with --tag/-t or [build].tags",
+            param_hint="--tag/-t",
+        )
+    return tags
+
+
+def _validate_cli_image_tags(tags: list[str]) -> None:
+    for tag in tags:
+        if (
+            not tag
+            or any(character.isspace() for character in tag)
+            or any(ord(character) < 32 or ord(character) == 127 for character in tag)
+        ):
+            raise typer.BadParameter(
+                "must be non-empty and must not contain whitespace "
+                "or control characters",
+                param_hint="--tag/-t",
+            )
+
+
+@contextmanager
+def _default_source_resolvers() -> Iterator[SourceResolvers]:
+    """Yield default source resolvers and close owned resources when present."""
+    created = create_default_source_resolvers()
+    if hasattr(created, "__enter__"):
+        with created as resolvers:
+            yield resolvers
+        return
+    yield created
 
 
 def _format_config_files(config_files: list[Path]) -> str | Path:

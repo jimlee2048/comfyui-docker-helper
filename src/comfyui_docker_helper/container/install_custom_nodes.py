@@ -10,7 +10,15 @@ from typing import Protocol
 
 from comfyui_docker_helper.config.plan import CustomNodePlan
 from comfyui_docker_helper.config.validation import resolve_git_target_dir
-from comfyui_docker_helper.container.custom_nodes import load_custom_nodes_plan
+from comfyui_docker_helper.container.custom_nodes import (
+    CustomNodesConfigError,
+    build_custom_nodes_plan,
+)
+from comfyui_docker_helper.container.root_config import (
+    ContainerRootConfigError,
+    custom_nodes_document,
+    load_container_root_artifacts,
+)
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
@@ -29,14 +37,24 @@ class Logger(Protocol):
 
 def install_custom_nodes(
     config_path: str | Path,
+    lock_path: str | Path,
     *,
     scripts_dir: str | Path | None = None,
     runtime: ContainerRuntime = _DEFAULT_RUNTIME,
     log: Logger = print,
 ) -> None:
-    """Install custom nodes from the generated helper config."""
+    """Install custom nodes from the validated root artifacts."""
 
-    plan = load_custom_nodes_plan(config_path, scripts_dir=scripts_dir)
+    try:
+        artifacts = load_container_root_artifacts(config_path, lock_path)
+    except ContainerRootConfigError as error:
+        raise CustomNodesConfigError(str(error)) from error
+
+    plan = build_custom_nodes_plan(
+        custom_nodes_document(artifacts.config, artifacts.lockfile),
+        scripts_dir=scripts_dir,
+    )
+    python_index_url = artifacts.config.python.index_url
     env = runtime.env()
 
     if plan.update_cache:
@@ -59,7 +77,12 @@ def install_custom_nodes(
             env=env,
             log=log,
         )
-        _install_node(node, runtime=runtime, env=env)
+        _install_node(
+            node,
+            python_index_url=python_index_url,
+            runtime=runtime,
+            env=env,
+        )
         _run_node_hooks(
             "post",
             node,
@@ -73,11 +96,17 @@ def install_custom_nodes(
 def _install_node(
     node: CustomNodePlan,
     *,
+    python_index_url: str,
     runtime: ContainerRuntime,
     env: dict[str, str],
 ) -> None:
     if node.type == "git":
-        _install_git_node(node, runtime=runtime, env=env)
+        _install_git_node(
+            node,
+            python_index_url=python_index_url,
+            runtime=runtime,
+            env=env,
+        )
         return
 
     run_argv(
@@ -101,6 +130,7 @@ def _install_node(
 def _install_git_node(
     node: CustomNodePlan,
     *,
+    python_index_url: str,
     runtime: ContainerRuntime,
     env: dict[str, str],
 ) -> None:
@@ -154,6 +184,8 @@ def _install_git_node(
                 "install",
                 "--python",
                 str(runtime.python),
+                "--index-url",
+                python_index_url,
                 "-r",
                 str(requirements),
             ],

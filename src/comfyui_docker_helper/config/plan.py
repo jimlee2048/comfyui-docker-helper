@@ -7,6 +7,10 @@ from typing import Literal
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.models import Config, GitCustomNodeConfig
+from comfyui_docker_helper.config.url_validation import (
+    DownloaderName,
+    require_downloader_name,
+)
 from comfyui_docker_helper.config.validation import (
     normalize_comfy_cli_version,
     normalize_comfyui_version,
@@ -21,8 +25,8 @@ _DEFAULT_OS_PACKAGES = (
     "git",
     "build-essential",
     "aria2",
+    "openssh-server",
 )
-_PYTORCH_INDEX_BASE_URL = "https://download.pytorch.org/whl"
 
 
 class Layer(StrEnum):
@@ -55,6 +59,7 @@ class ArtifactCondition(StrEnum):
     CUSTOM_NODES = "custom-nodes"
     FILES = "files"
     HOOKS = "hooks"
+    RUNTIME_HOOKS = "runtime-hooks"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +86,7 @@ class PythonPlan:
 
     version: str
     uv_version: str
+    index_url: str
     extra_packages: tuple[str, ...]
 
 
@@ -102,6 +108,9 @@ class ComfyUIPlan:
     cli_requirement: str
     version: str
     install_manager: bool
+    listen: str
+    port: int
+    extra_arguments: tuple[str, ...]
     install_arguments: tuple[str, ...]
     launch_arguments: tuple[str, ...]
     launch_command: tuple[str, ...]
@@ -168,7 +177,7 @@ class HttpxPlan:
 class DownloaderPlan:
     """Normalized downloader selection and both backend settings."""
 
-    default: Literal["aria2", "httpx"]
+    default: DownloaderName
     aria2: Aria2Plan
     httpx: HttpxPlan
 
@@ -182,7 +191,7 @@ class FilePlan:
     filename: str
     target: str
     overwrite: bool
-    downloader: Literal["aria2", "httpx"]
+    downloader: DownloaderName
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +200,14 @@ class FilesPlan:
 
     downloader: DownloaderPlan
     items: tuple[FilePlan, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeHooksPlan:
+    """Host runtime hook source selected for baked image defaults."""
+
+    has_hooks: bool
+    source_dir: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +253,7 @@ class RenderPlan:
     comfyui: ComfyUIPlan
     custom_nodes: CustomNodesPlan
     files: FilesPlan
+    runtime_hooks: RuntimeHooksPlan
     build_arguments: tuple[BuildArgument, ...]
     layers: tuple[Layer, ...]
     output_manifest: OutputManifest
@@ -281,12 +299,13 @@ def build_render_plan(
     python = PythonPlan(
         version=config.python.version,
         uv_version=config.python.uv_version,
+        index_url=config.python.index_url,
         extra_packages=tuple(config.python.extra_packages),
     )
     pytorch = PyTorchPlan(
         version=config.pytorch.version,
         wheel_tag=wheel_tag,
-        index_base_url=_PYTORCH_INDEX_BASE_URL,
+        index_base_url=config.pytorch.index_base_url,
         requirements=(
             f"torch=={config.pytorch.version}",
             *config.pytorch.extra_packages,
@@ -300,6 +319,7 @@ def build_render_plan(
     )
     custom_nodes = _build_custom_nodes_plan(config, scripts_dir)
     files = _build_files_plan(config, comfyui_path)
+    runtime_hooks = RuntimeHooksPlan(has_hooks=False, source_dir=None)
     build_arguments = _build_arguments(
         config,
         cuda_image_tag,
@@ -321,9 +341,32 @@ def build_render_plan(
         comfyui=comfyui,
         custom_nodes=custom_nodes,
         files=files,
+        runtime_hooks=runtime_hooks,
         build_arguments=build_arguments,
         layers=_build_layers(config),
-        output_manifest=_build_output_manifest(custom_nodes, files),
+        output_manifest=_build_output_manifest(custom_nodes, runtime_hooks),
+    )
+
+
+def with_runtime_hooks_plan(
+    plan: RenderPlan,
+    runtime_hooks: RuntimeHooksPlan,
+) -> RenderPlan:
+    """Return a render plan with host runtime hook materialization attached."""
+    return RenderPlan(
+        base_image=plan.base_image,
+        paths=plan.paths,
+        os_packages=plan.os_packages,
+        environment=plan.environment,
+        python=plan.python,
+        pytorch=plan.pytorch,
+        comfyui=plan.comfyui,
+        custom_nodes=plan.custom_nodes,
+        files=plan.files,
+        runtime_hooks=runtime_hooks,
+        build_arguments=plan.build_arguments,
+        layers=plan.layers,
+        output_manifest=_build_output_manifest(plan.custom_nodes, runtime_hooks),
     )
 
 
@@ -343,7 +386,15 @@ def _build_comfyui_plan(
     if not config.comfyui.install_manager:
         install_arguments = (*install_arguments, "--skip-manager")
 
-    launch_arguments = tuple(config.comfyui.launch_args)
+    extra_arguments = tuple(config.comfyui.extra_args)
+    launch_arguments = (
+        "--listen",
+        config.comfyui.listen,
+        "--port",
+        str(config.comfyui.port),
+        "--disable-auto-launch",
+        *extra_arguments,
+    )
     return ComfyUIPlan(
         cli_version=cli_version,
         cli_requirement=(
@@ -351,6 +402,9 @@ def _build_comfyui_plan(
         ),
         version=comfyui_version,
         install_manager=config.comfyui.install_manager,
+        listen=config.comfyui.listen,
+        port=config.comfyui.port,
+        extra_arguments=extra_arguments,
         install_arguments=install_arguments,
         launch_arguments=launch_arguments,
         launch_command=(
@@ -428,24 +482,28 @@ def _build_custom_nodes_plan(
 
 def _build_files_plan(config: Config, comfyui_path: str) -> FilesPlan:
     downloader = DownloaderPlan(
-        default=config.downloader.default,
+        default=require_downloader_name(config.cdh.default_downloader),
         aria2=Aria2Plan(
-            rpc_port=config.downloader.aria2.rpc_port,
-            split=config.downloader.aria2.split,
+            rpc_port=config.cdh.downloader.aria2.rpc_port,
+            split=config.cdh.downloader.aria2.split,
             max_connection_per_server=(
-                config.downloader.aria2.max_connection_per_server
+                config.cdh.downloader.aria2.max_connection_per_server
             ),
-            min_split_size=config.downloader.aria2.min_split_size,
-            resume_download=config.downloader.aria2.resume_download,
+            min_split_size=config.cdh.downloader.aria2.min_split_size,
+            resume_download=config.cdh.downloader.aria2.resume_download,
         ),
         httpx=HttpxPlan(
-            timeout=config.downloader.httpx.timeout,
-            retries=config.downloader.httpx.retries,
+            timeout=config.cdh.downloader.httpx.timeout,
+            retries=config.cdh.downloader.httpx.retries,
         ),
     )
     items: list[FilePlan] = []
     for file in config.files:
-        effective_downloader = file.downloader or downloader.default
+        effective_downloader = (
+            require_downloader_name(file.downloader)
+            if file.downloader is not None
+            else downloader.default
+        )
         target = str(PurePosixPath(comfyui_path) / file.dir / file.filename)
         items.append(
             FilePlan(
@@ -502,37 +560,30 @@ def _build_layers(config: Config) -> tuple[Layer, ...]:
 
 def _build_output_manifest(
     custom_nodes: CustomNodesPlan,
-    files: FilesPlan,
+    runtime_hooks: RuntimeHooksPlan,
 ) -> OutputManifest:
     always = (
         OutputArtifact("Dockerfile", ArtifactKind.FILE),
         OutputArtifact(".cdh-rendered", ArtifactKind.FILE),
+        OutputArtifact("runtime/config.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/pyproject.toml", ArtifactKind.FILE),
         OutputArtifact("packages/cdh/src", ArtifactKind.TREE),
     )
     conditional: list[OutputArtifact] = []
-    if custom_nodes.items:
-        conditional.append(
-            OutputArtifact(
-                "config/custom-nodes.toml",
-                ArtifactKind.FILE,
-                ArtifactCondition.CUSTOM_NODES,
-            )
-        )
-    if files.items:
-        conditional.append(
-            OutputArtifact(
-                "config/files.toml",
-                ArtifactKind.FILE,
-                ArtifactCondition.FILES,
-            )
-        )
     if custom_nodes.has_hooks:
         conditional.append(
             OutputArtifact(
                 "scripts",
                 ArtifactKind.TREE,
                 ArtifactCondition.HOOKS,
+            )
+        )
+    if runtime_hooks.has_hooks:
+        conditional.append(
+            OutputArtifact(
+                "runtime/hooks",
+                ArtifactKind.TREE,
+                ArtifactCondition.RUNTIME_HOOKS,
             )
         )
     return OutputManifest(always=always, conditional=tuple(conditional))

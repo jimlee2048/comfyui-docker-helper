@@ -2,12 +2,17 @@
 
 import tomllib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticPath
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticPath,
+    DiagnosticSeverity,
+)
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import Config
 from comfyui_docker_helper.config.plan import (
@@ -15,9 +20,25 @@ from comfyui_docker_helper.config.plan import (
     RenderPlanValidationError,
     build_render_plan,
 )
+from comfyui_docker_helper.config.runtime_projection import (
+    RuntimeConfigProjection,
+    project_runtime_config,
+)
+from comfyui_docker_helper.config.ssh_keys import SshPublicKeyValidationError
 
 _CUSTOM_NODE_BRANCHES = frozenset({"git", "registry"})
 type ConfigPath = str | Path
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigurationResult:
+    """A validated render plan and non-fatal host-context diagnostics."""
+
+    config: Config
+    plan: RenderPlan
+    raw_document: dict[str, Any]
+    runtime_config: RuntimeConfigProjection
+    warnings: tuple[Diagnostic, ...] = ()
 
 
 class ConfigurationServiceError(ValueError):
@@ -36,16 +57,37 @@ def load_validate_plan(
     scripts_dir: str | Path = "./scripts",
 ) -> RenderPlan:
     """Read TOML file(s) and return the complete validated render plan."""
+    return load_validate_plan_result(config_path, scripts_dir=scripts_dir).plan
+
+
+def load_validate_plan_result(
+    config_path: ConfigPath | Sequence[ConfigPath],
+    *,
+    scripts_dir: str | Path = "./scripts",
+) -> ConfigurationResult:
+    """Read TOML file(s), returning the render plan and non-fatal warnings."""
     paths = _coerce_config_paths(config_path)
     include_source = len(paths) > 1
     document = merge_toml_documents(
         _read_toml(path, include_source=include_source) for path in paths
     )
     config = _validate_structure(document)
+    warnings = _validate_host_context(document)
     try:
-        return build_render_plan(config, scripts_dir=scripts_dir)
+        plan = build_render_plan(config, scripts_dir=scripts_dir)
     except RenderPlanValidationError as error:
         raise ConfigurationServiceError(error.diagnostics) from error
+    try:
+        runtime_config = project_runtime_config(config, document)
+    except SshPublicKeyValidationError as error:
+        raise ConfigurationServiceError(error.diagnostics) from error
+    return ConfigurationResult(
+        config=config,
+        plan=plan,
+        raw_document=document,
+        runtime_config=runtime_config,
+        warnings=warnings,
+    )
 
 
 def _coerce_config_paths(
@@ -136,6 +178,76 @@ def _validate_structure(document: Mapping[str, Any]) -> Config:
             for item in error.errors(include_url=False, include_context=False)
         )
         raise ConfigurationServiceError(diagnostics) from error
+
+
+def _validate_host_context(document: Mapping[str, Any]) -> tuple[Diagnostic, ...]:
+    """Collect host command warnings for cross-context fields."""
+    warnings: list[Diagnostic] = []
+    cdh = document.get("cdh")
+    files = document.get("files")
+    has_build_time_files = isinstance(files, list) and bool(files)
+    if (
+        isinstance(cdh, Mapping)
+        and cdh.get("download_failure_policy") == "continue"
+        and has_build_time_files
+    ):
+        warnings.append(
+            Diagnostic(
+                path=("cdh", "download_failure_policy"),
+                code="host_build.download_failure_policy_continue",
+                message=(
+                    'host build download_failure_policy = "continue" can build an '
+                    "image without every configured build-time file present"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
+    if (
+        isinstance(cdh, Mapping)
+        and "default_download_mode" in cdh
+        and has_build_time_files
+    ):
+        warnings.append(
+            Diagnostic(
+                path=("cdh", "default_download_mode"),
+                code="host_build.download_scheduling_ignored",
+                message=(
+                    "host build downloads run synchronously and ignore runtime "
+                    "download scheduling mode"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
+    if isinstance(files, list):
+        for index, item in enumerate(files):
+            if not isinstance(item, Mapping) or "download_mode" not in item:
+                continue
+            warnings.append(
+                Diagnostic(
+                    path=("files", index, "download_mode"),
+                    code="host_build.download_scheduling_ignored",
+                    message=(
+                        "host build downloads run synchronously and ignore runtime "
+                        "download scheduling mode"
+                    ),
+                    severity=DiagnosticSeverity.WARNING,
+                )
+            )
+    system = document.get("system")
+    ssh = system.get("ssh") if isinstance(system, Mapping) else None
+    if isinstance(ssh, Mapping) and ssh.get("password"):
+        warnings.append(
+            Diagnostic(
+                path=("system", "ssh", "password"),
+                code="host_build.ssh_password_baked",
+                message=(
+                    "non-empty SSH password can be written into rendered contexts "
+                    "and image artifacts"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
+    return tuple(warnings)
 
 
 def _with_source(message: str, path: Path, include_source: bool) -> str:

@@ -14,10 +14,11 @@ CDH_SMOKE_ENV = "comfyui-build-full"
 [pytorch]
 version = "2.10"
 
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
+default_download_mode = "sync"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 1
 max_connection_per_server = 1
@@ -27,7 +28,9 @@ resume_download = true
 [comfyui]
 version = "latest"
 install_manager = true
-launch_args = ["--listen", "0.0.0.0", "--disable-auto-launch"]
+listen = "0.0.0.0"
+port = 8188
+extra_args = []
 
 [[comfyui.custom_nodes]]
 type = "registry"
@@ -47,6 +50,7 @@ dir = "models/cdh-smoke"
 filename = "full-httpx-readme.md"
 overwrite = true
 downloader = "httpx"
+download_mode = "sync"
 
 [[files]]
 url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
@@ -54,3 +58,4 @@ dir = "models/cdh-smoke"
 filename = "full-aria2-readme.md"
 overwrite = true
 downloader = "aria2"
+download_mode = "sync"

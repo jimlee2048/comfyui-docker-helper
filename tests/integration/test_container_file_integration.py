@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import threading
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.artifact_helpers import write_root_artifacts
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
@@ -33,6 +35,19 @@ version = "2.10"
 [comfyui]
 version = "latest"
 """
+
+
+def write_file_root_artifacts(tmp_path: Path, body: str) -> tuple[Path, Path]:
+    """Write file-download root config and lock artifacts from a compact body."""
+    return write_root_artifacts(
+        tmp_path,
+        """
+[comfyui]
+version = "latest"
+
+"""
+        + body.lstrip(),
+    )
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
@@ -172,23 +187,24 @@ def test_rendered_files_context_downloads_from_local_http(
     monkeypatch: pytest.MonkeyPatch,
     local_http_server: tuple[str, RecordingHttpServer],
 ) -> None:
-    """Render public config, then consume generated files.toml with HTTPX."""
+    """Cover render-to-container artifacts and HTTPX download integration."""
     base_url, server = local_http_server
     server.routes = {
-        "/first.bin": b"first",
+        "/first.bin": b"new-first",
         "/second.bin": b"second",
     }
     config = tmp_path / "config.toml"
     config.write_text(
         MINIMAL_CONFIG
         + f"""
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
 [[files]]
 url = "{base_url}/first.bin"
 dir = "models/checkpoints"
 filename = "first.bin"
+overwrite = true
 
 [[files]]
 url = "{base_url}/second.bin"
@@ -206,91 +222,38 @@ filename = "second.bin"
 
     assert render.exit_code == 0
     assert has_valid_context_marker(output)
-    files_config = output / "config" / "files.toml"
+    files_config = output / "config.toml"
+    lock_config = output / "config.lock.toml"
     assert files_config.is_file()
+    assert lock_config.is_file()
+    assert not (output / "config" / "files.toml").exists()
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
     assert "cdh container download-files" in dockerfile
 
     comfyui_path = tmp_path / "runtime" / "ComfyUI"
+    target = comfyui_path / "models" / "checkpoints" / "first.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"old-first")
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
 
-    results = download_files(files_config, log=lambda _: None)
+    results = download_files(files_config, lock_config, log=lambda _: None)
 
     assert [result.item.filename for result in results] == [
         "first.bin",
         "second.bin",
     ]
-    assert (comfyui_path / "models" / "checkpoints" / "first.bin").read_bytes() == (
-        b"first"
-    )
+    assert target.read_bytes() == b"new-first"
     assert (comfyui_path / "models" / "loras" / "second.bin").read_bytes() == (
         b"second"
     )
     assert server.requests == ["/first.bin", "/second.bin"]
 
 
-def test_download_files_overwrites_and_preserves_request_order(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    local_http_server: tuple[str, RecordingHttpServer],
-) -> None:
-    """Overwrite existing targets and request files in config order."""
-    base_url, server = local_http_server
-    server.routes = {
-        "/a.bin": b"new-a",
-        "/b.bin": b"new-b",
-    }
-    comfyui_path = tmp_path / "ComfyUI"
-    target = comfyui_path / "models" / "a.bin"
-    target.parent.mkdir(parents=True)
-    target.write_bytes(b"old-a")
-    monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
-        f"""
-[downloader]
-default = "httpx"
-
-[downloader.aria2]
-rpc_port = 6811
-split = 8
-max_connection_per_server = 4
-min_split_size = "2M"
-resume_download = true
-
-[downloader.httpx]
-timeout = 30
-retries = 1
-
-[[files]]
-url = "{base_url}/a.bin"
-dir = "models"
-filename = "a.bin"
-overwrite = true
-downloader = "httpx"
-
-[[files]]
-url = "{base_url}/b.bin"
-dir = "models"
-filename = "b.bin"
-overwrite = false
-downloader = "httpx"
-""",
-        encoding="utf-8",
-    )
-
-    download_files(config, log=lambda _: None)
-
-    assert target.read_bytes() == b"new-a"
-    assert (comfyui_path / "models" / "b.bin").read_bytes() == b"new-b"
-    assert server.requests == ["/a.bin", "/b.bin"]
-
-
 def test_download_files_aria2_overwrite_removes_target_and_control_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify aria2 overwrite cleanup through the download-files entry point."""
+    """Cover aria2 overwrite cleanup through the download-files entry point."""
     comfyui_path = tmp_path / "ComfyUI"
     target = comfyui_path / "models" / "model.bin"
     target.parent.mkdir(parents=True)
@@ -298,20 +261,20 @@ def test_download_files_aria2_overwrite_removes_target_and_control_file(
     control_file = Path(f"{target}.aria2")
     control_file.write_text("partial\n", encoding="utf-8")
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         """
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 8
 max_connection_per_server = 4
 min_split_size = "2M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -322,12 +285,12 @@ filename = "model.bin"
 overwrite = true
 downloader = "aria2"
 """,
-        encoding="utf-8",
     )
     observed: list[str] = []
 
     download_files(
         config,
+        lock,
         aria2_downloader_factory=lambda *, log: Aria2Downloader(
             process_factory=lambda _: FakeAria2Process(),
             client_factory=lambda **_: FakeAria2Client(),
@@ -348,23 +311,23 @@ def test_download_files_rejects_tampered_paths_without_writing_outside(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep generated-helper containment even if files.toml is tampered."""
+    """Keep container file writes contained even if artifacts are tampered."""
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         """
-[downloader]
-default = "httpx"
+[cdh]
+default_downloader = "httpx"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 8
 max_connection_per_server = 4
 min_split_size = "2M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -375,11 +338,10 @@ filename = "escape.bin"
 overwrite = false
 downloader = "httpx"
 """,
-        encoding="utf-8",
     )
 
     with pytest.raises(Exception, match="dir must not contain"):
-        download_files(config, log=lambda _: None)
+        download_files(config, lock, log=lambda _: None)
 
     assert not (tmp_path / "escape" / "escape.bin").exists()
 
@@ -388,23 +350,23 @@ def test_download_files_cleans_up_aria2_context_on_interruption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run aria2 cleanup even when processing is interrupted."""
+    """Container integration keeps aria2 cleanup on interruption."""
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         """
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = 6811
 split = 8
 max_connection_per_server = 4
 min_split_size = "2M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -415,13 +377,13 @@ filename = "a.bin"
 overwrite = false
 downloader = "aria2"
 """,
-        encoding="utf-8",
     )
     events: list[str] = []
 
     with pytest.raises(KeyboardInterrupt):
         download_files(
             config,
+            lock,
             aria2_downloader_factory=lambda *, log: InterruptingManagedBackend(events),
             log=lambda _: None,
         )
@@ -436,7 +398,10 @@ def test_real_aria2_smoke_when_available(
     monkeypatch: pytest.MonkeyPatch,
     local_http_server: tuple[str, RecordingHttpServer],
 ) -> None:
-    """Smoke real aria2c when the binary is available on the host."""
+    """Opt-in smoke coverage for the real aria2 binary end to end."""
+    if os.environ.get("CDH_RUN_ARIA2_SMOKE") != "1":
+        pytest.skip("set CDH_RUN_ARIA2_SMOKE=1 to run the real aria2 smoke")
+
     if shutil.which("aria2c") is None:
         pytest.skip("real aria2 smoke skipped because aria2c is not installed")
 
@@ -445,20 +410,20 @@ def test_real_aria2_smoke_when_available(
     server.routes = {"/aria2.bin": b"aria2"}
     comfyui_path = tmp_path / "ComfyUI"
     monkeypatch.setenv("COMFYUI_PATH", str(comfyui_path))
-    config = tmp_path / "files.toml"
-    config.write_text(
+    config, lock = write_file_root_artifacts(
+        tmp_path,
         f"""
-[downloader]
-default = "aria2"
+[cdh]
+default_downloader = "aria2"
 
-[downloader.aria2]
+[cdh.downloader.aria2]
 rpc_port = {rpc_port}
 split = 1
 max_connection_per_server = 1
 min_split_size = "1M"
 resume_download = true
 
-[downloader.httpx]
+[cdh.downloader.httpx]
 timeout = 30
 retries = 1
 
@@ -469,10 +434,9 @@ filename = "aria2.bin"
 overwrite = false
 downloader = "aria2"
 """,
-        encoding="utf-8",
     )
 
-    download_files(config, log=lambda _: None)
+    download_files(config, lock, log=lambda _: None)
 
     assert (comfyui_path / "models" / "aria2.bin").read_bytes() == b"aria2"
     assert server.requests == ["/aria2.bin"]

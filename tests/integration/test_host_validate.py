@@ -1,5 +1,6 @@
 """CLI tests for ``cdh host validate`` and Rich diagnostics."""
 
+import tomllib
 from io import StringIO
 from pathlib import Path
 
@@ -8,7 +9,12 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config import Config, build_render_plan
+from comfyui_docker_helper.config import (
+    Config,
+    ConfigurationResult,
+    build_render_plan,
+    project_runtime_config,
+)
 from comfyui_docker_helper.host.diagnostics import render_plan_preview
 from comfyui_docker_helper.rendering import has_valid_context_marker
 
@@ -34,7 +40,7 @@ def _write_config(root: Path, document: str = MINIMAL_CONFIG) -> Path:
 
 
 def test_validate_help_exposes_current_options(cli_runner: CliRunner) -> None:
-    """Expose the validate options that are part of the v0.1 CLI contract."""
+    """Expose the current validate command options."""
     result = cli_runner.invoke(app, ["host", "validate", "--help"])
 
     assert result.exit_code == 0
@@ -42,11 +48,10 @@ def test_validate_help_exposes_current_options(cli_runner: CliRunner) -> None:
     assert "-f" in result.stdout
     assert "--file" in result.stdout
     assert "--scripts-dir" in result.stdout
-    assert "--format" not in result.stdout
 
 
 def test_render_help_exposes_current_options(cli_runner: CliRunner) -> None:
-    """Expose render options while keeping removed aliases out of help."""
+    """Expose render options and keep unsafe overwrite shortcuts unavailable."""
     result = cli_runner.invoke(app, ["host", "render", "--help"])
 
     assert result.exit_code == 0
@@ -56,10 +61,10 @@ def test_render_help_exposes_current_options(cli_runner: CliRunner) -> None:
     assert "-o" in result.stdout
     assert "--output" in result.stdout
     assert "--scripts-dir" in result.stdout
+    assert "--hooks-dir" in result.stdout
     assert "--dry-run" in result.stdout
     assert "--overwrite" in result.stdout
     assert "--force" not in result.stdout
-    assert "--format" not in result.stdout
 
 
 def test_validate_requires_at_least_one_file_option(cli_runner: CliRunner) -> None:
@@ -77,8 +82,6 @@ def test_validate_requires_at_least_one_file_option(cli_runner: CliRunner) -> No
     "file_args",
     [
         ["-f", "first.toml", "-f", "second.toml"],
-        ["--file", "first.toml", "-f", "second.toml"],
-        ["-f", "first.toml", "--file", "second.toml"],
         ["--file", "first.toml", "--file", "second.toml"],
     ],
 )
@@ -90,12 +93,30 @@ def test_validate_accepts_repeated_file_options_in_order(
     """Preserve repeated -f/--file order before config loading."""
     calls: list[tuple[list[Path], Path]] = []
 
-    def fake_load_validate_plan(config_files: list[Path], *, scripts_dir: Path) -> None:
+    def fake_load_validate_plan_result(
+        config_files: list[Path], *, scripts_dir: Path
+    ) -> ConfigurationResult:
         calls.append((config_files, scripts_dir))
+        config = Config.model_validate(
+            {
+                "compute_platform": {
+                    "type": "cuda",
+                    "cuda": {"version": "12.9.2"},
+                },
+                "pytorch": {"version": "2.10"},
+                "comfyui": {"version": "latest"},
+            }
+        )
+        return ConfigurationResult(
+            config=config,
+            plan=build_render_plan(config),
+            raw_document={},
+            runtime_config=project_runtime_config(config, {}),
+        )
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.load_validate_plan",
-        fake_load_validate_plan,
+        "comfyui_docker_helper.host.cli.load_validate_plan_result",
+        fake_load_validate_plan_result,
     )
 
     result = cli_runner.invoke(app, ["host", "validate", *file_args])
@@ -105,16 +126,9 @@ def test_validate_accepts_repeated_file_options_in_order(
     assert calls == [([Path("first.toml"), Path("second.toml")], Path("scripts"))]
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["-f", "config.toml", "-o", "one", "-o", "two"],
-    ],
-)
 def test_render_rejects_repeated_singleton_options_before_loading(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
-    args: list[str],
 ) -> None:
     """Reject repeated singleton options before any filesystem reads."""
     called = False
@@ -124,11 +138,13 @@ def test_render_rejects_repeated_singleton_options_before_loading(
         called = True
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.load_validate_plan",
+        "comfyui_docker_helper.host.cli.load_validate_plan_result",
         fail_if_called,
     )
 
-    result = cli_runner.invoke(app, ["host", "render", *args])
+    result = cli_runner.invoke(
+        app, ["host", "render", "-f", "config.toml", "-o", "one", "-o", "two"]
+    )
 
     assert result.exit_code == 2
     assert "must be provided exactly once" in result.output
@@ -150,6 +166,66 @@ def test_valid_input_is_silent_and_writes_nothing(
     assert result.stderr == ""
     assert result.output == ""
     assert {item.name: item.read_bytes() for item in tmp_path.iterdir()} == before
+
+
+def test_validate_renders_explicit_continue_build_file_warning(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    """Render host-context warnings without failing validation."""
+    path = _write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[cdh]
+download_failure_policy = "continue"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    result = cli_runner.invoke(app, ["host", "validate", "-f", str(path)])
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "Configuration has warnings:" in result.stderr
+    assert "[cdh.download_failure_policy]" in result.stderr
+    assert "host_build.download_failure_policy_continue" in result.stderr
+
+
+def test_render_with_runtime_download_mode_writes_context(
+    cli_runner: CliRunner, tmp_path: Path
+) -> None:
+    """Render runtime file download-mode defaults into the build context."""
+    path = _write_config(
+        tmp_path,
+        MINIMAL_CONFIG
+        + """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+download_mode = "async"
+""",
+    )
+    output = tmp_path / "context"
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "host_build.download_scheduling_ignored" in result.stderr
+    assert has_valid_context_marker(output)
+    rendered_runtime = tomllib.loads(
+        (output / "runtime" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert rendered_runtime["files"][0]["download_mode"] == "async"
 
 
 def test_invalid_input_renders_every_diagnostic_to_stderr(
@@ -233,60 +309,59 @@ url = "https://example.com/node.git"
     assert "custom_nodes.0.registry" not in result.stderr
 
 
-def test_malformed_and_missing_files_use_same_rich_error_shape(
-    cli_runner: CliRunner, tmp_path: Path
+@pytest.mark.parametrize(
+    ("file_builder", "expected_code", "expected_text"),
+    [
+        (
+            lambda root: _write_config(root, "[compute_platform\n"),
+            "toml.invalid_document",
+            "[config]",
+        ),
+        (
+            lambda root: root / "missing.toml",
+            "config.file_not_found",
+            "[config]",
+        ),
+        (
+            lambda root: (
+                root / "config.toml",
+                (root / "config.toml").write_bytes(
+                    b'[compute_platform]\ntype = "cuda"\n\xff'
+                ),
+            )[0],
+            "toml.invalid_encoding",
+            "configuration file must be valid UTF-8",
+        ),
+        (
+            lambda root: (root / "base.toml", root / "missing-override.toml"),
+            "config.file_not_found",
+            "missing-override",
+        ),
+    ],
+)
+def test_cli_read_errors_render_rich_stderr(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    file_builder,
+    expected_code: str,
+    expected_text: str,
 ) -> None:
-    """Render TOML parse and file-read failures through the same error path."""
-    malformed = _write_config(tmp_path, "[compute_platform\n")
+    """Render read, parse, and decode failures through the same CLI shape."""
+    path_or_paths = file_builder(tmp_path)
+    if isinstance(path_or_paths, tuple):
+        base, failing = path_or_paths
+        base.write_text(MINIMAL_CONFIG, encoding="utf-8")
+        args = ["host", "validate", "-f", str(base), "-f", str(failing)]
+    else:
+        args = ["host", "validate", "-f", str(path_or_paths)]
 
-    malformed_result = cli_runner.invoke(
-        app, ["host", "validate", "-f", str(malformed)]
-    )
-    missing_result = cli_runner.invoke(
-        app, ["host", "validate", "-f", str(tmp_path / "missing.toml")]
-    )
-
-    assert malformed_result.exit_code == 1
-    assert "[config]" in malformed_result.stderr
-    assert "toml.invalid_document" in malformed_result.stderr
-    assert missing_result.exit_code == 1
-    assert "[config]" in missing_result.stderr
-    assert "config.file_not_found" in missing_result.stderr
-
-
-def test_multi_file_read_errors_show_the_failing_file_path(
-    cli_runner: CliRunner, tmp_path: Path
-) -> None:
-    """Identify the failing source file when layered config loading fails."""
-    base = _write_config(tmp_path)
-    missing = tmp_path / "missing-override.toml"
-
-    result = cli_runner.invoke(
-        app,
-        ["host", "validate", "-f", str(base), "-f", str(missing)],
-    )
-
-    assert result.exit_code == 1
-    assert "Configuration is invalid:" in result.stderr
-    assert missing.stem in result.stderr
-    assert "config.file_not_found" in result.stderr
-
-
-def test_invalid_utf8_uses_rich_stderr_and_nonzero_exit(
-    cli_runner: CliRunner, tmp_path: Path
-) -> None:
-    """Convert invalid UTF-8 into a safe user-facing config diagnostic."""
-    path = tmp_path / "config.toml"
-    path.write_bytes(b'[compute_platform]\ntype = "cuda"\n\xff')
-
-    result = cli_runner.invoke(app, ["host", "validate", "-f", str(path)])
+    result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 1
     assert result.stdout == ""
     assert "Configuration is invalid:" in result.stderr
-    assert "[config]" in result.stderr
-    assert "configuration file must be valid UTF-8" in result.stderr
-    assert "toml.invalid_encoding" in result.stderr
+    assert expected_code in result.stderr
+    assert expected_text in result.stderr
     assert "UnicodeDecodeError" not in result.stderr
 
 
@@ -354,6 +429,58 @@ def test_render_dry_run_prints_preview_and_writes_nothing(
     assert not (tmp_path / "missing").exists()
 
 
+@pytest.mark.parametrize(
+    ("lock_flag", "mode", "resolution"),
+    [
+        ("--locked", "Mode: locked + dry-run", "Resolution: no update; no resolution"),
+        (
+            "--upgrade-lock",
+            "Mode: upgrade + dry-run",
+            "Resolution: re-resolve moving selectors",
+        ),
+    ],
+)
+def test_render_dry_run_with_lock_flags_reports_behavior_and_writes_nothing(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    lock_flag: str,
+    mode: str,
+    resolution: str,
+) -> None:
+    """Dry-run lock flags report effective lock behavior without writing files."""
+    path = _write_config(tmp_path)
+    output = tmp_path / "context"
+    rendered = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output)],
+    )
+    assert rendered.exit_code == 0
+    before = {
+        item.relative_to(output).as_posix(): item.read_bytes()
+        for item in output.rglob("*")
+        if item.is_file()
+    }
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output), "--dry-run", lock_flag],
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert "Lock:" in result.stdout
+    assert mode in result.stdout
+    assert resolution in result.stdout
+    assert "Write: no (dry-run)" in result.stdout
+    assert "ComfyUI: 0.26.0 @" in result.stdout
+    assert "comfy-cli: 1.5.0" in result.stdout
+    assert {
+        item.relative_to(output).as_posix(): item.read_bytes()
+        for item in output.rglob("*")
+        if item.is_file()
+    } == before
+
+
 def test_render_dry_run_merges_repeated_file_options(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -390,6 +517,36 @@ workspace = "/srv"
     assert not output.exists()
 
 
+@pytest.mark.parametrize(
+    ("extra_flag", "message"),
+    [
+        ("--dry-run", "--check cannot be combined with --dry-run"),
+        ("--upgrade-lock", "--check cannot be combined with --upgrade-lock"),
+    ],
+)
+def test_render_check_rejects_incompatible_flags_at_cli_level(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    extra_flag: str,
+    message: str,
+) -> None:
+    """Render CLI surfaces shared lock option compatibility diagnostics."""
+    path = _write_config(tmp_path)
+    output = tmp_path / "context"
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "render", "-f", str(path), "-o", str(output), "--check", extra_flag],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Configuration is invalid:" in result.stderr
+    assert "lock.options_incompatible" in result.stderr
+    assert message in result.stderr
+    assert not output.exists()
+
+
 def test_render_plan_preview_has_stable_full_shape() -> None:
     """Lock the minimal dry-run preview order and labels."""
     plan = build_render_plan(Config.model_validate(toml_minimal_config()))
@@ -415,11 +572,15 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             "  Virtualenv: /opt/venv",
             "",
             "OS packages:",
-            "  bash, ca-certificates, curl, git, build-essential, aria2",
+            (
+                "  bash, ca-certificates, curl, git, build-essential, aria2, "
+                "openssh-server"
+            ),
             "",
             "Python:",
             "  Version: 3.12",
             "  uv image tag: latest",
+            "  Index URL: https://pypi.org/simple",
             "  Extra packages: none",
             "",
             "PyTorch:",
@@ -438,7 +599,7 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             ),
             (
                 "  Launch command: python, /workspace/ComfyUI/main.py, "
-                "--listen, 0.0.0.0, --disable-auto-launch"
+                "--listen, 0.0.0.0, --port, 8188, --disable-auto-launch"
             ),
             "",
             "Environment:",
@@ -475,8 +636,11 @@ def test_render_plan_preview_has_stable_full_shape() -> None:
             "  - final",
             "",
             "Output manifest:",
+            "  - config.toml [file]",
+            "  - config.lock.toml [file]",
             "  - Dockerfile [file]",
             "  - .cdh-rendered [file]",
+            "  - runtime/config.toml [file]",
             "  - packages/cdh/pyproject.toml [file]",
             "  - packages/cdh/src [tree]",
             "",
@@ -509,7 +673,7 @@ def test_render_cli_writes_conditional_configs_and_scripts(
     cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Write helper configs and scripts only when render-plan features need them."""
+    """Write root artifacts and scripts only when render-plan features need them."""
     path = _write_config(
         tmp_path,
         MINIMAL_CONFIG
@@ -547,8 +711,10 @@ filename = "model.safetensors"
 
     assert result.exit_code == 0
     assert has_valid_context_marker(output)
-    assert (output / "config" / "custom-nodes.toml").is_file()
-    assert (output / "config" / "files.toml").is_file()
+    assert (output / "config.toml").is_file()
+    assert (output / "config.lock.toml").is_file()
+    assert not (output / "config" / "custom-nodes.toml").exists()
+    assert not (output / "config" / "files.toml").exists()
     assert (output / "scripts" / "hook.sh").read_text() == "#!/bin/sh\n"
     assert (output / "scripts" / "unused.txt").read_text() == (
         "copy whole scripts tree\n"
@@ -605,11 +771,11 @@ def test_render_rejects_unmarked_output_even_with_overwrite(
     assert (output / "caller-owned.txt").read_text() == "preserve\n"
 
 
-def test_render_rejects_removed_force_alias(
+def test_render_rejects_force_shortcut_for_overwrite_safety(
     cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    """Keep the removed --force alias unavailable on render."""
+    """Reject force-style overwrite shortcuts that bypass marker safety."""
     path = _write_config(tmp_path)
     output = tmp_path / "context"
 

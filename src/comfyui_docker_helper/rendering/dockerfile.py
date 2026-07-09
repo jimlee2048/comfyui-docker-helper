@@ -4,9 +4,11 @@ import json
 import re
 import shlex
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
+from comfyui_docker_helper.config.lock import Lockfile
 from comfyui_docker_helper.config.plan import RenderPlan
 
 _BUILD_ARGUMENT_NAMES = (
@@ -24,6 +26,16 @@ _GLOBAL_BUILD_ARGUMENT_NAMES = frozenset(_BUILD_ARGUMENT_NAMES[:2])
 _DOCKERFILE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _DOCKERFILE_BARE_WORD_PATTERN = re.compile(r"[A-Za-z0-9_./:@%+,-]+\Z")
 _FORBIDDEN_SOURCE_CHARACTERS = frozenset({"\0", "\r", "\n"})
+
+
+@dataclass(frozen=True, slots=True)
+class LockedComfyUIInstall:
+    """Dockerfile-ready ComfyUI and comfy-cli selections from config.lock.toml."""
+
+    cli_requirement: str
+    install_arguments: tuple[str, ...]
+    verify_stable_commit: bool
+    commit: str
 
 
 def serialize_dockerfile_identifier(value: str) -> str:
@@ -57,13 +69,14 @@ def serialize_json_array(values: Sequence[str]) -> str:
     return json.dumps(list(values), ensure_ascii=False)
 
 
-def render_dockerfile(plan: RenderPlan) -> str:
-    """Render a complete Dockerfile using only an immutable normalized plan."""
+def render_dockerfile(plan: RenderPlan, *, lockfile: Lockfile | None = None) -> str:
+    """Render a complete Dockerfile using immutable plan and lock selections."""
     argument_names = tuple(argument.name for argument in plan.build_arguments)
     if argument_names != _BUILD_ARGUMENT_NAMES:
         raise ValueError(
             "render plan build arguments do not match the Dockerfile contract"
         )
+    locked_comfyui = _locked_comfyui_install(lockfile)
 
     build_arguments = {
         argument.name: argument.value for argument in plan.build_arguments
@@ -79,6 +92,7 @@ def render_dockerfile(plan: RenderPlan) -> str:
         plan=plan,
         build_arguments=build_arguments,
         stage_arguments=stage_arguments,
+        locked_comfyui=locked_comfyui,
         pytorch_extra_packages=plan.pytorch.requirements[1:],
     )
     return rendered if rendered.endswith("\n") else f"{rendered}\n"
@@ -110,3 +124,32 @@ def _ensure_source_line_safe(value: str) -> None:
             "Dockerfile source values must not contain NUL, carriage return, "
             "or line feed"
         )
+
+
+def _locked_comfyui_install(lockfile: Lockfile | None) -> LockedComfyUIInstall:
+    if lockfile is None:
+        raise ValueError("render_dockerfile requires config.lock.toml selections")
+
+    comfyui = lockfile.comfyui
+    _require_lock_value(comfyui.cli_version, ("comfyui", "cli_version"))
+    _require_lock_value(comfyui.commit, ("comfyui", "commit"))
+    if comfyui.version is None:
+        install_arguments = ("--version", "nightly", "--commit", comfyui.commit)
+        verify_stable_commit = False
+    else:
+        _require_lock_value(comfyui.version, ("comfyui", "version"))
+        install_arguments = ("--version", comfyui.version)
+        verify_stable_commit = True
+
+    return LockedComfyUIInstall(
+        cli_requirement=f"comfy-cli=={comfyui.cli_version}",
+        install_arguments=install_arguments,
+        verify_stable_commit=verify_stable_commit,
+        commit=comfyui.commit,
+    )
+
+
+def _require_lock_value(value: str, path: tuple[str, str]) -> None:
+    if not value:
+        raise ValueError(f"config.lock.toml missing required [{path[0]}].{path[1]}")
+    _ensure_source_line_safe(value)

@@ -6,8 +6,8 @@ import os
 import secrets
 import stat
 import subprocess
+import threading
 import time
-import tomllib
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,13 +15,24 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Literal, Protocol
-from urllib.parse import urlparse
 
 import aria2p
 import httpx
 from pydantic import Field, ValidationError
 
 from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.url_validation import (
+    DownloaderName,
+    is_http_url,
+    require_downloader_name,
+    validate_file_name,
+    validate_relative_file_directory,
+)
+from comfyui_docker_helper.container.root_config import (
+    ContainerRootConfigError,
+    files_document,
+    load_container_root_artifacts,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 
@@ -31,6 +42,14 @@ class DownloadFilesConfigError(ApplicationError):
 
 class DownloadFilesError(ApplicationError):
     """A user-facing file-download processing failure."""
+
+
+class TransferDownloadFilesError(DownloadFilesError):
+    """A source or transport download failure eligible for retry/continue policy."""
+
+
+class DownloadCancelled(DownloadFilesError):
+    """A cooperative download cancellation request was observed."""
 
 
 class DownloadStatus(StrEnum):
@@ -63,7 +82,7 @@ class HttpxDownloadSettings:
 class DownloaderSettings:
     """Normalized downloader settings for both backends."""
 
-    default: Literal["aria2", "httpx"]
+    default: DownloaderName
     aria2: Aria2DownloadSettings
     httpx: HttpxDownloadSettings
 
@@ -77,7 +96,7 @@ class FileDownloadItem:
     filename: str
     target: Path
     overwrite: bool
-    downloader: Literal["aria2", "httpx"]
+    downloader: DownloaderName
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +105,8 @@ class FileDownloadPlan:
 
     downloader: DownloaderSettings
     items: tuple[FileDownloadItem, ...]
+    download_max_attempts: int = 3
+    download_failure_policy: Literal["continue", "fail"] = "fail"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,8 +127,14 @@ class DownloadBackend(Protocol):
     ) -> None: ...
 
 
+class DownloadBackendPreparer(Protocol):
+    """Optional backend hook for startup work before downloads begin."""
+
+    def prepare(self, settings: DownloaderSettings) -> None: ...
+
+
 class HttpxDownloader:
-    """HTTPX streaming downloader with v0.1 retry and tmp-file semantics."""
+    """HTTPX streaming downloader with retries and temporary-file replacement."""
 
     chunk_size = 1024 * 1024
     progress_interval_seconds = 5.0
@@ -124,25 +151,34 @@ class HttpxDownloader:
         self._sleep = sleep
         self._monotonic = monotonic
         self._log = log
+        self._cancel_requested = threading.Event()
+        self._client_lock = threading.Lock()
+        self._active_client: httpx.Client | None = None
 
     def download(
         self,
         item: FileDownloadItem,
         settings: DownloaderSettings,
     ) -> None:
+        self._raise_if_cancelled()
         tmp_path = _tmp_path(item.target)
         _remove_stale_tmp(tmp_path)
 
         attempts = settings.httpx.retries + 1
         for attempt in range(attempts):
+            self._raise_if_cancelled()
             try:
                 self._download_once(item, settings, tmp_path)
+                self._raise_if_cancelled()
                 tmp_path.replace(item.target)
                 return
+            except DownloadCancelled:
+                _cleanup_tmp(tmp_path)
+                raise
             except _RetryableDownloadError as error:
                 _cleanup_tmp(tmp_path)
                 if attempt + 1 >= attempts:
-                    raise DownloadFilesError(str(error)) from error
+                    raise TransferDownloadFilesError(str(error)) from error
                 delay = _backoff_delay(attempt)
                 self._log(
                     f"Retrying HTTP download in {delay}s after failure: {item.url}"
@@ -165,26 +201,36 @@ class HttpxDownloader:
     ) -> None:
         timeout = httpx.Timeout(settings.httpx.timeout)
         try:
-            with (
-                httpx.Client(
-                    follow_redirects=True,
-                    timeout=timeout,
-                    transport=self._transport,
-                ) as client,
-                client.stream("GET", item.url) as response,
-            ):
-                _raise_for_http_status(response)
-                self._write_response(response, tmp_path)
+            with httpx.Client(
+                follow_redirects=True,
+                timeout=timeout,
+                transport=self._transport,
+            ) as client:
+                self._set_active_client(client)
+                with client.stream("GET", item.url) as response:
+                    self._raise_if_cancelled()
+                    _raise_for_http_status(response)
+                    self._write_response(response, tmp_path)
+        except DownloadCancelled:
+            raise
         except (httpx.TimeoutException, httpx.TransportError) as error:
+            self._raise_if_cancelled()
             raise _RetryableDownloadError(
                 f"HTTP download failed for {item.url}: {error}"
             ) from error
+        finally:
+            self._set_active_client(None)
+
+    def _set_active_client(self, client: httpx.Client | None) -> None:
+        with self._client_lock:
+            self._active_client = client
 
     def _write_response(self, response: httpx.Response, tmp_path: Path) -> None:
         downloaded = 0
         last_log = self._monotonic()
         with tmp_path.open("wb") as output:
             for chunk in response.iter_bytes(chunk_size=self.chunk_size):
+                self._raise_if_cancelled()
                 if not chunk:
                     continue
                 output.write(chunk)
@@ -193,6 +239,18 @@ class HttpxDownloader:
                 if now - last_log >= self.progress_interval_seconds:
                     self._log(f"Downloaded {downloaded} bytes to {tmp_path}")
                     last_log = now
+
+    def cancel(self) -> None:
+        self._cancel_requested.set()
+        with self._client_lock:
+            client = self._active_client
+        if client is not None:
+            with suppress(Exception):
+                client.close()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_requested.is_set():
+            raise DownloadCancelled("download cancelled")
 
 
 class Aria2Downloader:
@@ -224,6 +282,7 @@ class Aria2Downloader:
         self._process: Aria2Process | None = None
         self._client: Aria2Client | None = None
         self._api: Aria2Api | None = None
+        self._cancel_requested = threading.Event()
 
     def __enter__(self) -> Aria2Downloader:
         return self
@@ -237,11 +296,16 @@ class Aria2Downloader:
         del exc_type, exc_value, traceback
         self.close()
 
+    def prepare(self, settings: DownloaderSettings) -> None:
+        self._raise_if_cancelled()
+        self._ensure_started(settings)
+
     def download(
         self,
         item: FileDownloadItem,
         settings: DownloaderSettings,
     ) -> None:
+        self._raise_if_cancelled()
         api = self._ensure_started(settings)
         _remove_aria2_control_file(item)
         options = _aria2_options(item, settings.aria2)
@@ -291,6 +355,10 @@ class Aria2Downloader:
         except Exception:
             pass
 
+    def cancel(self) -> None:
+        self._cancel_requested.set()
+        self.close()
+
     def _ensure_started(self, settings: DownloaderSettings) -> Aria2Api:
         if self._api is not None:
             return self._api
@@ -328,6 +396,7 @@ class Aria2Downloader:
         last_error: Exception | None = None
 
         while True:
+            self._raise_if_cancelled()
             self._fail_if_daemon_exited("before RPC became ready")
             try:
                 client.get_version()
@@ -348,6 +417,7 @@ class Aria2Downloader:
         item: FileDownloadItem,
     ) -> None:
         while True:
+            self._raise_if_cancelled()
             self._fail_if_daemon_exited(f"while downloading {item.url}")
             try:
                 download.update()
@@ -361,10 +431,12 @@ class Aria2Downloader:
                 self._log(f"aria2 download complete: {item.target}")
                 return
             if download.is_removed or status == "removed":
-                raise DownloadFilesError(f"aria2 download was removed: {item.url}")
+                raise TransferDownloadFilesError(
+                    f"aria2 download was removed: {item.url}"
+                )
             if status == "error":
                 message = download.error_message or "unknown aria2 error"
-                raise DownloadFilesError(
+                raise TransferDownloadFilesError(
                     f"aria2 download failed for {item.url}: {message}"
                 )
 
@@ -379,6 +451,10 @@ class Aria2Downloader:
             raise DownloadFilesError(
                 f"aria2 daemon exited with code {returncode} {detail}"
             )
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_requested.is_set():
+            raise DownloadCancelled("download cancelled")
 
 
 class _Aria2Config(ConfigModel):
@@ -395,9 +471,14 @@ class _HttpxConfig(ConfigModel):
 
 
 class _DownloaderConfig(ConfigModel):
-    default: Literal["aria2", "httpx"]
+    default: DownloaderName
     aria2: _Aria2Config
     httpx: _HttpxConfig
+
+
+class _CdhConfig(ConfigModel):
+    download_max_attempts: int = Field(default=3, ge=1)
+    download_failure_policy: Literal["continue", "fail"] = "fail"
 
 
 class _FileConfig(ConfigModel):
@@ -405,38 +486,28 @@ class _FileConfig(ConfigModel):
     dir: str
     filename: str
     overwrite: bool
-    downloader: Literal["aria2", "httpx"]
+    downloader: DownloaderName
 
 
 class _FilesConfig(ConfigModel):
+    cdh: _CdhConfig = Field(default_factory=_CdhConfig)
     downloader: _DownloaderConfig
     files: list[_FileConfig]
 
 
 def load_file_download_plan(
     config_path: str | Path,
+    lock_path: str | Path,
     *,
     comfyui_path: str | Path | None = None,
 ) -> FileDownloadPlan:
-    """Load generated files.toml and build a deterministic download plan."""
+    """Load root artifacts and build a deterministic file-download plan."""
 
-    path = Path(config_path)
     try:
-        with path.open("rb") as config_file:
-            document = tomllib.load(config_file)
-    except FileNotFoundError as error:
-        raise DownloadFilesConfigError(
-            f"file-download config does not exist: {path}"
-        ) from error
-    except tomllib.TOMLDecodeError as error:
-        raise DownloadFilesConfigError(
-            f"file-download config is not valid TOML: {path}: {error}"
-        ) from error
-    except OSError as error:
-        raise DownloadFilesConfigError(
-            f"file-download config cannot be read: {path}: {error}"
-        ) from error
-
+        artifacts = load_container_root_artifacts(config_path, lock_path)
+    except ContainerRootConfigError as error:
+        raise DownloadFilesConfigError(str(error)) from error
+    document = files_document(artifacts.config)
     return build_file_download_plan(document, comfyui_path=comfyui_path)
 
 
@@ -445,7 +516,7 @@ def build_file_download_plan(
     *,
     comfyui_path: str | Path | None = None,
 ) -> FileDownloadPlan:
-    """Validate generated file config data and derive container targets."""
+    """Validate file-download helper data and derive container targets."""
 
     try:
         config = _FilesConfig.model_validate(document)
@@ -455,7 +526,7 @@ def build_file_download_plan(
         ) from error
 
     downloader = DownloaderSettings(
-        default=config.downloader.default,
+        default=require_downloader_name(config.downloader.default),
         aria2=Aria2DownloadSettings(
             rpc_port=config.downloader.aria2.rpc_port,
             split=config.downloader.aria2.split,
@@ -475,7 +546,12 @@ def build_file_download_plan(
         _build_file_item(file, comfyui_path=resolved_comfyui_path)
         for file in config.files
     )
-    return FileDownloadPlan(downloader=downloader, items=items)
+    return FileDownloadPlan(
+        downloader=downloader,
+        items=items,
+        download_max_attempts=config.cdh.download_max_attempts,
+        download_failure_policy=config.cdh.download_failure_policy,
+    )
 
 
 def process_file_downloads(
@@ -501,7 +577,23 @@ def process_file_downloads(
             ) from error
 
         log(f"Downloading file with {item.downloader}: {item.url}")
-        backend.download(item, plan.downloader)
+        try:
+            _download_with_policy(
+                item,
+                backend,
+                plan,
+                log=log,
+            )
+        except TransferDownloadFilesError as error:
+            if plan.download_failure_policy == "fail":
+                raise
+            _cleanup_failed_target(item, log=log)
+            log(
+                "WARNING: download failed after "
+                f"{plan.download_max_attempts} attempt(s), continuing: "
+                f"{item.target}: {error}"
+            )
+            continue
         log(f"Downloaded file: {item.target}")
         results.append(DownloadResult(item=item, status=DownloadStatus.DOWNLOADED))
 
@@ -510,15 +602,20 @@ def process_file_downloads(
 
 def download_files(
     config_path: str | Path,
+    lock_path: str | Path,
     *,
     comfyui_path: str | Path | None = None,
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
 ) -> tuple[DownloadResult, ...]:
-    """Download files from the generated helper config with managed backends."""
+    """Download files from validated root artifacts with managed backends."""
 
-    plan = load_file_download_plan(config_path, comfyui_path=comfyui_path)
+    plan = load_file_download_plan(
+        config_path,
+        lock_path,
+        comfyui_path=comfyui_path,
+    )
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 
@@ -657,8 +754,60 @@ def _build_file_item(
         filename=file.filename,
         target=comfyui_path.joinpath(*directory.parts, filename.name),
         overwrite=file.overwrite,
-        downloader=file.downloader,
+        downloader=require_downloader_name(file.downloader),
     )
+
+
+def _download_with_policy(
+    item: FileDownloadItem,
+    backend: DownloadBackend,
+    plan: FileDownloadPlan,
+    *,
+    log: Logger,
+) -> None:
+    settings = _single_host_attempt_settings(plan.downloader)
+    attempts = plan.download_max_attempts
+    for attempt in range(1, attempts + 1):
+        try:
+            backend.download(item, settings)
+            return
+        except TransferDownloadFilesError as error:
+            _cleanup_failed_target(item, log=log)
+            if attempt >= attempts:
+                raise
+            log(
+                f"Retrying file download after attempt {attempt}/{attempts} failed: "
+                f"{item.target}: {error}"
+            )
+        except DownloadFilesError:
+            _cleanup_failed_target(item, log=log)
+            raise
+
+
+def _single_host_attempt_settings(settings: DownloaderSettings) -> DownloaderSettings:
+    """Keep host build policy attempts from multiplying backend HTTPX retries."""
+    return DownloaderSettings(
+        default=settings.default,
+        aria2=settings.aria2,
+        httpx=HttpxDownloadSettings(
+            timeout=settings.httpx.timeout,
+            retries=0,
+        ),
+    )
+
+
+def _cleanup_failed_target(item: FileDownloadItem, *, log: Logger) -> None:
+    _cleanup_failed_path(item.target, log=log)
+    if item.downloader == "aria2":
+        _cleanup_failed_path(_aria2_control_path(item.target), log=log)
+
+
+def _cleanup_failed_path(path: Path, *, log: Logger) -> None:
+    try:
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    except OSError as error:
+        log(f"WARNING: failed download artifact could not be removed: {path}: {error}")
 
 
 def _preflight_file(item: FileDownloadItem, *, log: Logger) -> bool:
@@ -755,29 +904,31 @@ def _resolve_comfyui_path(comfyui_path: str | Path | None) -> Path:
 
 
 def _validate_url(value: str) -> None:
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise DownloadFilesConfigError(f"url must be HTTP(S): {value}")
+    if not is_http_url(value):
+        raise DownloadFilesConfigError(
+            f"url must be an HTTP(S) URL with a host: {value}"
+        )
 
 
 def _validate_relative_path(value: str, *, field: str) -> PurePosixPath:
-    path = PurePosixPath(value)
-    if path.is_absolute():
+    result = validate_relative_file_directory(value)
+    if result.path is not None:
+        return result.path
+    if result.code == "absolute_directory":
         raise DownloadFilesConfigError(f"{field} must be relative: {value}")
-    if ".." in path.parts:
+    if result.code == "parent_directory_segment":
         raise DownloadFilesConfigError(f"{field} must not contain '..': {value}")
-    if not path.parts or path == PurePosixPath("."):
-        raise DownloadFilesConfigError(f"{field} must not be empty")
-    return path
+    message = result.message or "must be a valid relative path"
+    raise DownloadFilesConfigError(f"{field} {message}: {value}")
 
 
 def _validate_filename(value: str) -> PurePosixPath:
-    if "\\" in value:
-        raise DownloadFilesConfigError(f"filename must not contain '\\': {value}")
-    path = PurePosixPath(value)
-    if path.is_absolute() or len(path.parts) != 1 or path.name in {"", ".", ".."}:
+    result = validate_file_name(value)
+    if result.filename is None:
+        if "\\" in value:
+            raise DownloadFilesConfigError(f"filename must not contain '\\': {value}")
         raise DownloadFilesConfigError(f"filename must be one path component: {value}")
-    return path
+    return PurePosixPath(result.filename)
 
 
 def _raise_for_http_status(response: httpx.Response) -> None:
@@ -787,7 +938,7 @@ def _raise_for_http_status(response: httpx.Response) -> None:
             f"HTTP download got retryable status {status}: {response.url}"
         )
     if 400 <= status <= 599:
-        raise DownloadFilesError(
+        raise TransferDownloadFilesError(
             f"HTTP download got non-retryable status {status}: {response.url}"
         )
 

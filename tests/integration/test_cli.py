@@ -1,6 +1,7 @@
 """Smoke tests for the CLI skeleton and shared error boundary."""
 
 from importlib.metadata import entry_points, version
+from pathlib import Path
 
 import pytest
 import typer
@@ -43,6 +44,7 @@ def test_root_command_exposes_current_groups() -> None:
     }
     assert set(command.commands["container"].commands) == {
         "download-files",
+        "entrypoint",
         "install-custom-nodes",
     }
 
@@ -61,6 +63,7 @@ def test_root_command_exposes_current_groups() -> None:
             "Usage: cdh container install-custom-nodes",
         ),
         (["container", "download-files"], "Usage: cdh container download-files"),
+        (["container", "entrypoint"], "Usage: cdh container entrypoint"),
     ],
 )
 @pytest.mark.parametrize("help_flag", ["--help", "-h"])
@@ -77,11 +80,60 @@ def test_help_succeeds(
     assert usage in result.output
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["container", "install-custom-nodes"],
+        ["container", "download-files"],
+    ],
+)
+def test_container_helper_help_exposes_lock_option(
+    cli_runner: CliRunner,
+    args: list[str],
+) -> None:
+    """Keep root lock artifacts visible on container helper commands."""
+    result = cli_runner.invoke(app, [*args, "--help"])
+
+    assert result.exit_code == 0
+    assert "--config" in result.output
+    assert "--lock" in result.output
+    assert "Root rendered config.lock.toml." in result.output
+
+
+def test_container_entrypoint_invokes_service_and_propagates_exit_code(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the CLI command wired to the runtime entrypoint service."""
+    seen: dict[str, Path] = {}
+
+    def fake_run_entrypoint(*, runtime) -> int:
+        seen["workspace"] = runtime.workspace
+        seen["comfyui_path"] = runtime.comfyui_path
+        return 17
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.container.cli.run_entrypoint",
+        fake_run_entrypoint,
+    )
+    monkeypatch.setenv("WORKSPACE", "/srv/work")
+    monkeypatch.setenv("COMFYUI_PATH", "/opt/comfy")
+
+    result = cli_runner.invoke(app, ["container", "entrypoint"])
+
+    assert result.exit_code == 17
+    assert seen == {
+        "workspace": Path("/srv/work"),
+        "comfyui_path": Path("/opt/comfy"),
+    }
+
+
 @pytest.mark.parametrize("args", [["--install-completion"], ["--show-completion"]])
 def test_completion_options_remain_disabled(
     cli_runner: CliRunner,
     args: list[str],
 ) -> None:
+    """Avoid advertising shell completion commands before supporting them."""
     result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 2

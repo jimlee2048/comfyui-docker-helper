@@ -26,13 +26,23 @@ class ComputePlatformConfig(ConfigModel):
     cuda: CudaConfig
 
 
+class SystemSshConfig(ConfigModel):
+    """SSH runtime defaults accepted from host build configuration."""
+
+    enable: bool = False
+    port: int = Field(default=22, ge=1, le=65535)
+    password: str = ""
+    pub_keys: list[str] = Field(default_factory=list)
+
+
 class SystemConfig(ConfigModel):
-    """Container workspace, OS packages, and environment settings."""
+    """Container workspace, OS packages, environment, and SSH runtime defaults."""
 
     workspace: str = "/workspace"
     comfyui_path: str | None = None
     extra_packages: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    ssh: SystemSshConfig = Field(default_factory=SystemSshConfig)
 
 
 class PythonConfig(ConfigModel):
@@ -40,6 +50,7 @@ class PythonConfig(ConfigModel):
 
     version: str = "3.12"
     uv_version: str = "latest"
+    index_url: str = "https://pypi.org/simple"
     extra_packages: list[str] = Field(default_factory=list)
 
 
@@ -47,6 +58,7 @@ class PyTorchConfig(ConfigModel):
     """PyTorch installation settings."""
 
     version: str
+    index_base_url: str = "https://download.pytorch.org/whl"
     extra_packages: list[str] = Field(default_factory=list)
 
 
@@ -67,12 +79,28 @@ class HttpxConfig(ConfigModel):
     retries: int = 3
 
 
-class DownloaderConfig(ConfigModel):
-    """Global downloader selection and backend settings."""
+class CdhDownloaderConfig(ConfigModel):
+    """cdh-owned downloader backend settings."""
 
-    default: str = "aria2"
     aria2: Aria2Config = Field(default_factory=Aria2Config)
     httpx: HttpxConfig = Field(default_factory=HttpxConfig)
+
+
+class CdhConfig(ConfigModel):
+    """cdh-owned helper settings."""
+
+    default_downloader: str = "aria2"
+    default_download_mode: Literal["sync", "async"] = "sync"
+    download_max_attempts: int = Field(default=3, ge=1)
+    download_failure_policy: Literal["continue", "fail"] = "fail"
+    downloader: CdhDownloaderConfig = Field(default_factory=CdhDownloaderConfig)
+
+
+class BuildConfig(ConfigModel):
+    """Docker build ergonomics."""
+
+    tags: list[str] = Field(default_factory=list)
+    output: Literal["load", "push"] = "load"
 
 
 class _CustomNodeConfig(ConfigModel):
@@ -111,13 +139,9 @@ class ComfyUIConfig(ConfigModel):
     version: str
     cli_version: str = "latest"
     install_manager: bool = True
-    launch_args: list[str] = Field(
-        default_factory=lambda: [
-            "--listen",
-            "0.0.0.0",
-            "--disable-auto-launch",
-        ]
-    )
+    listen: str = "0.0.0.0"
+    port: int = Field(default=8188, ge=1, le=65535)
+    extra_args: list[str] = Field(default_factory=list)
     custom_nodes: list[CustomNodeConfig] = Field(default_factory=list)
 
 
@@ -129,15 +153,17 @@ class FileConfig(ConfigModel):
     filename: str
     overwrite: bool = False
     downloader: str | None = None
+    download_mode: Literal["sync", "async"] | None = None
 
 
 class Config(ConfigModel):
     """Root public configuration loaded from one TOML document."""
 
+    cdh: CdhConfig = Field(default_factory=CdhConfig)
     compute_platform: ComputePlatformConfig
     system: SystemConfig = Field(default_factory=SystemConfig)
     python: PythonConfig = Field(default_factory=PythonConfig)
     pytorch: PyTorchConfig
-    downloader: DownloaderConfig = Field(default_factory=DownloaderConfig)
+    build: BuildConfig = Field(default_factory=BuildConfig)
     comfyui: ComfyUIConfig
     files: list[FileConfig] = Field(default_factory=list)

@@ -13,7 +13,6 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from inspect import Parameter, signature
 from pathlib import Path
 from types import FrameType
 from typing import Protocol
@@ -119,6 +118,8 @@ class ChildProcess(Protocol):
 
     def terminate(self) -> None: ...
 
+    def kill(self) -> None: ...
+
 
 class RuntimeDownloadRunner(Protocol):
     """Runtime file downloader callable used before ComfyUI spawn."""
@@ -219,7 +220,7 @@ class _RuntimeDownloadQueues:
 
 
 class RuntimeAsyncQueueStartupError(RuntimeError):
-    """Async queue infrastructure failed before accepting planned work."""
+    """Async queue infrastructure failed before accepting downloads."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -865,6 +866,13 @@ def _stop_sshd_runtime_service(
             file=sys.stderr,
         )
         _kill_sshd_runtime_service(sshd_handle)
+        _bounded_process_wait(
+            sshd_handle,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
         return False
 
     deadline = monotonic() + timeout
@@ -875,6 +883,13 @@ def _stop_sshd_runtime_service(
                 file=sys.stderr,
             )
             _kill_sshd_runtime_service(sshd_handle)
+            _bounded_process_wait(
+                sshd_handle,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
             return False
         now = monotonic()
         if now >= deadline:
@@ -884,8 +899,16 @@ def _stop_sshd_runtime_service(
                 file=sys.stderr,
             )
             _kill_sshd_runtime_service(sshd_handle)
+            _bounded_process_wait(
+                sshd_handle,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
             return False
         sleep(min(poll_interval, deadline - now))
+    _reap_process_if_exited(sshd_handle)
     print("SSH runtime service stopped")
     return True
 
@@ -941,6 +964,13 @@ def _stop_runtime_async_download_queue(
                 "terminating backends"
             )
             handle.terminate_backends()
+            _join_runtime_async_download_queue_after_backend_termination(
+                handle,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
             return False
         now = monotonic()
         if now >= deadline:
@@ -949,12 +979,41 @@ def _stop_runtime_async_download_queue(
                 f"{timeout:.1f}s; terminating backends"
             )
             handle.terminate_backends()
+            _join_runtime_async_download_queue_after_backend_termination(
+                handle,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
             return False
         handle.join(timeout=min(poll_interval, deadline - now))
         if handle.is_alive():
             sleep(0)
     print("Async runtime download queue stopped")
     return True
+
+
+def _join_runtime_async_download_queue_after_backend_termination(
+    handle: RuntimeAsyncDownloadQueueHandle,
+    *,
+    timeout: float,
+    poll_interval: float,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], object],
+) -> None:
+    deadline = monotonic() + min(timeout, poll_interval)
+    while handle.is_alive():
+        now = monotonic()
+        if now >= deadline:
+            print(
+                "WARNING: Async runtime download queue remained alive after "
+                "backend termination"
+            )
+            return
+        handle.join(timeout=min(poll_interval, deadline - now))
+        if handle.is_alive():
+            sleep(0)
 
 
 def _stop_runtime_async_download_queue_for_startup(
@@ -982,32 +1041,12 @@ def _call_runtime_downloader(
     state_observer: RuntimeDownloadStateObserver,
     extra_protected_staging_targets: tuple[Path, ...] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
-    kwargs: dict[str, object] = {"config": config, "log": log}
-    if _runtime_downloader_accepts_keyword(runtime_downloader, "state_observer"):
-        kwargs["state_observer"] = state_observer
-    if _runtime_downloader_accepts_keyword(
-        runtime_downloader, "extra_protected_staging_targets"
-    ):
-        kwargs["extra_protected_staging_targets"] = extra_protected_staging_targets
-    return runtime_downloader(plan, **kwargs)
-
-
-def _runtime_downloader_accepts_state_observer(
-    runtime_downloader: RuntimeDownloadRunner,
-) -> bool:
-    return _runtime_downloader_accepts_keyword(runtime_downloader, "state_observer")
-
-
-def _runtime_downloader_accepts_keyword(
-    runtime_downloader: RuntimeDownloadRunner,
-    name: str,
-) -> bool:
-    try:
-        parameters = signature(runtime_downloader).parameters
-    except (TypeError, ValueError):
-        return True
-    return name in parameters or any(
-        parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()
+    return runtime_downloader(
+        plan,
+        config=config,
+        log=log,
+        state_observer=state_observer,
+        extra_protected_staging_targets=extra_protected_staging_targets,
     )
 
 
@@ -1172,30 +1211,88 @@ def _run_post_start_hooks_if_required(
 
 
 def _terminate_child_if_running(child: ChildProcess) -> None:
-    if _reap_child_if_exited(child):
-        return
-    with suppress(OSError):
-        child.terminate()
-    _reap_child_until_exited(child)
+    _terminate_process_with_bounded_kill(
+        child,
+        terminate=lambda: child.terminate(),
+        kill=getattr(child, "kill", None),
+        terminate_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+        kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+    )
 
 
 def _reap_child_if_exited(child: ChildProcess) -> bool:
-    if child.poll() is None:
-        return False
-    with suppress(OSError):
-        child.wait()
-    return True
+    return _reap_process_if_exited(child)
 
 
 def _reap_child_until_exited(child: ChildProcess) -> None:
-    deadline = time.monotonic() + CHILD_TERMINATION_REAP_GRACE_SECONDS
+    _bounded_process_wait(
+        child,
+        timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+    )
+
+
+def _terminate_process_with_bounded_kill(
+    process: ChildProcess,
+    *,
+    terminate: Callable[[], object],
+    kill: Callable[[], object] | None,
+    terminate_timeout: float,
+    kill_timeout: float,
+    poll_interval: float,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], object] = time.sleep,
+) -> bool:
+    if _reap_process_if_exited(process):
+        return True
+    with suppress(OSError):
+        terminate()
+    if _bounded_process_wait(
+        process,
+        timeout=terminate_timeout,
+        poll_interval=poll_interval,
+        monotonic=monotonic,
+        sleep=sleep,
+    ):
+        return True
+    if kill is None:
+        return False
+    with suppress(OSError):
+        kill()
+    return _bounded_process_wait(
+        process,
+        timeout=kill_timeout,
+        poll_interval=poll_interval,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+
+
+def _reap_process_if_exited(process: ChildProcess) -> bool:
+    if process.poll() is None:
+        return False
+    with suppress(OSError):
+        process.wait()
+    return True
+
+
+def _bounded_process_wait(
+    process: ChildProcess,
+    *,
+    timeout: float,
+    poll_interval: float,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], object] = time.sleep,
+) -> bool:
+    deadline = monotonic() + timeout
     while True:
-        if _reap_child_if_exited(child):
-            return
-        now = time.monotonic()
+        if _reap_process_if_exited(process):
+            return True
+        now = monotonic()
         if now >= deadline:
-            return
-        time.sleep(min(CHILD_REAP_POLL_INTERVAL_SECONDS, deadline - now))
+            return False
+        sleep(min(poll_interval, deadline - now))
 
 
 class _StartupShutdownRequested(BaseException):
@@ -1258,9 +1355,7 @@ def _forward_startup_shutdown_to_child(
     child: ChildProcess,
     sig: signal.Signals,
 ) -> int:
-    if child.poll() is None:
-        child.send_signal(sig)
-    return _normalize_child_exit_code(child.wait())
+    return _normalize_child_exit_code(_signal_child_with_bounded_kill(child, sig))
 
 
 class _ShutdownRequested(Exception):
@@ -1352,12 +1447,35 @@ def _wait_with_signal_forwarding(
                     runtime_stop_hook_runner=runtime_stop_hook_runner,
                     cancel_requested=shutdown_state.stop_hooks_cancelled,
                 )
-            if child.poll() is None:
-                child.send_signal(request.sig)
-            return child.wait()
+            return _signal_child_with_bounded_kill(child, request.sig)
     finally:
         for sig, previous in previous_handlers.items():
             signal.signal(sig, previous)
+
+
+def _signal_child_with_bounded_kill(
+    child: ChildProcess,
+    sig: signal.Signals,
+) -> int:
+    if child.poll() is None:
+        child.send_signal(sig)
+    if _bounded_process_wait(
+        child,
+        timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+    ):
+        assert child.returncode is not None
+        return child.returncode
+    with suppress(OSError):
+        child.kill()
+    if _bounded_process_wait(
+        child,
+        timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+    ):
+        assert child.returncode is not None
+        return child.returncode
+    return -int(signal.SIGKILL)
 
 
 def _run_stop_hooks_before_signal(

@@ -78,7 +78,7 @@ def make_downloader(
 
 
 def test_httpx_downloader_streams_to_tmp_then_renames(tmp_path: Path) -> None:
-    """Write the response body through a tmp file and atomically publish it."""
+    """HTTPX writes through a tmp file before atomically publishing target."""
     item = make_item(tmp_path)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -130,7 +130,7 @@ def test_httpx_downloader_removes_stale_tmp_before_download(tmp_path: Path) -> N
 def test_httpx_downloader_removes_broken_tmp_symlink_before_write(
     tmp_path: Path,
 ) -> None:
-    """Remove broken tmp symlinks so writes cannot escape the target tree."""
+    """Remove tmp symlinks before streaming so writes stay in target tree."""
     item = make_item(tmp_path)
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
@@ -163,7 +163,7 @@ def test_httpx_downloader_removes_broken_tmp_symlink_before_write(
 def test_httpx_downloader_does_not_retry_non_retryable_status(
     tmp_path: Path,
 ) -> None:
-    """Treat ordinary 4xx statuses as terminal user-facing failures."""
+    """Ordinary 4xx responses are terminal and leave no partial file."""
     item = make_item(tmp_path)
     sleeps: list[float] = []
     requests = 0
@@ -187,7 +187,7 @@ def test_httpx_downloader_does_not_retry_non_retryable_status(
 def test_httpx_downloader_retries_retryable_status_then_succeeds(
     tmp_path: Path,
 ) -> None:
-    """Retry 408/429/5xx responses with deterministic 1/2/4 backoff."""
+    """Retry 408/429/5xx responses with deterministic backoff."""
     item = make_item(tmp_path)
     sleeps: list[float] = []
     statuses = [503, 429, 200]
@@ -233,7 +233,7 @@ def test_httpx_downloader_retries_timeout_and_transport_errors(
 
 
 def test_httpx_downloader_exhausts_retries_and_cleans_tmp(tmp_path: Path) -> None:
-    """Surface retry exhaustion and remove partial tmp state."""
+    """Surface retry exhaustion and remove partial HTTPX tmp state."""
     item = make_item(tmp_path)
     sleeps: list[float] = []
 

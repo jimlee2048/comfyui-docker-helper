@@ -98,7 +98,3 @@ Use `pytest` for testing:
     - Commands that may access a local GPU, such as `nvidia-smi`.
     - Commands that write to or update Git state, such as `git commit`.
 - Browser verification tool selection: prefer Chrome plugin [@chrome](plugin://chrome@openai-bundled), then In-App Browser plugin [@Browser](plugin://browser@openai-bundled).
-- When delegating sub-agents:
-    - use reasoning effort `medium` for implementation.
-    - use reasoning effort `xhigh` for planning or review.
-    - use reasoning effort `low` for browser verification.

@@ -5,7 +5,7 @@ import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, ValidationError
@@ -17,12 +17,16 @@ from comfyui_docker_helper.config.diagnostics import (
 )
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.runtime_file_validation import (
+    normalize_runtime_file_path,
+    validate_runtime_file_url,
+)
 from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
 from comfyui_docker_helper.config.ssh_keys import (
     normalize_ssh_public_key,
     normalize_ssh_public_keys,
 )
-from comfyui_docker_helper.config.url_validation import DownloaderName, is_http_url
+from comfyui_docker_helper.config.url_validation import DownloaderName
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
@@ -525,10 +529,10 @@ def _merge_runtime_file_items(
             indexes.clear()
             continue
 
-        for item in parsed.files:
-            path: RuntimeFilePath = ("files", len(merged))
+        for source_index, item in enumerate(parsed.files):
+            path: RuntimeFilePath = ("files", source_index)
             item_document = item.model_dump(mode="json", exclude_none=True)
-            has_valid_url = _validate_runtime_file_url(
+            has_valid_url = validate_runtime_file_url(
                 item.url,
                 (*path, "url"),
                 diagnostics,
@@ -547,112 +551,20 @@ def _merge_runtime_file_items(
     return tuple(merged)
 
 
-def _validate_runtime_file_url(
-    value: str | None,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> bool:
-    if value is None or is_http_url(value):
-        return True
-    diagnostics.append(
-        Diagnostic(
-            path,
-            "runtime_file.invalid_url",
-            "must be an HTTP(S) URL with a host",
-        )
-    )
-    return False
-
-
 def _runtime_file_merge_key(
     item: _RuntimeFilePatch,
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
 ) -> str | None:
-    directory = _normalize_runtime_file_directory(item.dir, (*path, "dir"), diagnostics)
-    filename = _normalize_runtime_file_filename(
+    normalized = normalize_runtime_file_path(
+        item.dir,
         item.filename,
-        (*path, "filename"),
+        path,
         diagnostics,
     )
-    if directory is None or filename is None:
+    if normalized is None:
         return None
-    return (directory / filename).as_posix()
-
-
-def _normalize_runtime_file_directory(
-    value: str,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> PurePosixPath | None:
-    if value.startswith("/"):
-        diagnostics.append(
-            Diagnostic(path, "runtime_file.absolute_directory", "must be relative")
-        )
-        return None
-    if value.endswith("/"):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.trailing_slash",
-                "must not end with a slash",
-            )
-        )
-        return None
-
-    parts = value.split("/")
-    if not value or any(part == "" for part in parts):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.empty_directory_segment",
-                "must not contain empty path segments",
-            )
-        )
-        return None
-    if any(part == "." for part in parts):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.current_directory_segment",
-                "must not contain '.'",
-            )
-        )
-        return None
-    if any(part == ".." for part in parts):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.parent_directory_segment",
-                "must not contain '..'",
-            )
-        )
-        return None
-
-    normalized = PurePosixPath(os.path.normpath(value))
-    if normalized == PurePosixPath("."):
-        diagnostics.append(
-            Diagnostic(path, "runtime_file.empty_directory", "must not be empty")
-        )
-        return None
-    return normalized
-
-
-def _normalize_runtime_file_filename(
-    value: str,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> str | None:
-    if not value or value in {".", ".."} or "/" in value or "\\" in value:
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.invalid_filename",
-                "must be one nonempty filename component",
-            )
-        )
-        return None
-    return value
+    return normalized[1]
 
 
 def _diagnostics_from_validation_error(

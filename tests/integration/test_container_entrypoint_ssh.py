@@ -55,6 +55,7 @@ class FakeChild:
         self._shutdown_signal = shutdown_signal
         self.signals: list[signal.Signals] = []
         self.terminated = False
+        self.killed = False
         self.wait_calls = 0
 
     def wait(self) -> int:
@@ -77,10 +78,18 @@ class FakeChild:
         self.signals.append(sig)
         if self._events is not None:
             self._events.append(f"signal:{sig.name}")
+        if self._wait_returncode == -int(sig):
+            self.returncode = self._wait_returncode
 
     def terminate(self) -> None:
         self.terminated = True
         self.returncode = self._wait_returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        if self._events is not None:
+            self._events.append("kill")
+        self.returncode = -int(signal.SIGKILL)
 
 
 class WaitForEventChild(FakeChild):
@@ -285,6 +294,7 @@ def _capture_signal_handlers(
     return handlers
 
 
+# Default/inactive SSH coverage ensures normal entrypoint startup is untouched.
 def test_default_inactive_ssh_does_not_call_starter_and_spawns(
     tmp_path: Path,
 ) -> None:
@@ -329,6 +339,7 @@ def test_default_inactive_ssh_does_not_call_starter_and_spawns(
     assert events == ["spawn"]
 
 
+# Activation coverage verifies SSH starts after sync/pre-start and before async/spawn.
 def test_runtime_enabled_ssh_starts_after_sync_and_pre_start_before_async_and_spawn(
     tmp_path: Path,
 ) -> None:
@@ -363,6 +374,7 @@ download_mode = "async"
         *,
         config: RuntimeConfig,
         log: Logger,
+        **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         del config, log
         assert [item.filename for item in plan.items] == ["sync.bin"]
@@ -446,6 +458,7 @@ download_mode = "async"
     assert events == ["sync-download", "pre-start", "ssh-start", "async-start", "spawn"]
 
 
+# Real helper coverage exercises credential prep and entrypoint sshd argv.
 def test_entrypoint_can_start_real_ssh_helper_with_fake_system_dependencies(
     tmp_path: Path,
 ) -> None:
@@ -633,6 +646,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
     assert seen[0].system.ssh.pub_keys == [VALID_SSH_KEY, SECOND_SSH_KEY]
 
 
+# Disabled and credential-less SSH cases must continue without starting sshd.
 @pytest.mark.parametrize(
     ("document", "environ"),
     [
@@ -726,6 +740,7 @@ enable = true
     )
 
 
+# Failure coverage protects pre-spawn abort behavior and credential redaction.
 def test_ssh_start_failure_prevents_spawn_and_redacts_credentials(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -819,6 +834,7 @@ password = "line1\\nline2"
     assert "line2" not in payload
 
 
+# Lifecycle coverage protects sshd monitoring and async/SSH shutdown ordering.
 def test_unexpected_post_start_sshd_exit_warns_without_changing_comfyui_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

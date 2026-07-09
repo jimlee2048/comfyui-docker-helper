@@ -19,7 +19,7 @@ from comfyui_docker_helper.container.download_files import (
 
 
 class FakeProcess:
-    """Fake aria2c process with controllable lifecycle."""
+    """Fake aria2c process with controllable daemon lifecycle."""
 
     def __init__(
         self,
@@ -172,7 +172,7 @@ def make_item(tmp_path: Path, *, overwrite: bool = False) -> FileDownloadItem:
 def test_aria2_downloader_starts_daemon_and_submits_options(
     tmp_path: Path,
 ) -> None:
-    """Start aria2c on the configured port and submit one URL with options."""
+    """Start aria2c on the configured port and submit sanitized options."""
     process = FakeProcess()
     argv_calls: list[list[str]] = []
     client_calls: list[FakeClient] = []
@@ -242,7 +242,7 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
 
 
 def test_aria2_downloader_context_always_shuts_down_daemon(tmp_path: Path) -> None:
-    """Shut down aria2 RPC and wait for the process on context exit."""
+    """Backend lifecycle always shuts down RPC and waits on context exit."""
     process = FakeProcess()
     client = FakeClient(host="http://localhost", port=6811, secret="s", timeout=5)
     api = FakeApi(FakeDownload(["complete"]))
@@ -265,7 +265,7 @@ def test_aria2_downloader_context_always_shuts_down_daemon(tmp_path: Path) -> No
 def test_aria2_downloader_context_cleans_up_after_download_failure(
     tmp_path: Path,
 ) -> None:
-    """Still shut down aria2 when a download fails inside the context."""
+    """Download failures must not bypass aria2 context cleanup."""
     process = FakeProcess()
     client = FakeClient(host="http://localhost", port=6811, secret="s", timeout=5)
     api = FakeApi(FakeDownload(["error"], error_message="failed"))
@@ -311,7 +311,7 @@ def test_aria2_downloader_terminates_process_when_shutdown_does_not_exit(
 
 
 def test_aria2_downloader_reports_error_status(tmp_path: Path) -> None:
-    """Treat aria2 error status as a helper failure."""
+    """Treat aria2 terminal error status as a helper failure."""
     api = FakeApi(FakeDownload(["error"], error_message="checksum failed"))
     downloader = Aria2Downloader(
         process_factory=lambda _: FakeProcess(),
@@ -327,7 +327,7 @@ def test_aria2_downloader_reports_error_status(tmp_path: Path) -> None:
 
 
 def test_aria2_downloader_reports_removed_status(tmp_path: Path) -> None:
-    """Treat removed downloads as failures."""
+    """Treat aria2 removed status as a failed transfer."""
     api = FakeApi(FakeDownload(["removed"]))
     downloader = Aria2Downloader(
         process_factory=lambda _: FakeProcess(),
@@ -343,7 +343,7 @@ def test_aria2_downloader_reports_removed_status(tmp_path: Path) -> None:
 
 
 def test_aria2_downloader_reports_rpc_disconnect(tmp_path: Path) -> None:
-    """Treat update failures as RPC disconnects."""
+    """Treat update failures as RPC disconnects instead of silent success."""
     api = FakeApi(FakeDownload(["active"], update_error=ConnectionError("lost")))
     downloader = Aria2Downloader(
         process_factory=lambda _: FakeProcess(),
@@ -399,7 +399,7 @@ def test_aria2_downloader_reports_startup_port_failure(tmp_path: Path) -> None:
 
 
 def test_aria2_downloader_removes_control_file_on_overwrite(tmp_path: Path) -> None:
-    """Remove target.aria2 when overwrite=true before submitting the download."""
+    """Overwrite removes target.aria2 before submitting aria2 work."""
     item = make_item(tmp_path, overwrite=True)
     control_file = Path(f"{item.target}.aria2")
     control_file.write_text("partial\n", encoding="utf-8")

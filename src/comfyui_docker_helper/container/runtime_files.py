@@ -18,13 +18,12 @@ from pydantic import ValidationError
 
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.config.models import ConfigModel
-from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
-from comfyui_docker_helper.config.url_validation import (
-    DownloaderName,
-    is_http_url,
-    validate_file_name,
-    validate_relative_file_directory,
+from comfyui_docker_helper.config.runtime_file_validation import (
+    normalize_runtime_file_path,
+    validate_runtime_file_url,
 )
+from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.url_validation import DownloaderName
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloaderFactory,
@@ -136,6 +135,12 @@ class RuntimeFileReconciliation:
     stale_staging_candidates: tuple[Path, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _MergedRuntimeFileItem:
+    document: dict[str, Any]
+    source_index: int
+
+
 class RuntimeFilePlanError(ValueError):
     """Runtime file planning failure represented by stable diagnostics."""
 
@@ -189,20 +194,20 @@ def build_runtime_file_plan(
     default_download_mode: Literal["sync", "async"] = "sync",
 ) -> RuntimeFilePlan:
     """Merge runtime file documents and derive safe target paths."""
-    merged_items = merge_runtime_file_items(documents)
+    merged_items = _merge_runtime_file_items(documents)
     diagnostics: list[Diagnostic] = []
     items: list[RuntimeFilePlanItem] = []
     root = Path(comfyui_path)
 
-    for index, item in enumerate(merged_items):
-        path: RuntimeFilePath = ("files", index)
+    for item in merged_items:
+        path: RuntimeFilePath = ("files", item.source_index)
         try:
-            config = _RuntimeFileConfig.model_validate(item)
+            config = _RuntimeFileConfig.model_validate(item.document)
         except ValidationError as error:
             diagnostics.extend(_diagnostics_from_validation_error(error, path))
             continue
 
-        if not _validate_runtime_file_url(config.url, (*path, "url"), diagnostics):
+        if not validate_runtime_file_url(config.url, (*path, "url"), diagnostics):
             continue
 
         normalized = _normalize_runtime_file_path(config, path, diagnostics)
@@ -290,16 +295,20 @@ def process_runtime_file_downloads(
             backend_name,
             settings=settings,
         )
-        _prepare_staging_parent(
-            staging_item.target.parent,
-            ("files", index - 1),
-            current_staging_targets=current_staging_targets,
-            clock=staging_cleanup_clock,
-        )
 
-        log(f"Downloading runtime file {index}/{len(plan.items)} with {backend_name}")
         transfer_completed = False
         try:
+            _prepare_staging_parent(
+                item,
+                staging_item.target.parent,
+                ("files", index - 1),
+                current_staging_targets=current_staging_targets,
+                clock=staging_cleanup_clock,
+            )
+            log(
+                f"Downloading runtime file {index}/{len(plan.items)} "
+                f"with {backend_name}"
+            )
             _observe_cancellable_runtime_backend(backend, backend_observer)
             attempts_used = _download_runtime_file_with_policy(
                 item,
@@ -925,7 +934,13 @@ def merge_runtime_file_items(
     documents: Iterable[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
     """Merge runtime file arrays by normalized relative target path."""
-    merged: list[dict[str, Any]] = []
+    return tuple(item.document for item in _merge_runtime_file_items(documents))
+
+
+def _merge_runtime_file_items(
+    documents: Iterable[Mapping[str, Any]],
+) -> tuple[_MergedRuntimeFileItem, ...]:
+    merged: list[_MergedRuntimeFileItem] = []
     indexes: dict[str, int] = {}
     diagnostics: list[Diagnostic] = []
 
@@ -945,10 +960,10 @@ def merge_runtime_file_items(
             indexes.clear()
             continue
 
-        for item in parsed.files:
-            path: RuntimeFilePath = ("files", len(merged))
+        for source_index, item in enumerate(parsed.files):
+            path: RuntimeFilePath = ("files", source_index)
             item_document = item.model_dump(mode="json", exclude_none=True)
-            has_valid_url = _validate_runtime_file_url(
+            has_valid_url = validate_runtime_file_url(
                 item.url,
                 (*path, "url"),
                 diagnostics,
@@ -957,31 +972,23 @@ def merge_runtime_file_items(
             if key is None or not has_valid_url:
                 continue
             if key in indexes:
-                merged[indexes[key]] = {**merged[indexes[key]], **item_document}
+                previous = merged[indexes[key]]
+                merged[indexes[key]] = _MergedRuntimeFileItem(
+                    document={**previous.document, **item_document},
+                    source_index=source_index,
+                )
             else:
                 indexes[key] = len(merged)
-                merged.append(item_document)
+                merged.append(
+                    _MergedRuntimeFileItem(
+                        document=item_document,
+                        source_index=source_index,
+                    )
+                )
 
     if diagnostics:
         raise RuntimeFilePlanError(tuple(diagnostics))
     return tuple(merged)
-
-
-def _validate_runtime_file_url(
-    value: str | None,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> bool:
-    if value is None or is_http_url(value):
-        return True
-    diagnostics.append(
-        Diagnostic(
-            path,
-            "runtime_file.invalid_url",
-            "must be an HTTP(S) URL with a host",
-        )
-    )
-    return False
 
 
 def _files_only_document(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -1033,12 +1040,21 @@ def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:
 
 
 def _prepare_staging_parent(
+    item: RuntimeFilePlanItem,
     staging_parent: Path,
     path: RuntimeFilePath,
     *,
     current_staging_targets: Iterable[Path],
     clock: RuntimeStagingClock,
 ) -> None:
+    target_parent_error = _validate_existing_parent_contained(
+        _runtime_item_root(item),
+        PurePosixPath(item.directory),
+        path,
+    )
+    if target_parent_error is not None:
+        raise RuntimeFileDownloadError((target_parent_error,))
+
     try:
         staging_parent.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -1053,6 +1069,9 @@ def _prepare_staging_parent(
         ) from error
 
     _validate_staging_parent(staging_parent, path)
+    target_parent_error = _validate_resolved_target_parent_contained(item, path)
+    if target_parent_error is not None:
+        raise RuntimeFileDownloadError((target_parent_error,))
     _cleanup_stale_staging_files(
         staging_parent,
         current_staging_targets=current_staging_targets,
@@ -1102,6 +1121,10 @@ def _place_staged_runtime_file(
     if existing_error is not None:
         raise RuntimeFileDownloadError((existing_error,))
 
+    target_parent_error = _validate_resolved_target_parent_contained(item, path)
+    if target_parent_error is not None:
+        raise RuntimeFileDownloadError((target_parent_error,))
+
     try:
         staging_target.replace(item.target)
     except OSError as error:
@@ -1142,6 +1165,42 @@ def _validate_staging_target(
             message="download backend did not produce a regular staging file",
         )
     return None
+
+
+def _validate_resolved_target_parent_contained(
+    item: RuntimeFilePlanItem,
+    path: RuntimeFilePath,
+) -> Diagnostic | None:
+    root = _runtime_item_root(item)
+    try:
+        resolved_root = root.resolve(strict=False)
+    except OSError as error:
+        return Diagnostic(
+            (*path, "target"),
+            "runtime_file.root_resolution_failed",
+            f"COMFYUI_PATH cannot be resolved: {error}",
+        )
+
+    try:
+        item.target.parent.resolve(strict=True).relative_to(resolved_root)
+    except ValueError:
+        return Diagnostic(
+            (*path, "target"),
+            "runtime_file.symlink_escape",
+            "target parent must not escape COMFYUI_PATH",
+        )
+    except OSError as error:
+        return Diagnostic(
+            (*path, "target"),
+            "runtime_file.parent_resolution_failed",
+            f"target parent cannot be resolved: {error}",
+        )
+    return None
+
+
+def _runtime_item_root(item: RuntimeFilePlanItem) -> Path:
+    relative_parts = PurePosixPath(item.relative_target).parts
+    return item.target.parents[len(relative_parts) - 1]
 
 
 def _validate_final_target_before_replace(
@@ -1274,7 +1333,7 @@ def _merge_key(
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
 ) -> str | None:
-    normalized = _normalize_runtime_file_path(item, path, diagnostics)
+    normalized = normalize_runtime_file_path(item.dir, item.filename, path, diagnostics)
     if normalized is None:
         return None
     return normalized[1]
@@ -1285,48 +1344,7 @@ def _normalize_runtime_file_path(
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
 ) -> tuple[PurePosixPath, str] | None:
-    directory = _normalize_directory(item.dir, (*path, "dir"), diagnostics)
-    filename = _normalize_filename(item.filename, (*path, "filename"), diagnostics)
-    if directory is None or filename is None:
-        return None
-    relative_target = (directory / filename).as_posix()
-    return directory, relative_target
-
-
-def _normalize_directory(
-    value: str,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> PurePosixPath | None:
-    result = validate_relative_file_directory(value)
-    if result.path is not None:
-        return result.path
-    diagnostics.append(
-        Diagnostic(
-            path,
-            f"runtime_file.{result.code}",
-            result.message or "must be a valid relative directory",
-        )
-    )
-    return None
-
-
-def _normalize_filename(
-    value: str,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> str | None:
-    result = validate_file_name(value)
-    if result.filename is None:
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "runtime_file.invalid_filename",
-                "must be one nonempty filename component",
-            )
-        )
-        return None
-    return result.filename
+    return normalize_runtime_file_path(item.dir, item.filename, path, diagnostics)
 
 
 def _target_action(

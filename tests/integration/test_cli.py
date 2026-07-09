@@ -133,6 +133,7 @@ def test_completion_options_remain_disabled(
     cli_runner: CliRunner,
     args: list[str],
 ) -> None:
+    """Avoid advertising shell completion commands before supporting them."""
     result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 2

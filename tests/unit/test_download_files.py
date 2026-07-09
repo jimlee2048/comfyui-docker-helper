@@ -81,6 +81,7 @@ def _aria2_item(comfyui: Path, filename: str) -> FileDownloadItem:
 def test_file_download_continue_policy_keeps_plain_download_error_fatal(
     tmp_path: Path,
 ) -> None:
+    """Continue only applies to transfer failures, not local helper failures."""
     comfyui = tmp_path / "ComfyUI"
     comfyui.mkdir()
     first = _item(comfyui, "a.bin")
@@ -107,6 +108,7 @@ def test_file_download_continue_policy_keeps_plain_download_error_fatal(
 def test_file_download_continue_policy_handles_transfer_error(
     tmp_path: Path,
 ) -> None:
+    """Continue policy retries transfer errors and advances to later files."""
     comfyui = tmp_path / "ComfyUI"
     comfyui.mkdir()
     first = _item(comfyui, "a.bin")
@@ -138,6 +140,7 @@ def test_file_download_continue_policy_handles_transfer_error(
 def test_file_download_continue_policy_cleans_failed_aria2_sidecar(
     tmp_path: Path,
 ) -> None:
+    """Failed aria2 attempts must not leave partial targets or sidecar state."""
     comfyui = tmp_path / "ComfyUI"
     comfyui.mkdir()
     first = _aria2_item(comfyui, "a.bin")

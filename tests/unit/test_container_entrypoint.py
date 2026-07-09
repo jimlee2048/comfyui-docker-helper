@@ -66,21 +66,29 @@ class FakeChild:
         self._wait_returncode = returncode
         self.signals: list[signal.Signals] = []
         self.terminated = False
+        self.killed = False
         self.wait_calls = 0
 
     def wait(self) -> int:
         self.wait_calls += 1
-        self.returncode = self._wait_returncode
-        return self._wait_returncode
+        if self.returncode is None:
+            self.returncode = self._wait_returncode
+        return self.returncode
 
     def poll(self) -> int | None:
         return self.returncode
 
     def send_signal(self, sig: signal.Signals) -> None:
         self.signals.append(sig)
+        if self._wait_returncode == -int(sig):
+            self.returncode = self._wait_returncode
 
     def terminate(self) -> None:
         self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -int(signal.SIGKILL)
 
 
 class FakeSshdProcess:
@@ -269,11 +277,13 @@ class FakeAsyncHandle:
         *,
         alive: bool = True,
         complete_on_join: bool = True,
+        complete_on_terminate: bool = True,
         on_join: Callable[[], object] | None = None,
     ) -> None:
         self.events = events
         self._alive = alive
         self._complete_on_join = complete_on_join
+        self._complete_on_terminate = complete_on_terminate
         self._on_join = on_join
 
     def request_stop(self) -> None:
@@ -281,6 +291,8 @@ class FakeAsyncHandle:
 
     def terminate_backends(self) -> None:
         self.events.append("async-terminate")
+        if self._complete_on_terminate:
+            self._alive = False
 
     def join(self, timeout: float | None = None) -> None:
         del timeout
@@ -314,11 +326,22 @@ def _activate_async_plan(
     *items: RuntimeFilePlanItem,
     config: RuntimeConfig | None = None,
 ) -> RuntimeFilePlan:
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log, state_observer, extra_protected_staging_targets
+        return ()
+
     queues = entrypoint_module._activate_runtime_file_plan(
         RuntimeFilePlan(items=items),
         config=config or RuntimeConfig.model_validate({}),
         runtime=runtime,
-        runtime_downloader=lambda plan, *, config, log: (),
+        runtime_downloader=runtime_downloader,
         runtime_state_path=state_path,
     )
     assert queues.sync_plan.items == ()
@@ -342,213 +365,8 @@ def _runtime_file_staging_target(item: RuntimeFilePlanItem) -> Path:
     )
 
 
-def test_default_argv_uses_runtime_defaults_and_venv_python(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    calls: list[tuple[list[str], str, dict[str, str]]] = []
-    child = FakeChild(0)
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append((list(argv), cwd, dict(env)))
-        return child
-
-    exit_code = run_entrypoint(
-        runtime=runtime,
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=tmp_path / "missing-mounted.toml",
-        environ={"PATH": "/usr/bin"},
-        runner=runner,
-    )
-
-    assert exit_code == 0
-    assert calls == [
-        (
-            [
-                str(runtime.python),
-                str(runtime.comfyui_path / "main.py"),
-                "--listen",
-                "0.0.0.0",
-                "--port",
-                "8188",
-                "--disable-auto-launch",
-            ],
-            str(runtime.comfyui_path),
-            {
-                "PATH": f"{runtime.virtual_env / 'bin'}:/usr/bin",
-                "WORKSPACE": str(runtime.workspace),
-                "COMFYUI_PATH": str(runtime.comfyui_path),
-                "VIRTUAL_ENV": str(runtime.virtual_env),
-            },
-        )
-    ]
-
-
-def test_mounted_config_and_env_overrides_affect_argv(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[comfyui]
-listen = "127.0.0.1"
-port = 8190
-extra_args = ["--cpu"]
-""",
-    )
-    calls: list[list[str]] = []
-    child = FakeChild(0)
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return child
-
-    exit_code = run_entrypoint(
-        runtime=runtime,
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=mounted,
-        environ={
-            "CDH_COMFYUI_PORT": "8288",
-            "CDH_COMFYUI_EXTRA_ARGS": '--preview-method "latent2rgb"',
-        },
-        runner=runner,
-    )
-
-    assert exit_code == 0
-    assert calls == [
-        [
-            str(runtime.python),
-            str(runtime.comfyui_path / "main.py"),
-            "--listen",
-            "127.0.0.1",
-            "--port",
-            "8288",
-            "--disable-auto-launch",
-            "--preview-method",
-            "latent2rgb",
-        ]
-    ]
-
-
-def test_runtime_config_warnings_are_printed_before_spawn(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system]
-workspace = "/srv"
-
-[comfyui]
-listen = "127.0.0.1"
-""",
-    )
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=runner,
-        )
-        == 0
-    )
-
-    captured = capsys.readouterr()
-    assert calls
-    assert captured.out == ""
-    assert "Runtime configuration warnings:" in captured.err
-    assert "[system.workspace]" in captured.err
-    assert "runtime.host_only_ignored" in captured.err
-    assert "severity=warning" in captured.err
-
-
-def test_ssh_disabled_does_not_call_ssh_starter(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del cwd, env, shell
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    def runtime_ssh_starter(*_args, **_kwargs) -> None:
-        raise AssertionError("disabled SSH must not call starter")
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=tmp_path / "missing-mounted.toml",
-            environ={},
-            runner=runner,
-            runtime_ssh_starter=runtime_ssh_starter,
-        )
-        == 0
-    )
-
-    assert len(calls) == 1
-
-
-def test_ssh_enabled_without_credentials_warns_and_continues(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-""",
-    )
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=lambda *_args, **_kwargs: FakeChild(0),
-        )
-        == 0
-    )
-
-    captured = capsys.readouterr()
-    assert "WARNING: SSH is enabled but no root SSH credentials are configured" in (
-        captured.out
-    )
-
-
+# Exit and signal tests protect the entrypoint's child-process status mapping
+# and forwarded shutdown behavior.
 @pytest.mark.parametrize("returncode", [0, 17, -15])
 def test_child_exit_code_is_returned(tmp_path: Path, returncode: int) -> None:
     runtime = _runtime(tmp_path)
@@ -633,9 +451,67 @@ def test_signals_are_forwarded_to_spawned_child(
     ]
 
 
+def test_forwarded_shutdown_signal_ignored_by_child_escalates_to_kill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    handlers, restored = _capture_signal_handlers(monkeypatch)
+    monkeypatch.setattr(
+        entrypoint_module,
+        "CHILD_TERMINATION_REAP_GRACE_SECONDS",
+        0.0,
+    )
+
+    class IgnoringShutdownChild(FakeChild):
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("shutdown signal handler should interrupt wait")
+            if self.returncode is None:
+                self.returncode = self._wait_returncode
+            return self.returncode
+
+    child = IgnoringShutdownChild(0)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return child
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={},
+            runner=runner,
+        )
+        == 137
+    )
+
+    assert child.signals == [signal.SIGTERM]
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
+    assert restored == [
+        signal.SIGTERM,
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGINT,
+    ]
+
+
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGINT])
-# Lifecycle signal tests pin the ordered windows for hook execution, child
-# forwarding, and cancellation during startup and shutdown.
+# Shutdown-ordering tests pin cleanup order across async queues, SSH, hooks, and
+# child signal forwarding.
 def test_shutdown_signal_runs_stop_hooks_before_forwarding_to_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1633,12 +1509,17 @@ def test_ssh_stop_timeout_kills_sshd_and_returns_false(
     assert stopped is False
     assert shutdown_requested.is_set()
     assert events == ["ssh-terminate", "ssh-kill"]
+    assert sshd.waited.is_set()
     assert "WARNING: SSH runtime service did not stop in 0.2s" in captured.err
 
 
 def test_async_stop_timeout_is_bounded(capsys: pytest.CaptureFixture[str]) -> None:
     events: list[str] = []
-    handle = FakeAsyncHandle(events, complete_on_join=False)
+    handle = FakeAsyncHandle(
+        events,
+        complete_on_join=False,
+        complete_on_terminate=False,
+    )
     now = 0.0
 
     def monotonic() -> float:
@@ -1663,13 +1544,17 @@ def test_async_stop_timeout_is_bounded(capsys: pytest.CaptureFixture[str]) -> No
         "async-join",
         "async-join",
         "async-terminate",
+        "async-join",
     ]
-    assert now == pytest.approx(0.2)
+    assert now == pytest.approx(0.3)
     output = capsys.readouterr().out
     assert "Async runtime download queue stop requested" in output
     assert (
         "WARNING: Async runtime download queue did not stop in 0.2s; "
         "terminating backends"
+    ) in output
+    assert (
+        "WARNING: Async runtime download queue remained alive after backend termination"
     ) in output
 
 
@@ -1693,15 +1578,31 @@ def test_async_stop_interrupted_terminates_backends(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     events: list[str] = []
-    handle = FakeAsyncHandle(events, complete_on_join=False)
+    handle = FakeAsyncHandle(
+        events,
+        complete_on_join=False,
+        complete_on_terminate=False,
+    )
+    now = 0.0
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds if seconds > 0 else 0.1
 
     stopped = entrypoint_module._stop_runtime_async_download_queue(
         handle,
         cancel_requested=lambda: True,
+        timeout=0.2,
+        poll_interval=0.1,
+        monotonic=monotonic,
+        sleep=sleep,
     )
 
     assert stopped is False
-    assert events == ["async-stop", "async-terminate"]
+    assert events == ["async-stop", "async-terminate", "async-join"]
     output = capsys.readouterr().out
     assert "Async runtime download queue stop requested" in output
     assert (
@@ -1709,6 +1610,8 @@ def test_async_stop_interrupted_terminates_backends(
     ) in output
 
 
+# Startup-interruption tests cover signals that arrive before the normal child
+# wait loop begins: downloads, hooks, spawn handoff, readiness, and post-start.
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGINT])
 def test_shutdown_signal_during_runtime_downloads_exits_without_spawn_or_stop_hooks(
     tmp_path: Path,
@@ -1746,8 +1649,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         handler = handlers[forwarded]
         assert callable(handler)
@@ -2696,68 +2601,6 @@ password = "secret"
     ]
 
 
-def test_runtime_validation_failure_happens_before_spawn(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    with pytest.raises(EntrypointError) as error:
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=tmp_path / "missing-mounted.toml",
-            environ={"CDH_COMFYUI_PORT": "0"},
-            runner=runner,
-        )
-
-    assert calls == []
-    assert "runtime configuration is invalid" in str(error.value)
-    assert "[env.CDH_COMFYUI_PORT]" in str(error.value)
-
-
-def test_unknown_runtime_config_field_is_rejected_before_spawn(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[comfyui]
-unknown = true
-""",
-    )
-    calls: list[list[str]] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        calls.append(list(argv))
-        return FakeChild(0)
-
-    with pytest.raises(EntrypointError) as error:
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=runner,
-        )
-
-    assert calls == []
-    assert "[comfyui.unknown]" in str(error.value)
-
-
 def test_runtime_downloads_run_before_spawn_without_root_lock(
     tmp_path: Path,
 ) -> None:
@@ -2790,8 +2633,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         assert spawn_calls == []
         download_calls.append(plan)
         return ()
@@ -2852,8 +2697,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -2909,8 +2756,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         assert events == []
         events.append("download")
         return ()
@@ -3292,7 +3141,8 @@ def test_readiness_failure_terminates_child_and_prevents_normal_wait(
 
     assert events == ["spawn", "readiness"]
     assert child.terminated is True
-    assert child.returncode is None
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
     assert "readiness.timeout" in str(error.value)
 
 
@@ -3429,7 +3279,8 @@ def test_post_start_hook_failure_terminates_child_and_prevents_normal_wait(
 
     assert events == ["spawn", "readiness", "post-start"]
     assert child.terminated is True
-    assert child.returncode is None
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
     assert "runtime hook failed" in str(error.value)
     assert "[hooks.mounted.post-start.10-fail.sh]" in str(error.value)
 
@@ -3585,8 +3436,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         raise RuntimeFileDownloadError(
             (
                 Diagnostic(
@@ -3636,8 +3489,10 @@ def test_no_runtime_files_ignore_invalid_state_and_spawn(tmp_path: Path) -> None
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3693,8 +3548,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3763,8 +3620,10 @@ filename = "model.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3819,8 +3678,10 @@ overwrite = false
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -3891,7 +3752,9 @@ filename = "model.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del extra_protected_staging_targets
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -3923,6 +3786,98 @@ filename = "model.bin"
     assert backend.calls[0][0].url == "https://example.com/model.bin"
 
 
+# Typed downloader boundary tests protect the injection contract between the
+# entrypoint and runtime file processing.
+def test_runtime_downloader_injection_receives_typed_boundary_kwargs(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state.json"
+    sync_item = RuntimeFilePlanItem(
+        url="https://example.com/sync.bin",
+        directory="models",
+        filename="sync.bin",
+        relative_target="models/sync.bin",
+        target=runtime.comfyui_path / "models" / "sync.bin",
+        overwrite=False,
+        download_mode="sync",
+        downloader=None,
+        action="download",
+    )
+    async_item = _async_item(runtime, "async.bin")
+    observed_state_observers: list[
+        entrypoint_module.RuntimeDownloadStateObserver | None
+    ] = []
+    observed_protected_targets: list[tuple[Path, ...]] = []
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del config, log
+        assert plan.items == (sync_item,)
+        observed_state_observers.append(state_observer)
+        observed_protected_targets.append(extra_protected_staging_targets)
+        return ()
+
+    queues = entrypoint_module._activate_runtime_file_plan(
+        RuntimeFilePlan(items=(sync_item, async_item)),
+        config=RuntimeConfig.model_validate({}),
+        runtime=runtime,
+        runtime_downloader=runtime_downloader,
+        runtime_state_path=state_path,
+    )
+
+    expected_protected_target = entrypoint_module.runtime_file_staging_target(
+        async_item,
+        entrypoint_module.runtime_file_identity_digest(async_item),
+    )
+    assert queues.sync_plan.items == (sync_item,)
+    assert queues.async_plan.items == (async_item,)
+    assert observed_state_observers and observed_state_observers[0] is not None
+    assert observed_protected_targets == [(expected_protected_target,)]
+
+
+def test_stale_short_signature_runtime_downloader_injection_fails(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    state_path = tmp_path / "state.json"
+    item = RuntimeFilePlanItem(
+        url="https://example.com/model.bin",
+        directory="models",
+        filename="model.bin",
+        relative_target="models/model.bin",
+        target=runtime.comfyui_path / "models" / "model.bin",
+        overwrite=False,
+        download_mode="sync",
+        downloader=None,
+        action="download",
+    )
+
+    def runtime_downloader(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        log: Logger,
+    ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del plan, config, log
+        return ()
+
+    with pytest.raises(TypeError, match="state_observer"):
+        entrypoint_module._activate_runtime_file_plan(
+            RuntimeFilePlan(items=(item,)),
+            config=RuntimeConfig.model_validate({}),
+            runtime=runtime,
+            runtime_downloader=runtime_downloader,
+            runtime_state_path=state_path,
+        )
+
+
 def test_internal_async_plan_exercises_active_state_gate_without_download(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -3947,8 +3902,10 @@ def test_internal_async_plan_exercises_active_state_gate_without_download(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -4017,8 +3974,10 @@ filename = "async.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -4103,8 +4062,10 @@ download_mode = "async"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         assert [item.relative_target for item in plan.items] == ["models/sync.bin"]
         events.append("download")
         return ()
@@ -4191,8 +4152,10 @@ filename = "async.bin"
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -4245,167 +4208,6 @@ filename = "async.bin"
     )
 
     assert events == ["async-start", "spawn", "readiness", "post-start"]
-
-
-def test_ssh_starts_after_sync_downloads_and_pre_start_before_async_and_comfyui(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-password = "secret"
-
-[[files]]
-url = "https://example.com/sync.bin"
-dir = "models"
-filename = "sync.bin"
-download_mode = "sync"
-
-[[files]]
-url = "https://example.com/async.bin"
-dir = "models"
-filename = "async.bin"
-download_mode = "async"
-""",
-    )
-    hooks = tmp_path / "hooks"
-    _write_hook(hooks, "pre-start.d", "10-pre.sh")
-    events: list[str] = []
-
-    def runtime_downloader(
-        plan: RuntimeFilePlan,
-        *,
-        config: RuntimeConfig,
-        log: Logger,
-    ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
-        assert [item.filename for item in plan.items] == ["sync.bin"]
-        events.append("sync-download")
-        return ()
-
-    def runtime_hook_runner(
-        plan: RuntimeHookPlan,
-        phase: str,
-        *,
-        runtime: ContainerRuntime,
-        env: Mapping[str, str] | None = None,
-        log: Logger,
-        cancel_requested: Callable[[], bool],
-    ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, cancel_requested
-        assert phase == "pre-start"
-        assert events == ["sync-download"]
-        events.append("pre-start")
-        return ()
-
-    def runtime_ssh_starter(
-        config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
-    ) -> FakeSshdProcess:
-        del runtime, log
-        assert config.system.ssh.enable is True
-        assert events == ["sync-download", "pre-start"]
-        events.append("ssh-start")
-        return FakeSshdProcess()
-
-    def runtime_async_queue_starter(
-        plan: RuntimeFilePlan,
-        *,
-        config: RuntimeConfig,
-        runtime: ContainerRuntime,
-        runtime_state_path: Path,
-        log: Logger,
-    ) -> FakeAsyncHandle:
-        del config, runtime, runtime_state_path, log
-        assert [item.filename for item in plan.items] == ["async.bin"]
-        assert events == ["sync-download", "pre-start", "ssh-start"]
-        events.append("async-start")
-        return FakeAsyncHandle(events, alive=False)
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-        assert events == ["sync-download", "pre-start", "ssh-start", "async-start"]
-        events.append("spawn")
-        return FakeChild(0)
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            mounted_hooks_path=hooks,
-            environ={},
-            runner=runner,
-            runtime_downloader=runtime_downloader,
-            runtime_hook_runner=runtime_hook_runner,
-            runtime_async_queue_starter=runtime_async_queue_starter,
-            runtime_ssh_starter=runtime_ssh_starter,
-            runtime_state_path=tmp_path / "state.json",
-        )
-        == 0
-    )
-
-    assert events == ["sync-download", "pre-start", "ssh-start", "async-start", "spawn"]
-
-
-def test_ssh_start_failure_prevents_comfyui_spawn(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-password = "secret"
-""",
-    )
-    events: list[str] = []
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-        events.append("spawn")
-        return FakeChild(0)
-
-    def runtime_ssh_starter(
-        config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
-    ) -> None:
-        del config, runtime, log
-        events.append("ssh-start")
-        raise entrypoint_module.SshdStartupError("host keys unavailable")
-
-    with pytest.raises(EntrypointError) as raised:
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=runner,
-            runtime_ssh_starter=runtime_ssh_starter,
-        )
-
-    assert events == ["ssh-start"]
-    assert "SSH runtime service failed to start" in str(raised.value)
-    assert "host keys unavailable" in str(raised.value)
 
 
 def test_async_queue_start_failure_stops_started_ssh_without_spawning(
@@ -4621,42 +4423,8 @@ download_mode = "async"
     assert events == ["ssh-start", "async-start", "async-stop", "async-join"]
 
 
-def test_unexpected_sshd_exit_is_logged_without_changing_comfyui_exit(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime = _runtime(tmp_path)
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[system.ssh]
-enable = true
-password = "secret"
-""",
-    )
-    sshd = FakeSshdProcess(wait_returncode=23)
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-            environ={},
-            runner=lambda *_args, **_kwargs: FakeChild(7),
-            runtime_ssh_starter=lambda *_args, **_kwargs: sshd,
-        )
-        == 7
-    )
-
-    assert sshd.waited.wait(timeout=1)
-    captured = capsys.readouterr()
-    assert "WARNING: SSH runtime service exited unexpectedly: returncode=23" in (
-        captured.err
-    )
-
-
-# Verifies accepted async work is cancelled on natural child exit without
-# running graceful-shutdown hooks.
+# Async starter injection tests cover lifecycle coordination with ComfyUI and SSH
+# without running the real queue worker.
 def test_normal_child_exit_stops_accepted_async_queue(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
@@ -5367,7 +5135,9 @@ filename = "b.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del extra_protected_staging_targets
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -5469,7 +5239,9 @@ filename = "b.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
+        del extra_protected_staging_targets
         return process_runtime_file_downloads(
             plan,
             config=config,
@@ -5541,8 +5313,10 @@ filename = "model.bin"
         *,
         config: object,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         actions.extend(item.action for item in plan.items)
         return ()
 
@@ -5602,8 +5376,10 @@ download_mode = "sync"
         *,
         config: object,
         log: Logger,
+        state_observer: entrypoint_module.RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del log
+        del log, state_observer, extra_protected_staging_targets
         default_downloader.append(config.cdh.default_downloader)
         seen.extend((item.downloader, item.download_mode) for item in plan.items)
         return ()
@@ -5808,109 +5584,6 @@ def test_async_overwrite_preserves_old_final_until_atomic_replacement(
 
     assert not handle.thread.is_alive()
     assert final_target.read_bytes() == b"new"
-
-
-def test_async_exhausted_continue_records_failure_and_completes_later_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    state_path = tmp_path / "state.json"
-    first = _async_item(runtime, "a.bin")
-    second = _async_item(runtime, "b.bin")
-    plan = _activate_async_plan(runtime, state_path, first, second)
-    backend = AsyncBackend()
-    backend.failures["a.bin"] = None
-    backend.payloads["b.bin"] = b"later"
-    _install_async_backend(monkeypatch, backend)
-    messages: list[str] = []
-
-    handle = entrypoint_module.start_runtime_async_download_queue(
-        plan,
-        config=RuntimeConfig.model_validate(
-            {
-                "cdh": {
-                    "default_downloader": "httpx",
-                    "download_max_attempts": 2,
-                    "download_failure_policy": "continue",
-                }
-            }
-        ),
-        runtime=runtime,
-        runtime_state_path=state_path,
-        log=messages.append,
-    )
-    handle.join(timeout=1)
-
-    state = load_runtime_state(state_path)
-    entries = {entry.target: entry for entry in state.downloads.entries.values()}
-    assert [call[0].filename for call in backend.calls] == ["a.bin", "a.bin", "b.bin"]
-    assert entries["models/a.bin"].status == "exhausted"
-    assert entries["models/a.bin"].attempts == 2
-    assert not first.target.exists()
-    assert not _runtime_file_staging_target(first).exists()
-    assert entries["models/b.bin"].status == "completed"
-    assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
-    assert any(
-        "WARNING: Runtime download exhausted: mode=async target=models/a.bin "
-        "backend=httpx attempts=2/2 policy=continue status=exhausted" in message
-        for message in messages
-    )
-    assert not any(
-        "Async runtime download queue stopping: reason=download_exhausted" in message
-        for message in messages
-    )
-
-
-def test_async_exhausted_fail_records_failure_and_leaves_later_file_pending(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    state_path = tmp_path / "state.json"
-    first = _async_item(runtime, "a.bin")
-    second = _async_item(runtime, "b.bin")
-    plan = _activate_async_plan(runtime, state_path, first, second)
-    backend = AsyncBackend()
-    backend.failures["a.bin"] = None
-    _install_async_backend(monkeypatch, backend)
-    messages: list[str] = []
-
-    handle = entrypoint_module.start_runtime_async_download_queue(
-        plan,
-        config=RuntimeConfig.model_validate(
-            {
-                "cdh": {
-                    "default_downloader": "httpx",
-                    "download_max_attempts": 2,
-                    "download_failure_policy": "fail",
-                }
-            }
-        ),
-        runtime=runtime,
-        runtime_state_path=state_path,
-        log=messages.append,
-    )
-    handle.join(timeout=1)
-
-    state = load_runtime_state(state_path)
-    entries = {entry.target: entry for entry in state.downloads.entries.values()}
-    assert [call[0].filename for call in backend.calls] == ["a.bin", "a.bin"]
-    assert entries["models/a.bin"].status == "exhausted"
-    assert entries["models/a.bin"].attempts == 2
-    assert not first.target.exists()
-    assert not _runtime_file_staging_target(first).exists()
-    assert entries["models/b.bin"].status == "pending"
-    assert not (runtime.comfyui_path / "models" / "b.bin").exists()
-    assert any(
-        "WARNING: Async runtime download queue stopping: "
-        "reason=download_exhausted policy=fail target=models/a.bin pending=1" in message
-        for message in messages
-    )
-    assert any(
-        "WARNING: async runtime download worker failed: reason=" in message
-        for message in messages
-    )
 
 
 def test_async_file_level_failure_after_acceptance_does_not_prevent_spawn(

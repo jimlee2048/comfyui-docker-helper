@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
+from comfyui_docker_helper.container import entrypoint as entrypoint_module
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
+    RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
@@ -40,14 +42,16 @@ class FakeChild:
         self._wait_event = wait_event
         self.signals: list[signal.Signals] = []
         self.terminated = False
+        self.killed = False
         self.wait_calls = 0
 
     def wait(self) -> int:
         self.wait_calls += 1
         if self._wait_event is not None and self._events is not None:
             self._events.append(self._wait_event)
-        self.returncode = self._wait_returncode
-        return self._wait_returncode
+        if self.returncode is None:
+            self.returncode = self._wait_returncode
+        return self.returncode
 
     def poll(self) -> int | None:
         return self.returncode
@@ -56,10 +60,18 @@ class FakeChild:
         self.signals.append(sig)
         if self._events is not None:
             self._events.append(f"forward:{sig.name}")
+        if self._wait_returncode == -int(sig):
+            self.returncode = self._wait_returncode
 
     def terminate(self) -> None:
         self.terminated = True
         self.returncode = self._wait_returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        if self._events is not None:
+            self._events.append("kill")
+        self.returncode = -int(signal.SIGKILL)
 
 
 class SignalOnFirstWaitChild(FakeChild):
@@ -89,6 +101,10 @@ class SignalOnFirstWaitChild(FakeChild):
         self._events.append("wait:final")
         self.returncode = self._final_returncode
         return self._final_returncode
+
+    def send_signal(self, sig: signal.Signals) -> None:
+        super().send_signal(sig)
+        self.returncode = self._final_returncode
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -162,6 +178,8 @@ def _hook_names(plan: RuntimeHookPlan, phase: str) -> list[str]:
     return [hook.filename for hook in plan.for_phase(phase)]
 
 
+# Happy-path lifecycle coverage pins the entrypoint order from downloads through
+# startup hooks, readiness, and normal child wait.
 def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
     tmp_path: Path,
 ) -> None:
@@ -180,8 +198,10 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config, log, state_observer, extra_protected_staging_targets
         assert len(plan.items) == 1
         assert plan.items[0].target == (
             runtime.comfyui_path / "models" / "checkpoints" / "model.bin"
@@ -272,6 +292,8 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
     ]
 
 
+# Startup failure coverage ensures failed pre-start, readiness, and post-start
+# phases stop later phases and surface actionable diagnostics.
 def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
     tmp_path: Path,
 ) -> None:
@@ -288,8 +310,10 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         return ()
 
@@ -481,6 +505,8 @@ def test_post_start_failure_after_readiness_terminates_child_as_startup_failure(
     assert "[hooks.mounted.post-start.10-fail.sh]" in str(error.value)
 
 
+# Startup shutdown coverage protects cancellation behavior before ComfyUI is
+# fully running, including skipped stop hooks during partial startup.
 def test_startup_shutdown_during_download_prevents_spawn_and_stop_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -497,8 +523,10 @@ def test_startup_shutdown_during_download_prevents_spawn_and_stop_hooks(
         *,
         config: RuntimeConfig,
         log: Logger,
+        state_observer: RuntimeDownloadStateObserver | None = None,
+        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log
+        del plan, config, log, state_observer, extra_protected_staging_targets
         events.append("download")
         handler = handlers[signal.SIGTERM]
         assert callable(handler)
@@ -677,6 +705,72 @@ def test_startup_shutdown_during_readiness_forwards_to_child_and_skips_stop_hook
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
 
+def test_startup_shutdown_during_readiness_kills_child_that_ignores_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "post-start", "10-post.sh")
+    handlers, restored = _capture_signal_handlers(monkeypatch)
+    monkeypatch.setattr(
+        entrypoint_module,
+        "CHILD_TERMINATION_REAP_GRACE_SECONDS",
+        0.0,
+    )
+    events: list[str] = []
+
+    class IgnoringChild(FakeChild):
+        def send_signal(self, sig: signal.Signals) -> None:
+            self.signals.append(sig)
+            if self._events is not None:
+                self._events.append(f"forward:{sig.name}")
+
+    child = IgnoringChild(0, events=events)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return child
+
+    def readiness_waiter(port: int, *, child: FakeChild) -> None:
+        del port
+        assert child.poll() is None
+        events.append("readiness")
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        raise AssertionError("shutdown handler should interrupt readiness")
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
+            mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
+            baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+            mounted_hooks_path=hooks,
+            environ={"PATH": "/usr/bin"},
+            runner=runner,
+            readiness_waiter=readiness_waiter,
+        )
+        == 137
+    )
+
+    assert events == ["spawn", "readiness", "forward:SIGTERM", "kill"]
+    assert child.signals == [signal.SIGTERM]
+    assert child.killed is True
+    assert child.returncode == -int(signal.SIGKILL)
+    assert restored == [signal.SIGTERM, signal.SIGINT]
+
+
+# Post-readiness shutdown coverage keeps signal forwarding, hook cancellation,
+# stop-hook ordering, and child exit-code precedence stable.
 @pytest.mark.parametrize(
     "sig", [signal.SIGTERM, signal.SIGINT], ids=lambda sig: sig.name
 )

@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -16,6 +17,11 @@ from comfyui_docker_helper.config.plan import (
     ArtifactKind,
     OutputArtifact,
     RenderPlan,
+)
+from comfyui_docker_helper.config.runtime_hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
+    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+    runtime_hook_phase_directory_list,
 )
 from comfyui_docker_helper.config.runtime_projection import (
     RuntimeConfigProjection,
@@ -50,8 +56,6 @@ _PACKAGE_CACHE_DIRECTORIES = frozenset(
 )
 _PACKAGE_CACHE_SUFFIXES = (".pyc", ".pyo")
 _PACKAGE_METADATA_SUFFIXES = (".dist-info", ".egg-info")
-_RUNTIME_HOOK_PHASE_DIRECTORIES = frozenset({"pre-start.d", "post-start.d", "stop.d"})
-_RUNTIME_HOOK_SUFFIXES = frozenset({".sh", ".py"})
 type ConfigInput = str | Path | Iterable[str | Path]
 
 
@@ -427,7 +431,8 @@ def _validate_scripts_source_tree(plan: RenderPlan) -> None:
         raise ContextWriteError(
             "render plan enables hooks without a scripts source directory"
         )
-    if source.is_symlink() or not source.is_dir():
+    source_mode = _context_path_mode(source, "scripts source")
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
         raise ContextWriteError("scripts source must be a real directory")
     root = source.resolve(strict=True)
     _validate_plain_tree(source, "scripts source")
@@ -446,12 +451,17 @@ def _validate_scripts_source_tree(plan: RenderPlan) -> None:
 
 
 def _validate_plain_tree(source: Path, label: str) -> None:
-    for child in sorted(source.iterdir(), key=lambda item: item.name):
-        if child.is_symlink():
+    try:
+        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise ContextWriteError(f"{label} tree could not be read: {source}") from exc
+    for child in children:
+        child_mode = _context_path_mode(child, f"{label} tree entry")
+        if stat.S_ISLNK(child_mode):
             raise ContextWriteError(f"{label} tree contains a symlink: {child.name}")
-        if child.is_dir():
+        if stat.S_ISDIR(child_mode):
             _validate_plain_tree(child, label)
-        elif not child.is_file():
+        elif not stat.S_ISREG(child_mode):
             raise ContextWriteError(
                 f"{label} tree contains a special file: {child.name}"
             )
@@ -465,23 +475,31 @@ def _validate_runtime_hooks_source_tree(plan: RenderPlan) -> None:
         raise ContextWriteError(
             "render plan enables runtime hooks without a hooks source directory"
         )
-    if source.is_symlink() or not source.is_dir():
+    source_mode = _context_path_mode(source, "runtime hooks source")
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
         raise ContextWriteError("runtime hooks source must be a real directory")
-    for child in sorted(source.iterdir(), key=lambda item: item.name):
-        if child.is_symlink():
+    try:
+        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise ContextWriteError(
+            f"runtime hooks source could not be read: {source}"
+        ) from exc
+    for child in children:
+        child_mode = _context_path_mode(child, "runtime hooks source entry")
+        if stat.S_ISLNK(child_mode):
             raise ContextWriteError(
                 f"runtime hooks source contains a symlink: {child.name}"
             )
-        if not child.is_dir() and not child.is_file():
+        if not stat.S_ISDIR(child_mode) and not stat.S_ISREG(child_mode):
             raise ContextWriteError(
                 f"runtime hooks source contains a special file: {child.name}"
             )
-        if child.name not in _RUNTIME_HOOK_PHASE_DIRECTORIES:
+        if child.name not in RUNTIME_HOOK_PHASE_DIRECTORY_NAMES:
             raise ContextWriteError(
-                "runtime hooks source may only contain pre-start.d, "
-                "post-start.d, and stop.d directories"
+                "runtime hooks source may only contain "
+                f"{runtime_hook_phase_directory_list()} directories"
             )
-        if not child.is_dir():
+        if not stat.S_ISDIR(child_mode):
             raise ContextWriteError(
                 f"runtime hook phase entry must be a directory: {child.name}"
             )
@@ -489,21 +507,28 @@ def _validate_runtime_hooks_source_tree(plan: RenderPlan) -> None:
 
 
 def _validate_runtime_hook_phase_tree(phase: Path, phase_name: str) -> None:
-    for child in sorted(phase.iterdir(), key=lambda item: item.name):
+    try:
+        children = tuple(sorted(phase.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise ContextWriteError(
+            f"runtime hook phase directory could not be read: {phase_name}"
+        ) from exc
+    for child in children:
         relative = f"{phase_name}/{child.name}"
-        if child.is_symlink():
+        child_mode = _context_path_mode(child, "runtime hook phase entry")
+        if stat.S_ISLNK(child_mode):
             raise ContextWriteError(
                 f"runtime hooks source contains a symlink: {relative}"
             )
-        if child.is_dir():
+        if stat.S_ISDIR(child_mode):
             raise ContextWriteError(
                 f"runtime hook phase entry must be a regular file: {relative}"
             )
-        if not child.is_file():
+        if not stat.S_ISREG(child_mode):
             raise ContextWriteError(
                 f"runtime hooks source contains a special file: {relative}"
             )
-        if child.suffix not in _RUNTIME_HOOK_SUFFIXES:
+        if child.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
             raise ContextWriteError(
                 f"runtime hook files must end in .sh or .py: {relative}"
             )
@@ -546,11 +571,19 @@ def _replace_destination(
     try:
         output.replace(backup)
         staging.replace(output)
-    except BaseException:
+    except BaseException as exc:
         if not output.exists() and backup.exists():
-            backup.replace(output)
-        raise
-    finally:
+            try:
+                backup.replace(output)
+            except OSError as restore_exc:
+                raise ContextWriteError(
+                    "could not replace output context and could not restore "
+                    f"previous context; retained backup: {backup}"
+                ) from restore_exc
+        if not isinstance(exc, Exception):
+            raise
+        raise ContextWriteError("could not replace output context") from exc
+    else:
         _remove_path(backup)
 
 
@@ -570,7 +603,11 @@ def _materialize_package_projection(destination: Path) -> None:
         ) from exc
 
     with resources.as_file(package_resource) as package_source:
-        if package_source.is_symlink() or not package_source.is_dir():
+        package_source_mode = _materialization_path_mode(
+            package_source,
+            "package resource root",
+        )
+        if stat.S_ISLNK(package_source_mode) or not stat.S_ISDIR(package_source_mode):
             raise MaterializationError(
                 "package resource root must be a real directory: "
                 f"{_PACKAGE_IMPORT_NAME}"
@@ -660,18 +697,24 @@ def _copy_plain_tree(
     *,
     skip_package_cache_entries: bool = False,
 ) -> None:
-    if source.is_symlink() or not source.is_dir():
+    source_mode = _materialization_path_mode(source, f"{label} tree root")
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
         raise MaterializationError(f"{label} tree root must be a real directory")
     _ensure_directory(destination)
-    for child in sorted(source.iterdir(), key=lambda item: item.name):
+    try:
+        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
+    except OSError as exc:
+        raise MaterializationError(f"{label} tree could not be read: {source}") from exc
+    for child in children:
         if skip_package_cache_entries and _should_skip_package_entry(child.name):
             continue
         target = destination / child.name
-        if child.is_symlink():
+        child_mode = _materialization_path_mode(child, f"{label} tree entry")
+        if stat.S_ISLNK(child_mode):
             raise MaterializationError(
                 f"{label} tree contains a symlink: {child.relative_to(source)}"
             )
-        if child.is_dir():
+        if stat.S_ISDIR(child_mode):
             _ensure_directory(target)
             _copy_plain_tree(
                 child,
@@ -679,13 +722,33 @@ def _copy_plain_tree(
                 label,
                 skip_package_cache_entries=skip_package_cache_entries,
             )
-        elif child.is_file():
-            _write_bytes(target, child.read_bytes())
+        elif stat.S_ISREG(child_mode):
+            try:
+                content = child.read_bytes()
+            except OSError as exc:
+                raise MaterializationError(
+                    f"{label} file could not be read: {child.relative_to(source)}"
+                ) from exc
+            _write_bytes(target, content)
             target.chmod(_FILE_MODE)
         else:
             raise MaterializationError(
                 f"{label} tree contains a special file: {child.relative_to(source)}"
             )
+
+
+def _context_path_mode(path: Path, label: str) -> int:
+    try:
+        return path.lstat().st_mode
+    except OSError as exc:
+        raise ContextWriteError(f"{label} could not be inspected: {path}") from exc
+
+
+def _materialization_path_mode(path: Path, label: str) -> int:
+    try:
+        return path.lstat().st_mode
+    except OSError as exc:
+        raise MaterializationError(f"{label} could not be inspected: {path}") from exc
 
 
 def _should_skip_package_entry(name: str) -> bool:

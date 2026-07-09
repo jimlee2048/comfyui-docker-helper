@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,11 @@ from comfyui_docker_helper.config import (
     resolve_lockfile,
     with_runtime_hooks_plan,
 )
+from comfyui_docker_helper.config.runtime_hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
+    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+    runtime_hook_phase_directory_list,
+)
 from comfyui_docker_helper.rendering import (
     ContextWriteError,
     MaterializationError,
@@ -35,8 +41,6 @@ _ALWAYS_MANAGED_TREES = ("packages/cdh/src",)
 _CONDITIONAL_MANAGED_TREES = ("scripts", "runtime/hooks")
 _RETIRED_HELPER_PROJECTION_ROOTS = ("config",)
 _DEFAULT_RUNTIME_HOOKS_DIR = Path("./hooks")
-_RUNTIME_HOOK_PHASE_DIRS = frozenset({"pre-start.d", "post-start.d", "stop.d"})
-_RUNTIME_HOOK_SUFFIXES = frozenset({".sh", ".py"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,18 +200,47 @@ def _resolve_runtime_hooks_plan(
     source = Path(hooks_dir) if explicit else _DEFAULT_RUNTIME_HOOKS_DIR
     candidate = source if source.is_absolute() else base / source
 
-    if not explicit and not candidate.exists() and not candidate.is_symlink():
-        return RuntimeHooksPlan(has_hooks=False, source_dir=None)
+    if not explicit:
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            return RuntimeHooksPlan(has_hooks=False, source_dir=None)
+        except OSError as error:
+            raise HostRenderServiceError(
+                (
+                    Diagnostic(
+                        path=("hooks_dir",),
+                        code="runtime_hooks.source_inspect_failed",
+                        message=(
+                            f"runtime hook source could not be inspected: {error}"
+                        ),
+                    ),
+                )
+            ) from error
 
     diagnostics = _validate_runtime_hooks_source(candidate)
     if diagnostics:
         raise HostRenderServiceError(tuple(diagnostics))
-    return RuntimeHooksPlan(has_hooks=True, source_dir=candidate.resolve(strict=True))
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise HostRenderServiceError(
+            (
+                Diagnostic(
+                    path=("hooks_dir",),
+                    code="runtime_hooks.source_resolve_failed",
+                    message=f"runtime hook source could not be resolved: {error}",
+                ),
+            )
+        ) from error
+    return RuntimeHooksPlan(has_hooks=True, source_dir=resolved)
 
 
 def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
-    if source.is_symlink() or not source.exists():
+    try:
+        source_mode = source.lstat().st_mode
+    except FileNotFoundError:
         diagnostics.append(
             Diagnostic(
                 path=("hooks_dir",),
@@ -216,7 +249,16 @@ def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
             )
         )
         return diagnostics
-    if not source.is_dir():
+    except OSError as error:
+        diagnostics.append(
+            Diagnostic(
+                path=("hooks_dir",),
+                code="runtime_hooks.source_inspect_failed",
+                message=f"runtime hook source could not be inspected: {error}",
+            )
+        )
+        return diagnostics
+    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
         diagnostics.append(
             Diagnostic(
                 path=("hooks_dir",),
@@ -226,9 +268,24 @@ def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
         )
         return diagnostics
 
-    for child in sorted(source.iterdir(), key=lambda item: item.name):
+    try:
+        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
+    except OSError as error:
+        diagnostics.append(
+            Diagnostic(
+                path=("hooks_dir",),
+                code="runtime_hooks.source_read_failed",
+                message=f"runtime hook source could not be read: {error}",
+            )
+        )
+        return diagnostics
+
+    for child in children:
         child_path = ("hooks_dir", child.name)
-        if child.is_symlink():
+        child_mode = _runtime_hook_path_mode(child, child_path, diagnostics)
+        if child_mode is None:
+            continue
+        if stat.S_ISLNK(child_mode):
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
@@ -237,7 +294,7 @@ def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
                 )
             )
             continue
-        if not child.is_dir() and not child.is_file():
+        if not stat.S_ISDIR(child_mode) and not stat.S_ISREG(child_mode):
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
@@ -246,19 +303,19 @@ def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
                 )
             )
             continue
-        if child.name not in _RUNTIME_HOOK_PHASE_DIRS:
+        if child.name not in RUNTIME_HOOK_PHASE_DIRECTORY_NAMES:
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
                     code="runtime_hooks.unknown_top_level",
                     message=(
-                        "runtime hook source may only contain pre-start.d, "
-                        "post-start.d, and stop.d directories"
+                        "runtime hook source may only contain "
+                        f"{runtime_hook_phase_directory_list()} directories"
                     ),
                 )
             )
             continue
-        if not child.is_dir():
+        if not stat.S_ISDIR(child_mode):
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
@@ -276,9 +333,23 @@ def _validate_runtime_hook_phase(
     path: tuple[str, ...],
     diagnostics: list[Diagnostic],
 ) -> None:
-    for child in sorted(phase.iterdir(), key=lambda item: item.name):
+    try:
+        children = tuple(sorted(phase.iterdir(), key=lambda item: item.name))
+    except OSError as error:
+        diagnostics.append(
+            Diagnostic(
+                path=path,
+                code="runtime_hooks.phase_read_failed",
+                message=f"runtime hook phase directory could not be read: {error}",
+            )
+        )
+        return
+    for child in children:
         child_path = (*path, child.name)
-        if child.is_symlink():
+        child_mode = _runtime_hook_path_mode(child, child_path, diagnostics)
+        if child_mode is None:
+            continue
+        if stat.S_ISLNK(child_mode):
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
@@ -287,7 +358,7 @@ def _validate_runtime_hook_phase(
                 )
             )
             continue
-        if child.is_dir():
+        if stat.S_ISDIR(child_mode):
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
@@ -296,7 +367,7 @@ def _validate_runtime_hook_phase(
                 )
             )
             continue
-        if not child.is_file():
+        if not stat.S_ISREG(child_mode):
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
@@ -305,7 +376,7 @@ def _validate_runtime_hook_phase(
                 )
             )
             continue
-        if child.suffix not in _RUNTIME_HOOK_SUFFIXES:
+        if child.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
             diagnostics.append(
                 Diagnostic(
                     path=child_path,
@@ -313,6 +384,24 @@ def _validate_runtime_hook_phase(
                     message="runtime hook files must end in .sh or .py",
                 )
             )
+
+
+def _runtime_hook_path_mode(
+    path: Path,
+    diagnostic_path: tuple[str, ...],
+    diagnostics: list[Diagnostic],
+) -> int | None:
+    try:
+        return path.lstat().st_mode
+    except OSError as error:
+        diagnostics.append(
+            Diagnostic(
+                path=diagnostic_path,
+                code="runtime_hooks.inspect_failed",
+                message=f"runtime hook source entry could not be inspected: {error}",
+            )
+        )
+        return None
 
 
 def _load_existing_lockfile(output_dir: Path) -> Lockfile | None:

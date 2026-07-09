@@ -380,6 +380,8 @@ version = "latest"
     assert calls == [context]
 
 
+# Package index coverage stays here because it needs the rendered Dockerfile
+# layers, but Docker itself is still replaced by fake Buildx.
 def test_host_build_wires_package_indexes_before_fake_docker(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -480,6 +482,8 @@ version = "latest"
     assert calls == [(("demo:indexes",), "load", context, Path.cwd())]
 
 
+# This is the full-context Buildx failure retention check; narrower host build
+# failure cases should rely on this instead of duplicating minimal coverage.
 def test_host_build_failure_after_context_completion_keeps_full_context(
     cli_runner: CliRunner,
     tmp_path: Path,

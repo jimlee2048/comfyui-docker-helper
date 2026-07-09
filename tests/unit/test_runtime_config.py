@@ -623,8 +623,8 @@ unexpected = "value"
     ]
 
 
-# Runtime file merge tests preserve baked/mounted ordering and same-target
-# override behavior before the downloader plan consumes entries.
+# Runtime file config coverage preserves file-layer shape plus authored files.N
+# diagnostics before runtime_files turns entries into executable plans.
 def test_runtime_file_entries_are_accepted_and_recorded(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
@@ -682,6 +682,66 @@ filename = "model.bin"
 
     assert _identities(error.value) == [
         (("files", 0, "url"), "runtime_file.invalid_url")
+    ]
+
+
+def test_invalid_mounted_runtime_file_after_baked_reports_authored_index(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/baked.bin"
+dir = "models"
+filename = "baked.bin"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "ftp://example.com/mounted.bin"
+dir = "models"
+filename = "mounted.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+
+    assert _identities(error.value) == [
+        (("files", 0, "url"), "runtime_file.invalid_url")
+    ]
+
+
+def test_multiple_invalid_runtime_file_items_keep_authored_indexes(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/a.bin"
+dir = "/models"
+filename = "a.bin"
+
+[[files]]
+url = "https://example.com/b.bin"
+dir = "models"
+filename = "nested/b.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "dir"), "runtime_file.absolute_directory"),
+        (("files", 1, "filename"), "runtime_file.invalid_filename"),
     ]
 
 
@@ -786,10 +846,10 @@ unexpected = true
     ]
 
 
-def test_runtime_file_merge_appends_mounted_files_to_baked_files(
+def test_runtime_file_merge_preserves_current_baked_mounted_contract(
     tmp_path: Path,
 ) -> None:
-    baked = _write(
+    appended_baked = _write(
         tmp_path / "baked.toml",
         """
 [[files]]
@@ -798,7 +858,7 @@ dir = "models"
 filename = "baked.bin"
 """,
     )
-    mounted = _write(
+    appended_mounted = _write(
         tmp_path / "mounted.toml",
         """
 [[files]]
@@ -809,9 +869,12 @@ downloader = "httpx"
 """,
     )
 
-    result = load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+    appended = load_runtime_config(
+        baked_config_path=appended_baked,
+        mounted_config_path=appended_mounted,
+    )
 
-    assert result.files == (
+    assert appended.files == (
         {
             "url": "https://example.com/baked.bin",
             "dir": "models",
@@ -825,12 +888,8 @@ downloader = "httpx"
         },
     )
 
-
-def test_runtime_file_merge_same_key_mounted_values_override_baked(
-    tmp_path: Path,
-) -> None:
-    baked = _write(
-        tmp_path / "baked.toml",
+    override_baked = _write(
+        tmp_path / "override-baked.toml",
         """
 [[files]]
 url = "https://example.com/baked.bin"
@@ -840,8 +899,8 @@ overwrite = false
 downloader = "aria2"
 """,
     )
-    mounted = _write(
-        tmp_path / "mounted.toml",
+    override_mounted = _write(
+        tmp_path / "override-mounted.toml",
         """
 [[files]]
 url = "https://example.com/mounted.bin"
@@ -851,9 +910,12 @@ overwrite = true
 """,
     )
 
-    result = load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+    overridden = load_runtime_config(
+        baked_config_path=override_baked,
+        mounted_config_path=override_mounted,
+    )
 
-    assert result.files == (
+    assert overridden.files == (
         {
             "url": "https://example.com/mounted.bin",
             "dir": "models",
@@ -863,12 +925,8 @@ overwrite = true
         },
     )
 
-
-def test_runtime_file_merge_mounted_empty_files_resets_baked_files(
-    tmp_path: Path,
-) -> None:
-    baked = _write(
-        tmp_path / "baked.toml",
+    reset_baked = _write(
+        tmp_path / "reset-baked.toml",
         """
 [[files]]
 url = "https://example.com/baked.bin"
@@ -876,11 +934,14 @@ dir = "models"
 filename = "baked.bin"
 """,
     )
-    mounted = _write(tmp_path / "mounted.toml", "files = []\n")
+    reset_mounted = _write(tmp_path / "reset-mounted.toml", "files = []\n")
 
-    result = load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+    reset = load_runtime_config(
+        baked_config_path=reset_baked,
+        mounted_config_path=reset_mounted,
+    )
 
-    assert result.files == ()
+    assert reset.files == ()
 
 
 # Downloader validation keeps runtime-only backend tuning strict at load time.

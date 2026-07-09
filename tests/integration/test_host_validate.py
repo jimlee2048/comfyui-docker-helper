@@ -82,8 +82,6 @@ def test_validate_requires_at_least_one_file_option(cli_runner: CliRunner) -> No
     "file_args",
     [
         ["-f", "first.toml", "-f", "second.toml"],
-        ["--file", "first.toml", "-f", "second.toml"],
-        ["-f", "first.toml", "--file", "second.toml"],
         ["--file", "first.toml", "--file", "second.toml"],
     ],
 )
@@ -128,16 +126,9 @@ def test_validate_accepts_repeated_file_options_in_order(
     assert calls == [([Path("first.toml"), Path("second.toml")], Path("scripts"))]
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["-f", "config.toml", "-o", "one", "-o", "two"],
-    ],
-)
 def test_render_rejects_repeated_singleton_options_before_loading(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
-    args: list[str],
 ) -> None:
     """Reject repeated singleton options before any filesystem reads."""
     called = False
@@ -151,7 +142,9 @@ def test_render_rejects_repeated_singleton_options_before_loading(
         fail_if_called,
     )
 
-    result = cli_runner.invoke(app, ["host", "render", *args])
+    result = cli_runner.invoke(
+        app, ["host", "render", "-f", "config.toml", "-o", "one", "-o", "two"]
+    )
 
     assert result.exit_code == 2
     assert "must be provided exactly once" in result.output
@@ -173,36 +166,6 @@ def test_valid_input_is_silent_and_writes_nothing(
     assert result.stderr == ""
     assert result.output == ""
     assert {item.name: item.read_bytes() for item in tmp_path.iterdir()} == before
-
-
-def test_valid_runtime_download_mode_input_warns_for_build_time_files(
-    cli_runner: CliRunner, tmp_path: Path
-) -> None:
-    """Runtime download-mode fields are valid host inputs for baked defaults."""
-    path = _write_config(
-        tmp_path,
-        MINIMAL_CONFIG
-        + """
-[cdh]
-default_download_mode = "async"
-
-[[files]]
-url = "https://example.com/model.bin"
-dir = "models"
-filename = "model.bin"
-download_mode = "async"
-""",
-    )
-
-    result = cli_runner.invoke(app, ["host", "validate", "-f", str(path)])
-
-    assert result.exit_code == 0
-    assert result.stdout == ""
-    assert "Configuration has warnings:" in result.stderr
-    assert "[cdh.default_download_mode]" in result.stderr
-    assert "[files.0.download_mode]" in result.stderr
-    assert "host_build.download_scheduling_ignored" in result.stderr
-    assert "downloads run synchronously" in result.stderr
 
 
 def test_validate_renders_explicit_continue_build_file_warning(
@@ -346,60 +309,59 @@ url = "https://example.com/node.git"
     assert "custom_nodes.0.registry" not in result.stderr
 
 
-def test_malformed_and_missing_files_use_same_rich_error_shape(
-    cli_runner: CliRunner, tmp_path: Path
+@pytest.mark.parametrize(
+    ("file_builder", "expected_code", "expected_text"),
+    [
+        (
+            lambda root: _write_config(root, "[compute_platform\n"),
+            "toml.invalid_document",
+            "[config]",
+        ),
+        (
+            lambda root: root / "missing.toml",
+            "config.file_not_found",
+            "[config]",
+        ),
+        (
+            lambda root: (
+                root / "config.toml",
+                (root / "config.toml").write_bytes(
+                    b'[compute_platform]\ntype = "cuda"\n\xff'
+                ),
+            )[0],
+            "toml.invalid_encoding",
+            "configuration file must be valid UTF-8",
+        ),
+        (
+            lambda root: (root / "base.toml", root / "missing-override.toml"),
+            "config.file_not_found",
+            "missing-override",
+        ),
+    ],
+)
+def test_cli_read_errors_render_rich_stderr(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    file_builder,
+    expected_code: str,
+    expected_text: str,
 ) -> None:
-    """Render TOML parse and file-read failures through the same error path."""
-    malformed = _write_config(tmp_path, "[compute_platform\n")
+    """Render read, parse, and decode failures through the same CLI shape."""
+    path_or_paths = file_builder(tmp_path)
+    if isinstance(path_or_paths, tuple):
+        base, failing = path_or_paths
+        base.write_text(MINIMAL_CONFIG, encoding="utf-8")
+        args = ["host", "validate", "-f", str(base), "-f", str(failing)]
+    else:
+        args = ["host", "validate", "-f", str(path_or_paths)]
 
-    malformed_result = cli_runner.invoke(
-        app, ["host", "validate", "-f", str(malformed)]
-    )
-    missing_result = cli_runner.invoke(
-        app, ["host", "validate", "-f", str(tmp_path / "missing.toml")]
-    )
-
-    assert malformed_result.exit_code == 1
-    assert "[config]" in malformed_result.stderr
-    assert "toml.invalid_document" in malformed_result.stderr
-    assert missing_result.exit_code == 1
-    assert "[config]" in missing_result.stderr
-    assert "config.file_not_found" in missing_result.stderr
-
-
-def test_multi_file_read_errors_show_the_failing_file_path(
-    cli_runner: CliRunner, tmp_path: Path
-) -> None:
-    """Identify the failing source file when layered config loading fails."""
-    base = _write_config(tmp_path)
-    missing = tmp_path / "missing-override.toml"
-
-    result = cli_runner.invoke(
-        app,
-        ["host", "validate", "-f", str(base), "-f", str(missing)],
-    )
-
-    assert result.exit_code == 1
-    assert "Configuration is invalid:" in result.stderr
-    assert missing.stem in result.stderr
-    assert "config.file_not_found" in result.stderr
-
-
-def test_invalid_utf8_uses_rich_stderr_and_nonzero_exit(
-    cli_runner: CliRunner, tmp_path: Path
-) -> None:
-    """Convert invalid UTF-8 into a safe user-facing config diagnostic."""
-    path = tmp_path / "config.toml"
-    path.write_bytes(b'[compute_platform]\ntype = "cuda"\n\xff')
-
-    result = cli_runner.invoke(app, ["host", "validate", "-f", str(path)])
+    result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 1
     assert result.stdout == ""
     assert "Configuration is invalid:" in result.stderr
-    assert "[config]" in result.stderr
-    assert "configuration file must be valid UTF-8" in result.stderr
-    assert "toml.invalid_encoding" in result.stderr
+    assert expected_code in result.stderr
+    assert expected_text in result.stderr
     assert "UnicodeDecodeError" not in result.stderr
 
 

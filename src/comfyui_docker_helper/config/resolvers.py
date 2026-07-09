@@ -151,7 +151,7 @@ class ComfyUIReleaseProvider(Protocol):
         """Return ComfyUI release candidates with their source commits."""
 
     def get_nightly_commit(self) -> str:
-        """Return the concrete commit currently selected by nightly."""
+        """Return the concrete commit selected by the nightly channel."""
 
 
 class ComfyCliPackageProvider(Protocol):

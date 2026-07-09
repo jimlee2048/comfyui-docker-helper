@@ -200,6 +200,8 @@ def _run_with_real_async_queue(
     )
 
 
+# Async queue acceptance coverage proves startup hooks and readiness are not
+# blocked by in-flight downloads, while completion still updates final state.
 def test_actual_async_queue_acceptance_does_not_block_startup_hooks_or_completion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -297,6 +299,8 @@ filename = "model.bin"
     assert _state_by_target(state_path)["models/model.bin"].status == "completed"
 
 
+# Restart coverage protects staging isolation: interrupted async downloads remain
+# resumable without exposing partial files at their final targets.
 def test_interrupted_async_download_restarts_without_exposing_partial_final(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -453,6 +457,8 @@ filename = "model.bin"
     assert completed_entries["models/model.bin"].status == "completed"
 
 
+# Scheduling and cleanup coverage keeps missing/stale state behavior and
+# cdh-owned staging-file garbage collection tied to the real async queue.
 def test_missing_and_stale_state_schedule_async_downloads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -602,6 +608,8 @@ filename = "model.bin"
     )
 
 
+# Exhausted-policy coverage pins async failure semantics: ComfyUI keeps running,
+# state records exhaustion, and continue/fail controls later queued files.
 @pytest.mark.parametrize(
     ("policy", "expected_calls", "expected_statuses"),
     [

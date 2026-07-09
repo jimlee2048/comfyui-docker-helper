@@ -45,6 +45,9 @@ def _identities(error: ConfigurationServiceError) -> list[tuple[tuple, str]]:
     return [(diagnostic.path, diagnostic.code) for diagnostic in error.diagnostics]
 
 
+# Service warning and runtime projection boundaries.
+
+
 def test_minimal_config_returns_complete_normalized_plan(
     write_config: Callable[[str], Path],
 ) -> None:
@@ -61,7 +64,7 @@ def test_minimal_config_returns_complete_normalized_plan(
 def test_result_bakes_host_async_download_mode_with_scheduling_warnings(
     write_config: Callable[[str], Path],
 ) -> None:
-    """Runtime download-mode fields are now part of baked runtime defaults."""
+    """Runtime download-mode fields are baked into runtime defaults."""
     document = (
         MINIMAL_CONFIG
         + """
@@ -297,6 +300,9 @@ def test_no_hooks_do_not_require_or_inspect_scripts_directory(
 
     assert plan.custom_nodes.has_hooks is False
     assert plan.custom_nodes.scripts_source_dir is None
+
+
+# Multi-file merge behavior.
 
 
 def test_multi_file_merge_applies_cli_order_and_keyed_overrides(
@@ -541,6 +547,9 @@ extra_args = ["--cpu", "{argument}"]
         (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
     ]
     assert argument.split("=", maxsplit=1)[0] in raised.value.diagnostics[0].message
+
+
+# Diagnostic normalization.
 
 
 @pytest.mark.parametrize(

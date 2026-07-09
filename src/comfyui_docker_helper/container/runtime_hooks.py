@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from comfyui_docker_helper.config import Diagnostic
+from comfyui_docker_helper.config.runtime_hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE,
+    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+)
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
@@ -25,13 +29,6 @@ MOUNTED_RUNTIME_HOOKS_PATH = Path("/etc/cdh/runtime/hooks")
 STOP_HOOK_TIMEOUT_SECONDS = 30.0
 STOP_HOOK_TERMINATION_GRACE_SECONDS = 2.0
 STOP_HOOK_POLL_INTERVAL_SECONDS = 0.1
-
-_KNOWN_PHASE_DIRS = {
-    "pre-start": "pre-start.d",
-    "post-start": "post-start.d",
-    "stop": "stop.d",
-}
-_SUPPORTED_SUFFIXES = frozenset({".sh", ".py"})
 
 type RuntimeHookPhase = Literal["pre-start", "post-start", "stop"]
 type RuntimeHookSource = Literal["baked", "mounted"]
@@ -154,7 +151,7 @@ def discover_runtime_hooks(
         if root_error is not None:
             diagnostics.append(root_error)
             continue
-        for phase, dirname in _KNOWN_PHASE_DIRS.items():
+        for phase, dirname in RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE.items():
             phase_dir = hook_root.root / dirname
             if not _root_exists(phase_dir):
                 continue
@@ -510,7 +507,7 @@ def _validate_hook_file(
             code="runtime_hook.special_file",
             message="runtime hook phase entries must be regular files",
         )
-    if path.suffix not in _SUPPORTED_SUFFIXES:
+    if path.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
         return Diagnostic(
             path=diagnostic_path,
             code="runtime_hook.unsupported_extension",
@@ -777,6 +774,8 @@ def _root_exists(path: Path) -> bool:
         path.lstat()
     except FileNotFoundError:
         return False
+    except OSError:
+        return True
     return True
 
 

@@ -32,6 +32,7 @@ VALID_SSH_KEY = (
 TRUNCATED_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 truncated"
 
 
+# Runtime projection bakes only runtime-owned fields and explicit user intent.
 def test_runtime_projection_writes_deterministic_startup_and_downloader_defaults(
     tmp_path,
 ) -> None:

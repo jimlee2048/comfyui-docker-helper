@@ -668,6 +668,8 @@ def test_reconcile_removed_config_entry_reports_absolute_stale_candidate(
     assert stale_digest not in reconciliation.state.downloads.entries
 
 
+# Runtime file async mode and merge behavior stays paired with runtime_config:
+# config validates user-authored files.N, this module preserves execution intent.
 def test_reconcile_runtime_file_plan_accepts_internal_async_items(
     tmp_path: Path,
 ) -> None:
@@ -893,6 +895,119 @@ def test_runtime_file_merge_ignores_full_runtime_keys_but_validates_files() -> N
 
     assert _identities(error.value) == [
         (("files", 0, "download_mode"), "schema.literal_error")
+    ]
+
+
+# Authored-index diagnostics must report the file position from the source layer
+# that contributed the surviving item, not the merged output position.
+def test_runtime_file_plan_invalid_mounted_after_baked_reports_authored_index(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/baked.bin",
+                            "dir": "models",
+                            "filename": "baked.bin",
+                        }
+                    ]
+                },
+                {
+                    "files": [
+                        {
+                            "url": "ftp://example.com/mounted.bin",
+                            "dir": "models",
+                            "filename": "mounted.bin",
+                        }
+                    ]
+                },
+            ],
+            comfyui_path=comfyui,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "url"), "runtime_file.invalid_url")
+    ]
+
+
+def test_runtime_file_plan_multiple_invalid_items_keep_authored_indexes(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/a.bin",
+                            "dir": "/models",
+                            "filename": "a.bin",
+                        },
+                        {
+                            "url": "https://example.com/b.bin",
+                            "dir": "models",
+                            "filename": "nested/b.bin",
+                        },
+                    ]
+                }
+            ],
+            comfyui_path=comfyui,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "dir"), "runtime_file.absolute_directory"),
+        (("files", 1, "filename"), "runtime_file.invalid_filename"),
+    ]
+
+
+def test_runtime_file_plan_override_target_error_uses_override_source_index(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    target = comfyui / "models" / "overridden.bin"
+    target.mkdir(parents=True)
+
+    with pytest.raises(RuntimeFilePlanError) as error:
+        build_runtime_file_plan(
+            [
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/first.bin",
+                            "dir": "models",
+                            "filename": "first.bin",
+                        },
+                        {
+                            "url": "https://example.com/baked.bin",
+                            "dir": "models",
+                            "filename": "overridden.bin",
+                        },
+                    ]
+                },
+                {
+                    "files": [
+                        {
+                            "url": "https://example.com/mounted.bin",
+                            "dir": "models",
+                            "filename": "overridden.bin",
+                        }
+                    ]
+                },
+            ],
+            comfyui_path=comfyui,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "target"), "runtime_file.non_regular_target")
     ]
 
 
@@ -2338,6 +2453,202 @@ def test_runtime_file_download_rejects_racing_final_when_overwrite_false(
     assert not backend.calls[0][0].target.exists()
 
 
+# Containment race tests cover symlink swaps between planning, staging mkdir,
+# backend completion, and final replacement; keep these with the positive case.
+def test_runtime_file_download_rejects_parent_symlink_inserted_after_planning(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    outside = tmp_path / "outside"
+    comfyui.mkdir()
+    outside.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    (comfyui / "models").symlink_to(outside, target_is_directory=True)
+    backend = FakeDownloadBackend(payload=b"new")
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.symlink_escape")
+    ]
+    assert backend.calls == []
+    assert not (outside / "a.bin").exists()
+    assert not (outside / ".cdh-staging").exists()
+
+
+def test_runtime_file_download_cleans_staging_parent_after_mkdir_symlink_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    outside = tmp_path / "outside"
+    comfyui.mkdir()
+    outside.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    staging_parent = _staging_target(plan.items[0]).parent
+    original_mkdir = Path.mkdir
+
+    def swap_parent_before_staging_mkdir(
+        self: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if self == staging_parent:
+            (comfyui / "models").symlink_to(outside, target_is_directory=True)
+        original_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", swap_parent_before_staging_mkdir)
+    backend = FakeDownloadBackend(payload=b"new")
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.symlink_escape")
+    ]
+    assert backend.calls == []
+    assert not (outside / "a.bin").exists()
+    assert not (outside / ".cdh-staging").exists()
+
+
+def test_runtime_file_download_rejects_parent_symlink_swap_before_final_replace(
+    tmp_path: Path,
+) -> None:
+    class SwappingBackend(FakeDownloadBackend):
+        def __init__(self, outside_parent: Path) -> None:
+            super().__init__(payload=b"new")
+            self._outside_parent = outside_parent
+
+        def download(
+            self,
+            item: FileDownloadItem,
+            settings: DownloaderSettings,
+        ) -> None:
+            self.calls.append((item, settings))
+            item.target.write_bytes(self.payload)
+            outside_staging = self._outside_parent / ".cdh-staging"
+            outside_staging.mkdir()
+            (outside_staging / item.target.name).write_bytes(self.payload)
+            item.target.unlink()
+            item.target.parent.rmdir()
+            item.target.parent.parent.rmdir()
+            item.target.parent.parent.symlink_to(
+                self._outside_parent,
+                target_is_directory=True,
+            )
+
+    comfyui = tmp_path / "ComfyUI"
+    outside = tmp_path / "outside"
+    comfyui.mkdir()
+    outside.mkdir()
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+    backend = SwappingBackend(outside)
+
+    with pytest.raises(RuntimeFileDownloadError) as error:
+        process_runtime_file_downloads(
+            plan,
+            config=RuntimeConfig.model_validate(
+                {"cdh": {"default_downloader": "httpx"}}
+            ),
+            backends={"httpx": backend},
+            log=lambda message: None,
+        )
+
+    assert [(item.path, item.code) for item in error.value.diagnostics] == [
+        (("files", 0, "target"), "runtime_file.symlink_escape")
+    ]
+    assert not (outside / "a.bin").exists()
+    assert not (comfyui / "models" / "a.bin").exists()
+
+
+def test_runtime_file_download_overwrites_existing_file_under_real_parent(
+    tmp_path: Path,
+) -> None:
+    comfyui = tmp_path / "ComfyUI"
+    final_target = comfyui / "models" / "checkpoints" / "a.bin"
+    final_target.parent.mkdir(parents=True)
+    final_target.write_bytes(b"old")
+    plan = build_runtime_file_plan(
+        [
+            {
+                "files": [
+                    {
+                        "url": "https://example.com/a.bin",
+                        "dir": "models/checkpoints",
+                        "filename": "a.bin",
+                        "overwrite": True,
+                    }
+                ]
+            }
+        ],
+        comfyui_path=comfyui,
+    )
+
+    process_runtime_file_downloads(
+        plan,
+        config=RuntimeConfig.model_validate({"cdh": {"default_downloader": "httpx"}}),
+        backends={"httpx": FakeDownloadBackend(payload=b"new")},
+        log=lambda message: None,
+    )
+
+    assert final_target.read_bytes() == b"new"
+
+
 def test_runtime_file_download_continue_policy_keeps_atomic_place_error_fatal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2485,7 +2796,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
     unreadable_mtime = staging_dir / f"cdh-{unreadable_digest}.part"
     symlink_artifact = staging_dir / f"cdh-{'d' * 64}.part"
     user_file = staging_dir / "user-file.txt"
-    old_v03 = staging_dir / "old.bin.cdh-download"
+    unrecognized_staging_artifact = staging_dir / "old.bin.cdh-download"
     outside = comfyui / "models" / f"cdh-{'e' * 64}.part"
     for path in (
         current_control,
@@ -2495,7 +2806,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
         fresh,
         unreadable_mtime,
         user_file,
-        old_v03,
+        unrecognized_staging_artifact,
         outside,
     ):
         path.write_bytes(b"keep-or-clean")
@@ -2510,7 +2821,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
         unreadable_mtime,
         symlink_artifact,
         user_file,
-        old_v03,
+        unrecognized_staging_artifact,
         outside,
     ):
         _touch_mtime(path, old_mtime)
@@ -2541,7 +2852,7 @@ def test_runtime_file_download_cleans_only_stale_fixed_pattern_artifacts(
     assert unreadable_mtime.name in {path.name for path in staging_dir.iterdir()}
     assert symlink_artifact.is_symlink()
     assert user_file.read_bytes() == b"keep-or-clean"
-    assert old_v03.read_bytes() == b"keep-or-clean"
+    assert unrecognized_staging_artifact.read_bytes() == b"keep-or-clean"
     assert outside.read_bytes() == b"keep-or-clean"
     assert (comfyui / "models" / "a.bin").read_bytes() == b"new"
 

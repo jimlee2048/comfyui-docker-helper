@@ -317,6 +317,8 @@ def test_root_artifacts_are_deterministic_across_repeated_renders(
     ) == first
 
 
+# Lock reuse tests keep normal, locked, and relative-output modes from
+# resolving sources when a compatible artifact lock already exists.
 def test_default_render_reuses_existing_lock_without_provider_calls(
     tmp_path: Path,
 ) -> None:
@@ -377,7 +379,7 @@ def test_locked_mode_reads_relative_output_lock_from_working_directory(
     assert (work / "context" / "config.lock.toml").is_file()
 
 
-# Check-mode tests compare the managed artifact set without mutating the
+# Render-check tests compare the managed artifact set without mutating the
 # rendered context, including stale files under current managed trees.
 def test_check_mode_is_non_mutating_and_detects_current_root_artifacts(
     tmp_path: Path,
@@ -577,7 +579,7 @@ def test_check_mode_reports_stale_scripts_tree_when_hooks_are_removed(
     ] == [("scripts",)]
 
 
-# Runtime hook render/check coverage protects source validation, copied hook
+# Runtime hook source-safety coverage protects validation diagnostics, copied hook
 # artifacts, and drift detection when hooks are added, removed, or changed.
 def test_omitted_runtime_hooks_dir_is_copied_when_default_exists(
     tmp_path: Path,
@@ -624,6 +626,55 @@ def test_runtime_hooks_reject_unknown_top_level_entries(tmp_path: Path) -> None:
     assert locations_and_codes(error.value) == [
         (("hooks_dir", "README.md"), "runtime_hooks.unknown_top_level")
     ]
+
+
+def test_runtime_hooks_wrap_source_traversal_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host hook preflight reports traversal failures as diagnostics."""
+    hooks = tmp_path / "runtime-hooks"
+    hooks.mkdir()
+    original_iterdir = Path.iterdir
+
+    def fail_iterdir(self: Path):
+        if self == hooks:
+            raise PermissionError("list denied")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fail_iterdir)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path, hooks_dir=hooks)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir",), "runtime_hooks.source_read_failed")
+    ]
+    assert "list denied" in error.value.diagnostics[0].message
+
+
+def test_omitted_runtime_hooks_wrap_default_source_lstat_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default hook auto-detection reports probe failures as diagnostics."""
+    hooks = tmp_path / "hooks"
+    original_lstat = Path.lstat
+
+    def fail_default_hooks_lstat(self: Path):
+        if self == hooks:
+            raise PermissionError("stat denied")
+        return original_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", fail_default_hooks_lstat)
+
+    with pytest.raises(HostRenderServiceError) as error:
+        render_context(tmp_path)
+
+    assert locations_and_codes(error.value) == [
+        (("hooks_dir",), "runtime_hooks.source_inspect_failed")
+    ]
+    assert "stat denied" in error.value.diagnostics[0].message
 
 
 def test_runtime_hooks_reject_phase_name_as_file(tmp_path: Path) -> None:

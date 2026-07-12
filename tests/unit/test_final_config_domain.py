@@ -59,7 +59,6 @@ def test_domain_and_semantic_passes_are_isolated_and_facade_orders_them() -> Non
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [
-        ("python", "uv_tools", ["ruff==0.12.0"]),
         ("cdh", "shutdown_timeout", 8),
     ],
 )
@@ -76,6 +75,34 @@ def test_deferred_root_block_fields_are_not_in_active_schema(
 
     assert raised.value.diagnostics[0].path == (section, field)
     assert raised.value.diagnostics[0].code == "schema.extra_forbidden"
+
+
+def test_uv_tools_are_active_strict_isolated_requirements() -> None:
+    document = _document()
+    document["python"] = {"uv_tools": ["Ruff==0.15.18", "mypy[dmypy]>=1,<2"]}
+
+    config = validate_final_config_structure(document)
+
+    assert config.python.uv_tools == ["Ruff==0.15.18", "mypy[dmypy]>=1,<2"]
+    assert validate_final_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    "uv_tools",
+    [
+        ["ruff", "Ruff==0.15.18"],
+        ["comfyui-docker-helper==0.5.0"],
+        ["demo @ https://example.com/demo.whl"],
+    ],
+)
+def test_uv_tools_reject_duplicate_reserved_or_direct_sources(
+    uv_tools: list[str],
+) -> None:
+    document = _document()
+    document["python"] = {"uv_tools": uv_tools}
+    config = validate_final_config_structure(document)
+
+    assert validate_final_config(config)
 
 
 def test_deferred_file_checksum_is_not_in_active_schema() -> None:
@@ -331,6 +358,17 @@ def test_package_ownership_is_normalized_across_groups() -> None:
         ("pytorch", "extra_packages", 0),
         ("pytorch", "extra_packages", 1),
     ]
+
+
+def test_package_ownership_is_scoped_to_isolated_environment() -> None:
+    document = _document()
+    document["python"] = {
+        "extra_packages": ["ruff==0.15.18"],
+        "uv_tools": ["Ruff==0.15.18"],
+    }
+    config = validate_final_config_structure(document)
+
+    assert validate_final_config(config) == ()
 
 
 @pytest.mark.parametrize(

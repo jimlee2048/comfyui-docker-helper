@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -54,6 +55,10 @@ from comfyui_docker_helper.config.value_validation import has_control_characters
 from comfyui_docker_helper.exact_ledger import (
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
+)
+from comfyui_docker_helper.release_artifacts import (
+    production_inventory,
+    production_requirements_digest,
 )
 
 BUILD_PLAN_SCHEMA_VERSION = 1
@@ -109,6 +114,77 @@ class ManagedPythonPlan(_PlanModel):
     uv_build_version: str
 
 
+class ExactDistributionPlan(_PlanModel):
+    name: str
+    version: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if canonicalize_name(value) != value:
+            raise ValueError("name must be one normalized distribution name")
+        return value
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        return _exact_distribution_version(value)
+
+
+class UvToolPlan(_PlanModel):
+    name: str
+    extras: tuple[str, ...]
+    version: str
+    environment: str
+
+    @model_validator(mode="after")
+    def _validate_identity(self) -> UvToolPlan:
+        if canonicalize_name(self.name) != self.name:
+            raise ValueError("uv tool name must be normalized")
+        _exact_distribution_version(self.version)
+        if self.environment != f"uv-tool:{self.name}":
+            raise ValueError("uv tool environment must match its distribution")
+        if tuple(sorted(set(self.extras))) != self.extras or any(
+            canonicalize_name(extra) != extra for extra in self.extras
+        ):
+            raise ValueError("uv tool extras must be sorted, unique, and normalized")
+        return self
+
+    @property
+    def requirement(self) -> str:
+        extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        return f"{self.name}{extras}=={self.version}"
+
+
+class ToolStorePlan(_PlanModel):
+    tool_dir: Literal["/opt/uv/tools"]
+    bin_dir: Literal["/opt/uv/bin"]
+    cdh_environment: Literal["/opt/uv/tools/comfyui-docker-helper"]
+    cdh_executable: Literal["/opt/uv/bin/cdh"]
+    requirements_digest: str
+    cdh_closure: tuple[ExactDistributionPlan, ...]
+    uv_tools: tuple[UvToolPlan, ...]
+
+    @model_validator(mode="after")
+    def _validate_unique_tools(self) -> ToolStorePlan:
+        names = [tool.name for tool in self.uv_tools]
+        if len(names) != len(set(names)):
+            raise ValueError("uv tools must have unique distribution owners")
+        closure = tuple((item.name, item.version) for item in self.cdh_closure)
+        if not closure or tuple(sorted(set(closure))) != closure:
+            raise ValueError("cdh closure must be non-empty, sorted, and unique")
+        if (
+            not self.requirements_digest.startswith("sha256:")
+            or len(self.requirements_digest) != 71
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.requirements_digest.removeprefix("sha256:")
+            )
+        ):
+            raise ValueError("requirements_digest must be one SHA-256 digest")
+        return self
+
+
 class ToolchainPhase(_PlanModel):
     platform: Literal["linux/amd64"]
     cuda_version: str
@@ -116,6 +192,7 @@ class ToolchainPhase(_PlanModel):
     cuda_image: ImagePlan
     uv_image: ImagePlan
     python: ManagedPythonPlan
+    tool_store: ToolStorePlan
 
 
 class PathsPlan(_PlanModel):
@@ -405,6 +482,10 @@ def construct_build_plan(
         used,
         package_channel=None,
     )
+    uv_tools = tuple(
+        _uv_tool(requirement, config.python.version, entries, used)
+        for requirement in config.python.uv_tools
+    )
     pytorch_requirements = [
         f"torch=={config.pytorch.version}",
         *config.pytorch.extra_packages,
@@ -485,6 +566,18 @@ def construct_build_plan(
                 python_entry.model_dump(
                     mode="python", exclude={"type", "request_digest"}
                 )
+            ),
+            tool_store=ToolStorePlan(
+                tool_dir="/opt/uv/tools",
+                bin_dir="/opt/uv/bin",
+                cdh_environment="/opt/uv/tools/comfyui-docker-helper",
+                cdh_executable="/opt/uv/bin/cdh",
+                requirements_digest=production_requirements_digest(),
+                cdh_closure=tuple(
+                    ExactDistributionPlan(name=name, version=version)
+                    for name, version in production_inventory(config.python.version)
+                ),
+                uv_tools=uv_tools,
             ),
         ),
         application=ApplicationPhase(
@@ -640,8 +733,51 @@ def _package_group(
     )
 
 
+def _uv_tool(
+    requirement: str,
+    python_version: str,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> UvToolPlan:
+    diagnostics = []
+    normalized = validate_direct_requirement(
+        requirement, ("python", "uv_tools"), diagnostics
+    )
+    if normalized is None or diagnostics:
+        raise ValueError("validated config contains an invalid uv tool requirement")
+    environment = f"uv-tool:{normalized.name}"
+    entry = _take(
+        entries,
+        used,
+        ("python-package", environment, normalized.name),
+        DirectPythonLockEntry,
+    )
+    if entry.extras != list(normalized.extras) or not _selector_accepts(
+        normalized.specifier, entry.version
+    ):
+        raise ValueError(f"canonical uv tool does not satisfy {normalized.name}")
+    return UvToolPlan(
+        name=entry.package,
+        extras=tuple(entry.extras),
+        version=entry.version,
+        environment=environment,
+    )
+
+
 def _selector_accepts(selector: str, version: str) -> bool:
     return not selector or SpecifierSet(selector).contains(version, prereleases=False)
+
+
+def _exact_distribution_version(value: str) -> str:
+    try:
+        version = Version(value)
+    except InvalidVersion as error:
+        raise ValueError(
+            "version must be one exact stable distribution version"
+        ) from error
+    if str(version) != value or version.is_prerelease or version.is_devrelease:
+        raise ValueError("version must be one exact stable distribution version")
+    return value
 
 
 def _custom_node(

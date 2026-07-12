@@ -46,6 +46,9 @@ uv_version = "0.11.28"
 index_url = "https://pypi.org/simple"
 # Extra Python packages installed into the final virtualenv after PyTorch.
 extra_packages = ["numpy"]
+# Standalone CLI distributions installed into isolated uv tool environments.
+# Direct URL, VCS, local, editable, marker, and raw uv argument forms are rejected.
+uv_tools = ["ruff==0.15.18"]
 
 [pytorch]
 # Required. Installs torch==version from the CUDA wheel index inferred from CUDA.

@@ -49,12 +49,13 @@ class FinalSystemConfig(FinalConfigModel):
 
 
 class FinalPythonConfig(FinalConfigModel):
-    """Managed Python and application-environment package requests."""
+    """Managed Python, application packages, and isolated CLI-tool requests."""
 
     version: str = DEFAULT_MANAGED_PYTHON_VERSION
     uv_version: str = UV_VERSION
     index_url: str = "https://pypi.org/simple"
     extra_packages: list[str] = Field(default_factory=list)
+    uv_tools: list[str] = Field(default_factory=list)
 
 
 class FinalPyTorchConfig(FinalConfigModel):

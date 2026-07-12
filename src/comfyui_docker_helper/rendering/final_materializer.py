@@ -23,6 +23,11 @@ from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_LOCK_PREFIX,
 )
 from comfyui_docker_helper.container.phase_inputs import phase_document
+from comfyui_docker_helper.release_artifacts import (
+    PRODUCTION_REQUIREMENTS,
+    release_source_digest,
+    release_source_files,
+)
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
@@ -104,6 +109,7 @@ def materialize_build_plan(
             _runtime_config_bytes(plan),
             root=target,
         )
+        _materialize_cdh_release(plan, target)
         _write(
             target / "Dockerfile",
             render_build_plan_dockerfile(plan).encode("utf-8"),
@@ -116,6 +122,37 @@ def materialize_build_plan(
             else:
                 child.unlink()
         raise
+
+
+def _materialize_cdh_release(plan: BuildPlan, target: Path) -> None:
+    if release_source_digest() != plan.toolchain.python.cdh_source_digest:
+        raise FinalMaterializationError("cdh source does not match BuildPlan")
+    for item in release_source_files():
+        _write(
+            target / "cdh" / item.relative_path,
+            item.source_path.read_bytes(),
+            root=target,
+        )
+    requirements = PRODUCTION_REQUIREMENTS.read_bytes()
+    observed = f"sha256:{hashlib.sha256(requirements).hexdigest()}"
+    if observed != plan.toolchain.tool_store.requirements_digest:
+        raise FinalMaterializationError(
+            "cdh production closure does not match BuildPlan"
+        )
+    _write(
+        target / "cdh-production-requirements.txt",
+        requirements,
+        root=target,
+    )
+    inventory = [
+        f"{item.name}=={item.version}" for item in plan.toolchain.tool_store.cdh_closure
+    ]
+    inventory.append(f"comfyui-docker-helper=={plan.toolchain.python.cdh_version}")
+    _write(
+        target / "cdh-production-inventory.txt",
+        ("\n".join(sorted(inventory)) + "\n").encode("utf-8"),
+        root=target,
+    )
 
 
 def _expected_hooks(

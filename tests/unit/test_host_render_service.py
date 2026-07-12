@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -65,8 +66,9 @@ DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT = "1" * 40
 
 
-def _config() -> str:
-    return """
+def _config(*, with_uv_tool: bool = False) -> str:
+    uv_tools = 'uv_tools = ["ruff>=0.15,<0.16"]' if with_uv_tool else ""
+    return f"""
 [compute_platform]
 type = "cuda"
 [compute_platform.cuda]
@@ -74,6 +76,7 @@ version = "13.0.3"
 [python]
 version = "3.13.14"
 uv_version = "0.11.28"
+{uv_tools}
 [pytorch]
 version = "2.12.1"
 extra_packages = ["torchvision==0.27.1"]
@@ -173,6 +176,7 @@ class FakeAcquirer:
             versions = {
                 "torch": "2.12.1+cu130",
                 "torchvision": "0.27.1+cu130",
+                "ruff": "0.15.18",
             }
             entries = tuple(
                 DirectPythonLockEntry(
@@ -188,6 +192,38 @@ class FakeAcquirer:
         else:  # pragma: no cover
             raise AssertionError(request)
         return AcquiredCanonicalEntries(entries, True)
+
+
+def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config(with_uv_tool=True))
+    output = tmp_path / "output"
+    fake = FakeAcquirer()
+
+    _prepare(config, output, fake)
+
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    tool_entry = next(
+        entry
+        for entry in lock.entries
+        if isinstance(entry, DirectPythonLockEntry)
+        and entry.environment == "uv-tool:ruff"
+    )
+    plan = json.loads((output / "build-plan.json").read_bytes())
+    assert tool_entry.version == "0.15.18"
+    assert plan["toolchain"]["tool_store"]["uv_tools"] == [
+        {
+            "environment": "uv-tool:ruff",
+            "extras": [],
+            "name": "ruff",
+            "version": "0.15.18",
+        }
+    ]
+    dockerfile = (output / "Dockerfile").read_text()
+    assert "uv --no-config tool install" in dockerfile
+    assert "ruff==0.15.18" in dockerfile
 
 
 @dataclass

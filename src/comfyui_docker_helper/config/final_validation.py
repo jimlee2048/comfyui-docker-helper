@@ -304,6 +304,13 @@ def _validate_python_domain(
     _collect_requirements(
         "python", config.python.extra_packages, requirements, diagnostics
     )
+    _collect_requirements(
+        "python",
+        config.python.uv_tools,
+        requirements,
+        diagnostics,
+        field="uv_tools",
+    )
 
 
 def _validate_pytorch_domain(
@@ -360,9 +367,11 @@ def _collect_requirements(
     values: list[str],
     requirements: list[NormalizedRequirement],
     diagnostics: list[Diagnostic],
+    *,
+    field: str = "extra_packages",
 ) -> None:
     for index, value in enumerate(values):
-        path: DiagnosticPath = (group, "extra_packages", index)
+        path: DiagnosticPath = (group, field, index)
         normalized = validate_direct_requirement(value, path, diagnostics)
         if normalized is not None:
             requirements.append(normalized)
@@ -1052,8 +1061,19 @@ def _package_owner_diagnostics(
     requirements: tuple[NormalizedRequirement, ...],
     diagnostics: list[Diagnostic],
 ) -> None:
-    owners: dict[str, DiagnosticPath] = {"torch": ("pytorch", "version")}
+    application_owners: dict[str, DiagnosticPath] = {
+        "torch": ("pytorch", "version"),
+        "comfyui-docker-helper": ("cdh",),
+    }
+    tool_owners: dict[str, DiagnosticPath] = {
+        "comfyui-docker-helper": ("cdh",),
+    }
     for requirement in requirements:
+        owners = (
+            tool_owners
+            if requirement.path[:2] == ("python", "uv_tools")
+            else application_owners
+        )
         existing = owners.get(requirement.name)
         if existing is not None:
             diagnostics.append(

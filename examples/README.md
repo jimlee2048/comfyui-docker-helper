@@ -38,3 +38,9 @@ context, `--locked` for zero-provider/zero-write verification, and
 The public PyTorch version is a selector. Its CUDA-derived channel, index, and
 target enter the resolver request identity, while the canonical lock and
 BuildPlan retain complete resolved versions such as `2.12.1+cu130`.
+
+`full.toml` also demonstrates `[python].uv_tools`. Each entry is resolved and
+locked as an isolated direct package, then installed under `/opt/uv/tools` with
+executables linked under `/opt/uv/bin`. The application interpreter and its
+`pip` commands remain under `/opt/venv`; cdh is the first isolated tool and
+executable collisions are fatal.

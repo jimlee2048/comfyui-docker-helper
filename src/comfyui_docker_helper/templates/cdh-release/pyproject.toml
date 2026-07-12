@@ -1,0 +1,62 @@
+[project]
+name = "comfyui-docker-helper"
+version = "0.5.0"
+description = "Build customized ComfyUI Docker images from declarative configuration"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<3.14"
+authors = [
+    { name = "jimlee2048" },
+]
+maintainers = [
+    { name = "jimlee2048" },
+]
+keywords = [
+    "comfyui",
+    "docker",
+    "docker-buildx",
+    "buildkit",
+    "cli",
+    "developer-tools",
+    "container-images",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "aria2p",
+    "httpx",
+    "jinja2",
+    "packaging>=26.2",
+    "pydantic>=2,<3",
+    "rich",
+    "tomli-w",
+    "typer",
+    "uv==0.11.28",
+]
+
+[project.scripts]
+cdh = "comfyui_docker_helper.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/jimlee2048/comfyui-docker-helper"
+Repository = "https://github.com/jimlee2048/comfyui-docker-helper"
+Issues = "https://github.com/jimlee2048/comfyui-docker-helper/issues"
+
+[build-system]
+requires = ["uv_build==0.11.28"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "comfyui_docker_helper"

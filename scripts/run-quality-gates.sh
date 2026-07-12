@@ -45,3 +45,29 @@ uv --no-config pip install \
     --no-deps \
     "$wheel_path"
 "$artifact_dir/venv/bin/cdh" --help >/dev/null
+
+projection_dir="$artifact_dir/projected-source"
+mkdir -p "$projection_dir"
+"$artifact_dir/venv/bin/python" - "$projection_dir" <<'PY'
+from pathlib import Path
+import sys
+
+from comfyui_docker_helper.release_artifacts import release_source_files
+
+target = Path(sys.argv[1])
+for item in release_source_files():
+    output = target / item.relative_path
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(item.source_path.read_bytes())
+PY
+uv --no-config build \
+    --wheel \
+    --python "$artifact_dir/venv/bin/python" \
+    --out-dir "$artifact_dir/projected-dist" \
+    "$projection_dir"
+projected_wheel="$(find "$artifact_dir/projected-dist" -maxdepth 1 -type f -name '*.whl' -print -quit)"
+if [[ -z "$projected_wheel" ]]; then
+    echo "projected source did not produce a wheel" >&2
+    exit 1
+fi
+cmp --silent "$wheel_path" "$projected_wheel"

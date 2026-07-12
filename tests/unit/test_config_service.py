@@ -64,7 +64,6 @@ def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     ("section", "line", "path"),
     [
-        ("python", 'uv_tools = ["ruff"]', ("python", "uv_tools")),
         ("cdh", "shutdown_timeout = 8", ("cdh", "shutdown_timeout")),
     ],
 )
@@ -81,6 +80,13 @@ def test_deferred_public_fields_remain_forbidden(
         load_validate_config(config)
 
     assert raised.value.diagnostics[0].path == path
+
+
+def test_public_service_accepts_active_uv_tools(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config() + '\n[python]\nuv_tools = ["ruff>=0.15,<0.16"]\n')
+
+    assert load_validate_config(config).python.uv_tools == ["ruff>=0.15,<0.16"]
 
 
 def test_httpx_retries_remains_public_and_consumed(tmp_path: Path) -> None:

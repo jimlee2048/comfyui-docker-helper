@@ -45,8 +45,9 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
         f"FROM --platform=linux/amd64 {plan.toolchain.cuda_image.reference}\n"
         in rendered
     )
+    assert "COPY --from=uv /uv /uvx /usr/local/bin/" in rendered
     assert "ARG " not in rendered
-    assert "${" not in rendered
+    assert "${PATH}" in rendered
     assert rendered == render_build_plan_dockerfile(plan)
 
 
@@ -62,6 +63,23 @@ def test_renderer_quotes_container_paths_without_host_projection() -> None:
 
     assert 'ENV WORKSPACE="/workspace data"' in rendered
     assert 'WORKDIR "/workspace data"' in rendered
+
+
+def test_renderer_installs_cdh_first_and_never_forces_tool_collisions() -> None:
+    plan = construct_build_plan(
+        final_config(with_uv_tool=True), accepted_resolution(with_uv_tool=True)
+    )
+
+    rendered = render_build_plan_dockerfile(plan)
+
+    cdh_install = rendered.index("/opt/cdh/wheel/*.whl")
+    tool_install = rendered.index("ruff==0.15.18")
+    assert cdh_install < tool_install
+    assert "--force" not in rendered
+    assert 'UV_TOOL_DIR="/opt/uv/tools"' in rendered
+    assert 'UV_TOOL_BIN_DIR="/opt/uv/bin"' in rendered
+    assert 'ENV PATH="/opt/uv/bin:/opt/venv/bin:$' + '{PATH}"' in rendered
+    assert plan.runtime.launch_command[0] == "/opt/venv/bin/python"
 
 
 def test_materializer_writes_deterministic_plan_phases_and_verified_input(
@@ -103,6 +121,11 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     )
     assert runtime.config.comfyui.port == 8188
     assert _tree(first) == _tree(second)
+    tree = _tree(first)
+    assert "cdh/pyproject.toml" in tree
+    assert "cdh/src/comfyui_docker_helper/cli.py" in tree
+    assert "cdh-production-requirements.txt" in tree
+    assert "cdh-production-inventory.txt" in tree
     assert not (first / "config.toml").exists()
     assert not (first / "config.lock.toml").exists()
     assert str(source).encode() not in (first / "build-plan.json").read_bytes()

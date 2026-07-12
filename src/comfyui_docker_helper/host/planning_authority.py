@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -70,8 +69,7 @@ from comfyui_docker_helper.host.identity_providers import (
     UvManagedPythonIdentityProvider,
 )
 from comfyui_docker_helper.host.uv_runner import locate_host_uv
-
-_SOURCE_ROOT = Path(__file__).parents[3]
+from comfyui_docker_helper.release_artifacts import release_source_digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +218,18 @@ def build_desired_planning_inputs(
                 members=python_members,
             )
         )
+    for member in _members(domains, "python", field="uv_tools"):
+        requests.append(
+            DirectPythonRequestIdentity(
+                type="python-group",
+                environment=f"uv-tool:{member.package}",
+                group="uv-tool",
+                python_version=config.python.version,
+                platform=platform.value,
+                index_url=config.python.index_url,
+                members=[member],
+            )
+        )
     requests.append(
         PyTorchRequestIdentity(
             type="pytorch-group",
@@ -301,13 +311,16 @@ def managed_python_release_inputs() -> ManagedPythonReleaseInputs:
         setuptools_version=SETUPTOOLS_VERSION,
         wheel_version=WHEEL_VERSION,
         cdh_version=CDH_VERSION,
-        cdh_source_digest=_release_source_digest(),
+        cdh_source_digest=release_source_digest(),
         uv_build_version=UV_VERSION,
     )
 
 
 def _members(
-    domains: FinalConfigDomainResult, group: str
+    domains: FinalConfigDomainResult,
+    group: str,
+    *,
+    field: str = "extra_packages",
 ) -> list[DirectPythonRequestMember]:
     return [
         DirectPythonRequestMember(
@@ -316,22 +329,5 @@ def _members(
             selector=item.specifier,
         )
         for item in domains.package_requirements
-        if item.path[:2] == (group, "extra_packages")
+        if item.path[:2] == (group, field)
     ]
-
-
-def _release_source_digest() -> str:
-    digest = hashlib.sha256()
-    files = [
-        _SOURCE_ROOT / "pyproject.toml",
-        _SOURCE_ROOT / "uv.lock",
-        *sorted((_SOURCE_ROOT / "src/comfyui_docker_helper").rglob("*.py")),
-    ]
-    for path in files:
-        relative = path.relative_to(_SOURCE_ROOT).as_posix().encode("utf-8")
-        content = path.read_bytes()
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return f"sha256:{digest.hexdigest()}"

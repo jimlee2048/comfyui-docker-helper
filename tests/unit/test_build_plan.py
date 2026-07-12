@@ -35,6 +35,7 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY, UV_IMAGE_REPOSITORY
+from comfyui_docker_helper.release_artifacts import release_source_digest
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
@@ -47,6 +48,7 @@ def final_config(
     *,
     scripts_dir: Path | None = None,
     with_hook: bool = False,
+    with_uv_tool: bool = False,
 ) -> FinalConfig:
     registry_node: dict[str, object] = {
         "type": "registry",
@@ -68,6 +70,7 @@ def final_config(
                 "version": "3.13.14",
                 "uv_version": "0.11.28",
                 "extra_packages": ["NumPy>=2,<3"],
+                "uv_tools": ["Ruff>=0.15,<0.16"] if with_uv_tool else [],
             },
             "pytorch": {
                 "version": "2.12.1",
@@ -110,6 +113,7 @@ def final_config(
 def accepted_resolution(
     *,
     hook_digest: str | None = None,
+    with_uv_tool: bool = False,
     reverse: bool = False,
 ) -> AcceptedCanonicalLock:
     entries = [
@@ -148,7 +152,7 @@ def accepted_resolution(
             setuptools_version="83.0.0",
             wheel_version="0.47.0",
             cdh_version="0.5.0",
-            cdh_source_digest=DIGEST_C,
+            cdh_source_digest=release_source_digest(),
             uv_build_version="0.11.28",
         ),
         OfficialComfyUILockEntry(
@@ -210,6 +214,17 @@ def accepted_resolution(
                 digest=hook_digest,
             )
         )
+    if with_uv_tool:
+        entries.append(
+            DirectPythonLockEntry(
+                type="python-package",
+                request_digest=DIGEST_C,
+                package="ruff",
+                extras=[],
+                version="0.15.18",
+                environment="uv-tool:ruff",
+            )
+        )
     if reverse:
         entries.reverse()
     lock = CanonicalLock(schema_version=1, entries=entries)
@@ -254,6 +269,18 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     assert plan.files.files[0].target == (
         "/workspace/ComfyUI/models/checkpoints/model.safetensors"
     )
+
+
+def test_constructor_projects_isolated_uv_tool_exact_result() -> None:
+    plan = construct_build_plan(
+        final_config(with_uv_tool=True), accepted_resolution(with_uv_tool=True)
+    )
+
+    assert len(plan.toolchain.tool_store.uv_tools) == 1
+    tool = plan.toolchain.tool_store.uv_tools[0]
+    assert tool.environment == "uv-tool:ruff"
+    assert tool.requirement == "ruff==0.15.18"
+    assert plan.toolchain.tool_store.cdh_closure
 
 
 def test_plan_bytes_digest_and_lock_order_are_deterministic() -> None:
@@ -398,11 +425,13 @@ def test_unused_lock_identity_is_rejected() -> None:
         construct_build_plan(final_config(), changed)
 
 
-def test_deferred_fields_are_absent_while_httpx_retries_remains_consumed() -> None:
+def test_active_uv_tools_and_remaining_deferred_fields_are_unambiguous() -> None:
     plan = construct_build_plan(final_config(), accepted_resolution())
     document = dump_build_plan_json(plan)
 
-    for deferred in (b"uv_tools", b"checksum", b"shutdown_timeout", b"lifecycle"):
+    assert plan.toolchain.tool_store.uv_tools == ()
+    assert b"uv_tools" in document
+    for deferred in (b"checksum", b"shutdown_timeout", b"lifecycle"):
         assert deferred not in document
     assert plan.files.downloader.httpx.retries == 3
 

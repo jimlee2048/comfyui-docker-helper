@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import comfyui_docker_helper.container.ssh as ssh_module
 from comfyui_docker_helper.config import RuntimeConfig, RuntimeSystemSshConfig
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.ssh import (
@@ -113,6 +115,8 @@ class OwnershipRecorder:
     def __init__(self) -> None:
         self.chown_calls: list[tuple[Path, int, int]] = []
         self.chmod_calls: list[tuple[Path, int]] = []
+        self.fchown_calls: list[tuple[int, int]] = []
+        self.fchmod_calls: list[int] = []
 
     def chown(self, path: str | Path, uid: int, gid: int) -> None:
         self.chown_calls.append((Path(path), uid, gid))
@@ -120,6 +124,29 @@ class OwnershipRecorder:
     def chmod(self, path: str | Path, mode: int) -> None:
         self.chmod_calls.append((Path(path), mode))
         Path(path).chmod(mode)
+
+    def fchown(self, descriptor: int, uid: int, gid: int) -> None:
+        del descriptor
+        self.fchown_calls.append((uid, gid))
+
+    def fchmod(self, descriptor: int, mode: int) -> None:
+        self.fchmod_calls.append(mode)
+        os.fchmod(descriptor, mode)
+
+
+def _create_root_home(tmp_path: Path) -> Path:
+    root_home = tmp_path / "root"
+    root_home.mkdir(mode=0o700)
+    return root_home
+
+
+def _prepare_public_keys(root_home: Path) -> RootSshCredentialPreparationStatus:
+    return prepare_root_ssh_credentials(
+        RuntimeSystemSshConfig(enable=True, pub_keys=[VALID_SSH_KEY]),
+        root_home=root_home,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
 
 
 # Credential tests protect no-op paths, side effects, and secret redaction.
@@ -207,7 +234,7 @@ def test_public_keys_prepare_authorized_keys_permissions_and_ownership(
 ) -> None:
     runner = RecordingRunner()
     ownership = OwnershipRecorder()
-    root_home = tmp_path / "root"
+    root_home = _create_root_home(tmp_path)
 
     status = prepare_root_ssh_credentials(
         RuntimeSystemSshConfig(
@@ -218,6 +245,10 @@ def test_public_keys_prepare_authorized_keys_permissions_and_ownership(
         command_runner=runner,
         chown=ownership.chown,
         chmod=ownership.chmod,
+        fchown=ownership.fchown,
+        fchmod=ownership.fchmod,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
     )
 
     ssh_dir = root_home / ".ssh"
@@ -232,13 +263,13 @@ def test_public_keys_prepare_authorized_keys_permissions_and_ownership(
     assert stat.S_IMODE(ssh_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(authorized_keys.stat().st_mode) == 0o600
     assert ownership.chown_calls == [
-        (ssh_dir, 0, 0),
-        (authorized_keys, 0, 0),
+        (ssh_dir, os.getuid(), os.getgid()),
     ]
     assert ownership.chmod_calls == [
         (ssh_dir, 0o700),
-        (authorized_keys, 0o600),
     ]
+    assert ownership.fchown_calls == [(os.getuid(), os.getgid())]
+    assert ownership.fchmod_calls == [0o600]
     assert runner.calls == []
 
 
@@ -274,6 +305,7 @@ def test_runtime_config_with_password_and_keys_prepares_both_credentials(
 ) -> None:
     runner = RecordingRunner()
     ownership = OwnershipRecorder()
+    root_home = _create_root_home(tmp_path)
     config = RuntimeConfig.model_validate(
         {
             "system": {
@@ -288,10 +320,14 @@ def test_runtime_config_with_password_and_keys_prepares_both_credentials(
 
     status = prepare_root_ssh_credentials(
         config,
-        root_home=tmp_path / "root",
+        root_home=root_home,
         command_runner=runner,
         chown=ownership.chown,
         chmod=ownership.chmod,
+        fchown=ownership.fchown,
+        fchmod=ownership.fchmod,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
     )
 
     assert status.ssh_enabled is True
@@ -300,7 +336,7 @@ def test_runtime_config_with_password_and_keys_prepares_both_credentials(
     assert status.password_configured is True
     assert status.root_password_set is True
     assert status.root_unlocked is True
-    assert status.authorized_keys_path == tmp_path / "root" / ".ssh" / "authorized_keys"
+    assert status.authorized_keys_path == root_home / ".ssh" / "authorized_keys"
     assert [call.argv for call in runner.calls] == [
         ["chpasswd"],
         ["passwd", "-u", "root"],
@@ -374,6 +410,333 @@ def test_password_command_failure_does_not_leak_credential_material(
     assert runner.calls[0].input_data == b"root:top-secret-password\n"
 
 
+@pytest.mark.parametrize(
+    "state",
+    ["absent", "symlink", "dangling", "file", "fifo", "unsafe_mode"],
+)
+def test_root_home_rejects_unsafe_static_states_without_key_disclosure(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    root_home = tmp_path / "root"
+    if state == "symlink":
+        destination = tmp_path / "redirected-root"
+        destination.mkdir()
+        root_home.symlink_to(destination, target_is_directory=True)
+    elif state == "dangling":
+        root_home.symlink_to(tmp_path / "missing-root", target_is_directory=True)
+    elif state == "file":
+        root_home.write_text("unchanged", encoding="utf-8")
+    elif state == "fifo":
+        os.mkfifo(root_home)
+    elif state == "unsafe_mode":
+        root_home.mkdir()
+        root_home.chmod(0o777)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        _prepare_public_keys(root_home)
+
+    assert str(raised.value) == (
+        "root SSH home must be an existing root-owned directory with a safe mode"
+    )
+    assert VALID_SSH_KEY not in str(raised.value)
+
+
+def test_root_home_rejects_wrong_ownership_via_owner_seam(tmp_path: Path) -> None:
+    root_home = _create_root_home(tmp_path)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        prepare_root_ssh_credentials(
+            RuntimeSystemSshConfig(enable=True, pub_keys=[VALID_SSH_KEY]),
+            root_home=root_home,
+            owner_uid=os.getuid() + 1,
+            owner_gid=os.getgid(),
+        )
+
+    assert "root SSH home" in str(raised.value)
+    assert not (root_home / ".ssh").exists()
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["symlink", "dangling", "file", "fifo", "unsafe_mode"],
+)
+def test_ssh_directory_rejects_unsafe_static_states(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    if state == "symlink":
+        destination = tmp_path / "redirected-ssh"
+        destination.mkdir()
+        ssh_dir.symlink_to(destination, target_is_directory=True)
+    elif state == "dangling":
+        ssh_dir.symlink_to(tmp_path / "missing-ssh", target_is_directory=True)
+    elif state == "file":
+        ssh_dir.write_text("unchanged", encoding="utf-8")
+    elif state == "fifo":
+        os.mkfifo(ssh_dir)
+    else:
+        ssh_dir.mkdir(mode=0o700)
+        ssh_dir.chmod(0o755)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        _prepare_public_keys(root_home)
+
+    assert str(raised.value) == (
+        "root SSH directory must be a root-owned directory with mode 0700"
+    )
+    assert VALID_SSH_KEY not in str(raised.value)
+
+
+def test_ssh_directory_rejects_wrong_ownership_via_owner_seam(
+    tmp_path: Path,
+) -> None:
+    ssh_dir = _create_root_home(tmp_path) / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        ssh_module._ensure_root_ssh_directory(
+            ssh_dir,
+            chown=os.chown,
+            chmod=os.chmod,
+            owner_uid=os.getuid() + 1,
+            owner_gid=os.getgid(),
+        )
+
+    assert "root SSH directory" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["symlink", "dangling", "directory", "fifo", "unsafe_mode"],
+)
+def test_authorized_keys_rejects_unsafe_static_states_and_preserves_redirect(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    target = ssh_dir / "authorized_keys"
+    redirected = tmp_path / "redirected-keys"
+    redirected.write_text("victim\n", encoding="utf-8")
+    if state == "symlink":
+        target.symlink_to(redirected)
+    elif state == "dangling":
+        target.symlink_to(tmp_path / "missing-keys")
+    elif state == "directory":
+        target.mkdir()
+    elif state == "fifo":
+        os.mkfifo(target)
+    else:
+        target.write_text("old\n", encoding="utf-8")
+        target.chmod(0o644)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        _prepare_public_keys(root_home)
+
+    assert str(raised.value) == (
+        "root SSH authorized keys must be a root-owned regular file with mode 0600"
+    )
+    assert redirected.read_text(encoding="utf-8") == "victim\n"
+    assert VALID_SSH_KEY not in str(raised.value)
+
+
+def test_authorized_keys_rejects_wrong_ownership_via_owner_seam(
+    tmp_path: Path,
+) -> None:
+    target = _create_root_home(tmp_path) / "authorized_keys"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(0o600)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        ssh_module._validate_authorized_keys_target(
+            target,
+            owner_uid=os.getuid() + 1,
+            owner_gid=os.getgid(),
+        )
+
+    assert "root SSH authorized keys" in str(raised.value)
+
+
+def test_interrupted_temporary_write_preserves_old_target_and_cleans_owned_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    target = ssh_dir / "authorized_keys"
+    target.write_text("old key material\n", encoding="utf-8")
+    target.chmod(0o600)
+
+    def interrupt_fsync(descriptor: int) -> None:
+        del descriptor
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ssh_module.os, "fsync", interrupt_fsync)
+
+    with pytest.raises(KeyboardInterrupt):
+        _prepare_public_keys(root_home)
+
+    assert target.read_text(encoding="utf-8") == "old key material\n"
+    assert list(ssh_dir.glob(".authorized_keys.*.tmp")) == []
+
+
+def test_successful_write_atomically_replaces_existing_regular_target(
+    tmp_path: Path,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    target = ssh_dir / "authorized_keys"
+    target.write_text("old key material\n", encoding="utf-8")
+    target.chmod(0o600)
+    old_inode = target.stat().st_ino
+
+    _prepare_public_keys(root_home)
+
+    assert target.read_text(encoding="utf-8") == f"{VALID_SSH_KEY}\n"
+    assert target.stat().st_ino != old_inode
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert list(ssh_dir.glob(".authorized_keys.*.tmp")) == []
+
+
+def test_replace_failure_preserves_old_target_and_cleans_owned_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    target = ssh_dir / "authorized_keys"
+    target.write_text("old key material\n", encoding="utf-8")
+    target.chmod(0o600)
+
+    def fail_replace(source: Path, destination: Path) -> None:
+        del source, destination
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(ssh_module.os, "replace", fail_replace)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        _prepare_public_keys(root_home)
+
+    assert str(raised.value) == "failed to prepare root SSH authorized keys"
+    assert target.read_text(encoding="utf-8") == "old key material\n"
+    assert list(ssh_dir.glob(".authorized_keys.*.tmp")) == []
+
+
+def test_successful_write_fsyncs_regular_file_and_parent_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def record_fsync(descriptor: int) -> None:
+        metadata = os.fstat(descriptor)
+        if stat.S_ISREG(metadata.st_mode):
+            events.append("fsync:file")
+        else:
+            events.append(f"fsync:{Path(os.readlink(f'/proc/self/fd/{descriptor}'))}")
+        real_fsync(descriptor)
+
+    def record_replace(source: Path, destination: Path) -> None:
+        events.append("replace")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(ssh_module.os, "fsync", record_fsync)
+    monkeypatch.setattr(ssh_module.os, "replace", record_replace)
+
+    _prepare_public_keys(root_home)
+
+    assert events == [
+        "fsync:file",
+        "replace",
+        f"fsync:{ssh_dir}",
+        f"fsync:{root_home}",
+    ]
+
+
+def test_existing_ssh_directory_skips_root_home_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def record_fsync(descriptor: int) -> None:
+        metadata = os.fstat(descriptor)
+        if stat.S_ISREG(metadata.st_mode):
+            events.append("fsync:file")
+        else:
+            events.append(f"fsync:{Path(os.readlink(f'/proc/self/fd/{descriptor}'))}")
+        real_fsync(descriptor)
+
+    def record_replace(source: Path, destination: Path) -> None:
+        events.append("replace")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(ssh_module.os, "fsync", record_fsync)
+    monkeypatch.setattr(ssh_module.os, "replace", record_replace)
+
+    _prepare_public_keys(root_home)
+
+    assert events == ["fsync:file", "replace", f"fsync:{ssh_dir}"]
+
+
+def test_directory_fsync_failure_reports_durability_after_atomic_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    target = ssh_dir / "authorized_keys"
+    target.write_text("old key material\n", encoding="utf-8")
+    target.chmod(0o600)
+    old_inode = target.stat().st_ino
+    real_fsync = os.fsync
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("simulated directory fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(ssh_module.os, "fsync", fail_directory_fsync)
+
+    with pytest.raises(SshCredentialPreparationError) as raised:
+        _prepare_public_keys(root_home)
+
+    assert str(raised.value) == "failed to make root SSH authorized keys durable"
+    assert target.read_text(encoding="utf-8") == f"{VALID_SSH_KEY}\n"
+    assert target.stat().st_ino != old_inode
+    assert list(ssh_dir.glob(".authorized_keys.*.tmp")) == []
+
+
+def test_writer_leaves_unowned_similarly_named_entry_untouched(tmp_path: Path) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    unrelated = ssh_dir / ".authorized_keys.preexisting.tmp"
+    unrelated.write_text("unowned\n", encoding="utf-8")
+
+    _prepare_public_keys(root_home)
+
+    assert unrelated.read_text(encoding="utf-8") == "unowned\n"
+    assert list(ssh_dir.glob(".authorized_keys.*.tmp")) == [unrelated]
+
+
 # sshd argument tests lock down the effective auth mode passed to OpenSSH.
 def test_build_sshd_argv_enforces_effective_config_without_credentials() -> None:
     status = RootSshCredentialPreparationStatus(
@@ -442,7 +805,7 @@ def test_start_sshd_if_enabled_generates_host_keys_runtime_dir_and_foreground_ar
     command_runner = RecordingCommandRunner()
     process = FakeSshdProcess()
     process_starter = RecordingProcessStarter(process)
-    root_home = tmp_path / "root"
+    root_home = _create_root_home(tmp_path)
     runtime_dir = tmp_path / "run" / "sshd"
 
     result = start_sshd_if_enabled(
@@ -511,7 +874,7 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
     process_starter = RecordingProcessStarter(process)
     ownership = OwnershipRecorder()
     messages: list[str] = []
-    root_home = tmp_path / "root"
+    root_home = _create_root_home(tmp_path)
     runtime_dir = tmp_path / "run" / "sshd"
 
     result = start_sshd_if_enabled(
@@ -532,6 +895,10 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
         credential_command_runner=credential_runner,
         credential_chown=ownership.chown,
         credential_chmod=ownership.chmod,
+        credential_fchown=ownership.fchown,
+        credential_fchmod=ownership.fchmod,
+        credential_owner_uid=os.getuid(),
+        credential_owner_gid=os.getgid(),
         command_runner=command_runner,
         process_starter=process_starter,
         log=messages.append,
@@ -541,13 +908,13 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
     assert result is process
     assert authorized_keys.read_text(encoding="utf-8") == f"{VALID_SSH_KEY}\n"
     assert ownership.chown_calls == [
-        (root_home / ".ssh", 0, 0),
-        (authorized_keys, 0, 0),
+        (root_home / ".ssh", os.getuid(), os.getgid()),
     ]
     assert ownership.chmod_calls == [
         (root_home / ".ssh", 0o700),
-        (authorized_keys, 0o600),
     ]
+    assert ownership.fchown_calls == [(os.getuid(), os.getgid())]
+    assert ownership.fchmod_calls == [0o600]
     assert command_runner.calls == [
         PlainCommandCall(["/usr/bin/ssh-keygen", "-A"], "generate OpenSSH host keys")
     ]
@@ -589,7 +956,7 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
     process_starter = RecordingProcessStarter()
     ownership = OwnershipRecorder()
     password = "secret-password"
-    root_home = tmp_path / "root"
+    root_home = _create_root_home(tmp_path)
     runtime_dir = tmp_path / "run" / "sshd"
 
     with pytest.raises(SshdStartupError) as raised:
@@ -611,6 +978,10 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
             credential_command_runner=credential_runner,
             credential_chown=ownership.chown,
             credential_chmod=ownership.chmod,
+            credential_fchown=ownership.fchown,
+            credential_fchmod=ownership.fchmod,
+            credential_owner_uid=os.getuid(),
+            credential_owner_gid=os.getgid(),
             command_runner=command_runner,
             process_starter=process_starter,
             log=lambda message: None,

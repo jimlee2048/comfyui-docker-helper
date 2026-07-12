@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -229,6 +230,8 @@ class OwnershipRecorder:
     def __init__(self) -> None:
         self.chown_calls: list[tuple[Path, int, int]] = []
         self.chmod_calls: list[tuple[Path, int]] = []
+        self.fchown_calls: list[tuple[int, int]] = []
+        self.fchmod_calls: list[int] = []
 
     def chown(self, path: str | Path, uid: int, gid: int) -> None:
         self.chown_calls.append((Path(path), uid, gid))
@@ -237,6 +240,14 @@ class OwnershipRecorder:
         target = Path(path)
         self.chmod_calls.append((target, mode))
         target.chmod(mode)
+
+    def fchown(self, descriptor: int, uid: int, gid: int) -> None:
+        del descriptor
+        self.fchown_calls.append((uid, gid))
+
+    def fchmod(self, descriptor: int, mode: int) -> None:
+        self.fchmod_calls.append(mode)
+        os.fchmod(descriptor, mode)
 
 
 class EventStderr(StringIO):
@@ -480,6 +491,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
     process_starter = RecordingProcessStarter(process)
     ownership = OwnershipRecorder()
     root_home = tmp_path / "root"
+    root_home.mkdir(mode=0o700)
     runtime_dir = tmp_path / "run" / "sshd"
     events: list[str] = []
 
@@ -499,6 +511,10 @@ pub_keys = ["{VALID_SSH_KEY}"]
             credential_command_runner=credential_runner,
             credential_chown=ownership.chown,
             credential_chmod=ownership.chmod,
+            credential_fchown=ownership.fchown,
+            credential_fchmod=ownership.fchmod,
+            credential_owner_uid=os.getuid(),
+            credential_owner_gid=os.getgid(),
             command_runner=command_runner,
             process_starter=process_starter,
         )
@@ -532,13 +548,13 @@ pub_keys = ["{VALID_SSH_KEY}"]
     assert events == ["ssh-start", "spawn"]
     assert authorized_keys.read_text(encoding="utf-8") == f"{VALID_SSH_KEY}\n"
     assert ownership.chown_calls == [
-        (root_home / ".ssh", 0, 0),
-        (authorized_keys, 0, 0),
+        (root_home / ".ssh", os.getuid(), os.getgid()),
     ]
     assert ownership.chmod_calls == [
         (root_home / ".ssh", 0o700),
-        (authorized_keys, 0o600),
     ]
+    assert ownership.fchown_calls == [(os.getuid(), os.getgid())]
+    assert ownership.fchmod_calls == [0o600]
     assert credential_runner.calls == [
         SensitiveCommandCall(
             argv=["chpasswd"],

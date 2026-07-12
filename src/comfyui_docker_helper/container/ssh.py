@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +23,8 @@ type Chown = Callable[
     None,
 ]
 type Chmod = Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes], int], None]
+type Fchown = Callable[[int, int, int], None]
+type Fchmod = Callable[[int, int], None]
 
 
 class SshCredentialPreparationError(ApplicationError):
@@ -99,6 +103,10 @@ def start_sshd_if_enabled(
     credential_command_runner: SensitiveCommandRunner | None = None,
     credential_chown: Chown | None = None,
     credential_chmod: Chmod | None = None,
+    credential_fchown: Fchown | None = None,
+    credential_fchmod: Fchmod | None = None,
+    credential_owner_uid: int = _ROOT_UID,
+    credential_owner_gid: int = _ROOT_GID,
     command_runner: CommandRunner | None = None,
     process_starter: SshdProcessStarter | None = None,
 ) -> SshdProcess | None:
@@ -115,6 +123,10 @@ def start_sshd_if_enabled(
             command_runner=credential_command_runner,
             chown=credential_chown,
             chmod=credential_chmod,
+            fchown=credential_fchown,
+            fchmod=credential_fchmod,
+            owner_uid=credential_owner_uid,
+            owner_gid=credential_owner_gid,
         )
     except SshCredentialPreparationError as error:
         raise SshdStartupError(f"SSH credential preparation failed: {error}") from error
@@ -165,12 +177,18 @@ def prepare_root_ssh_credentials(
     command_runner: SensitiveCommandRunner | None = None,
     chown: Chown | None = None,
     chmod: Chmod | None = None,
+    fchown: Fchown | None = None,
+    fchmod: Fchmod | None = None,
+    owner_uid: int = _ROOT_UID,
+    owner_gid: int = _ROOT_GID,
 ) -> RootSshCredentialPreparationStatus:
     """Prepare root SSH credentials without starting sshd."""
     ssh = _coerce_ssh_config(config)
     runner = _run_sensitive_command if command_runner is None else command_runner
     chown_func = os.chown if chown is None else chown
     chmod_func = os.chmod if chmod is None else chmod
+    fchown_func = os.fchown if fchown is None else fchown
+    fchmod_func = os.fchmod if fchmod is None else fchmod
 
     if not ssh.enable:
         return RootSshCredentialPreparationStatus(
@@ -189,6 +207,10 @@ def prepare_root_ssh_credentials(
             root_home=root_home,
             chown=chown_func,
             chmod=chmod_func,
+            fchown=fchown_func,
+            fchmod=fchmod_func,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
         )
 
     root_password_set = False
@@ -306,24 +328,165 @@ def _write_authorized_keys(
     root_home: Path,
     chown: Chown,
     chmod: Chmod,
+    fchown: Fchown,
+    fchmod: Fchmod,
+    owner_uid: int,
+    owner_gid: int,
 ) -> Path:
     ssh_dir = root_home / ".ssh"
     authorized_keys = ssh_dir / "authorized_keys"
     try:
-        ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        chown(ssh_dir, _ROOT_UID, _ROOT_GID)
-        chmod(ssh_dir, 0o700)
-        authorized_keys.write_text(
-            "".join(f"{key}\n" for key in public_keys),
-            encoding="utf-8",
+        _validate_root_home(root_home, owner_uid=owner_uid, owner_gid=owner_gid)
+        ssh_directory_created = _ensure_root_ssh_directory(
+            ssh_dir,
+            chown=chown,
+            chmod=chmod,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
         )
-        chown(authorized_keys, _ROOT_UID, _ROOT_GID)
-        chmod(authorized_keys, 0o600)
+        _validate_authorized_keys_target(
+            authorized_keys,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
+        _atomic_replace_authorized_keys(
+            authorized_keys,
+            "".join(f"{key}\n" for key in public_keys).encode(),
+            fchown=fchown,
+            fchmod=fchmod,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+            sync_root_home=ssh_directory_created,
+        )
+    except SshCredentialPreparationError:
+        raise
     except OSError as error:
         raise SshCredentialPreparationError(
             "failed to prepare root SSH authorized keys"
         ) from error
     return authorized_keys
+
+
+def _validate_root_home(path: Path, *, owner_uid: int, owner_gid: int) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as error:
+        raise SshCredentialPreparationError(
+            "root SSH home must be an existing root-owned directory with a safe mode"
+        ) from error
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != owner_uid
+        or metadata.st_gid != owner_gid
+        or mode & 0o022
+    ):
+        raise SshCredentialPreparationError(
+            "root SSH home must be an existing root-owned directory with a safe mode"
+        )
+
+
+def _ensure_root_ssh_directory(
+    path: Path,
+    *,
+    chown: Chown,
+    chmod: Chmod,
+    owner_uid: int,
+    owner_gid: int,
+) -> bool:
+    created = False
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        path.mkdir(mode=0o700)
+        created = True
+        chown(path, owner_uid, owner_gid)
+        chmod(path, 0o700)
+        metadata = path.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != owner_uid
+        or metadata.st_gid != owner_gid
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise SshCredentialPreparationError(
+            "root SSH directory must be a root-owned directory with mode 0700"
+        )
+    return created
+
+
+def _validate_authorized_keys_target(
+    path: Path,
+    *,
+    owner_uid: int,
+    owner_gid: int,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != owner_uid
+        or metadata.st_gid != owner_gid
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise SshCredentialPreparationError(
+            "root SSH authorized keys must be a root-owned regular file with mode 0600"
+        )
+
+
+def _atomic_replace_authorized_keys(
+    target: Path,
+    content: bytes,
+    *,
+    fchown: Fchown,
+    fchmod: Fchmod,
+    owner_uid: int,
+    owner_gid: int,
+    sync_root_home: bool,
+) -> None:
+    temporary_path: Path | None = None
+    committed = False
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".authorized_keys.",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise SshCredentialPreparationError(
+                    "root SSH authorized keys temporary must be a regular file"
+                )
+            fchown(stream.fileno(), owner_uid, owner_gid)
+            fchmod(stream.fileno(), 0o600)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, target)
+        committed = True
+        try:
+            _sync_directory(target.parent)
+            if sync_root_home:
+                _sync_directory(target.parent.parent)
+        except OSError as error:
+            raise SshCredentialPreparationError(
+                "failed to make root SSH authorized keys durable"
+            ) from error
+    finally:
+        if temporary_path is not None and not committed:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _normalize_runtime_public_keys(values: list[str]) -> tuple[str, ...]:

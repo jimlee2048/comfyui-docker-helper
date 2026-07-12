@@ -1,0 +1,401 @@
+"""Focused M2-T7 renderer, materializer, and phase-loader contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+
+import pytest
+from pydantic import ValidationError
+from tests.unit.test_build_plan import accepted_resolution, final_config
+
+from comfyui_docker_helper.config.build_plan import (
+    build_plan_digest,
+    construct_build_plan,
+    dump_build_plan_json,
+    parse_build_plan_json,
+)
+from comfyui_docker_helper.config.final_models import FinalConfig
+from comfyui_docker_helper.container.phase_inputs import load_phase_input
+from comfyui_docker_helper.rendering import final_materializer
+from comfyui_docker_helper.rendering.final_materializer import (
+    FinalMaterializationError,
+    LocalMaterializationSource,
+    materialize_build_plan,
+)
+from comfyui_docker_helper.rendering.final_renderer import (
+    render_build_plan_dockerfile,
+)
+
+
+def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
+    plan = construct_build_plan(final_config(), accepted_resolution())
+
+    rendered = render_build_plan_dockerfile(plan)
+
+    assert rendered.count("FROM ") == 2
+    assert (
+        f"FROM --platform=linux/amd64 {plan.toolchain.uv_image.reference} AS uv"
+        in rendered
+    )
+    assert (
+        f"FROM --platform=linux/amd64 {plan.toolchain.cuda_image.reference}\n"
+        in rendered
+    )
+    assert "ARG " not in rendered
+    assert "${" not in rendered
+    assert rendered == render_build_plan_dockerfile(plan)
+
+
+def test_renderer_quotes_container_paths_without_host_projection() -> None:
+    config = final_config()
+    document = config.model_dump(mode="python")
+    document["system"]["workspace"] = "/workspace data"
+    changed = FinalConfig.model_validate(document)
+
+    rendered = render_build_plan_dockerfile(
+        construct_build_plan(changed, accepted_resolution())
+    )
+
+    assert 'ENV WORKSPACE="/workspace data"' in rendered
+    assert 'WORKDIR "/workspace data"' in rendered
+
+
+def test_materializer_writes_deterministic_plan_phases_and_verified_input(
+    tmp_path: Path,
+) -> None:
+    content = b"#!/usr/bin/env python3\n"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    scripts = tmp_path / "scripts"
+    source = scripts / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    source.chmod(0o755)
+    plan = construct_build_plan(
+        final_config(scripts_dir=scripts, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    source_input = LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    materialize_build_plan(plan, first, local_sources=(source_input,))
+    materialize_build_plan(plan, second, local_sources=(source_input,))
+
+    assert (first / "build-plan.json").read_bytes() == dump_build_plan_json(plan)
+    assert (first / "inputs/hooks/pre.py").read_bytes() == content
+    assert (first / "Dockerfile").read_text() == render_build_plan_dockerfile(plan)
+    assert _tree(first) == _tree(second)
+    assert not (first / "config.toml").exists()
+    assert not (first / "config.lock.toml").exists()
+    assert str(source).encode() not in (first / "build-plan.json").read_bytes()
+
+    expected = build_plan_digest(plan)
+    assert (
+        load_phase_input(
+            first / "phases/build.json",
+            "build",
+            expected_build_plan_digest=expected,
+        )
+        == plan.build
+    )
+    assert (
+        load_phase_input(
+            first / "phases/toolchain.json",
+            "toolchain",
+            expected_build_plan_digest=expected,
+        )
+        == plan.toolchain
+    )
+    assert (
+        load_phase_input(
+            first / "phases/application.json",
+            "application",
+            expected_build_plan_digest=expected,
+        )
+        == plan.application
+    )
+    assert (
+        load_phase_input(
+            first / "phases/custom-nodes.json",
+            "custom-nodes",
+            expected_build_plan_digest=expected,
+        )
+        == plan.custom_nodes
+    )
+    assert (
+        load_phase_input(
+            first / "phases/files.json",
+            "files",
+            expected_build_plan_digest=expected,
+        )
+        == plan.files
+    )
+    assert (
+        load_phase_input(
+            first / "phases/runtime.json",
+            "runtime",
+            expected_build_plan_digest=expected,
+        )
+        == plan.runtime
+    )
+
+
+def test_phase_loader_rejects_wrong_binding_wrong_phase_and_extra_fields(
+    tmp_path: Path,
+) -> None:
+    content = b"#!/bin/sh\n"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    scripts = tmp_path / "scripts"
+    source = scripts / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    source.chmod(0o755)
+    plan = construct_build_plan(
+        final_config(scripts_dir=scripts, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    materialize_build_plan(
+        plan,
+        output,
+        local_sources=(
+            LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+        ),
+    )
+    phase_path = output / "phases/toolchain.json"
+
+    with pytest.raises(ValueError, match="different BuildPlan"):
+        load_phase_input(
+            phase_path,
+            "toolchain",
+            expected_build_plan_digest=f"sha256:{'0' * 64}",
+        )
+    with pytest.raises(ValidationError):
+        load_phase_input(
+            phase_path,
+            "files",
+            expected_build_plan_digest=build_plan_digest(plan),
+        )
+
+    document = json.loads(phase_path.read_text())
+    document["unknown"] = True
+    phase_path.write_text(json.dumps(document))
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        load_phase_input(
+            phase_path,
+            "toolchain",
+            expected_build_plan_digest=build_plan_digest(plan),
+        )
+
+
+def test_materializer_rejects_missing_extra_or_changed_local_sources(
+    tmp_path: Path,
+) -> None:
+    content = b"hook"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    scripts = tmp_path / "scripts"
+    source = scripts / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    source.chmod(0o755)
+    plan = construct_build_plan(
+        final_config(scripts_dir=scripts, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+
+    with pytest.raises(FinalMaterializationError, match="exactly match"):
+        materialize_build_plan(plan, output)
+    assert tuple(output.iterdir()) == ()
+
+    source.write_bytes(b"changed")
+    with pytest.raises(FinalMaterializationError, match="digest"):
+        materialize_build_plan(
+            plan,
+            output,
+            local_sources=(
+                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+            ),
+        )
+    assert tuple(output.iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["../escape.py", "/tmp/escape.py", "hooks\\pre.py", "", "hooks/./pre.py"],
+)
+def test_parsed_build_plan_rejects_unsafe_hook_paths(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    content = b"hook"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    scripts = tmp_path / "scripts"
+    source = scripts / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    source.chmod(0o755)
+    plan = construct_build_plan(
+        final_config(scripts_dir=scripts, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    document = json.loads(dump_build_plan_json(plan))
+    document["custom_nodes"]["nodes"][0]["pre_install"][0]["relative_path"] = (
+        relative_path
+    )
+
+    with pytest.raises(ValidationError, match="canonical safe POSIX path"):
+        parse_build_plan_json(json.dumps(document))
+
+    assert not (tmp_path / "escape.py").exists()
+
+
+def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) -> None:
+    content = b"hook"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    scripts = tmp_path / "scripts"
+    source = scripts / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    source.chmod(0o755)
+    plan = construct_build_plan(
+        final_config(scripts_dir=scripts, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+
+    real_source = tmp_path / "real.py"
+    real_source.write_bytes(content)
+    source.unlink()
+    source.symlink_to(real_source)
+    output = tmp_path / "symlink-output"
+    output.mkdir()
+    with pytest.raises(FinalMaterializationError, match="regular file"):
+        materialize_build_plan(
+            plan,
+            output,
+            local_sources=(
+                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+            ),
+        )
+    assert tuple(output.iterdir()) == ()
+
+    source.unlink()
+    source.write_bytes(content)
+    source.chmod(0o755)
+    real_scripts = tmp_path / "real-scripts"
+    scripts.rename(real_scripts)
+    scripts.symlink_to(real_scripts, target_is_directory=True)
+    output = tmp_path / "parent-symlink-output"
+    output.mkdir()
+    with pytest.raises(FinalMaterializationError, match="source parent"):
+        materialize_build_plan(
+            plan,
+            output,
+            local_sources=(
+                LocalMaterializationSource(
+                    PurePosixPath("hooks/pre.py"), scripts / "hooks/pre.py"
+                ),
+            ),
+        )
+    assert tuple(output.iterdir()) == ()
+
+
+def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
+    content = b"hook"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    scripts = tmp_path / "scripts"
+    source = scripts / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    source.chmod(0o755)
+    plan = construct_build_plan(
+        final_config(scripts_dir=scripts, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    source.unlink()
+    os.mkfifo(source)
+    output = tmp_path / "special-output"
+    output.mkdir()
+
+    with pytest.raises(FinalMaterializationError, match="regular file"):
+        materialize_build_plan(
+            plan,
+            output,
+            local_sources=(
+                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+            ),
+        )
+
+    assert tuple(output.iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    "injected_type",
+    ["parent-symlink", "parent-special", "final-symlink", "final-special"],
+)
+def test_materializer_rejects_symlink_or_special_destination_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    injected_type: str,
+) -> None:
+    content = b"hook"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    scripts = tmp_path / "scripts"
+    source = scripts / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    source.chmod(0o755)
+    plan = construct_build_plan(
+        final_config(scripts_dir=scripts, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("unchanged")
+
+    def inject_destination(_path: Path, _digest: str) -> bytes:
+        if injected_type == "parent-symlink":
+            (output / "inputs").symlink_to(outside, target_is_directory=True)
+        elif injected_type == "parent-special":
+            os.mkfifo(output / "inputs")
+        else:
+            parent = output / "inputs/hooks"
+            parent.mkdir(parents=True)
+            final = parent / "pre.py"
+            if injected_type == "final-symlink":
+                final.symlink_to(sentinel)
+            else:
+                os.mkfifo(final)
+        return content
+
+    monkeypatch.setattr(final_materializer, "_verified_source", inject_destination)
+
+    with pytest.raises(FinalMaterializationError, match="symlink or special"):
+        materialize_build_plan(
+            plan,
+            output,
+            local_sources=(
+                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+            ),
+        )
+
+    assert tuple(output.iterdir()) == ()
+    assert sentinel.read_text() == "unchanged"
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }

@@ -7,6 +7,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from comfyui_docker_helper.exact_ledger import (
+    DEFAULT_MANAGED_PYTHON_VERSION,
+    UV_VERSION,
+)
+
 
 class FinalConfigModel(BaseModel):
     """Apply strict structural validation to every final config block."""
@@ -49,8 +54,8 @@ class FinalSystemConfig(FinalConfigModel):
 class FinalPythonConfig(FinalConfigModel):
     """Managed Python and application-environment package requests."""
 
-    version: str = "3.13.14"
-    uv_version: str = "0.11.28"
+    version: str = DEFAULT_MANAGED_PYTHON_VERSION
+    uv_version: str = UV_VERSION
     index_url: str = "https://pypi.org/simple"
     extra_packages: list[str] = Field(default_factory=list)
 

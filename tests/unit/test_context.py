@@ -202,6 +202,9 @@ def test_generated_pyproject_matches_installed_distribution_metadata(
     )
     distribution = metadata.distribution("comfyui-docker-helper")
     package_metadata = distribution.metadata
+    project_pyproject = tomllib.loads(
+        (Path(__file__).parents[2] / "pyproject.toml").read_text(encoding="utf-8")
+    )
 
     assert list(generated) == ["project", "build-system", "tool"]
     assert "readme" not in generated["project"]
@@ -213,10 +216,7 @@ def test_generated_pyproject_matches_installed_distribution_metadata(
         "dependencies": list(distribution.requires or ()),
         "scripts": {"cdh": "comfyui_docker_helper.cli:app"},
     }
-    assert generated["build-system"] == {
-        "requires": ["uv_build>=0.11.23,<0.12"],
-        "build-backend": "uv_build",
-    }
+    assert generated["build-system"] == project_pyproject["build-system"]
     assert generated["tool"]["uv"]["build-backend"] == {
         "module-name": "comfyui_docker_helper"
     }

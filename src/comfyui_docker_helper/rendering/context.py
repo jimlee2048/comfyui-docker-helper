@@ -27,6 +27,7 @@ from comfyui_docker_helper.config.runtime_projection import (
     RuntimeConfigProjection,
     project_runtime_config,
 )
+from comfyui_docker_helper.exact_ledger import UV_BUILD_REQUIREMENT
 from comfyui_docker_helper.rendering.dockerfile import render_dockerfile
 
 _DEFERRED_MARKER_PATH = PurePosixPath(".cdh-rendered")
@@ -40,7 +41,7 @@ _DISTRIBUTION_NAME = "comfyui-docker-helper"
 _PACKAGE_IMPORT_NAME = "comfyui_docker_helper"
 _CONSOLE_SCRIPT_NAME = "cdh"
 _CONSOLE_SCRIPT_VALUE = "comfyui_docker_helper.cli:app"
-_BUILD_BACKEND_REQUIRES = ("uv_build>=0.11.23,<0.12",)
+_BUILD_BACKEND_REQUIRES = (UV_BUILD_REQUIREMENT,)
 _BUILD_BACKEND = "uv_build"
 _DIRECTORY_MODE = 0o755
 _FILE_MODE = 0o644

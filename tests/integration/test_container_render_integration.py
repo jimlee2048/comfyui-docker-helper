@@ -155,7 +155,7 @@ def test_rendered_custom_node_context_feeds_container_installer(
     runtime = ContainerRuntime(
         workspace=workspace,
         comfyui_path=comfyui_path,
-        virtual_env=Path(sys.executable).resolve().parent.parent,
+        virtual_env=Path(sys.prefix),
     )
     subprocess_calls: list[tuple[str, list[str]]] = []
 

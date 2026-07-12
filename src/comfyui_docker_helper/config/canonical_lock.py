@@ -308,7 +308,7 @@ class CanonicalLock(_StrictLockModel):
 
     @model_validator(mode="after")
     def _validate_entries(self) -> CanonicalLock:
-        keys = [_entry_key(entry) for entry in self.entries]
+        keys = [canonical_entry_key(entry) for entry in self.entries]
         if len(keys) != len(set(keys)):
             raise ValueError("lock entries must have unique logical identities")
         return self
@@ -505,7 +505,7 @@ class DirectPythonRequestIdentity(_StrictLockModel):
         return self
 
 
-_ResolverRequestIdentity = (
+ResolverRequestIdentity = (
     OciRequestIdentity
     | ManagedPythonRequestIdentity
     | ComfyUIRequestIdentity
@@ -516,7 +516,7 @@ _ResolverRequestIdentity = (
 )
 
 
-def compute_request_digest(request: _ResolverRequestIdentity) -> str:
+def compute_request_digest(request: ResolverRequestIdentity) -> str:
     """Bind one normalized, resolution-affecting request identity."""
     canonical = json.dumps(
         request.model_dump(mode="json"),
@@ -549,7 +549,7 @@ def load_canonical_lock(path: str | Path) -> CanonicalLock:
 
 def dump_canonical_lock_toml(lock: CanonicalLock) -> str:
     """Serialize canonical fields and entries in deterministic logical order."""
-    entries = sorted(lock.entries, key=_entry_key)
+    entries = sorted(lock.entries, key=canonical_entry_key)
     data = {
         "schema_version": lock.schema_version,
         "entries": [
@@ -559,7 +559,8 @@ def dump_canonical_lock_toml(lock: CanonicalLock) -> str:
     return tomli_w.dumps(data)
 
 
-def _entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
+def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
+    """Return the stable logical identity used by lock reconciliation."""
     if isinstance(entry, OciLockEntry):
         return (entry.type, entry.role)
     if isinstance(entry, ManagedPythonLockEntry):

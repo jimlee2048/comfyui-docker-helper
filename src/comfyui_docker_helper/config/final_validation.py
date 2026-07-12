@@ -459,7 +459,7 @@ def validate_direct_requirement(
     return NormalizedRequirement(
         path,
         canonicalize_name(requirement.name),
-        tuple(sorted(extra.casefold() for extra in requirement.extras)),
+        tuple(sorted({canonicalize_name(extra) for extra in requirement.extras})),
         str(requirement.specifier),
     )
 

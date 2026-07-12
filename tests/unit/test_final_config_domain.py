@@ -386,6 +386,29 @@ def test_normalized_requirement_retains_every_resolution_affecting_input() -> No
     assert requirement.specifier == "<2,>=1"
 
 
+@pytest.mark.parametrize("extra", ["Foo_Bar", "foo-bar", "FOO.BAR"])
+def test_requirement_extras_use_pep685_identity(extra: str) -> None:
+    document = _document()
+    document["python"] = {"extra_packages": [f"Demo[{extra}]>=1,<2"]}
+    config = validate_final_config_structure(document)
+
+    requirement = validate_final_config_domains(config).package_requirements[0]
+
+    assert requirement.extras == ("foo-bar",)
+
+
+def test_requirement_extra_aliases_are_stably_deduplicated() -> None:
+    document = _document()
+    document["python"] = {
+        "extra_packages": ["Demo[z_extra,Foo_Bar,foo-bar,FOO.BAR]>=1,<2"]
+    }
+    config = validate_final_config_structure(document)
+
+    requirement = validate_final_config_domains(config).package_requirements[0]
+
+    assert requirement.extras == ("foo-bar", "z-extra")
+
+
 def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     document = _document()
     document["files"] = [

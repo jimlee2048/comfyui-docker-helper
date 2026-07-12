@@ -1,4 +1,4 @@
-"""Sanitized runtime download diagnostics for container logs."""
+"""Bounded, control-safe runtime download diagnostics for container logs."""
 
 from __future__ import annotations
 

@@ -218,7 +218,7 @@ def failed_runtime_download_entry(
     last_error: object,
     updated_at: datetime,
 ) -> RuntimeDownloadEntry:
-    """Return a failed/exhausted entry with a sanitized error message."""
+    """Return a failed/exhausted entry with a bounded, single-line error."""
     return RuntimeDownloadEntry.model_validate(
         {
             **entry.model_dump(),

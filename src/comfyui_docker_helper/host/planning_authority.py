@@ -34,6 +34,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
     DesiredResolution,
     LockPolicy,
     ManagedPythonReleaseInputs,
+    entries_satisfy_request,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -137,7 +138,7 @@ def uv_catalog_descriptor_digest(
             if (
                 isinstance(entry, OciLockEntry)
                 and canonical_entry_key(entry) == ("oci", "uv-tool")
-                and entry.request_digest == digest
+                and entries_satisfy_request(request, (entry,), digest)
             ):
                 return entry.descriptor_digest
     if policy is LockPolicy.LOCKED:
@@ -154,10 +155,12 @@ def uv_catalog_descriptor_digest(
                 ),
             )
         ) from error
-    entries = tuple(item for item in acquired.entries if isinstance(item, OciLockEntry))
-    if len(entries) != 1 or entries[0].role != "uv-tool":
+    if not entries_satisfy_request(request, acquired.entries, digest):
         raise ValueError("uv provider returned an incompatible descriptor")
-    return entries[0].descriptor_digest
+    entry = acquired.entries[0]
+    if not isinstance(entry, OciLockEntry):  # pragma: no cover - proven above
+        raise AssertionError("compatible uv OCI result must be an OCI entry")
+    return entry.descriptor_digest
 
 
 def build_desired_planning_inputs(

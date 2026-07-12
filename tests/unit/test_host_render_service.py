@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config.canonical_lock import (
+    CanonicalLock,
     CanonicalLockEntry,
     ComfyCliLockEntry,
     ComfyUIRequestIdentity,
@@ -25,6 +26,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     PythonGroupRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
+    compute_request_digest,
+    dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
@@ -58,6 +61,7 @@ from comfyui_docker_helper.host.render_service import (
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
+DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT = "1" * 40
 
 
@@ -216,6 +220,29 @@ def _prepare(
         hooks_dir=hooks_dir,
         working_directory=working_directory,
     )
+
+
+def _write_cross_dependent_incompatible_uv_lock(output: Path) -> None:
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    data = lock.model_dump(mode="python")
+    for entry in data["entries"]:
+        if entry["type"] == "oci" and entry["role"] == "uv-tool":
+            entry["repository"] = "registry.example.test/wrong/uv"
+            entry["tag"] = "wrong"
+            entry["descriptor_digest"] = DIGEST_C
+        elif entry["type"] == "managed-python":
+            entry["catalog_descriptor_digest"] = DIGEST_C
+            request = ManagedPythonRequestIdentity(
+                type="managed-python",
+                version=entry["version"],
+                implementation=entry["implementation"],
+                platform=entry["platform"],
+                libc=entry["libc"],
+                catalog_descriptor_digest=DIGEST_C,
+            )
+            entry["request_digest"] = compute_request_digest(request)
+    malformed = CanonicalLock.model_validate(data)
+    (output / "config.lock.toml").write_text(dump_canonical_lock_toml(malformed))
 
 
 @pytest.mark.parametrize(
@@ -390,6 +417,59 @@ def test_locked_rejects_stale_context_for_config_only_build_changes(
     assert raised.value.diagnostics[0].code == "render.context_changed"
     assert fake.calls == []
     assert _tree(output) == before
+
+
+def test_uv_descriptor_pre_reuse_validates_cross_dependent_lock_in_every_mode(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    _write_cross_dependent_incompatible_uv_lock(output)
+
+    default_fake = FakeAcquirer()
+    prepared = _prepare(config, output, default_fake, overwrite=True)
+
+    assert default_fake.calls == ["oci", "managed-python"]
+    assert prepared.plan.toolchain.uv_image.descriptor_digest == DIGEST_B
+    assert prepared.plan.toolchain.python.catalog_descriptor_digest == DIGEST_B
+    corrected = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    uv_entry = next(
+        entry
+        for entry in corrected.entries
+        if isinstance(entry, OciLockEntry) and entry.role == "uv-tool"
+    )
+    assert uv_entry.repository == "ghcr.io/astral-sh/uv"
+    assert uv_entry.tag == "0.11.28"
+    assert uv_entry.descriptor_digest == DIGEST_B
+
+    _write_cross_dependent_incompatible_uv_lock(output)
+    malformed_tree = _tree(output)
+    check_fake = FakeAcquirer()
+    with pytest.raises(HostRenderServiceError) as checked:
+        _prepare(
+            config,
+            output,
+            check_fake,
+            options=PlanningOptions(check=True),
+        )
+    assert checked.value.diagnostics[0].code == "render.context_changed"
+    assert check_fake.calls == ["oci", "managed-python"]
+    assert _tree(output) == malformed_tree
+
+    locked_fake = FakeAcquirer()
+    with pytest.raises(HostRenderServiceError) as locked:
+        _prepare(
+            config,
+            output,
+            locked_fake,
+            options=PlanningOptions(locked=True),
+        )
+    assert locked_fake.calls == []
+    assert locked.value.diagnostics
+    assert all(item.code == "lock.locked_mismatch" for item in locked.value.diagnostics)
+    assert _tree(output) == malformed_tree
 
 
 def test_dry_run_resolves_without_writing_and_check_compares_without_writing(

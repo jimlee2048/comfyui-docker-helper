@@ -1,4 +1,4 @@
-"""Isolated immutable BuildPlan v1 authority and deterministic construction."""
+"""Immutable BuildPlan v1 authority and deterministic construction."""
 
 from __future__ import annotations
 
@@ -285,7 +285,7 @@ class BuildOutputPlan(_PlanModel):
 
 
 class BuildPlan(_PlanModel):
-    """Complete immutable M2-owned build execution authority."""
+    """Complete immutable build execution authority."""
 
     schema_version: Literal[1]
     config_digest: str

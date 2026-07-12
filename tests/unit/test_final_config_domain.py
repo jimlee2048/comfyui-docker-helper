@@ -1,4 +1,4 @@
-"""Focused M2-T1 tests for the isolated final config boundary."""
+"""Focused active public-configuration boundary contracts."""
 
 from pathlib import Path
 from typing import Any
@@ -63,7 +63,7 @@ def test_domain_and_semantic_passes_are_isolated_and_facade_orders_them() -> Non
         ("cdh", "shutdown_timeout", 8),
     ],
 )
-def test_deferred_root_block_fields_are_not_in_replacement_schema(
+def test_deferred_root_block_fields_are_not_in_active_schema(
     section: str,
     field: str,
     value: object,
@@ -78,7 +78,7 @@ def test_deferred_root_block_fields_are_not_in_replacement_schema(
     assert raised.value.diagnostics[0].code == "schema.extra_forbidden"
 
 
-def test_deferred_file_checksum_is_not_in_replacement_schema() -> None:
+def test_deferred_file_checksum_is_not_in_active_schema() -> None:
     document = _document()
     document["files"] = [
         {

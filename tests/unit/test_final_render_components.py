@@ -1,4 +1,4 @@
-"""Focused M2-T7 renderer, materializer, and phase-loader contracts."""
+"""Focused renderer, materializer, and phase-loader contracts."""
 
 from __future__ import annotations
 

@@ -1,7 +1,4 @@
-"""Isolated canonical config-lock schema v1 components.
-
-This module deliberately has no connection to the active prototype lock path.
-"""
+"""Canonical config-lock schema v1 and resolver request identities."""
 
 from __future__ import annotations
 
@@ -302,7 +299,7 @@ CanonicalLockEntry = Annotated[
 
 
 class CanonicalLock(_StrictLockModel):
-    """Complete strict replacement config-lock schema v1."""
+    """Complete strict canonical config-lock schema v1."""
 
     schema_version: Literal[1]
     entries: list[CanonicalLockEntry]
@@ -583,7 +580,7 @@ def parse_canonical_lock_toml(document: str | bytes) -> CanonicalLock:
 
 
 def load_canonical_lock(path: str | Path) -> CanonicalLock:
-    """Load one isolated canonical v1 lock without prototype detection."""
+    """Load one strict canonical config-lock v1 document."""
     try:
         document = Path(path).read_bytes()
     except OSError as error:

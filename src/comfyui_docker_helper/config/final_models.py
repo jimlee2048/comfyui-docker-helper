@@ -1,7 +1,4 @@
-"""Isolated final public-config models prepared for the M2 authority cutover.
-
-These models are deliberately not imported by the active configuration service.
-"""
+"""Strict public configuration models for the active Planning Authority."""
 
 from typing import Annotated, Literal
 
@@ -69,7 +66,7 @@ class FinalPyTorchConfig(FinalConfigModel):
 
 
 class FinalAria2Config(FinalConfigModel):
-    """aria2 downloader settings retained through the M2 cutover."""
+    """Active aria2 downloader settings."""
 
     rpc_port: int = Field(default=6800, ge=1, le=65535)
     split: int = Field(default=16, ge=1)
@@ -79,7 +76,7 @@ class FinalAria2Config(FinalConfigModel):
 
 
 class FinalHttpxConfig(FinalConfigModel):
-    """HTTPX settings; retries remains public until the M4-T4 handoff."""
+    """HTTPX settings with the currently public retry count."""
 
     timeout: int | float = Field(default=60, gt=0)
     retries: int = Field(default=3, ge=0)
@@ -93,7 +90,7 @@ class FinalDownloaderConfig(FinalConfigModel):
 
 
 class FinalCdhConfig(FinalConfigModel):
-    """cdh-owned transfer settings present at the M2 cutover."""
+    """Active cdh-owned transfer settings."""
 
     default_downloader: Literal["aria2", "httpx"] = "aria2"
     default_download_mode: Literal["sync", "async"] = "sync"
@@ -166,7 +163,7 @@ class FinalFileConfig(FinalConfigModel):
 
 
 class FinalConfig(FinalConfigModel):
-    """Strict replacement config schema, isolated until the M2-T8 cutover."""
+    """Strict active public configuration schema."""
 
     cdh: FinalCdhConfig = Field(default_factory=FinalCdhConfig)
     compute_platform: FinalComputePlatformConfig

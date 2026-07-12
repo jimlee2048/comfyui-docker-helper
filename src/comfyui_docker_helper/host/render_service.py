@@ -292,8 +292,8 @@ def _check_context(
         raise _render_error("render.context_check_failed", str(error)) from error
 
 
-def _tree(root: Path) -> dict[str, tuple[str, bytes | None]]:
-    entries: dict[str, tuple[str, bytes | None]] = {}
+def _tree(root: Path) -> dict[str, tuple[str, int, bytes | None]]:
+    entries: dict[str, tuple[str, int, bytes | None]] = {}
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -301,15 +301,16 @@ def _tree(root: Path) -> dict[str, tuple[str, bytes | None]]:
         for path in children:
             relative = path.relative_to(root).as_posix()
             mode = path.lstat().st_mode
+            permissions = stat.S_IMODE(mode)
             if stat.S_ISLNK(mode):
-                entries[relative] = ("symlink", None)
+                entries[relative] = ("symlink", permissions, None)
             elif stat.S_ISDIR(mode):
-                entries[relative] = ("directory", None)
+                entries[relative] = ("directory", permissions, None)
                 pending.append(path)
             elif stat.S_ISREG(mode):
-                entries[relative] = ("file", path.read_bytes())
+                entries[relative] = ("file", permissions, path.read_bytes())
             else:
-                entries[relative] = ("special", None)
+                entries[relative] = ("special", permissions, None)
     return entries
 
 

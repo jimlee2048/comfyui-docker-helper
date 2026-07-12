@@ -1,4 +1,4 @@
-"""Focused M2-T5 contracts for the isolated canonical config-lock v1."""
+"""Focused canonical config-lock v1 contracts."""
 
 from __future__ import annotations
 

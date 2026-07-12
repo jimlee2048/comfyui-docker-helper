@@ -1,7 +1,7 @@
 # Configuration examples
 
 `minimal.toml` is the smallest canonical CUDA 13 / PyTorch 2.12 configuration.
-`full.toml` documents every field active at the Planning Authority cutover.
+`full.toml` documents every field in the current public configuration schema.
 
 Validate locally without providers or writes:
 
@@ -34,3 +34,7 @@ mounted `/etc/cdh/runtime/hooks` remains external runtime input.
 Use `--dry-run` for an exact no-write preview, `--check` to compare an existing
 context, `--locked` for zero-provider/zero-write verification, and
 `--upgrade-lock` to refresh moving selectors.
+
+The public PyTorch version is a selector. Its CUDA-derived channel, index, and
+target enter the resolver request identity, while the canonical lock and
+BuildPlan retain complete resolved versions such as `2.12.1+cu130`.

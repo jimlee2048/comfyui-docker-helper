@@ -155,7 +155,7 @@ class UvPythonGroupResolver:
 
 @dataclass(frozen=True, slots=True)
 class ProviderIdentityAcquirer:
-    """Adapt typed T4 providers into minimal canonical lock entries."""
+    """Adapt typed identity providers into minimal canonical lock entries."""
 
     oci: OciIdentityProvider
     managed_python: ManagedPythonIdentityProvider

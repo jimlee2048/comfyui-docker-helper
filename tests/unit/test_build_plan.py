@@ -1,4 +1,4 @@
-"""Focused M2-T7 contracts for isolated BuildPlan construction and binding."""
+"""Focused BuildPlan construction and binding contracts."""
 
 from __future__ import annotations
 

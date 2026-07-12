@@ -104,6 +104,27 @@ def test_host_hook_option_is_preserved_only_on_render_and_build(
     assert "--hooks-dir" not in validate_help.output
 
 
+def test_host_validate_remains_offline_and_does_not_construct_providers(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("host validate must not construct planning providers")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers",
+        fail_providers,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "validate", "-f", "examples/minimal.toml"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
 def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
     cli_runner: CliRunner,
     tmp_path: Path,

@@ -1,4 +1,4 @@
-"""Focused M2-T3 tests for the isolated platform/backend planning domain."""
+"""Focused platform/backend planning-domain contracts."""
 
 from typing import Any
 

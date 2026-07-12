@@ -1,4 +1,4 @@
-"""Materialize isolated BuildPlan artifacts and verified local inputs."""
+"""Materialize BuildPlan artifacts and verified local inputs."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from comfyui_docker_helper.rendering.final_renderer import (
 
 
 class FinalMaterializationError(RuntimeError):
-    """The isolated BuildPlan context could not be materialized safely."""
+    """The BuildPlan context could not be materialized safely."""
 
 
 @dataclass(frozen=True, slots=True)

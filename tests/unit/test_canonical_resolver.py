@@ -1,4 +1,4 @@
-"""Focused M2-T6 mode and delta contracts for isolated reconciliation."""
+"""Focused canonical reconciliation mode and delta contracts."""
 
 from __future__ import annotations
 

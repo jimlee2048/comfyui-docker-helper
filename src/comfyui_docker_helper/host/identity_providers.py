@@ -1,8 +1,7 @@
-"""Isolated exact-identity provider seams for the final planning authority.
+"""Exact-identity provider seams for the active Planning Authority.
 
-The providers in this module are intentionally not connected to the active
-configuration service.  They return only the identity fields required by the
-canonical v1 domain and stable, credential-free failure categories.
+Providers return only the identity fields required by canonical config-lock v1
+and stable, credential-free failure categories.
 """
 
 from __future__ import annotations

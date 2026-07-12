@@ -93,6 +93,10 @@ def test_root_readme_documents_no_root_replanning() -> None:
     assert "literal `tag@sha256` references" in readme
     assert "runtime/config.toml" in readme
     assert "/opt/cdh/runtime/hooks" in readme
+    assert "PyTorch configuration versions are selectors" in readme
+    assert "2.12.1+cu130" in readme
+    assert "Resolved versions never enter `request_digest`" in readme
+    assert "separate public/local" in readme
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

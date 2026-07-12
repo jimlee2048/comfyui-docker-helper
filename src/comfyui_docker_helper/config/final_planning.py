@@ -1,4 +1,4 @@
-"""Isolated platform/backend planning prepared for the M2 authority cutover."""
+"""Deterministic platform and backend planning for the active authority."""
 
 from dataclasses import dataclass
 from enum import StrEnum
@@ -106,7 +106,7 @@ class PackageRequirementRequest:
 
 @dataclass(frozen=True, slots=True)
 class PackageGroupRequest:
-    """Complete backend package group that a later resolver must solve once."""
+    """Complete backend package group that the resolver must solve once."""
 
     owner: Literal["pytorch"]
     environment: Literal["application"]
@@ -119,7 +119,7 @@ class PackageGroupRequest:
 
 @dataclass(frozen=True, slots=True)
 class FinalPlanningDomain:
-    """Non-active deterministic platform/backend planning result."""
+    """Deterministic platform/backend planning result."""
 
     target_platforms: tuple[TargetPlatform, ...]
     backend: BackendPlan
@@ -127,7 +127,7 @@ class FinalPlanningDomain:
 
 
 class FinalPlanningError(DiagnosticError):
-    """Expected invalid-config failure at the isolated planning boundary."""
+    """Expected invalid-config failure at the planning boundary."""
 
 
 def build_final_planning_domain(

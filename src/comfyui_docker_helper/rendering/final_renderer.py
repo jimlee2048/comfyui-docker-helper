@@ -1,4 +1,4 @@
-"""Deterministic isolated Dockerfile rendering from BuildPlan only."""
+"""Deterministic Dockerfile rendering from BuildPlan only."""
 
 import json
 

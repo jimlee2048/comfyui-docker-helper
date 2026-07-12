@@ -30,6 +30,8 @@ from comfyui_docker_helper.config.canonical_lock import (
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
     CanonicalAcquisitionError,
+    LockPolicy,
+    ReconcilePurpose,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
@@ -216,6 +218,77 @@ def _prepare(
     )
 
 
+@pytest.mark.parametrize(
+    ("options", "policy", "purpose", "writes"),
+    [
+        (PlanningOptions(), LockPolicy.DEFAULT, ReconcilePurpose.APPLY, True),
+        (
+            PlanningOptions(locked=True),
+            LockPolicy.LOCKED,
+            ReconcilePurpose.APPLY,
+            False,
+        ),
+        (
+            PlanningOptions(upgrade_lock=True),
+            LockPolicy.UPGRADE,
+            ReconcilePurpose.APPLY,
+            True,
+        ),
+        (
+            PlanningOptions(check=True),
+            LockPolicy.DEFAULT,
+            ReconcilePurpose.CHECK,
+            False,
+        ),
+        (
+            PlanningOptions(dry_run=True),
+            LockPolicy.DEFAULT,
+            ReconcilePurpose.DRY_RUN,
+            False,
+        ),
+        (
+            PlanningOptions(locked=True, dry_run=True),
+            LockPolicy.LOCKED,
+            ReconcilePurpose.DRY_RUN,
+            False,
+        ),
+        (
+            PlanningOptions(upgrade_lock=True, dry_run=True),
+            LockPolicy.UPGRADE,
+            ReconcilePurpose.DRY_RUN,
+            False,
+        ),
+    ],
+)
+def test_planning_options_map_public_modes_to_policy_purpose_and_writes(
+    options: PlanningOptions,
+    policy: LockPolicy,
+    purpose: ReconcilePurpose,
+    writes: bool,
+) -> None:
+    assert options.policy is policy
+    assert options.purpose is purpose
+    assert options.writes is writes
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"locked": True, "upgrade_lock": True},
+        {"check": True, "locked": True},
+        {"check": True, "upgrade_lock": True},
+        {"check": True, "dry_run": True},
+    ],
+)
+def test_planning_options_reject_conflicting_public_modes(
+    options: dict[str, bool],
+) -> None:
+    with pytest.raises(HostRenderServiceError) as raised:
+        PlanningOptions(**options)
+
+    assert raised.value.diagnostics[0].code == "render.options_conflict"
+
+
 def test_default_writes_canonical_context_and_second_default_reuses_lock(
     tmp_path: Path,
 ) -> None:
@@ -239,6 +312,43 @@ def test_default_writes_canonical_context_and_second_default_reuses_lock(
     _prepare(config, output, second_fake, overwrite=True)
     assert second_fake.calls == []
     assert _tree(output) == before
+
+
+def test_upgrade_refreshes_only_moving_requests_and_preserves_exact_results(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    before_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    before_exact = {
+        (entry.type, getattr(entry, "package", None)): entry
+        for entry in before_lock.entries
+        if entry.type not in {"oci"}
+    }
+    fake = FakeAcquirer()
+
+    prepared = _prepare(
+        config,
+        output,
+        fake,
+        options=PlanningOptions(upgrade_lock=True),
+        overwrite=True,
+    )
+
+    assert fake.calls == ["oci", "oci"]
+    assert prepared.lock_result.provider_calls == (
+        ("oci", "cuda-base"),
+        ("oci", "uv-tool"),
+    )
+    assert prepared.lock_result.write_intent is False
+    after_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    assert {
+        (entry.type, getattr(entry, "package", None)): entry
+        for entry in after_lock.entries
+        if entry.type not in {"oci"}
+    } == before_exact
 
 
 def test_locked_performs_zero_provider_calls_and_zero_writes(tmp_path: Path) -> None:
@@ -884,6 +994,28 @@ def test_check_compares_complete_path_type_and_bytes_without_following(
 
     assert raised.value.diagnostics[0].code == "render.context_changed"
     assert outside.read_text() == "outside sentinel"
+
+
+def test_check_detects_materialized_hook_permission_drift(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = _runtime_hooks(tmp_path / "hooks")
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks)
+    rendered = output / "runtime/hooks/pre-start.d/10-pre.sh"
+    assert rendered.stat().st_mode & 0o777 == 0o755
+    rendered.chmod(0o644)
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            hooks_dir=hooks,
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
 
 
 def _tree(root: Path) -> dict[str, bytes]:

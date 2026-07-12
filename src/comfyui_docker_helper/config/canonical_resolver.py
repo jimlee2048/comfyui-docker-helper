@@ -1,4 +1,4 @@
-"""Isolated canonical-lock reconciliation and provider-acquisition boundary."""
+"""Canonical-lock reconciliation and provider-acquisition boundary."""
 
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ class DesiredResolution:
 
 @dataclass(frozen=True, slots=True)
 class AcceptedCanonicalLock:
-    """Pure T6 result; callers may consume write_intent but T6 never writes."""
+    """Accepted lock result with provider, local-read, and write intent."""
 
     lock: CanonicalLock
     delta: tuple[LockDeltaItem, ...]
@@ -173,7 +173,7 @@ def reconcile_canonical_lock(
     policy: LockPolicy = LockPolicy.DEFAULT,
     purpose: ReconcilePurpose = ReconcilePurpose.APPLY,
 ) -> AcceptedCanonicalLock:
-    """Accept one deterministic lock result without writing or active integration."""
+    """Accept one deterministic lock result without performing writes."""
     if purpose is ReconcilePurpose.CHECK and policy is not LockPolicy.DEFAULT:
         raise ValueError("check uses default reconciliation policy")
     existing = _canonical_lock(existing)

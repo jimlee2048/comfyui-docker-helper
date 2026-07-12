@@ -1,4 +1,4 @@
-"""Focused M2-T4 tests for isolated exact identity providers."""
+"""Focused exact identity-provider contracts."""
 
 from __future__ import annotations
 

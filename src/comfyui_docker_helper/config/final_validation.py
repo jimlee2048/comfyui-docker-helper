@@ -1,4 +1,4 @@
-"""Layered validation for the isolated final config models."""
+"""Layered validation for the active public configuration models."""
 
 import re
 import stat

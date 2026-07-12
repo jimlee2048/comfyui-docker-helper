@@ -104,6 +104,14 @@ cdh host build \
 Old, malformed, or future lock schemas fail with one remove-and-regenerate
 diagnostic. There is no compatibility reader or migration path.
 
+PyTorch configuration versions are selectors, not resolved artifact versions.
+The canonical PyTorch request binds the CUDA-derived channel, index URL, target
+Python/platform, and complete package group into its `request_digest`. The lock
+records each complete resolved distribution version, including a stable local
+label such as `2.12.1+cu130`; BuildPlan carries that same exact install version.
+Resolved versions never enter `request_digest`, and the resolved version is not
+split into separate public/local fields.
+
 ## Runtime lifecycle hooks
 
 Pass `--hooks-dir <dir>` to `cdh host render` or `cdh host build` to bake a

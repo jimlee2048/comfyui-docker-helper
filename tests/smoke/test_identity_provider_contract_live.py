@@ -1,4 +1,4 @@
-"""Opt-in live contracts for the isolated final identity providers."""
+"""Opt-in live contracts for the active identity providers."""
 
 from __future__ import annotations
 

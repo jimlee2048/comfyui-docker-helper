@@ -219,6 +219,21 @@ def test_comfyui_path_must_not_equal_workspace() -> None:
     ]
 
 
+@pytest.mark.parametrize("field", ["workspace", "comfyui_path"])
+def test_container_paths_reject_control_characters(field: str) -> None:
+    config = make_config()
+    if field == "workspace":
+        config.system.workspace = "/workspace\x7fescape"
+        path = ("system", "workspace")
+    else:
+        config.system.comfyui_path = "/workspace/ComfyUI\x85escape"
+        path = ("system", "comfyui_path")
+
+    assert locations_and_codes(validate_config(config)) == [
+        (path, "system.path_control_character")
+    ]
+
+
 @pytest.mark.parametrize(
     "managed_name",
     [
@@ -289,8 +304,6 @@ def test_environment_names_reject_non_identifiers(name: str) -> None:
         ("version", ("compute_platform", "cuda", "version")),
         ("image_flavor", ("compute_platform", "cuda", "image_flavor")),
         ("image_distro", ("compute_platform", "cuda", "image_distro")),
-        ("workspace", ("system", "workspace")),
-        ("comfyui_path", ("system", "comfyui_path")),
         ("system_package", ("system", "extra_packages", 0)),
         ("environment_name", ("system", "env", "BAD")),
         ("environment_value", ("system", "env", "SAFE")),
@@ -301,8 +314,6 @@ def test_environment_names_reject_non_identifiers(name: str) -> None:
         ("pytorch_package", ("pytorch", "extra_packages", 0)),
         ("comfy_cli_version", ("comfyui", "cli_version")),
         ("comfyui_version", ("comfyui", "version")),
-        ("listen", ("comfyui", "listen")),
-        ("extra_argument", ("comfyui", "extra_args", 0)),
     ],
 )
 def test_dockerfile_bound_strings_reject_source_line_controls(
@@ -414,6 +425,26 @@ def test_comfyui_extra_args_reject_cdh_controlled_startup_flags(
     assert argument.split("=", maxsplit=1)[0] in diagnostics[0].message
 
 
+@pytest.mark.parametrize("argument", ["", "   ", "--cpu\n--listen", "value\x7fmore"])
+def test_comfyui_extra_args_reject_empty_and_control_values(argument: str) -> None:
+    config = make_config()
+    config.comfyui.extra_args = [argument]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (("comfyui", "extra_args", 0), "comfyui.invalid_extra_arg")
+    ]
+
+
+@pytest.mark.parametrize("listen", ["", "   ", "0.0.0.0\n--port", "host\x7fpart"])
+def test_comfyui_listen_rejects_empty_and_control_values(listen: str) -> None:
+    config = make_config()
+    config.comfyui.listen = listen
+
+    assert locations_and_codes(validate_config(config)) == [
+        (("comfyui", "listen"), "comfyui.invalid_listen")
+    ]
+
+
 @pytest.mark.parametrize(
     "torch_requirement",
     ["torch", "Torch==2.10", "torch[opt]>=2", "torch @ https://example.com/torch.whl"],
@@ -471,17 +502,32 @@ def test_package_index_urls_accept_http_and_https(field: str, value: str) -> Non
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("python_index", "https://user:token@example.com/simple"),
+        ("pytorch_index", "https://token@example.com/whl"),
+    ],
+)
+def test_package_index_urls_accept_valid_userinfo(
+    field: str,
+    value: str,
+) -> None:
+    """Treat configured userinfo as ordinary user-managed URL data."""
+    config = make_config()
+    if field == "python_index":
+        config.python.index_url = value
+    else:
+        config.pytorch.index_base_url = value
+
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
     ("field", "value", "path", "code"),
     [
         (
             "python_index",
             "file:///tmp/simple",
-            ("python", "index_url"),
-            "python.invalid_index_url",
-        ),
-        (
-            "python_index",
-            "https://user:token@example.com/simple",
             ("python", "index_url"),
             "python.invalid_index_url",
         ),
@@ -492,20 +538,19 @@ def test_package_index_urls_accept_http_and_https(field: str, value: str) -> Non
             "pytorch.invalid_index_base_url",
         ),
         (
-            "pytorch_index",
-            "https://token@example.com/whl",
-            ("pytorch", "index_base_url"),
-            "pytorch.invalid_index_base_url",
+            "python_index",
+            "https://example.com/simple\x7fmore",
+            ("python", "index_url"),
+            "python.invalid_index_url",
         ),
     ],
 )
-def test_package_index_urls_reject_non_http_and_userinfo(
+def test_package_index_urls_reject_wrong_consumers_and_controls(
     field: str,
     value: str,
     path: tuple[str | int, ...],
     code: str,
 ) -> None:
-    """Reject non-HTTP(S) indexes and TOML-embedded index credentials."""
     config = make_config()
     if field == "python_index":
         config.python.index_url = value
@@ -783,6 +828,34 @@ def test_git_urls_must_be_unique_even_with_different_refs() -> None:
             ("comfyui", "custom_nodes", 1, "url"),
             "custom_node.duplicate_git_url",
         )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("url", "", "custom_node.invalid_git_url"),
+        (
+            "url",
+            "https://example.com/node.git\n--upload-pack=probe",
+            "custom_node.invalid_git_url",
+        ),
+        ("ref", "", "custom_node.invalid_git_ref"),
+        ("ref", "main\x7fprobe", "custom_node.invalid_git_ref"),
+    ],
+)
+def test_git_argv_values_reject_empty_and_control_characters(
+    field: str,
+    value: str,
+    code: str,
+) -> None:
+    config = make_config()
+    node = {"type": "git", "url": "https://example.com/node.git"}
+    node[field] = value
+    config.comfyui.custom_nodes = [GitCustomNodeConfig.model_validate(node)]
+
+    assert locations_and_codes(validate_config(config)) == [
+        (("comfyui", "custom_nodes", 0, field), code)
     ]
 
 
@@ -1257,6 +1330,44 @@ def test_http_and_https_file_urls_are_valid(url: str) -> None:
     config.files = [FileConfig(url=url, dir="models", filename="model.bin")]
 
     assert validate_config(config) == ()
+
+
+def test_file_url_accepts_valid_userinfo() -> None:
+    config = make_config()
+    config.files = [
+        FileConfig(
+            url="https://user:password@example.com/model",
+            dir="models",
+            filename="model.bin",
+        )
+    ]
+
+    assert validate_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("url", "https://example.com/model\x7f.bin", "file.invalid_url"),
+        ("dir", "models\ncheckpoints", "file.control_character"),
+        ("filename", "model\x85.bin", "file.invalid_filename"),
+    ],
+)
+def test_file_url_and_path_domains_reject_control_characters(
+    field: str,
+    value: str,
+    code: str,
+) -> None:
+    config = make_config()
+    values = {
+        "url": "https://example.com/model.bin",
+        "dir": "models",
+        "filename": "model.bin",
+    }
+    values[field] = value
+    config.files = [FileConfig.model_validate(values)]
+
+    assert locations_and_codes(validate_config(config)) == [(("files", 0, field), code)]
 
 
 def test_file_directories_follow_runtime_lexical_rules() -> None:

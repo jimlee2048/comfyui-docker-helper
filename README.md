@@ -289,9 +289,11 @@ overriding ComfyUI's final result.
 
 ## Secrets and logs
 
-Values in `[system.env]` are ordinary Dockerfile `ENV` values. Token-like
-values are not hidden, prevented from appearing in image history, or redacted
-from build output. Do not put secrets in configuration unless that exposure is
+User-authored configuration is ordinary user-managed data. This includes
+`[system.env]` values, URL userinfo and query strings, paths, arguments, and
+third-party error text. cdh does not guess which of these values are secrets or
+mask them; they may appear in previews, rendered contexts, image history, logs,
+or runtime state. Do not put secrets in configuration unless that exposure is
 acceptable.
 
 The temporary aria2 RPC secret is generated inside the helper process and is not

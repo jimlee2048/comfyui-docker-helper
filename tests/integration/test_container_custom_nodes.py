@@ -377,6 +377,27 @@ def test_invalid_git_target_directories_are_rejected(target_dir: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("url", "", "Git URL at item 0 must be non-empty"),
+        ("url", "https://example.com/node.git\nprobe", "Git URL at item 0"),
+        ("ref", "", "Git ref at item 0 must be non-empty"),
+        ("ref", "main\x7fprobe", "Git ref at item 0"),
+    ],
+)
+def test_container_git_argv_values_reject_empty_and_controls(
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    node = {"type": "git", "url": "https://example.com/node.git"}
+    node[field] = value
+
+    with pytest.raises(CustomNodesConfigError, match=message):
+        build_custom_nodes_plan({"comfyui": {"custom_nodes": [node]}})
+
+
+@pytest.mark.parametrize(
     ("document", "message"),
     [
         ({}, "only a \\[comfyui\\] table"),

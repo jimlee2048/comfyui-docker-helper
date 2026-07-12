@@ -24,7 +24,7 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeStateError,
     load_runtime_state,
     prepare_runtime_state_for_start,
-    sanitize_last_error,
+    summarize_runtime_error,
     write_runtime_state,
 )
 
@@ -150,8 +150,8 @@ def test_runtime_download_entry_rejects_invalid_target_paths(target: str) -> Non
         _entry(target=target)
 
 
-# Runtime state must only retain sanitized failure details for failed/exhausted
-# downloads; all non-error statuses clear stale messages.
+# Runtime state retains bounded, control-safe failure details only for
+# failed/exhausted downloads; all non-error statuses clear stale messages.
 @pytest.mark.parametrize("status", ["pending", "downloading", "completed", "skipped"])
 def test_runtime_download_entry_clears_last_error_for_non_error_statuses(
     status: str,
@@ -168,7 +168,7 @@ def test_runtime_download_entry_clears_last_error_for_non_error_statuses(
 
 
 @pytest.mark.parametrize("status", ["failed", "exhausted"])
-def test_runtime_download_entry_sanitizes_last_error_for_error_statuses(
+def test_runtime_download_entry_summarizes_last_error_for_error_statuses(
     status: str,
 ) -> None:
     raw_error = (
@@ -183,11 +183,10 @@ def test_runtime_download_entry_sanitizes_last_error_for_error_statuses(
 
     assert entry.last_error is not None
     assert "\n" not in entry.last_error
-    assert "https://example.com" not in entry.last_error
-    assert "hunter2" not in entry.last_error
-    assert "auth-secret" not in entry.last_error
-    assert "bearer-secret" not in entry.last_error
-    assert "/workspace/ComfyUI" not in entry.last_error
+    assert "https://example.com/model.safetensors?token=secret" in entry.last_error
+    assert "password=hunter2" in entry.last_error
+    assert "Authorization: Bearer auth-secret" in entry.last_error
+    assert "/workspace/ComfyUI/models/model.safetensors" in entry.last_error
     assert len(entry.last_error) == 512
     assert entry.last_error.endswith("...")
 
@@ -206,12 +205,9 @@ def test_failed_runtime_download_entry_accepts_exception_last_error() -> None:
     assert isinstance(entry, RuntimeDownloadEntry)
     assert entry.status == "failed"
     assert entry.last_error is not None
-    assert "https://example.com" not in entry.last_error
-    assert "token=secret" not in entry.last_error
-    assert "hunter2" not in entry.last_error
-    assert "/absolute/path" not in entry.last_error
-    assert "[REDACTED_URL]" in entry.last_error
-    assert "[REDACTED_PATH]" in entry.last_error
+    assert "https://example.com/model.safetensors?token=secret" in entry.last_error
+    assert "password=hunter2" in entry.last_error
+    assert "/absolute/path/model.safetensors" in entry.last_error
 
 
 # Atomic writes protect the state file from partial updates and re-normalize any
@@ -225,7 +221,7 @@ def test_atomic_write_replaces_file(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8"))["run_id"] == "run-1"
 
 
-def test_write_runtime_state_renormalizes_mutated_last_error(tmp_path: Path) -> None:
+def test_write_runtime_state_resummarizes_mutated_last_error(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     state = _state(entries={DIGEST_KEY: _entry(status="failed")})
     state.downloads.entries[DIGEST_KEY].last_error = (
@@ -236,12 +232,9 @@ def test_write_runtime_state_renormalizes_mutated_last_error(tmp_path: Path) -> 
     write_runtime_state(path, state)
 
     payload = path.read_text(encoding="utf-8")
-    assert "https://example.com" not in payload
-    assert "token=secret" not in payload
-    assert "hunter2" not in payload
-    assert "/workspace/ComfyUI" not in payload
-    assert "[REDACTED_URL]" in payload
-    assert "[REDACTED_PATH]" in payload
+    assert "https://example.com/model.safetensors?token=secret" in payload
+    assert "password=hunter2" in payload
+    assert "/workspace/ComfyUI/model.safetensors" in payload
 
 
 def test_atomic_write_preserves_old_file_on_replace_failure(
@@ -364,9 +357,9 @@ def test_prepare_runtime_state_resets_attempts_for_new_run_and_preserves_same_ru
     assert prepared.downloads.entries[OTHER_DIGEST_KEY].updated_at == old_updated_at
 
 
-# Redaction helpers keep diagnostics useful without leaking URLs, credentials,
-# backend details, or container paths.
-def test_sanitize_last_error_redacts_and_truncates() -> None:
+# Runtime error summaries preserve authored text while making it structurally
+# safe for one-line state and log records.
+def test_summarize_runtime_error_preserves_text_and_truncates() -> None:
     raw = (
         "failed\n"
         "url=https://example.com/file.bin?token=abc "
@@ -377,19 +370,19 @@ def test_sanitize_last_error_redacts_and_truncates() -> None:
         "\x00 done"
     )
 
-    sanitized = sanitize_last_error(raw, max_length=80)
+    summarized = summarize_runtime_error(raw)
+    bounded = summarize_runtime_error(raw, max_length=80)
 
-    assert "\n" not in sanitized
-    assert "\x00" not in sanitized
-    assert "https://example.com" not in sanitized
-    assert "hunter2" not in sanitized
-    assert "abcdef" not in sanitized
-    assert "auth-secret" not in sanitized
-    assert "bearer-secret" not in sanitized
-    assert "/workspace/ComfyUI" not in sanitized
-    assert "/var/lib/cdh/runtime/staging" not in sanitized
-    assert len(sanitized) == 80
-    assert sanitized.endswith("...")
+    assert "\n" not in summarized
+    assert "\x00" not in summarized
+    assert "https://example.com/file.bin?token=abc" in summarized
+    assert "password=hunter2" in summarized
+    assert "api_key:abcdef" in summarized
+    assert "Authorization: Bearer auth-secret" in summarized
+    assert "/workspace/ComfyUI/models/file.bin" in summarized
+    assert "/var/lib/cdh/runtime/staging/file.tmp" in summarized
+    assert len(bounded) == 80
+    assert bounded.endswith("...")
 
 
 def test_runtime_diagnostics_source_host_and_short_identity_are_safe() -> None:
@@ -408,7 +401,7 @@ def test_runtime_diagnostics_source_host_and_short_identity_are_safe() -> None:
     )
 
 
-def test_runtime_error_reason_redacts_known_secret_values() -> None:
+def test_runtime_error_reason_preserves_authored_text_and_quotes_it() -> None:
     reason = runtime_error_reason(
         "failed https://user:pass@example.com/a.bin?token=url-secret "
         "SSH_PASSWORD=hunter2 password=plain token:abc123 "
@@ -417,15 +410,14 @@ def test_runtime_error_reason_redacts_known_secret_values() -> None:
 
     assert reason.startswith('"')
     assert reason.endswith('"')
-    assert "https://user:pass@example.com" not in reason
-    assert "url-secret" not in reason
-    assert "hunter2" not in reason
-    assert "plain" not in reason
-    assert "abc123" not in reason
-    assert "bearer-secret" not in reason
+    assert "https://user:pass@example.com/a.bin?token=url-secret" in reason
+    assert "SSH_PASSWORD=hunter2" in reason
+    assert "password=plain" in reason
+    assert "token:abc123" in reason
+    assert "Bearer bearer-secret" in reason
 
 
-def test_state_json_does_not_serialize_source_urls_credentials_or_absolute_paths(
+def test_state_json_preserves_bounded_authored_failure_details(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "state.json"
@@ -448,14 +440,13 @@ def test_state_json_does_not_serialize_source_urls_credentials_or_absolute_paths
     write_runtime_state(path, state)
 
     payload = path.read_text(encoding="utf-8")
-    assert "https://example.com" not in payload
-    assert "hunter2" not in payload
-    assert "token=secret" not in payload
-    assert "auth-secret" not in payload
-    assert "bearer-secret" not in payload
-    assert "backend" not in payload
-    assert "failure_policy" not in payload
-    assert "/workspace/ComfyUI" not in payload
-    assert "/var/lib/cdh/runtime/staging" not in payload
+    assert "https://example.com/model.safetensors?token=secret" in payload
+    assert "password=hunter2" in payload
+    assert "Authorization: Bearer auth-secret" in payload
+    assert "bearer bearer-secret" in payload
+    assert "backend=httpx" in payload
+    assert "failure_policy=continue" in payload
+    assert "/workspace/ComfyUI/models/model.safetensors" in payload
+    assert "/var/lib/cdh/runtime/staging/model.tmp" in payload
     assert "models/checkpoints/model.safetensors" in payload
     assert os.linesep

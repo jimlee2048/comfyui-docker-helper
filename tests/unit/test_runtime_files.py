@@ -1859,7 +1859,7 @@ def test_runtime_file_download_exhausted_continue_omits_failed_and_continues(
     )
 
 
-def test_runtime_file_download_diagnostics_do_not_leak_url_or_secret_values(
+def test_runtime_file_download_diagnostics_keep_structured_source_and_authored_reason(
     tmp_path: Path,
 ) -> None:
     class SecretFailingBackend(FakeDownloadBackend):
@@ -1915,12 +1915,10 @@ def test_runtime_file_download_diagnostics_do_not_leak_url_or_secret_values(
     output = "\n".join(messages)
     assert "source_host=example.com" in output
     assert "https://user:source-password@example.com" not in output
-    assert "source-password" not in output
     assert "source-token" not in output
-    assert "fragment" not in output
-    assert "raw-token" not in output
-    assert "hunter2" not in output
-    assert "bearer-secret" not in output
+    assert "failed https://example.com/a.bin?token=raw-token" in output
+    assert "password=hunter2" in output
+    assert "Authorization: Bearer bearer-secret" in output
 
 
 def test_runtime_file_download_continue_policy_keeps_plain_download_error_fatal(

@@ -23,6 +23,10 @@ from comfyui_docker_helper.config.url_validation import (
     validate_file_name,
     validate_relative_file_directory,
 )
+from comfyui_docker_helper.config.value_validation import (
+    has_control_characters,
+    is_argv_value,
+)
 
 _CUDA_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
 _SEMVER_PATTERN = re.compile(
@@ -68,7 +72,6 @@ _COMFYUI_CONTROLLED_LAUNCH_FLAGS = frozenset(
 )
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _GIT_TARGET_DIR_PATTERN = re.compile(r"[A-Za-z0-9._-]+\Z")
-_DOCKERFILE_SOURCE_FORBIDDEN = frozenset({"\0", "\r", "\n"})
 _SUPPORTED_VERSION_CONSTRAINT_OPERATORS = ("==", "!=", "<=", ">=", "<", ">")
 _UNSUPPORTED_VERSION_CONSTRAINT_TOKENS = ("~=", "===", "^", "||")
 
@@ -407,6 +410,15 @@ def _validate_comfyui(
 ) -> None:
     comfyui = config.comfyui
 
+    if not is_argv_value(comfyui.listen):
+        diagnostics.append(
+            Diagnostic(
+                path=("comfyui", "listen"),
+                code="comfyui.invalid_listen",
+                message="must be non-empty and must not contain control characters",
+            )
+        )
+
     try:
         normalize_comfyui_version(comfyui.version)
     except ValueError as error:
@@ -439,6 +451,15 @@ def _validate_comfyui(
         )
 
     for index, argument in enumerate(comfyui.extra_args):
+        if not is_argv_value(argument):
+            diagnostics.append(
+                Diagnostic(
+                    path=("comfyui", "extra_args", index),
+                    code="comfyui.invalid_extra_arg",
+                    message="must be non-empty and must not contain control characters",
+                )
+            )
+            continue
         flag = argument.split("=", maxsplit=1)[0]
         if flag in _COMFYUI_CONTROLLED_LAUNCH_FLAGS:
             diagnostics.append(
@@ -462,6 +483,27 @@ def _validate_comfyui(
     for index, node in enumerate(comfyui.custom_nodes):
         node_path = ("comfyui", "custom_nodes", index)
         if isinstance(node, GitCustomNodeConfig):
+            url_valid = is_argv_value(node.url)
+            if not url_valid:
+                diagnostics.append(
+                    Diagnostic(
+                        path=(*node_path, "url"),
+                        code="custom_node.invalid_git_url",
+                        message=(
+                            "must be non-empty and must not contain control characters"
+                        ),
+                    )
+                )
+            if node.ref is not None and not is_argv_value(node.ref):
+                diagnostics.append(
+                    Diagnostic(
+                        path=(*node_path, "ref"),
+                        code="custom_node.invalid_git_ref",
+                        message=(
+                            "must be non-empty and must not contain control characters"
+                        ),
+                    )
+                )
             if node.url in git_urls:
                 diagnostics.append(
                     Diagnostic(
@@ -476,27 +518,30 @@ def _validate_comfyui(
                 if node.target_dir is not None
                 else (*node_path, "url")
             )
-            try:
-                git_target_dir = resolve_git_target_dir(node.url, node.target_dir)
-            except ValueError as error:
-                diagnostics.append(
-                    Diagnostic(
-                        path=git_target_dir_path,
-                        code="custom_node.invalid_git_target_dir",
-                        message=str(error),
-                    )
-                )
-            else:
-                existing_url = git_target_dirs.get(git_target_dir)
-                if existing_url is not None and existing_url != node.url:
+            if url_valid:
+                try:
+                    git_target_dir = resolve_git_target_dir(node.url, node.target_dir)
+                except ValueError as error:
                     diagnostics.append(
                         Diagnostic(
                             path=git_target_dir_path,
-                            code="custom_node.duplicate_git_target_dir",
-                            message="git custom-node target directories must be unique",
+                            code="custom_node.invalid_git_target_dir",
+                            message=str(error),
                         )
                     )
-                git_target_dirs.setdefault(git_target_dir, node.url)
+                else:
+                    existing_url = git_target_dirs.get(git_target_dir)
+                    if existing_url is not None and existing_url != node.url:
+                        diagnostics.append(
+                            Diagnostic(
+                                path=git_target_dir_path,
+                                code="custom_node.duplicate_git_target_dir",
+                                message=(
+                                    "git custom-node target directories must be unique"
+                                ),
+                            )
+                        )
+                    git_target_dirs.setdefault(git_target_dir, node.url)
         else:
             if node.version is not None:
                 try:
@@ -660,7 +705,7 @@ def _validate_build(config: Config, diagnostics: list[Diagnostic]) -> None:
         if (
             not tag
             or any(character.isspace() for character in tag)
-            or any(ord(character) < 32 or ord(character) == 127 for character in tag)
+            or has_control_characters(tag)
         ):
             diagnostics.append(
                 Diagnostic(
@@ -689,17 +734,12 @@ def _validate_dockerfile_source_strings(
             config.compute_platform.cuda.image_distro,
             ("compute_platform", "cuda", "image_distro"),
         ),
-        (config.system.workspace, ("system", "workspace")),
         (config.python.version, ("python", "version")),
         (config.python.uv_version, ("python", "uv_version")),
-        (config.python.index_url, ("python", "index_url")),
         (config.pytorch.version, ("pytorch", "version")),
-        (config.pytorch.index_base_url, ("pytorch", "index_base_url")),
         (config.comfyui.cli_version, ("comfyui", "cli_version")),
         (config.comfyui.version, ("comfyui", "version")),
     ]
-    if config.system.comfyui_path is not None:
-        values.append((config.system.comfyui_path, ("system", "comfyui_path")))
 
     values.extend(
         (package, ("system", "extra_packages", index))
@@ -716,19 +756,13 @@ def _validate_dockerfile_source_strings(
         (package, ("pytorch", "extra_packages", index))
         for index, package in enumerate(config.pytorch.extra_packages)
     )
-    values.append((config.comfyui.listen, ("comfyui", "listen")))
-    values.extend(
-        (argument, ("comfyui", "extra_args", index))
-        for index, argument in enumerate(config.comfyui.extra_args)
-    )
-
     for value, path in values:
-        if any(character in value for character in _DOCKERFILE_SOURCE_FORBIDDEN):
+        if has_control_characters(value):
             diagnostics.append(
                 Diagnostic(
                     path=path,
                     code="dockerfile.invalid_source_character",
-                    message="must not contain NUL, carriage return, or line feed",
+                    message="must not contain control characters",
                 )
             )
 
@@ -814,6 +848,15 @@ def _require_absolute_container_path(
     path: DiagnosticPath,
     diagnostics: list[Diagnostic],
 ) -> None:
+    if has_control_characters(value):
+        diagnostics.append(
+            Diagnostic(
+                path,
+                "system.path_control_character",
+                "must not contain control characters",
+            )
+        )
+        return
     if not PurePosixPath(value).is_absolute():
         diagnostics.append(
             Diagnostic(
@@ -850,9 +893,7 @@ def _require_http_index_url(
         or not hostname
         or "\\" in parsed.netloc
         or any(character.isspace() for character in parsed.netloc)
+        or has_control_characters(url)
     ):
         diagnostics.append(Diagnostic(path, code, "must be an HTTP(S) URL with a host"))
         return
-
-    if parsed.username is not None or parsed.password is not None:
-        diagnostics.append(Diagnostic(path, code, "must not include URL userinfo"))

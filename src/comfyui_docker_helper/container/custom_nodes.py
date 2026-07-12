@@ -18,6 +18,7 @@ from comfyui_docker_helper.config.plan import (
     RegistryCustomNodePlan,
 )
 from comfyui_docker_helper.config.validation import resolve_git_target_dir
+from comfyui_docker_helper.config.value_validation import is_argv_value
 from comfyui_docker_helper.container.root_config import (
     ContainerRootConfigError,
     custom_nodes_document,
@@ -85,6 +86,16 @@ def build_custom_nodes_plan(
         _validate_hooks(index, pre_hooks, post_hooks, resolved_scripts_dir)
 
         if isinstance(node, GitCustomNodeConfig):
+            if not is_argv_value(node.url):
+                raise CustomNodesConfigError(
+                    f"custom-node Git URL at item {index} must be non-empty "
+                    "and must not contain control characters"
+                )
+            if node.ref is not None and not is_argv_value(node.ref):
+                raise CustomNodesConfigError(
+                    f"custom-node Git ref at item {index} must be non-empty "
+                    "and must not contain control characters"
+                )
             if node.url in git_urls:
                 raise CustomNodesConfigError(
                     f"custom-node config duplicates Git URL at item {index}: {node.url}"

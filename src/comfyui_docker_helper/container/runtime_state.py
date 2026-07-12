@@ -12,26 +12,15 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.value_validation import (
+    has_control_characters,
+    replace_control_characters,
+)
 
 RUNTIME_STATE_PATH = Path("/var/lib/cdh/runtime/state.json")
 RUNTIME_STATE_SCHEMA_VERSION = 1
 
 _DIGEST_KEY_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
-_CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f]+")
-_HTTP_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
-_SECRET_ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(password|passwd|pwd|token|api_key|access_token|secret|authorization|"
-    r"bearer|SSH_PASSWORD)(\s*[=:]\s*|/)[^\s&;]+"
-)
-_SECRET_PARAM_PATTERN = re.compile(
-    r"(?i)([?&](?:password|passwd|pwd|token|api_key|access_token|secret|"
-    r"authorization|bearer|SSH_PASSWORD)=)[^&\s]+"
-)
-_BEARER_SECRET_PATTERN = re.compile(r"(?i)\b(?:authorization\s*:\s*)?bearer\s+[^\s&;]+")
-_CONFIG_FIELD_PATTERN = re.compile(
-    r"(?i)\b(?:backend|downloader|failure_policy|download_failure_policy)\s*=\s*[^\s&;]+"
-)
-_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![\w.-])/(?:[^\s:;,\"'<>|]+/)*[^\s:;,\"'<>|]*")
 _ERROR_DOWNLOAD_STATUSES = frozenset({"failed", "exhausted"})
 
 type RuntimeDownloadDigestKey = Annotated[
@@ -68,6 +57,8 @@ class RuntimeDownloadEntry(ConfigModel):
             raise ValueError("target must be a non-empty relative POSIX path")
         if "\\" in value:
             raise ValueError("target must use POSIX separators")
+        if has_control_characters(value):
+            raise ValueError("target must not contain control characters")
 
         raw_parts = value.split("/")
         if any(part in ("", ".", "..") for part in raw_parts):
@@ -95,7 +86,7 @@ class RuntimeDownloadEntry(ConfigModel):
         if self.status not in _ERROR_DOWNLOAD_STATUSES:
             self.last_error = None
         elif self.last_error is not None:
-            self.last_error = sanitize_last_error(self.last_error)
+            self.last_error = summarize_runtime_error(self.last_error)
         return self
 
 
@@ -207,16 +198,10 @@ def prepare_runtime_state_for_start(
     return prepared
 
 
-def sanitize_last_error(value: object, *, max_length: int = 512) -> str:
-    """Return a redacted, single-line error string safe for persisted state."""
+def summarize_runtime_error(value: object, *, max_length: int = 512) -> str:
+    """Return bounded, single-line runtime error text without classifying it."""
     text = "" if value is None else str(value)
-    text = _CONTROL_CHARS_PATTERN.sub(" ", text)
-    text = _HTTP_URL_PATTERN.sub("[REDACTED_URL]", text)
-    text = _SECRET_PARAM_PATTERN.sub(r"\1[REDACTED]", text)
-    text = _BEARER_SECRET_PATTERN.sub("[REDACTED_SECRET]", text)
-    text = _SECRET_ASSIGNMENT_PATTERN.sub(r"\1=[REDACTED]", text)
-    text = _CONFIG_FIELD_PATTERN.sub("[REDACTED_CONFIG]", text)
-    text = _ABSOLUTE_PATH_PATTERN.sub("[REDACTED_PATH]", text)
+    text = replace_control_characters(text)
     text = " ".join(text.split())
 
     if max_length < 3:
@@ -238,7 +223,7 @@ def failed_runtime_download_entry(
         {
             **entry.model_dump(),
             "status": status,
-            "last_error": sanitize_last_error(last_error),
+            "last_error": summarize_runtime_error(last_error),
             "updated_at": updated_at,
         }
     )

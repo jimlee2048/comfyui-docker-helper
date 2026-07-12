@@ -661,6 +661,64 @@ filename = "model.bin"
     )
 
 
+def test_runtime_file_url_accepts_valid_userinfo(tmp_path: Path) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://user:password@example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=mounted,
+    )
+
+    assert result.files[0]["url"] == "https://user:password@example.com/model.bin"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("url", "https://example.com/model\\u007f.bin", "runtime_file.invalid_url"),
+        ("dir", "models\\u007fescape", "runtime_file.control_character"),
+        ("filename", "model\\u007f.bin", "runtime_file.invalid_filename"),
+    ],
+)
+def test_runtime_file_domains_reject_control_characters(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    code: str,
+) -> None:
+    values = {
+        "url": "https://example.com/model.bin",
+        "dir": "models",
+        "filename": "model.bin",
+    }
+    values[field] = value
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f"""
+[[files]]
+url = "{values["url"]}"
+dir = "{values["dir"]}"
+filename = "{values["filename"]}"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [(("files", 0, field), code)]
+
+
 def test_runtime_file_non_http_url_fails_runtime_validation(
     tmp_path: Path,
 ) -> None:
@@ -1163,6 +1221,44 @@ extra_args = ["--cpu", "{argument}"]
     assert _identities(error.value) == [
         (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
     ]
+
+
+@pytest.mark.parametrize(
+    ("document", "path", "code"),
+    [
+        (
+            'listen = "host\\u007fpart"',
+            ("comfyui", "listen"),
+            "comfyui.invalid_listen",
+        ),
+        (
+            'extra_args = ["--cpu\\u007fprobe"]',
+            ("comfyui", "extra_args", 0),
+            "comfyui.invalid_extra_arg",
+        ),
+    ],
+)
+def test_runtime_comfyui_argv_rejects_control_characters(
+    tmp_path: Path,
+    document: str,
+    path: tuple[str | int, ...],
+    code: str,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f"""
+[comfyui]
+{document}
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [(path, code)]
 
 
 def test_env_extra_args_reject_cdh_controlled_flags(tmp_path: Path) -> None:

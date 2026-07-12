@@ -14,6 +14,7 @@ from comfyui_docker_helper.config import (
     SourceResolvers,
     load_validate_plan_result,
 )
+from comfyui_docker_helper.config.value_validation import has_control_characters
 from comfyui_docker_helper.host.buildx import BuildxOutput, build_image_with_buildx
 from comfyui_docker_helper.host.diagnostics import (
     render_configuration_diagnostics,
@@ -363,7 +364,7 @@ def _validate_cli_image_tags(tags: list[str]) -> None:
         if (
             not tag
             or any(character.isspace() for character in tag)
-            or any(ord(character) < 32 or ord(character) == 127 for character in tag)
+            or has_control_characters(tag)
         ):
             raise typer.BadParameter(
                 "must be non-empty and must not contain whitespace "

@@ -18,7 +18,6 @@ from comfyui_docker_helper.config import (
     Lockfile,
     LockManifest,
     RegistryCustomNodeConfig,
-    RenderPlanValidationError,
     RuntimeHooksPlan,
     build_render_plan,
     with_runtime_hooks_plan,
@@ -281,19 +280,26 @@ def test_package_index_urls_are_shell_quoted_in_dockerfile() -> None:
         ),
     ],
 )
-def test_credential_bearing_index_urls_fail_before_dockerfile_render(
+def test_index_url_userinfo_is_preserved_as_one_shell_argument(
     field: str,
     value: str,
 ) -> None:
-    """Fail closed before credentials can be rendered into Dockerfile source."""
+    """Render valid userinfo as ordinary user-managed index URL data."""
     config = make_config()
     if field == "python":
         config.python.index_url = value
     else:
         config.pytorch.index_base_url = value
 
-    with pytest.raises(RenderPlanValidationError):
-        build_render_plan(config)
+    rendered = render_dockerfile(
+        build_render_plan(config),
+        lockfile=make_lockfile(config),
+    )
+
+    if field == "python":
+        assert rendered.count(f"--index-url {value}") == 3
+    else:
+        assert f"--index-url {value}/${{PYTORCH_WHEEL_TAG}}" in rendered
 
 
 def test_stable_comfyui_commit_verification_command_succeeds_for_match(

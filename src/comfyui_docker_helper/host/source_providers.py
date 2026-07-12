@@ -21,6 +21,7 @@ from comfyui_docker_helper.config import (
     SourceResolvers,
     UpstreamResponseError,
 )
+from comfyui_docker_helper.config.value_validation import is_argv_value
 
 _GITHUB_TAG_REFS_PREFIX = "refs/tags/"
 _GIT_TIMEOUT_SECONDS = 30.0
@@ -75,6 +76,7 @@ class GitRemoteProvider:
         return commit
 
     def resolve_default_branch_head(self, url: str) -> str:
+        _require_git_argv_value(url, name="URL")
         refs = _run_git(
             self.git_executable,
             "ls-remote",
@@ -86,6 +88,8 @@ class GitRemoteProvider:
         return commit
 
     def resolve_ref(self, url: str, ref: str) -> str:
+        _require_git_argv_value(url, name="URL")
+        _require_git_argv_value(ref, name="ref")
         refs = _run_git(
             self.git_executable,
             "ls-remote",
@@ -246,6 +250,16 @@ def _run_git(git_executable: str, *args: str) -> str:
             reason=reason or f"git exited with code {completed.returncode}",
         )
     return completed.stdout
+
+
+def _require_git_argv_value(value: str, *, name: str) -> None:
+    if is_argv_value(value):
+        return
+    raise UpstreamResponseError(
+        source="git ls-remote",
+        selector=name,
+        reason=f"{name} must be non-empty and must not contain control characters",
+    )
 
 
 def _select_single_ls_remote_ref(

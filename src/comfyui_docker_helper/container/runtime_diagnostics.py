@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from comfyui_docker_helper.container.runtime_state import sanitize_last_error
+from comfyui_docker_helper.container.runtime_state import summarize_runtime_error
 
 _UNKNOWN_SOURCE_HOST = "unknown"
 _IDENTITY_HEX_LENGTH = 12
@@ -31,8 +31,8 @@ def short_runtime_identity(identity: str) -> str:
 
 
 def runtime_error_reason(error: object) -> str:
-    """Return a quoted, redacted, single-line error reason for logs."""
-    reason = sanitize_last_error(error, max_length=_REASON_MAX_LENGTH)
+    """Return a quoted, bounded, control-safe error reason for logs."""
+    reason = summarize_runtime_error(error, max_length=_REASON_MAX_LENGTH)
     return _quote_log_value(reason)
 
 

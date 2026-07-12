@@ -27,6 +27,7 @@ from comfyui_docker_helper.config.ssh_keys import (
     normalize_ssh_public_keys,
 )
 from comfyui_docker_helper.config.url_validation import DownloaderName
+from comfyui_docker_helper.config.value_validation import is_argv_value
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
@@ -632,7 +633,24 @@ def _validate_runtime_downloader(config: RuntimeConfig) -> None:
 
 def _validate_runtime_extra_args(config: RuntimeConfig) -> None:
     diagnostics: list[Diagnostic] = []
+    if not is_argv_value(config.comfyui.listen):
+        diagnostics.append(
+            Diagnostic(
+                path=("comfyui", "listen"),
+                code="comfyui.invalid_listen",
+                message="must be non-empty and must not contain control characters",
+            )
+        )
     for index, argument in enumerate(config.comfyui.extra_args):
+        if not is_argv_value(argument):
+            diagnostics.append(
+                Diagnostic(
+                    path=("comfyui", "extra_args", index),
+                    code="comfyui.invalid_extra_arg",
+                    message="must be non-empty and must not contain control characters",
+                )
+            )
+            continue
         flag = argument.split("=", maxsplit=1)[0]
         if flag in _COMFYUI_CONTROLLED_STARTUP_FLAGS:
             diagnostics.append(

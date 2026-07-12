@@ -164,6 +164,46 @@ def test_git_ref_resolution_keeps_lightweight_tag_commit(
     assert commit == COMMIT_A
 
 
+@pytest.mark.parametrize(
+    ("method", "url", "ref", "selector"),
+    [
+        ("default", "", None, "URL"),
+        ("default", "https://example.com/repo.git\nprobe", None, "URL"),
+        ("ref", "https://example.com/repo.git", "", "ref"),
+        ("ref", "https://example.com/repo.git", "main\x7fprobe", "ref"),
+    ],
+)
+def test_git_provider_rejects_invalid_argv_values_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    url: str,
+    ref: str | None,
+    selector: str,
+) -> None:
+    called = False
+
+    def unexpected_run(*args: str) -> str:
+        nonlocal called
+        called = True
+        return ""
+
+    monkeypatch.setattr(provider_module, "_run_git", unexpected_run)
+    provider = GitRemoteProvider()
+
+    with pytest.raises(UpstreamResponseError) as error:
+        if method == "default":
+            provider.resolve_default_branch_head(url)
+        else:
+            assert ref is not None
+            provider.resolve_ref(url, ref)
+
+    assert error.value.selector == selector
+    assert error.value.reason == (
+        f"{selector} must be non-empty and must not contain control characters"
+    )
+    assert called is False
+
+
 def test_run_git_disables_interactive_prompts_and_sets_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -6,6 +6,8 @@ from pathlib import PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 
+from comfyui_docker_helper.config.value_validation import has_control_characters
+
 type DownloaderName = Literal["aria2", "httpx"]
 
 DOWNLOADERS: frozenset[DownloaderName] = frozenset({"aria2", "httpx"})
@@ -24,6 +26,7 @@ class RelativeDirectoryValidationResult:
             "current_directory_segment",
             "parent_directory_segment",
             "empty_directory",
+            "control_character",
         ]
         | None
     ) = None
@@ -40,7 +43,9 @@ class FilenameValidationResult:
 
 
 def is_http_url(url: str) -> bool:
-    """Return whether a URL is HTTP(S), host-qualified, and shell-safe."""
+    """Return whether a URL is HTTP(S), host-qualified, and consumer-safe."""
+    if has_control_characters(url):
+        return False
     try:
         parsed = urlsplit(url)
         hostname = parsed.hostname
@@ -72,6 +77,12 @@ def require_downloader_name(value: str) -> DownloaderName:
 
 def validate_relative_file_directory(value: str) -> RelativeDirectoryValidationResult:
     """Validate and normalize a runtime-compatible relative file directory."""
+    if has_control_characters(value):
+        return RelativeDirectoryValidationResult(
+            None,
+            "control_character",
+            "must not contain control characters",
+        )
     if value.startswith("/"):
         return RelativeDirectoryValidationResult(
             None,
@@ -117,7 +128,13 @@ def validate_relative_file_directory(value: str) -> RelativeDirectoryValidationR
 
 def validate_file_name(value: str) -> FilenameValidationResult:
     """Validate one nonempty POSIX filename component."""
-    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+    if (
+        not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or has_control_characters(value)
+    ):
         return FilenameValidationResult(
             None,
             "invalid_filename",

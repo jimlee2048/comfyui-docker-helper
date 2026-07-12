@@ -41,6 +41,8 @@ def test_buildx_invocation_uses_required_argv_and_cwd(tmp_path: Path) -> None:
                 "buildx",
                 "build",
                 "--load",
+                "--platform",
+                "linux/amd64",
                 "-t",
                 "example/comfy:dev",
                 "-t",
@@ -56,7 +58,8 @@ def test_buildx_invocation_uses_required_argv_and_cwd(tmp_path: Path) -> None:
     assert result.image_tags == ("example/comfy:dev", "example/comfy:latest")
     assert result.output == "load"
     assert logs == [
-        "Running Docker Buildx: docker buildx build --load -t "
+        "Running Docker Buildx: docker buildx build --load --platform "
+        "linux/amd64 -t "
         "example/comfy:dev -t example/comfy:latest "
         f"'{tmp_path / 'context with space'}'",
         "Docker Buildx loaded image tags: example/comfy:dev, example/comfy:latest",
@@ -90,6 +93,8 @@ def test_buildx_invocation_can_push_tags(tmp_path: Path) -> None:
             "buildx",
             "build",
             "--push",
+            "--platform",
+            "linux/amd64",
             "-t",
             "registry.example.com/comfy:dev",
             str(tmp_path),

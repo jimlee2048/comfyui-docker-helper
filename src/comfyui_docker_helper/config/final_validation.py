@@ -24,17 +24,17 @@ from comfyui_docker_helper.config.final_models import (
     FinalGitCustomNodeConfig,
     FinalRegistryCustomNodeConfig,
 )
+from comfyui_docker_helper.config.selector_validation import (
+    normalize_comfy_cli_version,
+    normalize_comfyui_version,
+    normalize_registry_version,
+    resolve_git_target_dir,
+)
 from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.url_validation import (
     is_http_url,
     validate_file_name,
     validate_relative_file_directory,
-)
-from comfyui_docker_helper.config.validation import (
-    normalize_comfy_cli_version,
-    normalize_comfyui_version,
-    normalize_registry_version,
-    resolve_git_target_dir,
 )
 from comfyui_docker_helper.config.value_validation import (
     has_control_characters,

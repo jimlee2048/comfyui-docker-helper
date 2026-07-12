@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from packaging.specifiers import SpecifierSet
-from packaging.version import Version
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from packaging.version import InvalidVersion, Version
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
@@ -24,6 +25,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     RegistryNodeLockEntry,
     canonical_entry_key,
     dump_canonical_lock_toml,
+    pytorch_core_version_matches_channel,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import (
@@ -37,7 +39,12 @@ from comfyui_docker_helper.config.final_planning import (
     TargetPlatform,
 )
 from comfyui_docker_helper.config.final_validation import validate_direct_requirement
-from comfyui_docker_helper.config.validation import (
+from comfyui_docker_helper.config.runtime_hooks import (
+    CUSTOM_NODE_HOOK_LOCK_PREFIX,
+    RUNTIME_HOOK_LOCK_PREFIX,
+    RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
+)
+from comfyui_docker_helper.config.selector_validation import (
     normalize_comfy_cli_version,
     normalize_comfyui_version,
     normalize_registry_version,
@@ -122,6 +129,21 @@ class ExactPackagePlan(_PlanModel):
     extras: tuple[str, ...]
     version: str
     environment: Literal["application"]
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        try:
+            version = Version(value)
+        except InvalidVersion as error:
+            raise ValueError(
+                "version must be one canonical exact stable distribution version"
+            ) from error
+        if str(version) != value or version.is_prerelease or version.is_devrelease:
+            raise ValueError(
+                "version must be one canonical exact stable distribution version"
+            )
+        return value
 
     @property
     def requirement(self) -> str:
@@ -224,10 +246,13 @@ class FilePlan(_PlanModel):
     overwrite: bool
     downloader: Literal["aria2", "httpx"]
     download_mode: Literal["sync", "async"]
+    downloader_explicit: bool
+    download_mode_explicit: bool
 
 
 class FilesPhase(_PlanModel):
     downloader: DownloaderPlan
+    default_download_mode: Literal["sync", "async"]
     download_max_attempts: int
     download_failure_policy: Literal["continue", "fail"]
     files: tuple[FilePlan, ...]
@@ -249,6 +274,8 @@ class RuntimePhase(_PlanModel):
     environment: tuple[EnvironmentPlan, ...]
     ssh: SshPlan
     launch_command: tuple[str, ...]
+    hooks: tuple[HookPlan, ...]
+    download_failure_policy: Literal["continue", "fail"] | None
 
 
 class BuildOutputPlan(_PlanModel):
@@ -270,6 +297,17 @@ class BuildPlan(_PlanModel):
     files: FilesPhase
     runtime: RuntimePhase
 
+    @model_validator(mode="after")
+    def _validate_pytorch_channel(self) -> BuildPlan:
+        if any(
+            not pytorch_core_version_matches_channel(
+                package.name, package.version, self.toolchain.pytorch_channel
+            )
+            for package in self.application.pytorch.packages
+        ):
+            raise ValueError("PyTorch core package does not match the backend channel")
+        return self
+
 
 class ManifestBinding(_PlanModel):
     """Stable final-verification binding without observed evidence or timestamps."""
@@ -281,9 +319,20 @@ class ManifestBinding(_PlanModel):
     lock_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimePlanningProvenance:
+    """Authorship needed when projecting host config into runtime config."""
+
+    failure_policy_explicit: bool = False
+    file_downloader_explicit: tuple[bool, ...] = ()
+    file_download_mode_explicit: tuple[bool, ...] = ()
+
+
 def construct_build_plan(
     config: FinalConfig,
     resolution: AcceptedCanonicalLock,
+    *,
+    runtime_provenance: RuntimePlanningProvenance | None = None,
 ) -> BuildPlan:
     """Construct BuildPlan exactly once from validated config and accepted lock."""
     config = FinalConfig.model_validate(config.model_dump(mode="python"))
@@ -354,6 +403,7 @@ def construct_build_plan(
         config.python.index_url,
         entries,
         used,
+        package_channel=None,
     )
     pytorch_requirements = [
         f"torch=={config.pytorch.version}",
@@ -367,9 +417,10 @@ def construct_build_plan(
         f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}",
         entries,
         used,
+        package_channel=backend.package_channel,
     )
     torch = next(item for item in pytorch_packages.packages if item.name == "torch")
-    if torch.version != config.pytorch.version:
+    if Version(torch.version).public != config.pytorch.version:
         raise ValueError("canonical torch version does not match final config")
 
     workspace = str(PurePosixPath(config.system.workspace))
@@ -383,6 +434,21 @@ def construct_build_plan(
         _custom_node(node, comfyui_path, entries, used)
         for node in config.comfyui.custom_nodes
     )
+    provenance = runtime_provenance or RuntimePlanningProvenance()
+    if provenance.file_downloader_explicit and len(
+        provenance.file_downloader_explicit
+    ) != len(config.files):
+        raise ValueError("runtime file downloader provenance does not match config")
+    if provenance.file_download_mode_explicit and len(
+        provenance.file_download_mode_explicit
+    ) != len(config.files):
+        raise ValueError("runtime file download-mode provenance does not match config")
+    downloader_explicit = provenance.file_downloader_explicit or (False,) * len(
+        config.files
+    )
+    download_mode_explicit = provenance.file_download_mode_explicit or (False,) * len(
+        config.files
+    )
     files = tuple(
         FilePlan(
             url=item.url,
@@ -390,9 +456,12 @@ def construct_build_plan(
             overwrite=item.overwrite,
             downloader=item.downloader or config.cdh.default_downloader,
             download_mode=item.download_mode or config.cdh.default_download_mode,
+            downloader_explicit=downloader_explicit[index],
+            download_mode_explicit=download_mode_explicit[index],
         )
-        for item in config.files
+        for index, item in enumerate(config.files)
     )
+    runtime_hooks = _runtime_hooks(entries, used)
     unused = sorted(set(entries) - used)
     if unused:
         raise ValueError(f"canonical lock contains unused identities: {unused!r}")
@@ -446,6 +515,7 @@ def construct_build_plan(
                     config.cdh.downloader.httpx.model_dump(mode="python")
                 ),
             ),
+            default_download_mode=config.cdh.default_download_mode,
             download_max_attempts=config.cdh.download_max_attempts,
             download_failure_policy=config.cdh.download_failure_policy,
             files=files,
@@ -470,6 +540,12 @@ def construct_build_plan(
                 str(config.comfyui.port),
                 "--disable-auto-launch",
                 *config.comfyui.extra_args,
+            ),
+            hooks=runtime_hooks,
+            download_failure_policy=(
+                config.cdh.download_failure_policy
+                if provenance.failure_policy_explicit
+                else None
             ),
         ),
     )
@@ -523,6 +599,8 @@ def _package_group(
     index_url: str,
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
+    *,
+    package_channel: str | None,
 ) -> PackageGroupPlan:
     packages: list[ExactPackagePlan] = []
     for index, value in enumerate(requirements):
@@ -538,6 +616,12 @@ def _package_group(
             normalized.specifier, entry.version
         ):
             raise ValueError(f"canonical package does not satisfy {normalized.name}")
+        if package_channel is not None and not pytorch_core_version_matches_channel(
+            entry.package, entry.version, package_channel
+        ):
+            raise ValueError(
+                f"canonical {entry.package} version does not match PyTorch channel"
+            )
         packages.append(
             ExactPackagePlan(
                 name=entry.package,
@@ -599,13 +683,46 @@ def _hook(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
 ) -> HookPlan:
+    identity_path = f"{CUSTOM_NODE_HOOK_LOCK_PREFIX}/{relative_path}"
     entry = _take(
         entries,
         used,
-        ("local-executable", relative_path),
+        ("local-executable", identity_path),
         LocalExecutableLockEntry,
     )
-    return HookPlan(relative_path=entry.relative_path, digest=entry.digest)
+    return HookPlan(relative_path=relative_path, digest=entry.digest)
+
+
+def _runtime_hooks(
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> tuple[HookPlan, ...]:
+    prefix = f"{RUNTIME_HOOK_LOCK_PREFIX}/"
+    hooks: list[HookPlan] = []
+    phase_order = {
+        directory: index
+        for index, (_, directory) in enumerate(RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS)
+    }
+    runtime_keys = [
+        key
+        for key in entries
+        if key[0] == "local-executable" and key[1].startswith(prefix)
+    ]
+    runtime_keys.sort(
+        key=lambda key: (
+            phase_order.get(key[1].removeprefix(prefix).split("/", 1)[0], 99),
+            key[1],
+        )
+    )
+    for key in runtime_keys:
+        entry = _take(entries, used, key, LocalExecutableLockEntry)
+        hooks.append(
+            HookPlan(
+                relative_path=entry.relative_path.removeprefix(prefix),
+                digest=entry.digest,
+            )
+        )
+    return tuple(hooks)
 
 
 def _image_plan(entry: OciLockEntry) -> ImagePlan:

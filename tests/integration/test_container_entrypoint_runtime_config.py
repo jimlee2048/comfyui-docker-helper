@@ -1,4 +1,4 @@
-"""End-to-end runtime config coverage from host render to entrypoint startup."""
+"""Runtime config precedence coverage for container entrypoint startup."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
-from comfyui_docker_helper.cli import app
 from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -20,17 +18,6 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
-
-HOST_CONFIG_BASE = """\
-[compute_platform]
-type = "cuda"
-
-[compute_platform.cuda]
-version = "12.9.2"
-
-[pytorch]
-version = "2.10"
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,24 +76,6 @@ def _recording_runner(calls: list[SpawnCall]):
         return FakeChild()
 
     return runner
-
-
-def _render_host_context(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    document: str,
-) -> Path:
-    config = _write(tmp_path / "host.toml", document)
-    context = tmp_path / "context"
-
-    result = cli_runner.invoke(
-        app,
-        ["host", "render", "-f", str(config), "-o", str(context)],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert (context / "runtime" / "config.toml").is_file()
-    return context
 
 
 def _expected_argv(
@@ -178,17 +147,11 @@ def test_entrypoint_starts_with_defaults_without_runtime_config(
     ]
 
 
-def test_host_rendered_baked_runtime_config_feeds_entrypoint_argv(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-) -> None:
-    context = _render_host_context(
-        cli_runner,
-        tmp_path,
-        HOST_CONFIG_BASE
-        + """
+def test_baked_runtime_config_feeds_entrypoint_argv(tmp_path: Path) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
 [comfyui]
-version = "latest"
 listen = "127.0.0.10"
 port = 8191
 extra_args = ["--cpu", "--lowvram"]
@@ -199,7 +162,7 @@ extra_args = ["--cpu", "--lowvram"]
 
     exit_code = run_entrypoint(
         runtime=runtime,
-        baked_config_path=context / "runtime" / "config.toml",
+        baked_config_path=baked,
         mounted_config_path=_missing_mounted_config(tmp_path),
         baked_hooks_path=_missing_baked_hooks(tmp_path),
         mounted_hooks_path=_missing_mounted_hooks(tmp_path),
@@ -218,17 +181,11 @@ extra_args = ["--cpu", "--lowvram"]
     ]
 
 
-def test_mounted_runtime_config_overrides_host_rendered_baked_config(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-) -> None:
-    context = _render_host_context(
-        cli_runner,
-        tmp_path,
-        HOST_CONFIG_BASE
-        + """
+def test_mounted_runtime_config_overrides_baked_config(tmp_path: Path) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
 [comfyui]
-version = "latest"
 listen = "127.0.0.10"
 port = 8191
 extra_args = ["--cpu"]
@@ -248,7 +205,7 @@ extra_args = ["--preview-method", "auto"]
 
     exit_code = run_entrypoint(
         runtime=runtime,
-        baked_config_path=context / "runtime" / "config.toml",
+        baked_config_path=baked,
         mounted_config_path=mounted,
         baked_hooks_path=_missing_baked_hooks(tmp_path),
         mounted_hooks_path=_missing_mounted_hooks(tmp_path),
@@ -270,21 +227,17 @@ extra_args = ["--preview-method", "auto"]
 # Environment override coverage keeps CLI-facing knobs wired through both
 # ComfyUI argv generation and runtime downloader configuration.
 def test_environment_overrides_mounted_and_baked_runtime_config(
-    cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    context = _render_host_context(
-        cli_runner,
-        tmp_path,
-        HOST_CONFIG_BASE
-        + """
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
 [cdh]
 default_downloader = "aria2"
 download_max_attempts = 4
 download_failure_policy = "continue"
 
 [comfyui]
-version = "latest"
 listen = "127.0.0.10"
 port = 8191
 extra_args = ["--cpu"]
@@ -344,7 +297,7 @@ extra_args = ["--preview-method", "auto"]
     exit_code = run_entrypoint(
         runtime=runtime,
         runtime_state_path=tmp_path / "state.json",
-        baked_config_path=context / "runtime" / "config.toml",
+        baked_config_path=baked,
         mounted_config_path=mounted,
         baked_hooks_path=_missing_baked_hooks(tmp_path),
         mounted_hooks_path=_missing_mounted_hooks(tmp_path),

@@ -21,16 +21,18 @@ from comfyui_docker_helper.config.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
-    DirectPythonRequestIdentity,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    PythonGroupRequestIdentity,
+    PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     ResolverRequestIdentity,
+    pytorch_core_version_matches_channel,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
@@ -72,7 +74,7 @@ class ResolvedPythonMember:
 
 class PythonGroupResolver(Protocol):
     def resolve(
-        self, request: DirectPythonRequestIdentity
+        self, request: PythonGroupRequestIdentity
     ) -> tuple[ResolvedPythonMember, ...]: ...
 
 
@@ -87,7 +89,7 @@ class UvPythonGroupResolver:
     runner: ProcessRunner = subprocess.run
 
     def resolve(
-        self, request: DirectPythonRequestIdentity
+        self, request: PythonGroupRequestIdentity
     ) -> tuple[ResolvedPythonMember, ...]:
         requirements = "\n".join(
             _requirement_text(member.package, member.extras, member.selector)
@@ -138,7 +140,17 @@ class UvPythonGroupResolver:
             raise CanonicalAcquisitionError("Python group resolution failed") from error
         if completed.returncode != 0:
             raise CanonicalAcquisitionError("Python group resolution failed")
-        return _parse_direct_members(completed.stdout, request)
+        resolved = _parse_direct_members(completed.stdout, request)
+        if isinstance(request, PyTorchRequestIdentity) and any(
+            not pytorch_core_version_matches_channel(
+                member.package, member.version, request.channel
+            )
+            for member in resolved
+        ):
+            raise CanonicalAcquisitionError(
+                "Python resolver returned an incompatible PyTorch channel"
+            )
+        return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +315,15 @@ class ProviderIdentityAcquirer:
             raise CanonicalAcquisitionError(
                 "Python resolver returned an incompatible direct group"
             )
+        if isinstance(request, PyTorchRequestIdentity) and any(
+            not pytorch_core_version_matches_channel(
+                member.package, by_package[member.package], request.channel
+            )
+            for member in request.members
+        ):
+            raise CanonicalAcquisitionError(
+                "Python resolver returned an incompatible PyTorch channel"
+            )
         return tuple(
             DirectPythonLockEntry(
                 type="python-package",
@@ -418,7 +439,7 @@ def _select_registry_candidate(
 
 
 def _parse_direct_members(
-    output: str, request: DirectPythonRequestIdentity
+    output: str, request: PythonGroupRequestIdentity
 ) -> tuple[ResolvedPythonMember, ...]:
     requested = {member.package for member in request.members}
     matches: dict[str, str] = {}
@@ -438,7 +459,7 @@ def _parse_direct_members(
         exact = [item for item in requirement.specifier if item.operator == "=="]
         if len(exact) != 1 or len(tuple(requirement.specifier)) != 1:
             raise CanonicalAcquisitionError("Python resolver returned invalid data")
-        version = _stable_version(exact[0].version)
+        version = _stable_direct_version(exact[0].version)
         if version is None or package in matches:
             raise CanonicalAcquisitionError("Python resolver returned invalid data")
         matches[package] = str(version)
@@ -473,6 +494,19 @@ def _stable_version(value: str) -> Version | None:
     except InvalidVersion:
         return None
     if version.is_prerelease or version.is_devrelease or version.local is not None:
+        return None
+    return version
+
+
+def _stable_direct_version(value: str) -> Version | None:
+    """Return one complete canonical stable distribution version."""
+    try:
+        version = Version(value)
+    except InvalidVersion:
+        return None
+    if version.is_prerelease or version.is_devrelease:
+        return None
+    if str(version) != value:
         return None
     return version
 

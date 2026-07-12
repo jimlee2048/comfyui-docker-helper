@@ -48,6 +48,7 @@ def build_image_with_buildx(
     image_tags: Sequence[str],
     output: BuildxOutput = "load",
     context_dir: str | Path,
+    platforms: Sequence[str] = ("linux/amd64",),
     cwd: str | Path | None = None,
     docker_executable: str = "docker",
     runner: BuildxRunner = subprocess.run,
@@ -67,6 +68,8 @@ def build_image_with_buildx(
         "buildx",
         "build",
         f"--{output}",
+        "--platform",
+        ",".join(platforms),
         *tag_args,
         str(resolved_context),
     )

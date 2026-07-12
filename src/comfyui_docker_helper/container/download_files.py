@@ -20,7 +20,8 @@ import aria2p
 import httpx
 from pydantic import Field, ValidationError
 
-from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.build_plan import FilesPhase
+from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
     is_http_url,
@@ -28,11 +29,7 @@ from comfyui_docker_helper.config.url_validation import (
     validate_file_name,
     validate_relative_file_directory,
 )
-from comfyui_docker_helper.container.root_config import (
-    ContainerRootConfigError,
-    files_document,
-    load_container_root_artifacts,
-)
+from comfyui_docker_helper.container.phase_inputs import load_phase_input
 from comfyui_docker_helper.errors import ApplicationError
 
 
@@ -496,19 +493,52 @@ class _FilesConfig(ConfigModel):
 
 
 def load_file_download_plan(
-    config_path: str | Path,
-    lock_path: str | Path,
+    phase_path: str | Path,
     *,
-    comfyui_path: str | Path | None = None,
+    expected_build_plan_digest: str,
 ) -> FileDownloadPlan:
-    """Load root artifacts and build a deterministic file-download plan."""
-
+    """Load only the BuildPlan-owned file phase without root re-planning."""
     try:
-        artifacts = load_container_root_artifacts(config_path, lock_path)
-    except ContainerRootConfigError as error:
+        payload = load_phase_input(
+            phase_path,
+            "files",
+            expected_build_plan_digest=expected_build_plan_digest,
+        )
+    except ValueError as error:
         raise DownloadFilesConfigError(str(error)) from error
-    document = files_document(artifacts.config)
-    return build_file_download_plan(document, comfyui_path=comfyui_path)
+    if not isinstance(payload, FilesPhase):
+        raise DownloadFilesConfigError("file phase input has the wrong payload")
+    return FileDownloadPlan(
+        downloader=DownloaderSettings(
+            default=require_downloader_name(payload.downloader.default),
+            aria2=Aria2DownloadSettings(
+                rpc_port=payload.downloader.aria2.rpc_port,
+                split=payload.downloader.aria2.split,
+                max_connection_per_server=(
+                    payload.downloader.aria2.max_connection_per_server
+                ),
+                min_split_size=payload.downloader.aria2.min_split_size,
+                resume_download=payload.downloader.aria2.resume_download,
+            ),
+            httpx=HttpxDownloadSettings(
+                timeout=payload.downloader.httpx.timeout,
+                retries=payload.downloader.httpx.retries,
+            ),
+        ),
+        items=tuple(
+            FileDownloadItem(
+                url=item.url,
+                directory=str(Path(item.target).parent),
+                filename=Path(item.target).name,
+                target=Path(item.target),
+                overwrite=item.overwrite,
+                downloader=require_downloader_name(item.downloader),
+            )
+            for item in payload.files
+        ),
+        download_max_attempts=payload.download_max_attempts,
+        download_failure_policy=payload.download_failure_policy,
+    )
 
 
 def build_file_download_plan(
@@ -601,20 +631,18 @@ def process_file_downloads(
 
 
 def download_files(
-    config_path: str | Path,
-    lock_path: str | Path,
+    phase_path: str | Path,
     *,
-    comfyui_path: str | Path | None = None,
+    expected_build_plan_digest: str,
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
 ) -> tuple[DownloadResult, ...]:
-    """Download files from validated root artifacts with managed backends."""
+    """Download files from one digest-bound BuildPlan phase."""
 
     plan = load_file_download_plan(
-        config_path,
-        lock_path,
-        comfyui_path=comfyui_path,
+        phase_path,
+        expected_build_plan_digest=expected_build_plan_digest,
     )
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}

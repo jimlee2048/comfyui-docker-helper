@@ -1,18 +1,14 @@
 """Host command group."""
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
-from comfyui_docker_helper.config import (
+from comfyui_docker_helper.config.service import (
     ConfigurationServiceError,
-    LockOptions,
-    SourceResolvers,
-    load_validate_plan_result,
+    load_validate_config_result,
 )
 from comfyui_docker_helper.config.value_validation import has_control_characters
 from comfyui_docker_helper.host.buildx import BuildxOutput, build_image_with_buildx
@@ -21,11 +17,13 @@ from comfyui_docker_helper.host.diagnostics import (
     render_configuration_warnings,
     render_plan_preview,
 )
+from comfyui_docker_helper.host.planning_authority import default_planning_providers
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,
+    PlanningOptions,
     prepare_render_context,
 )
-from comfyui_docker_helper.host.source_providers import create_default_source_resolvers
+from comfyui_docker_helper.host.uv_runner import HostUvError
 
 _DEFAULT_SCRIPTS_DIR = Path("./scripts")
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
@@ -64,10 +62,10 @@ def validate(
         ),
     ] = _DEFAULT_SCRIPTS_DIR,
 ) -> None:
-    """Validate configuration and build its normalized plan without writing files."""
+    """Validate configuration locally without providers, Docker, or writes."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     try:
-        result = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
+        result = load_validate_config_result(config_files, scripts_dir=scripts_dir)
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
@@ -109,7 +107,7 @@ def render(
         Path | None,
         typer.Option(
             "--hooks-dir",
-            help="Directory containing runtime lifecycle hook files.",
+            help="Directory containing baked runtime lifecycle hook files.",
             metavar="DIR",
         ),
     ] = None,
@@ -152,25 +150,26 @@ def render(
     """Render a Docker build context from configuration file(s)."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
-    lock_options = LockOptions(
-        locked=locked,
-        check=check,
-        upgrade_lock=upgrade_lock,
-        dry_run=dry_run,
-    )
     try:
-        with _default_source_resolvers() as resolvers:
+        options = PlanningOptions(
+            locked=locked,
+            check=check,
+            upgrade_lock=upgrade_lock,
+            dry_run=dry_run,
+        )
+        with default_planning_providers() as providers:
             prepared = prepare_render_context(
                 config_files,
                 output_dir,
                 scripts_dir=scripts_dir,
                 hooks_dir=hooks_dir,
-                resolvers=resolvers,
-                lock_options=lock_options,
+                acquirer=providers.acquirer,
+                local_acquirer=providers.local_acquirer,
+                options=options,
                 overwrite=overwrite,
                 working_directory=Path.cwd(),
             )
-    except (ConfigurationServiceError, HostRenderServiceError) as error:
+    except (ConfigurationServiceError, HostRenderServiceError, HostUvError) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
@@ -182,7 +181,7 @@ def render(
         render_plan_preview(
             prepared.plan,
             lock_result=prepared.lock_result,
-            lock_options=lock_options,
+            options=options,
         )
         return
 
@@ -236,7 +235,7 @@ def build(
         Path | None,
         typer.Option(
             "--hooks-dir",
-            help="Directory containing runtime lifecycle hook files.",
+            help="Directory containing baked runtime lifecycle hook files.",
             metavar="DIR",
         ),
     ] = None,
@@ -269,7 +268,7 @@ def build(
     cli_output = _resolve_cli_build_output(load=load, push=push)
 
     try:
-        validated = load_validate_plan_result(config_files, scripts_dir=scripts_dir)
+        validated = load_validate_config_result(config_files, scripts_dir=scripts_dir)
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
@@ -283,19 +282,21 @@ def build(
     effective_output = cli_output or validated.config.build.output
 
     try:
-        with _default_source_resolvers() as resolvers:
+        options = PlanningOptions(locked=locked, upgrade_lock=upgrade_lock)
+        with default_planning_providers() as providers:
             prepared = prepare_render_context(
                 config_files,
                 context_dir,
                 scripts_dir=scripts_dir,
                 hooks_dir=hooks_dir,
-                resolvers=resolvers,
-                lock_options=LockOptions(locked=locked, upgrade_lock=upgrade_lock),
+                acquirer=providers.acquirer,
+                local_acquirer=providers.local_acquirer,
+                options=options,
                 overwrite=True,
                 working_directory=Path.cwd(),
                 configuration_result=validated,
             )
-    except (ConfigurationServiceError, HostRenderServiceError) as error:
+    except (ConfigurationServiceError, HostRenderServiceError, HostUvError) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
@@ -308,6 +309,7 @@ def build(
         image_tags=effective_tags,
         output=effective_output,
         context_dir=context_dir,
+        platforms=prepared.plan.build.platforms,
         cwd=Path.cwd(),
         log=typer.echo,
     )
@@ -371,17 +373,6 @@ def _validate_cli_image_tags(tags: list[str]) -> None:
                 "or control characters",
                 param_hint="--tag/-t",
             )
-
-
-@contextmanager
-def _default_source_resolvers() -> Iterator[SourceResolvers]:
-    """Yield default source resolvers and close owned resources when present."""
-    created = create_default_source_resolvers()
-    if hasattr(created, "__enter__"):
-        with created as resolvers:
-            yield resolvers
-        return
-    yield created
 
 
 def _format_config_files(config_files: list[Path]) -> str | Path:

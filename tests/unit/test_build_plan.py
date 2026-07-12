@@ -178,7 +178,7 @@ def accepted_resolution(
             request_digest=DIGEST_B,
             package="torch",
             extras=[],
-            version="2.12.1",
+            version="2.12.1+cu130",
             environment="application",
         ),
         DirectPythonLockEntry(
@@ -186,7 +186,7 @@ def accepted_resolution(
             request_digest=DIGEST_B,
             package="torchvision",
             extras=["image"],
-            version="0.27.1",
+            version="0.27.1+cu130",
             environment="application",
         ),
         RegistryNodeLockEntry(
@@ -206,7 +206,7 @@ def accepted_resolution(
         entries.append(
             LocalExecutableLockEntry(
                 type="local-executable",
-                relative_path="hooks/pre.py",
+                relative_path="custom-node-hooks/hooks/pre.py",
                 digest=hook_digest,
             )
         )
@@ -239,7 +239,7 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
         "torchvision",
     ]
     assert plan.application.pytorch.packages[1].requirement == (
-        "torchvision[image]==0.27.1"
+        "torchvision[image]==0.27.1+cu130"
     )
     assert plan.application.python_extras is not None
     assert plan.application.python_extras.packages[0].requirement == "numpy==2.3.1"
@@ -314,7 +314,7 @@ def test_execution_only_config_change_updates_binding_deterministically() -> Non
         (2, "version", "3.12.13", "managed Python"),
         (3, "formal_release", "0.5.0", "ComfyUI identity"),
         (4, "version", "1.5.4", "comfy-cli identity"),
-        (6, "version", "2.11.0", "satisfy torch"),
+        (6, "version", "2.11.0+cu130", "satisfy torch"),
         (8, "version", "1.2.4", "Registry identity"),
         (9, "commit", "3" * 40, "Git identity"),
     ],
@@ -338,6 +338,42 @@ def test_config_lock_identity_mismatches_fail_construction(
 
     with pytest.raises(ValueError, match=message):
         construct_build_plan(final_config(), changed)
+
+
+@pytest.mark.parametrize("entry_index", [6, 7])
+@pytest.mark.parametrize("version", ["2.12.1", "2.12.1+cpu", "2.12.1+cu129"])
+def test_build_plan_constructor_rejects_core_channel_mismatch(
+    entry_index: int, version: str
+) -> None:
+    resolution = accepted_resolution()
+    data = resolution.lock.model_dump(mode="python")
+    data["entries"][entry_index]["version"] = (
+        version if entry_index == 6 else version.replace("2.12.1", "0.27.1")
+    )
+    changed = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(data),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+
+    with pytest.raises(ValueError, match="does not match PyTorch channel"):
+        construct_build_plan(final_config(), changed)
+
+
+def test_build_plan_parser_rejects_forged_core_channel() -> None:
+    plan = construct_build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    torch = next(
+        package
+        for package in document["application"]["pytorch"]["packages"]
+        if package["name"] == "torch"
+    )
+    torch["version"] = "2.12.1+cu129"
+
+    with pytest.raises(ValidationError, match="does not match the backend channel"):
+        BuildPlan.model_validate(document)
 
 
 def test_unused_lock_identity_is_rejected() -> None:

@@ -23,9 +23,9 @@ from urllib.parse import quote, urlencode, urlparse
 import httpx
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.resolvers import COMFYUI_REPO_URL
-from comfyui_docker_helper.config.validation import normalize_registry_version
+from comfyui_docker_helper.config.selector_validation import normalize_registry_version
 from comfyui_docker_helper.config.value_validation import is_argv_value
+from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.uv_runner import HostUvRunner
 
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -231,7 +231,12 @@ class DirectGitIdentityProvider(Protocol):
 class LocalExecutableIdentityRequest:
     root: Path
     relative_path: PurePosixPath
+    identity_path: PurePosixPath | None = None
     stability: SelectorStability = SelectorStability.MOVING
+
+    @property
+    def canonical_path(self) -> PurePosixPath:
+        return self.identity_path or self.relative_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,7 +460,7 @@ class GitOfficialComfyUIIdentityProvider:
                 tags[base_ref] = commit
         identities = [
             OfficialComfyUIIdentity(
-                repository=COMFYUI_REPO_URL,
+                repository=COMFYUI_REPOSITORY,
                 commit=peeled.get(ref, commit),
                 formal_release=_formal_release_from_ref(ref),
             )
@@ -477,7 +482,7 @@ class GitOfficialComfyUIIdentityProvider:
             runner=self.runner,
         )
         return OfficialComfyUIIdentity(
-            repository=COMFYUI_REPO_URL,
+            repository=COMFYUI_REPOSITORY,
             commit=commit,
             formal_release=_formal_release_from_ref(request.ref),
         )
@@ -594,14 +599,22 @@ class GitDirectIdentityProvider:
 
 @dataclass(frozen=True, slots=True)
 class FilesystemLocalExecutableIdentityProvider:
-    """Hash one validated regular executable without following symlinks."""
+    """Hash one validated regular trusted-code input without following symlinks."""
 
     def resolve(
         self, request: LocalExecutableIdentityRequest
     ) -> LocalExecutableIdentity:
         source = "local executable"
         relative = request.relative_path
-        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        identity = request.canonical_path
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or ".." in relative.parts
+            or identity.is_absolute()
+            or not identity.parts
+            or ".." in identity.parts
+        ):
             raise IdentityProviderError(source, ProviderFailureKind.INVALID_REQUEST)
         try:
             root = request.root.resolve(strict=True)
@@ -612,7 +625,7 @@ class FilesystemLocalExecutableIdentityProvider:
                     raise IdentityProviderError(source, ProviderFailureKind.LOCAL_INPUT)
             path = parent / relative.name
             metadata = path.lstat()
-            if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o111:
+            if not stat.S_ISREG(metadata.st_mode):
                 raise IdentityProviderError(source, ProviderFailureKind.LOCAL_INPUT)
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except IdentityProviderError:
@@ -622,7 +635,7 @@ class FilesystemLocalExecutableIdentityProvider:
                 source, ProviderFailureKind.LOCAL_INPUT
             ) from error
         return LocalExecutableIdentity(
-            relative_path=relative, digest=f"sha256:{digest}"
+            relative_path=identity, digest=f"sha256:{digest}"
         )
 
 
@@ -932,7 +945,7 @@ def _formal_release_from_ref(ref: str) -> str | None:
 
 
 def _require_official_comfyui_repository(repository: str) -> None:
-    if repository != COMFYUI_REPO_URL:
+    if repository != COMFYUI_REPOSITORY:
         raise IdentityProviderError(
             "official ComfyUI", ProviderFailureKind.INVALID_REQUEST
         )

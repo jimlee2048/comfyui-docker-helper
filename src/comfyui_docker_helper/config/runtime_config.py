@@ -16,12 +16,12 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticSeverity,
 )
 from comfyui_docker_helper.config.merge import merge_toml_documents
-from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime_file_validation import (
     normalize_runtime_file_path,
     validate_runtime_file_url,
 )
-from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.config.ssh_keys import (
     normalize_ssh_public_key,
     normalize_ssh_public_keys,

@@ -16,6 +16,8 @@ RUNTIME_HOOK_PHASE_DIRECTORY_NAMES = frozenset(
     dirname for _, dirname in RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS
 )
 RUNTIME_HOOK_SUPPORTED_SUFFIXES = frozenset({".sh", ".py"})
+RUNTIME_HOOK_LOCK_PREFIX = "runtime-hooks"
+CUSTOM_NODE_HOOK_LOCK_PREFIX = "custom-node-hooks"
 
 
 def runtime_hook_phase_directory_list() -> str:

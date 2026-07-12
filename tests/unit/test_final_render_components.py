@@ -18,6 +18,7 @@ from comfyui_docker_helper.config.build_plan import (
     parse_build_plan_json,
 )
 from comfyui_docker_helper.config.final_models import FinalConfig
+from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.container.phase_inputs import load_phase_input
 from comfyui_docker_helper.rendering import final_materializer
 from comfyui_docker_helper.rendering.final_materializer import (
@@ -77,7 +78,9 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
-    source_input = LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source)
+    source_input = LocalMaterializationSource(
+        PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+    )
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
@@ -89,6 +92,16 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     assert (first / "build-plan.json").read_bytes() == dump_build_plan_json(plan)
     assert (first / "inputs/hooks/pre.py").read_bytes() == content
     assert (first / "Dockerfile").read_text() == render_build_plan_dockerfile(plan)
+    assert (
+        "COPY runtime/config.toml /opt/cdh/runtime/config.toml"
+        in (first / "Dockerfile").read_text()
+    )
+    runtime = load_runtime_config(
+        baked_config_path=first / "runtime/config.toml",
+        mounted_config_path=tmp_path / "missing-runtime.toml",
+        environ={},
+    )
+    assert runtime.config.comfyui.port == 8188
     assert _tree(first) == _tree(second)
     assert not (first / "config.toml").exists()
     assert not (first / "config.lock.toml").exists()
@@ -165,7 +178,9 @@ def test_phase_loader_rejects_wrong_binding_wrong_phase_and_extra_fields(
         plan,
         output,
         local_sources=(
-            LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+            LocalMaterializationSource(
+                PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+            ),
         ),
     )
     phase_path = output / "phases/toolchain.json"
@@ -221,7 +236,9 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
             plan,
             output,
             local_sources=(
-                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+                LocalMaterializationSource(
+                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                ),
             ),
         )
     assert tuple(output.iterdir()) == ()
@@ -281,7 +298,9 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
             plan,
             output,
             local_sources=(
-                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+                LocalMaterializationSource(
+                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                ),
             ),
         )
     assert tuple(output.iterdir()) == ()
@@ -300,7 +319,8 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
             output,
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("hooks/pre.py"), scripts / "hooks/pre.py"
+                    PurePosixPath("custom-node-hooks/hooks/pre.py"),
+                    scripts / "hooks/pre.py",
                 ),
             ),
         )
@@ -329,7 +349,9 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
             plan,
             output,
             local_sources=(
-                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+                LocalMaterializationSource(
+                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                ),
             ),
         )
 
@@ -385,7 +407,9 @@ def test_materializer_rejects_symlink_or_special_destination_components(
             plan,
             output,
             local_sources=(
-                LocalMaterializationSource(PurePosixPath("hooks/pre.py"), source),
+                LocalMaterializationSource(
+                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                ),
             ),
         )
 

@@ -8,8 +8,8 @@ from typing import Literal
 import httpx
 import pytest
 
-from comfyui_docker_helper.config.resolvers import COMFYUI_REPO_URL
 from comfyui_docker_helper.exact_ledger import (
+    COMFYUI_REPOSITORY,
     CUDA_IMAGE_REPOSITORY,
     CUDA_VERSION,
     DEFAULT_MANAGED_PYTHON_VERSION,
@@ -88,8 +88,8 @@ def test_live_exact_uv_managed_python_catalog(version: str) -> None:
 def test_live_official_comfyui_release_and_head_identities() -> None:
     provider = GitOfficialComfyUIIdentityProvider()
 
-    releases = provider.list_releases(COMFYUI_REPO_URL)
-    head = provider.resolve(OfficialComfyUIIdentityRequest(COMFYUI_REPO_URL, "HEAD"))
+    releases = provider.list_releases(COMFYUI_REPOSITORY)
+    head = provider.resolve(OfficialComfyUIIdentityRequest(COMFYUI_REPOSITORY, "HEAD"))
 
     assert releases
     assert all(identity.formal_release for identity in releases)

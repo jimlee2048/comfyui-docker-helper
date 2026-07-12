@@ -19,18 +19,20 @@ from comfyui_docker_helper.config.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
-    DirectPythonRequestIdentity,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    PythonGroupRequestIdentity,
+    PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     ResolverRequestIdentity,
     canonical_entry_key,
     compute_request_digest,
+    pytorch_core_version_matches_channel,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.host.identity_providers import (
@@ -316,12 +318,12 @@ def _acquire_local_entries(
 ) -> tuple[tuple[LocalExecutableLockEntry, ...], tuple[LockEntryKey, ...]]:
     if requests and acquirer is None:
         raise ValueError("local executable requests require a local acquirer")
-    ordered = tuple(sorted(requests, key=lambda item: item.relative_path.as_posix()))
+    ordered = tuple(sorted(requests, key=lambda item: item.canonical_path.as_posix()))
     entries: list[LocalExecutableLockEntry] = []
     diagnostics: list[Diagnostic] = []
     reads: list[LockEntryKey] = []
     for request in ordered:
-        key = ("local-executable", request.relative_path.as_posix())
+        key = ("local-executable", request.canonical_path.as_posix())
         reads.append(key)
         try:
             entry = acquirer.acquire(request) if acquirer is not None else None
@@ -419,7 +421,7 @@ def entries_satisfy_request(
             entry.url == request.url
             and (not _is_commit(request.ref) or entry.commit == request.ref)
         )
-    if not isinstance(request, DirectPythonRequestIdentity):
+    if not isinstance(request, PythonGroupRequestIdentity):
         return False
     members = {member.package: member for member in request.members}
     for entry in entries:
@@ -430,6 +432,12 @@ def entries_satisfy_request(
             return False
         if entry.extras != member.extras or not _direct_result_matches(
             member.selector, entry.version
+        ):
+            return False
+        if isinstance(request, PyTorchRequestIdentity) and not (
+            pytorch_core_version_matches_channel(
+                entry.package, entry.version, request.channel
+            )
         ):
             return False
     return True
@@ -602,7 +610,7 @@ def _published_result_matches(selector: str, value: str) -> bool:
 
 def _direct_result_matches(selector: str, value: str) -> bool:
     version = Version(value)
-    if not _is_stable(version):
+    if version.is_prerelease or version.is_devrelease:
         return False
     return not selector or SpecifierSet(selector).contains(version, prereleases=False)
 

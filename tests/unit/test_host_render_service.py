@@ -1,1081 +1,912 @@
-"""Tests for host render context preparation and root lock artifacts."""
+"""Active canonical render-service mode and atomic context contracts."""
 
 from __future__ import annotations
 
 import os
 import shutil
-import tomllib
-from collections.abc import Sequence
-from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import TracebackType
 
 import pytest
 
-from comfyui_docker_helper.config import (
-    COMFYUI_REPO_URL,
-    ComfyCliVersionCandidate,
-    ComfyUIReleaseCandidate,
-    LockOptions,
-    RegistryInstallMetadata,
-    RegistryVersionCandidate,
-    SourceResolvers,
-    parse_lockfile_toml,
+from comfyui_docker_helper.config.canonical_lock import (
+    CanonicalLockEntry,
+    ComfyCliLockEntry,
+    ComfyUIRequestIdentity,
+    DirectGitLockEntry,
+    DirectGitRequestIdentity,
+    DirectPythonLockEntry,
+    LocalExecutableLockEntry,
+    ManagedPythonLockEntry,
+    ManagedPythonRequestIdentity,
+    OciLockEntry,
+    OciRequestIdentity,
+    OfficialComfyUILockEntry,
+    PythonGroupRequestIdentity,
+    RegistryNodeLockEntry,
+    RegistryRequestIdentity,
+    parse_canonical_lock_toml,
+)
+from comfyui_docker_helper.config.canonical_resolver import (
+    AcquiredCanonicalEntries,
+    CanonicalAcquisitionError,
+)
+from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.runtime_config import load_runtime_config
+from comfyui_docker_helper.container.runtime_files import (
+    build_runtime_file_plan,
+    runtime_downloader_settings,
+)
+from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
+from comfyui_docker_helper.host.canonical_acquisition import (
+    LocalExecutableEntryAcquirer,
+)
+from comfyui_docker_helper.host.identity_providers import (
+    FilesystemLocalExecutableIdentityProvider,
+)
+from comfyui_docker_helper.host.planning_authority import (
+    CachingCanonicalAcquirer,
+    managed_python_release_inputs,
 )
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,
+    PlanningOptions,
     prepare_render_context,
 )
 
-COMMIT_1 = "1" * 40
-COMMIT_2 = "2" * 40
-COMMIT_A = "a" * 40
-COMMIT_B = "b" * 40
-GIT_URL = "https://example.com/custom-node.git"
+DIGEST_A = f"sha256:{'a' * 64}"
+DIGEST_B = f"sha256:{'b' * 64}"
+COMMIT = "1" * 40
 
-CONFIG = f"""\
+
+def _config() -> str:
+    return """
 [compute_platform]
 type = "cuda"
-
 [compute_platform.cuda]
-version = "12.9.2"
-
+version = "13.0.3"
+[python]
+version = "3.13.14"
+uv_version = "0.11.28"
 [pytorch]
-version = "2.10"
-
+version = "2.12.1"
+extra_packages = ["torchvision==0.27.1"]
 [comfyui]
-version = "latest"
-cli_version = "latest"
-
-[[comfyui.custom_nodes]]
-type = "registry"
-id = "node"
-
-[[comfyui.custom_nodes]]
-type = "git"
-url = "{GIT_URL}"
-ref = "main"
-
-[[files]]
-url = "https://example.com/model.safetensors"
-dir = "models/checkpoints"
-filename = "model.safetensors"
+version = "0.4.0"
+cli_version = "1.5.3"
+install_manager = false
+[build]
+tags = ["example:test"]
+platforms = ["linux/amd64"]
 """
 
-HOOK_CONFIG = CONFIG.replace(
-    'id = "node"\n',
-    'id = "node"\npre_install_scripts = ["pre.sh"]\n',
-)
+
+@dataclass
+class FakeAcquirer:
+    calls: list[str] = field(default_factory=list)
+
+    def acquire(self, request, request_digest: str) -> AcquiredCanonicalEntries:
+        self.calls.append(request.type)
+        entries: tuple[CanonicalLockEntry, ...]
+        if isinstance(request, OciRequestIdentity):
+            entries = (
+                OciLockEntry(
+                    type="oci",
+                    request_digest=request_digest,
+                    role=request.role,
+                    repository=request.repository,
+                    tag=request.tag,
+                    descriptor_digest=(
+                        DIGEST_B if request.role == "uv-tool" else DIGEST_A
+                    ),
+                    descriptor_kind="index",
+                    platform=request.platform,
+                ),
+            )
+        elif isinstance(request, ManagedPythonRequestIdentity):
+            release = managed_python_release_inputs()
+            entries = (
+                ManagedPythonLockEntry(
+                    type="managed-python",
+                    request_digest=request_digest,
+                    version=request.version,
+                    implementation=request.implementation,
+                    platform=request.platform,
+                    libc=request.libc,
+                    provider="uv-managed",
+                    catalog_descriptor_digest=request.catalog_descriptor_digest,
+                    catalog_key="cpython-3.13.14-linux-x86_64-gnu",
+                    catalog_url="https://example.test/python.tar.zst",
+                    pip_version=release.pip_version,
+                    setuptools_version=release.setuptools_version,
+                    wheel_version=release.wheel_version,
+                    cdh_version=release.cdh_version,
+                    cdh_source_digest=release.cdh_source_digest,
+                    uv_build_version=release.uv_build_version,
+                ),
+            )
+        elif isinstance(request, ComfyUIRequestIdentity):
+            entries = (
+                OfficialComfyUILockEntry(
+                    type="comfyui",
+                    request_digest=request_digest,
+                    repository=request.repository,
+                    commit=COMMIT,
+                    formal_release="0.4.0",
+                ),
+            )
+        elif request.type == "comfy-cli":
+            entries = (
+                ComfyCliLockEntry(
+                    type="comfy-cli",
+                    request_digest=request_digest,
+                    package="comfy-cli",
+                    version="1.5.3",
+                    environment="application",
+                ),
+            )
+        elif isinstance(request, RegistryRequestIdentity):
+            entries = (
+                RegistryNodeLockEntry(
+                    type="registry",
+                    request_digest=request_digest,
+                    id=request.id,
+                    version="1.0.0",
+                ),
+            )
+        elif isinstance(request, DirectGitRequestIdentity):
+            entries = (
+                DirectGitLockEntry(
+                    type="git",
+                    request_digest=request_digest,
+                    url=request.url,
+                    commit=COMMIT,
+                ),
+            )
+        elif isinstance(request, PythonGroupRequestIdentity):
+            versions = {
+                "torch": "2.12.1+cu130",
+                "torchvision": "0.27.1+cu130",
+            }
+            entries = tuple(
+                DirectPythonLockEntry(
+                    type="python-package",
+                    request_digest=request_digest,
+                    package=member.package,
+                    extras=member.extras,
+                    version=versions[member.package],
+                    environment=request.environment,
+                )
+                for member in request.members
+            )
+        else:  # pragma: no cover
+            raise AssertionError(request)
+        return AcquiredCanonicalEntries(entries, True)
 
 
-@dataclass(slots=True)
-class FakeComfyUIProvider:
-    """In-memory ComfyUI provider with controllable latest selection."""
-
-    version: str = "0.26.0"
-    commit: str = COMMIT_1
-    release_calls: int = 0
-    nightly_calls: int = 0
-
-    def list_releases(self) -> Sequence[ComfyUIReleaseCandidate]:
-        self.release_calls += 1
-        return [ComfyUIReleaseCandidate(version=self.version, commit=self.commit)]
-
-    def get_nightly_commit(self) -> str:
-        self.nightly_calls += 1
-        return COMMIT_2
+@dataclass
+class NoLocalInputs:
+    def acquire(self, request):  # pragma: no cover - config has no hooks
+        raise AssertionError(request)
 
 
-@dataclass(slots=True)
-class FakeComfyCliProvider:
-    """In-memory comfy-cli provider with controllable latest selection."""
-
-    version: str = "1.5.0"
-    calls: int = 0
-
-    def list_versions(self) -> Sequence[ComfyCliVersionCandidate]:
-        self.calls += 1
-        return [ComfyCliVersionCandidate(version=self.version)]
-
-
-@dataclass(slots=True)
-class FakeRegistryProvider:
-    """In-memory registry provider with controllable latest selection."""
-
-    version: str = "1.0.0"
-    install_calls: list[tuple[str, str | None]] = field(default_factory=list)
-    version_calls: list[str] = field(default_factory=list)
-
-    def get_install_metadata(
-        self,
-        node_id: str,
-        version: str | None = None,
-    ) -> RegistryInstallMetadata:
-        self.install_calls.append((node_id, version))
-        return RegistryInstallMetadata(
-            node_id=node_id,
-            version=self.version if version is None else version,
-        )
-
-    def list_versions(self, node_id: str) -> Sequence[RegistryVersionCandidate]:
-        self.version_calls.append(node_id)
-        return [RegistryVersionCandidate(node_id=node_id, version=self.version)]
-
-
-@dataclass(slots=True)
-class FakeGitProvider:
-    """In-memory Git provider with controllable ref selection."""
-
-    commit: str = COMMIT_A
-    default_calls: list[str] = field(default_factory=list)
-    ref_calls: list[tuple[str, str]] = field(default_factory=list)
-
-    def resolve_default_branch_head(self, url: str) -> str:
-        self.default_calls.append(url)
-        return self.commit
-
-    def resolve_ref(self, url: str, ref: str) -> str:
-        self.ref_calls.append((url, ref))
-        return self.commit
-
-
-@dataclass(slots=True)
-class FakeResolvers:
-    """Aggregate fake providers for host render service tests."""
-
-    comfyui: FakeComfyUIProvider = field(default_factory=FakeComfyUIProvider)
-    comfy_cli: FakeComfyCliProvider = field(default_factory=FakeComfyCliProvider)
-    registry: FakeRegistryProvider = field(default_factory=FakeRegistryProvider)
-    git: FakeGitProvider = field(default_factory=FakeGitProvider)
-
-    def source_resolvers(self) -> SourceResolvers:
-        return SourceResolvers(
-            comfyui=self.comfyui,
-            comfy_cli=self.comfy_cli,
-            registry=self.registry,
-            git=self.git,
-        )
-
-    def assert_zero_calls(self) -> None:
-        assert self.comfyui.release_calls == 0
-        assert self.comfyui.nightly_calls == 0
-        assert self.comfy_cli.calls == 0
-        assert self.registry.install_calls == []
-        assert self.registry.version_calls == []
-        assert self.git.default_calls == []
-        assert self.git.ref_calls == []
-
-
-def write_config(tmp_path: Path, content: str = CONFIG) -> Path:
-    """Write a render config for service tests."""
-    path = tmp_path / "config.toml"
-    path.write_text(content, encoding="utf-8")
-    return path
-
-
-def render_context(
-    tmp_path: Path,
+def _prepare(
+    config: Path,
+    output: Path,
+    fake: FakeAcquirer,
     *,
-    output: Path | None = None,
-    working_directory: Path | None = None,
-    config_content: str = CONFIG,
-    scripts_dir: Path | None = None,
-    hooks_dir: Path | None = None,
-    resolvers: FakeResolvers | None = None,
-    options: LockOptions | None = None,
+    options: PlanningOptions | None = None,
     overwrite: bool = False,
-) -> FakeResolvers:
-    """Render a context and return the fake resolvers used."""
-    providers = resolvers or FakeResolvers()
-    work = tmp_path if working_directory is None else working_directory
-    prepare_render_context(
-        write_config(work, config_content),
-        output or tmp_path / "context",
-        scripts_dir=scripts_dir or work / "scripts",
-        hooks_dir=hooks_dir,
-        resolvers=providers.source_resolvers(),
-        lock_options=options,
+    hooks_dir: Path | None = None,
+    working_directory: Path | None = None,
+    scripts_dir: Path | str = "./scripts",
+):
+    return prepare_render_context(
+        config,
+        output,
+        scripts_dir=scripts_dir,
+        acquirer=CachingCanonicalAcquirer(fake),
+        local_acquirer=LocalExecutableEntryAcquirer(
+            FilesystemLocalExecutableIdentityProvider()
+        ),
+        options=options,
         overwrite=overwrite,
-        working_directory=work,
+        hooks_dir=hooks_dir,
+        working_directory=working_directory,
     )
-    return providers
 
 
-def test_root_artifacts_written_after_successful_render(tmp_path: Path) -> None:
-    """A successful host render writes root, runtime, and lock artifacts."""
+def test_default_writes_canonical_context_and_second_default_reuses_lock(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    first_fake = FakeAcquirer()
+
+    prepared = _prepare(config, output, first_fake)
+
+    assert prepared.plan.toolchain.platform == "linux/amd64"
+    assert (output / "build-plan.json").is_file()
+    assert (output / "phases/application.json").is_file()
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    assert lock.schema_version == 1
+    assert not (output / "config.toml").exists()
+    assert first_fake.calls
+
+    before = _tree(output)
+    second_fake = FakeAcquirer()
+    _prepare(config, output, second_fake, overwrite=True)
+    assert second_fake.calls == []
+    assert _tree(output) == before
+
+
+def test_locked_performs_zero_provider_calls_and_zero_writes(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    before = _tree(output)
+    fake = FakeAcquirer()
+
+    prepared = _prepare(
+        config, output, fake, options=PlanningOptions(locked=True), overwrite=True
+    )
+
+    assert fake.calls == []
+    assert prepared.lock_result.write_intent is False
+    assert _tree(output) == before
+
+
+def test_dry_run_resolves_without_writing_and_check_compares_without_writing(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    dry_output = tmp_path / "dry"
+    dry = _prepare(
+        config,
+        dry_output,
+        FakeAcquirer(),
+        options=PlanningOptions(dry_run=True),
+    )
+    assert dry.lock_result.changed
+    assert not dry_output.exists()
+
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    before = _tree(output)
+    _prepare(config, output, FakeAcquirer(), options=PlanningOptions(check=True))
+    assert _tree(output) == before
+    (output / "Dockerfile").write_text("changed")
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer(), options=PlanningOptions(check=True))
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_old_or_invalid_lock_fails_generically(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    output.mkdir()
+    (output / "config.lock.toml").write_text("[comfyui]\ncommit='legacy'\n")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "lock.invalid"
+    assert "remove" in raised.value.diagnostics[0].message
+
+
+def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
 
-    render_context(tmp_path, output=output)
+    prepared = _prepare(config, output, FakeAcquirer(), hooks_dir=hooks)
 
-    config_data = tomllib.loads((output / "config.toml").read_text())
-    runtime_data = tomllib.loads((output / "runtime" / "config.toml").read_text())
-    lockfile = parse_lockfile_toml((output / "config.lock.toml").read_text())
-    assert config_data["comfyui"]["version"] == "latest"
-    assert config_data["comfyui"]["custom_nodes"][0] == {
-        "type": "registry",
-        "id": "node",
-        "pre_install_scripts": [],
-        "post_install_scripts": [],
-    }
-    assert lockfile.comfyui.repo == COMFYUI_REPO_URL
-    assert lockfile.comfyui.version == "0.26.0"
-    assert lockfile.comfyui.commit == COMMIT_1
-    assert lockfile.custom_nodes[0].version == "1.0.0"
-    assert lockfile.custom_nodes[1].commit == COMMIT_A
-    assert runtime_data["comfyui"] == {
-        "listen": "0.0.0.0",
-        "port": 8188,
-        "extra_args": [],
-    }
-    assert runtime_data["cdh"]["default_downloader"] == "aria2"
-    assert runtime_data["cdh"]["default_download_mode"] == "sync"
-    assert "download_failure_policy" not in runtime_data["cdh"]
-    assert "downloader" in runtime_data["cdh"]
-    assert runtime_data["files"] == [
-        {
-            "url": "https://example.com/model.safetensors",
-            "dir": "models/checkpoints",
-            "filename": "model.safetensors",
-            "overwrite": False,
-        }
+    assert [hook.relative_path for hook in prepared.plan.runtime.hooks] == [
+        "pre-start.d/10-pre.sh",
+        "post-start.d/20-post.py",
+        "stop.d/30-stop.sh",
     ]
-    assert "custom_nodes" not in runtime_data["comfyui"]
-    assert not (output / "runtime" / "hooks").exists()
-    dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
-    assert "comfy-cli==1.5.0" in dockerfile
-    assert "COPY runtime/hooks /opt/cdh/runtime/hooks" not in dockerfile
-    assert "      --version \\\n      0.26.0 \\" in dockerfile
-    expected_verify = (
-        'RUN comfyui_commit="$(git -C "$COMFYUI_PATH" rev-parse HEAD)" && '
-        f'test "$comfyui_commit" = {COMMIT_1}'
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    local_entries = [
+        entry for entry in lock.entries if isinstance(entry, LocalExecutableLockEntry)
+    ]
+    assert [entry.relative_path for entry in local_entries] == [
+        "runtime-hooks/post-start.d/20-post.py",
+        "runtime-hooks/pre-start.d/10-pre.sh",
+        "runtime-hooks/stop.d/30-stop.sh",
+    ]
+    assert (output / "runtime/hooks/pre-start.d/10-pre.sh").read_text() == "pre\n"
+    dockerfile = (output / "Dockerfile").read_text()
+    assert "COPY runtime/config.toml /opt/cdh/runtime/config.toml" in dockerfile
+    assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
+    runtime = load_runtime_config(
+        baked_config_path=output / "runtime/config.toml",
+        mounted_config_path=tmp_path / "missing.toml",
+        environ={},
     )
-    assert expected_verify in dockerfile
+    assert runtime.config.comfyui.port == 8188
+    discovered = discover_runtime_hooks(
+        baked_hooks_path=output / "runtime/hooks",
+        mounted_hooks_path=tmp_path / "missing-hooks",
+    )
+    assert [hook.filename for hook in discovered.hooks] == [
+        "10-pre.sh",
+        "20-post.py",
+        "30-stop.sh",
+    ]
+
+
+def test_runtime_file_projection_preserves_global_and_item_precedence(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + """
+[cdh]
+default_downloader = "httpx"
+default_download_mode = "async"
+
+[[files]]
+url = "https://example.test/implicit.bin"
+dir = "models"
+filename = "implicit.bin"
+
+[[files]]
+url = "https://example.test/explicit.bin"
+dir = "models"
+filename = "explicit.bin"
+downloader = "httpx"
+download_mode = "async"
+"""
+    )
+    output = tmp_path / "context"
+
+    prepared = _prepare(config, output, FakeAcquirer())
+
+    assert prepared.plan.files.downloader.default == "httpx"
+    assert prepared.plan.files.default_download_mode == "async"
+    assert [item.downloader_explicit for item in prepared.plan.files.files] == [
+        False,
+        True,
+    ]
+    assert [item.download_mode_explicit for item in prepared.plan.files.files] == [
+        False,
+        True,
+    ]
+    baked_runtime = load_runtime_config(
+        baked_config_path=output / "runtime/config.toml",
+        mounted_config_path=tmp_path / "missing.toml",
+        environ={},
+    )
+    assert baked_runtime.config.cdh.default_downloader == "httpx"
+    assert baked_runtime.config.cdh.default_download_mode == "async"
+
+    runtime = load_runtime_config(
+        baked_config_path=output / "runtime/config.toml",
+        mounted_config_path=tmp_path / "missing.toml",
+        environ={
+            "CDH_DEFAULT_DOWNLOADER": "aria2",
+            "CDH_DEFAULT_DOWNLOAD_MODE": "sync",
+        },
+    )
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    runtime_plan = build_runtime_file_plan(
+        runtime.file_documents,
+        comfyui_path=comfyui,
+        default_download_mode=runtime.config.cdh.default_download_mode,
+    )
+
+    assert runtime_downloader_settings(runtime.config).default == "aria2"
+    assert runtime_plan.items[0].downloader is None
+    assert runtime_plan.items[0].download_mode == "sync"
+    assert runtime_plan.items[1].downloader == "httpx"
+    assert runtime_plan.items[1].download_mode == "async"
+
+
+@pytest.mark.parametrize("source_kind", ["custom", "runtime"])
+@pytest.mark.parametrize("relation", ["equal", "output-descendant", "output-ancestor"])
+def test_render_rejects_every_source_output_overlap_before_overwrite(
+    tmp_path: Path,
+    source_kind: str,
+    relation: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = workspace / ("scripts" if source_kind == "custom" else "hooks")
+    workspace.mkdir()
+    if source_kind == "custom":
+        hook = source / "hook.sh"
+        hook.parent.mkdir()
+        hook.write_text("sentinel\n")
+        config_text = (
+            _config()
+            + """
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://example.test/node.git"
+ref = "1111111111111111111111111111111111111111"
+pre_install_scripts = ["hook.sh"]
+"""
+        )
+        scripts_dir = source
+        hooks_dir = None
+    else:
+        hook = source / "pre-start.d/10-hook.sh"
+        hook.parent.mkdir(parents=True)
+        hook.write_text("sentinel\n")
+        config_text = _config()
+        scripts_dir = tmp_path / "unused-scripts"
+        hooks_dir = source
+    hook.chmod(0o644)
+    config = tmp_path / f"{source_kind}.toml"
+    config.write_text(config_text)
+    output = {
+        "equal": source,
+        "output-descendant": source / "context",
+        "output-ancestor": workspace,
+    }[relation]
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            overwrite=True,
+            scripts_dir=scripts_dir,
+            hooks_dir=hooks_dir,
+        )
+
+    assert raised.value.diagnostics[0].code == "render.input_output_overlap"
+    assert hook.read_text() == "sentinel\n"
 
 
 @pytest.mark.parametrize(
-    ("cdh_fields", "expected_policy"),
+    ("target", "error"),
     [
-        ("", None),
-        ('download_failure_policy = "fail"\n', "fail"),
-        ('download_failure_policy = "continue"\n', "continue"),
+        ("construct_build_plan", ValueError("injected constructor bug")),
+        ("reconcile_canonical_lock", AssertionError("injected resolver bug")),
     ],
 )
-def test_rendered_runtime_config_preserves_authored_failure_policy_only(
-    tmp_path: Path,
-    cdh_fields: str,
-    expected_policy: str | None,
-) -> None:
-    """Render runtime TOML from the service path with host/runtime provenance."""
-    output = tmp_path / "context"
-    config = CONFIG.replace(
-        "[[files]]",
-        f"[cdh]\n{cdh_fields}\n[[files]]",
-        1,
-    )
-
-    render_context(tmp_path, output=output, config_content=config)
-
-    runtime_data = tomllib.loads((output / "runtime" / "config.toml").read_text())
-    if expected_policy is None:
-        assert "download_failure_policy" not in runtime_data["cdh"]
-    else:
-        assert runtime_data["cdh"]["download_failure_policy"] == expected_policy
-
-
-def test_root_artifacts_omitted_during_dry_run(tmp_path: Path) -> None:
-    """Dry-run resolves the lock preview but writes no context artifacts."""
-    output = tmp_path / "context"
-
-    render_context(
-        tmp_path,
-        output=output,
-        options=LockOptions(dry_run=True),
-    )
-
-    assert not output.exists()
-
-
-def test_root_artifacts_are_deterministic_across_repeated_renders(
-    tmp_path: Path,
-) -> None:
-    """Repeated renders with reused compatible locks keep root artifact bytes stable."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    first = (
-        (output / "config.toml").read_bytes(),
-        (output / "config.lock.toml").read_bytes(),
-        (output / "runtime" / "config.toml").read_bytes(),
-    )
-
-    render_context(tmp_path, output=output, overwrite=True)
-
-    assert (
-        (output / "config.toml").read_bytes(),
-        (output / "config.lock.toml").read_bytes(),
-        (output / "runtime" / "config.toml").read_bytes(),
-    ) == first
-
-
-# Lock reuse tests keep normal, locked, and relative-output modes from
-# resolving sources when a compatible artifact lock already exists.
-def test_default_render_reuses_existing_lock_without_provider_calls(
-    tmp_path: Path,
-) -> None:
-    """Default mode reuses compatible context lock entries."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    providers = FakeResolvers()
-
-    render_context(tmp_path, output=output, resolvers=providers, overwrite=True)
-
-    providers.assert_zero_calls()
-
-
-def test_locked_mode_requires_existing_lock_and_avoids_provider_calls(
-    tmp_path: Path,
-) -> None:
-    """Locked mode consumes the existing context lock without resolver calls."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    providers = FakeResolvers()
-
-    render_context(
-        tmp_path,
-        output=output,
-        resolvers=providers,
-        options=LockOptions(locked=True),
-        overwrite=True,
-    )
-
-    providers.assert_zero_calls()
-
-
-def test_locked_mode_fails_when_lock_is_missing(tmp_path: Path) -> None:
-    """Locked mode fails closed instead of resolving a missing lock."""
-    with pytest_raises_host_error("lockfile.required"):
-        render_context(tmp_path, options=LockOptions(locked=True))
-
-
-def test_locked_mode_reads_relative_output_lock_from_working_directory(
-    tmp_path: Path,
-) -> None:
-    """Relative output lookup uses working_directory, matching context writes."""
-    work = tmp_path / "work"
-    work.mkdir()
-    render_context(tmp_path, output=Path("context"), working_directory=work)
-    providers = FakeResolvers()
-
-    render_context(
-        tmp_path,
-        output=Path("context"),
-        working_directory=work,
-        resolvers=providers,
-        options=LockOptions(locked=True),
-        overwrite=True,
-    )
-
-    providers.assert_zero_calls()
-    assert (work / "context" / "config.lock.toml").is_file()
-
-
-# Render-check tests compare the managed artifact set without mutating the
-# rendered context, including stale files under current managed trees.
-def test_check_mode_is_non_mutating_and_detects_current_root_artifacts(
-    tmp_path: Path,
-) -> None:
-    """Check mode validates root artifacts without rewriting the context."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    before = file_contents(output)
-
-    render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-    assert file_contents(output) == before
-
-
-def test_check_mode_reads_relative_output_artifacts_from_working_directory(
-    tmp_path: Path,
-) -> None:
-    """Relative check lookup uses working_directory, not the process cwd."""
-    work = tmp_path / "work"
-    work.mkdir()
-    render_context(tmp_path, output=Path("context"), working_directory=work)
-    before = file_contents(work / "context")
-
-    render_context(
-        tmp_path,
-        output=Path("context"),
-        working_directory=work,
-        options=LockOptions(check=True),
-    )
-
-    assert file_contents(work / "context") == before
-
-
-def test_check_mode_reports_root_artifact_drift(tmp_path: Path) -> None:
-    """Check mode fails when a root artifact differs from the expected render."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    (output / "config.toml").write_text("changed = true\n", encoding="utf-8")
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_reports_runtime_config_drift(tmp_path: Path) -> None:
-    """Check mode compares the managed baked runtime config."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    (output / "runtime" / "config.toml").write_text(
-        '[comfyui]\nlisten = "127.0.0.1"\n',
-        encoding="utf-8",
-    )
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_reports_dockerfile_drift(tmp_path: Path) -> None:
-    """Check mode compares the generated Dockerfile, not only root TOML."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    (output / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_reports_package_projection_drift(tmp_path: Path) -> None:
-    """Check mode compares managed package projection files."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    package_pyproject = output / "packages" / "cdh" / "pyproject.toml"
-    package_pyproject.write_text('[project]\nname = "changed"\n', encoding="utf-8")
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_reports_stale_file_under_package_source_tree(
-    tmp_path: Path,
-) -> None:
-    """Check mode catches actual-only files inside managed package trees."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    stale = output / "packages" / "cdh" / "src" / "stale.py"
-    stale.write_text("stale\n", encoding="utf-8")
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_reports_symlink_package_projection_file(
-    tmp_path: Path,
-) -> None:
-    """Check mode treats symlinked managed package files as drift."""
-    if not hasattr(os, "symlink"):
-        pytest.skip("symlinks are not supported on this platform")
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    package_pyproject = output / "packages" / "cdh" / "pyproject.toml"
-    real_pyproject = tmp_path / "real-package-pyproject.toml"
-    real_pyproject.write_bytes(package_pyproject.read_bytes())
-    package_pyproject.unlink()
-    package_pyproject.symlink_to(real_pyproject)
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_reports_symlink_package_projection_dir(tmp_path: Path) -> None:
-    """Check mode treats symlinked managed package directories as drift."""
-    if not hasattr(os, "symlink"):
-        pytest.skip("symlinks are not supported on this platform")
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    package_src = output / "packages" / "cdh" / "src"
-    real_src = tmp_path / "real-package-src"
-    package_src.rename(real_src)
-    package_src.symlink_to(real_src, target_is_directory=True)
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_reports_scripts_drift_when_hooks_are_present(
-    tmp_path: Path,
-) -> None:
-    """Check mode compares copied scripts when the render plan has hooks."""
-    output = tmp_path / "context"
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    render_context(
-        tmp_path,
-        output=output,
-        config_content=HOOK_CONFIG,
-        scripts_dir=scripts,
-    )
-    (output / "scripts" / "pre.sh").write_text("changed\n", encoding="utf-8")
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(
-            tmp_path,
-            output=output,
-            config_content=HOOK_CONFIG,
-            scripts_dir=scripts,
-            options=LockOptions(check=True),
-        )
-
-
-def test_check_mode_reports_stale_file_under_scripts_when_hooks_are_present(
-    tmp_path: Path,
-) -> None:
-    """Check mode catches actual-only files inside the managed scripts tree."""
-    output = tmp_path / "context"
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    render_context(
-        tmp_path,
-        output=output,
-        config_content=HOOK_CONFIG,
-        scripts_dir=scripts,
-    )
-    stale = output / "scripts" / "stale.sh"
-    stale.write_text("#!/bin/sh\n", encoding="utf-8")
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(
-            tmp_path,
-            output=output,
-            config_content=HOOK_CONFIG,
-            scripts_dir=scripts,
-            options=LockOptions(check=True),
-        )
-
-
-def test_check_mode_reports_stale_scripts_tree_when_hooks_are_removed(
-    tmp_path: Path,
-) -> None:
-    """Check mode catches a previously managed scripts tree after hooks are removed."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    stale_scripts = output / "scripts"
-    stale_scripts.mkdir()
-    (stale_scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(
-            tmp_path,
-            output=output,
-            options=LockOptions(check=True),
-        )
-    assert [
-        diagnostic.path
-        for diagnostic in error.value.diagnostics
-        if diagnostic.code == "render.check_changed"
-    ] == [("scripts",)]
-
-
-# Runtime hook source-safety coverage protects validation diagnostics, copied hook
-# artifacts, and drift detection when hooks are added, removed, or changed.
-def test_omitted_runtime_hooks_dir_is_copied_when_default_exists(
-    tmp_path: Path,
-) -> None:
-    """An omitted --hooks-dir activates ./hooks when the tree exists."""
-    output = tmp_path / "context"
-    hooks = write_runtime_hook_tree(tmp_path / "hooks")
-
-    render_context(tmp_path, output=output)
-
-    assert (output / "runtime" / "hooks" / "pre-start.d" / "10-pre.sh").read_text(
-        encoding="utf-8"
-    ) == "#!/bin/sh\n"
-    assert (output / "runtime" / "hooks" / "post-start.d" / "20-post.py").read_text(
-        encoding="utf-8"
-    ) == "print('post')\n"
-    assert (output / "runtime" / "hooks" / "stop.d" / "30-stop.sh").is_file()
-    dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
-    assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
-    assert hooks.resolve() != (output / "runtime" / "hooks").resolve()
-
-
-def test_explicit_runtime_hooks_dir_must_exist(tmp_path: Path) -> None:
-    """An explicit --hooks-dir fails when the source path is missing."""
-    missing = tmp_path / "missing-hooks"
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=missing)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir",), "runtime_hooks.source_not_directory")
-    ]
-
-
-def test_runtime_hooks_reject_unknown_top_level_entries(tmp_path: Path) -> None:
-    """Active runtime hook sources are a closed top-level phase directory set."""
-    hooks = tmp_path / "runtime-hooks"
-    hooks.mkdir()
-    (hooks / "README.md").write_text("not a phase\n", encoding="utf-8")
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir", "README.md"), "runtime_hooks.unknown_top_level")
-    ]
-
-
-def test_runtime_hooks_wrap_source_traversal_permission_error(
+def test_unexpected_planning_failures_propagate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    error: Exception,
 ) -> None:
-    """Host hook preflight reports traversal failures as diagnostics."""
-    hooks = tmp_path / "runtime-hooks"
-    hooks.mkdir()
-    original_iterdir = Path.iterdir
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
 
-    def fail_iterdir(self: Path):
-        if self == hooks:
-            raise PermissionError("list denied")
-        return original_iterdir(self)
+    def fail(*args, **kwargs):
+        raise error
 
-    monkeypatch.setattr(Path, "iterdir", fail_iterdir)
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir",), "runtime_hooks.source_read_failed")
-    ]
-    assert "list denied" in error.value.diagnostics[0].message
+    monkeypatch.setattr(f"comfyui_docker_helper.host.render_service.{target}", fail)
+    with pytest.raises(type(error), match="injected"):
+        _prepare(config, tmp_path / "context", FakeAcquirer())
 
 
-def test_omitted_runtime_hooks_wrap_default_source_lstat_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Default hook auto-detection reports probe failures as diagnostics."""
-    hooks = tmp_path / "hooks"
-    original_lstat = Path.lstat
-
-    def fail_default_hooks_lstat(self: Path):
-        if self == hooks:
-            raise PermissionError("stat denied")
-        return original_lstat(self)
-
-    monkeypatch.setattr(Path, "lstat", fail_default_hooks_lstat)
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir",), "runtime_hooks.source_inspect_failed")
-    ]
-    assert "stat denied" in error.value.diagnostics[0].message
-
-
-def test_runtime_hooks_reject_phase_name_as_file(tmp_path: Path) -> None:
-    """Known runtime hook phase entries must be directories."""
-    hooks = tmp_path / "runtime-hooks"
-    hooks.mkdir()
-    (hooks / "pre-start.d").write_text("#!/bin/sh\n", encoding="utf-8")
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir", "pre-start.d"), "runtime_hooks.phase_not_directory")
-    ]
-
-
-def test_runtime_hooks_reject_symlinks(tmp_path: Path) -> None:
-    """Runtime hook source trees must not contain symlinks."""
-    if not hasattr(os, "symlink"):
-        pytest.skip("symlinks are not supported on this platform")
-    hooks = tmp_path / "runtime-hooks"
-    hooks.mkdir()
-    real_phase = tmp_path / "real-pre-start"
-    real_phase.mkdir()
-    (hooks / "pre-start.d").symlink_to(real_phase, target_is_directory=True)
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir", "pre-start.d"), "runtime_hooks.symlink")
-    ]
-
-
-def test_runtime_hooks_reject_special_files(tmp_path: Path) -> None:
-    """Runtime hook phase entries must be regular files."""
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("fifo special files are not supported on this platform")
-    hooks = tmp_path / "runtime-hooks"
-    phase = hooks / "pre-start.d"
-    phase.mkdir(parents=True)
-    os.mkfifo(phase / "pipe.sh")
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir", "pre-start.d", "pipe.sh"), "runtime_hooks.special_file")
-    ]
-
-
-def test_runtime_hooks_reject_phase_subdirectories(tmp_path: Path) -> None:
-    """Runtime hook phase entries must not contain nested directories."""
-    hooks = tmp_path / "runtime-hooks"
-    nested = hooks / "pre-start.d" / "nested"
-    nested.mkdir(parents=True)
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (("hooks_dir", "pre-start.d", "nested"), "runtime_hooks.entry_not_file")
-    ]
-
-
-def test_runtime_hooks_reject_unsupported_extensions(tmp_path: Path) -> None:
-    """Runtime hook phase files must be shell or Python scripts."""
-    hooks = tmp_path / "runtime-hooks"
-    phase = hooks / "pre-start.d"
-    phase.mkdir(parents=True)
-    (phase / "note.txt").write_text("nope\n", encoding="utf-8")
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (
-            ("hooks_dir", "pre-start.d", "note.txt"),
-            "runtime_hooks.unsupported_extension",
-        )
-    ]
-
-
-def test_runtime_hooks_reject_output_nested_inside_source(tmp_path: Path) -> None:
-    """Render output must not be nested inside the runtime hook source."""
-    hooks = write_runtime_hook_tree(tmp_path / "runtime-hooks")
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, output=hooks / "context", hooks_dir=hooks)
-
-    assert locations_and_codes(error.value) == [
-        (("render",), "render.context_write_failed")
-    ]
-    assert "runtime hooks source" in error.value.diagnostics[0].message
-
-
-def test_check_mode_reports_stale_runtime_hooks_tree_when_hooks_are_removed(
+def test_uv_pre_reconcile_expected_acquisition_failure_is_diagnostic(
     tmp_path: Path,
 ) -> None:
-    """Check mode catches a previously managed runtime hook tree after removal."""
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+
+    class FailingAcquirer:
+        def acquire(self, request, request_digest):
+            raise CanonicalAcquisitionError(
+                "OCI registry: requested identity was not found"
+            )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, tmp_path / "context", FailingAcquirer())
+
+    assert raised.value.diagnostics == (
+        Diagnostic(
+            ("config.lock.toml", "oci", "uv-tool"),
+            "lock.resolve_failed",
+            "OCI registry: requested identity was not found",
+        ),
+    )
+
+
+def test_custom_node_and_runtime_hook_lock_namespaces_cannot_collide(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + """
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://example.test/node.git"
+ref = "1111111111111111111111111111111111111111"
+pre_install_scripts = ["runtime-hooks/pre-start.d/10-pre.sh"]
+"""
+    )
+    scripts = tmp_path / "scripts"
+    custom_hook = scripts / "runtime-hooks/pre-start.d/10-pre.sh"
+    custom_hook.parent.mkdir(parents=True)
+    custom_hook.write_text("custom\n")
+    custom_hook.chmod(0o755)
+    hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
-    hooks = write_runtime_hook_tree(tmp_path / "hooks")
-    render_context(tmp_path, output=output)
-    shutil.rmtree(hooks)
 
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
+    _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        hooks_dir=hooks,
+        scripts_dir=scripts,
+    )
 
-    changed_paths = [
-        diagnostic.path
-        for diagnostic in error.value.diagnostics
-        if diagnostic.code == "render.check_changed"
-    ]
-    assert ("runtime", "hooks") in changed_paths
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    paths = {
+        entry.relative_path
+        for entry in lock.entries
+        if isinstance(entry, LocalExecutableLockEntry)
+    }
+    assert paths == {
+        "custom-node-hooks/runtime-hooks/pre-start.d/10-pre.sh",
+        "runtime-hooks/pre-start.d/10-pre.sh",
+        "runtime-hooks/post-start.d/20-post.py",
+        "runtime-hooks/stop.d/30-stop.sh",
+    }
+    assert (output / "inputs/runtime-hooks/pre-start.d/10-pre.sh").read_text() == (
+        "custom\n"
+    )
+    assert (output / "runtime/hooks/pre-start.d/10-pre.sh").read_text() == "pre\n"
 
 
-def test_check_mode_rejects_runtime_hooks_source_inside_output(
-    tmp_path: Path,
-) -> None:
-    """Check mode must not derive expected hooks from the rendered output."""
+def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
-    hooks = write_runtime_hook_tree(tmp_path / "hooks")
-    render_context(tmp_path, output=output, hooks_dir=hooks)
+    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks)
+    before = _tree(output)
+    before_binding = (output / "manifest-binding.json").read_bytes()
+    before_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    before_request_digests = {
+        entry.request_digest
+        for entry in before_lock.entries
+        if hasattr(entry, "request_digest")
+    }
 
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(
-            tmp_path,
-            output=output,
-            hooks_dir=output / "runtime" / "hooks",
-            options=LockOptions(check=True),
-        )
-
-    assert locations_and_codes(error.value) == [
-        (("render",), "render.context_write_failed")
-    ]
-    assert "ancestor of runtime hooks source" in error.value.diagnostics[0].message
-
-
-def test_dry_run_rejects_output_nested_inside_runtime_hooks_source(
-    tmp_path: Path,
-) -> None:
-    """Early-return render modes still enforce hook source ancestry safety."""
-    hooks = write_runtime_hook_tree(tmp_path / "hooks")
-
-    with pytest.raises(HostRenderServiceError) as error:
-        render_context(
-            tmp_path,
-            output=hooks / "pre-start.d" / "context",
+    changed = hooks / "pre-start.d/10-pre.sh"
+    changed.write_text("changed\n")
+    changed.chmod(0o755)
+    locked_fake = FakeAcquirer()
+    with pytest.raises(HostRenderServiceError) as locked:
+        _prepare(
+            config,
+            output,
+            locked_fake,
             hooks_dir=hooks,
-            options=LockOptions(dry_run=True),
+            options=PlanningOptions(locked=True),
+        )
+    assert locked.value.diagnostics[0].code == "lock.locked_mismatch"
+    assert locked_fake.calls == []
+    check_fake = FakeAcquirer()
+    with pytest.raises(HostRenderServiceError) as checked:
+        _prepare(
+            config,
+            output,
+            check_fake,
+            hooks_dir=hooks,
+            options=PlanningOptions(check=True),
+        )
+    assert checked.value.diagnostics[0].code == "render.context_changed"
+    assert check_fake.calls == []
+    dry_fake = FakeAcquirer()
+    dry = _prepare(
+        config,
+        output,
+        dry_fake,
+        hooks_dir=hooks,
+        options=PlanningOptions(dry_run=True),
+    )
+    assert dry.lock_result.changed
+    assert dry_fake.calls == []
+    assert _tree(output) == before
+
+    added = hooks / "pre-start.d/11-added.py"
+    added.write_text("print('added')\n")
+    added.chmod(0o755)
+    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks, overwrite=True)
+    updated_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    assert {
+        entry.request_digest
+        for entry in updated_lock.entries
+        if hasattr(entry, "request_digest")
+    } == before_request_digests
+    assert (output / "manifest-binding.json").read_bytes() != before_binding
+    assert (output / "runtime/hooks/pre-start.d/11-added.py").is_file()
+
+    added.unlink()
+    with pytest.raises(HostRenderServiceError) as deleted_check:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            hooks_dir=hooks,
+            options=PlanningOptions(check=True),
+        )
+    assert deleted_check.value.diagnostics[0].code == "render.context_changed"
+    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks, overwrite=True)
+    assert not (output / "runtime/hooks/pre-start.d/11-added.py").exists()
+
+
+def test_runtime_hook_tree_rejects_symlinks_and_special_files(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = _runtime_hooks(tmp_path / "hooks")
+    target = hooks / "pre-start.d/10-pre.sh"
+    target.unlink()
+    target.symlink_to(tmp_path / "outside")
+    with pytest.raises(HostRenderServiceError) as symlinked:
+        _prepare(config, tmp_path / "context", FakeAcquirer(), hooks_dir=hooks)
+    assert symlinked.value.diagnostics[0].code == "runtime_hooks.symlink"
+
+    target.unlink()
+    os.mkfifo(target)
+    with pytest.raises(HostRenderServiceError) as special:
+        _prepare(config, tmp_path / "context", FakeAcquirer(), hooks_dir=hooks)
+    assert special.value.diagnostics[0].code == "runtime_hooks.special_file"
+
+
+def test_default_runtime_hook_tree_is_active_when_present(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    _runtime_hooks(tmp_path / "hooks")
+
+    prepared = _prepare(
+        config,
+        tmp_path / "context",
+        FakeAcquirer(),
+        working_directory=tmp_path,
+    )
+
+    assert len(prepared.plan.runtime.hooks) == 3
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("missing", "runtime_hooks.source_not_directory"),
+        ("unknown", "runtime_hooks.unknown_top_level"),
+        ("extension", "runtime_hooks.unsupported_extension"),
+    ],
+)
+def test_runtime_hook_tree_reports_closed_validation_contract(
+    tmp_path: Path,
+    mutation: str,
+    code: str,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = tmp_path / "hooks"
+    if mutation != "missing":
+        hooks.mkdir()
+    if mutation == "unknown":
+        (hooks / "README.md").write_text("unknown")
+    elif mutation == "extension":
+        phase = hooks / "pre-start.d"
+        phase.mkdir()
+        path = phase / "10-hook.txt"
+        path.write_text("hook")
+        path.chmod(0o755)
+    fake = FakeAcquirer()
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, tmp_path / "context", fake, hooks_dir=hooks)
+
+    assert raised.value.diagnostics[0].code == code
+    assert fake.calls == []
+
+
+def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = tmp_path / "hooks/pre-start.d"
+    hooks.mkdir(parents=True)
+    hook = hooks / "10-hook.sh"
+    hook.write_text("hook\n")
+    hook.chmod(0o644)
+
+    prepared = _prepare(
+        config, tmp_path / "context", FakeAcquirer(), hooks_dir=hooks.parent
+    )
+
+    assert prepared.plan.runtime.hooks[0].relative_path == "pre-start.d/10-hook.sh"
+    assert (tmp_path / "context/runtime/hooks/pre-start.d/10-hook.sh").read_text() == (
+        "hook\n"
+    )
+
+
+def test_overwrite_uses_unique_owned_backup_and_preserves_sibling(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    sibling = tmp_path / ".context.previous"
+    sibling.mkdir()
+    sentinel = sibling / "sentinel"
+    sentinel.write_text("keep")
+    backup_sibling = tmp_path / ".context.backup-user"
+    backup_sibling.mkdir()
+    backup_sentinel = backup_sibling / "sentinel"
+    backup_sentinel.write_text("also keep")
+
+    _prepare(config, output, FakeAcquirer(), overwrite=True)
+
+    assert sentinel.read_text() == "keep"
+    assert backup_sentinel.read_text() == "also keep"
+    assert list(tmp_path.glob(".context.backup-*")) == [backup_sibling]
+
+
+def test_stage_rename_failure_restores_existing_context_and_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    before = _tree(output)
+    sibling = tmp_path / ".context.previous"
+    sibling.write_text("keep")
+    original_rename = Path.rename
+
+    def fail_stage(self: Path, target: Path):
+        if self.name.startswith(".context.stage-") and Path(target) == output:
+            raise OSError("stage rename denied")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_stage)
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer(), overwrite=True)
+
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert _tree(output) == before
+    assert sibling.read_text() == "keep"
+    assert not list(tmp_path.glob(".context.backup-*"))
+
+
+def test_owned_backup_cleanup_failure_never_touches_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    sibling = tmp_path / ".context.previous"
+    sibling.write_text("keep")
+    original_rmtree = shutil.rmtree
+
+    def fail_backup(path, *args, **kwargs):
+        if Path(path).name.startswith(".context.backup-"):
+            raise OSError("cleanup denied")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_backup)
+    _prepare(config, output, FakeAcquirer(), overwrite=True)
+
+    assert sibling.read_text() == "keep"
+    assert _valid_context(output)
+    assert len(list(tmp_path.glob(".context.backup-*"))) == 1
+
+
+def test_restore_rename_failure_retains_original_in_owned_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    before = _tree(output)
+    sibling = tmp_path / ".context.previous"
+    sibling.write_text("keep")
+    original_rename = Path.rename
+
+    def fail_stage_and_restore(self: Path, target: Path):
+        target = Path(target)
+        if self.name.startswith(".context.stage-") and target == output:
+            raise OSError("stage rename denied")
+        if self.name == "previous" and target == output:
+            raise OSError("restore rename denied")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_stage_and_restore)
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer(), overwrite=True)
+
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    backups = list(tmp_path.glob(".context.backup-*"))
+    assert len(backups) == 1
+    assert _tree(backups[0] / "previous") == before
+    assert sibling.read_text() == "keep"
+
+
+def test_context_parent_filesystem_failure_is_stable_render_diagnostic(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    parent = tmp_path / "not-a-directory"
+    parent.write_text("sentinel")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, parent / "context", FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert parent.read_text() == "sentinel"
+
+
+@pytest.mark.parametrize("mutation", ["extra-dir", "missing-dir", "symlink", "special"])
+def test_check_compares_complete_path_type_and_bytes_without_following(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    outside = tmp_path / "outside"
+    outside.write_text("outside sentinel")
+    if mutation == "extra-dir":
+        (output / "extra-empty").mkdir()
+    elif mutation == "missing-dir":
+        shutil.rmtree(output / "runtime")
+    elif mutation == "symlink":
+        (output / "Dockerfile").unlink()
+        (output / "Dockerfile").symlink_to(outside)
+    else:
+        os.mkfifo(output / "extra-special")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
         )
 
-    assert locations_and_codes(error.value) == [
-        (("render",), "render.context_write_failed")
-    ]
-    assert (
-        "nested inside the runtime hooks source" in error.value.diagnostics[0].message
-    )
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+    assert outside.read_text() == "outside sentinel"
 
 
-def test_check_mode_reports_symlink_script_when_hooks_are_present(
-    tmp_path: Path,
-) -> None:
-    """Check mode treats symlinked managed hook scripts as drift."""
-    if not hasattr(os, "symlink"):
-        pytest.skip("symlinks are not supported on this platform")
-    output = tmp_path / "context"
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    render_context(
-        tmp_path,
-        output=output,
-        config_content=HOOK_CONFIG,
-        scripts_dir=scripts,
-    )
-    real_script = tmp_path / "real-pre.sh"
-    real_script.write_bytes((output / "scripts" / "pre.sh").read_bytes())
-    (output / "scripts" / "pre.sh").unlink()
-    (output / "scripts" / "pre.sh").symlink_to(real_script)
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(
-            tmp_path,
-            output=output,
-            config_content=HOOK_CONFIG,
-            scripts_dir=scripts,
-            options=LockOptions(check=True),
-        )
-
-
-def test_check_mode_reports_missing_scripts_when_hooks_are_present(
-    tmp_path: Path,
-) -> None:
-    """Check mode fails when a managed scripts tree is missing."""
-    output = tmp_path / "context"
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    (scripts / "pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    render_context(
-        tmp_path,
-        output=output,
-        config_content=HOOK_CONFIG,
-        scripts_dir=scripts,
-    )
-    (output / "scripts" / "pre.sh").unlink()
-    (output / "scripts").rmdir()
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(
-            tmp_path,
-            output=output,
-            config_content=HOOK_CONFIG,
-            scripts_dir=scripts,
-            options=LockOptions(check=True),
-        )
-
-
-def test_check_mode_ignores_unmanaged_extras_and_keeps_target_unchanged(
-    tmp_path: Path,
-) -> None:
-    """Check mode neither reports nor deletes files outside managed artifacts."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    extra = output / "unmanaged" / "extra.txt"
-    extra.parent.mkdir()
-    extra.write_text("keep me\n", encoding="utf-8")
-    before = file_contents(output)
-
-    render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-    assert file_contents(output) == before
-    assert extra.read_text(encoding="utf-8") == "keep me\n"
-
-
-def test_check_mode_cleans_temporary_expected_contexts(tmp_path: Path) -> None:
-    """Check mode removes temporary expected contexts after success and failure."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-
-    render_context(tmp_path, output=output, options=LockOptions(check=True))
-    assert check_temp_dirs(tmp_path) == []
-
-    (output / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-    assert check_temp_dirs(tmp_path) == []
-
-
-def test_check_locked_mode_reuses_compatible_lock_without_provider_calls(
-    tmp_path: Path,
-) -> None:
-    """Check plus locked mode keeps the strict no-resolution lock behavior."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    providers = FakeResolvers()
-
-    render_context(
-        tmp_path,
-        output=output,
-        resolvers=providers,
-        options=LockOptions(check=True, locked=True),
-    )
-
-    providers.assert_zero_calls()
-
-
-def test_check_mode_rejects_missing_context(tmp_path: Path) -> None:
-    """Check mode fails before accepting absent output paths."""
-    with pytest_raises_host_error("render.context_missing"):
-        render_context(tmp_path, options=LockOptions(check=True))
-
-
-def test_check_mode_rejects_unmarked_context(tmp_path: Path) -> None:
-    """Check mode requires the existing rendered-context marker."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    (output / ".cdh-rendered").unlink()
-
-    with pytest_raises_host_error("render.context_unmarked"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_rejects_symlink_output_dir(tmp_path: Path) -> None:
-    """Check mode refuses to follow a symlinked output directory."""
-    if not hasattr(os, "symlink"):
-        pytest.skip("symlinks are not supported on this platform")
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    output_link = tmp_path / "context-link"
-    output_link.symlink_to(output, target_is_directory=True)
-
-    with pytest_raises_host_error("render.output_symlink"):
-        render_context(tmp_path, output=output_link, options=LockOptions(check=True))
-
-
-def test_check_mode_rejects_symlink_root_config_artifact(tmp_path: Path) -> None:
-    """Check mode treats symlinked root config.toml as unsafe drift."""
-    if not hasattr(os, "symlink"):
-        pytest.skip("symlinks are not supported on this platform")
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    real_config = tmp_path / "real-config.toml"
-    real_config.write_bytes((output / "config.toml").read_bytes())
-    (output / "config.toml").unlink()
-    (output / "config.toml").symlink_to(real_config)
-
-    with pytest_raises_host_error("render.check_changed"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_check_mode_rejects_symlink_root_lock_artifact(tmp_path: Path) -> None:
-    """Check mode refuses symlinked config.lock.toml before lock consumption."""
-    if not hasattr(os, "symlink"):
-        pytest.skip("symlinks are not supported on this platform")
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    real_lock = tmp_path / "real-config.lock.toml"
-    real_lock.write_bytes((output / "config.lock.toml").read_bytes())
-    (output / "config.lock.toml").unlink()
-    (output / "config.lock.toml").symlink_to(real_lock)
-
-    with pytest_raises_host_error("lockfile.invalid_path"):
-        render_context(tmp_path, output=output, options=LockOptions(check=True))
-
-
-def test_upgrade_lock_refreshes_moving_source_selections(tmp_path: Path) -> None:
-    """Upgrade mode intentionally re-resolves moving selectors."""
-    output = tmp_path / "context"
-    render_context(tmp_path, output=output)
-    providers = FakeResolvers(
-        comfyui=FakeComfyUIProvider(version="0.27.0", commit=COMMIT_2),
-        comfy_cli=FakeComfyCliProvider(version="2.0.0"),
-        registry=FakeRegistryProvider(version="2.0.0"),
-        git=FakeGitProvider(commit=COMMIT_B),
-    )
-
-    render_context(
-        tmp_path,
-        output=output,
-        resolvers=providers,
-        options=LockOptions(upgrade_lock=True),
-        overwrite=True,
-    )
-
-    lockfile = parse_lockfile_toml((output / "config.lock.toml").read_text())
-    assert lockfile.comfyui.version == "0.27.0"
-    assert lockfile.comfyui.cli_version == "2.0.0"
-    assert lockfile.custom_nodes[0].version == "2.0.0"
-    assert lockfile.custom_nodes[1].commit == COMMIT_B
-
-
-def file_contents(root: Path) -> dict[str, bytes]:
-    """Return relative file content for non-mutating checks."""
+def _tree(root: Path) -> dict[str, bytes]:
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
-        for path in root.rglob("*")
+        for path in sorted(root.rglob("*"))
         if path.is_file()
     }
 
 
-def check_temp_dirs(parent: Path) -> list[Path]:
-    """Return leaked render-check temporary context directories."""
-    return sorted(parent.glob(".cdh-check-*"))
-
-
-def write_runtime_hook_tree(root: Path) -> Path:
-    """Write a valid runtime hook source tree and return its root."""
-    (root / "pre-start.d").mkdir(parents=True)
-    (root / "post-start.d").mkdir()
-    (root / "stop.d").mkdir()
-    (root / "pre-start.d" / "10-pre.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    (root / "post-start.d" / "20-post.py").write_text(
-        "print('post')\n",
-        encoding="utf-8",
-    )
-    (root / "stop.d" / "30-stop.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+def _runtime_hooks(root: Path) -> Path:
+    files = {
+        "pre-start.d/10-pre.sh": "pre\n",
+        "post-start.d/20-post.py": "print('post')\n",
+        "stop.d/30-stop.sh": "stop\n",
+    }
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        path.chmod(0o755)
     return root
 
 
-def locations_and_codes(
-    error: HostRenderServiceError,
-) -> list[tuple[tuple[object, ...], str]]:
-    """Return diagnostic paths and codes for concise assertions."""
-    return [(diagnostic.path, diagnostic.code) for diagnostic in error.diagnostics]
-
-
-class pytest_raises_host_error(AbstractContextManager[None]):
-    """Assert that a host render service error includes a diagnostic code."""
-
-    def __init__(self, code: str) -> None:
-        self.code = code
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool:
-        del traceback
-        assert exc_type is HostRenderServiceError
-        assert isinstance(exc, HostRenderServiceError)
-        assert any(diagnostic.code == self.code for diagnostic in exc.diagnostics)
-        return True
+def _valid_context(output: Path) -> bool:
+    return (output / ".cdh-rendered").is_file() and (output / "Dockerfile").is_file()

@@ -17,12 +17,12 @@ from typing import Any, Literal, Protocol
 from pydantic import ValidationError
 
 from comfyui_docker_helper.config import Diagnostic
-from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime_file_validation import (
     normalize_runtime_file_path,
     validate_runtime_file_url,
 )
-from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.config.url_validation import DownloaderName
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,

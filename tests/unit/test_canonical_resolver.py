@@ -16,7 +16,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
-    DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
@@ -24,6 +23,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     ResolverRequestIdentity,
@@ -98,10 +98,12 @@ def _requests() -> tuple[ResolverRequestIdentity, ...]:
         DirectGitRequestIdentity(
             type="git", url="https://example.test/node.git", ref=COMMIT_A
         ),
-        DirectPythonRequestIdentity(
-            type="python-group",
+        PyTorchRequestIdentity(
+            type="pytorch-group",
             environment="application",
             group="pytorch",
+            backend="cuda",
+            channel="cu130",
             python_version="3.13.14",
             platform="linux/amd64",
             index_url="https://download.pytorch.org/whl/cu130",
@@ -255,7 +257,10 @@ class FakeAcquirer:
                 ),
             )
         else:
-            versions = {"torch": "2.12.1", "torchvision": "0.27.1"}
+            versions = {
+                "torch": "2.12.1+cu130",
+                "torchvision": "0.27.1+cu130",
+            }
             entries = tuple(
                 DirectPythonLockEntry(
                     type="python-package",
@@ -451,8 +456,8 @@ def test_reconcile_rederives_after_nested_exact_selector_becomes_moving() -> Non
 
 def test_reconcile_rederives_after_nested_python_member_mutation() -> None:
     request = _requests()[-1]
-    assert isinstance(request, DirectPythonRequestIdentity)
-    exact = DirectPythonRequestIdentity.model_validate(
+    assert isinstance(request, PyTorchRequestIdentity)
+    exact = PyTorchRequestIdentity.model_validate(
         {
             **request.model_dump(),
             "members": [
@@ -474,7 +479,7 @@ def test_reconcile_rederives_after_nested_python_member_mutation() -> None:
     )
 
     assert desired.stability is SelectorStability.EXACT
-    assert acquirer.calls == ["python-group"]
+    assert acquirer.calls == ["pytorch-group"]
     assert len(result.delta) == 2
 
 
@@ -540,14 +545,14 @@ def test_default_initial_acquisition_is_sorted_and_returns_write_intent() -> Non
         "git",
         "managed-python",
         "oci",
-        "python-group",
+        "pytorch-group",
         "registry",
     ]
     assert acquirer.provider_calls == [
         "comfyui",
         "managed-python",
         "oci",
-        "python-group",
+        "pytorch-group",
         "registry",
     ]
     assert all(item.kind is DeltaKind.ADDED for item in result.delta)
@@ -585,12 +590,12 @@ def test_one_changed_group_member_reacquires_the_complete_group_only() -> None:
     existing = _initial_lock(desired)
     requests = list(_requests())
     group = requests[-1]
-    assert isinstance(group, DirectPythonRequestIdentity)
+    assert isinstance(group, PyTorchRequestIdentity)
     members = [
         group.members[0],
         group.members[1].model_copy(update={"selector": "<0.29,>=0.27"}),
     ]
-    requests[-1] = DirectPythonRequestIdentity.model_validate(
+    requests[-1] = PyTorchRequestIdentity.model_validate(
         {**group.model_dump(), "members": members}
     )
     acquirer = FakeAcquirer()
@@ -599,8 +604,8 @@ def test_one_changed_group_member_reacquires_the_complete_group_only() -> None:
         _desired(tuple(requests)), existing=existing, acquirer=acquirer
     )
 
-    assert acquirer.calls == ["python-group"]
-    assert acquirer.provider_calls == ["python-group"]
+    assert acquirer.calls == ["pytorch-group"]
+    assert acquirer.provider_calls == ["pytorch-group"]
     package_delta = [item for item in result.delta if item.key[0] == "python-package"]
     assert {item.key[-1] for item in package_delta} == {"torch", "torchvision"}
     assert all(item.kind is DeltaKind.UPDATED for item in package_delta)
@@ -615,7 +620,7 @@ def test_one_changed_group_member_reacquires_the_complete_group_only() -> None:
         ("comfy-cli", "comfy-cli"),
         ("registry", "registry"),
         ("git", "git"),
-        ("python-package", "python-group"),
+        ("python-package", "pytorch-group"),
     ],
 )
 def test_matching_digest_but_incompatible_result_is_reacquired_by_domain(
@@ -683,11 +688,52 @@ def _corrupt_lock_result(lock: CanonicalLock, entry_type: str) -> CanonicalLock:
         elif isinstance(entry, DirectGitLockEntry):
             data["commit"] = COMMIT_B
         else:
-            data["version"] = "2.11.0"
+            data["version"] = "2.11.0+cu130"
         entries.append(type(entry).model_validate(data))
         changed = True
     assert changed
     return CanonicalLock(schema_version=1, entries=entries)
+
+
+@pytest.mark.parametrize("version", ["2.12.1", "2.12.1+cpu", "2.12.1+cu129"])
+@pytest.mark.parametrize("policy", [LockPolicy.DEFAULT, LockPolicy.LOCKED])
+def test_pytorch_core_channel_mismatch_is_reacquired_or_rejected_without_calls(
+    version: str, policy: LockPolicy
+) -> None:
+    desired = _desired()
+    existing = _initial_lock(desired)
+    entries = list(existing.entries)
+    index = next(
+        index
+        for index, entry in enumerate(entries)
+        if isinstance(entry, DirectPythonLockEntry) and entry.package == "torch"
+    )
+    entries[index] = entries[index].model_copy(update={"version": version})
+    existing = CanonicalLock(schema_version=1, entries=entries)
+    acquirer = FakeAcquirer()
+
+    if policy is LockPolicy.LOCKED:
+        with pytest.raises(CanonicalResolutionError) as raised:
+            reconcile_canonical_lock(
+                desired, existing=existing, acquirer=acquirer, policy=policy
+            )
+        assert acquirer.calls == []
+        assert any(
+            item.code == "lock.locked_mismatch" for item in raised.value.diagnostics
+        )
+        return
+
+    result = reconcile_canonical_lock(
+        desired, existing=existing, acquirer=acquirer, policy=policy
+    )
+
+    assert acquirer.calls == ["pytorch-group"]
+    torch = next(
+        entry
+        for entry in result.lock.entries
+        if isinstance(entry, DirectPythonLockEntry) and entry.package == "torch"
+    )
+    assert torch.version == "2.12.1+cu130"
 
 
 def test_locked_aggregates_entry_set_digest_and_local_content_without_calls() -> None:
@@ -818,7 +864,7 @@ def test_upgrade_refreshes_all_moving_and_retains_every_exact_entry() -> None:
         policy=LockPolicy.UPGRADE,
     )
 
-    assert acquirer.calls == ["comfyui", "oci", "python-group", "registry"]
+    assert acquirer.calls == ["comfyui", "oci", "pytorch-group", "registry"]
     assert result.provider_calls == (
         ("comfyui", "https://github.com/Comfy-Org/ComfyUI.git"),
         ("oci", "cuda-base"),
@@ -838,8 +884,8 @@ def test_upgrade_refreshes_all_moving_and_retains_every_exact_entry() -> None:
 
 def test_upgrade_retains_an_unchanged_all_exact_python_group_without_uv_call() -> None:
     group = _requests()[-1]
-    assert isinstance(group, DirectPythonRequestIdentity)
-    exact_group = DirectPythonRequestIdentity.model_validate(
+    assert isinstance(group, PyTorchRequestIdentity)
+    exact_group = PyTorchRequestIdentity.model_validate(
         {
             **group.model_dump(),
             "members": [
@@ -873,7 +919,7 @@ def test_upgrade_retains_an_unchanged_all_exact_python_group_without_uv_call() -
         (
             LockPolicy.UPGRADE,
             ReconcilePurpose.DRY_RUN,
-            ["comfyui", "oci", "python-group", "registry"],
+            ["comfyui", "oci", "pytorch-group", "registry"],
             False,
         ),
         (LockPolicy.LOCKED, ReconcilePurpose.DRY_RUN, [], False),
@@ -918,7 +964,7 @@ def test_provider_failures_are_aggregated_in_deterministic_order() -> None:
         "git",
         "managed-python",
         "oci",
-        "python-group",
+        "pytorch-group",
         "registry",
     ]
 

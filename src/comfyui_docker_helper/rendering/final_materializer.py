@@ -9,12 +9,18 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+import tomli_w
+
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
     build_plan_digest,
     dump_build_plan_json,
     manifest_binding,
+)
+from comfyui_docker_helper.config.runtime_hooks import (
+    CUSTOM_NODE_HOOK_LOCK_PREFIX,
+    RUNTIME_HOOK_LOCK_PREFIX,
 )
 from comfyui_docker_helper.container.phase_inputs import phase_document
 from comfyui_docker_helper.rendering.final_renderer import (
@@ -49,7 +55,8 @@ def materialize_build_plan(
     if next(target.iterdir(), None) is not None:
         raise FinalMaterializationError("materialization target must be empty")
     try:
-        expected = _expected_hooks(plan)
+        custom_hooks, runtime_hooks = _expected_hooks(plan)
+        expected = {**custom_hooks, **runtime_hooks}
         sources = {item.relative_path.as_posix(): item for item in local_sources}
         if len(sources) != len(local_sources) or set(sources) != set(expected):
             raise FinalMaterializationError(
@@ -81,8 +88,22 @@ def materialize_build_plan(
         for relative_path, hook in expected.items():
             source = sources[relative_path].source_path
             content = _verified_source(source, hook.digest)
-            output = target / "inputs" / relative_path
+            if relative_path in runtime_hooks:
+                runtime_relative = relative_path.removeprefix(
+                    f"{RUNTIME_HOOK_LOCK_PREFIX}/"
+                )
+                output = target / "runtime" / "hooks" / runtime_relative
+            else:
+                custom_relative = relative_path.removeprefix(
+                    f"{CUSTOM_NODE_HOOK_LOCK_PREFIX}/"
+                )
+                output = target / "inputs" / custom_relative
             _write(output, content, root=target, executable=True)
+        _write(
+            target / "runtime" / "config.toml",
+            _runtime_config_bytes(plan),
+            root=target,
+        )
         _write(
             target / "Dockerfile",
             render_build_plan_dockerfile(plan).encode("utf-8"),
@@ -97,15 +118,82 @@ def materialize_build_plan(
         raise
 
 
-def _expected_hooks(plan: BuildPlan) -> dict[str, HookPlan]:
-    expected: dict[str, HookPlan] = {}
+def _expected_hooks(
+    plan: BuildPlan,
+) -> tuple[dict[str, HookPlan], dict[str, HookPlan]]:
+    custom: dict[str, HookPlan] = {}
     for node in plan.custom_nodes.nodes:
         for hook in (*node.pre_install, *node.post_install):
-            existing = expected.get(hook.relative_path)
+            identity_path = f"{CUSTOM_NODE_HOOK_LOCK_PREFIX}/{hook.relative_path}"
+            existing = custom.get(identity_path)
             if existing is not None and existing != hook:
                 raise FinalMaterializationError("hook identity has conflicting digests")
-            expected[hook.relative_path] = hook
-    return expected
+            custom[identity_path] = hook
+    runtime = {
+        f"{RUNTIME_HOOK_LOCK_PREFIX}/{hook.relative_path}": hook
+        for hook in plan.runtime.hooks
+    }
+    if len(runtime) != len(plan.runtime.hooks) or set(custom) & set(runtime):
+        raise FinalMaterializationError("hook identity has conflicting paths")
+    return custom, runtime
+
+
+def _runtime_config_bytes(plan: BuildPlan) -> bytes:
+    command = plan.runtime.launch_command
+    if (
+        len(command) < 7
+        or command[2] != "--listen"
+        or command[4] != "--port"
+        or command[6] != "--disable-auto-launch"
+    ):
+        raise FinalMaterializationError("runtime launch command is invalid")
+    try:
+        port = int(command[5])
+    except ValueError as error:
+        raise FinalMaterializationError("runtime launch port is invalid") from error
+    cdh = {
+        "default_downloader": plan.files.downloader.default,
+        "default_download_mode": plan.files.default_download_mode,
+        "download_max_attempts": plan.files.download_max_attempts,
+        "downloader": plan.files.downloader.model_dump(
+            mode="json", exclude={"default"}
+        ),
+    }
+    if plan.runtime.download_failure_policy is not None:
+        cdh["download_failure_policy"] = plan.runtime.download_failure_policy
+    comfyui_root = PurePosixPath(plan.application.paths.comfyui)
+    files = []
+    for item in plan.files.files:
+        target = PurePosixPath(item.target)
+        try:
+            relative = target.relative_to(comfyui_root)
+        except ValueError as error:
+            raise FinalMaterializationError(
+                "runtime file target is outside ComfyUI"
+            ) from error
+        runtime_item = {
+            "url": item.url,
+            "dir": relative.parent.as_posix(),
+            "filename": relative.name,
+            "overwrite": item.overwrite,
+        }
+        if item.downloader_explicit:
+            runtime_item["downloader"] = item.downloader
+        if item.download_mode_explicit:
+            runtime_item["download_mode"] = item.download_mode
+        files.append(runtime_item)
+    document = {
+        "comfyui": {
+            "listen": command[3],
+            "port": port,
+            "extra_args": list(command[7:]),
+        },
+        "cdh": cdh,
+        "system": {"ssh": plan.runtime.ssh.model_dump(mode="json")},
+    }
+    if files:
+        document["files"] = files
+    return tomli_w.dumps(document).encode("utf-8")
 
 
 def _verified_source(path: Path, expected_digest: str) -> bytes:

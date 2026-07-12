@@ -13,10 +13,11 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     DirectGitRequestIdentity,
-    DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     ManagedPythonRequestIdentity,
     OciRequestIdentity,
+    PythonGroupRequestIdentity,
+    PyTorchRequestIdentity,
     RegistryRequestIdentity,
     compute_request_digest,
 )
@@ -46,11 +47,13 @@ COMMIT_B = "2" * 40
 OFFICIAL_REPOSITORY = "https://github.com/comfyanonymous/ComfyUI.git"
 
 
-def _group() -> DirectPythonRequestIdentity:
-    return DirectPythonRequestIdentity(
-        type="python-group",
+def _group() -> PyTorchRequestIdentity:
+    return PyTorchRequestIdentity(
+        type="pytorch-group",
         environment="application",
         group="pytorch",
+        backend="cuda",
+        channel="cu130",
         python_version="3.13.14",
         platform="linux/amd64",
         index_url="https://download.pytorch.org/whl/cu130",
@@ -79,8 +82,8 @@ def test_uv_group_resolver_uses_one_absolute_isolated_explicit_invocation(
             0,
             stdout=(
                 "nvidia-cublas-cu13==13.1.0\n"
-                "torch==2.12.1\n"
-                "torchvision[image]==0.27.1\n"
+                "torch==2.12.1+cu130\n"
+                "torchvision[image]==0.27.1+cu130\n"
             ),
         )
 
@@ -88,8 +91,8 @@ def test_uv_group_resolver_uses_one_absolute_isolated_explicit_invocation(
     result = resolver.resolve(_group())
 
     assert result == (
-        ResolvedPythonMember("torch", "2.12.1"),
-        ResolvedPythonMember("torchvision", "0.27.1"),
+        ResolvedPythonMember("torch", "2.12.1+cu130"),
+        ResolvedPythonMember("torchvision", "0.27.1+cu130"),
     )
     assert len(calls) == 1
     argv, kwargs = calls[0]
@@ -112,6 +115,32 @@ def test_uv_group_resolver_uses_one_absolute_isolated_explicit_invocation(
         ("torch==2.12.1\n", 0, "omitted"),
         ("torch>=2\ntorchvision==0.27.1\n", 0, "invalid data"),
         ("torch===\n", 0, "invalid data"),
+        ("torch==2.12.1rc1+cu130\ntorchvision==0.27.1\n", 0, "invalid data"),
+        (
+            "torch==2.12.1\ntorchvision==0.27.1+cu130\n",
+            0,
+            "incompatible PyTorch channel",
+        ),
+        (
+            "torch==2.12.1+cpu\ntorchvision==0.27.1+cu130\n",
+            0,
+            "incompatible PyTorch channel",
+        ),
+        (
+            "torch==2.12.1+cu129\ntorchvision==0.27.1+cu130\n",
+            0,
+            "incompatible PyTorch channel",
+        ),
+        (
+            "torch==2.12.1+cu130\ntorchvision==0.27.1\n",
+            0,
+            "incompatible PyTorch channel",
+        ),
+        (
+            "torch==2.12.1+cu130\ntorchvision==0.27.1+cu129\n",
+            0,
+            "incompatible PyTorch channel",
+        ),
         ("", 2, "resolution failed"),
     ],
 )
@@ -127,6 +156,39 @@ def test_uv_group_resolver_rejects_failed_or_incomplete_output(
 
     with pytest.raises(CanonicalAcquisitionError, match=message):
         resolver.resolve(_group())
+
+
+def test_pytorch_group_does_not_interpret_arbitrary_extra_local_label() -> None:
+    request = PyTorchRequestIdentity.model_validate(
+        {
+            **_group().model_dump(),
+            "members": [
+                *_group().members,
+                DirectPythonRequestMember(
+                    package="custom-extra", extras=[], selector="==1.0"
+                ),
+            ],
+        }
+    )
+
+    def runner(
+        args: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                "custom-extra==1.0+vendor.1\n"
+                "torch==2.12.1+cu130\n"
+                "torchvision==0.27.1+cu130\n"
+            ),
+        )
+
+    resolved = UvPythonGroupResolver(
+        HostUvRunner(Path("/opt/cdh/bin/uv")), runner
+    ).resolve(request)
+
+    assert resolved[0] == ResolvedPythonMember("custom-extra", "1.0+vendor.1")
 
 
 @dataclass
@@ -230,15 +292,15 @@ class FakeGit:
 
 @dataclass
 class FakePythonGroup:
-    calls: list[DirectPythonRequestIdentity] = field(default_factory=list)
+    calls: list[PythonGroupRequestIdentity] = field(default_factory=list)
 
     def resolve(
-        self, request: DirectPythonRequestIdentity
+        self, request: PythonGroupRequestIdentity
     ) -> tuple[ResolvedPythonMember, ...]:
         self.calls.append(request)
         return (
-            ResolvedPythonMember("torch", "2.12.1"),
-            ResolvedPythonMember("torchvision", "0.27.1"),
+            ResolvedPythonMember("torch", "2.12.1+cu130"),
+            ResolvedPythonMember("torchvision", "0.27.1+cu130"),
         )
 
 
@@ -400,11 +462,11 @@ def test_registry_exact_rejects_mismatched_provider_version() -> None:
 def test_python_group_rejects_version_outside_member_selector() -> None:
     class MismatchedPythonGroup(FakePythonGroup):
         def resolve(
-            self, request: DirectPythonRequestIdentity
+            self, request: PythonGroupRequestIdentity
         ) -> tuple[ResolvedPythonMember, ...]:
             return (
-                ResolvedPythonMember("torch", "2.11.0"),
-                ResolvedPythonMember("torchvision", "0.27.1"),
+                ResolvedPythonMember("torch", "2.11.0+cu130"),
+                ResolvedPythonMember("torchvision", "0.27.1+cu130"),
             )
 
     fakes = ProviderFakes(group=MismatchedPythonGroup())

@@ -2,7 +2,7 @@
 type = "cuda"
 
 [compute_platform.cuda]
-version = "12.9.2"
+version = "13.0.3"
 
 [system]
 workspace = "/workspace"
@@ -12,7 +12,7 @@ comfyui_path = "/workspace/ComfyUI"
 CDH_SMOKE_ENV = "comfyui-build-full"
 
 [pytorch]
-version = "2.10"
+version = "2.12.1"
 
 [cdh]
 default_downloader = "httpx"

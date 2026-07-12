@@ -8,12 +8,7 @@ type = "cuda"
 
 [compute_platform.cuda]
 # Required. Numeric CUDA version used in the nvidia/cuda base image tag.
-version = "12.9.2"
-# Default: "cudnn-devel". Supported: "base", "runtime", "devel",
-# "cudnn-runtime", "cudnn-devel".
-image_flavor = "cudnn-devel"
-# Default: "ubuntu24.04". Supported: "ubuntu22.04", "ubuntu24.04".
-image_distro = "ubuntu24.04"
+version = "13.0.3"
 
 [system]
 # Default: "/workspace". Must be an absolute POSIX container path.
@@ -42,10 +37,10 @@ password = ""
 pub_keys = []
 
 [python]
-# Default: "3.12". Passed to uv's Python installation workflow.
-version = "3.12"
-# Default: "latest". Used as the ghcr.io/astral-sh/uv image tag.
-uv_version = "latest"
+# Default: "3.13.14". Must be an exact stable CPython patch.
+version = "3.13.14"
+# Default: "0.11.28". Used as the locked ghcr.io/astral-sh/uv image tag.
+uv_version = "0.11.28"
 # Default: "https://pypi.org/simple". Used by cdh-controlled Python package
 # installation steps.
 index_url = "https://pypi.org/simple"
@@ -54,11 +49,11 @@ extra_packages = ["numpy"]
 
 [pytorch]
 # Required. Installs torch==version from the CUDA wheel index inferred from CUDA.
-version = "2.10"
+version = "2.12.1"
 # Default: "https://download.pytorch.org/whl". Combined with the CUDA wheel tag.
 index_base_url = "https://download.pytorch.org/whl"
 # Additional PyTorch-family packages. Do not include "torch" here.
-extra_packages = ["torchvision", "torchaudio"]
+extra_packages = ["torchvision==0.27.1"]
 
 [cdh]
 # Default: "aria2". Supported: "aria2", "httpx".
@@ -96,14 +91,16 @@ resume_download = true
 tags = ["my-comfy:dev", "registry.example.com/my-comfy:dev"]
 # Default: "load". Supported: "load", "push".
 output = "load"
+# v0.5 accepts exactly this ordered target list.
+platforms = ["linux/amd64"]
 
 [comfyui]
 # Required. Supported: "latest", "nightly", semver, v-prefixed semver, or
 # PEP 440-style constraints such as ">=0.3.0,<0.4.0" where accepted upstream.
-version = "latest"
+version = "0.4.0"
 # Default: "latest". Supported: "latest", a public PEP 440 comfy-cli version,
 # or PEP 440-style constraints such as ">=1.4.0,<2.0.0".
-cli_version = "latest"
+cli_version = "1.5.3"
 # Default: true. Must be true when custom_nodes are configured.
 install_manager = true
 # Default: "0.0.0.0". cdh owns the final ComfyUI --listen argument.

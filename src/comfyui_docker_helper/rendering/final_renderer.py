@@ -17,9 +17,12 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         "COPY build-plan.json /opt/cdh/build/build-plan.json",
         "COPY manifest-binding.json /opt/cdh/build/manifest-binding.json",
         "COPY phases /opt/cdh/build/phases",
+        "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
     ]
     if any(node.pre_install or node.post_install for node in plan.custom_nodes.nodes):
         lines.append("COPY inputs /opt/cdh/build/inputs")
+    if plan.runtime.hooks:
+        lines.append("COPY runtime/hooks /opt/cdh/runtime/hooks")
     lines.extend(
         (
             f"ENV VIRTUAL_ENV={_docker_word(plan.application.paths.venv)}",
@@ -27,6 +30,10 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
             f"ENV COMFYUI_PATH={_docker_word(plan.application.paths.comfyui)}",
             f"WORKDIR {_docker_word(plan.application.paths.workspace)}",
         )
+    )
+    lines.extend(
+        f"ENV {item.name}={_docker_word(item.value)}"
+        for item in plan.runtime.environment
     )
     return "\n".join(lines) + "\n"
 

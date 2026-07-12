@@ -22,12 +22,12 @@ from comfyui_docker_helper.config.final_validation import (
     is_git_source_url,
     is_oci_tag,
 )
-from comfyui_docker_helper.config.url_validation import is_http_url
-from comfyui_docker_helper.config.validation import (
+from comfyui_docker_helper.config.selector_validation import (
     normalize_comfy_cli_version,
     normalize_comfyui_version,
     normalize_registry_version,
 )
+from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.config.value_validation import has_control_characters
 
 CANONICAL_LOCK_SCHEMA_VERSION = 1
@@ -42,6 +42,7 @@ _EXTRA_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _EXACT_STABLE_PATTERN = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
 )
+_CUDA_CHANNEL_PATTERN = re.compile(r"cu[0-9]+\Z")
 _OCI_REPOSITORY_PATTERN = re.compile(
     r"(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?/)?"
     r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
@@ -258,7 +259,7 @@ class DirectPythonLockEntry(_ResolverEntry):
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        return _require_exact_stable_public_version(value)
+        return _require_exact_stable_distribution_version(value)
 
 
 class LocalExecutableLockEntry(_StrictLockModel):
@@ -449,11 +450,11 @@ class DirectPythonRequestMember(_StrictLockModel):
 
 
 class DirectPythonRequestIdentity(_StrictLockModel):
-    """Complete normalized group identity shared by every resolved member."""
+    """Complete normalized generic group identity shared by resolved members."""
 
     type: Literal["python-group"]
     environment: str
-    group: Literal["application-extra", "pytorch", "uv-tool"]
+    group: Literal["application-extra", "uv-tool"]
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
     index_url: str = Field(min_length=1)
@@ -498,11 +499,53 @@ class DirectPythonRequestIdentity(_StrictLockModel):
                 )
         elif self.environment != "application":
             raise ValueError("application groups require the application environment")
-        if self.group == "pytorch" and not any(
-            member.package == "torch" for member in self.members
-        ):
-            raise ValueError("pytorch groups must include torch")
         return self
+
+
+class PyTorchRequestIdentity(_StrictLockModel):
+    """Typed backend package-group request with independent channel identity."""
+
+    type: Literal["pytorch-group"]
+    environment: Literal["application"]
+    group: Literal["pytorch"]
+    backend: Literal["cuda"]
+    channel: str
+    python_version: str = Field(min_length=1)
+    platform: Literal["linux/amd64"]
+    index_url: str = Field(min_length=1)
+    members: list[DirectPythonRequestMember] = Field(min_length=1)
+
+    @field_validator("channel")
+    @classmethod
+    def _validate_channel(cls, value: str) -> str:
+        if _CUDA_CHANNEL_PATTERN.fullmatch(value) is None:
+            raise ValueError("channel must be one canonical CUDA wheel channel")
+        return value
+
+    @field_validator("members")
+    @classmethod
+    def _normalize_members(
+        cls, value: list[DirectPythonRequestMember]
+    ) -> list[DirectPythonRequestMember]:
+        packages = [member.package for member in value]
+        if len(packages) != len(set(packages)):
+            raise ValueError("members must contain each package exactly once")
+        if "torch" not in packages:
+            raise ValueError("pytorch groups must include torch")
+        return sorted(value, key=lambda member: member.package)
+
+    @field_validator("python_version")
+    @classmethod
+    def _validate_python_version(cls, value: str) -> str:
+        return _require_exact_stable_version(value)
+
+    @field_validator("index_url")
+    @classmethod
+    def _validate_index_url(cls, value: str) -> str:
+        return _require_http_url(value, "index_url")
+
+
+PythonGroupRequestIdentity = DirectPythonRequestIdentity | PyTorchRequestIdentity
 
 
 ResolverRequestIdentity = (
@@ -513,6 +556,7 @@ ResolverRequestIdentity = (
     | RegistryRequestIdentity
     | DirectGitRequestIdentity
     | DirectPythonRequestIdentity
+    | PyTorchRequestIdentity
 )
 
 
@@ -622,6 +666,33 @@ def _require_exact_stable_public_version(value: str) -> str:
     if parsed.is_prerelease or parsed.is_devrelease:
         raise ValueError("version must be one canonical exact stable public version")
     return value
+
+
+def _require_exact_stable_distribution_version(value: str) -> str:
+    try:
+        parsed = Version(value)
+    except InvalidVersion as error:
+        raise ValueError(
+            "version must be one canonical exact stable distribution version"
+        ) from error
+    if str(parsed) != value or parsed.is_prerelease or parsed.is_devrelease:
+        raise ValueError(
+            "version must be one canonical exact stable distribution version"
+        )
+    return value
+
+
+def pytorch_core_version_matches_channel(
+    package: str, version: str, channel: str
+) -> bool:
+    """Bind only the approved PyTorch core distributions to a backend channel."""
+    if package not in {"torch", "torchvision"}:
+        return True
+    try:
+        parsed = Version(version)
+    except InvalidVersion:
+        return False
+    return parsed.local == channel
 
 
 def _require_exact_registry_version(value: str) -> str:

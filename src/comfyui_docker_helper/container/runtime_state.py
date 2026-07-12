@@ -11,7 +11,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
-from comfyui_docker_helper.config.models import ConfigModel
+from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
     replace_control_characters,

@@ -27,6 +27,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     compute_request_digest,
@@ -90,10 +91,12 @@ def _request_digests() -> dict[str, str]:
             )
         ),
         "package": compute_request_digest(
-            DirectPythonRequestIdentity(
-                type="python-group",
+            PyTorchRequestIdentity(
+                type="pytorch-group",
                 environment="application",
                 group="pytorch",
+                backend="cuda",
+                channel="cu130",
                 python_version="3.13.14",
                 platform="linux/amd64",
                 index_url="https://download.pytorch.org/whl/cu130",
@@ -181,7 +184,7 @@ def _lock() -> CanonicalLock:
                 request_digest=digests["package"],
                 package="torch",
                 extras=[],
-                version="2.12.1",
+                version="2.12.1+cu130",
                 environment="application",
             ),
             DirectPythonLockEntry(
@@ -189,7 +192,7 @@ def _lock() -> CanonicalLock:
                 request_digest=digests["package"],
                 package="torchvision",
                 extras=["image"],
-                version="0.27.1",
+                version="0.27.1+cu130",
                 environment="application",
             ),
         ],
@@ -345,11 +348,13 @@ def test_each_python_resolution_dimension_changes_request_digest(
     assert compute_request_digest(changed) != compute_request_digest(request)
 
 
-def _pytorch_group() -> DirectPythonRequestIdentity:
-    return DirectPythonRequestIdentity(
-        type="python-group",
+def _pytorch_group() -> PyTorchRequestIdentity:
+    return PyTorchRequestIdentity(
+        type="pytorch-group",
         environment="application",
         group="pytorch",
+        backend="cuda",
+        channel="cu130",
         python_version="3.13.14",
         platform="linux/amd64",
         index_url="https://download.pytorch.org/whl/cu130",
@@ -360,6 +365,34 @@ def _pytorch_group() -> DirectPythonRequestIdentity:
             ),
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("channel", "cu129"),
+        ("index_url", "https://download.pytorch.org/whl/cu129"),
+        ("python_version", "3.12.13"),
+    ],
+)
+def test_pytorch_request_digest_owns_typed_resolution_dimensions(
+    field: str, value: str
+) -> None:
+    request = _pytorch_group()
+    data = {**request.model_dump(), field: value}
+    changed = PyTorchRequestIdentity.model_validate(data)
+
+    assert compute_request_digest(changed) != compute_request_digest(request)
+
+
+def test_generic_python_group_cannot_impersonate_pytorch_group() -> None:
+    data = _pytorch_group().model_dump()
+    data.update(type="python-group")
+    data.pop("backend")
+    data.pop("channel")
+
+    with pytest.raises(ValidationError):
+        DirectPythonRequestIdentity.model_validate(data)
 
 
 @pytest.mark.parametrize(
@@ -390,7 +423,7 @@ def test_any_cohesive_group_membership_change_updates_shared_digest(
 ) -> None:
     group = _pytorch_group()
     changed_members = mutate_members(group.members)
-    changed = DirectPythonRequestIdentity.model_validate(
+    changed = PyTorchRequestIdentity.model_validate(
         {**group.model_dump(), "members": changed_members}
     )
 
@@ -399,7 +432,7 @@ def test_any_cohesive_group_membership_change_updates_shared_digest(
 
 def test_group_member_order_permutation_property_has_one_digest() -> None:
     initial = _pytorch_group()
-    group = DirectPythonRequestIdentity.model_validate(
+    group = PyTorchRequestIdentity.model_validate(
         {
             **initial.model_dump(),
             "members": [
@@ -413,7 +446,7 @@ def test_group_member_order_permutation_property_has_one_digest() -> None:
 
     digests = {
         compute_request_digest(
-            DirectPythonRequestIdentity.model_validate(
+            PyTorchRequestIdentity.model_validate(
                 {**group.model_dump(), "members": list(order)}
             )
         )
@@ -428,7 +461,7 @@ def test_group_rejects_duplicate_package_with_different_extras() -> None:
     duplicate = group.members[1].model_copy(update={"extras": ["video"]})
 
     with pytest.raises(ValidationError, match="each package exactly once"):
-        DirectPythonRequestIdentity.model_validate(
+        PyTorchRequestIdentity.model_validate(
             {**group.model_dump(), "members": [*group.members, duplicate]}
         )
 
@@ -567,15 +600,31 @@ def test_comfyui_formal_release_requires_stable_floor(version: str) -> None:
         CanonicalLock.model_validate(data)
 
 
-def test_direct_python_resolved_version_must_be_stable() -> None:
+@pytest.mark.parametrize(
+    "version", ["1.0rc1+vendor", "1.0.dev1+vendor", "1.0+Vendor", "1.0+vendor_1"]
+)
+def test_direct_python_resolved_version_must_be_canonical_and_stable(
+    version: str,
+) -> None:
     data = _lock().model_dump(mode="python")
     package = next(
         entry for entry in data["entries"] if entry["type"] == "python-package"
     )
-    package["version"] = "1.0rc1"
+    package["version"] = version
 
-    with pytest.raises(ValidationError, match="stable public version"):
+    with pytest.raises(ValidationError, match="stable distribution version"):
         CanonicalLock.model_validate(data)
+
+
+def test_direct_python_resolved_version_preserves_canonical_local_segment() -> None:
+    lock = parse_canonical_lock_toml(dump_canonical_lock_toml(_lock()))
+    versions = {
+        entry.package: entry.version
+        for entry in lock.entries
+        if isinstance(entry, DirectPythonLockEntry)
+    }
+
+    assert versions == {"torch": "2.12.1+cu130", "torchvision": "0.27.1+cu130"}
 
 
 def test_published_cli_and_registry_exact_prereleases_remain_valid() -> None:

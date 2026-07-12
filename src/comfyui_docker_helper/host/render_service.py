@@ -1,595 +1,407 @@
-"""Host render/build context preparation service."""
+"""Active canonical Planning Authority render/build-context service."""
 
 from __future__ import annotations
 
+import json
+import shutil
 import stat
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import ValidationError
-
-from comfyui_docker_helper.config import (
+from comfyui_docker_helper.config.build_plan import (
+    BuildPlan,
+    RuntimePlanningProvenance,
+    construct_build_plan,
+)
+from comfyui_docker_helper.config.canonical_lock import (
+    CanonicalLock,
+    CanonicalLockError,
+    dump_canonical_lock_toml,
+    parse_canonical_lock_toml,
+)
+from comfyui_docker_helper.config.canonical_resolver import (
+    AcceptedCanonicalLock,
+    CanonicalResolutionError,
+    LocalExecutableEntryAcquirer,
+    LockPolicy,
+    ReconcilePurpose,
+    reconcile_canonical_lock,
+)
+from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.service import (
     ConfigurationResult,
-    Diagnostic,
-    Lockfile,
-    LockOptions,
-    LockServiceError,
-    LockServiceResult,
-    RenderPlan,
-    RuntimeHooksPlan,
-    SourceResolvers,
-    load_validate_plan_result,
-    parse_lockfile_toml,
-    resolve_lockfile,
-    with_runtime_hooks_plan,
+    load_validate_config_result,
 )
-from comfyui_docker_helper.config.runtime_hooks import (
-    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
-    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
-    runtime_hook_phase_directory_list,
+from comfyui_docker_helper.host.planning_authority import (
+    CachingCanonicalAcquirer,
+    build_desired_planning_inputs,
+    uv_catalog_descriptor_digest,
 )
-from comfyui_docker_helper.rendering import (
-    ContextWriteError,
-    MaterializationError,
-    has_valid_context_marker,
-    materialize_expected_build_context,
-    write_build_context,
+from comfyui_docker_helper.host.runtime_hook_inputs import (
+    RuntimeHookInputError,
+    discover_runtime_hook_inputs,
 )
-from comfyui_docker_helper.rendering.context import ConfigInput
+from comfyui_docker_helper.rendering.final_materializer import (
+    FinalMaterializationError,
+    LocalMaterializationSource,
+    materialize_build_plan,
+)
 
-_ALWAYS_MANAGED_TREES = ("packages/cdh/src",)
-_CONDITIONAL_MANAGED_TREES = ("scripts", "runtime/hooks")
-_RETIRED_HELPER_PROJECTION_ROOTS = ("config",)
-_DEFAULT_RUNTIME_HOOKS_DIR = Path("./hooks")
+_LOCK_FILE = "config.lock.toml"
+_MARKER_FILE = ".cdh-rendered"
+_MARKER = {"tool": "comfyui-docker-helper", "kind": "build-context", "version": 1}
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningOptions:
+    locked: bool = False
+    check: bool = False
+    upgrade_lock: bool = False
+    dry_run: bool = False
+
+    def __post_init__(self) -> None:
+        if self.locked and self.upgrade_lock:
+            raise _render_error(
+                "render.options_conflict",
+                "--locked and --upgrade-lock are mutually exclusive",
+            )
+        if self.check and (self.locked or self.upgrade_lock or self.dry_run):
+            raise _render_error(
+                "render.options_conflict",
+                "--check cannot be combined with lock or dry-run modifiers",
+            )
+
+    @property
+    def policy(self) -> LockPolicy:
+        if self.locked:
+            return LockPolicy.LOCKED
+        if self.upgrade_lock:
+            return LockPolicy.UPGRADE
+        return LockPolicy.DEFAULT
+
+    @property
+    def purpose(self) -> ReconcilePurpose:
+        if self.check:
+            return ReconcilePurpose.CHECK
+        if self.dry_run:
+            return ReconcilePurpose.DRY_RUN
+        return ReconcilePurpose.APPLY
+
+    @property
+    def writes(self) -> bool:
+        return not (self.locked or self.check or self.dry_run)
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedContext:
-    """Prepared render context data and non-fatal diagnostics."""
-
-    plan: RenderPlan
-    lock_result: LockServiceResult
+    plan: BuildPlan
+    lock_result: AcceptedCanonicalLock
     warnings: tuple[Diagnostic, ...] = ()
 
 
 class HostRenderServiceError(ValueError):
-    """A host render/build preparation failure."""
-
     def __init__(self, diagnostics: tuple[Diagnostic, ...]) -> None:
-        if not diagnostics:
-            raise ValueError("host render service errors require diagnostics")
         self.diagnostics = diagnostics
         super().__init__("host render failed")
 
 
 def prepare_render_context(
-    config_files: ConfigInput,
+    config_files,
     output_dir: str | Path,
     *,
     scripts_dir: str | Path = "./scripts",
     hooks_dir: str | Path | None = None,
-    resolvers: SourceResolvers,
-    lock_options: LockOptions | None = None,
+    acquirer: CachingCanonicalAcquirer,
+    local_acquirer: LocalExecutableEntryAcquirer,
+    options: PlanningOptions | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
     configuration_result: ConfigurationResult | None = None,
 ) -> PreparedContext:
-    """Validate config, resolve/check the lock, and optionally write the context."""
-    options = lock_options or LockOptions()
-    result = configuration_result or load_validate_plan_result(
-        config_files,
-        scripts_dir=scripts_dir,
+    """Resolve one canonical lock, construct once, then render or compare."""
+    selected = options or PlanningOptions()
+    result = configuration_result or load_validate_config_result(
+        config_files, scripts_dir=scripts_dir
     )
-    runtime_hooks = _resolve_runtime_hooks_plan(
-        hooks_dir,
-        working_directory=working_directory,
-    )
-    plan = with_runtime_hooks_plan(result.plan, runtime_hooks)
-    output_path = _resolve_effective_output_path(output_dir, working_directory)
-    _validate_output_source_relationships(
-        output_path,
-        scripts_source=plan.custom_nodes.scripts_source_dir,
-        runtime_hooks_source=plan.runtime_hooks.source_dir,
-    )
-    existing_lockfile = _load_existing_lockfile(output_path)
+    output = _output_path(output_dir, working_directory)
+    existing = _load_existing_lock(output)
     try:
-        lock_result = resolve_lockfile(
-            result.config,
-            existing_lockfile,
-            resolvers,
-            options,
+        runtime_hooks = discover_runtime_hook_inputs(
+            hooks_dir, working_directory=working_directory
         )
-    except LockServiceError as error:
+        custom_hook_root = _custom_hook_source_root(result, scripts_dir)
+        _validate_input_output_separation(output, custom_hook_root, "custom hook")
+        _validate_input_output_separation(
+            output, runtime_hooks.source_root, "runtime hook"
+        )
+        uv_digest = uv_catalog_descriptor_digest(
+            result.config, existing, selected.policy, acquirer
+        )
+        desired = build_desired_planning_inputs(
+            result.config,
+            result.domains,
+            scripts_dir=scripts_dir,
+            uv_descriptor_digest=uv_digest,
+            runtime_hook_requests=runtime_hooks.requests,
+        )
+        accepted = reconcile_canonical_lock(
+            desired.desired,
+            local_requests=desired.local_requests,
+            local_acquirer=local_acquirer,
+            existing=existing,
+            acquirer=acquirer,
+            policy=selected.policy,
+            purpose=selected.purpose,
+        )
+        plan = construct_build_plan(
+            result.config,
+            accepted,
+            runtime_provenance=_runtime_provenance(result),
+        )
+    except RuntimeHookInputError as error:
+        raise HostRenderServiceError(error.diagnostics) from error
+    except CanonicalResolutionError as error:
         raise HostRenderServiceError(error.diagnostics) from error
 
-    warnings = (*result.warnings, *lock_result.warnings)
-    if options.check:
-        _check_managed_artifacts(
-            output_path,
-            plan,
-            result.config,
-            lock_result.lockfile,
-            result.runtime_config,
+    sources = tuple(
+        LocalMaterializationSource(
+            request.canonical_path, request.root / request.relative_path
         )
-        return PreparedContext(
-            plan=plan,
-            lock_result=lock_result,
-            warnings=warnings,
-        )
-    if options.dry_run:
-        return PreparedContext(
-            plan=plan,
-            lock_result=lock_result,
-            warnings=warnings,
-        )
+        for request in desired.local_requests
+    )
+    if selected.check:
+        _check_context(output, plan, accepted.lock, sources)
+    elif selected.writes:
+        _write_context(output, plan, accepted.lock, sources, overwrite=overwrite)
+    return PreparedContext(plan, accepted, result.warnings)
 
+
+def _load_existing_lock(output: Path) -> CanonicalLock | None:
+    path = output / _LOCK_FILE
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise _render_error(
+            "lock.invalid", "config.lock.toml is invalid; remove it and regenerate"
+        )
     try:
-        write_build_context(
-            plan,
-            output_path,
-            config=result.config,
-            lockfile=lock_result.lockfile,
-            runtime_config=result.runtime_config,
-            overwrite=overwrite,
-            working_directory=working_directory,
-            config_file=config_files,
-        )
-    except (ContextWriteError, MaterializationError) as error:
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("render",),
-                    code="render.context_write_failed",
-                    message=str(error),
-                ),
-            )
-        ) from error
-    return PreparedContext(plan=plan, lock_result=lock_result, warnings=warnings)
+        return parse_canonical_lock_toml(path.read_bytes())
+    except (OSError, CanonicalLockError) as error:
+        raise _render_error("lock.invalid", str(error)) from error
 
 
-def _validate_output_source_relationships(
-    output_path: Path,
+def _write_context(
+    output: Path,
+    plan: BuildPlan,
+    lock: CanonicalLock,
+    sources: tuple[LocalMaterializationSource, ...],
     *,
-    scripts_source: Path | None,
-    runtime_hooks_source: Path | None,
+    overwrite: bool,
 ) -> None:
-    for label, source in (
-        ("scripts source", scripts_source),
-        ("runtime hooks source", runtime_hooks_source),
-    ):
-        if source is None:
-            continue
-        message = _output_source_relationship_error(output_path, source, label)
-        if message is not None:
-            raise HostRenderServiceError(
-                (
-                    Diagnostic(
-                        path=("render",),
-                        code="render.context_write_failed",
-                        message=message,
-                    ),
-                )
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise _render_error("render.context_write_failed", str(error)) from error
+    if output.exists() or output.is_symlink():
+        if not overwrite:
+            raise _render_error(
+                "render.output_exists", "output exists; use --overwrite"
             )
-
-
-def _output_source_relationship_error(
-    output_path: Path,
-    source: Path,
-    label: str,
-) -> str | None:
-    output = output_path.resolve(strict=False)
-    protected = source.resolve(strict=False)
-    if _is_equal_or_ancestor(output, protected):
-        return f"output directory must not be equal to or an ancestor of {label}"
-    if protected in output.parents:
-        return f"output directory must not be nested inside the {label}"
-    return None
-
-
-def _is_equal_or_ancestor(candidate: Path, target: Path) -> bool:
-    return candidate == target or candidate in target.parents
-
-
-def _resolve_runtime_hooks_plan(
-    hooks_dir: str | Path | None,
-    *,
-    working_directory: str | Path | None,
-) -> RuntimeHooksPlan:
-    base = Path.cwd() if working_directory is None else Path(working_directory)
-    explicit = hooks_dir is not None
-    source = Path(hooks_dir) if explicit else _DEFAULT_RUNTIME_HOOKS_DIR
-    candidate = source if source.is_absolute() else base / source
-
-    if not explicit:
+        if output.is_symlink() or not output.is_dir() or not _valid_marker(output):
+            raise _render_error(
+                "render.output_invalid", "existing output is not a cdh context"
+            )
+    try:
+        stage = Path(
+            tempfile.mkdtemp(prefix=f".{output.name}.stage-", dir=output.parent)
+        )
+    except OSError as error:
+        raise _render_error("render.context_write_failed", str(error)) from error
+    backup_root: Path | None = None
+    try:
+        materialize_build_plan(plan, stage, local_sources=sources)
+        (stage / _LOCK_FILE).write_text(
+            dump_canonical_lock_toml(lock), encoding="utf-8"
+        )
+        (stage / _MARKER_FILE).write_text(
+            json.dumps(_MARKER, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if output.exists():
+            backup_root = Path(
+                tempfile.mkdtemp(prefix=f".{output.name}.backup-", dir=output.parent)
+            )
+            previous = backup_root / "previous"
+            output.rename(previous)
+            try:
+                stage.rename(output)
+            except BaseException:
+                with suppress(OSError):
+                    previous.rename(output)
+                raise
+            with suppress(OSError):
+                shutil.rmtree(backup_root)
+            backup_root = None
+        else:
+            stage.rename(output)
+    except (FinalMaterializationError, OSError) as error:
+        _cleanup_owned_after_failure(stage)
+        _cleanup_empty_backup_root(backup_root)
+        raise _render_error("render.context_write_failed", str(error)) from error
+    except BaseException:
+        _cleanup_owned_after_failure(stage)
+        _cleanup_empty_backup_root(backup_root)
+        raise
+    if stage.exists():
         try:
-            candidate.lstat()
-        except FileNotFoundError:
-            return RuntimeHooksPlan(has_hooks=False, source_dir=None)
+            shutil.rmtree(stage)
         except OSError as error:
-            raise HostRenderServiceError(
-                (
-                    Diagnostic(
-                        path=("hooks_dir",),
-                        code="runtime_hooks.source_inspect_failed",
-                        message=(
-                            f"runtime hook source could not be inspected: {error}"
-                        ),
-                    ),
-                )
-            ) from error
-
-    diagnostics = _validate_runtime_hooks_source(candidate)
-    if diagnostics:
-        raise HostRenderServiceError(tuple(diagnostics))
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError as error:
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("hooks_dir",),
-                    code="runtime_hooks.source_resolve_failed",
-                    message=f"runtime hook source could not be resolved: {error}",
-                ),
-            )
-        ) from error
-    return RuntimeHooksPlan(has_hooks=True, source_dir=resolved)
+            raise _render_error("render.context_write_failed", str(error)) from error
 
 
-def _validate_runtime_hooks_source(source: Path) -> list[Diagnostic]:
-    diagnostics: list[Diagnostic] = []
-    try:
-        source_mode = source.lstat().st_mode
-    except FileNotFoundError:
-        diagnostics.append(
-            Diagnostic(
-                path=("hooks_dir",),
-                code="runtime_hooks.source_not_directory",
-                message="runtime hook source must be an existing real directory",
-            )
-        )
-        return diagnostics
-    except OSError as error:
-        diagnostics.append(
-            Diagnostic(
-                path=("hooks_dir",),
-                code="runtime_hooks.source_inspect_failed",
-                message=f"runtime hook source could not be inspected: {error}",
-            )
-        )
-        return diagnostics
-    if stat.S_ISLNK(source_mode) or not stat.S_ISDIR(source_mode):
-        diagnostics.append(
-            Diagnostic(
-                path=("hooks_dir",),
-                code="runtime_hooks.source_not_directory",
-                message="runtime hook source must be an existing real directory",
-            )
-        )
-        return diagnostics
-
-    try:
-        children = tuple(sorted(source.iterdir(), key=lambda item: item.name))
-    except OSError as error:
-        diagnostics.append(
-            Diagnostic(
-                path=("hooks_dir",),
-                code="runtime_hooks.source_read_failed",
-                message=f"runtime hook source could not be read: {error}",
-            )
-        )
-        return diagnostics
-
-    for child in children:
-        child_path = ("hooks_dir", child.name)
-        child_mode = _runtime_hook_path_mode(child, child_path, diagnostics)
-        if child_mode is None:
-            continue
-        if stat.S_ISLNK(child_mode):
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.symlink",
-                    message="runtime hook source must not contain symlinks",
-                )
-            )
-            continue
-        if not stat.S_ISDIR(child_mode) and not stat.S_ISREG(child_mode):
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.special_file",
-                    message="runtime hook source must not contain special files",
-                )
-            )
-            continue
-        if child.name not in RUNTIME_HOOK_PHASE_DIRECTORY_NAMES:
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.unknown_top_level",
-                    message=(
-                        "runtime hook source may only contain "
-                        f"{runtime_hook_phase_directory_list()} directories"
-                    ),
-                )
-            )
-            continue
-        if not stat.S_ISDIR(child_mode):
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.phase_not_directory",
-                    message="runtime hook phase entries must be directories",
-                )
-            )
-            continue
-        _validate_runtime_hook_phase(child, child_path, diagnostics)
-    return diagnostics
-
-
-def _validate_runtime_hook_phase(
-    phase: Path,
-    path: tuple[str, ...],
-    diagnostics: list[Diagnostic],
+def _check_context(
+    output: Path,
+    plan: BuildPlan,
+    lock: CanonicalLock,
+    sources: tuple[LocalMaterializationSource, ...],
 ) -> None:
-    try:
-        children = tuple(sorted(phase.iterdir(), key=lambda item: item.name))
-    except OSError as error:
-        diagnostics.append(
-            Diagnostic(
-                path=path,
-                code="runtime_hooks.phase_read_failed",
-                message=f"runtime hook phase directory could not be read: {error}",
-            )
+    if not output.is_dir() or not _valid_marker(output):
+        raise _render_error(
+            "render.context_missing", "--check requires a rendered context"
         )
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".cdh-check-", dir=output.parent
+        ) as raw:
+            expected = Path(raw)
+            materialize_build_plan(plan, expected, local_sources=sources)
+            (expected / _LOCK_FILE).write_text(
+                dump_canonical_lock_toml(lock), encoding="utf-8"
+            )
+            (expected / _MARKER_FILE).write_text(
+                json.dumps(_MARKER, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            if _tree(expected) != _tree(output):
+                raise _render_error(
+                    "render.context_changed", "rendered context is out of date"
+                )
+    except HostRenderServiceError:
+        raise
+    except (FinalMaterializationError, OSError) as error:
+        raise _render_error("render.context_check_failed", str(error)) from error
+
+
+def _tree(root: Path) -> dict[str, tuple[str, bytes | None]]:
+    entries: dict[str, tuple[str, bytes | None]] = {}
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        children = tuple(sorted(directory.iterdir(), key=lambda item: item.name))
+        for path in children:
+            relative = path.relative_to(root).as_posix()
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                entries[relative] = ("symlink", None)
+            elif stat.S_ISDIR(mode):
+                entries[relative] = ("directory", None)
+                pending.append(path)
+            elif stat.S_ISREG(mode):
+                entries[relative] = ("file", path.read_bytes())
+            else:
+                entries[relative] = ("special", None)
+    return entries
+
+
+def _cleanup_owned_after_failure(path: Path) -> None:
+    if not path.exists() or path.is_symlink():
         return
-    for child in children:
-        child_path = (*path, child.name)
-        child_mode = _runtime_hook_path_mode(child, child_path, diagnostics)
-        if child_mode is None:
-            continue
-        if stat.S_ISLNK(child_mode):
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.symlink",
-                    message="runtime hook source must not contain symlinks",
-                )
-            )
-            continue
-        if stat.S_ISDIR(child_mode):
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.entry_not_file",
-                    message="runtime hook phase entries must be regular files",
-                )
-            )
-            continue
-        if not stat.S_ISREG(child_mode):
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.special_file",
-                    message="runtime hook source must not contain special files",
-                )
-            )
-            continue
-        if child.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
-            diagnostics.append(
-                Diagnostic(
-                    path=child_path,
-                    code="runtime_hooks.unsupported_extension",
-                    message="runtime hook files must end in .sh or .py",
-                )
-            )
+    with suppress(OSError):
+        shutil.rmtree(path)
 
 
-def _runtime_hook_path_mode(
-    path: Path,
-    diagnostic_path: tuple[str, ...],
-    diagnostics: list[Diagnostic],
-) -> int | None:
+def _cleanup_empty_backup_root(path: Path | None) -> None:
+    if path is None or not path.exists() or (path / "previous").exists():
+        return
+    with suppress(OSError):
+        path.rmdir()
+
+
+def _valid_marker(output: Path) -> bool:
+    path = output / _MARKER_FILE
     try:
-        return path.lstat().st_mode
-    except OSError as error:
-        diagnostics.append(
-            Diagnostic(
-                path=diagnostic_path,
-                code="runtime_hooks.inspect_failed",
-                message=f"runtime hook source entry could not be inspected: {error}",
-            )
-        )
-        return None
-
-
-def _load_existing_lockfile(output_dir: Path) -> Lockfile | None:
-    lock_path = output_dir / "config.lock.toml"
-    if not lock_path.exists():
-        return None
-    if lock_path.is_symlink() or not lock_path.is_file():
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("config.lock.toml",),
-                    code="lockfile.invalid_path",
-                    message="existing config.lock.toml must be a regular file",
-                ),
-            )
-        )
-    try:
-        return parse_lockfile_toml(lock_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValidationError, ValueError) as error:
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("config.lock.toml",),
-                    code="lockfile.invalid",
-                    message=f"existing config.lock.toml could not be read: {error}",
-                ),
-            )
-        ) from error
-
-
-def _resolve_effective_output_path(
-    output_dir: str | Path,
-    working_directory: str | Path | None,
-) -> Path:
-    base = Path.cwd() if working_directory is None else Path(working_directory)
-    output = Path(output_dir)
-    candidate = output if output.is_absolute() else base / output
-    if candidate.is_symlink():
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("render", "output"),
-                    code="render.output_symlink",
-                    message="render output directory must not be a symlink",
-                ),
-            )
-        )
-    return candidate.resolve(strict=False)
-
-
-def _check_managed_artifacts(
-    output_dir: Path,
-    plan: RenderPlan,
-    config,
-    lockfile: Lockfile,
-    runtime_config,
-) -> None:
-    if not output_dir.is_dir():
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("render", "check"),
-                    code="render.context_missing",
-                    message="--check requires an existing rendered context directory",
-                ),
-            )
-        )
-    if not has_valid_context_marker(output_dir):
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("render", "check"),
-                    code="render.context_unmarked",
-                    message="--check requires an existing cdh rendered context",
-                ),
-            )
-        )
-    try:
-        with materialize_expected_build_context(
-            plan,
-            output_dir.parent,
-            config=config,
-            lockfile=lockfile,
-            runtime_config=runtime_config,
-        ) as expected:
-            diagnostics = _compare_managed_artifacts(expected, output_dir)
-    except (ContextWriteError, MaterializationError) as error:
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    path=("render", "check"),
-                    code="render.check_failed",
-                    message=str(error),
-                ),
-            )
-        ) from error
-    if diagnostics:
-        raise HostRenderServiceError(tuple(diagnostics))
-
-
-def _compare_managed_artifacts(
-    expected_dir: Path,
-    output_dir: Path,
-) -> list[Diagnostic]:
-    diagnostics: list[Diagnostic] = []
-    for expected_path in _walk_expected_artifacts(expected_dir):
-        relative = expected_path.relative_to(expected_dir)
-        actual_path = output_dir / relative
-        artifact = relative.as_posix()
-        if expected_path.is_dir():
-            if actual_path.is_symlink() or not actual_path.is_dir():
-                diagnostics.append(_changed_artifact_diagnostic(artifact))
-            continue
-        if not expected_path.is_file():
-            continue
-        if (
-            actual_path.is_symlink()
-            or not actual_path.is_file()
-            or not _files_match(expected_path, actual_path)
-        ):
-            diagnostics.append(_changed_artifact_diagnostic(artifact))
-    diagnostics.extend(
-        _actual_only_managed_artifact_diagnostics(expected_dir, output_dir)
-    )
-    return diagnostics
-
-
-def _actual_only_managed_artifact_diagnostics(
-    expected_dir: Path,
-    output_dir: Path,
-) -> list[Diagnostic]:
-    diagnostics: list[Diagnostic] = []
-    for root in _managed_tree_roots():
-        actual_root = output_dir / root
-        if not (expected_dir / root).exists():
-            if actual_root.exists() or actual_root.is_symlink():
-                diagnostics.append(_changed_artifact_diagnostic(root))
-            continue
-        if (
-            not actual_root.exists()
-            or actual_root.is_symlink()
-            or not actual_root.is_dir()
-        ):
-            continue
-        for actual_path in _walk_actual_artifacts(actual_root):
-            relative = actual_path.relative_to(output_dir)
-            if not (expected_dir / relative).exists():
-                diagnostics.append(_changed_artifact_diagnostic(relative.as_posix()))
-
-    for root in _RETIRED_HELPER_PROJECTION_ROOTS:
-        actual_path = output_dir / root
-        if actual_path.exists() or actual_path.is_symlink():
-            diagnostics.append(_changed_artifact_diagnostic(root))
-    return diagnostics
-
-
-def _managed_tree_roots() -> tuple[str, ...]:
-    return (*_ALWAYS_MANAGED_TREES, *_CONDITIONAL_MANAGED_TREES)
-
-
-def _walk_actual_artifacts(root: Path) -> tuple[Path, ...]:
-    return tuple(
-        sorted(
-            root.rglob("*"),
-            key=lambda path: path.as_posix(),
-        )
-    )
-
-
-def _files_match(expected_path: Path, actual_path: Path) -> bool:
-    try:
-        return actual_path.read_bytes() == expected_path.read_bytes()
-    except OSError:
+        return not path.is_symlink() and json.loads(path.read_text()) == _MARKER
+    except (OSError, ValueError):
         return False
 
 
-def _walk_expected_artifacts(expected_dir: Path) -> tuple[Path, ...]:
-    return tuple(
-        sorted(
-            expected_dir.rglob("*"),
-            key=lambda path: path.relative_to(expected_dir).as_posix(),
+def _output_path(output: str | Path, working_directory: str | Path | None) -> Path:
+    base = Path.cwd() if working_directory is None else Path(working_directory)
+    candidate = Path(output)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    if candidate.is_symlink():
+        raise _render_error("render.output_symlink", "output must not be a symlink")
+    return candidate.absolute()
+
+
+def _validate_input_output_separation(
+    output: Path, source: Path | None, source_kind: str
+) -> None:
+    if source is None:
+        return
+    try:
+        output_resolved = output.resolve(strict=False)
+        source_resolved = source.resolve(strict=True)
+    except OSError as error:
+        raise _render_error(
+            "render.input_output_inspect_failed",
+            f"{source_kind} source and output could not be compared",
+        ) from error
+    if (
+        output_resolved == source_resolved
+        or output_resolved in source_resolved.parents
+        or source_resolved in output_resolved.parents
+    ):
+        raise _render_error(
+            "render.input_output_overlap",
+            f"output and {source_kind} source must not overlap",
         )
+
+
+def _custom_hook_source_root(
+    result: ConfigurationResult, scripts_dir: str | Path
+) -> Path | None:
+    has_hooks = any(
+        node.pre_install_scripts or node.post_install_scripts
+        for node in result.config.comfyui.custom_nodes
+    )
+    if not has_hooks:
+        return None
+    try:
+        return Path(scripts_dir).resolve(strict=True)
+    except OSError as error:
+        raise _render_error(
+            "render.custom_hook_source_unavailable",
+            "custom hook source could not be resolved",
+        ) from error
+
+
+def _runtime_provenance(result: ConfigurationResult) -> RuntimePlanningProvenance:
+    raw_cdh = result.raw_document.get("cdh", {})
+    raw_files = result.raw_document.get("files", [])
+    if not isinstance(raw_cdh, dict) or not isinstance(raw_files, list):
+        raise AssertionError("validated raw config has an unexpected shape")
+    return RuntimePlanningProvenance(
+        failure_policy_explicit="download_failure_policy" in raw_cdh,
+        file_downloader_explicit=tuple(
+            isinstance(item, dict) and "downloader" in item for item in raw_files
+        ),
+        file_download_mode_explicit=tuple(
+            isinstance(item, dict) and "download_mode" in item for item in raw_files
+        ),
     )
 
 
-def _changed_artifact_diagnostic(artifact: str) -> Diagnostic:
-    return Diagnostic(
-        path=tuple(artifact.split("/")),
-        code="render.check_changed",
-        message=f"{artifact} would be changed by render",
-    )
+def _render_error(code: str, message: str) -> HostRenderServiceError:
+    return HostRenderServiceError((Diagnostic(("render",), code, message),))

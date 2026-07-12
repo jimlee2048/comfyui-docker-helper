@@ -11,7 +11,7 @@ from types import TracebackType
 import httpx
 import pytest
 
-from comfyui_docker_helper.config.runtime_projection import RuntimeConfig
+from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.container.download_files import (
     DownloadCancelled,
     DownloaderSettings,

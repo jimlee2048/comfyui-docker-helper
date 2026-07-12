@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
-from comfyui_docker_helper.config.resolvers import COMFYUI_REPO_URL
+from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.identity_providers import (
     ComfyCliIdentityRequest,
     DirectGitIdentityRequest,
@@ -577,12 +577,12 @@ def test_official_comfyui_resolves_peeled_release_commit_and_release_identity() 
             calls,
         )
     )
-    request = OfficialComfyUIIdentityRequest(COMFYUI_REPO_URL, "refs/tags/v0.4.0")
+    request = OfficialComfyUIIdentityRequest(COMFYUI_REPOSITORY, "refs/tags/v0.4.0")
 
     identity = provider.resolve(request)
 
     assert request.stability is SelectorStability.EXACT
-    assert identity.repository == COMFYUI_REPO_URL
+    assert identity.repository == COMFYUI_REPOSITORY
     assert identity.commit == COMMIT_B
     assert identity.formal_release == "0.4.0"
     assert calls[0][0][1:3] == ("ls-remote", "--end-of-options")
@@ -598,7 +598,7 @@ def test_official_comfyui_release_catalog_returns_sorted_exact_identities() -> N
     calls: list[tuple[Sequence[str], Mapping[str, object]]] = []
     provider = GitOfficialComfyUIIdentityProvider(runner=_git_runner(output, calls))
 
-    releases = provider.list_releases(COMFYUI_REPO_URL)
+    releases = provider.list_releases(COMFYUI_REPOSITORY)
 
     assert [item.formal_release for item in releases] == ["0.4.0", "0.5.0"]
     assert releases[0].commit == "3" * 40
@@ -907,7 +907,7 @@ def test_local_executable_rejects_noncanonical_paths(
     assert raised.value.kind is ProviderFailureKind.INVALID_REQUEST
 
 
-def test_local_executable_rejects_symlink_and_non_executable(
+def test_local_executable_rejects_symlink_and_accepts_regular_0644(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "scripts"
@@ -924,11 +924,10 @@ def test_local_executable_rejects_symlink_and_non_executable(
     assert linked.value.kind is ProviderFailureKind.LOCAL_INPUT
 
     target.chmod(0o644)
-    with pytest.raises(IdentityProviderError) as not_executable:
-        provider.resolve(
-            LocalExecutableIdentityRequest(root, PurePosixPath("target.sh"))
-        )
-    assert not_executable.value.kind is ProviderFailureKind.LOCAL_INPUT
+    identity = provider.resolve(
+        LocalExecutableIdentityRequest(root, PurePosixPath("target.sh"))
+    )
+    assert identity.relative_path == PurePosixPath("target.sh")
 
 
 def test_local_executable_rejects_symlinked_parent(tmp_path: Path) -> None:

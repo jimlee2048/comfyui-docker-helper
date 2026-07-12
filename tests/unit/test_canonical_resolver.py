@@ -16,6 +16,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
+    DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
@@ -909,6 +910,67 @@ def test_upgrade_retains_an_unchanged_all_exact_python_group_without_uv_call() -
     assert acquirer.calls == []
     assert acquirer.provider_calls == []
     assert result.delta == ()
+
+
+def test_non_public_uv_tool_group_acquires_then_reuses_and_locks_without_calls() -> (
+    None
+):
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="uv-tool:ruff",
+        group="uv-tool",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        members=[
+            DirectPythonRequestMember(package="ruff", extras=[], selector="==0.12.0")
+        ],
+    )
+    desired = (DesiredResolution.from_request(request),)
+
+    @dataclass
+    class UvToolAcquirer:
+        calls: int = 0
+
+        def acquire(
+            self, requested: ResolverRequestIdentity, request_digest: str
+        ) -> AcquiredCanonicalEntries:
+            self.calls += 1
+            assert requested == request
+            return AcquiredCanonicalEntries(
+                (
+                    DirectPythonLockEntry(
+                        type="python-package",
+                        request_digest=request_digest,
+                        package="ruff",
+                        extras=[],
+                        version="0.12.0",
+                        environment="uv-tool:ruff",
+                    ),
+                ),
+                True,
+            )
+
+    first_acquirer = UvToolAcquirer()
+    first = reconcile_canonical_lock(desired, existing=None, acquirer=first_acquirer)
+
+    assert first_acquirer.calls == 1
+    assert first.provider_calls == (("python-package", "uv-tool:ruff", "ruff"),)
+    assert first.lock.entries[0].environment == "uv-tool:ruff"
+
+    for policy in (LockPolicy.DEFAULT, LockPolicy.LOCKED):
+        replay_acquirer = UvToolAcquirer()
+        replay = reconcile_canonical_lock(
+            desired,
+            existing=first.lock,
+            acquirer=replay_acquirer,
+            policy=policy,
+        )
+
+        assert replay_acquirer.calls == 0
+        assert replay.provider_calls == ()
+        assert replay.delta == ()
+        assert replay.write_intent is False
 
 
 @pytest.mark.parametrize(

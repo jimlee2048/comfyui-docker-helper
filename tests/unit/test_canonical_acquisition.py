@@ -13,6 +13,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     DirectGitRequestIdentity,
+    DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     ManagedPythonRequestIdentity,
     OciRequestIdentity,
@@ -107,6 +108,40 @@ def test_uv_group_resolver_uses_one_absolute_isolated_explicit_invocation(
     assert environment["UV_NO_CONFIG"] == "1"
     assert "UV_INDEX_URL" not in environment
     assert "PIP_CONFIG_FILE" not in environment
+
+
+def test_non_public_uv_tool_group_uses_exact_isolated_resolution_seam() -> None:
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="uv-tool:ruff",
+        group="uv-tool",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        members=[
+            DirectPythonRequestMember(package="ruff", extras=[], selector="==0.12.0")
+        ],
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def runner(
+        args: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="ruff==0.12.0\n")
+
+    resolved = UvPythonGroupResolver(
+        HostUvRunner(Path("/opt/cdh/bin/uv")), runner
+    ).resolve(request)
+
+    assert resolved == (ResolvedPythonMember("ruff", "0.12.0"),)
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv[0] == "/opt/cdh/bin/uv"
+    assert argv[argv.index("--python-version") + 1] == "3.13.14"
+    assert argv[argv.index("--python-platform") + 1] == "x86_64-unknown-linux-gnu"
+    assert argv[argv.index("--default-index") + 1] == "https://pypi.org/simple"
+    assert kwargs["input"] == "ruff==0.12.0\n"
 
 
 @pytest.mark.parametrize(

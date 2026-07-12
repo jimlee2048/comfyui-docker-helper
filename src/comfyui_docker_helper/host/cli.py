@@ -1,5 +1,6 @@
 """Host command group."""
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -7,6 +8,7 @@ import typer
 
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.config.service import (
+    ConfigurationResult,
     ConfigurationServiceError,
     load_validate_config_result,
 )
@@ -280,6 +282,11 @@ def build(
         config_tags=validated.config.build.tags,
     )
     effective_output = cli_output or validated.config.build.output
+    validated = _apply_build_overrides(
+        validated,
+        image_tags=effective_tags,
+        output=effective_output,
+    )
 
     try:
         options = PlanningOptions(locked=locked, upgrade_lock=upgrade_lock)
@@ -305,11 +312,12 @@ def build(
     render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
 
     typer.echo(f"Build context: {context_dir}")
+    build_plan = prepared.plan.build
     build_image_with_buildx(
-        image_tags=effective_tags,
-        output=effective_output,
+        image_tags=build_plan.tags,
+        output=build_plan.output,
         context_dir=context_dir,
-        platforms=prepared.plan.build.platforms,
+        platforms=build_plan.platforms,
         cwd=Path.cwd(),
         log=typer.echo,
     )
@@ -344,6 +352,19 @@ def _resolve_cli_build_output(*, load: bool, push: bool) -> BuildxOutput | None:
     if load:
         return "load"
     return None
+
+
+def _apply_build_overrides(
+    result: ConfigurationResult,
+    *,
+    image_tags: tuple[str, ...],
+    output: BuildxOutput,
+) -> ConfigurationResult:
+    build = result.config.build.model_copy(
+        update={"tags": list(image_tags), "output": output}
+    )
+    config = result.config.model_copy(update={"build": build})
+    return replace(result, config=config)
 
 
 def _resolve_effective_image_tags(

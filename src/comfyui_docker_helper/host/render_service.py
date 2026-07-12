@@ -171,7 +171,7 @@ def prepare_render_context(
         )
         for request in desired.local_requests
     )
-    if selected.check:
+    if selected.check or (selected.locked and not selected.dry_run):
         _check_context(output, plan, accepted.lock, sources)
     elif selected.writes:
         _write_context(output, plan, accepted.lock, sources, overwrite=overwrite)

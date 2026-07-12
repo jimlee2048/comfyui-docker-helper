@@ -368,6 +368,30 @@ def test_locked_performs_zero_provider_calls_and_zero_writes(tmp_path: Path) -> 
     assert _tree(output) == before
 
 
+def test_locked_rejects_stale_context_for_config_only_build_changes(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    before = _tree(output)
+    config.write_text(
+        _config().replace(
+            'tags = ["example:test"]',
+            'tags = ["cli:first", "cli:second"]\noutput = "push"',
+        )
+    )
+    fake = FakeAcquirer()
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, fake, options=PlanningOptions(locked=True))
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+    assert fake.calls == []
+    assert _tree(output) == before
+
+
 def test_dry_run_resolves_without_writing_and_check_compares_without_writing(
     tmp_path: Path,
 ) -> None:

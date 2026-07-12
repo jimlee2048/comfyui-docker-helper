@@ -11,8 +11,13 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
+from comfyui_docker_helper.config.build_plan import BuildOutputPlan
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.container.phase_inputs import (
+    load_phase_input,
+    phase_document,
+)
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.uv_runner import HostUvError
@@ -329,7 +334,7 @@ def test_render_materialization_error_is_short_and_has_no_traceback(
     assert "Traceback" not in result.output
 
 
-def test_build_passes_hooks_dir_before_buildx(
+def test_build_overrides_flow_through_plan_phase_and_buildx(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -340,26 +345,52 @@ def test_build_passes_hooks_dir_before_buildx(
     def providers():
         yield SimpleNamespace(acquirer=object(), local_acquirer=object())
 
-    validated = SimpleNamespace(
-        config=SimpleNamespace(
-            build=SimpleNamespace(tags=["example:test"], output="load")
-        )
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[compute_platform]
+type = "cuda"
+[compute_platform.cuda]
+version = "13.0.3"
+[pytorch]
+version = "2.12.1"
+[comfyui]
+version = "0.4.0"
+install_manager = false
+[build]
+tags = ["config:test"]
+output = "load"
+platforms = ["linux/amd64"]
+"""
+    )
+    plan_digest = f"sha256:{'a' * 64}"
+    plan_build = BuildOutputPlan(
+        tags=("cli:first", "cli:second"),
+        output="push",
+        platforms=("linux/amd64",),
     )
 
     def prepare(*args, **kwargs):
         seen["hooks_dir"] = kwargs["hooks_dir"]
+        configuration = kwargs["configuration_result"]
+        seen["configuration_build"] = configuration.config.build
+        phase = phase_document("build", plan_build, plan_digest)
+        phase_path = context / "phases" / "build.json"
+        phase_path.parent.mkdir(parents=True)
+        phase_path.write_text(phase.model_dump_json())
         return SimpleNamespace(
             warnings=(),
-            plan=SimpleNamespace(build=SimpleNamespace(platforms=("linux/amd64",))),
+            plan=SimpleNamespace(build=plan_build),
         )
 
     def buildx(**kwargs):
-        seen["built"] = kwargs["context_dir"]
+        seen["buildx"] = {
+            "image_tags": kwargs["image_tags"],
+            "output": kwargs["output"],
+            "platforms": kwargs["platforms"],
+            "context_dir": kwargs["context_dir"],
+        }
 
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.load_validate_config_result",
-        lambda *args, **kwargs: validated,
-    )
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.default_planning_providers", providers
     )
@@ -377,16 +408,113 @@ def test_build_passes_hooks_dir_before_buildx(
             "host",
             "build",
             "-f",
-            str(tmp_path / "config.toml"),
+            str(config),
             "--context-dir",
             str(context),
             "--hooks-dir",
             str(hooks),
+            "--tag",
+            "cli:first",
+            "--tag",
+            "cli:second",
+            "--push",
         ],
     )
 
     assert result.exit_code == 0
-    assert seen == {"hooks_dir": hooks, "built": context}
+    assert seen["hooks_dir"] == hooks
+    configuration_build = seen["configuration_build"]
+    assert configuration_build.tags == list(plan_build.tags)
+    assert configuration_build.output == plan_build.output
+    assert configuration_build.platforms == list(plan_build.platforms)
+    assert (
+        load_phase_input(
+            context / "phases" / "build.json",
+            "build",
+            expected_build_plan_digest=plan_digest,
+        )
+        == plan_build
+    )
+    assert seen["buildx"] == {
+        "image_tags": plan_build.tags,
+        "output": plan_build.output,
+        "platforms": plan_build.platforms,
+        "context_dir": context,
+    }
+
+
+def test_locked_build_override_stops_before_buildx_when_context_is_stale(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[compute_platform]
+type = "cuda"
+[compute_platform.cuda]
+version = "13.0.3"
+[pytorch]
+version = "2.12.1"
+[comfyui]
+version = "0.4.0"
+install_manager = false
+[build]
+tags = ["config:test"]
+platforms = ["linux/amd64"]
+"""
+    )
+
+    @contextmanager
+    def providers():
+        yield SimpleNamespace(acquirer=object(), local_acquirer=object())
+
+    def prepare(*args, **kwargs):
+        configuration = kwargs["configuration_result"]
+        assert configuration.config.build.tags == ["cli:test"]
+        assert kwargs["options"].locked is True
+        raise HostRenderServiceError(
+            (
+                Diagnostic(
+                    ("render",),
+                    "render.context_changed",
+                    "rendered context differs from the current BuildPlan",
+                ),
+            )
+        )
+
+    def fail_buildx(**kwargs):
+        pytest.fail("stale locked context must stop before Docker Buildx")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers", providers
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.prepare_render_context", prepare
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx", fail_buildx
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "cli:test",
+            "--locked",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "render.context_changed" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_container_entrypoint_invokes_service_and_propagates_exit_code(

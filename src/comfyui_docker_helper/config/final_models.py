@@ -1,0 +1,173 @@
+"""Isolated final public-config models prepared for the M2 authority cutover.
+
+These models are deliberately not imported by the active configuration service.
+"""
+
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class FinalConfigModel(BaseModel):
+    """Apply strict structural validation to every final config block."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, validate_default=True)
+
+
+class FinalCudaConfig(FinalConfigModel):
+    """The sole configured CUDA version authority."""
+
+    version: str
+
+
+class FinalComputePlatformConfig(FinalConfigModel):
+    """Typed compute backend selection."""
+
+    type: Literal["cuda"]
+    cuda: FinalCudaConfig
+
+
+class FinalSystemSshConfig(FinalConfigModel):
+    """SSH runtime defaults accepted from image configuration."""
+
+    enable: bool = False
+    port: int = Field(default=22, ge=1, le=65535)
+    password: str = ""
+    pub_keys: list[str] = Field(default_factory=list)
+
+
+class FinalSystemConfig(FinalConfigModel):
+    """Container paths, OS packages, environment, and SSH defaults."""
+
+    workspace: str = "/workspace"
+    comfyui_path: str | None = None
+    extra_packages: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    ssh: FinalSystemSshConfig = Field(default_factory=FinalSystemSshConfig)
+
+
+class FinalPythonConfig(FinalConfigModel):
+    """Managed Python and application-environment package requests."""
+
+    version: str = "3.13.14"
+    uv_version: str = "0.11.28"
+    index_url: str = "https://pypi.org/simple"
+    extra_packages: list[str] = Field(default_factory=list)
+
+
+class FinalPyTorchConfig(FinalConfigModel):
+    """PyTorch group requests independent of backend-specific channel syntax."""
+
+    version: str
+    index_base_url: str = "https://download.pytorch.org/whl"
+    extra_packages: list[str] = Field(default_factory=list)
+
+
+class FinalAria2Config(FinalConfigModel):
+    """aria2 downloader settings retained through the M2 cutover."""
+
+    rpc_port: int = Field(default=6800, ge=1, le=65535)
+    split: int = Field(default=16, ge=1)
+    max_connection_per_server: int = Field(default=16, ge=1)
+    min_split_size: str = "1M"
+    resume_download: bool = True
+
+
+class FinalHttpxConfig(FinalConfigModel):
+    """HTTPX settings; retries remains public until the M4-T4 handoff."""
+
+    timeout: int | float = Field(default=60, gt=0)
+    retries: int = Field(default=3, ge=0)
+
+
+class FinalDownloaderConfig(FinalConfigModel):
+    """Downloader-specific settings."""
+
+    aria2: FinalAria2Config = Field(default_factory=FinalAria2Config)
+    httpx: FinalHttpxConfig = Field(default_factory=FinalHttpxConfig)
+
+
+class FinalCdhConfig(FinalConfigModel):
+    """cdh-owned transfer settings present at the M2 cutover."""
+
+    default_downloader: Literal["aria2", "httpx"] = "aria2"
+    default_download_mode: Literal["sync", "async"] = "sync"
+    download_max_attempts: int = Field(default=3, ge=1)
+    download_failure_policy: Literal["continue", "fail"] = "fail"
+    downloader: FinalDownloaderConfig = Field(default_factory=FinalDownloaderConfig)
+
+
+class FinalBuildConfig(FinalConfigModel):
+    """Build output settings and the canonical ordered target platform list."""
+
+    tags: list[str] = Field(default_factory=list)
+    output: Literal["load", "push"] = "load"
+    platforms: list[Literal["linux/amd64"]] = Field(
+        default_factory=lambda: ["linux/amd64"], min_length=1
+    )
+
+
+class _FinalCustomNodeConfig(FinalConfigModel):
+    """Ordered executable hooks shared by custom-node variants."""
+
+    pre_install_scripts: list[str] = Field(default_factory=list)
+    post_install_scripts: list[str] = Field(default_factory=list)
+
+
+class FinalRegistryCustomNodeConfig(_FinalCustomNodeConfig):
+    """A custom node selected by Registry identity."""
+
+    type: Literal["registry"]
+    id: str
+    version: str | None = None
+
+
+class FinalGitCustomNodeConfig(_FinalCustomNodeConfig):
+    """A custom node installed directly from Git."""
+
+    type: Literal["git"]
+    url: str
+    ref: str | None = None
+    target_dir: str | None = None
+
+
+FinalCustomNodeConfig = Annotated[
+    FinalRegistryCustomNodeConfig | FinalGitCustomNodeConfig,
+    Field(discriminator="type"),
+]
+
+
+class FinalComfyUIConfig(FinalConfigModel):
+    """ComfyUI, Manager, launch, and custom-node requests."""
+
+    version: str
+    cli_version: str = "latest"
+    install_manager: bool = True
+    listen: str = "0.0.0.0"
+    port: int = Field(default=8188, ge=1, le=65535)
+    extra_args: list[str] = Field(default_factory=list)
+    custom_nodes: list[FinalCustomNodeConfig] = Field(default_factory=list)
+
+
+class FinalFileConfig(FinalConfigModel):
+    """A required file transfer request without the deferred checksum field."""
+
+    url: str
+    dir: str
+    filename: str
+    overwrite: bool = False
+    downloader: Literal["aria2", "httpx"] | None = None
+    download_mode: Literal["sync", "async"] | None = None
+
+
+class FinalConfig(FinalConfigModel):
+    """Strict replacement config schema, isolated until the M2-T8 cutover."""
+
+    cdh: FinalCdhConfig = Field(default_factory=FinalCdhConfig)
+    compute_platform: FinalComputePlatformConfig
+    system: FinalSystemConfig = Field(default_factory=FinalSystemConfig)
+    python: FinalPythonConfig = Field(default_factory=FinalPythonConfig)
+    pytorch: FinalPyTorchConfig
+    build: FinalBuildConfig = Field(default_factory=FinalBuildConfig)
+    comfyui: FinalComfyUIConfig
+    files: list[FinalFileConfig] = Field(default_factory=list)

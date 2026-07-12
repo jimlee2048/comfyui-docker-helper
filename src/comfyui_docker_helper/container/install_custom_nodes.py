@@ -27,6 +27,7 @@ from comfyui_docker_helper.container.runners import (
 )
 
 _DEFAULT_RUNTIME = ContainerRuntime()
+_FULL_GIT_COMMIT_PATTERN = re.compile(r"[0-9a-fA-F]{40}\Z")
 
 
 class Logger(Protocol):
@@ -136,6 +137,11 @@ def _install_git_node(
 ) -> None:
     if node.type != "git":  # pragma: no cover - caller guards this branch.
         raise ContainerCommandError(f"not a git custom node: {node.target}")
+    if node.ref is None or _FULL_GIT_COMMIT_PATTERN.fullmatch(node.ref) is None:
+        raise ContainerCommandError(
+            f"custom-node locked Git commit must be a 40-character hexadecimal "
+            f"SHA: {node.url}"
+        )
 
     repo_name = _derive_git_repo_name(node.url, node.target_dir)
     repo_path = runtime.comfyui_path / "custom_nodes" / repo_name
@@ -146,7 +152,14 @@ def _install_git_node(
 
     repo_path.parent.mkdir(parents=True, exist_ok=True)
     run_argv(
-        ["git", "clone", "--recursive", node.url, str(repo_path)],
+        [
+            "git",
+            "clone",
+            "--recursive",
+            "--end-of-options",
+            node.url,
+            str(repo_path),
+        ],
         cwd=runtime.comfyui_path,
         env=env,
         description=f"custom-node git clone {node.target}",
@@ -154,7 +167,14 @@ def _install_git_node(
 
     if node.ref:
         run_argv(
-            ["git", "-C", str(repo_path), "checkout", "--detach", node.ref],
+            [
+                "git",
+                "-C",
+                str(repo_path),
+                "checkout",
+                "--detach",
+                node.ref,
+            ],
             cwd=runtime.comfyui_path,
             env=env,
             description=f"custom-node git checkout {node.target}",

@@ -116,6 +116,7 @@ def _assert_installer_subprocess_contract(
         "git",
         "clone",
         "--recursive",
+        "--end-of-options",
         "https://example.com/git-node.git",
         str(comfyui_path / "custom_nodes" / "explicit-git-node"),
     ]

@@ -37,6 +37,7 @@ class GitRemoteProvider:
             self.git_executable,
             "ls-remote",
             "--tags",
+            "--end-of-options",
             COMFYUI_REPO_URL,
         )
         tag_refs: dict[str, str] = {}
@@ -59,7 +60,13 @@ class GitRemoteProvider:
         ]
 
     def get_nightly_commit(self) -> str:
-        refs = _run_git(self.git_executable, "ls-remote", COMFYUI_REPO_URL, "HEAD")
+        refs = _run_git(
+            self.git_executable,
+            "ls-remote",
+            "--end-of-options",
+            COMFYUI_REPO_URL,
+            "HEAD",
+        )
         commit, _ = _select_single_ls_remote_ref(
             refs,
             selector="HEAD",
@@ -68,12 +75,24 @@ class GitRemoteProvider:
         return commit
 
     def resolve_default_branch_head(self, url: str) -> str:
-        refs = _run_git(self.git_executable, "ls-remote", url, "HEAD")
+        refs = _run_git(
+            self.git_executable,
+            "ls-remote",
+            "--end-of-options",
+            url,
+            "HEAD",
+        )
         commit, _ = _select_single_ls_remote_ref(refs, selector="HEAD", url=url)
         return commit
 
     def resolve_ref(self, url: str, ref: str) -> str:
-        refs = _run_git(self.git_executable, "ls-remote", url, ref)
+        refs = _run_git(
+            self.git_executable,
+            "ls-remote",
+            "--end-of-options",
+            url,
+            ref,
+        )
         lines = refs.splitlines()
         if not lines:
             raise UpstreamResponseError(

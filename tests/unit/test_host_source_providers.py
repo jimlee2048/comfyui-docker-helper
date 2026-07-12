@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -189,6 +190,112 @@ def test_run_git_disables_interactive_prompts_and_sets_timeout(
     assert calls[0]["env"]["GIT_ASKPASS"] == ""
     assert calls[0]["env"]["GCM_INTERACTIVE"] == "never"
     assert calls[0]["env"]["SSH_ASKPASS"] == ""
+
+
+def test_git_remote_url_cannot_be_interpreted_as_an_option(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leading-option repository value stays positional in a real Git process."""
+    repository = tmp_path / "HEAD"
+    subprocess.run(
+        ["git", "init", "--quiet", "--bare", str(repository)],
+        check=True,
+    )
+    marker = tmp_path / "upload-pack-ran"
+    helper = tmp_path / "upload-pack-probe"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "os.execvp('git-upload-pack', ['git-upload-pack', *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    malicious_url = f"--upload-pack={helper}"
+    monkeypatch.chdir(tmp_path)
+
+    unsafe = subprocess.run(
+        ["git", "ls-remote", malicious_url, "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert unsafe.returncode == 0
+    assert marker.is_file(), "fixture must reproduce option interpretation"
+    marker.unlink()
+
+    with pytest.raises(UpstreamResponseError):
+        GitRemoteProvider().resolve_default_branch_head(malicious_url)
+
+    assert not marker.exists()
+
+
+def test_git_provider_resolves_valid_local_repository_with_real_git(
+    tmp_path: Path,
+) -> None:
+    """The option boundary preserves valid URL/ref resolution behavior."""
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (repository / "tracked").write_text("content\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "tracked"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "--quiet", "-m", "initial"],
+        check=True,
+    )
+    expected = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    provider = GitRemoteProvider()
+
+    assert provider.resolve_default_branch_head(str(repository)) == expected
+    assert provider.resolve_ref(str(repository), "HEAD") == expected
+
+
+def test_git_provider_places_dynamic_url_and_ref_after_option_terminator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both dynamic ls-remote operands follow Git's explicit option boundary."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_git(*args: str) -> str:
+        calls.append(args)
+        return f"{COMMIT_A}\trefs/heads/--upload-pack=probe\n"
+
+    monkeypatch.setattr(provider_module, "_run_git", fake_run_git)
+
+    GitRemoteProvider().resolve_ref(
+        "--upload-pack=repository-probe",
+        "--upload-pack=ref-probe",
+    )
+
+    assert calls == [
+        (
+            "git",
+            "ls-remote",
+            "--end-of-options",
+            "--upload-pack=repository-probe",
+            "--upload-pack=ref-probe",
+        )
+    ]
 
 
 def test_run_git_wraps_timeout_as_upstream_response_error(

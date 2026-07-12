@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from tests.artifact_helpers import COMMIT_A, write_root_artifacts
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
+from comfyui_docker_helper.config.plan import GitCustomNodePlan
 from comfyui_docker_helper.container import install_custom_nodes as installer
 from comfyui_docker_helper.container.install_custom_nodes import install_custom_nodes
 from comfyui_docker_helper.container.runners import (
@@ -37,6 +40,166 @@ def make_runtime(tmp_path: Path) -> ContainerRuntime:
         comfyui_path=tmp_path / "workspace" / "ComfyUI",
         virtual_env=tmp_path / "venv",
     )
+
+
+def write_upload_pack_probe(helper: Path, marker: Path) -> None:
+    """Write a Git upload-pack helper whose execution leaves a marker."""
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "os.execvp('git-upload-pack', ['git-upload-pack', *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+
+
+def init_git_repository(repository: Path) -> str:
+    """Create a one-commit repository and return its full HEAD identity."""
+    repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (repository / "tracked").write_text("content\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "tracked"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "--quiet", "-m", "initial"],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_git_clone_url_cannot_be_interpreted_as_an_option(tmp_path: Path) -> None:
+    """The direct-Git clone URL stays positional in a real Git process."""
+    runtime = make_runtime(tmp_path)
+    runtime.comfyui_path.mkdir(parents=True)
+    repo_path = runtime.comfyui_path / "custom_nodes" / "target"
+    repo_path.parent.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", "--bare", str(repo_path)],
+        check=True,
+    )
+    marker = tmp_path / "upload-pack-ran"
+    helper = tmp_path / "upload-pack-probe"
+    write_upload_pack_probe(helper, marker)
+    malicious_url = f"--upload-pack={helper}"
+
+    unsafe = subprocess.run(
+        ["git", "clone", "--recursive", malicious_url, str(repo_path)],
+        cwd=runtime.comfyui_path,
+        env=runtime.env(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert unsafe.returncode == 0
+    assert marker.is_file(), "fixture must reproduce option interpretation"
+    marker.unlink()
+    shutil.rmtree(runtime.comfyui_path / "target")
+    shutil.rmtree(repo_path)
+
+    node = GitCustomNodePlan(
+        type="git",
+        url=malicious_url,
+        ref="a" * 40,
+        target_dir="target",
+        target=malicious_url,
+        pre_install_scripts=(),
+        post_install_scripts=(),
+    )
+    with pytest.raises(ContainerCommandError, match="git clone"):
+        installer._install_git_node(
+            node,
+            python_index_url="https://pypi.org/simple",
+            runtime=runtime,
+            env=runtime.env(),
+        )
+
+    assert not marker.exists()
+
+
+def test_git_checkout_ref_cannot_be_interpreted_as_an_option(tmp_path: Path) -> None:
+    """The direct-Git checkout ref stays positional in a real Git process."""
+    source = tmp_path / "source"
+    init_git_repository(source)
+    unsafe = subprocess.run(
+        ["git", "-C", str(source), "checkout", "--detach", "--guess"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert unsafe.returncode == 0, "fixture must reproduce option interpretation"
+
+    runtime = make_runtime(tmp_path)
+    runtime.comfyui_path.mkdir(parents=True)
+    node = GitCustomNodePlan(
+        type="git",
+        url=str(source),
+        ref="--guess",
+        target_dir="target",
+        target=f"{source}@--guess",
+        pre_install_scripts=(),
+        post_install_scripts=(),
+    )
+
+    with pytest.raises(ContainerCommandError, match="locked Git commit"):
+        installer._install_git_node(
+            node,
+            python_index_url="https://pypi.org/simple",
+            runtime=runtime,
+            env=runtime.env(),
+        )
+    assert not (runtime.comfyui_path / "custom_nodes" / "target").exists()
+
+
+def test_git_node_valid_commit_clone_and_checkout_use_real_git(tmp_path: Path) -> None:
+    """A valid direct-Git node still clones and checks out its exact commit."""
+    source = tmp_path / "source"
+    commit = init_git_repository(source)
+    runtime = make_runtime(tmp_path)
+    runtime.comfyui_path.mkdir(parents=True)
+    node = GitCustomNodePlan(
+        type="git",
+        url=str(source),
+        ref=commit,
+        target_dir="target",
+        target=f"{source}@{commit}",
+        pre_install_scripts=(),
+        post_install_scripts=(),
+    )
+
+    installer._install_git_node(
+        node,
+        python_index_url="https://pypi.org/simple",
+        runtime=runtime,
+        env=runtime.env(),
+    )
+
+    checkout = runtime.comfyui_path / "custom_nodes" / "target"
+    actual = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert actual == commit
 
 
 def test_registry_nodes_update_cache_once_before_ordered_installs(
@@ -115,6 +278,7 @@ version = "1.0.0"
         "git",
         "clone",
         "--recursive",
+        "--end-of-options",
         "https://example.com/second.git",
         str(runtime.comfyui_path / "custom_nodes" / "second"),
     ]
@@ -237,6 +401,7 @@ target_dir = "custom-name"
             "git",
             "clone",
             "--recursive",
+            "--end-of-options",
             "https://example.com/upstream.git",
             str(runtime.comfyui_path / "custom_nodes" / "custom-name"),
         ],
@@ -324,6 +489,7 @@ ref = "{ref}"
         "git",
         "clone",
         "--recursive",
+        "--end-of-options",
         "https://example.com/ComfyUI-Example.git",
         str(repo_path),
     ]

@@ -9,6 +9,7 @@ from comfyui_docker_helper.comfyui_requirements import (
     ComfyUIRequirementsError,
     merge_pytorch_requirements,
     parse_comfyui_requirements,
+    parse_manager_requirements,
     protected_policy_digest,
 )
 from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
@@ -132,3 +133,63 @@ def test_policy_digest_binds_sorted_names_and_policy_version() -> None:
     assert protected_policy_digest(
         ("torchvision", "torch", "torchaudio")
     ) == protected_policy_digest(CUDA_PROTECTED_REQUIREMENTS)
+
+
+def test_manager_parser_projects_exact_checkout_owned_distribution() -> None:
+    parsed = parse_manager_requirements(
+        b"""
+# exact checkout declaration
+comfyui_manager==4.0.5
+packaging>=24; python_version >= "3.13"
+ignored==1; python_version < "3.13"
+""",
+        python_version="3.13.14",
+        platform="linux/amd64",
+    )
+
+    assert parsed.rows == (
+        "comfyui_manager==4.0.5",
+        'packaging>=24; python_version >= "3.13"',
+        'ignored==1; python_version < "3.13"',
+    )
+    assert parsed.digest.startswith("sha256:")
+    assert [(item.package, item.specifier) for item in parsed.active] == [
+        ("comfyui-manager", "==4.0.5"),
+        ("packaging", ">=24"),
+    ]
+    assert parsed.manager_version == "4.0.5"
+
+
+@pytest.mark.parametrize(
+    "content, message",
+    [
+        (b"--index-url https://poison.test/simple\n", "changes package sources"),
+        (b"comfyui_manager @ https://poison.test/manager.whl\n", "direct source"),
+        (b"comfyui_manager>=4\n", "exact checkout-owned version"),
+        (b"comfyui_manager==v4.0.5\n", "canonical exact"),
+        (b"requests==2\n", "exactly one active comfyui-manager"),
+        (
+            b"comfyui_manager==4.0.5\nComfyUI-Manager==4.0.5\n",
+            "duplicate target package",
+        ),
+    ],
+)
+def test_manager_parser_rejects_unowned_or_ambiguous_requirements(
+    content: bytes, message: str
+) -> None:
+    with pytest.raises(ComfyUIRequirementsError, match=message):
+        parse_manager_requirements(
+            content,
+            python_version="3.13.14",
+            platform="linux/amd64",
+        )
+
+
+def test_manager_parser_accepts_checkout_owned_prerelease_pin() -> None:
+    parsed = parse_manager_requirements(
+        b"comfyui_manager==4.1b8\n",
+        python_version="3.13.14",
+        platform="linux/amd64",
+    )
+
+    assert parsed.manager_version == "4.1b8"

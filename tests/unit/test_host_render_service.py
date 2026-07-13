@@ -74,7 +74,12 @@ DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT = "1" * 40
 
 
-def _config(*, with_uv_tool: bool = False, install_cli: bool = True) -> str:
+def _config(
+    *,
+    with_uv_tool: bool = False,
+    install_cli: bool = True,
+    install_manager: bool = False,
+) -> str:
     uv_tools = 'uv_tools = ["ruff>=0.15,<0.16"]' if with_uv_tool else ""
     return f"""
 [compute_platform]
@@ -91,7 +96,7 @@ extra_packages = ["torchvision==0.27.1"]
 [comfyui]
 version = "0.11.0"
 install_cli = {str(install_cli).lower()}
-install_manager = false
+install_manager = {str(install_manager).lower()}
 [build]
 tags = ["example:test"]
 platforms = ["linux/amd64"]
@@ -271,9 +276,38 @@ def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
         "name": "comfy-cli",
         "version": "1.8.0",
     }
+    assert plan["application"]["comfyui"]["manager"] is None
     dockerfile = (output / "Dockerfile").read_text()
     assert "uv --no-config tool install" in dockerfile
     assert "ruff==0.15.18" in dockerfile
+
+
+def test_checkout_owned_manager_capability_flows_only_to_application_phase(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config(install_cli=False, install_manager=True))
+    output = tmp_path / "output"
+
+    _prepare(config, output, FakeAcquirer())
+
+    plan = json.loads((output / "build-plan.json").read_bytes())
+    manager = plan["application"]["comfyui"]["manager"]
+    assert manager == {
+        "distribution": "comfyui-manager",
+        "entrypoint_name": "cm-cli",
+        "entrypoint_value": "comfyui_manager.cm_cli.__main__:main",
+        "executable": "/opt/venv/bin/cm-cli",
+        "import_anchor": (
+            "/opt/venv/lib/python3.13/site-packages/comfyui-docker-helper-comfyui.pth"
+        ),
+        "import_name": "comfyui_manager",
+        "requirements_path": "manager_requirements.txt",
+    }
+    assert plan["toolchain"]["tool_store"]["comfy_cli"] is None
+    assert "--enable-manager" not in plan["runtime"]["launch_command"]
+    phase = json.loads((output / "phases/application.json").read_bytes())
+    assert phase["payload"]["comfyui"]["manager"] == manager
 
 
 @dataclass

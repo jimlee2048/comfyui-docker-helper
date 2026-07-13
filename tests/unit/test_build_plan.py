@@ -392,6 +392,17 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     )
     assert plan.application.python_extras is not None
     assert plan.application.python_extras.packages[0].requirement == "numpy==2.3.1"
+    manager = plan.application.comfyui.manager
+    assert manager is not None
+    assert manager.requirements_path == "manager_requirements.txt"
+    assert manager.distribution == "comfyui-manager"
+    assert manager.import_name == "comfyui_manager"
+    assert manager.executable == "/opt/venv/bin/cm-cli"
+    assert manager.entrypoint_name == "cm-cli"
+    assert manager.entrypoint_value == "comfyui_manager.cm_cli.__main__:main"
+    assert manager.import_anchor == (
+        "/opt/venv/lib/python3.13/site-packages/comfyui-docker-helper-comfyui.pth"
+    )
     assert [item.name for item in plan.runtime.environment] == ["ALPHA", "ZED"]
     assert plan.runtime.launch_command[-3:] == (
         "--disable-auto-launch",
@@ -403,6 +414,21 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     assert plan.files.files[0].target == (
         "/workspace/ComfyUI/models/checkpoints/model.safetensors"
     )
+    assert "--enable-manager" not in plan.runtime.launch_command
+
+
+def test_build_plan_binds_optional_manager_capability_to_custom_node_intent() -> None:
+    plan = construct_build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    document["application"]["comfyui"]["manager"] = None
+
+    with pytest.raises(ValidationError, match="Manager capability does not match"):
+        BuildPlan.model_validate(document)
+
+    document["custom_nodes"]["install_manager"] = False
+    disabled = BuildPlan.model_validate(document)
+
+    assert disabled.application.comfyui.manager is None
 
 
 def test_constructor_projects_isolated_uv_tool_exact_result() -> None:

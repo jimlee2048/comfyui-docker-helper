@@ -8,7 +8,8 @@ version = "13.0.3"
 version = "2.12.1"
 
 [comfyui]
-version = "latest"
+version = "0.11.0"
+install_cli = false
 install_manager = true
 listen = "0.0.0.0"
 port = 8188

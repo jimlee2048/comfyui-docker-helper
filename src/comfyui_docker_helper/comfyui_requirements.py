@@ -39,6 +39,25 @@ class ParsedComfyUIRequirements:
     ordinary: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class DeclaredManagerRequirement:
+    """One target-active checkout-declared Manager requirement."""
+
+    package: str
+    requirement: str
+    specifier: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedManagerRequirements:
+    """Strict install rows plus the exact checkout-owned Manager identity."""
+
+    digest: str
+    rows: tuple[str, ...]
+    active: tuple[DeclaredManagerRequirement, ...]
+    manager_version: str
+
+
 def protected_policy_digest(protected_names: tuple[str, ...]) -> str:
     """Bind the parser policy and adapter-owned protected-name set."""
     names = _normalized_protected_names(protected_names)
@@ -99,6 +118,75 @@ def parse_comfyui_requirements(
     )
 
 
+def parse_manager_requirements(
+    content: bytes,
+    *,
+    python_version: str,
+    platform: str,
+) -> ParsedManagerRequirements:
+    """Parse checkout-owned Manager requirements without accepting source control."""
+    environment = _marker_environment(python_version, platform)
+    rows: list[str] = []
+    active: list[DeclaredManagerRequirement] = []
+    seen_active: set[str] = set()
+    try:
+        document = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ComfyUIRequirementsError("Manager requirements must be UTF-8") from error
+    for line_number, raw in enumerate(document.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-") or _SOURCE_OPTION.match(line):
+            raise ComfyUIRequirementsError(
+                f"Manager requirements line {line_number} changes package sources"
+            )
+        try:
+            requirement = Requirement(line)
+        except InvalidRequirement as error:
+            raise ComfyUIRequirementsError(
+                f"Manager requirements line {line_number} is not valid PEP 508"
+            ) from error
+        if requirement.url is not None:
+            raise ComfyUIRequirementsError(
+                f"Manager requirements line {line_number} uses a direct source"
+            )
+        canonical = str(requirement)
+        rows.append(canonical)
+        if requirement.marker is not None and not requirement.marker.evaluate(
+            environment
+        ):
+            continue
+        package = canonicalize_name(requirement.name)
+        if package in seen_active:
+            raise ComfyUIRequirementsError(
+                f"Manager requirements duplicate target package {package}"
+            )
+        seen_active.add(package)
+        active.append(
+            DeclaredManagerRequirement(
+                package=package,
+                requirement=canonical,
+                specifier=str(requirement.specifier),
+            )
+        )
+    manager = [item for item in active if item.package == "comfyui-manager"]
+    if len(manager) != 1:
+        raise ComfyUIRequirementsError(
+            "Manager requirements must declare exactly one active comfyui-manager"
+        )
+    manager_version = _exact_version(
+        manager[0].specifier,
+        subject="comfyui-manager",
+    )
+    return ParsedManagerRequirements(
+        digest=f"sha256:{hashlib.sha256(content).hexdigest()}",
+        rows=tuple(rows),
+        active=tuple(active),
+        manager_version=manager_version,
+    )
+
+
 def merge_pytorch_requirements(
     mandatory_torch: DirectPythonRequestMember,
     upstream: tuple[DirectPythonRequestMember, ...],
@@ -151,6 +239,26 @@ def _member(requirement: Requirement) -> DirectPythonRequestMember:
         extras=sorted(canonicalize_name(extra) for extra in requirement.extras),
         selector=selector,
     )
+
+
+def _exact_version(specifier: str, *, subject: str) -> str:
+    clauses = tuple(SpecifierSet(specifier))
+    if len(clauses) != 1 or clauses[0].operator != "==" or "*" in clauses[0].version:
+        raise ComfyUIRequirementsError(
+            f"{subject} must have one exact checkout-owned version"
+        )
+    try:
+        version = Version(clauses[0].version)
+    except InvalidVersion as error:
+        raise ComfyUIRequirementsError(
+            f"{subject} has an invalid exact version"
+        ) from error
+    value = str(version)
+    if value != clauses[0].version:
+        raise ComfyUIRequirementsError(
+            f"{subject} must have one canonical exact checkout-owned version"
+        )
+    return value
 
 
 def _merge_selectors(package: str, selectors: tuple[str, ...]) -> str:

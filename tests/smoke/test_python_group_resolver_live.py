@@ -9,6 +9,7 @@ from packaging.version import Version
 from comfyui_docker_helper.comfyui_requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
     parse_comfyui_requirements,
+    parse_manager_requirements,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
@@ -77,12 +78,17 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
         }
         assert {"comfy-kitchen", "requests"} <= ordinary_names
 
-    manager_rows = {
-        line.strip()
-        for line in manager_response.text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    assert "comfyui_manager==4.0.5" in manager_rows
+    manager = parse_manager_requirements(
+        manager_response.content,
+        python_version=DEFAULT_MANAGED_PYTHON_VERSION,
+        platform="linux/amd64",
+    )
+    assert manager.rows == ("comfyui_manager==4.0.5",)
+    assert manager.manager_version == "4.0.5"
+    assert manager.digest == (
+        "sha256:20c24949777265225ea5dc4ceb44a45c6dc6ec46d206d40b7871ebf80054e33c"
+    )
+    assert manager_response.content == b"comfyui_manager==4.0.5\n"
 
 
 @pytest.mark.network

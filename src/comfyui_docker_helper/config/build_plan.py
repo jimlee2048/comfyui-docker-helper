@@ -401,13 +401,38 @@ class ComfyUIRequirementsPlan(_PlanModel):
         return self
 
 
+class ManagerCapabilityPlan(_PlanModel):
+    """Checkout-owned Manager capability in the application environment."""
+
+    requirements_path: Literal["manager_requirements.txt"]
+    distribution: Literal["comfyui-manager"]
+    import_name: Literal["comfyui_manager"]
+    executable: Literal["/opt/venv/bin/cm-cli"]
+    entrypoint_name: Literal["cm-cli"]
+    entrypoint_value: Literal["comfyui_manager.cm_cli.__main__:main"]
+    import_anchor: str
+
+    @field_validator("import_anchor")
+    @classmethod
+    def _validate_import_anchor(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            not path.is_absolute()
+            or path.name != "comfyui-docker-helper-comfyui.pth"
+            or "site-packages" not in path.parts
+            or path.as_posix() != value
+        ):
+            raise ValueError("Manager import anchor must be one application site path")
+        return value
+
+
 class ComfyUIPlan(_PlanModel):
     repository: str
     commit: str
     floor_commit: str
     formal_release: str | None
-    install_manager: bool
     requirements: ComfyUIRequirementsPlan
+    manager: ManagerCapabilityPlan | None
 
     @field_validator("floor_commit")
     @classmethod
@@ -444,6 +469,15 @@ class ApplicationPhase(_PlanModel):
             or requirements.floor_commit != self.comfyui.floor_commit
         ):
             raise ValueError("ComfyUI requirements target must match PyTorch")
+        manager = self.comfyui.manager
+        if manager is not None:
+            python_minor = ".".join(self.pytorch.python_version.split(".")[:2])
+            expected_anchor = (
+                f"{self.paths.venv}/lib/python{python_minor}/site-packages/"
+                "comfyui-docker-helper-comfyui.pth"
+            )
+            if manager.import_anchor != expected_anchor:
+                raise ValueError("Manager import anchor does not match target Python")
         return self
 
 
@@ -589,6 +623,8 @@ class BuildPlan(_PlanModel):
             or self.toolchain.cuda_image.platform != self.toolchain.platform
         ):
             raise ValueError("PyTorch application target does not match the toolchain")
+        if bool(self.application.comfyui.manager) != self.custom_nodes.install_manager:
+            raise ValueError("Manager capability does not match custom-node intent")
         return self
 
 
@@ -842,6 +878,21 @@ def construct_build_plan(
         else PurePosixPath(workspace) / "ComfyUI"
     )
     paths = PathsPlan(workspace=workspace, comfyui=comfyui_path, venv=_VENV_PATH)
+    manager = None
+    if config.comfyui.install_manager:
+        python_minor = ".".join(config.python.version.split(".")[:2])
+        manager = ManagerCapabilityPlan(
+            requirements_path="manager_requirements.txt",
+            distribution="comfyui-manager",
+            import_name="comfyui_manager",
+            executable="/opt/venv/bin/cm-cli",
+            entrypoint_name="cm-cli",
+            entrypoint_value="comfyui_manager.cm_cli.__main__:main",
+            import_anchor=(
+                f"{_VENV_PATH}/lib/python{python_minor}/site-packages/"
+                "comfyui-docker-helper-comfyui.pth"
+            ),
+        )
     custom_nodes = tuple(
         _custom_node(node, comfyui_path, entries, used)
         for node in config.comfyui.custom_nodes
@@ -936,7 +987,6 @@ def construct_build_plan(
                 commit=comfyui_entry.commit,
                 floor_commit=COMFYUI_FLOOR_COMMIT,
                 formal_release=comfyui_entry.formal_release,
-                install_manager=config.comfyui.install_manager,
                 requirements=ComfyUIRequirementsPlan(
                     path=requirements_entry.path,
                     floor_commit=requirements_entry.floor_commit,
@@ -954,6 +1004,7 @@ def construct_build_plan(
                         for item in requirements_entry.protected
                     ),
                 ),
+                manager=manager,
             ),
         ),
         custom_nodes=CustomNodesPhase(

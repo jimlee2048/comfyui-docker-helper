@@ -67,6 +67,13 @@ ComfyUI v0.11.0 is the minimum supported release. Every resolved formal,
 moving, nightly, or full-commit checkout must descend from the immutable
 v0.11.0 floor commit before dependency installation begins.
 
+`install_manager = true` installs the exact checkout's declared Manager package
+into `/opt/venv` and verifies its absolute `/opt/venv/bin/cm-cli` capability.
+It does not add `--enable-manager` to ComfyUI startup; add that runtime argument
+explicitly through `comfyui.extra_args` when the selected checkout supports it.
+This application capability is independent of the optional isolated comfy-cli
+user tool.
+
 See [`examples/full.toml`](examples/full.toml) for all currently active fields.
 
 ## Validate, render, and build

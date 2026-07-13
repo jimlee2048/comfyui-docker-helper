@@ -46,3 +46,7 @@ executables linked under `/opt/uv/bin`. The application interpreter and its
 executable collisions are fatal. `[comfyui].install_cli` independently controls
 the isolated user-facing comfy-cli tool; enabled mode installs its exact locked
 release before generic tools and disabled mode omits it completely.
+`[comfyui].install_manager` separately controls the exact checkout-declared
+Manager package and `/opt/venv/bin/cm-cli` application capability. Enabling the
+capability does not append `--enable-manager`; runtime arguments remain explicit
+under `comfyui.extra_args`.

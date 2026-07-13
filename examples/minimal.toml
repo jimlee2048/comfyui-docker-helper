@@ -10,6 +10,7 @@ extra_packages = ["torchvision==0.27.1"]
 
 [comfyui]
 version = "0.11.0"
+# Disables the checkout-owned Manager/cm-cli application capability.
 install_manager = false
 
 [build]

@@ -110,7 +110,9 @@ version = "0.11.0"
 # Default: true. Installs the latest target-compatible stable comfy-cli >=1.7.0
 # as an isolated user tool; cdh does not invoke it during an image build.
 install_cli = true
-# Default: true. Must be true when custom_nodes are configured.
+# Default: true. Installs the exact checkout-declared Manager package and
+# /opt/venv/bin/cm-cli capability. This does not add --enable-manager to runtime
+# arguments. Must be true when Registry custom_nodes are configured.
 install_manager = true
 # Default: "0.0.0.0". cdh owns the final ComfyUI --listen argument.
 listen = "0.0.0.0"

@@ -89,6 +89,7 @@ def run_argv(
     env: Mapping[str, str],
     description: str = "command",
     start_new_session: bool = False,
+    close_stdin: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an argv subprocess with inherited stdout/stderr and strict failure."""
 
@@ -105,6 +106,8 @@ def run_argv(
         }
         if start_new_session:
             run_kwargs["start_new_session"] = True
+        if close_stdin:
+            run_kwargs["stdin"] = subprocess.DEVNULL
         result = subprocess.run(command, **run_kwargs)
     except FileNotFoundError as error:
         raise ContainerCommandError(

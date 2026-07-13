@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from tests.unit.test_build_plan import accepted_resolution, final_config
 
 from comfyui_docker_helper.config.build_plan import (
+    BuildPlan,
     build_plan_digest,
     construct_build_plan,
     dump_build_plan_json,
@@ -123,6 +124,46 @@ def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
     for command in ("comfy", "comfy-cli", "comfycli"):
         assert f"test ! -e /opt/uv/bin/{command}" in rendered
         assert f"test ! -L /opt/uv/bin/{command}" in rendered
+
+
+def test_renderer_runs_complete_registry_sequence_in_one_later_layer() -> None:
+    plan = construct_build_plan(
+        final_config(install_cli=False), accepted_resolution(install_cli=False)
+    )
+
+    rendered = render_build_plan_dockerfile(plan)
+
+    assert rendered.count("container install-registry-nodes") == 1
+    assert rendered.index("container install-comfyui") < rendered.index(
+        "container install-registry-nodes"
+    )
+    registry_line = next(
+        line for line in rendered.splitlines() if "install-registry-nodes" in line
+    )
+    assert registry_line.startswith("RUN /opt/uv/bin/cdh container")
+    assert "--custom-nodes-phase /opt/cdh/build/phases/custom-nodes.json" in (
+        registry_line
+    )
+    assert "--application-phase /opt/cdh/build/phases/application.json" in (
+        registry_line
+    )
+    assert "--constraints /opt/cdh/build/python-package-constraints.txt" in (
+        registry_line
+    )
+    assert "--hooks-directory /opt/cdh/build/inputs" in registry_line
+    assert "comfy node" not in rendered
+    assert "comfy install" not in rendered
+
+
+def test_renderer_omits_registry_layer_when_phase_has_only_git_nodes() -> None:
+    plan = construct_build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    document["custom_nodes"]["nodes"] = tuple(
+        node for node in document["custom_nodes"]["nodes"] if node["type"] == "git"
+    )
+    git_only = BuildPlan.model_validate(document)
+
+    assert "install-registry-nodes" not in render_build_plan_dockerfile(git_only)
 
 
 def test_materializer_writes_deterministic_plan_phases_and_verified_input(

@@ -818,6 +818,38 @@ def test_registry_id_rejects_leading_option_marker(model: str) -> None:
             RegistryRequestIdentity(type="registry", id="--help", selector="latest")
 
 
+@pytest.mark.parametrize("model", ["lock", "request"])
+@pytest.mark.parametrize("node_id", ["invalid/name", "invalid!name"])
+def test_registry_id_requires_valid_project_name(model: str, node_id: str) -> None:
+    with pytest.raises(ValidationError, match="valid Registry project name"):
+        if model == "lock":
+            RegistryNodeLockEntry(
+                type="registry",
+                request_digest=DIGEST_A,
+                id=node_id,
+                version="1.0.0",
+            )
+        else:
+            RegistryRequestIdentity(type="registry", id=node_id, selector="latest")
+
+
+def test_registry_lock_and_request_preserve_raw_valid_id_spelling() -> None:
+    entry = RegistryNodeLockEntry(
+        type="registry",
+        request_digest=DIGEST_A,
+        id="Example_Node",
+        version="1.0.0",
+    )
+    request = RegistryRequestIdentity(
+        type="registry",
+        id="Example_Node",
+        selector="latest",
+    )
+
+    assert entry.id == "Example_Node"
+    assert request.id == "Example_Node"
+
+
 def test_request_models_expose_no_execution_or_resolved_only_fields() -> None:
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         DirectGitRequestIdentity.model_validate(

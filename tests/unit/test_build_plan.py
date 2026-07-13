@@ -399,7 +399,6 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     assert manager.import_name == "comfyui_manager"
     assert manager.executable == "/opt/venv/bin/cm-cli"
     assert manager.entrypoint_name == "cm-cli"
-    assert manager.entrypoint_value == "comfyui_manager.cm_cli.__main__:main"
     assert manager.import_anchor == (
         "/opt/venv/lib/python3.13/site-packages/comfyui-docker-helper-comfyui.pth"
     )
@@ -410,6 +409,10 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
         "latent2rgb",
     )
     assert not hasattr(plan.custom_nodes.nodes[0], "target")
+    assert plan.custom_nodes.user_directory == "/workspace/ComfyUI/user"
+    assert plan.custom_nodes.registry_inventory == (
+        "/opt/cdh/build/registry-inventory.json"
+    )
     assert plan.custom_nodes.nodes[1].target.endswith("/custom_nodes/direct-node")
     assert plan.files.files[0].target == (
         "/workspace/ComfyUI/models/checkpoints/model.safetensors"
@@ -429,6 +432,15 @@ def test_build_plan_binds_optional_manager_capability_to_custom_node_intent() ->
     disabled = BuildPlan.model_validate(document)
 
     assert disabled.application.comfyui.manager is None
+
+
+def test_build_plan_binds_registry_user_directory_to_comfyui() -> None:
+    plan = construct_build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    document["custom_nodes"]["user_directory"] = "/workspace/other/user"
+
+    with pytest.raises(ValidationError, match="user directory does not match"):
+        BuildPlan.model_validate(document)
 
 
 def test_constructor_projects_isolated_uv_tool_exact_result() -> None:

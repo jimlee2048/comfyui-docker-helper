@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import Specifier, SpecifierSet
-from packaging.utils import canonicalize_name
+from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
@@ -201,6 +201,7 @@ def validate_final_config_semantics(
         "custom_node.duplicate_registry_id",
         "registry IDs must be unique",
         diagnostics,
+        normalize=lambda value: canonicalize_name(value, validate=True),
     )
     _duplicate_diagnostics(
         domains.git_urls,
@@ -782,12 +783,18 @@ def _validate_registry_node(
     diagnostics: list[Diagnostic],
 ) -> None:
     registry_nodes.append((*path, "type"))
-    if not is_argv_value(node.id) or node.id.startswith("-"):
+    id_valid = is_argv_value(node.id) and not node.id.startswith("-")
+    if id_valid:
+        try:
+            canonicalize_name(node.id, validate=True)
+        except InvalidName:
+            id_valid = False
+    if not id_valid:
         diagnostics.append(
             Diagnostic(
                 (*path, "id"),
                 "custom_node.invalid_registry_id",
-                "must be a non-empty control-free Registry ID",
+                "must be a non-empty control-free valid Registry project name",
             )
         )
     else:
@@ -1048,12 +1055,15 @@ def _duplicate_diagnostics(
     code: str,
     message: str,
     diagnostics: list[Diagnostic],
+    *,
+    normalize: Callable[[str], str] | None = None,
 ) -> None:
     seen: set[str] = set()
     for item in values:
-        if item.value in seen:
+        value = item.value if normalize is None else normalize(item.value)
+        if value in seen:
             diagnostics.append(Diagnostic(item.path, code, message))
-        seen.add(item.value)
+        seen.add(value)
 
 
 def _package_owner_diagnostics(

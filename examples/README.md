@@ -49,4 +49,6 @@ release before generic tools and disabled mode omits it completely.
 `[comfyui].install_manager` separately controls the exact checkout-declared
 Manager package and `/opt/venv/bin/cm-cli` application capability. Enabling the
 capability does not append `--enable-manager`; runtime arguments remain explicit
-under `comfyui.extra_args`.
+under `comfyui.extra_args`. Registry nodes call only that absolute application
+command, remain independent of optional comfy-cli, and produce verified ordered
+evidence at `/opt/cdh/build/registry-inventory.json`.

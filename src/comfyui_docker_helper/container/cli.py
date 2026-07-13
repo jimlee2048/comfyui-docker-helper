@@ -12,6 +12,7 @@ from comfyui_docker_helper.container.application_installer import (
 from comfyui_docker_helper.container.comfyui_installer import install_comfyui
 from comfyui_docker_helper.container.download_files import download_files
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
+from comfyui_docker_helper.container.registry_installer import install_registry_nodes
 from comfyui_docker_helper.container.runners import ContainerRuntime
 
 app = typer.Typer(
@@ -127,6 +128,52 @@ def install_comfyui_command(
         runtime=ContainerRuntime.from_env(),
         constraints_path=constraints,
         resolution_manifest_path=resolution_manifest,
+    )
+
+
+@app.command("install-registry-nodes", context_settings=HELP_CONTEXT_SETTINGS)
+def install_registry_nodes_command(
+    custom_nodes_phase: Annotated[
+        Path,
+        typer.Option(
+            "--custom-nodes-phase",
+            help="Materialized custom-nodes phase JSON.",
+        ),
+    ],
+    application_phase: Annotated[
+        Path,
+        typer.Option(
+            "--application-phase",
+            help="Materialized application phase JSON.",
+        ),
+    ],
+    build_plan_digest: Annotated[
+        str,
+        typer.Option(
+            "--build-plan-digest",
+            help="Expected owning BuildPlan SHA-256 digest.",
+        ),
+    ],
+    constraints: Annotated[
+        Path,
+        typer.Option("--constraints", help="Materialized managed constraints file."),
+    ] = Path("/opt/cdh/build/python-package-constraints.txt"),
+    hooks_directory: Annotated[
+        Path,
+        typer.Option(
+            "--hooks-directory",
+            help="Materialized custom-node hook directory.",
+        ),
+    ] = Path("/opt/cdh/build/inputs"),
+) -> None:
+    """Install exact Registry nodes through checkout-owned Manager cm-cli."""
+    install_registry_nodes(
+        custom_nodes_phase,
+        application_phase,
+        expected_build_plan_digest=build_plan_digest,
+        runtime=ContainerRuntime.from_env(),
+        constraints_path=constraints,
+        hooks_directory=hooks_directory,
     )
 
 

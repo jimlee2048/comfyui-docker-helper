@@ -119,7 +119,6 @@ assert manager["distribution"] == "comfyui-manager"
 assert manager["import_name"] == "comfyui_manager"
 assert manager["executable"] == "/opt/venv/bin/cm-cli"
 assert manager["entrypoint_name"] == "cm-cli"
-assert manager["entrypoint_value"] == "comfyui_manager.cm_cli.__main__:main"
 assert manager["import_anchor"] == (
     "/opt/venv/lib/python3.13/site-packages/"
     "comfyui-docker-helper-comfyui.pth"
@@ -199,14 +198,13 @@ imported_comfy_origin = (
     else pathlib.Path(imported_comfy_spec.origin).resolve(strict=True)
 )
 assert imported_comfy_origin == comfy_origin
-entries = [
-    item
-    for item in metadata.distribution("comfyui-manager").entry_points
+owners = [
+    distribution.metadata["Name"]
+    for distribution in metadata.distributions()
+    for item in distribution.entry_points
     if item.group == "console_scripts" and item.name == "cm-cli"
 ]
-assert [(item.name, item.value) for item in entries] == [
-    ("cm-cli", "comfyui_manager.cm_cli.__main__:main")
-]
+assert owners == ["comfyui-manager"]
 assert "--enable-manager" not in plan["runtime"]["launch_command"]
 '
 uv --no-config pip check --python /opt/venv/bin/python --no-python-downloads

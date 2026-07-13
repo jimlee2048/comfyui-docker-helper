@@ -74,6 +74,13 @@ explicitly through `comfyui.extra_args` when the selected checkout supports it.
 This application capability is independent of the optional isolated comfy-cli
 user tool.
 
+Registry custom nodes use that verified absolute `cm-cli` directly, one exact
+node request per process. cdh independently verifies each installed root
+`pyproject.toml` identity/version before hooks or a later node, rechecks the
+admitted node set after hooks, and writes the final declaration-ordered evidence
+to `/opt/cdh/build/registry-inventory.json`. Registry builds do not invoke the
+optional `comfy`, `comfy-cli`, or `comfycli` commands.
+
 See [`examples/full.toml`](examples/full.toml) for all currently active fields.
 
 ## Validate, render, and build
@@ -221,7 +228,9 @@ documents.
   `UV_` or `PIP_` are reserved so config cannot alter build-time package
   sources, constraints, configuration, Python selection, or tool ownership.
   Runtime `docker run -e` overrides are outside baked-image replay guarantees.
-- Registry custom nodes require Manager. Direct Git nodes are independently
+- Registry custom-node IDs must be valid Python project names. They require
+  Manager, preserve their raw locked ID/version,
+  and reject duplicate normalized IDs. Direct Git nodes are independently
   locked to full commits.
 - HTTPX `retries` remains an active public setting.
 - Ordinary configured values may appear in rendered artifacts or logs when the

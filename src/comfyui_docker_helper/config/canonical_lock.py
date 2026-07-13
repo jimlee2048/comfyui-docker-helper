@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import tomli_w
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -953,6 +954,10 @@ def _require_registry_id(value: str) -> str:
     value = _require_token(value, "id")
     if value.startswith("-"):
         raise ValueError("id must be one argv-safe Registry ID")
+    try:
+        canonicalize_name(value, validate=True)
+    except InvalidName as error:
+        raise ValueError("id must be one valid Registry project name") from error
     return value
 
 

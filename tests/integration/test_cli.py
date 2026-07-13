@@ -58,6 +58,7 @@ def test_root_command_exposes_current_groups() -> None:
         "entrypoint",
         "install-comfyui",
         "install-inference",
+        "install-registry-nodes",
     }
 
 
@@ -72,6 +73,10 @@ def test_root_command_exposes_current_groups() -> None:
         (["container"], "Usage: cdh container"),
         (["container", "download-files"], "Usage: cdh container download-files"),
         (["container", "install-inference"], "Usage: cdh container install-inference"),
+        (
+            ["container", "install-registry-nodes"],
+            "Usage: cdh container install-registry-nodes",
+        ),
         (["container", "entrypoint"], "Usage: cdh container entrypoint"),
     ],
 )
@@ -96,6 +101,24 @@ def test_container_helper_help_exposes_phase_binding(cli_runner: CliRunner) -> N
     assert result.exit_code == 0
     assert "--phase" in result.output
     assert "--build-plan-digest" in result.output
+    assert "--config" not in result.output
+    assert "--lock" not in result.output
+
+
+def test_registry_helper_help_exposes_only_owned_inputs(
+    cli_runner: CliRunner,
+) -> None:
+    result = cli_runner.invoke(
+        app,
+        ["container", "install-registry-nodes", "--help"],
+    )
+
+    assert result.exit_code == 0
+    assert "--custom-nodes-phase" in result.output
+    assert "--application-phase" in result.output
+    assert "--build-plan-digest" in result.output
+    assert "--constraints" in result.output
+    assert "--hooks-directory" in result.output
     assert "--config" not in result.output
     assert "--lock" not in result.output
 

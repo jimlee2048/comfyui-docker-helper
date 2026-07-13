@@ -296,7 +296,6 @@ def test_checkout_owned_manager_capability_flows_only_to_application_phase(
     assert manager == {
         "distribution": "comfyui-manager",
         "entrypoint_name": "cm-cli",
-        "entrypoint_value": "comfyui_manager.cm_cli.__main__:main",
         "executable": "/opt/venv/bin/cm-cli",
         "import_anchor": (
             "/opt/venv/lib/python3.13/site-packages/comfyui-docker-helper-comfyui.pth"
@@ -305,6 +304,10 @@ def test_checkout_owned_manager_capability_flows_only_to_application_phase(
         "requirements_path": "manager_requirements.txt",
     }
     assert plan["toolchain"]["tool_store"]["comfy_cli"] is None
+    assert plan["custom_nodes"]["user_directory"] == "/workspace/ComfyUI/user"
+    assert plan["custom_nodes"]["registry_inventory"] == (
+        "/opt/cdh/build/registry-inventory.json"
+    )
     assert "--enable-manager" not in plan["runtime"]["launch_command"]
     phase = json.loads((output / "phases/application.json").read_bytes())
     assert phase["payload"]["comfyui"]["manager"] == manager

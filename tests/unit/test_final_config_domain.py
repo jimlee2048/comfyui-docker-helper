@@ -404,6 +404,37 @@ def test_exact_registry_prerelease_remains_a_valid_published_selector() -> None:
     assert "custom_node.invalid_registry_version" not in _codes(config)
 
 
+def test_registry_duplicate_ids_use_normalized_project_identity() -> None:
+    document = _document()
+    document["comfyui"]["install_manager"] = True
+    document["comfyui"]["custom_nodes"] = [
+        {"type": "registry", "id": "Example_Node", "version": "1.0.0"},
+        {"type": "registry", "id": "example.node", "version": "1.1.0"},
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert config.comfyui.custom_nodes[0].id == "Example_Node"
+    assert [
+        item.path
+        for item in diagnostics
+        if item.code == "custom_node.duplicate_registry_id"
+    ] == [("comfyui", "custom_nodes", 1, "id")]
+
+
+@pytest.mark.parametrize("node_id", ["invalid/name", "invalid!name"])
+def test_registry_id_requires_valid_project_name(node_id: str) -> None:
+    document = _document()
+    document["comfyui"]["install_manager"] = True
+    document["comfyui"]["custom_nodes"] = [
+        {"type": "registry", "id": node_id, "version": "1.0.0"}
+    ]
+    config = validate_final_config_structure(document)
+
+    assert "custom_node.invalid_registry_id" in _codes(config)
+
+
 def test_registry_selector_ranges_reject_prerelease_operands() -> None:
     document = _document()
     document["comfyui"]["install_manager"] = True

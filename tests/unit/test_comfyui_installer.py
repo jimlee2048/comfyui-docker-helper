@@ -524,9 +524,8 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     assert install_kwargs["env"]["PIP_CONSTRAINT"] == os.fspath(constraints)
     verify, verify_kwargs = commands[1]
     assert verify[0] == os.fspath(runtime.python)
-    assert verify[-4] == os.fspath(Path(manager.import_anchor).parent)
-    assert verify[-3] == manager.import_name
-    assert verify[-2:] == (manager.entrypoint_name, manager.entrypoint_value)
+    assert verify[-2] == os.fspath(Path(manager.import_anchor).parent)
+    assert verify[-1] == manager.import_name
     assert verify_kwargs["env"]["COMFYUI_PATH"] == os.fspath(runtime.comfyui_path)
     assert verify_kwargs["env"]["VIRTUAL_ENV"] == os.fspath(runtime.virtual_env)
     assert events == [
@@ -606,8 +605,20 @@ def test_declared_manager_distributions_are_verified_from_application_site(
     def distributions(*, path):
         observed_paths.append(path)
         return (
-            SimpleNamespace(metadata={"Name": "ComfyUI_Manager"}, version="4.1b8"),
-            SimpleNamespace(metadata={"Name": "packaging"}, version="26.2"),
+            SimpleNamespace(
+                metadata={"Name": "ComfyUI_Manager"},
+                version="4.1b8",
+                entry_points=(
+                    SimpleNamespace(
+                        group="console_scripts", name="cm-cli", value="cm_cli:main"
+                    ),
+                ),
+            ),
+            SimpleNamespace(
+                metadata={"Name": "packaging"},
+                version="26.2",
+                entry_points=(),
+            ),
         )
 
     monkeypatch.setattr(
@@ -634,13 +645,208 @@ def test_declared_manager_distribution_mismatch_fails_capability(
         comfyui_installer.importlib_metadata,
         "distributions",
         lambda **_kwargs: (
-            SimpleNamespace(metadata={"Name": "comfyui-manager"}, version="4.0.4"),
+            SimpleNamespace(
+                metadata={"Name": "comfyui-manager"},
+                version="4.0.4",
+                entry_points=(),
+            ),
         ),
     )
 
     with pytest.raises(ComfyUIInstallError, match="does not satisfy"):
         comfyui_installer._verify_declared_manager_distributions(
             application, parsed, runtime
+        )
+
+
+@pytest.mark.parametrize("case", ["missing", "duplicate", "other-owner"])
+def test_manager_cm_cli_requires_one_unique_distribution_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    application, runtime = _application(tmp_path)
+    parsed = parse_manager_requirements(
+        _MANAGER_REQUIREMENTS,
+        python_version="3.13.14",
+        platform="linux/amd64",
+    )
+    manager_entries = ()
+    if case != "missing":
+        manager_entries = (
+            SimpleNamespace(
+                group="console_scripts",
+                name="cm-cli",
+                value="comfyui_manager.cm_cli.__main__:main",
+            ),
+        )
+    if case == "duplicate":
+        manager_entries = (*manager_entries, manager_entries[0])
+    distributions = [
+        SimpleNamespace(
+            metadata={"Name": "comfyui-manager"},
+            version="4.0.5",
+            entry_points=manager_entries,
+        )
+    ]
+    if case == "other-owner":
+        distributions.append(
+            SimpleNamespace(
+                metadata={"Name": "other"},
+                version="1.0.0",
+                entry_points=(
+                    SimpleNamespace(
+                        group="console_scripts", name="cm-cli", value="other:main"
+                    ),
+                ),
+            )
+        )
+    monkeypatch.setattr(
+        comfyui_installer.importlib_metadata,
+        "distributions",
+        lambda **_kwargs: tuple(distributions),
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="console ownership"):
+        comfyui_installer._verify_declared_manager_distributions(
+            application, parsed, runtime
+        )
+
+
+@pytest.mark.parametrize("owner_name", [None, "invalid/name"])
+def test_manager_cm_cli_rejects_unidentifiable_distribution_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_name: str | None,
+) -> None:
+    application, runtime = _application(tmp_path)
+    parsed = parse_manager_requirements(
+        _MANAGER_REQUIREMENTS,
+        python_version="3.13.14",
+        platform="linux/amd64",
+    )
+    distributions = (
+        SimpleNamespace(
+            metadata={"Name": "comfyui-manager"},
+            version="4.0.5",
+            entry_points=(
+                SimpleNamespace(
+                    group="console_scripts",
+                    name="cm-cli",
+                    value="comfyui_manager.cm_cli.__main__:main",
+                ),
+            ),
+        ),
+        SimpleNamespace(
+            metadata={"Name": owner_name},
+            version="1.0.0",
+            entry_points=(
+                SimpleNamespace(
+                    group="console_scripts",
+                    name="cm-cli",
+                    value="unidentified:main",
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        comfyui_installer.importlib_metadata,
+        "distributions",
+        lambda **_kwargs: distributions,
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="unidentifiable"):
+        comfyui_installer._verify_declared_manager_distributions(
+            application, parsed, runtime
+        )
+
+
+def test_registry_manager_capability_captures_and_reuses_immutable_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    manager = application.comfyui.manager
+    assert manager is not None
+    parsed = parse_manager_requirements(
+        _MANAGER_REQUIREMENTS,
+        python_version="3.13.14",
+        platform="linux/amd64",
+    )
+    events: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_read_manager_requirements",
+        lambda observed_application, observed_manager, observed_path: (
+            events.append(
+                ("requirements", observed_application, observed_manager, observed_path)
+            )
+            or parsed
+        ),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_declared_manager_distributions",
+        lambda observed_application, observed_parsed, observed_runtime: events.append(
+            ("distributions", observed_application, observed_parsed, observed_runtime)
+        ),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_cm_cli",
+        lambda observed_path, observed_runtime: events.append(
+            ("executable", observed_path, observed_runtime)
+        ),
+    )
+
+    authority = comfyui_installer.capture_manager_registry_authority(
+        application,
+        runtime,
+    )
+    comfyui_installer.verify_manager_registry_capability(
+        application,
+        runtime,
+        authority,
+    )
+
+    assert events == [
+        ("requirements", application, manager, runtime.comfyui_path),
+        ("distributions", application, parsed, runtime),
+        ("executable", Path(manager.executable), runtime),
+        ("requirements", application, manager, runtime.comfyui_path),
+        ("distributions", application, parsed, runtime),
+        ("executable", Path(manager.executable), runtime),
+    ]
+
+
+def test_registry_manager_authority_rejects_same_semantics_content_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    runtime.comfyui_path.mkdir(parents=True)
+    requirements = runtime.comfyui_path / "manager_requirements.txt"
+    requirements.write_bytes(_MANAGER_REQUIREMENTS)
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_declared_manager_distributions",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
+
+    authority = comfyui_installer.capture_manager_registry_authority(
+        application,
+        runtime,
+    )
+    requirements.write_bytes(
+        b"# same parsed requirements, different bytes\n" + _MANAGER_REQUIREMENTS
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="authority changed"):
+        comfyui_installer.verify_manager_registry_capability(
+            application,
+            runtime,
+            authority,
         )
 
 
@@ -979,8 +1185,6 @@ def _run_manager_capability_check(
             os.fspath(workspace),
             os.fspath(site_packages),
             "comfyui_manager",
-            "cm-cli",
-            "comfyui_manager.cm_cli.__main__:main",
         ],
         check=False,
         capture_output=True,

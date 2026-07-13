@@ -409,7 +409,6 @@ class ManagerCapabilityPlan(_PlanModel):
     import_name: Literal["comfyui_manager"]
     executable: Literal["/opt/venv/bin/cm-cli"]
     entrypoint_name: Literal["cm-cli"]
-    entrypoint_value: Literal["comfyui_manager.cm_cli.__main__:main"]
     import_anchor: str
 
     @field_validator("import_anchor")
@@ -523,7 +522,17 @@ CustomNodePlan = Annotated[RegistryNodePlan | GitNodePlan, Field(discriminator="
 
 class CustomNodesPhase(_PlanModel):
     install_manager: bool
+    user_directory: str
+    registry_inventory: Literal["/opt/cdh/build/registry-inventory.json"]
     nodes: tuple[CustomNodePlan, ...]
+
+    @field_validator("user_directory")
+    @classmethod
+    def _validate_user_directory(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if not path.is_absolute() or path.as_posix() != value:
+            raise ValueError("Registry user directory must be one absolute POSIX path")
+        return value
 
 
 class Aria2Plan(_PlanModel):
@@ -625,6 +634,11 @@ class BuildPlan(_PlanModel):
             raise ValueError("PyTorch application target does not match the toolchain")
         if bool(self.application.comfyui.manager) != self.custom_nodes.install_manager:
             raise ValueError("Manager capability does not match custom-node intent")
+        expected_user_directory = str(
+            PurePosixPath(self.application.paths.comfyui) / "user"
+        )
+        if self.custom_nodes.user_directory != expected_user_directory:
+            raise ValueError("Registry user directory does not match ComfyUI")
         return self
 
 
@@ -887,7 +901,6 @@ def construct_build_plan(
             import_name="comfyui_manager",
             executable="/opt/venv/bin/cm-cli",
             entrypoint_name="cm-cli",
-            entrypoint_value="comfyui_manager.cm_cli.__main__:main",
             import_anchor=(
                 f"{_VENV_PATH}/lib/python{python_minor}/site-packages/"
                 "comfyui-docker-helper-comfyui.pth"
@@ -1009,6 +1022,8 @@ def construct_build_plan(
         ),
         custom_nodes=CustomNodesPhase(
             install_manager=config.comfyui.install_manager,
+            user_directory=str(PurePosixPath(comfyui_path) / "user"),
+            registry_inventory="/opt/cdh/build/registry-inventory.json",
             nodes=custom_nodes,
         ),
         files=FilesPhase(

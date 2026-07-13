@@ -126,7 +126,8 @@ extra_args = []
 [[comfyui.custom_nodes]]
 # Registry custom node installed with ComfyUI-Manager.
 type = "registry"
-# Required for registry nodes. Registry IDs must be unique in this file.
+# Required for registry nodes. Registry IDs must be unique after normalized
+# Python project-name comparison.
 id = "comfyui-custom-scripts"
 # Default: unset. Use "latest", a registry-supported version selector, or
 # PEP 440-style constraints such as ">=1.0.0,<2.0.0" where applicable.

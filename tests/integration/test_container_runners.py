@@ -130,6 +130,31 @@ def test_run_argv_can_request_new_process_session(
     assert calls[1]["start_new_session"] is True
 
 
+def test_run_argv_can_close_child_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append({"command": command, **kwargs})
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    run_argv(
+        ["cm-cli", "install"],
+        cwd=tmp_path,
+        env={},
+        close_stdin=True,
+    )
+
+    assert calls[0]["stdin"] is subprocess.DEVNULL
+
+
 def test_start_argv_can_request_new_process_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

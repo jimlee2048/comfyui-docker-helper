@@ -14,7 +14,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 
 from packaging.specifiers import SpecifierSet
-from packaging.utils import canonicalize_name
+from packaging.utils import InvalidName, canonicalize_name
 
 from comfyui_docker_helper.comfyui_requirements import (
     ComfyUIRequirementsError,
@@ -430,8 +430,6 @@ def _install_manager_capability(
             os.fspath(runtime.comfyui_path),
             os.fspath(site_packages),
             manager.import_name,
-            manager.entrypoint_name,
-            manager.entrypoint_value,
         ),
         cwd=_BUILD_DIRECTORY,
         env={
@@ -453,17 +451,39 @@ def _verify_declared_manager_distributions(
     site_packages = (
         runtime.virtual_env / "lib" / f"python{python_minor}" / "site-packages"
     )
+    manager = application.comfyui.manager
+    if manager is None:  # pragma: no cover - caller owns the enabled capability.
+        raise ComfyUIInstallError("Manager capability is unavailable")
     observed: dict[str, str] = {}
+    distributions: dict[str, importlib_metadata.Distribution] = {}
     for distribution in importlib_metadata.distributions(path=[str(site_packages)]):
-        name = distribution.metadata["Name"]
+        controlled_entries = tuple(
+            entrypoint
+            for entrypoint in distribution.entry_points
+            if entrypoint.group == "console_scripts"
+            and entrypoint.name == manager.entrypoint_name
+        )
+        name = distribution.metadata.get("Name")
         if not name:
+            if controlled_entries:
+                raise ComfyUIInstallError(
+                    "Manager cm-cli console owner is unidentifiable"
+                )
             continue
-        normalized = canonicalize_name(name)
+        try:
+            normalized = canonicalize_name(name, validate=True)
+        except InvalidName as error:
+            if controlled_entries:
+                raise ComfyUIInstallError(
+                    "Manager cm-cli console owner is unidentifiable"
+                ) from error
+            continue
         if normalized in observed:
             raise ComfyUIInstallError(
                 f"Manager environment duplicates distribution {normalized}"
             )
         observed[normalized] = distribution.version
+        distributions[normalized] = distribution
     for declared in parsed.active:
         actual = observed.get(declared.package)
         if actual is None or not SpecifierSet(declared.specifier).contains(
@@ -472,6 +492,49 @@ def _verify_declared_manager_distributions(
             raise ComfyUIInstallError(
                 f"installed {declared.package} does not satisfy Manager requirements"
             )
+    if observed.get(manager.distribution) != parsed.manager_version:
+        raise ComfyUIInstallError(
+            "installed Manager does not match checkout requirements"
+        )
+    owners = tuple(
+        name
+        for name, distribution in distributions.items()
+        for entrypoint in distribution.entry_points
+        if entrypoint.group == "console_scripts"
+        and entrypoint.name == manager.entrypoint_name
+    )
+    if owners != (manager.distribution,):
+        raise ComfyUIInstallError("Manager cm-cli console ownership is invalid")
+
+
+def capture_manager_registry_authority(
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+) -> ParsedManagerRequirements:
+    """Capture and prove the immutable Manager authority before Registry hooks."""
+    manager = application.comfyui.manager
+    if manager is None:
+        raise ComfyUIInstallError("Manager capability is unavailable")
+    parsed = _read_manager_requirements(application, manager, runtime.comfyui_path)
+    _verify_declared_manager_distributions(application, parsed, runtime)
+    _verify_cm_cli(Path(manager.executable), runtime)
+    return parsed
+
+
+def verify_manager_registry_capability(
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    authority: ParsedManagerRequirements,
+) -> None:
+    """Re-prove Manager without allowing hooks to retarget its authority."""
+    manager = application.comfyui.manager
+    if manager is None:
+        raise ComfyUIInstallError("Manager capability is unavailable")
+    current = _read_manager_requirements(application, manager, runtime.comfyui_path)
+    if current != authority:
+        raise ComfyUIInstallError("Manager requirements authority changed")
+    _verify_declared_manager_distributions(application, authority, runtime)
+    _verify_cm_cli(Path(manager.executable), runtime)
 
 
 def _read_manager_requirements(
@@ -834,11 +897,6 @@ _MANAGER_CAPABILITY_CHECK = "; ".join(
         "imported_comfy_origin=None if imported_comfy_spec.origin is None else "
         "pathlib.Path(imported_comfy_spec.origin).resolve(strict=True)",
         "assert imported_comfy_origin == comfy_origin",
-        "distribution=m.distribution('comfyui-manager')",
-        "commands=[item for item in distribution.entry_points "
-        "if item.group == 'console_scripts' and item.name == sys.argv[5] "
-        "and item.value == sys.argv[6]]",
-        "assert len(commands) == 1",
     )
 )
 

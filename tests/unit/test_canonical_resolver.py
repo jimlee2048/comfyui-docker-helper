@@ -13,6 +13,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
@@ -24,6 +26,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    ProtectedRequirementProjection,
     PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
@@ -42,6 +45,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
     ReconcilePurpose,
     reconcile_canonical_lock,
 )
+from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
 )
@@ -140,6 +144,85 @@ def _local_request() -> LocalExecutableIdentityRequest:
     )
 
 
+def test_requirements_sidecar_reuses_refreshes_and_locked_never_calls_provider() -> (
+    None
+):
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository="https://github.com/Comfy-Org/ComfyUI.git",
+        commit=COMMIT_A,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        protected_names=["torch", "torchaudio", "torchvision"],
+        protected_policy_digest=DIGEST_B,
+    )
+
+    @dataclass
+    class SidecarAcquirer:
+        calls: int = 0
+
+        def acquire(self, requested, request_digest: str):
+            self.calls += 1
+            return AcquiredCanonicalEntries(
+                (
+                    ComfyUIRequirementsLockEntry(
+                        type="comfyui-requirements",
+                        request_digest=request_digest,
+                        repository=requested.repository,
+                        commit=requested.commit,
+                        floor_commit=requested.floor_commit,
+                        path=requested.path,
+                        python_version=requested.python_version,
+                        platform=requested.platform,
+                        protected_names=requested.protected_names,
+                        protected_policy_digest=requested.protected_policy_digest,
+                        requirements_digest=DIGEST_A,
+                        protected=[
+                            ProtectedRequirementProjection(
+                                package="torchaudio", extras=[], selector=""
+                            )
+                        ],
+                    ),
+                ),
+                True,
+            )
+
+    desired = _desired((request,))
+    first_acquirer = SidecarAcquirer()
+    first = reconcile_canonical_lock(desired, existing=None, acquirer=first_acquirer)
+    assert first_acquirer.calls == 1
+    assert first.provider_calls == (("comfyui-requirements", request.repository),)
+
+    default_acquirer = SidecarAcquirer()
+    reused = reconcile_canonical_lock(
+        desired, existing=first.lock, acquirer=default_acquirer
+    )
+    assert default_acquirer.calls == 0
+    assert not reused.changed
+
+    upgrade_acquirer = SidecarAcquirer()
+    upgraded = reconcile_canonical_lock(
+        desired,
+        existing=first.lock,
+        acquirer=upgrade_acquirer,
+        policy=LockPolicy.UPGRADE,
+    )
+    assert upgrade_acquirer.calls == 1
+    assert not upgraded.changed
+
+    locked_acquirer = SidecarAcquirer()
+    locked = reconcile_canonical_lock(
+        desired,
+        existing=first.lock,
+        acquirer=locked_acquirer,
+        policy=LockPolicy.LOCKED,
+    )
+    assert locked_acquirer.calls == 0
+    assert not locked.changed
+
+
 @dataclass
 class FakeLocalAcquirer:
     digest: str = DIGEST_A
@@ -219,7 +302,7 @@ class FakeAcquirer:
                     request_digest=effective_digest,
                     repository=request.repository,
                     commit=f"{generation:x}" * 40,
-                    formal_release="0.4.0",
+                    formal_release="0.11.0",
                 ),
             )
         elif isinstance(request, ComfyCliRequestIdentity):

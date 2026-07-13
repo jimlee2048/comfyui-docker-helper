@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tomllib
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -127,6 +128,14 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     assert "cdh-production-requirements.txt" in tree
     assert "cdh-production-inventory.txt" in tree
     routing = tree["pytorch-resolution.toml"].decode()
+    routing_document = tomllib.loads(routing)
+    source_map = routing_document["tool"]["uv"]["sources"]
+    expected_source_packages = {
+        package.name for package in plan.application.pytorch.packages
+    }
+    assert set(source_map) == expected_source_packages
+    assert "torchaudio" in source_map
+    assert all(source == {"index": "pytorch"} for source in source_map.values())
     assert 'url = "https://pypi.org/simple"' in routing
     assert 'url = "https://download.pytorch.org/whl/cu130"' in routing
     assert '[tool.uv.sources.torch]\nindex = "pytorch"' in routing
@@ -140,7 +149,7 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
         "COPY --chown=0:0 --chmod=0444 pytorch-resolution.toml "
         "/opt/cdh/build/pyproject.toml" in dockerfile
     )
-    assert "container install-inference" in dockerfile
+    assert "container install-comfyui" in dockerfile
     assert "torch==2.12.1+cu130" not in dockerfile
     assert "UV_CONSTRAINT" not in dockerfile
     assert "PIP_CONSTRAINT" not in dockerfile

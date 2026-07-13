@@ -102,9 +102,10 @@ output = "load"
 platforms = ["linux/amd64"]
 
 [comfyui]
-# Required. Supported: "latest", "nightly", semver, v-prefixed semver, or
-# PEP 440-style constraints such as ">=0.3.0,<0.4.0" where accepted upstream.
-version = "0.4.0"
+# Required. Supported: "latest", "nightly", a full lowercase commit, semver,
+# v-prefixed semver, or PEP 440-style constraints such as ">=0.11.0,<1".
+# Every resolved checkout must descend from the immutable v0.11.0 floor.
+version = "0.11.0"
 # Default: "latest". Supported: "latest", a public PEP 440 comfy-cli version,
 # or PEP 440-style constraints such as ">=1.4.0,<2.0.0".
 cli_version = "1.5.3"

@@ -56,6 +56,7 @@ def test_root_command_exposes_current_groups() -> None:
     assert set(command.commands["container"].commands) == {
         "download-files",
         "entrypoint",
+        "install-comfyui",
         "install-inference",
     }
 
@@ -170,7 +171,7 @@ version = "13.0.3"
 [pytorch]
 version = "2.12.1"
 [comfyui]
-version = "0.4.0"
+version = "0.11.0"
 install_manager = false
 [build]
 tags = ["example:test"]
@@ -220,7 +221,7 @@ version = "13.0.3"
 [pytorch]
 version = "2.12.1"
 [comfyui]
-version = "0.4.0"
+version = "0.11.0"
 install_manager = false
 [build]
 tags = ["example:test"]
@@ -357,7 +358,7 @@ version = "13.0.3"
 [pytorch]
 version = "2.12.1"
 [comfyui]
-version = "0.4.0"
+version = "0.11.0"
 install_manager = false
 [build]
 tags = ["config:test"]
@@ -460,7 +461,7 @@ version = "13.0.3"
 [pytorch]
 version = "2.12.1"
 [comfyui]
-version = "0.4.0"
+version = "0.11.0"
 install_manager = false
 [build]
 tags = ["config:test"]

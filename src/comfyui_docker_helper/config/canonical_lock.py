@@ -27,6 +27,7 @@ from comfyui_docker_helper.config.selector_validation import (
 )
 from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
 
 CANONICAL_LOCK_SCHEMA_VERSION = 1
 INVALID_CANONICAL_LOCK_MESSAGE = (
@@ -64,6 +65,29 @@ class _ResolverEntry(_StrictLockModel):
     @classmethod
     def _validate_request_digest(cls, value: str) -> str:
         return _require_sha256(value)
+
+
+class ProtectedRequirementProjection(_StrictLockModel):
+    """One target-active normalized protected requirement."""
+
+    package: str
+    extras: list[str]
+    selector: str
+
+    @field_validator("package")
+    @classmethod
+    def _validate_package(cls, value: str) -> str:
+        return _require_normalized_package(value)
+
+    @field_validator("extras")
+    @classmethod
+    def _validate_extras(cls, value: list[str]) -> list[str]:
+        return _require_normalized_extras(value)
+
+    @field_validator("selector")
+    @classmethod
+    def _validate_selector(cls, value: str) -> str:
+        return _require_direct_package_selector(value)
 
 
 class OciLockEntry(_ResolverEntry):
@@ -175,17 +199,81 @@ class OfficialComfyUILockEntry(_ResolverEntry):
             normalized = normalize_comfyui_version(value)
         except ValueError as error:
             raise ValueError(
-                "formal_release must be a stable ComfyUI 0.4.0+ release"
+                "formal_release must be a stable ComfyUI "
+                f"{COMFYUI_MINIMUM_VERSION}+ release"
             ) from error
         if (
             normalized != value
             or value in {"latest", "nightly"}
             or any(character in value for character in "<>=!,")
             or _EXACT_STABLE_PATTERN.fullmatch(value) is None
-            or Version(value) < Version("0.4.0")
+            or Version(value) < Version(COMFYUI_MINIMUM_VERSION)
         ):
-            raise ValueError("formal_release must be a stable ComfyUI 0.4.0+ release")
+            raise ValueError(
+                "formal_release must be a stable ComfyUI "
+                f"{COMFYUI_MINIMUM_VERSION}+ release"
+            )
         return value
+
+
+class ComfyUIRequirementsLockEntry(_ResolverEntry):
+    """Exact root requirements bytes and target-active protected projection."""
+
+    type: Literal["comfyui-requirements"]
+    repository: str = Field(min_length=1)
+    commit: str
+    floor_commit: str
+    path: Literal["requirements.txt"]
+    python_version: str = Field(min_length=1)
+    platform: Literal["linux/amd64"]
+    protected_names: list[str] = Field(min_length=1)
+    protected_policy_digest: str
+    requirements_digest: str
+    protected: list[ProtectedRequirementProjection]
+
+    @field_validator("repository")
+    @classmethod
+    def _validate_repository(cls, value: str) -> str:
+        return _require_git_url(value)
+
+    @field_validator("commit", "floor_commit")
+    @classmethod
+    def _validate_commit(cls, value: str) -> str:
+        return _require_commit(value)
+
+    @field_validator("python_version")
+    @classmethod
+    def _validate_python_version(cls, value: str) -> str:
+        return _require_exact_stable_version(value)
+
+    @field_validator("protected_policy_digest", "requirements_digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return _require_sha256(value)
+
+    @field_validator("protected_names")
+    @classmethod
+    def _validate_protected_names(cls, value: list[str]) -> list[str]:
+        names = [_require_normalized_package(item) for item in value]
+        if names != sorted(set(names)):
+            raise ValueError("protected_names must be sorted and unique")
+        return names
+
+    @field_validator("protected")
+    @classmethod
+    def _validate_protected(
+        cls, value: list[ProtectedRequirementProjection]
+    ) -> list[ProtectedRequirementProjection]:
+        packages = [item.package for item in value]
+        if packages != sorted(set(packages)):
+            raise ValueError("protected projection must be sorted and unique")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_projection_names(self) -> ComfyUIRequirementsLockEntry:
+        if any(item.package not in self.protected_names for item in self.protected):
+            raise ValueError("protected projection contains an unowned package")
+        return self
 
 
 class ComfyCliLockEntry(_ResolverEntry):
@@ -319,6 +407,7 @@ CanonicalLockEntry = Annotated[
     OciLockEntry
     | ManagedPythonLockEntry
     | OfficialComfyUILockEntry
+    | ComfyUIRequirementsLockEntry
     | ComfyCliLockEntry
     | RegistryNodeLockEntry
     | DirectGitLockEntry
@@ -394,6 +483,48 @@ class ComfyUIRequestIdentity(_StrictLockModel):
     @classmethod
     def _normalize_selector(cls, value: str) -> str:
         return normalize_comfyui_version(_require_token(value, "selector"))
+
+
+class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
+    """Request for one exact commit's target-specific protected projection."""
+
+    type: Literal["comfyui-requirements"]
+    repository: str = Field(min_length=1)
+    commit: str
+    floor_commit: str
+    path: Literal["requirements.txt"]
+    python_version: str = Field(min_length=1)
+    platform: Literal["linux/amd64"]
+    protected_names: list[str] = Field(min_length=1)
+    protected_policy_digest: str
+
+    @field_validator("repository")
+    @classmethod
+    def _validate_repository(cls, value: str) -> str:
+        return _require_git_url(value)
+
+    @field_validator("commit", "floor_commit")
+    @classmethod
+    def _validate_commit(cls, value: str) -> str:
+        return _require_commit(value)
+
+    @field_validator("python_version")
+    @classmethod
+    def _validate_python_version(cls, value: str) -> str:
+        return _require_exact_stable_version(value)
+
+    @field_validator("protected_names")
+    @classmethod
+    def _validate_protected_names(cls, value: list[str]) -> list[str]:
+        names = [_require_normalized_package(item) for item in value]
+        if names != sorted(set(names)):
+            raise ValueError("protected_names must be sorted and unique")
+        return names
+
+    @field_validator("protected_policy_digest")
+    @classmethod
+    def _validate_policy_digest(cls, value: str) -> str:
+        return _require_sha256(value)
 
 
 class ComfyCliRequestIdentity(_StrictLockModel):
@@ -542,6 +673,9 @@ class PyTorchRequestIdentity(_StrictLockModel):
     platform: Literal["linux/amd64"]
     python_index_url: str = Field(min_length=1)
     pytorch_index_url: str = Field(min_length=1)
+    upstream_protected: list[ProtectedRequirementProjection] = Field(
+        default_factory=list
+    )
     members: list[DirectPythonRequestMember] = Field(min_length=1)
 
     @field_validator("channel")
@@ -562,6 +696,25 @@ class PyTorchRequestIdentity(_StrictLockModel):
         if "torch" not in packages:
             raise ValueError("pytorch groups must include torch")
         return sorted(value, key=lambda member: member.package)
+
+    @field_validator("upstream_protected")
+    @classmethod
+    def _normalize_upstream_protected(
+        cls, value: list[ProtectedRequirementProjection]
+    ) -> list[ProtectedRequirementProjection]:
+        packages = [member.package for member in value]
+        if packages != sorted(set(packages)):
+            raise ValueError("upstream_protected must be sorted and unique")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_upstream_members(self) -> PyTorchRequestIdentity:
+        members = {member.package: member for member in self.members}
+        for upstream in self.upstream_protected:
+            member = members.get(upstream.package)
+            if member is None or not set(upstream.extras).issubset(member.extras):
+                raise ValueError("upstream protected requirements must enter the group")
+        return self
 
     @field_validator("python_version")
     @classmethod
@@ -589,6 +742,7 @@ ResolverRequestIdentity = (
     OciRequestIdentity
     | ManagedPythonRequestIdentity
     | ComfyUIRequestIdentity
+    | ComfyUIRequirementsRequestIdentity
     | ComfyCliRequestIdentity
     | RegistryRequestIdentity
     | DirectGitRequestIdentity
@@ -647,6 +801,8 @@ def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
     if isinstance(entry, ManagedPythonLockEntry):
         return (entry.type, entry.implementation, entry.platform)
     if isinstance(entry, OfficialComfyUILockEntry):
+        return (entry.type, entry.repository)
+    if isinstance(entry, ComfyUIRequirementsLockEntry):
         return (entry.type, entry.repository)
     if isinstance(entry, ComfyCliLockEntry):
         return (entry.type, entry.package, entry.environment)
@@ -791,15 +947,16 @@ def _require_direct_package_selector(value: str) -> str:
     try:
         specifiers = SpecifierSet(value)
     except InvalidSpecifier as error:
-        raise ValueError("selector must be a supported bounded selector") from error
+        raise ValueError("selector must be a supported package selector") from error
     if str(specifiers) != value:
-        raise ValueError("selector must be one canonical bounded selector")
+        raise ValueError("selector must be one canonical package selector")
     items = tuple(specifiers)
     if any(
-        item.operator not in {"==", "!=", "<", "<=", ">", ">="} or "*" in item.version
+        item.operator not in {"==", "!=", "<", "<=", ">", ">=", "~="}
+        or "*" in item.version
         for item in items
     ):
-        raise ValueError("selector must be a supported bounded selector")
+        raise ValueError("selector must be a supported package selector")
     if any(not _is_stable_public_operand(item.version) for item in items):
         raise ValueError("selector operands must be stable public versions")
     operators = {item.operator for item in items}
@@ -807,8 +964,6 @@ def _require_direct_package_selector(value: str) -> str:
         if len(items) != 1:
             raise ValueError("exact selectors must contain one version")
         return value
-    if items and (not operators & {">", ">="} or not operators & {"<", "<="}):
-        raise ValueError("comparison selectors must include lower and upper bounds")
     return value
 
 

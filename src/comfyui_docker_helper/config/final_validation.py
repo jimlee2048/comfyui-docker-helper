@@ -40,6 +40,7 @@ from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
     is_argv_value,
 )
+from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
 
 _EXACT_RELEASE_PATTERN = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
@@ -65,7 +66,7 @@ _MANAGED_ENV_KEYS = frozenset(
         "UV_PYTHON_CACHE_DIR",
     }
 )
-_COMFYUI_FLOOR = Version("0.4.0")
+_COMFYUI_FLOOR = Version(COMFYUI_MINIMUM_VERSION)
 
 
 class FinalConfigError(DiagnosticError):
@@ -638,6 +639,10 @@ def _validate_comfyui_selector(value: str, diagnostics: list[Diagnostic]) -> Non
         return
     if normalized in {"latest", "nightly"}:
         return
+    if len(normalized) == 40 and all(
+        character in "0123456789abcdef" for character in normalized
+    ):
+        return
     if normalized[0].isdigit():
         version = Version(normalized)
         if version.is_prerelease or version.is_devrelease or version.local is not None:
@@ -653,7 +658,7 @@ def _validate_comfyui_selector(value: str, diagnostics: list[Diagnostic]) -> Non
                 Diagnostic(
                     path,
                     "comfyui.version_below_floor",
-                    "must resolve to ComfyUI 0.4.0 or newer",
+                    f"must resolve to ComfyUI {COMFYUI_MINIMUM_VERSION} or newer",
                 )
             )
         return
@@ -678,9 +683,12 @@ def _validate_comfyui_selector(value: str, diagnostics: list[Diagnostic]) -> Non
                     else "comfyui.unsatisfiable_selector"
                 ),
                 (
-                    "must allow ComfyUI 0.4.0 or newer"
+                    f"must allow ComfyUI {COMFYUI_MINIMUM_VERSION} or newer"
                     if below_floor
-                    else "must allow at least one stable ComfyUI 0.4.0 or newer release"
+                    else (
+                        "must allow at least one stable ComfyUI "
+                        f"{COMFYUI_MINIMUM_VERSION} or newer release"
+                    )
                 ),
             )
         )

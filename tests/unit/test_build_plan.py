@@ -7,6 +7,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from comfyui_docker_helper.comfyui_requirements import (
+    CUDA_PROTECTED_REQUIREMENTS,
+    merge_pytorch_requirements,
+    protected_policy_digest,
+)
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
@@ -21,6 +26,8 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     ComfyCliLockEntry,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
     DirectPythonLockEntry,
     DirectPythonRequestMember,
@@ -28,6 +35,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     ManagedPythonLockEntry,
     OciLockEntry,
     OfficialComfyUILockEntry,
+    ProtectedRequirementProjection,
     PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
@@ -40,7 +48,11 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config,
     validate_final_config_structure,
 )
-from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY, UV_IMAGE_REPOSITORY
+from comfyui_docker_helper.exact_ledger import (
+    COMFYUI_FLOOR_COMMIT,
+    COMFYUI_REPOSITORY,
+    UV_IMAGE_REPOSITORY,
+)
 from comfyui_docker_helper.release_artifacts import release_source_digest
 
 DIGEST_A = f"sha256:{'a' * 64}"
@@ -88,7 +100,7 @@ def final_config(
                 "platforms": ["linux/amd64"],
             },
             "comfyui": {
-                "version": "0.4.0",
+                "version": "0.11.0",
                 "cli_version": "1.5.3",
                 "install_manager": True,
                 "extra_args": ["--preview-method", "latent2rgb"],
@@ -123,24 +135,34 @@ def accepted_resolution(
     reverse: bool = False,
 ) -> AcceptedCanonicalLock:
     config = final_config(with_uv_tool=with_uv_tool)
-    pytorch_requirements = [
-        f"torch=={config.pytorch.version}",
-        *config.pytorch.extra_packages,
-    ]
-    pytorch_members: list[DirectPythonRequestMember] = []
-    for index, value in enumerate(pytorch_requirements):
+    configured_members: list[DirectPythonRequestMember] = []
+    for index, value in enumerate(config.pytorch.extra_packages):
         diagnostics = []
         normalized = validate_direct_requirement(
             value, ("pytorch", "requirements", index), diagnostics
         )
         assert normalized is not None and not diagnostics
-        pytorch_members.append(
+        configured_members.append(
             DirectPythonRequestMember(
                 package=normalized.name,
                 extras=list(normalized.extras),
                 selector=normalized.specifier,
             )
         )
+    upstream = (
+        DirectPythonRequestMember(package="torch", extras=[], selector=""),
+        DirectPythonRequestMember(package="torchaudio", extras=[], selector=""),
+        DirectPythonRequestMember(package="torchvision", extras=[], selector=""),
+    )
+    pytorch_members = list(
+        merge_pytorch_requirements(
+            DirectPythonRequestMember(
+                package="torch", extras=[], selector=f"=={config.pytorch.version}"
+            ),
+            upstream,
+            tuple(configured_members),
+        )
+    )
     pytorch_digest = compute_request_digest(
         PyTorchRequestIdentity(
             type="pytorch-group",
@@ -152,8 +174,28 @@ def accepted_resolution(
             platform="linux/amd64",
             python_index_url=config.python.index_url,
             pytorch_index_url=(f"{config.pytorch.index_base_url.rstrip('/')}/cu130"),
+            upstream_protected=[
+                ProtectedRequirementProjection(
+                    package=item.package,
+                    extras=item.extras,
+                    selector=item.selector,
+                )
+                for item in upstream
+            ],
             members=pytorch_members,
         )
+    )
+    names = tuple(sorted(CUDA_PROTECTED_REQUIREMENTS))
+    requirements_request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository=COMFYUI_REPOSITORY,
+        commit=COMMIT_A,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+        python_version=config.python.version,
+        platform="linux/amd64",
+        protected_names=list(names),
+        protected_policy_digest=protected_policy_digest(names),
     )
     entries = [
         OciLockEntry(
@@ -198,7 +240,7 @@ def accepted_resolution(
             request_digest=DIGEST_A,
             repository=COMFYUI_REPOSITORY,
             commit=COMMIT_A,
-            formal_release="0.4.0",
+            formal_release="0.11.0",
         ),
         ComfyCliLockEntry(
             type="comfy-cli",
@@ -249,6 +291,35 @@ def accepted_resolution(
             environment="application",
             setuptools_specifier="<82",
         ),
+        DirectPythonLockEntry(
+            type="python-package",
+            request_digest=pytorch_digest,
+            package="torchaudio",
+            extras=[],
+            version="2.11.0+cu130",
+            environment="application",
+        ),
+        ComfyUIRequirementsLockEntry(
+            type="comfyui-requirements",
+            request_digest=compute_request_digest(requirements_request),
+            repository=COMFYUI_REPOSITORY,
+            commit=COMMIT_A,
+            floor_commit=COMFYUI_FLOOR_COMMIT,
+            path="requirements.txt",
+            python_version=config.python.version,
+            platform="linux/amd64",
+            protected_names=list(names),
+            protected_policy_digest=protected_policy_digest(names),
+            requirements_digest=DIGEST_C,
+            protected=[
+                ProtectedRequirementProjection(
+                    package=item.package,
+                    extras=item.extras,
+                    selector=item.selector,
+                )
+                for item in upstream
+            ],
+        ),
     ]
     if hook_digest is not None:
         entries.append(
@@ -295,9 +366,10 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     assert plan.toolchain.pytorch_channel == "cu130"
     assert [item.name for item in plan.application.pytorch.packages] == [
         "torch",
+        "torchaudio",
         "torchvision",
     ]
-    assert plan.application.pytorch.packages[1].requirement == (
+    assert plan.application.pytorch.packages[2].requirement == (
         "torchvision[image]==0.27.1+cu130"
     )
     assert plan.application.python_extras is not None
@@ -383,7 +455,7 @@ def test_execution_only_config_change_updates_binding_deterministically() -> Non
         (0, "tag", "12.9.2-cudnn-devel-ubuntu24.04", "CUDA image"),
         (1, "tag", "latest", "uv image"),
         (2, "version", "3.12.13", "managed Python"),
-        (3, "formal_release", "0.5.0", "ComfyUI identity"),
+        (3, "formal_release", "0.12.0", "ComfyUI identity"),
         (4, "version", "1.5.4", "comfy-cli identity"),
         (6, "version", "2.11.0+cu130", "satisfy torch"),
         (8, "version", "1.2.4", "Registry identity"),

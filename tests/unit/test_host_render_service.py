@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLockEntry,
     ComfyCliLockEntry,
     ComfyUIRequestIdentity,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
@@ -24,6 +27,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    ProtectedRequirementProjection,
     PythonGroupRequestIdentity,
     PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
@@ -46,6 +50,7 @@ from comfyui_docker_helper.container.runtime_files import (
     runtime_downloader_settings,
 )
 from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
+from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
 )
@@ -83,7 +88,7 @@ uv_version = "0.11.28"
 version = "2.12.1"
 extra_packages = ["torchvision==0.27.1"]
 [comfyui]
-version = "0.4.0"
+version = "0.11.0"
 cli_version = "1.5.3"
 install_manager = false
 [build]
@@ -142,7 +147,32 @@ class FakeAcquirer:
                     request_digest=request_digest,
                     repository=request.repository,
                     commit=COMMIT,
-                    formal_release="0.4.0",
+                    formal_release="0.11.0",
+                ),
+            )
+        elif isinstance(request, ComfyUIRequirementsRequestIdentity):
+            content = b"torch\ntorchvision\ntorchaudio\n"
+            entries = (
+                ComfyUIRequirementsLockEntry(
+                    type="comfyui-requirements",
+                    request_digest=request_digest,
+                    repository=request.repository,
+                    commit=request.commit,
+                    floor_commit=request.floor_commit,
+                    path=request.path,
+                    python_version=request.python_version,
+                    platform=request.platform,
+                    protected_names=request.protected_names,
+                    protected_policy_digest=request.protected_policy_digest,
+                    requirements_digest=(
+                        f"sha256:{hashlib.sha256(content).hexdigest()}"
+                    ),
+                    protected=[
+                        ProtectedRequirementProjection(
+                            package=name, extras=[], selector=""
+                        )
+                        for name in ("torch", "torchaudio", "torchvision")
+                    ],
                 ),
             )
         elif request.type == "comfy-cli":
@@ -176,6 +206,7 @@ class FakeAcquirer:
         elif isinstance(request, PythonGroupRequestIdentity):
             versions = {
                 "torch": "2.12.1+cu130",
+                "torchaudio": "2.11.0+cu130",
                 "torchvision": "0.27.1+cu130",
                 "ruff": "0.15.18",
             }
@@ -411,10 +442,17 @@ def test_upgrade_refreshes_only_moving_requests_and_preserves_exact_results(
         overwrite=True,
     )
 
-    assert fake.calls == ["oci", "oci"]
+    assert fake.calls == [
+        "oci",
+        "comfyui-requirements",
+        "oci",
+        "pytorch-group",
+    ]
     assert prepared.lock_result.provider_calls == (
+        ("comfyui-requirements", COMFYUI_REPOSITORY),
         ("oci", "cuda-base"),
         ("oci", "uv-tool"),
+        ("python-package", "application", "torch"),
     )
     assert prepared.lock_result.write_intent is False
     after_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())

@@ -37,6 +37,8 @@ from comfyui_docker_helper.config.service import (
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
     build_desired_planning_inputs,
+    stable_comfyui_entry,
+    stable_comfyui_requirements_entry,
     uv_catalog_descriptor_digest,
 )
 from comfyui_docker_helper.host.runtime_hook_inputs import (
@@ -139,11 +141,19 @@ def prepare_render_context(
         uv_digest = uv_catalog_descriptor_digest(
             result.config, existing, selected.policy, acquirer
         )
+        comfyui = stable_comfyui_entry(
+            result.config, existing, selected.policy, acquirer
+        )
+        requirements = stable_comfyui_requirements_entry(
+            result.config, comfyui, existing, selected.policy, acquirer
+        )
         desired = build_desired_planning_inputs(
             result.config,
             result.domains,
             scripts_dir=scripts_dir,
             uv_descriptor_digest=uv_digest,
+            comfyui_entry=comfyui,
+            requirements_entry=requirements,
             runtime_hook_requests=runtime_hooks.requests,
         )
         accepted = reconcile_canonical_lock(

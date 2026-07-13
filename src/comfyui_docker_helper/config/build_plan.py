@@ -14,10 +14,20 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from comfyui_docker_helper.comfyui_requirements import (
+    COMFYUI_REQUIREMENTS_PATH,
+    CUDA_PROTECTED_REQUIREMENTS,
+    ComfyUIRequirementsError,
+    merge_pytorch_requirements,
+    protected_policy_digest,
+    requirement_text,
+)
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     CanonicalLockEntry,
     ComfyCliLockEntry,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
     DirectPythonLockEntry,
     DirectPythonRequestMember,
@@ -25,6 +35,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     ManagedPythonLockEntry,
     OciLockEntry,
     OfficialComfyUILockEntry,
+    ProtectedRequirementProjection,
     PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
@@ -61,6 +72,7 @@ from comfyui_docker_helper.config.selector_validation import (
 from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.config.value_validation import has_control_characters
 from comfyui_docker_helper.exact_ledger import (
+    COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
 )
@@ -328,11 +340,48 @@ def managed_constraints_bytes(group: PyTorchGroupPlan) -> bytes:
     return ("\n".join(requirements) + "\n").encode("utf-8")
 
 
+class ProtectedRequirementPlan(_PlanModel):
+    package: str
+    extras: tuple[str, ...]
+    selector: str
+
+
+class ComfyUIRequirementsPlan(_PlanModel):
+    path: Literal["requirements.txt"]
+    floor_commit: str
+    python_version: str
+    platform: Literal["linux/amd64"]
+    protected_names: tuple[str, ...]
+    protected_policy_digest: str
+    digest: str
+    protected: tuple[ProtectedRequirementPlan, ...]
+
+    @model_validator(mode="after")
+    def _validate_projection(self) -> ComfyUIRequirementsPlan:
+        if self.floor_commit != COMFYUI_FLOOR_COMMIT:
+            raise ValueError("ComfyUI requirements floor does not match the ledger")
+        names = tuple(item.package for item in self.protected)
+        if names != tuple(sorted(set(names))):
+            raise ValueError("protected requirements must be sorted and unique")
+        if any(name not in self.protected_names for name in names):
+            raise ValueError("protected requirement is not adapter-owned")
+        return self
+
+
 class ComfyUIPlan(_PlanModel):
     repository: str
     commit: str
+    floor_commit: str
     formal_release: str | None
     install_manager: bool
+    requirements: ComfyUIRequirementsPlan
+
+    @field_validator("floor_commit")
+    @classmethod
+    def _validate_floor_commit(cls, value: str) -> str:
+        if value != COMFYUI_FLOOR_COMMIT:
+            raise ValueError("ComfyUI floor commit does not match the exact ledger")
+        return value
 
 
 class ApplicationPhase(_PlanModel):
@@ -356,6 +405,13 @@ class ApplicationPhase(_PlanModel):
             or self.python_extras.platform != self.pytorch.platform
         ):
             raise ValueError("application Python groups must share target and index")
+        requirements = self.comfyui.requirements
+        if (
+            requirements.python_version != self.pytorch.python_version
+            or requirements.platform != self.pytorch.platform
+            or requirements.floor_commit != self.comfyui.floor_commit
+        ):
+            raise ValueError("ComfyUI requirements target must match PyTorch")
         return self
 
 
@@ -546,6 +602,12 @@ def construct_build_plan(
     comfyui_entry = _take(
         entries, used, ("comfyui", COMFYUI_REPOSITORY), OfficialComfyUILockEntry
     )
+    requirements_entry = _take(
+        entries,
+        used,
+        ("comfyui-requirements", COMFYUI_REPOSITORY),
+        ComfyUIRequirementsLockEntry,
+    )
     cli_entry = _take(
         entries,
         used,
@@ -578,6 +640,33 @@ def construct_build_plan(
         raise ValueError("canonical ComfyUI source is not official")
     if not _comfyui_selector_accepts(config.comfyui.version, comfyui_entry):
         raise ValueError("canonical ComfyUI identity does not match final config")
+    requirements_request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository=COMFYUI_REPOSITORY,
+        commit=comfyui_entry.commit,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path=COMFYUI_REQUIREMENTS_PATH,
+        python_version=config.python.version,
+        platform=target_platform.value,
+        protected_names=list(sorted(CUDA_PROTECTED_REQUIREMENTS)),
+        protected_policy_digest=protected_policy_digest(
+            tuple(sorted(CUDA_PROTECTED_REQUIREMENTS))
+        ),
+    )
+    if (
+        requirements_entry.request_digest
+        != compute_request_digest(requirements_request)
+        or requirements_entry.repository != comfyui_entry.repository
+        or requirements_entry.commit != comfyui_entry.commit
+        or requirements_entry.floor_commit != COMFYUI_FLOOR_COMMIT
+        or requirements_entry.path != requirements_request.path
+        or requirements_entry.python_version != config.python.version
+        or requirements_entry.platform != target_platform.value
+        or requirements_entry.protected_names != requirements_request.protected_names
+        or requirements_entry.protected_policy_digest
+        != requirements_request.protected_policy_digest
+    ):
+        raise ValueError("canonical ComfyUI requirements do not match source/target")
     if not _published_selector_accepts(
         normalize_comfy_cli_version(config.comfyui.cli_version), cli_entry.version
     ):
@@ -597,25 +686,44 @@ def construct_build_plan(
         _uv_tool(requirement, config.python.version, entries, used)
         for requirement in config.python.uv_tools
     )
-    pytorch_requirements = [
-        f"torch=={config.pytorch.version}",
-        *config.pytorch.extra_packages,
-    ]
-    pytorch_members: list[DirectPythonRequestMember] = []
-    for index, value in enumerate(pytorch_requirements):
-        diagnostics = []
+    configured_members: list[DirectPythonRequestMember] = []
+    for index, value in enumerate(config.pytorch.extra_packages):
+        diagnostics: list = []
         normalized = validate_direct_requirement(
-            value, ("pytorch", "requirements", index), diagnostics
+            value, ("pytorch", "extra_packages", index), diagnostics
         )
         if normalized is None or diagnostics:
             raise ValueError("validated config contains an invalid package requirement")
-        pytorch_members.append(
+        configured_members.append(
             DirectPythonRequestMember(
                 package=normalized.name,
                 extras=list(normalized.extras),
                 selector=normalized.specifier,
             )
         )
+    upstream = tuple(
+        DirectPythonRequestMember(
+            package=item.package,
+            extras=item.extras,
+            selector=item.selector,
+        )
+        for item in requirements_entry.protected
+    )
+    try:
+        pytorch_members = list(
+            merge_pytorch_requirements(
+                DirectPythonRequestMember(
+                    package="torch",
+                    extras=[],
+                    selector=f"=={config.pytorch.version}",
+                ),
+                upstream,
+                tuple(configured_members),
+            )
+        )
+    except ComfyUIRequirementsError as error:
+        raise ValueError("protected PyTorch requirements conflict") from error
+    pytorch_requirements = [requirement_text(member) for member in pytorch_members]
     pytorch_packages = _package_group(
         pytorch_requirements,
         "pytorch",
@@ -645,6 +753,14 @@ def construct_build_plan(
             pytorch_index_url=(
                 f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}"
             ),
+            upstream_protected=[
+                ProtectedRequirementProjection(
+                    package=item.package,
+                    extras=item.extras,
+                    selector=item.selector,
+                )
+                for item in upstream
+            ],
             members=pytorch_members,
         )
     )
@@ -760,8 +876,26 @@ def construct_build_plan(
             comfyui=ComfyUIPlan(
                 repository=comfyui_entry.repository,
                 commit=comfyui_entry.commit,
+                floor_commit=COMFYUI_FLOOR_COMMIT,
                 formal_release=comfyui_entry.formal_release,
                 install_manager=config.comfyui.install_manager,
+                requirements=ComfyUIRequirementsPlan(
+                    path=requirements_entry.path,
+                    floor_commit=requirements_entry.floor_commit,
+                    python_version=requirements_entry.python_version,
+                    platform=requirements_entry.platform,
+                    protected_names=tuple(requirements_entry.protected_names),
+                    protected_policy_digest=requirements_entry.protected_policy_digest,
+                    digest=requirements_entry.requirements_digest,
+                    protected=tuple(
+                        ProtectedRequirementPlan(
+                            package=item.package,
+                            extras=tuple(item.extras),
+                            selector=item.selector,
+                        )
+                        for item in requirements_entry.protected
+                    ),
+                ),
             ),
         ),
         custom_nodes=CustomNodesPhase(

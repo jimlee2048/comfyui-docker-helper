@@ -12,6 +12,7 @@ import pytest
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitRequestIdentity,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
@@ -23,6 +24,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
+from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.canonical_acquisition import (
     ManagedPythonReleaseInputs,
     ProviderIdentityAcquirer,
@@ -341,6 +343,8 @@ class FakeManagedPython:
 class FakeComfyUI:
     resolve_calls: list[OfficialComfyUIIdentityRequest] = field(default_factory=list)
     list_calls: list[str] = field(default_factory=list)
+    ancestry_calls: list[tuple[str, str, str]] = field(default_factory=list)
+    ancestry_result: bool = True
 
     def resolve(
         self, request: OfficialComfyUIIdentityRequest
@@ -356,9 +360,13 @@ class FakeComfyUI:
     def list_releases(self, repository: str) -> tuple[OfficialComfyUIIdentity, ...]:
         self.list_calls.append(repository)
         return (
-            OfficialComfyUIIdentity(repository, COMMIT_A, "0.4.0"),
-            OfficialComfyUIIdentity(repository, COMMIT_B, "0.5.0"),
+            OfficialComfyUIIdentity(repository, COMMIT_A, "0.11.0"),
+            OfficialComfyUIIdentity(repository, COMMIT_B, "0.12.0"),
         )
+
+    def is_ancestor(self, repository: str, ancestor: str, descendant: str) -> bool:
+        self.ancestry_calls.append((repository, ancestor, descendant))
+        return self.ancestry_result
 
 
 @dataclass
@@ -426,6 +434,12 @@ class ProviderFakes:
     registry: FakeRegistry = field(default_factory=FakeRegistry)
     git: FakeGit = field(default_factory=FakeGit)
     group: FakePythonGroup = field(default_factory=FakePythonGroup)
+    requirements: bytes = b"torch\ntorchvision\ntorchaudio\nnumpy>=1.25\n"
+    requirements_reads: int = 0
+
+    def read_requirements(self, _request) -> bytes:
+        self.requirements_reads += 1
+        return self.requirements
 
     def acquirer(self) -> ProviderIdentityAcquirer:
         return ProviderIdentityAcquirer(
@@ -442,6 +456,7 @@ class ProviderFakes:
                 DIGEST_A,
                 "0.11.28",
             ),
+            requirements_reader=self.read_requirements,
         )
 
 
@@ -535,13 +550,86 @@ def test_exact_git_and_comfy_cli_are_direct_while_registry_is_verified() -> None
 def test_comfyui_exact_release_maps_to_canonical_tag_ref() -> None:
     fakes = ProviderFakes()
     request = ComfyUIRequestIdentity(
-        type="comfyui", repository=OFFICIAL_REPOSITORY, selector="0.4.0"
+        type="comfyui", repository=OFFICIAL_REPOSITORY, selector="0.11.0"
     )
 
     entry = _acquire(request, fakes)[0]
 
-    assert entry.formal_release == "0.4.0"
-    assert fakes.comfyui.resolve_calls[0].ref == "refs/tags/v0.4.0"
+    assert entry.formal_release == "0.11.0"
+    assert fakes.comfyui.resolve_calls[0].ref == "refs/tags/v0.11.0"
+
+
+def test_exact_comfyui_requirements_acquisition_binds_bytes_target_and_projection() -> (
+    None
+):
+    fakes = ProviderFakes()
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository=OFFICIAL_REPOSITORY,
+        commit=COMMIT_A,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        protected_names=["torch", "torchaudio", "torchvision"],
+        protected_policy_digest=DIGEST_B,
+    )
+
+    entry = _acquire(request, fakes)[0]
+
+    assert entry.commit == COMMIT_A
+    assert entry.floor_commit == COMFYUI_FLOOR_COMMIT
+    assert fakes.comfyui.ancestry_calls == [
+        (OFFICIAL_REPOSITORY, COMFYUI_FLOOR_COMMIT, COMMIT_A)
+    ]
+    assert fakes.requirements_reads == 1
+    assert entry.requirements_digest.startswith("sha256:")
+    assert [item.package for item in entry.protected] == [
+        "torch",
+        "torchaudio",
+        "torchvision",
+    ]
+    assert not hasattr(entry, "ordinary")
+
+
+def test_comfyui_requirements_proves_floor_before_reading_bytes() -> None:
+    fakes = ProviderFakes(comfyui=FakeComfyUI(ancestry_result=False))
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository=OFFICIAL_REPOSITORY,
+        commit=COMMIT_A,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        protected_names=["torch", "torchaudio", "torchvision"],
+        protected_policy_digest=DIGEST_B,
+    )
+
+    with pytest.raises(CanonicalAcquisitionError, match=r"supported v0\.11\.0 floor"):
+        _acquire(request, fakes)
+
+    assert fakes.requirements_reads == 0
+
+
+def test_exact_comfyui_requirements_rejects_source_changing_input() -> None:
+    fakes = ProviderFakes(
+        requirements=b"--extra-index-url https://poison.test/simple\ntorch\n"
+    )
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository=OFFICIAL_REPOSITORY,
+        commit=COMMIT_A,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        protected_names=["torch", "torchaudio", "torchvision"],
+        protected_policy_digest=DIGEST_B,
+    )
+
+    with pytest.raises(CanonicalAcquisitionError, match="changes package sources"):
+        _acquire(request, fakes)
 
 
 def test_comfyui_exact_release_rejects_mismatched_provider_release() -> None:
@@ -549,11 +637,11 @@ def test_comfyui_exact_release_rejects_mismatched_provider_release() -> None:
         def resolve(
             self, request: OfficialComfyUIIdentityRequest
         ) -> OfficialComfyUIIdentity:
-            return OfficialComfyUIIdentity(OFFICIAL_REPOSITORY, COMMIT_A, "0.5.0")
+            return OfficialComfyUIIdentity(OFFICIAL_REPOSITORY, COMMIT_A, "0.12.0")
 
     fakes = ProviderFakes(comfyui=MismatchedComfyUI())
     request = ComfyUIRequestIdentity(
-        type="comfyui", repository=OFFICIAL_REPOSITORY, selector="0.4.0"
+        type="comfyui", repository=OFFICIAL_REPOSITORY, selector="0.11.0"
     )
 
     with pytest.raises(CanonicalAcquisitionError, match="incompatible data"):
@@ -594,7 +682,7 @@ def test_python_group_rejects_version_outside_member_selector() -> None:
 def test_moving_catalog_selectors_choose_highest_stable_match() -> None:
     fakes = ProviderFakes()
     comfyui = ComfyUIRequestIdentity(
-        type="comfyui", repository=OFFICIAL_REPOSITORY, selector="<0.6,>=0.4"
+        type="comfyui", repository=OFFICIAL_REPOSITORY, selector="<1,>=0.11"
     )
     cli = ComfyCliRequestIdentity(
         type="comfy-cli",
@@ -608,7 +696,7 @@ def test_moving_catalog_selectors_choose_highest_stable_match() -> None:
         type="registry", id="example-node", selector="<3,>=1"
     )
 
-    assert _acquire(comfyui, fakes)[0].formal_release == "0.5.0"
+    assert _acquire(comfyui, fakes)[0].formal_release == "0.12.0"
     assert _acquire(cli, fakes)[0].version == "2.0.0"
     assert _acquire(registry, fakes)[0].version == "2.0.0"
 

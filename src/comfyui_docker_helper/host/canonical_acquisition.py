@@ -21,11 +21,17 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from comfyui_docker_helper.comfyui_requirements import (
+    ComfyUIRequirementsError,
+    parse_comfyui_requirements,
+)
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLockEntry,
     ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
@@ -35,6 +41,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    ProtectedRequirementProjection,
     PythonGroupRequestIdentity,
     PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
@@ -50,6 +57,10 @@ from comfyui_docker_helper.config.canonical_resolver import (
     ManagedPythonReleaseInputs,
     entries_satisfy_request,
     rebuild_canonical_entries,
+)
+from comfyui_docker_helper.exact_ledger import (
+    COMFYUI_FLOOR_COMMIT,
+    COMFYUI_MINIMUM_VERSION,
 )
 from comfyui_docker_helper.host.identity_providers import (
     ComfyCliIdentity,
@@ -75,7 +86,7 @@ from comfyui_docker_helper.pytorch_resolution import (
     pytorch_resolution_manifest_bytes,
 )
 
-_COMFYUI_FLOOR = Version("0.4.0")
+_COMFYUI_FLOOR = Version(COMFYUI_MINIMUM_VERSION)
 _LINUX_AMD64_UV_PLATFORM = "x86_64-unknown-linux-gnu"
 
 
@@ -97,6 +108,7 @@ class PythonGroupResolver(Protocol):
 
 type ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
 type MetadataReader = Callable[[str], str]
+type RequirementsReader = Callable[[ComfyUIRequirementsRequestIdentity], bytes]
 
 
 def _read_metadata_sidecar(url: str) -> str:
@@ -107,6 +119,20 @@ def _read_metadata_sidecar(url: str) -> str:
     except (httpx.HTTPError, UnicodeError) as error:
         raise CanonicalAcquisitionError(
             "PyTorch wheel metadata acquisition failed"
+        ) from error
+
+
+def _read_comfyui_requirements(
+    request: ComfyUIRequirementsRequestIdentity,
+) -> bytes:
+    url = _comfyui_requirements_url(request)
+    try:
+        response = httpx.get(url, follow_redirects=True, timeout=30.0)
+        response.raise_for_status()
+        return response.content
+    except httpx.HTTPError as error:
+        raise CanonicalAcquisitionError(
+            "exact ComfyUI requirements acquisition failed"
         ) from error
 
 
@@ -236,37 +262,35 @@ class UvPythonGroupResolver:
                     env=environment,
                 )
             except (OSError, subprocess.SubprocessError) as error:
-                raise CanonicalAcquisitionError(
-                    "Python group resolution failed"
-                ) from error
+                raise _pytorch_resolution_error(request, "resolution failed") from error
         if completed.returncode != 0:
-            raise CanonicalAcquisitionError("Python group resolution failed")
+            raise _pytorch_resolution_error(request, "resolution failed")
         try:
             document = tomllib.loads(completed.stdout)
             packages = document["packages"]
         except (KeyError, TypeError, tomllib.TOMLDecodeError) as error:
-            raise CanonicalAcquisitionError(
-                "Python resolver returned invalid PyTorch metadata"
+            raise _pytorch_resolution_error(
+                request, "resolver returned invalid PyTorch metadata"
             ) from error
         direct = {member.package for member in request.members}
         if not isinstance(packages, list) or any(
             not isinstance(item, dict) for item in packages
         ):
-            raise CanonicalAcquisitionError(
-                "Python resolver returned invalid PyTorch metadata"
+            raise _pytorch_resolution_error(
+                request, "resolver returned invalid PyTorch metadata"
             )
         selected = [item for item in packages if item.get("name") in direct]
         resolved_by_name = {item["name"]: item for item in selected}
         if len(selected) != len(resolved_by_name) or set(resolved_by_name) != direct:
-            raise CanonicalAcquisitionError(
-                "Python resolver returned an incompatible direct group"
+            raise _pytorch_resolution_error(
+                request, "resolver returned an incompatible direct group"
             )
         if any(
             not isinstance(item.get("version"), str)
             for item in resolved_by_name.values()
         ):
-            raise CanonicalAcquisitionError(
-                "Python resolver returned invalid PyTorch metadata"
+            raise _pytorch_resolution_error(
+                request, "resolver returned invalid PyTorch metadata"
             )
         resolved = tuple(
             ResolvedPythonMember(
@@ -280,21 +304,21 @@ class UvPythonGroupResolver:
             )
             for member in resolved
         ):
-            raise CanonicalAcquisitionError(
-                "Python resolver returned an incompatible PyTorch channel"
+            raise _pytorch_resolution_error(
+                request, "resolver returned an incompatible PyTorch channel"
             )
         torch = resolved_by_name["torch"]
         wheels = torch.get("wheels")
         if not isinstance(wheels, list) or len(wheels) != 1:
-            raise CanonicalAcquisitionError(
-                "Python resolver did not select one exact torch wheel"
+            raise _pytorch_resolution_error(
+                request, "resolver did not select one exact torch wheel"
             )
         wheel_url = wheels[0].get("url")
         if not isinstance(wheel_url, str) or not wheel_url.startswith(
             ("http://", "https://")
         ):
-            raise CanonicalAcquisitionError(
-                "Python resolver returned an invalid torch wheel URL"
+            raise _pytorch_resolution_error(
+                request, "resolver returned an invalid torch wheel URL"
             )
         metadata = self.metadata_reader(_metadata_sidecar_url(wheel_url))
         specifier = _setuptools_specifier_from_metadata(
@@ -317,6 +341,7 @@ class ProviderIdentityAcquirer:
     git: DirectGitIdentityProvider
     python_group: PythonGroupResolver
     release: ManagedPythonReleaseInputs
+    requirements_reader: RequirementsReader = _read_comfyui_requirements
 
     def acquire(
         self, request: ResolverRequestIdentity, request_digest: str
@@ -425,6 +450,52 @@ class ProviderIdentityAcquirer:
                     repository=identity.repository,
                     commit=identity.commit,
                     formal_release=identity.formal_release,
+                ),
+            )
+        if isinstance(request, ComfyUIRequirementsRequestIdentity):
+            try:
+                supported = self.comfyui.is_ancestor(
+                    request.repository,
+                    request.floor_commit,
+                    request.commit,
+                )
+            except IdentityProviderError as error:
+                raise CanonicalAcquisitionError(str(error)) from error
+            if request.floor_commit != COMFYUI_FLOOR_COMMIT or not supported:
+                raise CanonicalAcquisitionError(
+                    "official ComfyUI checkout is below the supported v0.11.0 floor"
+                )
+            content = self.requirements_reader(request)
+            try:
+                parsed = parse_comfyui_requirements(
+                    content,
+                    python_version=request.python_version,
+                    platform=request.platform,
+                    protected_names=tuple(request.protected_names),
+                )
+            except ComfyUIRequirementsError as error:
+                raise CanonicalAcquisitionError(str(error)) from error
+            return (
+                ComfyUIRequirementsLockEntry(
+                    type="comfyui-requirements",
+                    request_digest=request_digest,
+                    repository=request.repository,
+                    commit=request.commit,
+                    floor_commit=request.floor_commit,
+                    path=request.path,
+                    python_version=request.python_version,
+                    platform=request.platform,
+                    protected_names=request.protected_names,
+                    protected_policy_digest=request.protected_policy_digest,
+                    requirements_digest=parsed.digest,
+                    protected=[
+                        ProtectedRequirementProjection(
+                            package=item.package,
+                            extras=item.extras,
+                            selector=item.selector,
+                        )
+                        for item in parsed.protected
+                    ],
                 ),
             )
         if isinstance(request, ComfyCliRequestIdentity):
@@ -708,9 +779,40 @@ def _metadata_sidecar_url(wheel_url: str) -> str:
     return urlunsplit(parsed._replace(path=f"{parsed.path}.metadata", fragment=""))
 
 
+def _comfyui_requirements_url(
+    request: ComfyUIRequirementsRequestIdentity,
+) -> str:
+    parsed = urlsplit(request.repository)
+    if parsed.scheme != "https" or parsed.netloc != "github.com":
+        raise CanonicalAcquisitionError(
+            "official ComfyUI repository cannot provide immutable requirements"
+        )
+    repository_path = parsed.path.removesuffix(".git").strip("/")
+    parts = repository_path.split("/")
+    if len(parts) != 2:
+        raise CanonicalAcquisitionError(
+            "official ComfyUI repository cannot provide immutable requirements"
+        )
+    return (
+        f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/"
+        f"{request.commit}/{request.path}"
+    )
+
+
 def _requirement_text(package: str, extras: list[str], selector: str) -> str:
     rendered_extras = f"[{','.join(extras)}]" if extras else ""
     return f"{package}{rendered_extras}{selector}"
+
+
+def _pytorch_resolution_error(
+    request: PyTorchRequestIdentity, detail: str
+) -> CanonicalAcquisitionError:
+    packages = ",".join(member.package for member in request.members)
+    return CanonicalAcquisitionError(
+        f"PyTorch {detail} for packages [{packages}], channel {request.channel}, "
+        f"Python {request.python_version}, platform {request.platform}, "
+        f"source {request.pytorch_index_url}"
+    )
 
 
 def _uv_platform(platform: str) -> str:

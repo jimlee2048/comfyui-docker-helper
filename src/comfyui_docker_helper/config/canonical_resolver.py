@@ -16,6 +16,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
@@ -37,6 +39,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     uv_image_version_matches_tag,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
 from comfyui_docker_helper.host.identity_providers import (
     LocalExecutableIdentityRequest,
     SelectorStability,
@@ -403,6 +406,18 @@ def entries_satisfy_request(
             entry.repository == request.repository
             and _comfyui_result_matches(request.selector, entry)
         )
+    if isinstance(request, ComfyUIRequirementsRequestIdentity):
+        entry = entries[0]
+        return isinstance(entry, ComfyUIRequirementsLockEntry) and (
+            entry.repository == request.repository
+            and entry.commit == request.commit
+            and entry.floor_commit == request.floor_commit
+            and entry.path == request.path
+            and entry.python_version == request.python_version
+            and entry.platform == request.platform
+            and entry.protected_names == request.protected_names
+            and entry.protected_policy_digest == request.protected_policy_digest
+        )
     if isinstance(request, ComfyCliRequestIdentity):
         entry = entries[0]
         return isinstance(entry, ComfyCliLockEntry) and (
@@ -537,6 +552,8 @@ def _request_keys(request: ResolverRequestIdentity) -> tuple[LockEntryKey, ...]:
         return (("managed-python", request.implementation, request.platform),)
     if isinstance(request, ComfyUIRequestIdentity):
         return (("comfyui", request.repository),)
+    if isinstance(request, ComfyUIRequirementsRequestIdentity):
+        return (("comfyui-requirements", request.repository),)
     if isinstance(request, ComfyCliRequestIdentity):
         return (("comfy-cli", request.package, "application"),)
     if isinstance(request, RegistryRequestIdentity):
@@ -564,6 +581,8 @@ def _request_stability(request: ResolverRequestIdentity) -> SelectorStability:
             if _is_commit(selector) or selector[0].isdigit()
             else SelectorStability.MOVING
         )
+    if isinstance(request, ComfyUIRequirementsRequestIdentity):
+        return SelectorStability.MOVING
     if isinstance(request, (ComfyCliRequestIdentity, RegistryRequestIdentity)):
         return (
             SelectorStability.MOVING
@@ -598,7 +617,7 @@ def _comfyui_result_matches(selector: str, entry: OfficialComfyUILockEntry) -> b
     if entry.formal_release is None:
         return False
     version = Version(entry.formal_release)
-    if version < Version("0.4.0") or not _is_stable(version):
+    if version < Version(COMFYUI_MINIMUM_VERSION) or not _is_stable(version):
         return False
     if selector == "latest":
         return True

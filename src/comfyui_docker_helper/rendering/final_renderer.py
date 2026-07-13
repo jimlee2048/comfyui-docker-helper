@@ -139,7 +139,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
     phase_digest = _shell_word(build_plan_digest(plan))
     lines.append(
         f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
-        "container install-inference "
+        "container install-comfyui "
         "--application-phase /opt/cdh/build/phases/application.json "
         "--toolchain-phase /opt/cdh/build/phases/toolchain.json "
         f"--build-plan-digest {phase_digest} "

@@ -53,7 +53,7 @@ version = "2.12.1"
 extra_packages = ["torchvision==0.27.1"]
 
 [comfyui]
-version = "0.4.0"
+version = "0.11.0"
 cli_version = "1.5.3"
 install_manager = false
 
@@ -62,6 +62,10 @@ platforms = ["linux/amd64"]
 tags = ["my-comfy:dev"]
 output = "load"
 ```
+
+ComfyUI v0.11.0 is the minimum supported release. Every resolved formal,
+moving, nightly, or full-commit checkout must descend from the immutable
+v0.11.0 floor commit before dependency installation begins.
 
 See [`examples/full.toml`](examples/full.toml) for all currently active fields.
 

@@ -9,16 +9,27 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
+from comfyui_docker_helper.comfyui_requirements import (
+    COMFYUI_REQUIREMENTS_PATH,
+    CUDA_PROTECTED_REQUIREMENTS,
+    ComfyUIRequirementsError,
+    merge_pytorch_requirements,
+    protected_policy_digest,
+)
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitRequestIdentity,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     ManagedPythonRequestIdentity,
     OciLockEntry,
     OciRequestIdentity,
+    OfficialComfyUILockEntry,
+    ProtectedRequirementProjection,
     PyTorchRequestIdentity,
     RegistryRequestIdentity,
     ResolverRequestIdentity,
@@ -46,6 +57,7 @@ from comfyui_docker_helper.config.final_validation import FinalConfigDomainResul
 from comfyui_docker_helper.config.runtime_hooks import CUSTOM_NODE_HOOK_LOCK_PREFIX
 from comfyui_docker_helper.exact_ledger import (
     CDH_VERSION,
+    COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     PIP_VERSION,
     UV_IMAGE_REPOSITORY,
@@ -165,6 +177,8 @@ def build_desired_planning_inputs(
     *,
     scripts_dir: str | Path,
     uv_descriptor_digest: str,
+    comfyui_entry: OfficialComfyUILockEntry,
+    requirements_entry: ComfyUIRequirementsLockEntry,
     runtime_hook_requests: tuple[LocalExecutableIdentityRequest, ...] = (),
 ) -> DesiredPlanningInputs:
     platform = TargetPlatform(config.build.platforms[0])
@@ -172,6 +186,13 @@ def build_desired_planning_inputs(
         CudaVersion.from_validated(config.compute_platform.cuda.version), platform
     )
     repository, tag = backend.base_image.split(":", 1)
+    requirements_request = comfyui_requirements_request(config, comfyui_entry)
+    if not entries_satisfy_request(
+        requirements_request,
+        (requirements_entry,),
+        compute_request_digest(requirements_request),
+    ):
+        raise ValueError("ComfyUI requirements identity does not match final config")
     requests: list[ResolverRequestIdentity] = [
         OciRequestIdentity(
             type="oci",
@@ -194,6 +215,7 @@ def build_desired_planning_inputs(
             repository=COMFYUI_REPOSITORY,
             selector=config.comfyui.version,
         ),
+        requirements_request,
         ComfyCliRequestIdentity(
             type="comfy-cli",
             package="comfy-cli",
@@ -228,6 +250,32 @@ def build_desired_planning_inputs(
                 members=[member],
             )
         )
+    upstream = tuple(
+        DirectPythonRequestMember(
+            package=item.package,
+            extras=item.extras,
+            selector=item.selector,
+        )
+        for item in requirements_entry.protected
+    )
+    try:
+        pytorch_members = merge_pytorch_requirements(
+            DirectPythonRequestMember(
+                package="torch", extras=[], selector=f"=={config.pytorch.version}"
+            ),
+            upstream,
+            tuple(_members(domains, "pytorch")),
+        )
+    except ComfyUIRequirementsError as error:
+        raise CanonicalResolutionError(
+            (
+                Diagnostic(
+                    path=("config.lock.toml", "pytorch-group"),
+                    code="lock.protected_requirement_conflict",
+                    message=str(error),
+                ),
+            )
+        ) from error
     requests.append(
         PyTorchRequestIdentity(
             type="pytorch-group",
@@ -241,12 +289,15 @@ def build_desired_planning_inputs(
             pytorch_index_url=(
                 f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}"
             ),
-            members=[
-                DirectPythonRequestMember(
-                    package="torch", extras=[], selector=f"=={config.pytorch.version}"
-                ),
-                *_members(domains, "pytorch"),
+            upstream_protected=[
+                ProtectedRequirementProjection(
+                    package=item.package,
+                    extras=item.extras,
+                    selector=item.selector,
+                )
+                for item in upstream
             ],
+            members=list(pytorch_members),
         )
     )
     for node in config.comfyui.custom_nodes:
@@ -292,6 +343,135 @@ def build_desired_planning_inputs(
         + runtime_hook_requests
     )
     return DesiredPlanningInputs(desired, local)
+
+
+def stable_comfyui_entry(
+    config: FinalConfig,
+    existing: CanonicalLock | None,
+    policy: LockPolicy,
+    acquirer: CachingCanonicalAcquirer,
+) -> OfficialComfyUILockEntry:
+    """Stabilize the exact source identity needed by downstream requests."""
+    request = ComfyUIRequestIdentity(
+        type="comfyui", repository=COMFYUI_REPOSITORY, selector=config.comfyui.version
+    )
+    digest = compute_request_digest(request)
+    current = _existing_entry(existing, ("comfyui", COMFYUI_REPOSITORY))
+    moving = (
+        not (
+            len(request.selector) == 40
+            and all(character in "0123456789abcdef" for character in request.selector)
+        )
+        and not request.selector[0].isdigit()
+    )
+    if (
+        (policy is not LockPolicy.UPGRADE or not moving)
+        and isinstance(current, OfficialComfyUILockEntry)
+        and entries_satisfy_request(request, (current,), digest)
+    ):
+        return current
+    return _acquire_stable_entry(
+        request,
+        digest,
+        policy,
+        acquirer,
+        OfficialComfyUILockEntry,
+        ("comfyui", COMFYUI_REPOSITORY),
+    )
+
+
+def stable_comfyui_requirements_entry(
+    config: FinalConfig,
+    comfyui: OfficialComfyUILockEntry,
+    existing: CanonicalLock | None,
+    policy: LockPolicy,
+    acquirer: CachingCanonicalAcquirer,
+) -> ComfyUIRequirementsLockEntry:
+    """Stabilize the exact protected projection needed by the PyTorch request."""
+    request = comfyui_requirements_request(config, comfyui)
+    digest = compute_request_digest(request)
+    key = ("comfyui-requirements", COMFYUI_REPOSITORY)
+    current = _existing_entry(existing, key)
+    if (
+        policy is not LockPolicy.UPGRADE
+        and isinstance(current, ComfyUIRequirementsLockEntry)
+        and entries_satisfy_request(request, (current,), digest)
+    ):
+        return current
+    return _acquire_stable_entry(
+        request,
+        digest,
+        policy,
+        acquirer,
+        ComfyUIRequirementsLockEntry,
+        key,
+    )
+
+
+def comfyui_requirements_request(
+    config: FinalConfig,
+    comfyui: OfficialComfyUILockEntry,
+) -> ComfyUIRequirementsRequestIdentity:
+    names = tuple(sorted(CUDA_PROTECTED_REQUIREMENTS))
+    return ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository=comfyui.repository,
+        commit=comfyui.commit,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path=COMFYUI_REQUIREMENTS_PATH,
+        python_version=config.python.version,
+        platform=config.build.platforms[0],
+        protected_names=list(names),
+        protected_policy_digest=protected_policy_digest(names),
+    )
+
+
+def _existing_entry(lock: CanonicalLock | None, key: tuple[str, ...]):
+    if lock is None:
+        return None
+    return next(
+        (entry for entry in lock.entries if canonical_entry_key(entry) == key), None
+    )
+
+
+def _acquire_stable_entry(
+    request: ResolverRequestIdentity,
+    digest: str,
+    policy: LockPolicy,
+    acquirer: CachingCanonicalAcquirer,
+    expected_type,
+    key: tuple[str, ...],
+):
+    if policy is LockPolicy.LOCKED:
+        raise CanonicalResolutionError(
+            (
+                Diagnostic(
+                    path=("config.lock.toml", *key),
+                    code="lock.locked_mismatch",
+                    message=(
+                        "locked identity is missing or changed; "
+                        "regenerate config.lock.toml"
+                    ),
+                ),
+            )
+        )
+    try:
+        acquired = acquirer.acquire(request, digest)
+    except CanonicalAcquisitionError as error:
+        raise CanonicalResolutionError(
+            (
+                Diagnostic(
+                    path=("config.lock.toml", *key),
+                    code="lock.resolve_failed",
+                    message=str(error),
+                ),
+            )
+        ) from error
+    if len(acquired.entries) != 1 or not isinstance(acquired.entries[0], expected_type):
+        raise ValueError("provider returned an incompatible staged identity")
+    if not entries_satisfy_request(request, acquired.entries, digest):
+        raise ValueError("provider returned an incompatible staged identity")
+    return acquired.entries[0]
 
 
 def uv_oci_request(config: FinalConfig) -> OciRequestIdentity:

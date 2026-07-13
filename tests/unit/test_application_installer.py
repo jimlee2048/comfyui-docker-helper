@@ -121,6 +121,7 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     assert verify_argv[:3] == ("/opt/venv/bin/python", "-I", "-c")
     assert json.loads(verify_argv[4]) == {
         "torch": "2.12.1+cu130",
+        "torchaudio": "2.11.0+cu130",
         "torchvision": "0.27.1+cu130",
     }
     assert calls[2][0][:4] == (
@@ -144,7 +145,8 @@ def test_constraints_are_complete_deterministic_and_read_only(tmp_path: Path) ->
     )
 
     assert constraints.read_bytes() == (
-        b"setuptools<82\ntorch==2.12.1+cu130\ntorchvision==0.27.1+cu130\n"
+        b"setuptools<82\ntorch==2.12.1+cu130\n"
+        b"torchaudio==2.11.0+cu130\ntorchvision==0.27.1+cu130\n"
     )
     assert constraints.stat().st_mode & 0o777 == 0o444
 

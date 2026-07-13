@@ -30,6 +30,7 @@ _SEMVER_PATTERN = re.compile(
     re.VERBOSE,
 )
 _GIT_TARGET_DIR_PATTERN = re.compile(r"[A-Za-z0-9._-]+\Z")
+_FULL_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 _SUPPORTED_VERSION_CONSTRAINT_OPERATORS = ("==", "!=", "<=", ">=", "<", ">")
 _UNSUPPORTED_VERSION_CONSTRAINT_TOKENS = ("~=", "===", "^", "||")
 
@@ -37,13 +38,15 @@ _UNSUPPORTED_VERSION_CONSTRAINT_TOKENS = ("~=", "===", "^", "||")
 def normalize_comfyui_version(version: str) -> str:
     if version in {"latest", "nightly"}:
         return version
+    if _FULL_COMMIT_PATTERN.fullmatch(version):
+        return version
     if _looks_like_version_constraint(version):
         return _normalize_version_constraint(version, allow_local_versions=False)
     normalized = version.removeprefix("v")
     if not _SEMVER_PATTERN.fullmatch(normalized):
         raise ValueError(
-            "must be latest, nightly, semver, v-prefixed semver, or a supported "
-            "PEP 440 comparison constraint"
+            "must be latest, nightly, a full lowercase commit, semver, "
+            "v-prefixed semver, or a supported PEP 440 comparison constraint"
         )
     return normalized
 

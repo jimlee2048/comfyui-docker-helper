@@ -21,7 +21,7 @@ version = "13.0.3"
 version = "2.12.1"
 extra_packages = ["torchvision==0.27.1"]
 [comfyui]
-version = "0.4.0"
+version = "0.11.0"
 cli_version = "1.5.3"
 install_manager = false
 [build]

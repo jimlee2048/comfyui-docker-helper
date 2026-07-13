@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -162,6 +163,8 @@ class OfficialComfyUIIdentityProvider(Protocol):
     def resolve(
         self, request: OfficialComfyUIIdentityRequest
     ) -> OfficialComfyUIIdentity: ...
+
+    def is_ancestor(self, repository: str, ancestor: str, descendant: str) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +494,70 @@ class GitOfficialComfyUIIdentityProvider:
             commit=commit,
             formal_release=_formal_release_from_ref(request.ref),
         )
+
+    def is_ancestor(self, repository: str, ancestor: str, descendant: str) -> bool:
+        """Prove one resolved commit is inside the supported official history."""
+        source = "official ComfyUI ancestry"
+        _require_official_comfyui_repository(repository)
+        if not _COMMIT_PATTERN.fullmatch(ancestor) or not _COMMIT_PATTERN.fullmatch(
+            descendant
+        ):
+            raise IdentityProviderError(source, ProviderFailureKind.INVALID_REQUEST)
+        environment = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "",
+            "GCM_INTERACTIVE": "never",
+            "SSH_ASKPASS": "",
+        }
+        try:
+            with tempfile.TemporaryDirectory(prefix="cdh-comfyui-ancestry-") as raw:
+                checkout = Path(raw) / "repository.git"
+                cloned = self.runner(
+                    (
+                        self.git_executable,
+                        "clone",
+                        "--bare",
+                        "--filter=blob:none",
+                        "--",
+                        repository,
+                        os.fspath(checkout),
+                    ),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=_GIT_TIMEOUT_SECONDS,
+                    env=environment,
+                )
+                if cloned.returncode != 0:
+                    raise IdentityProviderError(source, ProviderFailureKind.NETWORK)
+                checked = self.runner(
+                    (
+                        self.git_executable,
+                        "-C",
+                        os.fspath(checkout),
+                        "merge-base",
+                        "--is-ancestor",
+                        ancestor,
+                        descendant,
+                    ),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=_GIT_TIMEOUT_SECONDS,
+                    env=environment,
+                )
+        except subprocess.TimeoutExpired as error:
+            raise IdentityProviderError(source, ProviderFailureKind.NETWORK) from error
+        except OSError as error:
+            raise IdentityProviderError(source, ProviderFailureKind.NETWORK) from error
+        if checked.returncode == 0:
+            return True
+        if checked.returncode == 1:
+            return False
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
 
 
 @dataclass(frozen=True, slots=True)

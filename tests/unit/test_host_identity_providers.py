@@ -612,6 +612,45 @@ def test_official_comfyui_release_catalog_returns_sorted_exact_identities() -> N
     assert calls[0][0][1:4] == ("ls-remote", "--tags", "--end-of-options")
 
 
+@pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
+def test_official_comfyui_proves_ancestry_from_filtered_official_history(
+    returncode: int, expected: bool
+) -> None:
+    calls: list[Sequence[str]] = []
+
+    def runner(args: Sequence[str], **_kwargs: object):
+        calls.append(args)
+        return _completed("", returncode=(0 if len(calls) == 1 else returncode))
+
+    provider = GitOfficialComfyUIIdentityProvider(runner=runner)
+
+    assert provider.is_ancestor(COMFYUI_REPOSITORY, COMMIT_A, COMMIT_B) is expected
+    assert calls[0][1:4] == ("clone", "--bare", "--filter=blob:none")
+    assert calls[0][-3] == "--"
+    assert calls[1][-4:] == (
+        "merge-base",
+        "--is-ancestor",
+        COMMIT_A,
+        COMMIT_B,
+    )
+
+
+def test_official_comfyui_rejects_unprovable_ancestry_response() -> None:
+    calls = 0
+
+    def runner(*_args: object, **_kwargs: object):
+        nonlocal calls
+        calls += 1
+        return _completed("", returncode=(0 if calls == 1 else 128))
+
+    with pytest.raises(IdentityProviderError) as raised:
+        GitOfficialComfyUIIdentityProvider(runner=runner).is_ancestor(
+            COMFYUI_REPOSITORY, COMMIT_A, COMMIT_B
+        )
+
+    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
+
+
 def test_official_comfyui_rejects_non_official_repository_before_git() -> None:
     called = False
 

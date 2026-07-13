@@ -16,6 +16,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
@@ -27,6 +29,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    ProtectedRequirementProjection,
     PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
@@ -35,6 +38,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
+from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
@@ -68,7 +72,7 @@ def _request_digests() -> dict[str, str]:
             ComfyUIRequestIdentity(
                 type="comfyui",
                 repository="https://github.com/Comfy-Org/ComfyUI.git",
-                selector="v0.4.0",
+                selector="v0.11.0",
             )
         ),
         "cli": compute_request_digest(
@@ -164,7 +168,7 @@ def _lock() -> CanonicalLock:
                 request_digest=digests["comfyui"],
                 repository="https://github.com/Comfy-Org/ComfyUI.git",
                 commit=COMMIT_A,
-                formal_release="0.4.0",
+                formal_release="0.11.0",
             ),
             ComfyCliLockEntry(
                 type="comfy-cli",
@@ -203,6 +207,43 @@ def _lock() -> CanonicalLock:
             ),
         ],
     )
+
+
+def test_requirements_sidecar_round_trips_as_one_strict_canonical_entry() -> None:
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository="https://github.com/Comfy-Org/ComfyUI.git",
+        commit=COMMIT_A,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        protected_names=["torch", "torchaudio", "torchvision"],
+        protected_policy_digest=DIGEST_B,
+    )
+    entry = ComfyUIRequirementsLockEntry(
+        type="comfyui-requirements",
+        request_digest=compute_request_digest(request),
+        repository=request.repository,
+        commit=request.commit,
+        floor_commit=request.floor_commit,
+        path=request.path,
+        python_version=request.python_version,
+        platform=request.platform,
+        protected_names=request.protected_names,
+        protected_policy_digest=request.protected_policy_digest,
+        requirements_digest=DIGEST_C,
+        protected=[
+            ProtectedRequirementProjection(package="torchaudio", extras=[], selector="")
+        ],
+    )
+    lock = CanonicalLock(schema_version=1, entries=[entry])
+
+    assert parse_canonical_lock_toml(dump_canonical_lock_toml(lock)) == lock
+    changed = lock.model_dump(mode="python")
+    changed["entries"][0]["unknown"] = True
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CanonicalLock.model_validate(changed)
 
 
 def test_complete_lock_round_trips_and_is_byte_deterministic() -> None:
@@ -492,19 +533,16 @@ def test_group_rejects_duplicate_package_with_different_extras() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "selector",
-    [">=1", "<3", "!=2", "~=1.2", "==1.*", "<3,>=1.0rc1"],
-)
-def test_direct_python_group_rejects_unbounded_or_unsupported_selectors(
-    selector: str,
-) -> None:
+@pytest.mark.parametrize("selector", ["===1", "==1.*", "<3,>=1.0rc1"])
+def test_direct_python_group_rejects_unsupported_selectors(selector: str) -> None:
     with pytest.raises(ValidationError):
         DirectPythonRequestMember(package="numpy", extras=[], selector=selector)
 
 
-@pytest.mark.parametrize("selector", ["", "==1.2.3", "!=2,<3,>=1"])
-def test_direct_python_group_accepts_final_bounded_selector_domain(
+@pytest.mark.parametrize(
+    "selector", ["", "==1.2.3", "!=2,<3,>=1", ">=1", "<3", "~=1.2"]
+)
+def test_direct_python_group_accepts_internal_pep440_selector_domain(
     selector: str,
 ) -> None:
     member = DirectPythonRequestMember(package="numpy", extras=[], selector=selector)
@@ -616,13 +654,13 @@ def test_parser_maps_non_exact_current_identity_to_generic_lock_error() -> None:
         parse_canonical_lock_toml(document)
 
 
-@pytest.mark.parametrize("version", ["0.3.99", "0.4.0rc1", "0.4.0.dev1"])
+@pytest.mark.parametrize("version", ["0.3.99", "0.11.0rc1", "0.11.0.dev1"])
 def test_comfyui_formal_release_requires_stable_floor(version: str) -> None:
     data = _lock().model_dump(mode="python")
     comfyui = next(entry for entry in data["entries"] if entry["type"] == "comfyui")
     comfyui["formal_release"] = version
 
-    with pytest.raises(ValidationError, match=r"stable ComfyUI 0.4.0"):
+    with pytest.raises(ValidationError, match=r"stable ComfyUI 0.11.0"):
         CanonicalLock.model_validate(data)
 
 

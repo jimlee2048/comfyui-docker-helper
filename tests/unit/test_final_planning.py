@@ -39,7 +39,7 @@ def _document() -> dict[str, Any]:
             "extra_packages": [f"torchvision=={TORCHVISION_VERSION}"],
         },
         "build": {"platforms": [TARGET_PLATFORM]},
-        "comfyui": {"version": "0.4.0", "install_manager": False},
+        "comfyui": {"version": "0.11.0", "install_manager": False},
     }
 
 

@@ -20,7 +20,7 @@ def _document() -> dict[str, Any]:
     return {
         "compute_platform": {"type": "cuda", "cuda": {"version": "13.0.3"}},
         "pytorch": {"version": "2.12.1"},
-        "comfyui": {"version": "0.4.0", "install_manager": False},
+        "comfyui": {"version": "0.11.0", "install_manager": False},
     }
 
 
@@ -221,7 +221,7 @@ def test_platforms_are_nonempty_typed_and_duplicate_free() -> None:
     assert "build.duplicate_platform" in _codes(config)
 
 
-@pytest.mark.parametrize("version", ["0.3.60", "v0.3.60", "<0.4.0", "==0.3.60"])
+@pytest.mark.parametrize("version", ["0.3.60", "v0.3.60", "<0.11.0", "==0.3.60"])
 def test_comfyui_rejects_selectors_definitely_below_floor(version: str) -> None:
     document = _document()
     document["comfyui"]["version"] = version
@@ -231,7 +231,15 @@ def test_comfyui_rejects_selectors_definitely_below_floor(version: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "version", ["0.4.0", "v0.4.1", ">=0.4.0,<1", "latest", "nightly"]
+    "version",
+    [
+        "0.11.0",
+        "v0.11.1",
+        ">=0.11.0,<1",
+        "latest",
+        "nightly",
+        "09725967cf76304371c390ca1d6483e04061da48",
+    ],
 )
 def test_comfyui_accepts_floor_compatible_stable_selectors(version: str) -> None:
     document = _document()
@@ -245,13 +253,13 @@ def test_comfyui_accepts_floor_compatible_stable_selectors(version: str) -> None
     ("version", "code"),
     [
         ("", "comfyui.invalid_version"),
-        (">=0.5.0,<0.5.0", "comfyui.unsatisfiable_selector"),
-        (">0.5.0,<=0.5.0", "comfyui.unsatisfiable_selector"),
-        (">0.5.0,<0.5.1", "comfyui.unsatisfiable_selector"),
-        ("==0.5.0,!=0.5.0", "comfyui.unsatisfiable_selector"),
-        ("0.5.0-rc.1", "comfyui.formal_stable_release_required"),
-        ("0.5.0+local", "comfyui.formal_stable_release_required"),
-        (">=0.5.0rc1,<1", "comfyui.prerelease_selector_forbidden"),
+        (">=0.12.0,<0.12.0", "comfyui.unsatisfiable_selector"),
+        (">0.12.0,<=0.12.0", "comfyui.unsatisfiable_selector"),
+        (">0.12.0,<0.12.1", "comfyui.unsatisfiable_selector"),
+        ("==0.12.0,!=0.12.0", "comfyui.unsatisfiable_selector"),
+        ("0.12.0-rc.1", "comfyui.formal_stable_release_required"),
+        ("0.12.0+local", "comfyui.formal_stable_release_required"),
+        (">=0.12.0rc1,<1", "comfyui.prerelease_selector_forbidden"),
     ],
 )
 def test_comfyui_requires_a_satisfiable_stable_formal_selector(
@@ -267,7 +275,7 @@ def test_comfyui_requires_a_satisfiable_stable_formal_selector(
 
 def test_comfyui_selector_satisfiability_uses_discrete_formal_releases() -> None:
     document = _document()
-    document["comfyui"]["version"] = ">=0.5.0,<0.5.1"
+    document["comfyui"]["version"] = ">=0.12.0,<0.12.1"
     config = validate_final_config_structure(document)
 
     assert "comfyui.unsatisfiable_selector" not in _codes(config)

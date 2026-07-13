@@ -25,6 +25,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciRequestIdentity,
     OfficialComfyUILockEntry,
     PythonGroupRequestIdentity,
+    PyTorchCompatibilityLockEntry,
+    PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     compute_request_digest,
@@ -110,6 +112,7 @@ class FakeAcquirer:
                     ),
                     descriptor_kind="index",
                     platform=request.platform,
+                    resolved_version=("0.11.28" if request.role == "uv-tool" else None),
                 ),
             )
         elif isinstance(request, ManagedPythonRequestIdentity):
@@ -127,8 +130,6 @@ class FakeAcquirer:
                     catalog_key="cpython-3.13.14-linux-x86_64-gnu",
                     catalog_url="https://example.test/python.tar.zst",
                     pip_version=release.pip_version,
-                    setuptools_version=release.setuptools_version,
-                    wheel_version=release.wheel_version,
                     cdh_version=release.cdh_version,
                     cdh_source_digest=release.cdh_source_digest,
                     uv_build_version=release.uv_build_version,
@@ -189,6 +190,16 @@ class FakeAcquirer:
                 )
                 for member in request.members
             )
+            if isinstance(request, PyTorchRequestIdentity):
+                entries = (
+                    *entries,
+                    PyTorchCompatibilityLockEntry(
+                        type="pytorch-compatibility",
+                        request_digest=request_digest,
+                        environment="application",
+                        setuptools_specifier="<82",
+                    ),
+                )
         else:  # pragma: no cover
             raise AssertionError(request)
         return AcquiredCanonicalEntries(entries, True)

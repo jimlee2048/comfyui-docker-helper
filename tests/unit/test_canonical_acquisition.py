@@ -26,8 +26,11 @@ from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisition
 from comfyui_docker_helper.host.canonical_acquisition import (
     ManagedPythonReleaseInputs,
     ProviderIdentityAcquirer,
+    ResolvedPythonGroup,
     ResolvedPythonMember,
     UvPythonGroupResolver,
+    _setuptools_specifier_from_metadata,
+    _target_marker_environment,
 )
 from comfyui_docker_helper.host.identity_providers import (
     ComfyCliIdentity,
@@ -57,7 +60,8 @@ def _group() -> PyTorchRequestIdentity:
         channel="cu130",
         python_version="3.13.14",
         platform="linux/amd64",
-        index_url="https://download.pytorch.org/whl/cu130",
+        python_index_url="https://pypi.org/simple",
+        pytorch_index_url="https://download.pytorch.org/whl/cu130",
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
             DirectPythonRequestMember(
@@ -65,6 +69,81 @@ def _group() -> PyTorchRequestIdentity:
             ),
         ],
     )
+
+
+def _pylock(*packages: tuple[str, str]) -> str:
+    sections = ['lock-version = "1.0"', 'created-by = "uv"']
+    for name, version in packages:
+        sections.extend(
+            (
+                "[[packages]]",
+                f'name = "{name}"',
+                f'version = "{version}"',
+            )
+        )
+        if name == "torch":
+            sections.append(
+                'wheels = [{ url = "https://download.pytorch.org/whl/cu130/'
+                'torch.whl" }]'
+            )
+    return "\n".join(sections) + "\n"
+
+
+_TORCH_METADATA = "\n".join(
+    (
+        "Metadata-Version: 2.4",
+        "Name: torch",
+        "Version: 2.12.1+cu130",
+        "Requires-Dist: setuptools<82",
+        "",
+    )
+)
+
+
+def test_torch_metadata_markers_use_deterministic_linux_amd64_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("platform.machine", lambda: "aarch64")
+    metadata = _TORCH_METADATA.replace(
+        "Requires-Dist: setuptools<82",
+        'Requires-Dist: setuptools<82; platform_machine == "x86_64" '
+        'and sys_platform == "linux" and python_version >= "3.12"',
+    )
+
+    assert _target_marker_environment("3.13.14")["platform_machine"] == "x86_64"
+    assert (
+        _setuptools_specifier_from_metadata(
+            metadata,
+            python_version="3.13.14",
+            expected_torch_version="2.12.1+cu130",
+        )
+        == "<82"
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        _TORCH_METADATA.replace("Name: torch", "Name: torch\nName: other"),
+        _TORCH_METADATA.replace(
+            "Version: 2.12.1+cu130",
+            "Version: 2.12.1+cu130\nVersion: 2.12.1+cu130",
+        ),
+        _TORCH_METADATA.replace("Metadata-Version: 2.4\n", ""),
+        _TORCH_METADATA.replace("setuptools<82", "setuptools=>82"),
+        "Metadata-Version: 2.4\n bad-continuation\nName: torch\n"
+        "Version: 2.12.1+cu130\n",
+    ],
+)
+def test_torch_metadata_rejects_duplicate_or_defective_identity(
+    metadata: str,
+) -> None:
+    with pytest.raises(CanonicalAcquisitionError, match="metadata is invalid"):
+        _setuptools_specifier_from_metadata(
+            metadata,
+            python_version="3.13.14",
+            expected_torch_version="2.12.1+cu130",
+        )
 
 
 def test_uv_group_resolver_uses_one_absolute_isolated_explicit_invocation(
@@ -81,28 +160,35 @@ def test_uv_group_resolver_uses_one_absolute_isolated_explicit_invocation(
         return subprocess.CompletedProcess(
             args,
             0,
-            stdout=(
-                "nvidia-cublas-cu13==13.1.0\n"
-                "torch==2.12.1+cu130\n"
-                "torchvision[image]==0.27.1+cu130\n"
+            stdout=_pylock(
+                ("nvidia-cublas-cu13", "13.1.0"),
+                ("torch", "2.12.1+cu130"),
+                ("torchvision", "0.27.1+cu130"),
             ),
         )
 
-    resolver = UvPythonGroupResolver(HostUvRunner(Path("/opt/cdh/bin/uv")), runner)
+    resolver = UvPythonGroupResolver(
+        HostUvRunner(Path("/opt/cdh/bin/uv")),
+        runner,
+        metadata_reader=lambda _url: _TORCH_METADATA,
+    )
     result = resolver.resolve(_group())
 
-    assert result == (
-        ResolvedPythonMember("torch", "2.12.1+cu130"),
-        ResolvedPythonMember("torchvision", "0.27.1+cu130"),
+    assert result == ResolvedPythonGroup(
+        (
+            ResolvedPythonMember("torch", "2.12.1+cu130"),
+            ResolvedPythonMember("torchvision", "0.27.1+cu130"),
+        ),
+        "<82",
     )
     assert len(calls) == 1
     argv, kwargs = calls[0]
     assert argv[:4] == ("/opt/cdh/bin/uv", "--no-config", "pip", "compile")
     assert argv[argv.index("--python-version") + 1] == "3.13.14"
     assert argv[argv.index("--python-platform") + 1] == "x86_64-unknown-linux-gnu"
-    assert argv[argv.index("--default-index") + 1].endswith("/cu130")
-    assert kwargs["input"] == ("torch==2.12.1\ntorchvision[image]<0.28,>=0.27\n")
-    assert kwargs["cwd"] == "/"
+    assert "--default-index" not in argv
+    assert "--no-sources" not in argv
+    assert str(kwargs["cwd"]).startswith("/tmp/cdh-pytorch-resolution-")
     environment = kwargs["env"]
     assert isinstance(environment, dict)
     assert environment["UV_NO_CONFIG"] == "1"
@@ -134,7 +220,7 @@ def test_non_public_uv_tool_group_uses_exact_isolated_resolution_seam() -> None:
         HostUvRunner(Path("/opt/cdh/bin/uv")), runner
     ).resolve(request)
 
-    assert resolved == (ResolvedPythonMember("ruff", "0.12.0"),)
+    assert resolved == ResolvedPythonGroup((ResolvedPythonMember("ruff", "0.12.0"),))
     assert len(calls) == 1
     argv, kwargs = calls[0]
     assert argv[0] == "/opt/cdh/bin/uv"
@@ -147,32 +233,17 @@ def test_non_public_uv_tool_group_uses_exact_isolated_resolution_seam() -> None:
 @pytest.mark.parametrize(
     ("stdout", "returncode", "message"),
     [
-        ("torch==2.12.1\n", 0, "omitted"),
-        ("torch>=2\ntorchvision==0.27.1\n", 0, "invalid data"),
-        ("torch===\n", 0, "invalid data"),
-        ("torch==2.12.1rc1+cu130\ntorchvision==0.27.1\n", 0, "invalid data"),
+        ("not toml", 0, "invalid PyTorch metadata"),
         (
-            "torch==2.12.1\ntorchvision==0.27.1+cu130\n",
+            _pylock(("torch", "2.12.1+cu130")),
             0,
-            "incompatible PyTorch channel",
+            "incompatible direct group",
         ),
         (
-            "torch==2.12.1+cpu\ntorchvision==0.27.1+cu130\n",
-            0,
-            "incompatible PyTorch channel",
-        ),
-        (
-            "torch==2.12.1+cu129\ntorchvision==0.27.1+cu130\n",
-            0,
-            "incompatible PyTorch channel",
-        ),
-        (
-            "torch==2.12.1+cu130\ntorchvision==0.27.1\n",
-            0,
-            "incompatible PyTorch channel",
-        ),
-        (
-            "torch==2.12.1+cu130\ntorchvision==0.27.1+cu129\n",
+            _pylock(
+                ("torch", "2.12.1+cpu"),
+                ("torchvision", "0.27.1+cu130"),
+            ),
             0,
             "incompatible PyTorch channel",
         ),
@@ -187,7 +258,11 @@ def test_uv_group_resolver_rejects_failed_or_incomplete_output(
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, returncode, stdout=stdout)
 
-    resolver = UvPythonGroupResolver(HostUvRunner(Path("/opt/cdh/bin/uv")), runner)
+    resolver = UvPythonGroupResolver(
+        HostUvRunner(Path("/opt/cdh/bin/uv")),
+        runner,
+        metadata_reader=lambda _url: _TORCH_METADATA,
+    )
 
     with pytest.raises(CanonicalAcquisitionError, match=message):
         resolver.resolve(_group())
@@ -212,18 +287,20 @@ def test_pytorch_group_does_not_interpret_arbitrary_extra_local_label() -> None:
         return subprocess.CompletedProcess(
             args,
             0,
-            stdout=(
-                "custom-extra==1.0+vendor.1\n"
-                "torch==2.12.1+cu130\n"
-                "torchvision==0.27.1+cu130\n"
+            stdout=_pylock(
+                ("custom-extra", "1.0+vendor.1"),
+                ("torch", "2.12.1+cu130"),
+                ("torchvision", "0.27.1+cu130"),
             ),
         )
 
     resolved = UvPythonGroupResolver(
-        HostUvRunner(Path("/opt/cdh/bin/uv")), runner
+        HostUvRunner(Path("/opt/cdh/bin/uv")),
+        runner,
+        metadata_reader=lambda _url: _TORCH_METADATA,
     ).resolve(request)
 
-    assert resolved[0] == ResolvedPythonMember("custom-extra", "1.0+vendor.1")
+    assert resolved.members[0] == ResolvedPythonMember("custom-extra", "1.0+vendor.1")
 
 
 @dataclass
@@ -329,13 +406,14 @@ class FakeGit:
 class FakePythonGroup:
     calls: list[PythonGroupRequestIdentity] = field(default_factory=list)
 
-    def resolve(
-        self, request: PythonGroupRequestIdentity
-    ) -> tuple[ResolvedPythonMember, ...]:
+    def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup:
         self.calls.append(request)
-        return (
-            ResolvedPythonMember("torch", "2.12.1+cu130"),
-            ResolvedPythonMember("torchvision", "0.27.1+cu130"),
+        return ResolvedPythonGroup(
+            (
+                ResolvedPythonMember("torch", "2.12.1+cu130"),
+                ResolvedPythonMember("torchvision", "0.27.1+cu130"),
+            ),
+            "<82",
         )
 
 
@@ -360,8 +438,6 @@ class ProviderFakes:
             self.group,
             ManagedPythonReleaseInputs(
                 "26.1.2",
-                "83.0.0",
-                "0.47.0",
                 "0.5.0",
                 DIGEST_A,
                 "0.11.28",
@@ -398,7 +474,11 @@ def test_adapter_converts_oci_managed_python_and_complete_group() -> None:
     assert oci_entry.descriptor_digest == DIGEST_A
     assert python_entry.pip_version == "26.1.2"
     assert python_entry.cdh_source_digest == DIGEST_A
-    assert [entry.package for entry in group_entries] == ["torch", "torchvision"]
+    assert [entry.package for entry in group_entries[:-1]] == [
+        "torch",
+        "torchvision",
+    ]
+    assert group_entries[-1].setuptools_specifier == "<82"
     assert len(fakes.group.calls) == 1
 
 
@@ -496,12 +576,13 @@ def test_registry_exact_rejects_mismatched_provider_version() -> None:
 
 def test_python_group_rejects_version_outside_member_selector() -> None:
     class MismatchedPythonGroup(FakePythonGroup):
-        def resolve(
-            self, request: PythonGroupRequestIdentity
-        ) -> tuple[ResolvedPythonMember, ...]:
-            return (
-                ResolvedPythonMember("torch", "2.11.0+cu130"),
-                ResolvedPythonMember("torchvision", "0.27.1+cu130"),
+        def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup:
+            return ResolvedPythonGroup(
+                (
+                    ResolvedPythonMember("torch", "2.11.0+cu130"),
+                    ResolvedPythonMember("torchvision", "0.27.1+cu130"),
+                ),
+                "<82",
             )
 
     fakes = ProviderFakes(group=MismatchedPythonGroup())

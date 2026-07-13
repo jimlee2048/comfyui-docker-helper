@@ -52,10 +52,14 @@ uv_tools = ["ruff==0.15.18"]
 
 [pytorch]
 # Required. Installs torch==version from the CUDA wheel index inferred from CUDA.
+# The lock and image retain the resolver's complete exact version, including
+# the derived local channel label (for example, torch==2.12.1+cu130).
 version = "2.12.1"
 # Default: "https://download.pytorch.org/whl". Combined with the CUDA wheel tag.
 index_base_url = "https://download.pytorch.org/whl"
-# Additional PyTorch-family packages. Do not include "torch" here.
+# Additional PyTorch-family packages installed and constrained with torch as
+# one exact group. Every direct member uses the derived PyTorch source; generic
+# transitive dependencies use [python].index_url. Do not include "torch" here.
 extra_packages = ["torchvision==0.27.1"]
 
 [cdh]

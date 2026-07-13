@@ -126,9 +126,24 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     assert "cdh/src/comfyui_docker_helper/cli.py" in tree
     assert "cdh-production-requirements.txt" in tree
     assert "cdh-production-inventory.txt" in tree
+    routing = tree["pytorch-resolution.toml"].decode()
+    assert 'url = "https://pypi.org/simple"' in routing
+    assert 'url = "https://download.pytorch.org/whl/cu130"' in routing
+    assert '[tool.uv.sources.torch]\nindex = "pytorch"' in routing
+    assert '[tool.uv.sources.torchvision]\nindex = "pytorch"' in routing
     assert not (first / "config.toml").exists()
     assert not (first / "config.lock.toml").exists()
     assert str(source).encode() not in (first / "build-plan.json").read_bytes()
+
+    dockerfile = (first / "Dockerfile").read_text()
+    assert (
+        "COPY --chown=0:0 --chmod=0444 pytorch-resolution.toml "
+        "/opt/cdh/build/pyproject.toml" in dockerfile
+    )
+    assert "container install-inference" in dockerfile
+    assert "torch==2.12.1+cu130" not in dockerfile
+    assert "UV_CONSTRAINT" not in dockerfile
+    assert "PIP_CONSTRAINT" not in dockerfile
 
     expected = build_plan_digest(plan)
     assert (

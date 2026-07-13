@@ -17,11 +17,15 @@ reload the root config or lock to make planning decisions.
 
 - Python 3.12 or 3.13;
 - Docker with Buildx for `cdh host build`;
-- NVIDIA Docker support for CUDA images.
+- NVIDIA Docker support with driver `>=580.65.06` on a Turing-or-newer x86_64
+  GPU.
 
 The tested v0.5 planning baseline is CPython 3.13.14 (with 3.12.13 fallback),
 CUDA 13.0.3, PyTorch 2.12.1, torchvision 0.27.1, Ubuntu 24.04, and
 `linux/amd64`. CUDA 13.0.3 derives the internal PyTorch channel `cu130`.
+The default resolved inference group is installed as the complete exact
+distributions `torch==2.12.1+cu130` and `torchvision==0.27.1+cu130` from the
+derived cu130 index.
 
 ## Install
 
@@ -106,12 +110,32 @@ Old, malformed, or future lock schemas fail with one remove-and-regenerate
 diagnostic. There is no compatibility reader or migration path.
 
 PyTorch configuration versions are selectors, not resolved artifact versions.
-The canonical PyTorch request binds the CUDA-derived channel, index URL, target
-Python/platform, and complete package group into its `request_digest`. The lock
+The canonical PyTorch request binds the CUDA-derived channel, both the ordinary
+Python index and derived PyTorch index, target Python/platform, and complete
+package group into its `request_digest`. The lock
 records each complete resolved distribution version, including a stable local
 label such as `2.12.1+cu130`; BuildPlan carries that same exact install version.
 Resolved versions never enter `request_digest`, and the resolved version is not
 split into separate public/local fields.
+
+Every direct member—`torch` plus all `[pytorch].extra_packages`—is mapped
+exclusively to the derived PyTorch index. Generic transitive dependencies use
+only `[python].index_url`; a missing direct member does not fall back to a
+same-named package on the Python index. The complete group is installed
+together into `/opt/venv` and verified with that environment's interpreter.
+Its exact direct distributions and the setuptools compatibility range derived
+from the selected torch wheel metadata are then protected by the root-owned,
+read-only
+`/opt/cdh/build/python-package-constraints.txt`. cdh scopes that artifact only
+to later application installation operations; it is not a global image
+`UV_CONSTRAINT` or `PIP_CONSTRAINT`.
+
+The application environment contains exact `pip==26.1.2`. cdh does not
+preinstall, lock, or version-gate wheel; packages that need wheel as a runtime
+library or CLI must declare it, while source builds declare build dependencies
+through their own PEP 517 build metadata. Setuptools has no global exact pin:
+its installed version must satisfy the selected torch wheel's derived range
+and the final dependency check.
 
 The image installs the exact managed interpreter once, creates the application
 environment at `/opt/venv`, and keeps cdh plus configured standalone CLI tools
@@ -123,6 +147,9 @@ Each `[python].uv_tools` entry accepts the same bounded direct-requirement
 grammar, resolves independently, and installs an exact direct result without
 force-replacing an existing executable. comfy-cli and cm-cli remain application
 environment tools rather than uv tools.
+The cdh-owned host resolver uv, release `uv_build` backend, and container
+uv/uvx image are independently locked and verified identities even when their
+current versions are equal.
 
 Users may mutate the public uv tool store at runtime, but those changes are
 outside the baked-image replay contract. Updating baked cdh or configured tools

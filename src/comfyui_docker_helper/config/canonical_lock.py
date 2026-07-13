@@ -8,6 +8,7 @@ import re
 import tomllib
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 import tomli_w
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -75,6 +76,7 @@ class OciLockEntry(_ResolverEntry):
     descriptor_digest: str
     descriptor_kind: Literal["index", "manifest"]
     platform: Literal["linux/amd64"]
+    resolved_version: str | None = None
 
     @field_validator("descriptor_digest")
     @classmethod
@@ -91,6 +93,17 @@ class OciLockEntry(_ResolverEntry):
     def _validate_tag(cls, value: str) -> str:
         return _require_oci_tag(value)
 
+    @field_validator("resolved_version")
+    @classmethod
+    def _validate_resolved_version(cls, value: str | None) -> str | None:
+        return None if value is None else _require_exact_stable_version(value)
+
+    @model_validator(mode="after")
+    def _validate_role_version(self) -> OciLockEntry:
+        if (self.role == "uv-tool") != (self.resolved_version is not None):
+            raise ValueError("only uv-tool images require a resolved version")
+        return self
+
 
 class ManagedPythonLockEntry(_ResolverEntry):
     """Exact uv-managed CPython plus release-owned bootstrap/cdh inputs."""
@@ -105,8 +118,6 @@ class ManagedPythonLockEntry(_ResolverEntry):
     catalog_key: str = Field(min_length=1)
     catalog_url: str = Field(min_length=1)
     pip_version: str = Field(min_length=1)
-    setuptools_version: str = Field(min_length=1)
-    wheel_version: str = Field(min_length=1)
     cdh_version: str = Field(min_length=1)
     cdh_source_digest: str
     uv_build_version: str = Field(min_length=1)
@@ -119,8 +130,6 @@ class ManagedPythonLockEntry(_ResolverEntry):
     @field_validator(
         "version",
         "pip_version",
-        "setuptools_version",
-        "wheel_version",
         "cdh_version",
         "uv_build_version",
     )
@@ -259,6 +268,27 @@ class DirectPythonLockEntry(_ResolverEntry):
         return _require_exact_stable_distribution_version(value)
 
 
+class PyTorchCompatibilityLockEntry(_ResolverEntry):
+    """Wheel-metadata policy derived with one exact PyTorch group."""
+
+    type: Literal["pytorch-compatibility"]
+    environment: Literal["application"]
+    setuptools_specifier: str | None = None
+
+    @field_validator("setuptools_specifier")
+    @classmethod
+    def _validate_setuptools_specifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = SpecifierSet(value)
+        except InvalidSpecifier as error:
+            raise ValueError("setuptools_specifier must be canonical") from error
+        if not value or str(parsed) != value:
+            raise ValueError("setuptools_specifier must be canonical")
+        return value
+
+
 class LocalExecutableLockEntry(_StrictLockModel):
     """Content-owned baked executable identity; no resolver request exists."""
 
@@ -293,6 +323,7 @@ CanonicalLockEntry = Annotated[
     | RegistryNodeLockEntry
     | DirectGitLockEntry
     | DirectPythonLockEntry
+    | PyTorchCompatibilityLockEntry
     | LocalExecutableLockEntry,
     Field(discriminator="type"),
 ]
@@ -509,7 +540,8 @@ class PyTorchRequestIdentity(_StrictLockModel):
     channel: str
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
-    index_url: str = Field(min_length=1)
+    python_index_url: str = Field(min_length=1)
+    pytorch_index_url: str = Field(min_length=1)
     members: list[DirectPythonRequestMember] = Field(min_length=1)
 
     @field_validator("channel")
@@ -536,10 +568,18 @@ class PyTorchRequestIdentity(_StrictLockModel):
     def _validate_python_version(cls, value: str) -> str:
         return _require_exact_stable_version(value)
 
-    @field_validator("index_url")
+    @field_validator("python_index_url", "pytorch_index_url")
     @classmethod
     def _validate_index_url(cls, value: str) -> str:
         return _require_http_url(value, "index_url")
+
+    @model_validator(mode="after")
+    def _validate_source_channel(self) -> PyTorchRequestIdentity:
+        if not pytorch_index_matches_channel(self.pytorch_index_url, self.channel):
+            raise ValueError("pytorch_index_url must end with the derived channel")
+        if self.python_index_url == self.pytorch_index_url:
+            raise ValueError("Python and PyTorch indexes must be distinct")
+        return self
 
 
 PythonGroupRequestIdentity = DirectPythonRequestIdentity | PyTorchRequestIdentity
@@ -616,6 +656,8 @@ def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
         return (entry.type, entry.url)
     if isinstance(entry, DirectPythonLockEntry):
         return (entry.type, entry.environment, entry.package)
+    if isinstance(entry, PyTorchCompatibilityLockEntry):
+        return (entry.type, entry.environment)
     return (entry.type, entry.relative_path)
 
 
@@ -690,6 +732,35 @@ def pytorch_core_version_matches_channel(
     except InvalidVersion:
         return False
     return parsed.local == channel
+
+
+def pytorch_index_matches_channel(index_url: str, channel: str) -> bool:
+    """Require the derived channel to be the final PyTorch index path segment."""
+    path = urlsplit(index_url).path.rstrip("/")
+    return bool(path) and path.rsplit("/", maxsplit=1)[-1] == channel
+
+
+def uv_image_version_matches_tag(tag: str, resolved_version: str | None) -> bool:
+    """Bind exact uv semver tags while allowing descriptor-locked moving tags."""
+    if resolved_version is None:
+        return False
+    try:
+        resolved = Version(resolved_version)
+    except InvalidVersion:
+        return False
+    if (
+        str(resolved) != resolved_version
+        or resolved.is_prerelease
+        or resolved.is_devrelease
+    ):
+        return False
+    try:
+        selector = Version(tag)
+    except InvalidVersion:
+        return True
+    if str(selector) != tag or selector.is_prerelease or selector.is_devrelease:
+        return True
+    return resolved_version == tag
 
 
 def _require_exact_registry_version(value: str) -> str:

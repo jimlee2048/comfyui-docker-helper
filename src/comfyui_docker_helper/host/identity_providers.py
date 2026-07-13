@@ -100,6 +100,7 @@ class OciIdentity:
     descriptor_digest: str
     descriptor_kind: Literal["index", "manifest"]
     platform: Literal["linux/amd64"]
+    resolved_version: str | None = None
 
 
 class OciIdentityProvider(Protocol):
@@ -320,7 +321,7 @@ class HttpOciIdentityProvider:
                 raise IdentityProviderError(
                     source, ProviderFailureKind.INVALID_RESPONSE
                 )
-            _verify_manifest_config_platform(
+            config_document = _verify_manifest_config_platform(
                 self.client,
                 child_document,
                 registry=registry,
@@ -332,7 +333,7 @@ class HttpOciIdentityProvider:
             )
             kind: Literal["index", "manifest"] = "index"
         elif media_type in _OCI_MANIFEST_MEDIA_TYPES:
-            _verify_manifest_config_platform(
+            config_document = _verify_manifest_config_platform(
                 self.client,
                 document,
                 registry=registry,
@@ -352,6 +353,11 @@ class HttpOciIdentityProvider:
             descriptor_digest=digest,
             descriptor_kind=kind,
             platform=request.platform,
+            resolved_version=(
+                _uv_version_from_config(config_document, source)
+                if request.role == "uv-tool"
+                else None
+            ),
         )
 
 
@@ -794,7 +800,7 @@ def _verify_manifest_config_platform(
     platform: str,
     platform_mismatch_kind: ProviderFailureKind,
     source: str,
-) -> None:
+) -> Mapping[str, object]:
     config = document.get("config")
     if not isinstance(config, Mapping):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
@@ -811,12 +817,35 @@ def _verify_manifest_config_platform(
     _raise_for_http_status(blob_response, source)
     if not _content_matches_digest(blob_response.content, config_digest):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    config_document = _response_json(blob_response, source)
     _require_config_platform(
-        _response_json(blob_response, source),
+        config_document,
         platform,
         source,
         mismatch_kind=platform_mismatch_kind,
     )
+    return config_document
+
+
+def _uv_version_from_config(document: Mapping[str, object], source: str) -> str:
+    config = document.get("config")
+    if not isinstance(config, Mapping):
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    labels = config.get("Labels")
+    if not isinstance(labels, Mapping):
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    value = labels.get("org.opencontainers.image.version")
+    if not isinstance(value, str):
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    try:
+        version = Version(value)
+    except InvalidVersion as error:
+        raise IdentityProviderError(
+            source, ProviderFailureKind.INVALID_RESPONSE
+        ) from error
+    if str(version) != value or version.is_prerelease or version.is_devrelease:
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    return value
 
 
 def _require_config_platform(

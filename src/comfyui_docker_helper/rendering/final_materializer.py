@@ -23,6 +23,9 @@ from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_LOCK_PREFIX,
 )
 from comfyui_docker_helper.container.phase_inputs import phase_document
+from comfyui_docker_helper.pytorch_resolution import (
+    pytorch_resolution_manifest_bytes,
+)
 from comfyui_docker_helper.release_artifacts import (
     PRODUCTION_REQUIREMENTS,
     release_source_digest,
@@ -110,6 +113,18 @@ def materialize_build_plan(
             root=target,
         )
         _materialize_cdh_release(plan, target)
+        pytorch = plan.application.pytorch
+        _write(
+            target / "pytorch-resolution.toml",
+            pytorch_resolution_manifest_bytes(
+                requirements=tuple(package.requirement for package in pytorch.packages),
+                direct_packages=tuple(package.name for package in pytorch.packages),
+                python_version=pytorch.python_version,
+                python_index_url=pytorch.python_index_url,
+                pytorch_index_url=pytorch.pytorch_index_url,
+            ),
+            root=target,
+        )
         _write(
             target / "Dockerfile",
             render_build_plan_dockerfile(plan).encode("utf-8"),

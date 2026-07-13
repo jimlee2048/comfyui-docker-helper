@@ -56,6 +56,7 @@ def test_root_command_exposes_current_groups() -> None:
     assert set(command.commands["container"].commands) == {
         "download-files",
         "entrypoint",
+        "install-inference",
     }
 
 
@@ -69,6 +70,7 @@ def test_root_command_exposes_current_groups() -> None:
         (["host", "build"], "Usage: cdh host build"),
         (["container"], "Usage: cdh container"),
         (["container", "download-files"], "Usage: cdh container download-files"),
+        (["container", "install-inference"], "Usage: cdh container install-inference"),
         (["container", "entrypoint"], "Usage: cdh container entrypoint"),
     ],
 )

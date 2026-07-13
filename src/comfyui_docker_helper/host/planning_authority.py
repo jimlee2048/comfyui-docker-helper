@@ -48,10 +48,8 @@ from comfyui_docker_helper.exact_ledger import (
     CDH_VERSION,
     COMFYUI_REPOSITORY,
     PIP_VERSION,
-    SETUPTOOLS_VERSION,
     UV_IMAGE_REPOSITORY,
     UV_VERSION,
-    WHEEL_VERSION,
 )
 from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
@@ -239,7 +237,8 @@ def build_desired_planning_inputs(
             channel=backend.package_channel,
             python_version=config.python.version,
             platform=platform.value,
-            index_url=(
+            python_index_url=config.python.index_url,
+            pytorch_index_url=(
                 f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}"
             ),
             members=[
@@ -308,8 +307,6 @@ def uv_oci_request(config: FinalConfig) -> OciRequestIdentity:
 def managed_python_release_inputs() -> ManagedPythonReleaseInputs:
     return ManagedPythonReleaseInputs(
         pip_version=PIP_VERSION,
-        setuptools_version=SETUPTOOLS_VERSION,
-        wheel_version=WHEEL_VERSION,
         cdh_version=CDH_VERSION,
         cdh_source_digest=release_source_digest(),
         uv_build_version=UV_VERSION,

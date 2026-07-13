@@ -24,6 +24,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
@@ -57,8 +58,6 @@ COMMIT_B = "2" * 40
 
 RELEASE = ManagedPythonReleaseInputs(
     pip_version="26.1.2",
-    setuptools_version="83.0.0",
-    wheel_version="0.47.0",
     cdh_version="0.5.0",
     cdh_source_digest=DIGEST_A,
     uv_build_version="0.11.28",
@@ -107,7 +106,8 @@ def _requests() -> tuple[ResolverRequestIdentity, ...]:
             channel="cu130",
             python_version="3.13.14",
             platform="linux/amd64",
-            index_url="https://download.pytorch.org/whl/cu130",
+            python_index_url="https://pypi.org/simple",
+            pytorch_index_url="https://download.pytorch.org/whl/cu130",
             members=[
                 DirectPythonRequestMember(
                     package="torch", extras=[], selector="==2.12.1"
@@ -190,6 +190,7 @@ class FakeAcquirer:
                     descriptor_digest=digest,
                     descriptor_kind="index",
                     platform=request.platform,
+                    resolved_version=("0.11.28" if request.role == "uv-tool" else None),
                 ),
             )
         elif isinstance(request, ManagedPythonRequestIdentity):
@@ -206,8 +207,6 @@ class FakeAcquirer:
                     catalog_key=f"cpython-{request.version}-linux-x86_64-gnu",
                     catalog_url="https://example.test/python.tar.zst",
                     pip_version=self.release.pip_version,
-                    setuptools_version=self.release.setuptools_version,
-                    wheel_version=self.release.wheel_version,
                     cdh_version=self.release.cdh_version,
                     cdh_source_digest=self.release.cdh_source_digest,
                     uv_build_version=self.release.uv_build_version,
@@ -273,6 +272,16 @@ class FakeAcquirer:
                 )
                 for member in request.members
             )
+            if isinstance(request, PyTorchRequestIdentity):
+                entries = (
+                    *entries,
+                    PyTorchCompatibilityLockEntry(
+                        type="pytorch-compatibility",
+                        request_digest=effective_digest,
+                        environment="application",
+                        setuptools_specifier="<82",
+                    ),
+                )
         return AcquiredCanonicalEntries(entries, provider_called)
 
 
@@ -320,6 +329,7 @@ def test_request_table_has_exact_keys_and_stability_for_every_domain() -> None:
         (
             ("python-package", "application", "torch"),
             ("python-package", "application", "torchvision"),
+            ("pytorch-compatibility", "application"),
         ),
     ]
     assert [item.stability for item in desired] == [
@@ -364,8 +374,6 @@ def test_managed_python_requires_typed_release_owned_compatibility() -> None:
     ("field_name", "new_value"),
     [
         ("pip_version", "26.1.3"),
-        ("setuptools_version", "83.0.1"),
-        ("wheel_version", "0.47.1"),
         ("cdh_version", "0.5.1"),
         ("cdh_source_digest", DIGEST_B),
         ("uv_build_version", "0.11.29"),
@@ -434,6 +442,85 @@ def test_managed_python_result_only_fields_do_not_enter_desired_compatibility(
     assert result.lock.entries == [changed]
 
 
+@pytest.mark.parametrize("policy", [LockPolicy.DEFAULT, LockPolicy.UPGRADE])
+def test_uv_exact_tag_mismatch_reacquires_in_mutating_modes(
+    policy: LockPolicy,
+) -> None:
+    request = OciRequestIdentity(
+        type="oci",
+        role="uv-tool",
+        repository="ghcr.io/astral-sh/uv",
+        tag="0.11.28",
+        platform="linux/amd64",
+    )
+    desired = (DesiredResolution.from_request(request),)
+    existing = CanonicalLock(
+        schema_version=1,
+        entries=[
+            OciLockEntry(
+                type="oci",
+                request_digest=desired[0].request_digest,
+                role="uv-tool",
+                repository=request.repository,
+                tag=request.tag,
+                descriptor_digest=DIGEST_A,
+                descriptor_kind="index",
+                platform=request.platform,
+                resolved_version="0.11.29",
+            )
+        ],
+    )
+    acquirer = FakeAcquirer()
+
+    result = reconcile_canonical_lock(
+        desired, existing=existing, acquirer=acquirer, policy=policy
+    )
+
+    assert acquirer.calls == ["oci"]
+    entry = result.lock.entries[0]
+    assert isinstance(entry, OciLockEntry)
+    assert entry.resolved_version == "0.11.28"
+
+
+def test_uv_exact_tag_mismatch_fails_locked_without_provider_calls() -> None:
+    request = OciRequestIdentity(
+        type="oci",
+        role="uv-tool",
+        repository="ghcr.io/astral-sh/uv",
+        tag="0.11.28",
+        platform="linux/amd64",
+    )
+    desired = (DesiredResolution.from_request(request),)
+    existing = CanonicalLock(
+        schema_version=1,
+        entries=[
+            OciLockEntry(
+                type="oci",
+                request_digest=desired[0].request_digest,
+                role="uv-tool",
+                repository=request.repository,
+                tag=request.tag,
+                descriptor_digest=DIGEST_A,
+                descriptor_kind="index",
+                platform=request.platform,
+                resolved_version="0.11.29",
+            )
+        ],
+    )
+    acquirer = FakeAcquirer()
+
+    with pytest.raises(CanonicalResolutionError) as raised:
+        reconcile_canonical_lock(
+            desired,
+            existing=existing,
+            acquirer=acquirer,
+            policy=LockPolicy.LOCKED,
+        )
+
+    assert acquirer.calls == []
+    assert [item.code for item in raised.value.diagnostics] == ["lock.locked_mismatch"]
+
+
 def test_reconcile_rederives_after_nested_exact_selector_becomes_moving() -> None:
     request = _requests()[3]
     assert isinstance(request, ComfyCliRequestIdentity)
@@ -481,7 +568,7 @@ def test_reconcile_rederives_after_nested_python_member_mutation() -> None:
 
     assert desired.stability is SelectorStability.EXACT
     assert acquirer.calls == ["pytorch-group"]
-    assert len(result.delta) == 2
+    assert len(result.delta) == 3
 
 
 @pytest.mark.parametrize(
@@ -762,6 +849,7 @@ def test_locked_aggregates_entry_set_digest_and_local_content_without_calls() ->
     assert acquirer.calls == []
     assert len(local.calls) == 1
     assert [item.code for item in raised.value.diagnostics] == [
+        "lock.locked_mismatch",
         "lock.locked_mismatch",
         "lock.locked_mismatch",
         "lock.locked_mismatch",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
@@ -19,14 +20,20 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliLockEntry,
     DirectGitLockEntry,
     DirectPythonLockEntry,
+    DirectPythonRequestMember,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     OciLockEntry,
     OfficialComfyUILockEntry,
+    PyTorchCompatibilityLockEntry,
+    PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     canonical_entry_key,
+    compute_request_digest,
     dump_canonical_lock_toml,
     pytorch_core_version_matches_channel,
+    pytorch_index_matches_channel,
+    uv_image_version_matches_tag,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import (
@@ -51,6 +58,7 @@ from comfyui_docker_helper.config.selector_validation import (
     normalize_registry_version,
     resolve_git_target_dir,
 )
+from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.config.value_validation import has_control_characters
 from comfyui_docker_helper.exact_ledger import (
     COMFYUI_REPOSITORY,
@@ -91,6 +99,17 @@ class ImagePlan(_PlanModel):
     descriptor_digest: str
     descriptor_kind: Literal["index", "manifest"]
     platform: Literal["linux/amd64"]
+    resolved_version: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_role_version(self) -> ImagePlan:
+        if (self.role == "uv-tool") != (self.resolved_version is not None):
+            raise ValueError("only uv-tool images require a resolved version")
+        if self.role == "uv-tool" and not uv_image_version_matches_tag(
+            self.tag, self.resolved_version
+        ):
+            raise ValueError("uv image resolved version does not match its exact tag")
+        return self
 
     @property
     def reference(self) -> str:
@@ -107,8 +126,6 @@ class ManagedPythonPlan(_PlanModel):
     catalog_key: str
     catalog_url: str
     pip_version: str
-    setuptools_version: str
-    wheel_version: str
     cdh_version: str
     cdh_source_digest: str
     uv_build_version: str
@@ -207,6 +224,21 @@ class ExactPackagePlan(_PlanModel):
     version: str
     environment: Literal["application"]
 
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if canonicalize_name(value) != value:
+            raise ValueError("package name must be one normalized distribution name")
+        return value
+
+    @field_validator("extras")
+    @classmethod
+    def _validate_extras(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(canonicalize_name(extra) for extra in value)
+        if normalized != value or tuple(sorted(set(normalized))) != value:
+            raise ValueError("package extras must be sorted, unique, and normalized")
+        return value
+
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
@@ -236,6 +268,66 @@ class PackageGroupPlan(_PlanModel):
     packages: tuple[ExactPackagePlan, ...]
 
 
+class PyTorchGroupPlan(_PlanModel):
+    group: Literal["pytorch"]
+    backend: Literal["cuda"]
+    channel: str
+    python_version: str
+    platform: Literal["linux/amd64"]
+    python_index_url: str
+    pytorch_index_url: str
+    packages: tuple[ExactPackagePlan, ...]
+    setuptools_specifier: str | None
+
+    @field_validator("python_index_url", "pytorch_index_url")
+    @classmethod
+    def _validate_index_url(cls, value: str) -> str:
+        if not is_http_url(value):
+            raise ValueError("index URL must be one HTTP(S) URL")
+        return value
+
+    @field_validator("setuptools_specifier")
+    @classmethod
+    def _validate_setuptools_specifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = SpecifierSet(value)
+        if not value or str(parsed) != value:
+            raise ValueError("setuptools specifier must be canonical")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_group_identity(self) -> PyTorchGroupPlan:
+        if re.fullmatch(r"cu[0-9]+", self.channel) is None:
+            raise ValueError("PyTorch channel must be canonical")
+        if not pytorch_index_matches_channel(self.pytorch_index_url, self.channel):
+            raise ValueError("PyTorch index must end with its derived channel")
+        if self.python_index_url == self.pytorch_index_url:
+            raise ValueError("Python and PyTorch indexes must be distinct")
+        names = tuple(canonicalize_name(package.name) for package in self.packages)
+        if "torch" not in names or len(names) != len(set(names)):
+            raise ValueError("PyTorch packages must be unique and include torch")
+        if names != tuple(sorted(names, key=lambda name: (name != "torch", name))):
+            raise ValueError("PyTorch packages must be canonically ordered")
+        if any(
+            not pytorch_core_version_matches_channel(
+                package.name, package.version, self.channel
+            )
+            for package in self.packages
+        ):
+            raise ValueError("PyTorch core package does not match the group channel")
+        return self
+
+
+def managed_constraints_bytes(group: PyTorchGroupPlan) -> bytes:
+    """Project exact protected packages plus wheel-derived compatibility."""
+    requirements = [f"{package.name}=={package.version}" for package in group.packages]
+    if group.setuptools_specifier is not None:
+        requirements.append(f"setuptools{group.setuptools_specifier}")
+    requirements.sort()
+    return ("\n".join(requirements) + "\n").encode("utf-8")
+
+
 class ComfyUIPlan(_PlanModel):
     repository: str
     commit: str
@@ -248,9 +340,23 @@ class ApplicationPhase(_PlanModel):
     os_packages: tuple[str, ...]
     python_index_url: str
     python_extras: PackageGroupPlan | None
-    pytorch: PackageGroupPlan
+    pytorch: PyTorchGroupPlan
     comfy_cli_version: str
     comfyui: ComfyUIPlan
+
+    @model_validator(mode="after")
+    def _validate_python_sources(self) -> ApplicationPhase:
+        if not is_http_url(self.python_index_url):
+            raise ValueError("python_index_url must be one HTTP(S) URL")
+        if self.pytorch.python_index_url != self.python_index_url:
+            raise ValueError("PyTorch generic dependencies must use the Python index")
+        if self.python_extras is not None and (
+            self.python_extras.index_url != self.python_index_url
+            or self.python_extras.python_version != self.pytorch.python_version
+            or self.python_extras.platform != self.pytorch.platform
+        ):
+            raise ValueError("application Python groups must share target and index")
+        return self
 
 
 class HookPlan(_PlanModel):
@@ -376,13 +482,18 @@ class BuildPlan(_PlanModel):
 
     @model_validator(mode="after")
     def _validate_pytorch_channel(self) -> BuildPlan:
-        if any(
-            not pytorch_core_version_matches_channel(
-                package.name, package.version, self.toolchain.pytorch_channel
-            )
-            for package in self.application.pytorch.packages
+        pytorch = self.application.pytorch
+        if (
+            pytorch.channel != self.toolchain.pytorch_channel
+            or pytorch.python_version != self.toolchain.python.version
+            or pytorch.platform != self.toolchain.platform
+            or self.toolchain.python.platform != self.toolchain.platform
+            or self.toolchain.uv_image.role != "uv-tool"
+            or self.toolchain.cuda_image.role != "cuda-base"
+            or self.toolchain.uv_image.platform != self.toolchain.platform
+            or self.toolchain.cuda_image.platform != self.toolchain.platform
         ):
-            raise ValueError("PyTorch core package does not match the backend channel")
+            raise ValueError("PyTorch application target does not match the toolchain")
         return self
 
 
@@ -490,6 +601,21 @@ def construct_build_plan(
         f"torch=={config.pytorch.version}",
         *config.pytorch.extra_packages,
     ]
+    pytorch_members: list[DirectPythonRequestMember] = []
+    for index, value in enumerate(pytorch_requirements):
+        diagnostics = []
+        normalized = validate_direct_requirement(
+            value, ("pytorch", "requirements", index), diagnostics
+        )
+        if normalized is None or diagnostics:
+            raise ValueError("validated config contains an invalid package requirement")
+        pytorch_members.append(
+            DirectPythonRequestMember(
+                package=normalized.name,
+                extras=list(normalized.extras),
+                selector=normalized.specifier,
+            )
+        )
     pytorch_packages = _package_group(
         pytorch_requirements,
         "pytorch",
@@ -500,6 +626,37 @@ def construct_build_plan(
         used,
         package_channel=backend.package_channel,
     )
+    pytorch_compatibility = _take(
+        entries,
+        used,
+        ("pytorch-compatibility", "application"),
+        PyTorchCompatibilityLockEntry,
+    )
+    expected_pytorch_digest = compute_request_digest(
+        PyTorchRequestIdentity(
+            type="pytorch-group",
+            environment="application",
+            group="pytorch",
+            backend="cuda",
+            channel=backend.package_channel,
+            python_version=config.python.version,
+            platform=target_platform.value,
+            python_index_url=config.python.index_url,
+            pytorch_index_url=(
+                f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}"
+            ),
+            members=pytorch_members,
+        )
+    )
+    if pytorch_compatibility.request_digest != expected_pytorch_digest or any(
+        entries[("python-package", "application", package.name)].request_digest
+        != expected_pytorch_digest
+        for package in pytorch_packages.packages
+    ):
+        raise ValueError(
+            "canonical PyTorch packages and compatibility policy "
+            "must share one request digest"
+        )
     torch = next(item for item in pytorch_packages.packages if item.name == "torch")
     if Version(torch.version).public != config.pytorch.version:
         raise ValueError("canonical torch version does not match final config")
@@ -585,7 +742,20 @@ def construct_build_plan(
             os_packages=(*_DEFAULT_OS_PACKAGES, *config.system.extra_packages),
             python_index_url=config.python.index_url,
             python_extras=python_packages if python_packages.packages else None,
-            pytorch=pytorch_packages,
+            pytorch=PyTorchGroupPlan(
+                group="pytorch",
+                backend="cuda",
+                channel=backend.package_channel,
+                python_version=pytorch_packages.python_version,
+                platform=pytorch_packages.platform,
+                python_index_url=config.python.index_url,
+                pytorch_index_url=(
+                    f"{config.pytorch.index_base_url.rstrip('/')}/"
+                    f"{backend.package_channel}"
+                ),
+                packages=pytorch_packages.packages,
+                setuptools_specifier=pytorch_compatibility.setuptools_specifier,
+            ),
             comfy_cli_version=cli_entry.version,
             comfyui=ComfyUIPlan(
                 repository=comfyui_entry.repository,

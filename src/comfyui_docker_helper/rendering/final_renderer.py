@@ -3,7 +3,7 @@
 import json
 import shlex
 
-from comfyui_docker_helper.config.build_plan import BuildPlan
+from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
 
 
 def render_build_plan_dockerfile(plan: BuildPlan) -> str:
@@ -23,6 +23,8 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         "COPY cdh-production-requirements.txt "
         "/opt/cdh/build/cdh-production-requirements.txt",
         "COPY cdh-production-inventory.txt /opt/cdh/build/cdh-production-inventory.txt",
+        "COPY --chown=0:0 --chmod=0444 pytorch-resolution.toml "
+        "/opt/cdh/build/pyproject.toml",
     ]
     if any(node.pre_install or node.post_install for node in plan.custom_nodes.nodes):
         lines.append("COPY inputs /opt/cdh/build/inputs")
@@ -63,8 +65,6 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         (
             "import importlib.metadata as m",
             f"assert m.version('pip') == {python.pip_version!r}",
-            f"assert m.version('setuptools') == {python.setuptools_version!r}",
-            f"assert m.version('wheel') == {python.wheel_version!r}",
         )
     )
     inventory_check = "; ".join(
@@ -88,9 +88,9 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f"    {packages} \\",
         " && rm -f /usr/sbin/policy-rc.d",
         f"RUN test \"$(uv --version | cut -d ' ' -f 1-2)\" = "
-        f"{_shell_word(f'uv {python.uv_build_version}')} \\",
+        f"{_shell_word(f'uv {plan.toolchain.uv_image.resolved_version}')} \\",
         f" && test \"$(uvx --version | cut -d ' ' -f 1-2)\" = "
-        f"{_shell_word(f'uvx {python.uv_build_version}')} \\",
+        f"{_shell_word(f'uvx {plan.toolchain.uv_image.resolved_version}')} \\",
         f" && uv --no-config python install --managed-python --install-dir "
         f"/opt/python --no-bin {_shell_word(python.version)} \\",
         f" && test -x {_shell_word(interpreter)} \\",
@@ -102,9 +102,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f" && uv --no-config pip install --python "
         f"{_shell_word(plan.application.paths.venv + '/bin/python')} "
         f"--default-index {_shell_word(plan.application.python_index_url)} -- "
-        f"{_shell_word(f'pip=={python.pip_version}')} "
-        f"{_shell_word(f'setuptools=={python.setuptools_version}')} "
-        f"{_shell_word(f'wheel=={python.wheel_version}')} \\",
+        f"{_shell_word(f'pip=={python.pip_version}')} \\",
         f" && {_shell_word(plan.application.paths.venv + '/bin/python')} "
         "-m pip --version \\",
         f" && {_shell_word(plan.application.paths.venv + '/bin/python')} "
@@ -138,6 +136,16 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             f"\n && test -x {_shell_word(tool_python)} \\"
             f"\n && {_shell_word(tool_python)} -c {_shell_word(direct_check)}"
         )
+    phase_digest = _shell_word(build_plan_digest(plan))
+    lines.append(
+        f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+        "container install-inference "
+        "--application-phase /opt/cdh/build/phases/application.json "
+        "--toolchain-phase /opt/cdh/build/phases/toolchain.json "
+        f"--build-plan-digest {phase_digest} "
+        "--resolution-manifest /opt/cdh/build/pyproject.toml "
+        "--constraints /opt/cdh/build/python-package-constraints.txt"
+    )
     return lines
 
 

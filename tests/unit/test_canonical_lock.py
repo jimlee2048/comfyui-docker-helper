@@ -27,6 +27,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
+    PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
@@ -99,7 +100,8 @@ def _request_digests() -> dict[str, str]:
                 channel="cu130",
                 python_version="3.13.14",
                 platform="linux/amd64",
-                index_url="https://download.pytorch.org/whl/cu130",
+                python_index_url="https://pypi.org/simple",
+                pytorch_index_url="https://download.pytorch.org/whl/cu130",
                 members=[
                     DirectPythonRequestMember(
                         package="torch", extras=[], selector="==2.12.1"
@@ -153,8 +155,6 @@ def _lock() -> CanonicalLock:
                 catalog_key="cpython-3.13.14-linux-x86_64-gnu",
                 catalog_url="https://example.test/python.tar.zst",
                 pip_version="26.1.2",
-                setuptools_version="83.0.0",
-                wheel_version="0.47.0",
                 cdh_version="0.5.0",
                 cdh_source_digest=DIGEST_C,
                 uv_build_version="0.11.28",
@@ -187,6 +187,12 @@ def _lock() -> CanonicalLock:
                 version="2.12.1+cu130",
                 environment="application",
             ),
+            PyTorchCompatibilityLockEntry(
+                type="pytorch-compatibility",
+                request_digest=digests["package"],
+                environment="application",
+                setuptools_specifier="<82",
+            ),
             DirectPythonLockEntry(
                 type="python-package",
                 request_digest=digests["package"],
@@ -210,7 +216,7 @@ def test_complete_lock_round_trips_and_is_byte_deterministic() -> None:
     assert first == second
     assert dump_canonical_lock_toml(parse_canonical_lock_toml(first)) == first
     assert first.startswith("schema_version = 1\n")
-    assert first.count("[[entries]]") == 9
+    assert first.count("[[entries]]") == 10
 
 
 def test_discriminator_selects_every_entry_variant() -> None:
@@ -224,6 +230,7 @@ def test_discriminator_selects_every_entry_variant() -> None:
         RegistryNodeLockEntry,
         DirectGitLockEntry,
         DirectPythonLockEntry,
+        PyTorchCompatibilityLockEntry,
         LocalExecutableLockEntry,
     }
 
@@ -277,7 +284,12 @@ def test_required_fields_cannot_be_omitted_from_any_entry() -> None:
     data = _lock().model_dump(mode="python")
 
     for entry_index, entry in enumerate(data["entries"]):
-        for required in entry.keys() - {"type", "formal_release"}:
+        for required in entry.keys() - {
+            "type",
+            "formal_release",
+            "resolved_version",
+            "setuptools_specifier",
+        }:
             invalid = deepcopy(data)
             del invalid["entries"][entry_index][required]
             with pytest.raises(ValidationError, match="Field required"):
@@ -357,7 +369,8 @@ def _pytorch_group() -> PyTorchRequestIdentity:
         channel="cu130",
         python_version="3.13.14",
         platform="linux/amd64",
-        index_url="https://download.pytorch.org/whl/cu130",
+        python_index_url="https://pypi.org/simple",
+        pytorch_index_url="https://download.pytorch.org/whl/cu130",
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
             DirectPythonRequestMember(
@@ -371,7 +384,8 @@ def _pytorch_group() -> PyTorchRequestIdentity:
     ("field", "value"),
     [
         ("channel", "cu129"),
-        ("index_url", "https://download.pytorch.org/whl/cu129"),
+        ("python_index_url", "https://index.example.test/simple"),
+        ("pytorch_index_url", "https://download.pytorch.org/whl/cu129"),
         ("python_version", "3.12.13"),
     ],
 )
@@ -380,9 +394,21 @@ def test_pytorch_request_digest_owns_typed_resolution_dimensions(
 ) -> None:
     request = _pytorch_group()
     data = {**request.model_dump(), field: value}
+    if field == "channel":
+        data["pytorch_index_url"] = "https://download.pytorch.org/whl/cu129"
+    elif field == "pytorch_index_url":
+        data["channel"] = "cu129"
     changed = PyTorchRequestIdentity.model_validate(data)
 
     assert compute_request_digest(changed) != compute_request_digest(request)
+
+
+def test_pytorch_request_rejects_channel_source_mismatch() -> None:
+    request = _pytorch_group()
+    with pytest.raises(ValidationError, match="must end with the derived channel"):
+        PyTorchRequestIdentity.model_validate(
+            {**request.model_dump(), "channel": "cu129"}
+        )
 
 
 def test_generic_python_group_cannot_impersonate_pytorch_group() -> None:
@@ -625,6 +651,55 @@ def test_direct_python_resolved_version_preserves_canonical_local_segment() -> N
     }
 
     assert versions == {"torch": "2.12.1+cu130", "torchvision": "0.27.1+cu130"}
+
+
+@pytest.mark.parametrize("value", [">=70,<82", "<82 ", "latest", ""])
+def test_pytorch_compatibility_specifier_must_be_canonical(value: str) -> None:
+    entry = next(
+        item
+        for item in _lock().entries
+        if isinstance(item, PyTorchCompatibilityLockEntry)
+    )
+    with pytest.raises(ValidationError, match="setuptools_specifier"):
+        PyTorchCompatibilityLockEntry.model_validate(
+            {**entry.model_dump(), "setuptools_specifier": value}
+        )
+
+
+def test_pytorch_compatibility_without_setuptools_requirement_round_trips() -> None:
+    lock = _lock()
+    compatibility = next(
+        item for item in lock.entries if isinstance(item, PyTorchCompatibilityLockEntry)
+    )
+    lock.entries[lock.entries.index(compatibility)] = compatibility.model_copy(
+        update={"setuptools_specifier": None}
+    )
+
+    parsed = parse_canonical_lock_toml(dump_canonical_lock_toml(lock))
+
+    entry = next(
+        item
+        for item in parsed.entries
+        if isinstance(item, PyTorchCompatibilityLockEntry)
+    )
+    assert entry.setuptools_specifier is None
+
+
+def test_uv_oci_requires_exact_resolved_version_and_cuda_forbids_one() -> None:
+    cuda = next(item for item in _lock().entries if isinstance(item, OciLockEntry))
+    with pytest.raises(ValidationError, match="only uv-tool"):
+        OciLockEntry.model_validate(
+            {**cuda.model_dump(), "resolved_version": "0.11.28"}
+        )
+    with pytest.raises(ValidationError, match="only uv-tool"):
+        OciLockEntry.model_validate(
+            {
+                **cuda.model_dump(),
+                "role": "uv-tool",
+                "repository": "ghcr.io/astral-sh/uv",
+                "tag": "latest",
+            }
+        )
 
 
 def test_published_cli_and_registry_exact_prereleases_remain_valid() -> None:

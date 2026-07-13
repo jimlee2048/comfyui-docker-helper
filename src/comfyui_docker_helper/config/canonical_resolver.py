@@ -26,6 +26,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciRequestIdentity,
     OfficialComfyUILockEntry,
     PythonGroupRequestIdentity,
+    PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
@@ -33,6 +34,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     canonical_entry_key,
     compute_request_digest,
     pytorch_core_version_matches_channel,
+    uv_image_version_matches_tag,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.host.identity_providers import (
@@ -78,8 +80,6 @@ class ManagedPythonReleaseInputs:
     """Current exact release-owned inputs that constrain managed Python reuse."""
 
     pip_version: str
-    setuptools_version: str
-    wheel_version: str
     cdh_version: str
     cdh_source_digest: str
     uv_build_version: str
@@ -375,6 +375,10 @@ def entries_satisfy_request(
             and entry.repository == request.repository
             and entry.tag == request.tag
             and entry.platform == request.platform
+            and (
+                request.role != "uv-tool"
+                or uv_image_version_matches_tag(request.tag, entry.resolved_version)
+            )
         )
     if isinstance(request, ManagedPythonRequestIdentity):
         entry = entries[0]
@@ -388,9 +392,6 @@ def entries_satisfy_request(
                 and entry.libc == request.libc
                 and entry.catalog_descriptor_digest == request.catalog_descriptor_digest
                 and entry.pip_version == managed_python_release.pip_version
-                and entry.setuptools_version
-                == managed_python_release.setuptools_version
-                and entry.wheel_version == managed_python_release.wheel_version
                 and entry.cdh_version == managed_python_release.cdh_version
                 and entry.cdh_source_digest == managed_python_release.cdh_source_digest
                 and entry.uv_build_version == managed_python_release.uv_build_version
@@ -424,7 +425,13 @@ def entries_satisfy_request(
     if not isinstance(request, PythonGroupRequestIdentity):
         return False
     members = {member.package: member for member in request.members}
+    compatibility = None
     for entry in entries:
+        if isinstance(entry, PyTorchCompatibilityLockEntry):
+            if not isinstance(request, PyTorchRequestIdentity):
+                return False
+            compatibility = entry
+            continue
         if not isinstance(entry, DirectPythonLockEntry):
             return False
         member = members.get(entry.package)
@@ -440,7 +447,7 @@ def entries_satisfy_request(
             )
         ):
             return False
-    return True
+    return not isinstance(request, PyTorchRequestIdentity) or compatibility is not None
 
 
 def _canonical_desired(item: DesiredResolution) -> DesiredResolution:
@@ -536,10 +543,13 @@ def _request_keys(request: ResolverRequestIdentity) -> tuple[LockEntryKey, ...]:
         return (("registry", request.id),)
     if isinstance(request, DirectGitRequestIdentity):
         return (("git", request.url),)
-    return tuple(
+    keys = tuple(
         ("python-package", request.environment, member.package)
         for member in request.members
     )
+    if isinstance(request, PyTorchRequestIdentity):
+        return (*keys, ("pytorch-compatibility", request.environment))
+    return keys
 
 
 def _request_stability(request: ResolverRequestIdentity) -> SelectorStability:

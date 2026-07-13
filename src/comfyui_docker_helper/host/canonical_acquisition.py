@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import tempfile
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
+from email import policy
+from email.parser import Parser
+from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
@@ -28,11 +36,13 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciRequestIdentity,
     OfficialComfyUILockEntry,
     PythonGroupRequestIdentity,
+    PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     ResolverRequestIdentity,
     pytorch_core_version_matches_channel,
+    uv_image_version_matches_tag,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
@@ -61,6 +71,9 @@ from comfyui_docker_helper.host.identity_providers import (
     RegistryNodeIdentityRequest,
 )
 from comfyui_docker_helper.host.uv_runner import HostUvRunner
+from comfyui_docker_helper.pytorch_resolution import (
+    pytorch_resolution_manifest_bytes,
+)
 
 _COMFYUI_FLOOR = Version("0.4.0")
 _LINUX_AMD64_UV_PLATFORM = "x86_64-unknown-linux-gnu"
@@ -72,13 +85,29 @@ class ResolvedPythonMember:
     version: str
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedPythonGroup:
+    members: tuple[ResolvedPythonMember, ...]
+    setuptools_specifier: str | None = None
+
+
 class PythonGroupResolver(Protocol):
-    def resolve(
-        self, request: PythonGroupRequestIdentity
-    ) -> tuple[ResolvedPythonMember, ...]: ...
+    def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup: ...
 
 
 type ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
+type MetadataReader = Callable[[str], str]
+
+
+def _read_metadata_sidecar(url: str) -> str:
+    try:
+        response = httpx.get(url, follow_redirects=True, timeout=30.0)
+        response.raise_for_status()
+        return response.text
+    except (httpx.HTTPError, UnicodeError) as error:
+        raise CanonicalAcquisitionError(
+            "PyTorch wheel metadata acquisition failed"
+        ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,10 +116,11 @@ class UvPythonGroupResolver:
 
     uv: HostUvRunner
     runner: ProcessRunner = subprocess.run
+    metadata_reader: MetadataReader = _read_metadata_sidecar
 
-    def resolve(
-        self, request: PythonGroupRequestIdentity
-    ) -> tuple[ResolvedPythonMember, ...]:
+    def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup:
+        if isinstance(request, PyTorchRequestIdentity):
+            return self._resolve_pytorch(request)
         requirements = "\n".join(
             _requirement_text(member.package, member.extras, member.selector)
             for member in request.members
@@ -150,7 +180,129 @@ class UvPythonGroupResolver:
             raise CanonicalAcquisitionError(
                 "Python resolver returned an incompatible PyTorch channel"
             )
-        return resolved
+        return ResolvedPythonGroup(resolved)
+
+    def _resolve_pytorch(self, request: PyTorchRequestIdentity) -> ResolvedPythonGroup:
+        manifest = pytorch_resolution_manifest_bytes(
+            requirements=tuple(
+                _requirement_text(member.package, member.extras, member.selector)
+                for member in request.members
+            ),
+            direct_packages=tuple(member.package for member in request.members),
+            python_version=request.python_version,
+            python_index_url=request.python_index_url,
+            pytorch_index_url=request.pytorch_index_url,
+        )
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("UV_", "PIP_"))
+        }
+        environment.update({"UV_NO_CONFIG": "1", "UV_NO_PROGRESS": "1"})
+        with tempfile.TemporaryDirectory(prefix="cdh-pytorch-resolution-") as root:
+            path = Path(root) / "pyproject.toml"
+            path.write_bytes(manifest)
+            argv = self.uv.argv(
+                (
+                    "pip",
+                    "compile",
+                    str(path),
+                    "--format",
+                    "pylock.toml",
+                    "--no-header",
+                    "--python-version",
+                    request.python_version,
+                    "--python-platform",
+                    _uv_platform(request.platform),
+                    "--resolution",
+                    "highest",
+                    "--prerelease",
+                    "disallow",
+                    "--no-python-downloads",
+                    "--color",
+                    "never",
+                    "--project",
+                    root,
+                )
+            )
+            try:
+                completed = self.runner(
+                    argv,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=root,
+                    env=environment,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                raise CanonicalAcquisitionError(
+                    "Python group resolution failed"
+                ) from error
+        if completed.returncode != 0:
+            raise CanonicalAcquisitionError("Python group resolution failed")
+        try:
+            document = tomllib.loads(completed.stdout)
+            packages = document["packages"]
+        except (KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+            raise CanonicalAcquisitionError(
+                "Python resolver returned invalid PyTorch metadata"
+            ) from error
+        direct = {member.package for member in request.members}
+        if not isinstance(packages, list) or any(
+            not isinstance(item, dict) for item in packages
+        ):
+            raise CanonicalAcquisitionError(
+                "Python resolver returned invalid PyTorch metadata"
+            )
+        selected = [item for item in packages if item.get("name") in direct]
+        resolved_by_name = {item["name"]: item for item in selected}
+        if len(selected) != len(resolved_by_name) or set(resolved_by_name) != direct:
+            raise CanonicalAcquisitionError(
+                "Python resolver returned an incompatible direct group"
+            )
+        if any(
+            not isinstance(item.get("version"), str)
+            for item in resolved_by_name.values()
+        ):
+            raise CanonicalAcquisitionError(
+                "Python resolver returned invalid PyTorch metadata"
+            )
+        resolved = tuple(
+            ResolvedPythonMember(
+                member.package, resolved_by_name[member.package]["version"]
+            )
+            for member in request.members
+        )
+        if any(
+            not pytorch_core_version_matches_channel(
+                member.package, member.version, request.channel
+            )
+            for member in resolved
+        ):
+            raise CanonicalAcquisitionError(
+                "Python resolver returned an incompatible PyTorch channel"
+            )
+        torch = resolved_by_name["torch"]
+        wheels = torch.get("wheels")
+        if not isinstance(wheels, list) or len(wheels) != 1:
+            raise CanonicalAcquisitionError(
+                "Python resolver did not select one exact torch wheel"
+            )
+        wheel_url = wheels[0].get("url")
+        if not isinstance(wheel_url, str) or not wheel_url.startswith(
+            ("http://", "https://")
+        ):
+            raise CanonicalAcquisitionError(
+                "Python resolver returned an invalid torch wheel URL"
+            )
+        metadata = self.metadata_reader(_metadata_sidecar_url(wheel_url))
+        specifier = _setuptools_specifier_from_metadata(
+            metadata,
+            python_version=request.python_version,
+            expected_torch_version=resolved_by_name["torch"]["version"],
+        )
+        return ResolvedPythonGroup(resolved, specifier)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +354,13 @@ class ProviderIdentityAcquirer:
                 ),
                 "OCI",
             )
+            if request.role == "uv-tool":
+                _require_provider_match(
+                    uv_image_version_matches_tag(
+                        request.tag, identity.resolved_version
+                    ),
+                    "OCI uv version",
+                )
             return (
                 OciLockEntry(
                     type="oci",
@@ -212,6 +371,7 @@ class ProviderIdentityAcquirer:
                     descriptor_digest=identity.descriptor_digest,
                     descriptor_kind=identity.descriptor_kind,
                     platform=identity.platform,
+                    resolved_version=identity.resolved_version,
                 ),
             )
         if isinstance(request, ManagedPythonRequestIdentity):
@@ -248,8 +408,6 @@ class ProviderIdentityAcquirer:
                     catalog_key=identity.catalog_key,
                     catalog_url=identity.catalog_url,
                     pip_version=self.release.pip_version,
-                    setuptools_version=self.release.setuptools_version,
-                    wheel_version=self.release.wheel_version,
                     cdh_version=self.release.cdh_version,
                     cdh_source_digest=self.release.cdh_source_digest,
                     uv_build_version=self.release.uv_build_version,
@@ -307,7 +465,8 @@ class ProviderIdentityAcquirer:
                     commit=commit,
                 ),
             )
-        resolved = self.python_group.resolve(request)
+        resolution = self.python_group.resolve(request)
+        resolved = resolution.members
         by_package = {item.package: item.version for item in resolved}
         if set(by_package) != {member.package for member in request.members} or len(
             by_package
@@ -324,7 +483,7 @@ class ProviderIdentityAcquirer:
             raise CanonicalAcquisitionError(
                 "Python resolver returned an incompatible PyTorch channel"
             )
-        return tuple(
+        entries: tuple[CanonicalLockEntry, ...] = tuple(
             DirectPythonLockEntry(
                 type="python-package",
                 request_digest=request_digest,
@@ -335,6 +494,17 @@ class ProviderIdentityAcquirer:
             )
             for member in request.members
         )
+        if isinstance(request, PyTorchRequestIdentity):
+            entries = (
+                *entries,
+                PyTorchCompatibilityLockEntry(
+                    type="pytorch-compatibility",
+                    request_digest=request_digest,
+                    environment="application",
+                    setuptools_specifier=resolution.setuptools_specifier,
+                ),
+            )
+        return entries
 
     def _resolve_comfyui(
         self, request: ComfyUIRequestIdentity
@@ -469,6 +639,73 @@ def _parse_direct_members(
         ResolvedPythonMember(member.package, matches[member.package])
         for member in request.members
     )
+
+
+def _setuptools_specifier_from_metadata(
+    metadata: str,
+    *,
+    python_version: str,
+    expected_torch_version: str,
+) -> str | None:
+    try:
+        message = Parser(policy=policy.default).parsestr(metadata)
+        names = message.get_all("Name", [])
+        versions = message.get_all("Version", [])
+        metadata_versions = message.get_all("Metadata-Version", [])
+        if message.defects or len(names) != 1 or len(versions) != 1:
+            raise ValueError
+        if (
+            len(metadata_versions) != 1
+            or re.fullmatch(r"[0-9]+\.[0-9]+", metadata_versions[0]) is None
+            or canonicalize_name(names[0]) != "torch"
+        ):
+            raise ValueError
+        if versions[0] != expected_torch_version:
+            raise ValueError
+        environment = _target_marker_environment(python_version)
+        specifiers = []
+        for value in message.get_all("Requires-Dist", []):
+            requirement = Requirement(value)
+            if canonicalize_name(requirement.name) != "setuptools":
+                continue
+            if requirement.url is not None or requirement.extras:
+                raise ValueError
+            if requirement.marker is not None and not requirement.marker.evaluate(
+                environment
+            ):
+                continue
+            specifiers.extend(str(item) for item in requirement.specifier)
+        if not specifiers:
+            return None
+        return str(SpecifierSet(",".join(specifiers)))
+    except (InvalidRequirement, KeyError, TypeError, ValueError) as error:
+        raise CanonicalAcquisitionError("PyTorch wheel metadata is invalid") from error
+
+
+def _target_marker_environment(python_version: str) -> dict[str, str]:
+    return {
+        "implementation_name": "cpython",
+        "implementation_version": python_version,
+        "os_name": "posix",
+        "platform_machine": "x86_64",
+        "platform_python_implementation": "CPython",
+        "platform_release": "",
+        "platform_system": "Linux",
+        "platform_version": "",
+        "python_full_version": python_version,
+        "python_version": ".".join(python_version.split(".")[:2]),
+        "sys_platform": "linux",
+        "extra": "",
+    }
+
+
+def _metadata_sidecar_url(wheel_url: str) -> str:
+    parsed = urlsplit(wheel_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise CanonicalAcquisitionError(
+            "Python resolver returned an invalid torch wheel URL"
+        )
+    return urlunsplit(parsed._replace(path=f"{parsed.path}.metadata", fragment=""))
 
 
 def _requirement_text(package: str, extras: list[str], selector: str) -> str:

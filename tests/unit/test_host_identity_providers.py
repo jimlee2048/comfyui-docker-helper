@@ -40,7 +40,13 @@ ARM64_DIGEST = f"sha256:{'d' * 64}"
 COMMIT_A = "1" * 40
 COMMIT_B = "2" * 40
 
-CONFIG_DOCUMENT = {"os": "linux", "architecture": "amd64"}
+CONFIG_DOCUMENT = {
+    "os": "linux",
+    "architecture": "amd64",
+    "config": {
+        "Labels": {"org.opencontainers.image.version": "0.11.28"},
+    },
+}
 CONFIG_CONTENT = json.dumps(CONFIG_DOCUMENT, separators=(",", ":")).encode()
 CONFIG_DIGEST = f"sha256:{hashlib.sha256(CONFIG_CONTENT).hexdigest()}"
 CHILD_DOCUMENT = {
@@ -171,6 +177,7 @@ def test_oci_tag_movement_returns_current_descriptor_without_local_catalog() -> 
 
     assert request.stability is SelectorStability.MOVING
     assert first.descriptor_digest != second.descriptor_digest
+    assert first.resolved_version == second.resolved_version == "0.11.28"
 
 
 def test_oci_bearer_challenge_retries_without_exposing_token() -> None:

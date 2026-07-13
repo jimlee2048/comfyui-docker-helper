@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
+    ExactPackagePlan,
     build_plan_digest,
     construct_build_plan,
     dump_build_plan_json,
@@ -22,15 +23,20 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliLockEntry,
     DirectGitLockEntry,
     DirectPythonLockEntry,
+    DirectPythonRequestMember,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     OciLockEntry,
     OfficialComfyUILockEntry,
+    PyTorchCompatibilityLockEntry,
+    PyTorchRequestIdentity,
     RegistryNodeLockEntry,
+    compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.final_validation import (
+    validate_direct_requirement,
     validate_final_config,
     validate_final_config_structure,
 )
@@ -116,6 +122,39 @@ def accepted_resolution(
     with_uv_tool: bool = False,
     reverse: bool = False,
 ) -> AcceptedCanonicalLock:
+    config = final_config(with_uv_tool=with_uv_tool)
+    pytorch_requirements = [
+        f"torch=={config.pytorch.version}",
+        *config.pytorch.extra_packages,
+    ]
+    pytorch_members: list[DirectPythonRequestMember] = []
+    for index, value in enumerate(pytorch_requirements):
+        diagnostics = []
+        normalized = validate_direct_requirement(
+            value, ("pytorch", "requirements", index), diagnostics
+        )
+        assert normalized is not None and not diagnostics
+        pytorch_members.append(
+            DirectPythonRequestMember(
+                package=normalized.name,
+                extras=list(normalized.extras),
+                selector=normalized.specifier,
+            )
+        )
+    pytorch_digest = compute_request_digest(
+        PyTorchRequestIdentity(
+            type="pytorch-group",
+            environment="application",
+            group="pytorch",
+            backend="cuda",
+            channel="cu130",
+            python_version=config.python.version,
+            platform="linux/amd64",
+            python_index_url=config.python.index_url,
+            pytorch_index_url=(f"{config.pytorch.index_base_url.rstrip('/')}/cu130"),
+            members=pytorch_members,
+        )
+    )
     entries = [
         OciLockEntry(
             type="oci",
@@ -136,6 +175,7 @@ def accepted_resolution(
             descriptor_digest=DIGEST_B,
             descriptor_kind="index",
             platform="linux/amd64",
+            resolved_version="0.11.28",
         ),
         ManagedPythonLockEntry(
             type="managed-python",
@@ -149,8 +189,6 @@ def accepted_resolution(
             catalog_key="cpython-3.13.14-linux-x86_64-gnu",
             catalog_url="https://example.test/python.tar.zst",
             pip_version="26.1.2",
-            setuptools_version="83.0.0",
-            wheel_version="0.47.0",
             cdh_version="0.5.0",
             cdh_source_digest=release_source_digest(),
             uv_build_version="0.11.28",
@@ -179,7 +217,7 @@ def accepted_resolution(
         ),
         DirectPythonLockEntry(
             type="python-package",
-            request_digest=DIGEST_B,
+            request_digest=pytorch_digest,
             package="torch",
             extras=[],
             version="2.12.1+cu130",
@@ -187,7 +225,7 @@ def accepted_resolution(
         ),
         DirectPythonLockEntry(
             type="python-package",
-            request_digest=DIGEST_B,
+            request_digest=pytorch_digest,
             package="torchvision",
             extras=["image"],
             version="0.27.1+cu130",
@@ -204,6 +242,12 @@ def accepted_resolution(
             request_digest=DIGEST_A,
             url="https://example.test/direct.git",
             commit=COMMIT_B,
+        ),
+        PyTorchCompatibilityLockEntry(
+            type="pytorch-compatibility",
+            request_digest=pytorch_digest,
+            environment="application",
+            setuptools_specifier="<82",
         ),
     ]
     if hook_digest is not None:
@@ -389,6 +433,69 @@ def test_build_plan_constructor_rejects_core_channel_mismatch(
         construct_build_plan(final_config(), changed)
 
 
+@pytest.mark.parametrize("entry_index", [6, 7, 10])
+def test_build_plan_constructor_rejects_split_pytorch_request_digest(
+    entry_index: int,
+) -> None:
+    resolution = accepted_resolution()
+    data = resolution.lock.model_dump(mode="python")
+    data["entries"][entry_index]["request_digest"] = DIGEST_C
+    changed = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(data),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+
+    with pytest.raises(ValueError, match="must share one request digest"):
+        construct_build_plan(final_config(), changed)
+
+
+def test_build_plan_constructor_rejects_cohesive_forged_pytorch_request_digest() -> (
+    None
+):
+    resolution = accepted_resolution()
+    data = resolution.lock.model_dump(mode="python")
+    for entry_index in (6, 7, 10):
+        data["entries"][entry_index]["request_digest"] = DIGEST_C
+    changed = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(data),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+
+    with pytest.raises(ValueError, match="must share one request digest"):
+        construct_build_plan(final_config(), changed)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("name", "Torch", "normalized distribution name"),
+        ("name", "torch.core", "normalized distribution name"),
+        ("extras", ("Image_Preview",), "sorted, unique, and normalized"),
+        ("extras", ("image", "image"), "sorted, unique, and normalized"),
+        ("extras", ("preview", "image"), "sorted, unique, and normalized"),
+    ],
+)
+def test_exact_package_plan_rejects_noncanonical_pep503_identity(
+    field: str, value: str | tuple[str, ...], message: str
+) -> None:
+    document = {
+        "name": "torch",
+        "extras": (),
+        "version": "2.12.1+cu130",
+        "environment": "application",
+    }
+    document[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        ExactPackagePlan.model_validate(document)
+
+
 def test_build_plan_parser_rejects_forged_core_channel() -> None:
     plan = construct_build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
@@ -399,7 +506,56 @@ def test_build_plan_parser_rejects_forged_core_channel() -> None:
     )
     torch["version"] = "2.12.1+cu129"
 
-    with pytest.raises(ValidationError, match="does not match the backend channel"):
+    with pytest.raises(ValidationError, match="does not match the group channel"):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("group-channel", "index must end"),
+        ("group-index", "index must end"),
+        ("group-python-index", "generic dependencies"),
+        ("toolchain-channel", "target does not match"),
+        ("toolchain-python", "target does not match"),
+        ("uv-resolved-version", "resolved version does not match"),
+        ("duplicate-package", "packages must be unique"),
+        ("case-variant-duplicate", "normalized distribution name"),
+        ("missing-torch", "packages must be unique"),
+        ("invalid-setuptools", "Invalid specifier"),
+    ],
+)
+def test_build_plan_parser_rejects_cross_field_authority_forgery(
+    mutation: str, message: str
+) -> None:
+    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    pytorch = document["application"]["pytorch"]
+    if mutation == "group-channel":
+        pytorch["channel"] = "cu129"
+    elif mutation == "group-index":
+        pytorch["pytorch_index_url"] = "https://download.pytorch.org/whl/cu129"
+    elif mutation == "group-python-index":
+        pytorch["python_index_url"] = "https://index.example.test/simple"
+    elif mutation == "toolchain-channel":
+        document["toolchain"]["pytorch_channel"] = "cu129"
+    elif mutation == "toolchain-python":
+        document["toolchain"]["python"]["version"] = "3.12.13"
+    elif mutation == "uv-resolved-version":
+        document["toolchain"]["uv_image"]["resolved_version"] = "0.11.29"
+    elif mutation == "duplicate-package":
+        pytorch["packages"] = (pytorch["packages"][0], pytorch["packages"][0])
+    elif mutation == "case-variant-duplicate":
+        duplicate = dict(pytorch["packages"][0])
+        duplicate["name"] = "Torch"
+        pytorch["packages"] = (*pytorch["packages"], duplicate)
+    elif mutation == "missing-torch":
+        pytorch["packages"] = (pytorch["packages"][1],)
+    else:
+        pytorch["setuptools_specifier"] = "latest"
+
+    with pytest.raises(ValidationError, match=message):
         BuildPlan.model_validate(document)
 
 

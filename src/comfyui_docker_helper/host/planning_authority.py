@@ -57,6 +57,7 @@ from comfyui_docker_helper.config.final_validation import FinalConfigDomainResul
 from comfyui_docker_helper.config.runtime_hooks import CUSTOM_NODE_HOOK_LOCK_PREFIX
 from comfyui_docker_helper.exact_ledger import (
     CDH_VERSION,
+    COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     PIP_VERSION,
@@ -75,7 +76,6 @@ from comfyui_docker_helper.host.identity_providers import (
     HttpOciIdentityProvider,
     HttpRegistryNodeIdentityProvider,
     LocalExecutableIdentityRequest,
-    PyPIComfyCliIdentityProvider,
     UvManagedPythonIdentityProvider,
 )
 from comfyui_docker_helper.host.uv_runner import locate_host_uv
@@ -120,7 +120,6 @@ def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
             oci=HttpOciIdentityProvider(client),
             managed_python=UvManagedPythonIdentityProvider(uv),
             comfyui=GitOfficialComfyUIIdentityProvider(),
-            comfy_cli=PyPIComfyCliIdentityProvider(client),
             registry=HttpRegistryNodeIdentityProvider(client),
             git=GitDirectIdentityProvider(),
             python_group=UvPythonGroupResolver(uv),
@@ -216,15 +215,20 @@ def build_desired_planning_inputs(
             selector=config.comfyui.version,
         ),
         requirements_request,
-        ComfyCliRequestIdentity(
-            type="comfy-cli",
-            package="comfy-cli",
-            selector=config.comfyui.cli_version,
-            index_url=config.python.index_url,
-            python_version=config.python.version,
-            platform=platform.value,
-        ),
     ]
+    if config.comfyui.install_cli:
+        requests.append(
+            ComfyCliRequestIdentity(
+                type="comfy-cli",
+                package="comfy-cli",
+                policy="highest-target-compatible-stable",
+                minimum_version=COMFY_CLI_MINIMUM_VERSION,
+                environment="uv-tool:comfy-cli",
+                index_url=config.python.index_url,
+                python_version=config.python.version,
+                platform=platform.value,
+            )
+        )
     python_members = _members(domains, "python")
     if python_members:
         requests.append(

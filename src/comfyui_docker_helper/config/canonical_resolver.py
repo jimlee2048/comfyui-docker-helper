@@ -422,8 +422,9 @@ def entries_satisfy_request(
         entry = entries[0]
         return isinstance(entry, ComfyCliLockEntry) and (
             entry.package == request.package
-            and entry.environment == "application"
-            and _published_result_matches(request.selector, entry.version)
+            and entry.environment == request.environment
+            and Version(entry.version) >= Version(request.minimum_version)
+            and _is_stable(Version(entry.version))
         )
     if isinstance(request, RegistryRequestIdentity):
         entry = entries[0]
@@ -555,7 +556,7 @@ def _request_keys(request: ResolverRequestIdentity) -> tuple[LockEntryKey, ...]:
     if isinstance(request, ComfyUIRequirementsRequestIdentity):
         return (("comfyui-requirements", request.repository),)
     if isinstance(request, ComfyCliRequestIdentity):
-        return (("comfy-cli", request.package, "application"),)
+        return (("comfy-cli", request.package, request.environment),)
     if isinstance(request, RegistryRequestIdentity):
         return (("registry", request.id),)
     if isinstance(request, DirectGitRequestIdentity):
@@ -583,7 +584,9 @@ def _request_stability(request: ResolverRequestIdentity) -> SelectorStability:
         )
     if isinstance(request, ComfyUIRequirementsRequestIdentity):
         return SelectorStability.MOVING
-    if isinstance(request, (ComfyCliRequestIdentity, RegistryRequestIdentity)):
+    if isinstance(request, ComfyCliRequestIdentity):
+        return SelectorStability.MOVING
+    if isinstance(request, RegistryRequestIdentity):
         return (
             SelectorStability.MOVING
             if request.selector == "latest"

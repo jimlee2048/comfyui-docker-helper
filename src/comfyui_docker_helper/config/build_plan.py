@@ -26,6 +26,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     CanonicalLockEntry,
     ComfyCliLockEntry,
+    ComfyCliRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
@@ -57,14 +58,16 @@ from comfyui_docker_helper.config.final_planning import (
     CudaVersion,
     TargetPlatform,
 )
-from comfyui_docker_helper.config.final_validation import validate_direct_requirement
+from comfyui_docker_helper.config.final_validation import (
+    is_managed_environment_name,
+    validate_direct_requirement,
+)
 from comfyui_docker_helper.config.runtime_hooks import (
     CUSTOM_NODE_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
 )
 from comfyui_docker_helper.config.selector_validation import (
-    normalize_comfy_cli_version,
     normalize_comfyui_version,
     normalize_registry_version,
     resolve_git_target_dir,
@@ -72,6 +75,7 @@ from comfyui_docker_helper.config.selector_validation import (
 from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.config.value_validation import has_control_characters
 from comfyui_docker_helper.exact_ledger import (
+    COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
@@ -185,6 +189,28 @@ class UvToolPlan(_PlanModel):
         return f"{self.name}{extras}=={self.version}"
 
 
+class ComfyCliToolPlan(_PlanModel):
+    """Exact dedicated isolated comfy-cli tool consumer."""
+
+    name: Literal["comfy-cli"]
+    version: str
+    environment: Literal["uv-tool:comfy-cli"]
+    executables: tuple[Literal["comfy"], Literal["comfy-cli"], Literal["comfycli"]]
+    inventory_path: Literal["/opt/cdh/build/comfy-cli-inventory.txt"]
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        version = Version(_exact_distribution_version(value))
+        if version.local is not None or version < Version(COMFY_CLI_MINIMUM_VERSION):
+            raise ValueError("comfy-cli version is below the supported tool floor")
+        return value
+
+    @property
+    def requirement(self) -> str:
+        return f"{self.name}=={self.version}"
+
+
 class ToolStorePlan(_PlanModel):
     tool_dir: Literal["/opt/uv/tools"]
     bin_dir: Literal["/opt/uv/bin"]
@@ -192,11 +218,16 @@ class ToolStorePlan(_PlanModel):
     cdh_executable: Literal["/opt/uv/bin/cdh"]
     requirements_digest: str
     cdh_closure: tuple[ExactDistributionPlan, ...]
+    comfy_cli: ComfyCliToolPlan | None
     uv_tools: tuple[UvToolPlan, ...]
 
     @model_validator(mode="after")
     def _validate_unique_tools(self) -> ToolStorePlan:
         names = [tool.name for tool in self.uv_tools]
+        if self.comfy_cli is not None:
+            if self.comfy_cli.name != "comfy-cli":
+                raise ValueError("optional comfy-cli tool has the wrong owner")
+            names.append(self.comfy_cli.name)
         if len(names) != len(set(names)):
             raise ValueError("uv tools must have unique distribution owners")
         closure = tuple((item.name, item.version) for item in self.cdh_closure)
@@ -241,6 +272,8 @@ class ExactPackagePlan(_PlanModel):
     def _validate_name(cls, value: str) -> str:
         if canonicalize_name(value) != value:
             raise ValueError("package name must be one normalized distribution name")
+        if value == "comfy-cli":
+            raise ValueError("comfy-cli is reserved to the dedicated optional tool")
         return value
 
     @field_validator("extras")
@@ -390,7 +423,6 @@ class ApplicationPhase(_PlanModel):
     python_index_url: str
     python_extras: PackageGroupPlan | None
     pytorch: PyTorchGroupPlan
-    comfy_cli_version: str
     comfyui: ComfyUIPlan
 
     @model_validator(mode="after")
@@ -501,6 +533,13 @@ class EnvironmentPlan(_PlanModel):
     name: str
     value: str
 
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if is_managed_environment_name(value):
+            raise ValueError("environment name is reserved to cdh image authority")
+        return value
+
 
 class SshPlan(_PlanModel):
     enable: bool
@@ -608,12 +647,14 @@ def construct_build_plan(
         ("comfyui-requirements", COMFYUI_REPOSITORY),
         ComfyUIRequirementsLockEntry,
     )
-    cli_entry = _take(
-        entries,
-        used,
-        ("comfy-cli", "comfy-cli", "application"),
-        ComfyCliLockEntry,
-    )
+    cli_entry = None
+    if config.comfyui.install_cli:
+        cli_entry = _take(
+            entries,
+            used,
+            ("comfy-cli", "comfy-cli", "uv-tool:comfy-cli"),
+            ComfyCliLockEntry,
+        )
 
     expected_cuda_repository, expected_cuda_tag = backend.base_image.split(":", 1)
     if (
@@ -667,10 +708,27 @@ def construct_build_plan(
         != requirements_request.protected_policy_digest
     ):
         raise ValueError("canonical ComfyUI requirements do not match source/target")
-    if not _published_selector_accepts(
-        normalize_comfy_cli_version(config.comfyui.cli_version), cli_entry.version
-    ):
-        raise ValueError("canonical comfy-cli identity does not match final config")
+    comfy_cli = None
+    if cli_entry is not None:
+        request = ComfyCliRequestIdentity(
+            type="comfy-cli",
+            package="comfy-cli",
+            policy="highest-target-compatible-stable",
+            minimum_version=COMFY_CLI_MINIMUM_VERSION,
+            environment="uv-tool:comfy-cli",
+            index_url=config.python.index_url,
+            python_version=config.python.version,
+            platform=target_platform.value,
+        )
+        if cli_entry.request_digest != compute_request_digest(request):
+            raise ValueError("canonical comfy-cli identity does not match final config")
+        comfy_cli = ComfyCliToolPlan(
+            name=cli_entry.package,
+            version=cli_entry.version,
+            environment=cli_entry.environment,
+            executables=("comfy", "comfy-cli", "comfycli"),
+            inventory_path="/opt/cdh/build/comfy-cli-inventory.txt",
+        )
 
     python_packages = _package_group(
         config.python.extra_packages,
@@ -850,6 +908,7 @@ def construct_build_plan(
                     ExactDistributionPlan(name=name, version=version)
                     for name, version in production_inventory(config.python.version)
                 ),
+                comfy_cli=comfy_cli,
                 uv_tools=uv_tools,
             ),
         ),
@@ -872,7 +931,6 @@ def construct_build_plan(
                 packages=pytorch_packages.packages,
                 setuptools_specifier=pytorch_compatibility.setuptools_specifier,
             ),
-            comfy_cli_version=cli_entry.version,
             comfyui=ComfyUIPlan(
                 repository=comfyui_entry.repository,
                 commit=comfyui_entry.commit,

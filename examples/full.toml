@@ -21,6 +21,7 @@ extra_packages = ["ffmpeg", "libgl1"]
 [system.env]
 # Values become Dockerfile ENV entries and may appear in image history/logs.
 # Do not put secrets here unless that exposure is acceptable.
+# UV_* and PIP_* names are reserved to cdh package and tool authority.
 COMFYUI_PORT = "8188"
 EXAMPLE_PROFILE = "full"
 
@@ -106,9 +107,9 @@ platforms = ["linux/amd64"]
 # v-prefixed semver, or PEP 440-style constraints such as ">=0.11.0,<1".
 # Every resolved checkout must descend from the immutable v0.11.0 floor.
 version = "0.11.0"
-# Default: "latest". Supported: "latest", a public PEP 440 comfy-cli version,
-# or PEP 440-style constraints such as ">=1.4.0,<2.0.0".
-cli_version = "1.5.3"
+# Default: true. Installs the latest target-compatible stable comfy-cli >=1.7.0
+# as an isolated user tool; cdh does not invoke it during an image build.
+install_cli = true
 # Default: true. Must be true when custom_nodes are configured.
 install_manager = true
 # Default: "0.0.0.0". cdh owns the final ComfyUI --listen argument.

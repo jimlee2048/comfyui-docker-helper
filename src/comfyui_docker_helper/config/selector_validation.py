@@ -51,23 +51,6 @@ def normalize_comfyui_version(version: str) -> str:
     return normalized
 
 
-def normalize_comfy_cli_version(version: str) -> str:
-    if version == "latest":
-        return version
-    if _looks_like_version_constraint(version):
-        return _normalize_version_constraint(version, allow_local_versions=False)
-    try:
-        parsed = Version(version)
-    except InvalidVersion as error:
-        raise ValueError(
-            "must be latest, a PEP 440 public version, or a supported PEP 440 "
-            "comparison constraint"
-        ) from error
-    if parsed.local is not None:
-        raise ValueError("must not contain a PEP 440 local-version label")
-    return parsed.public
-
-
 def normalize_registry_version(version: str) -> str:
     if version == "latest":
         return version

@@ -5,8 +5,11 @@ UV_RUNTIME_REQUIREMENT = f"uv=={UV_VERSION}"
 UV_BUILD_REQUIREMENT = f"uv_build=={UV_VERSION}"
 UV_IMAGE_REPOSITORY = "ghcr.io/astral-sh/uv"
 COMFYUI_REPOSITORY = "https://github.com/comfyanonymous/ComfyUI.git"
+# v0.11.0 is the first formal release to declare its runtime requests dependency.
 COMFYUI_MINIMUM_VERSION = "0.11.0"
 COMFYUI_FLOOR_COMMIT = "09725967cf76304371c390ca1d6483e04061da48"
+# v1.7.0 provides the complete isolated-tool/workspace-Python bridge we require.
+COMFY_CLI_MINIMUM_VERSION = "1.7.0"
 CDH_VERSION = "0.5.0"
 PIP_VERSION = "26.1.2"
 DEFAULT_MANAGED_PYTHON_VERSION = "3.13.14"

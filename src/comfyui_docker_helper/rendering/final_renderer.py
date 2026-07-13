@@ -122,6 +122,64 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f"-c {_shell_word(inventory_check)} {_shell_word(inventory)} \\",
         " && rm -rf /opt/cdh/source /opt/cdh/wheel",
     ]
+    if plan.toolchain.tool_store.comfy_cli is not None:
+        tool = plan.toolchain.tool_store.comfy_cli
+        tool_python = f"{plan.toolchain.tool_store.tool_dir}/{tool.name}/bin/python"
+        tool_environment = f"{plan.toolchain.tool_store.tool_dir}/{tool.name}"
+        inventory = tool.inventory_path
+        direct_check = "; ".join(
+            (
+                "import importlib.metadata as m, pathlib, sys",
+                f"distribution=m.distribution({tool.name!r})",
+                f"assert distribution.version == {tool.version!r}",
+                "commands={item.name for item in distribution.entry_points "
+                "if item.group == 'console_scripts'}",
+                "assert {'comfy', 'comfy-cli', 'comfycli'} <= commands",
+                "assert pathlib.Path(sys.prefix) == "
+                f"pathlib.Path({tool_environment!r})",
+                "assert pathlib.Path(sys._base_executable).resolve() == "
+                f"pathlib.Path({interpreter!r}).resolve()",
+            )
+        )
+        inventory_script = "; ".join(
+            (
+                "import importlib.metadata as m, re",
+                "normalize=lambda value: re.sub(r'[-_.]+', '-', value).lower()",
+                "items=sorted((normalize(d.metadata['Name']), d.version) "
+                "for d in m.distributions())",
+                "assert len(items) == len({name for name, _ in items})",
+                "print('\\n'.join(f'{name}=={version}' for name, version in items))",
+            )
+        )
+        commands = tool.executables
+        preflight = " && ".join(
+            _command_absence_checks(plan.toolchain.tool_store.bin_dir, commands)
+        )
+        links = " \\\n".join(
+            f" && {check}"
+            for check in _command_ownership_checks(
+                plan.toolchain.tool_store.bin_dir,
+                plan.toolchain.tool_store.tool_dir,
+                tool.name,
+                commands,
+            )
+        )
+        lines.append(
+            f"RUN {preflight} \\\n"
+            f" && uv --no-config tool install --python {_shell_word(interpreter)} "
+            f"--no-python-downloads --default-index "
+            f"{_shell_word(plan.application.python_index_url)} "
+            f"{_shell_word(tool.requirement)} \\\n"
+            f" && test -x {_shell_word(tool_python)} \\\n"
+            f" && {_shell_word(tool_python)} -c {_shell_word(direct_check)} \\\n"
+            f" && uv --no-config pip check --python {_shell_word(tool_python)} "
+            f"--no-python-downloads \\\n"
+            f" && {_shell_word(tool_python)} -c {_shell_word(inventory_script)} "
+            f"> {_shell_word(inventory)} \\\n"
+            f"{links} \\\n"
+            f" && grep -Fqx {_shell_word(f'comfy-cli=={tool.version}')} "
+            f"{_shell_word(inventory)}"
+        )
     for tool in plan.toolchain.tool_store.uv_tools:
         tool_python = f"{plan.toolchain.tool_store.tool_dir}/{tool.name}/bin/python"
         direct_check = (
@@ -135,6 +193,28 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             f"{_shell_word(tool.requirement)} \\"
             f"\n && test -x {_shell_word(tool_python)} \\"
             f"\n && {_shell_word(tool_python)} -c {_shell_word(direct_check)}"
+        )
+    if plan.toolchain.tool_store.comfy_cli is None:
+        commands = ("comfy", "comfy-cli", "comfycli")
+        lines.append(
+            "RUN "
+            + " && ".join(
+                _command_absence_checks(plan.toolchain.tool_store.bin_dir, commands)
+            )
+        )
+    else:
+        tool = plan.toolchain.tool_store.comfy_cli
+        commands = tool.executables
+        lines.append(
+            "RUN "
+            + " && ".join(
+                _command_ownership_checks(
+                    plan.toolchain.tool_store.bin_dir,
+                    plan.toolchain.tool_store.tool_dir,
+                    tool.name,
+                    commands,
+                )
+            )
         )
     phase_digest = _shell_word(build_plan_digest(plan))
     lines.append(
@@ -151,6 +231,28 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
 
 def _docker_word(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
+
+
+def _command_absence_checks(bin_dir: str, commands: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        f"test ! -e {_shell_word(f'{bin_dir}/{command}')} "
+        f"&& test ! -L {_shell_word(f'{bin_dir}/{command}')}"
+        for command in commands
+    )
+
+
+def _command_ownership_checks(
+    bin_dir: str,
+    tool_dir: str,
+    tool_name: str,
+    commands: tuple[str, ...],
+) -> tuple[str, ...]:
+    checks = []
+    for command in commands:
+        public = _shell_word(f"{bin_dir}/{command}")
+        owned = _shell_word(f"{tool_dir}/{tool_name}/bin/{command}")
+        checks.append(f'test -x {public} && test "$(readlink -f {public})" = {owned}')
+    return tuple(checks)
 
 
 def _shell_word(value: str) -> str:

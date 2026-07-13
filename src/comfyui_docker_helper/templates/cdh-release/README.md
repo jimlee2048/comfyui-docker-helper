@@ -54,7 +54,7 @@ extra_packages = ["torchvision==0.27.1"]
 
 [comfyui]
 version = "0.11.0"
-cli_version = "1.5.3"
+install_cli = true
 install_manager = false
 
 [build]
@@ -149,8 +149,13 @@ in isolated uv environments. `UV_TOOL_DIR=/opt/uv/tools`,
 production-only frozen closure derived from this repository's `uv.lock`.
 Each `[python].uv_tools` entry accepts the same bounded direct-requirement
 grammar, resolves independently, and installs an exact direct result without
-force-replacing an existing executable. comfy-cli and cm-cli remain application
-environment tools rather than uv tools.
+force-replacing an existing executable. When `[comfyui].install_cli=true`, cdh
+also resolves the highest target-compatible stable `comfy-cli>=1.7.0`, locks
+the exact result, and installs it in `/opt/uv/tools/comfy-cli` after cdh and
+before generic tools. The `comfy`, `comfy-cli`, and `comfycli` commands are
+linked under `/opt/uv/bin`; cdh does not invoke them during an image build.
+Set `install_cli=false` to omit the request, lock identity, tool environment,
+links, and verification.
 The cdh-owned host resolver uv, release `uv_build` backend, and container
 uv/uvx image are independently locked and verified identities even when their
 current versions are equal.
@@ -202,7 +207,13 @@ documents.
   environment markers are rejected.
 - `[python].uv_tools` installs standalone CLI distributions into isolated tool
   environments. Duplicate normalized owners and executable collisions,
-  including `cdh`, fail the image build.
+  including `cdh` and the optional comfy-cli commands, fail the image build.
+  `comfy-cli` itself is reserved to `[comfyui].install_cli` across Python
+  extras, PyTorch extras, and uv tools in both modes.
+- `[system].env` defines non-managed runtime image values. Names beginning with
+  `UV_` or `PIP_` are reserved so config cannot alter build-time package
+  sources, constraints, configuration, Python selection, or tool ownership.
+  Runtime `docker run -e` overrides are outside baked-image replay guarantees.
 - Registry custom nodes require Manager. Direct Git nodes are independently
   locked to full commits.
 - HTTPX `retries` remains an active public setting.

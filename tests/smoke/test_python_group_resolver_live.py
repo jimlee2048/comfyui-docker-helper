@@ -4,18 +4,21 @@ import httpx
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 from comfyui_docker_helper.comfyui_requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
     parse_comfyui_requirements,
 )
 from comfyui_docker_helper.config.canonical_lock import (
+    ComfyCliRequestIdentity,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     PyTorchRequestIdentity,
 )
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.exact_ledger import (
+    COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     DEFAULT_MANAGED_PYTHON_VERSION,
@@ -102,6 +105,42 @@ def test_exact_host_uv_resolves_one_real_complete_group() -> None:
     assert [(item.package, item.version) for item in resolved.members] == [
         ("packaging", "26.2")
     ]
+
+
+@pytest.mark.network
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "python_version",
+    [
+        DEFAULT_MANAGED_PYTHON_VERSION,
+        FALLBACK_MANAGED_PYTHON_VERSION,
+        "3.14.6",
+    ],
+)
+def test_exact_host_uv_resolves_optional_comfy_cli_for_every_target_profile(
+    python_version: str,
+) -> None:
+    request = ComfyCliRequestIdentity(
+        type="comfy-cli",
+        package="comfy-cli",
+        policy="highest-target-compatible-stable",
+        minimum_version=COMFY_CLI_MINIMUM_VERSION,
+        environment="uv-tool:comfy-cli",
+        python_version=python_version,
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+    )
+
+    resolved = UvPythonGroupResolver(locate_host_uv()).resolve(request)
+
+    assert len(resolved.members) == 1
+    member = resolved.members[0]
+    version = Version(member.version)
+    assert member.package == "comfy-cli"
+    assert version >= Version(COMFY_CLI_MINIMUM_VERSION)
+    assert not version.is_prerelease
+    assert not version.is_devrelease
+    assert version.local is None
 
 
 @pytest.mark.network

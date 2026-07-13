@@ -25,7 +25,6 @@ from comfyui_docker_helper.config.final_models import (
     FinalRegistryCustomNodeConfig,
 )
 from comfyui_docker_helper.config.selector_validation import (
-    normalize_comfy_cli_version,
     normalize_comfyui_version,
     normalize_registry_version,
     resolve_git_target_dir,
@@ -62,10 +61,9 @@ _MANAGED_ENV_KEYS = frozenset(
         "WORKSPACE",
         "COMFYUI_PATH",
         "DEBIAN_FRONTEND",
-        "UV_LINK_MODE",
-        "UV_PYTHON_CACHE_DIR",
     }
 )
+_MANAGED_PACKAGE_ENV_PREFIXES = ("UV_", "PIP_")
 _COMFYUI_FLOOR = Version(COMFYUI_MINIMUM_VERSION)
 
 
@@ -519,7 +517,7 @@ def _validate_system_domains(
                     "name must be a valid environment variable",
                 )
             )
-        if name in _MANAGED_ENV_KEYS:
+        if is_managed_environment_name(name):
             diagnostics.append(
                 Diagnostic(
                     path, "system.managed_env_override", f"must not override {name}"
@@ -588,13 +586,6 @@ def _validate_comfyui_domains(
 ) -> None:
     comfyui = config.comfyui
     _validate_comfyui_selector(comfyui.version, diagnostics)
-    _validate_published_selector(
-        comfyui.cli_version,
-        ("comfyui", "cli_version"),
-        "comfyui.invalid_cli_version",
-        normalize_comfy_cli_version,
-        diagnostics,
-    )
     if not is_argv_value(comfyui.listen):
         diagnostics.append(
             Diagnostic(
@@ -774,8 +765,8 @@ def _validate_published_selector(
         operands = SpecifierSet(normalized)
         invalid = any(not _is_stable_public_operand(item) for item in operands)
     else:
-        # Exact published comfy-cli and Registry versions may be prereleases.
-        # Their domain normalizers already reject malformed/local identities.
+        # Exact published Registry versions may be prereleases; its domain
+        # normalizer already rejects malformed/local identities.
         invalid = False
     if invalid:
         diagnostics.append(
@@ -1072,10 +1063,15 @@ def _package_owner_diagnostics(
     application_owners: dict[str, DiagnosticPath] = {
         "torch": ("pytorch", "version"),
         "comfyui-docker-helper": ("cdh",),
+        "comfy-cli": ("comfyui", "install_cli"),
     }
     tool_owners: dict[str, DiagnosticPath] = {
         "comfyui-docker-helper": ("cdh",),
+        "comfy-cli": ("comfyui", "install_cli"),
     }
+    reserved_owner_paths = frozenset(
+        {("pytorch", "version"), ("cdh",), ("comfyui", "install_cli")}
+    )
     for requirement in requirements:
         owners = (
             tool_owners
@@ -1084,11 +1080,16 @@ def _package_owner_diagnostics(
         )
         existing = owners.get(requirement.name)
         if existing is not None:
+            owner_text = (
+                "reserved by"
+                if existing in reserved_owner_paths
+                else "already owned at"
+            )
             diagnostics.append(
                 Diagnostic(
                     requirement.path,
                     "python.duplicate_package_owner",
-                    f"package {requirement.name} is already owned at "
+                    f"package {requirement.name} is {owner_text} "
                     f"{_format_path(existing)}",
                 )
             )
@@ -1098,6 +1099,11 @@ def _package_owner_diagnostics(
 
 def _format_path(path: DiagnosticPath) -> str:
     return ".".join(str(part) for part in path)
+
+
+def is_managed_environment_name(name: str) -> bool:
+    """Return whether image/package authority reserves an environment name."""
+    return name in _MANAGED_ENV_KEYS or name.startswith(_MANAGED_PACKAGE_ENV_PREFIXES)
 
 
 def is_oci_tag(value: str) -> bool:

@@ -168,24 +168,6 @@ class OfficialComfyUIIdentityProvider(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ComfyCliIdentityRequest:
-    version: str
-    stability: SelectorStability = SelectorStability.EXACT
-
-
-@dataclass(frozen=True, slots=True)
-class ComfyCliIdentity:
-    package: Literal["comfy-cli"]
-    version: str
-
-
-class ComfyCliIdentityProvider(Protocol):
-    def list_versions(self) -> tuple[ComfyCliIdentity, ...]: ...
-
-    def resolve(self, request: ComfyCliIdentityRequest) -> ComfyCliIdentity: ...
-
-
-@dataclass(frozen=True, slots=True)
 class RegistryNodeIdentityRequest:
     node_id: str
     version: str
@@ -558,53 +540,6 @@ class GitOfficialComfyUIIdentityProvider:
         if checked.returncode == 1:
             return False
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-
-
-@dataclass(frozen=True, slots=True)
-class PyPIComfyCliIdentityProvider:
-    client: httpx.Client
-    base_url: str = "https://pypi.org"
-
-    def list_versions(self) -> tuple[ComfyCliIdentity, ...]:
-        source = "PyPI comfy-cli"
-        response = _http_get(
-            self.client, f"{self.base_url}/pypi/comfy-cli/json", source
-        )
-        document = _response_json(response, source)
-        releases = document.get("releases")
-        if not isinstance(releases, Mapping):
-            raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-        versions: set[str] = set()
-        for candidate, artifacts in releases.items():
-            version = _parsed_exact_version_response(candidate, source)
-            _validate_pypi_artifacts(artifacts, source)
-            if artifacts:
-                versions.add(version)
-        return tuple(
-            ComfyCliIdentity(package="comfy-cli", version=str(version))
-            for version in sorted(map(Version, versions))
-        )
-
-    def resolve(self, request: ComfyCliIdentityRequest) -> ComfyCliIdentity:
-        source = "PyPI comfy-cli"
-        version = _normalized_exact_version_request(request.version, source)
-        response = _http_get(
-            self.client,
-            f"{self.base_url}/pypi/comfy-cli/{quote(version, safe='')}/json",
-            source,
-        )
-        document = _response_json(response, source)
-        info = document.get("info")
-        if not isinstance(info, Mapping):
-            raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-        published = _required_string(info, "version", source)
-        if _parsed_exact_version_response(published, source) != version:
-            raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-        artifacts = document.get("urls")
-        _validate_pypi_artifacts(artifacts, source)
-        if not artifacts:
-            raise IdentityProviderError(source, ProviderFailureKind.NOT_FOUND)
-        return ComfyCliIdentity(package="comfy-cli", version=version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -991,15 +926,6 @@ def _parsed_exact_version_response(value: object, source: str) -> str:
     if version.local is not None:
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
     return str(version)
-
-
-def _validate_pypi_artifacts(value: object, source: str) -> None:
-    if not isinstance(value, list):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    for artifact in value:
-        if not isinstance(artifact, Mapping):
-            raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-        _required_string(artifact, "filename", source)
 
 
 def _normalized_registry_exact_version_request(value: str, source: str) -> str:

@@ -41,7 +41,7 @@ _HOST_ONLY_SYSTEM_FIELDS = frozenset(
     {"workspace", "comfyui_path", "extra_packages", "env"}
 )
 _HOST_ONLY_COMFYUI_FIELDS = frozenset(
-    {"version", "cli_version", "install_manager", "custom_nodes"}
+    {"version", "install_cli", "install_manager", "custom_nodes"}
 )
 _COMFYUI_CONTROLLED_STARTUP_FLAGS = frozenset(
     {"--listen", "--port", "--auto-launch", "--disable-auto-launch"}

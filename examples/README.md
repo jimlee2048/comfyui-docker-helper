@@ -43,4 +43,6 @@ BuildPlan retain complete resolved versions such as `2.12.1+cu130`.
 locked as an isolated direct package, then installed under `/opt/uv/tools` with
 executables linked under `/opt/uv/bin`. The application interpreter and its
 `pip` commands remain under `/opt/venv`; cdh is the first isolated tool and
-executable collisions are fatal.
+executable collisions are fatal. `[comfyui].install_cli` independently controls
+the isolated user-facing comfy-cli tool; enabled mode installs its exact locked
+release before generic tools and disabled mode omits it completely.

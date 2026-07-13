@@ -539,7 +539,7 @@ tags = ["example:dev"]
 
 [comfyui]
 version = "latest"
-cli_version = "latest"
+install_cli = false
 install_manager = true
 listen = "127.0.0.1"
 
@@ -575,7 +575,7 @@ id = "node"
             DiagnosticSeverity.WARNING,
         ),
         (
-            ("comfyui", "cli_version"),
+            ("comfyui", "install_cli"),
             "runtime.host_only_ignored",
             DiagnosticSeverity.WARNING,
         ),

@@ -21,13 +21,15 @@ from comfyui_docker_helper.config.final_validation import (
     is_oci_tag,
 )
 from comfyui_docker_helper.config.selector_validation import (
-    normalize_comfy_cli_version,
     normalize_comfyui_version,
     normalize_registry_version,
 )
 from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.config.value_validation import has_control_characters
-from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
+from comfyui_docker_helper.exact_ledger import (
+    COMFY_CLI_MINIMUM_VERSION,
+    COMFYUI_MINIMUM_VERSION,
+)
 
 CANONICAL_LOCK_SCHEMA_VERSION = 1
 INVALID_CANONICAL_LOCK_MESSAGE = (
@@ -277,17 +279,22 @@ class ComfyUIRequirementsLockEntry(_ResolverEntry):
 
 
 class ComfyCliLockEntry(_ResolverEntry):
-    """Exact comfy-cli direct package selection."""
+    """Exact isolated comfy-cli user-tool selection."""
 
     type: Literal["comfy-cli"]
     package: Literal["comfy-cli"]
     version: str = Field(min_length=1)
-    environment: Literal["application"]
+    environment: Literal["uv-tool:comfy-cli"]
 
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        return _require_exact_public_version(value)
+        version = _require_exact_stable_public_version(value)
+        if Version(version) < Version(COMFY_CLI_MINIMUM_VERSION):
+            raise ValueError(
+                f"version must be comfy-cli {COMFY_CLI_MINIMUM_VERSION} or newer"
+            )
+        return version
 
 
 class RegistryNodeLockEntry(_ResolverEntry):
@@ -528,17 +535,23 @@ class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
 
 
 class ComfyCliRequestIdentity(_StrictLockModel):
+    """Internal highest-stable request for the optional isolated user tool."""
+
     type: Literal["comfy-cli"]
     package: Literal["comfy-cli"]
-    selector: str = Field(min_length=1)
+    policy: Literal["highest-target-compatible-stable"]
+    minimum_version: str
+    environment: Literal["uv-tool:comfy-cli"]
     index_url: str = Field(min_length=1)
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
 
-    @field_validator("selector")
+    @field_validator("minimum_version")
     @classmethod
-    def _normalize_selector(cls, value: str) -> str:
-        return normalize_comfy_cli_version(_require_token(value, "selector"))
+    def _validate_minimum_version(cls, value: str) -> str:
+        if value != COMFY_CLI_MINIMUM_VERSION:
+            raise ValueError("minimum_version must match the exact ledger")
+        return value
 
     @field_validator("index_url")
     @classmethod

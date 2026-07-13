@@ -26,6 +26,7 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     ComfyCliLockEntry,
+    ComfyCliRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
     DirectGitLockEntry,
@@ -49,6 +50,7 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.exact_ledger import (
+    COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
@@ -67,6 +69,7 @@ def final_config(
     scripts_dir: Path | None = None,
     with_hook: bool = False,
     with_uv_tool: bool = False,
+    install_cli: bool = True,
 ) -> FinalConfig:
     registry_node: dict[str, object] = {
         "type": "registry",
@@ -101,7 +104,7 @@ def final_config(
             },
             "comfyui": {
                 "version": "0.11.0",
-                "cli_version": "1.5.3",
+                "install_cli": install_cli,
                 "install_manager": True,
                 "extra_args": ["--preview-method", "latent2rgb"],
                 "custom_nodes": [
@@ -132,9 +135,10 @@ def accepted_resolution(
     *,
     hook_digest: str | None = None,
     with_uv_tool: bool = False,
+    install_cli: bool = True,
     reverse: bool = False,
 ) -> AcceptedCanonicalLock:
-    config = final_config(with_uv_tool=with_uv_tool)
+    config = final_config(with_uv_tool=with_uv_tool, install_cli=install_cli)
     configured_members: list[DirectPythonRequestMember] = []
     for index, value in enumerate(config.pytorch.extra_packages):
         diagnostics = []
@@ -242,13 +246,6 @@ def accepted_resolution(
             commit=COMMIT_A,
             formal_release="0.11.0",
         ),
-        ComfyCliLockEntry(
-            type="comfy-cli",
-            request_digest=DIGEST_A,
-            package="comfy-cli",
-            version="1.5.3",
-            environment="application",
-        ),
         DirectPythonLockEntry(
             type="python-package",
             request_digest=DIGEST_A,
@@ -321,6 +318,27 @@ def accepted_resolution(
             ],
         ),
     ]
+    if install_cli:
+        cli_request = ComfyCliRequestIdentity(
+            type="comfy-cli",
+            package="comfy-cli",
+            policy="highest-target-compatible-stable",
+            minimum_version=COMFY_CLI_MINIMUM_VERSION,
+            environment="uv-tool:comfy-cli",
+            index_url=config.python.index_url,
+            python_version=config.python.version,
+            platform="linux/amd64",
+        )
+        entries.insert(
+            4,
+            ComfyCliLockEntry(
+                type="comfy-cli",
+                request_digest=compute_request_digest(cli_request),
+                package="comfy-cli",
+                version="1.8.0",
+                environment="uv-tool:comfy-cli",
+            ),
+        )
     if hook_digest is not None:
         entries.append(
             LocalExecutableLockEntry(
@@ -399,6 +417,51 @@ def test_constructor_projects_isolated_uv_tool_exact_result() -> None:
     assert plan.toolchain.tool_store.cdh_closure
 
 
+def test_constructor_projects_optional_comfy_cli_only_to_the_tool_store() -> None:
+    enabled = construct_build_plan(final_config(), accepted_resolution())
+    disabled = construct_build_plan(
+        final_config(install_cli=False), accepted_resolution(install_cli=False)
+    )
+
+    tool = enabled.toolchain.tool_store.comfy_cli
+    assert tool is not None
+    assert tool.requirement == "comfy-cli==1.8.0"
+    assert tool.environment == "uv-tool:comfy-cli"
+    assert tool.executables == ("comfy", "comfy-cli", "comfycli")
+    assert disabled.toolchain.tool_store.comfy_cli is None
+
+
+@pytest.mark.parametrize("group", ["python", "pytorch"])
+def test_build_plan_reserves_comfy_cli_from_every_application_group(
+    group: str,
+) -> None:
+    plan = construct_build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    packages = (
+        document["application"]["python_extras"]["packages"]
+        if group == "python"
+        else document["application"]["pytorch"]["packages"]
+    )
+    packages[-1]["name"] = "comfy-cli"
+
+    with pytest.raises(ValidationError, match="dedicated optional tool"):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "name", ["UV_INDEX", "UV_INDEX_URL", "UV_TOOL_DIR", "PIP_CONSTRAINT"]
+)
+def test_build_plan_never_inherits_user_package_environment_controls(
+    name: str,
+) -> None:
+    plan = construct_build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    document["runtime"]["environment"] = ({"name": name, "value": "user-value"},)
+
+    with pytest.raises(ValidationError, match="reserved to cdh image authority"):
+        BuildPlan.model_validate(document)
+
+
 def test_plan_bytes_digest_and_lock_order_are_deterministic() -> None:
     first = construct_build_plan(final_config(), accepted_resolution())
     second = construct_build_plan(final_config(), accepted_resolution(reverse=True))
@@ -456,7 +519,7 @@ def test_execution_only_config_change_updates_binding_deterministically() -> Non
         (1, "tag", "latest", "uv image"),
         (2, "version", "3.12.13", "managed Python"),
         (3, "formal_release", "0.12.0", "ComfyUI identity"),
-        (4, "version", "1.5.4", "comfy-cli identity"),
+        (4, "request_digest", DIGEST_B, "comfy-cli identity"),
         (6, "version", "2.11.0+cu130", "satisfy torch"),
         (8, "version", "1.2.4", "Registry identity"),
         (9, "commit", "3" * 40, "Git identity"),

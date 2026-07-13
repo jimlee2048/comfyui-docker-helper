@@ -35,7 +35,6 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     _target_marker_environment,
 )
 from comfyui_docker_helper.host.identity_providers import (
-    ComfyCliIdentity,
     DirectGitIdentity,
     DirectGitIdentityRequest,
     ManagedPythonIdentity,
@@ -190,7 +189,11 @@ def test_uv_group_resolver_uses_one_absolute_isolated_explicit_invocation(
     assert argv[argv.index("--python-platform") + 1] == "x86_64-unknown-linux-gnu"
     assert "--default-index" not in argv
     assert "--no-sources" not in argv
-    assert str(kwargs["cwd"]).startswith("/tmp/cdh-pytorch-resolution-")
+    resolution_root = Path(str(kwargs["cwd"]))
+    assert resolution_root.is_absolute()
+    assert resolution_root.name.startswith("cdh-pytorch-resolution-")
+    assert Path(argv[4]).parent == resolution_root
+    assert argv[argv.index("--project") + 1] == str(resolution_root)
     environment = kwargs["env"]
     assert isinstance(environment, dict)
     assert environment["UV_NO_CONFIG"] == "1"
@@ -230,6 +233,41 @@ def test_non_public_uv_tool_group_uses_exact_isolated_resolution_seam() -> None:
     assert argv[argv.index("--python-platform") + 1] == "x86_64-unknown-linux-gnu"
     assert argv[argv.index("--default-index") + 1] == "https://pypi.org/simple"
     assert kwargs["input"] == "ruff==0.12.0\n"
+
+
+def test_comfy_cli_uses_highest_stable_target_resolution_through_python_index() -> None:
+    request = ComfyCliRequestIdentity(
+        type="comfy-cli",
+        package="comfy-cli",
+        policy="highest-target-compatible-stable",
+        minimum_version="1.7.0",
+        environment="uv-tool:comfy-cli",
+        python_version="3.14.6",
+        platform="linux/amd64",
+        index_url="https://packages.example/simple",
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def runner(
+        args: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="comfy-cli==2.0.0\n")
+
+    resolved = UvPythonGroupResolver(
+        HostUvRunner(Path("/opt/cdh/bin/uv")), runner
+    ).resolve(request)
+
+    assert resolved == ResolvedPythonGroup(
+        (ResolvedPythonMember("comfy-cli", "2.0.0"),)
+    )
+    argv, kwargs = calls[0]
+    assert argv[argv.index("--python-version") + 1] == "3.14.6"
+    assert argv[argv.index("--python-platform") + 1] == "x86_64-unknown-linux-gnu"
+    assert argv[argv.index("--default-index") + 1] == request.index_url
+    assert argv[argv.index("--resolution") + 1] == "highest"
+    assert argv[argv.index("--prerelease") + 1] == "disallow"
+    assert kwargs["input"] == "comfy-cli>=1.7.0\n"
 
 
 @pytest.mark.parametrize(
@@ -370,21 +408,6 @@ class FakeComfyUI:
 
 
 @dataclass
-class FakeComfyCli:
-    list_calls: int = 0
-
-    def list_versions(self) -> tuple[ComfyCliIdentity, ...]:
-        self.list_calls += 1
-        return (
-            ComfyCliIdentity("comfy-cli", "1.0.0"),
-            ComfyCliIdentity("comfy-cli", "2.0.0"),
-        )
-
-    def resolve(self, request: object) -> ComfyCliIdentity:
-        raise AssertionError("exact comfy-cli must be a direct result")
-
-
-@dataclass
 class FakeRegistry:
     resolve_calls: list[object] = field(default_factory=list)
     list_calls: list[str] = field(default_factory=list)
@@ -412,10 +435,16 @@ class FakeGit:
 
 @dataclass
 class FakePythonGroup:
-    calls: list[PythonGroupRequestIdentity] = field(default_factory=list)
+    calls: list[PythonGroupRequestIdentity | ComfyCliRequestIdentity] = field(
+        default_factory=list
+    )
 
-    def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup:
+    def resolve(
+        self, request: PythonGroupRequestIdentity | ComfyCliRequestIdentity
+    ) -> ResolvedPythonGroup:
         self.calls.append(request)
+        if isinstance(request, ComfyCliRequestIdentity):
+            return ResolvedPythonGroup((ResolvedPythonMember("comfy-cli", "2.0.0"),))
         return ResolvedPythonGroup(
             (
                 ResolvedPythonMember("torch", "2.12.1+cu130"),
@@ -430,7 +459,6 @@ class ProviderFakes:
     oci: FakeOci = field(default_factory=FakeOci)
     python: FakeManagedPython = field(default_factory=FakeManagedPython)
     comfyui: FakeComfyUI = field(default_factory=FakeComfyUI)
-    cli: FakeComfyCli = field(default_factory=FakeComfyCli)
     registry: FakeRegistry = field(default_factory=FakeRegistry)
     git: FakeGit = field(default_factory=FakeGit)
     group: FakePythonGroup = field(default_factory=FakePythonGroup)
@@ -443,14 +471,13 @@ class ProviderFakes:
 
     def acquirer(self) -> ProviderIdentityAcquirer:
         return ProviderIdentityAcquirer(
-            self.oci,
-            self.python,
-            self.comfyui,
-            self.cli,
-            self.registry,
-            self.git,
-            self.group,
-            ManagedPythonReleaseInputs(
+            oci=self.oci,
+            managed_python=self.python,
+            comfyui=self.comfyui,
+            registry=self.registry,
+            git=self.git,
+            python_group=self.group,
+            release=ManagedPythonReleaseInputs(
                 "26.1.2",
                 "0.5.0",
                 DIGEST_A,
@@ -522,7 +549,7 @@ def test_adapter_rejects_provider_identity_that_does_not_match_request() -> None
         _acquire(request, fakes)
 
 
-def test_exact_git_and_comfy_cli_are_direct_while_registry_is_verified() -> None:
+def test_exact_git_registry_and_comfy_cli_provider_boundaries() -> None:
     fakes = ProviderFakes()
     git = DirectGitRequestIdentity(
         type="git", url="https://example.test/node.git", ref=COMMIT_A
@@ -530,7 +557,9 @@ def test_exact_git_and_comfy_cli_are_direct_while_registry_is_verified() -> None
     cli = ComfyCliRequestIdentity(
         type="comfy-cli",
         package="comfy-cli",
-        selector="1.5.3",
+        policy="highest-target-compatible-stable",
+        minimum_version="1.7.0",
+        environment="uv-tool:comfy-cli",
         index_url="https://pypi.org/simple",
         python_version="3.13.14",
         platform="linux/amd64",
@@ -540,10 +569,10 @@ def test_exact_git_and_comfy_cli_are_direct_while_registry_is_verified() -> None
     )
 
     assert _acquire(git, fakes)[0].commit == COMMIT_A
-    assert _acquire(cli, fakes)[0].version == "1.5.3"
+    assert _acquire(cli, fakes)[0].version == "2.0.0"
     assert _acquire(registry, fakes)[0].version == "1.2.3"
     assert fakes.git.calls == []
-    assert fakes.cli.list_calls == 0
+    assert fakes.group.calls == [cli]
     assert len(fakes.registry.resolve_calls) == 1
 
 
@@ -687,7 +716,9 @@ def test_moving_catalog_selectors_choose_highest_stable_match() -> None:
     cli = ComfyCliRequestIdentity(
         type="comfy-cli",
         package="comfy-cli",
-        selector="<3,>=1",
+        policy="highest-target-compatible-stable",
+        minimum_version="1.7.0",
+        environment="uv-tool:comfy-cli",
         index_url="https://pypi.org/simple",
         python_version="3.13.14",
         platform="linux/amd64",

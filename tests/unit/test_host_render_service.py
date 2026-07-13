@@ -15,6 +15,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     CanonicalLockEntry,
     ComfyCliLockEntry,
+    ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
@@ -73,7 +74,7 @@ DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT = "1" * 40
 
 
-def _config(*, with_uv_tool: bool = False) -> str:
+def _config(*, with_uv_tool: bool = False, install_cli: bool = True) -> str:
     uv_tools = 'uv_tools = ["ruff>=0.15,<0.16"]' if with_uv_tool else ""
     return f"""
 [compute_platform]
@@ -89,7 +90,7 @@ version = "2.12.1"
 extra_packages = ["torchvision==0.27.1"]
 [comfyui]
 version = "0.11.0"
-cli_version = "1.5.3"
+install_cli = {str(install_cli).lower()}
 install_manager = false
 [build]
 tags = ["example:test"]
@@ -175,14 +176,14 @@ class FakeAcquirer:
                     ],
                 ),
             )
-        elif request.type == "comfy-cli":
+        elif isinstance(request, ComfyCliRequestIdentity):
             entries = (
                 ComfyCliLockEntry(
                     type="comfy-cli",
                     request_digest=request_digest,
                     package="comfy-cli",
-                    version="1.5.3",
-                    environment="application",
+                    version="1.8.0",
+                    environment=request.environment,
                 ),
             )
         elif isinstance(request, RegistryRequestIdentity):
@@ -263,6 +264,13 @@ def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
             "version": "0.15.18",
         }
     ]
+    assert plan["toolchain"]["tool_store"]["comfy_cli"] == {
+        "environment": "uv-tool:comfy-cli",
+        "executables": ["comfy", "comfy-cli", "comfycli"],
+        "inventory_path": "/opt/cdh/build/comfy-cli-inventory.txt",
+        "name": "comfy-cli",
+        "version": "1.8.0",
+    }
     dockerfile = (output / "Dockerfile").read_text()
     assert "uv --no-config tool install" in dockerfile
     assert "ruff==0.15.18" in dockerfile
@@ -445,10 +453,12 @@ def test_upgrade_refreshes_only_moving_requests_and_preserves_exact_results(
     assert fake.calls == [
         "oci",
         "comfyui-requirements",
+        "comfy-cli",
         "oci",
         "pytorch-group",
     ]
     assert prepared.lock_result.provider_calls == (
+        ("comfy-cli", "comfy-cli", "uv-tool:comfy-cli"),
         ("comfyui-requirements", COMFYUI_REPOSITORY),
         ("oci", "cuda-base"),
         ("oci", "uv-tool"),

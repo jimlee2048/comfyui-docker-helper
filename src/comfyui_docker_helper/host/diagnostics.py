@@ -70,7 +70,10 @@ def render_plan_preview(
     for package in plan.application.pytorch.packages:
         output.print(f"    - {package.requirement}")
     output.print(f"  ComfyUI commit: {plan.application.comfyui.commit}")
-    output.print(f"  comfy-cli: {plan.application.comfy_cli_version}")
+    comfy_cli = plan.toolchain.tool_store.comfy_cli
+    output.print(
+        f"  comfy-cli: {comfy_cli.version if comfy_cli is not None else 'disabled'}"
+    )
     output.print("  Custom nodes:")
     for node in plan.custom_nodes.nodes:
         if node.type == "registry":

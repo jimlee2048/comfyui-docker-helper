@@ -35,6 +35,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonLockEntry,
+    DirectPythonRequestIdentity,
+    DirectPythonRequestMember,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
@@ -63,8 +65,6 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_MINIMUM_VERSION,
 )
 from comfyui_docker_helper.host.identity_providers import (
-    ComfyCliIdentity,
-    ComfyCliIdentityProvider,
     DirectGitIdentityProvider,
     DirectGitIdentityRequest,
     IdentityProviderError,
@@ -103,7 +103,9 @@ class ResolvedPythonGroup:
 
 
 class PythonGroupResolver(Protocol):
-    def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup: ...
+    def resolve(
+        self, request: PythonGroupRequestIdentity | ComfyCliRequestIdentity
+    ) -> ResolvedPythonGroup: ...
 
 
 type ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -144,7 +146,26 @@ class UvPythonGroupResolver:
     runner: ProcessRunner = subprocess.run
     metadata_reader: MetadataReader = _read_metadata_sidecar
 
-    def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup:
+    def resolve(
+        self, request: PythonGroupRequestIdentity | ComfyCliRequestIdentity
+    ) -> ResolvedPythonGroup:
+        if isinstance(request, ComfyCliRequestIdentity):
+            direct = DirectPythonRequestIdentity(
+                type="python-group",
+                environment=request.environment,
+                group="uv-tool",
+                python_version=request.python_version,
+                platform=request.platform,
+                index_url=request.index_url,
+                members=[
+                    DirectPythonRequestMember(
+                        package=request.package,
+                        extras=[],
+                        selector=f">={request.minimum_version}",
+                    )
+                ],
+            )
+            return self.resolve(direct)
         if isinstance(request, PyTorchRequestIdentity):
             return self._resolve_pytorch(request)
         requirements = "\n".join(
@@ -336,7 +357,6 @@ class ProviderIdentityAcquirer:
     oci: OciIdentityProvider
     managed_python: ManagedPythonIdentityProvider
     comfyui: OfficialComfyUIIdentityProvider
-    comfy_cli: ComfyCliIdentityProvider
     registry: RegistryNodeIdentityProvider
     git: DirectGitIdentityProvider
     python_group: PythonGroupResolver
@@ -499,14 +519,23 @@ class ProviderIdentityAcquirer:
                 ),
             )
         if isinstance(request, ComfyCliRequestIdentity):
-            version = self._resolve_comfy_cli(request.selector)
+            resolution = self.python_group.resolve(request)
+            if len(resolution.members) != 1:
+                raise CanonicalAcquisitionError(
+                    "Python resolver returned an incompatible comfy-cli result"
+                )
+            member = resolution.members[0]
+            if member.package != request.package:
+                raise CanonicalAcquisitionError(
+                    "Python resolver returned an incompatible comfy-cli result"
+                )
             return (
                 ComfyCliLockEntry(
                     type="comfy-cli",
                     request_digest=request_digest,
                     package="comfy-cli",
-                    version=version,
-                    environment="application",
+                    version=member.version,
+                    environment=request.environment,
                 ),
             )
         if isinstance(request, RegistryRequestIdentity):
@@ -597,12 +626,6 @@ class ProviderIdentityAcquirer:
         selected = _select_comfyui_candidate(candidates, selector)
         return selected
 
-    def _resolve_comfy_cli(self, selector: str) -> str:
-        if _is_exact_selector(selector):
-            return selector
-        candidates = self.comfy_cli.list_versions()
-        return _select_package_candidate(candidates, selector, "comfy-cli").version
-
     def _resolve_registry(
         self, request: RegistryRequestIdentity
     ) -> RegistryNodeIdentity:
@@ -648,20 +671,6 @@ def _select_comfyui_candidate(
     if not compatible:
         raise CanonicalAcquisitionError("official ComfyUI identity was not found")
     return max(compatible, key=lambda item: Version(item.formal_release or "0"))
-
-
-def _select_package_candidate(
-    candidates: tuple[ComfyCliIdentity, ...], selector: str, source: str
-) -> ComfyCliIdentity:
-    compatible = [
-        item
-        for item in candidates
-        if (version := _stable_version(item.version)) is not None
-        and _selector_matches(selector, version)
-    ]
-    if not compatible:
-        raise CanonicalAcquisitionError(f"{source} identity was not found")
-    return max(compatible, key=lambda item: Version(item.version))
 
 
 def _select_registry_candidate(
@@ -873,7 +882,7 @@ def _uses_external_provider(request: ResolverRequestIdentity) -> bool:
     if isinstance(request, ComfyUIRequestIdentity):
         return not _is_commit(request.selector)
     if isinstance(request, ComfyCliRequestIdentity):
-        return not _is_exact_selector(request.selector)
+        return True
     if isinstance(request, RegistryRequestIdentity):
         return True
     if isinstance(request, DirectGitRequestIdentity):

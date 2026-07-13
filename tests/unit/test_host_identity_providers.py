@@ -14,7 +14,6 @@ import pytest
 
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.identity_providers import (
-    ComfyCliIdentityRequest,
     DirectGitIdentityRequest,
     FilesystemLocalExecutableIdentityProvider,
     GitDirectIdentityProvider,
@@ -27,7 +26,6 @@ from comfyui_docker_helper.host.identity_providers import (
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
     ProviderFailureKind,
-    PyPIComfyCliIdentityProvider,
     RegistryNodeIdentityRequest,
     SelectorStability,
     UvManagedPythonIdentityProvider,
@@ -689,88 +687,6 @@ def test_direct_git_full_commit_request_is_classified_exact() -> None:
     assert request.stability is SelectorStability.EXACT
 
 
-def test_pypi_comfy_cli_confirms_exact_published_version() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/pypi/comfy-cli/1.4.1/json"
-        return httpx.Response(
-            200,
-            request=request,
-            json={
-                "info": {"version": "1.4.1"},
-                "urls": [{"filename": "comfy_cli-1.4.1-py3-none-any.whl"}],
-            },
-        )
-
-    with _client(handler) as client:
-        request = ComfyCliIdentityRequest("v1.4.1")
-        identity = PyPIComfyCliIdentityProvider(client).resolve(request)
-
-    assert request.stability is SelectorStability.EXACT
-    assert identity.package == "comfy-cli"
-    assert identity.version == "1.4.1"
-
-
-def test_pypi_comfy_cli_catalog_returns_sorted_published_identities() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            request=request,
-            json={
-                "releases": {
-                    "2.0.0": [],
-                    "1.1.0": [{"filename": "comfy_cli-1.1.0.whl"}],
-                    "1.0.0rc1": [{"filename": "comfy_cli-1.0.0rc1.whl"}],
-                }
-            },
-        )
-
-    with _client(handler) as client:
-        identities = PyPIComfyCliIdentityProvider(client).list_versions()
-
-    assert [identity.version for identity in identities] == [
-        "1.0.0rc1",
-        "1.1.0",
-    ]
-
-
-def test_pypi_comfy_cli_exact_release_without_artifacts_is_not_published() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            request=request,
-            json={"info": {"version": "2.0.0"}, "urls": []},
-        )
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        PyPIComfyCliIdentityProvider(client).resolve(ComfyCliIdentityRequest("2.0.0"))
-
-    assert raised.value.kind is ProviderFailureKind.NOT_FOUND
-
-
-@pytest.mark.parametrize(
-    "document",
-    [
-        {"releases": {"not-a-version": [{"filename": "bad.whl"}]}},
-        {"releases": {"1.0.0": "not-a-files-list"}},
-    ],
-)
-def test_pypi_comfy_cli_maps_malformed_catalog_to_invalid_response(
-    document: dict[str, object],
-) -> None:
-    with (
-        _client(
-            lambda request: httpx.Response(200, request=request, json=document)
-        ) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        PyPIComfyCliIdentityProvider(client).list_versions()
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
-
-
 def test_registry_confirms_exact_node_and_version_identity() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/nodes/example-node/versions"
@@ -870,15 +786,15 @@ def test_http_provider_status_errors_are_short_stable_and_secret_free(
         _client(handler) as client,
         pytest.raises(IdentityProviderError) as raised,
     ):
-        PyPIComfyCliIdentityProvider(
+        HttpRegistryNodeIdentityProvider(
             client, base_url="https://user:password@example.test"
-        ).resolve(ComfyCliIdentityRequest("1.0.0"))
+        ).list_versions("example-node")
 
     assert raised.value.kind is kind
     rendered = str(raised.value)
     assert "super-secret" not in rendered
     assert "password" not in rendered
-    assert "1.0.0" not in rendered
+    assert "example-node" not in rendered
 
 
 def test_http_provider_maps_network_and_invalid_payload() -> None:
@@ -889,7 +805,7 @@ def test_http_provider_maps_network_and_invalid_payload() -> None:
         _client(network_failure) as client,
         pytest.raises(IdentityProviderError) as network,
     ):
-        PyPIComfyCliIdentityProvider(client).resolve(ComfyCliIdentityRequest("1.0.0"))
+        HttpRegistryNodeIdentityProvider(client).list_versions("example-node")
     assert network.value.kind is ProviderFailureKind.NETWORK
     assert "super-secret" not in str(network.value)
 
@@ -900,7 +816,7 @@ def test_http_provider_maps_network_and_invalid_payload() -> None:
         _client(invalid_payload) as client,
         pytest.raises(IdentityProviderError) as invalid,
     ):
-        PyPIComfyCliIdentityProvider(client).resolve(ComfyCliIdentityRequest("1.0.0"))
+        HttpRegistryNodeIdentityProvider(client).list_versions("example-node")
     assert invalid.value.kind is ProviderFailureKind.INVALID_RESPONSE
     assert "secret" not in str(invalid.value)
 

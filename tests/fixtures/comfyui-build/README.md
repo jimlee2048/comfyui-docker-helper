@@ -1,8 +1,9 @@
 # ComfyUI Build Smoke Fixtures
 
 These fixtures define reusable, opt-in ComfyUI build smoke scenarios. They use
-real Docker Buildx, real comfy-cli behavior, and real ComfyUI-Manager behavior
-when executed. They do not require private tokens.
+real Docker Buildx, direct exact ComfyUI installation, optional isolated
+comfy-cli behavior, and real ComfyUI-Manager behavior when executed. They do
+not require private tokens.
 
 The TOML fixture files are safe to validate locally with the lightweight tests in
 `tests/smoke/`; those tests do not run Docker. The `cdh host build` commands
@@ -11,9 +12,10 @@ services.
 
 Notes:
 
-- `comfyui.version = "nightly"` is a cdh/comfy-cli input, not a GitHub branch
-  assumption.
-- Smoke tests validate `comfy` inside the generated build container.
+- `comfyui.version = "nightly"` is a cdh source-selection input, not a GitHub
+  branch assumption.
+- comfy-cli commands are invoked only by disposable post-build smoke harnesses;
+  cdh does not invoke them during a build.
 - `comfyui-custom-scripts` is the default registry smoke candidate because it is
   a small public node that exercises the Manager registry install path.
 - `comfyui-impact-pack` is an optional heavier registry candidate for broader
@@ -43,6 +45,7 @@ Concrete smoke inputs live under `tests/fixtures/comfyui-build/`.
 | S8 | httpx files | `tests/fixtures/comfyui-build/configs/httpx-files.toml` |
 | S9 | aria2 files | `tests/fixtures/comfyui-build/configs/aria2-files.toml` |
 | S10 | full workflow | `tests/fixtures/comfyui-build/configs/full.toml` |
+| S11 | pinned minimal, comfy-cli disabled | `tests/fixtures/comfyui-build/configs/minimal-pinned-cli-disabled.toml` |
 
 The default fixture configs are build-focused. Runtime download behavior,
 including async queueing, `/var/lib/cdh/runtime/state.json`, target-local
@@ -115,13 +118,19 @@ cdh host build -f tests/fixtures/comfyui-build/configs/aria2-files.toml -t cdh-s
 cdh host build -f tests/fixtures/comfyui-build/configs/full.toml -t cdh-smoke:full --scripts-dir tests/fixtures/comfyui-build/scripts --context-dir .cdh/smoke/comfyui-build/full
 ```
 
+### S11 Pinned Minimal With comfy-cli Disabled
+
+```bash
+cdh host build -f tests/fixtures/comfyui-build/configs/minimal-pinned-cli-disabled.toml -t cdh-smoke:minimal-pinned-cli-disabled --context-dir .cdh/smoke/comfyui-build/minimal-pinned-cli-disabled
+```
+
 ## Scenario Matrix
 
 | ID | Scenario | Config intent | Command | Run notes | Pass criteria |
 | --- | --- | --- | --- | --- | --- |
-| S1 | pinned minimal | `comfyui.version` pinned or stable, `install_manager=false`, no nodes/files | S1 command | build log, rendered context, image ID, `docker image inspect`, container filesystem checks | Build succeeds; ComfyUI installed under `COMFYUI_PATH`; `/opt/venv` exists; `$COMFYUI_PATH/.venv` absent; final image does not include build-only context artifacts such as `/tmp/cdh`, `packages/cdh`, `scripts`, or root render artifacts; `WORKDIR` and cdh `ENTRYPOINT` match the rendered Dockerfile. |
-| S2 | latest ComfyUI | `comfyui.version="latest"`, Manager off | S2 command | comfy-cli install output, ComfyUI git/version details | Build succeeds or external conflict is recorded; latest behavior is identified from real install output. |
-| S3 | nightly ComfyUI | `comfyui.version="nightly"`, Manager off | S3 command | comfy-cli install output, ComfyUI git/version details | Build succeeds or the conflict is recorded without an undocumented workaround. |
+| S1 | pinned minimal | `comfyui.version="0.11.0"`, `install_cli=true`, `install_manager=false`, no nodes/files | S1 command | build log, rendered context, image ID, exact comfy-cli inventory and links, external three-command help and workspace-launch probes | Build succeeds; ComfyUI is installed under `COMFYUI_PATH`; comfy-cli is isolated under `/opt/uv/tools/comfy-cli`; all three public commands resolve to that tool; its workspace launch uses `/opt/venv/bin/python`; `$COMFYUI_PATH/.venv` and `$COMFYUI_PATH/venv` remain absent. |
+| S2 | latest ComfyUI | `comfyui.version="latest"`, Manager off | S2 command | direct install output and ComfyUI git/version details | Build succeeds or an external conflict is recorded; latest behavior is identified from real install output. |
+| S3 | nightly ComfyUI | `comfyui.version="nightly"`, Manager off | S3 command | direct install output and ComfyUI git/version details | Build succeeds or the conflict is recorded without an undocumented workaround. |
 | S4 | Manager on, no nodes | `install_manager=true`, no custom nodes | S4 command | `cm_cli` availability, Manager source/version, manager requirements relationship | Manager is available from final venv; Manager source/version assumptions are verified from the final image. |
 | S5 | registry node | default candidate `comfyui-custom-scripts@latest`; optional heavier candidate `comfyui-impact-pack@latest` for broader coverage | S5 command | cache update log, one update invocation, `cm_cli update-cache`, install log, installed custom node path | Clean-cache registry install succeeds; version/source details are recorded; failure is classified as product, upstream, or network behavior. |
 | S6 | git node | `https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git@609f3afaa74b2f88ef9ce8d939626065e3247469` | S6 command | git ref details, install order, installed path | Git URL/ref install succeeds and source/ref are recorded. |
@@ -129,6 +138,7 @@ cdh host build -f tests/fixtures/comfyui-build/configs/full.toml -t cdh-smoke:fu
 | S8 | httpx downloader | local public/small HTTP server or small public asset, redirect, overwrite, skip | S8 command | build log, target file contents/path, request log, overwrite/skip details | Real httpx backend covers download, redirect, overwrite, skip, and target path. |
 | S9 | aria2 downloader | local public/small HTTP asset through aria2 backend | S9 command | aria2 RPC log, process cleanup check, target file, no secret in logs | Real aria2 backend succeeds; no persistent RPC config/process remains; secret is absent from captured logs/config. |
 | S10 | mixed full workflow | nodes, hooks, httpx, aria2, custom env, entrypoint startup | S10 command | full build log, context/image inspection, startup check | Combined workflow succeeds; serial order and backend override details are captured; image starts configured ComfyUI from `WORKSPACE` through the cdh entrypoint. |
+| S11 | pinned minimal, comfy-cli disabled | `comfyui.version="0.11.0"`, `install_cli=false`, Manager off | S11 command | build log, lock/plan/image inspection | Build succeeds; no comfy-cli lock entry, plan action, tool directory, inventory, or public command exists; `/opt/venv` and ComfyUI remain healthy. |
 
 ## Runtime Startup Smoke Notes
 

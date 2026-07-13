@@ -17,7 +17,6 @@ from comfyui_docker_helper.exact_ledger import (
     UV_VERSION,
 )
 from comfyui_docker_helper.host.identity_providers import (
-    ComfyCliIdentityRequest,
     DirectGitIdentityRequest,
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
@@ -26,7 +25,6 @@ from comfyui_docker_helper.host.identity_providers import (
     ManagedPythonIdentityRequest,
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
-    PyPIComfyCliIdentityProvider,
     RegistryNodeIdentityRequest,
     UvManagedPythonIdentityProvider,
 )
@@ -95,15 +93,6 @@ def test_live_official_comfyui_release_and_head_identities() -> None:
     assert all(identity.formal_release for identity in releases)
     assert len(head.commit) == 40
     assert head.formal_release is None
-
-
-def test_live_comfy_cli_exact_published_identity() -> None:
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        provider = PyPIComfyCliIdentityProvider(client)
-        versions = provider.list_versions()
-        identity = provider.resolve(ComfyCliIdentityRequest(versions[-1].version))
-
-    assert identity == versions[-1]
 
 
 def test_live_registry_exact_node_version_identity() -> None:

@@ -144,7 +144,7 @@ class FinalComfyUIConfig(FinalConfigModel):
     """ComfyUI, Manager, launch, and custom-node requests."""
 
     version: str
-    cli_version: str = "latest"
+    install_cli: bool = True
     install_manager: bool = True
     listen: str = "0.0.0.0"
     port: int = Field(default=8188, ge=1, le=65535)

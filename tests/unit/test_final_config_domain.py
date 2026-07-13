@@ -37,7 +37,19 @@ def test_final_structure_uses_exact_baseline_defaults() -> None:
     assert config.python.version == "3.13.14"
     assert config.python.uv_version == "0.11.28"
     assert config.build.platforms == ["linux/amd64"]
+    assert config.comfyui.install_cli is True
     assert validate_final_config(config) == ()
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", "false"])
+def test_install_cli_is_a_strict_boolean(value: object) -> None:
+    document = _document()
+    document["comfyui"]["install_cli"] = value
+
+    with pytest.raises(FinalConfigError) as raised:
+        validate_final_config_structure(document)
+
+    assert raised.value.diagnostics[0].path == ("comfyui", "install_cli")
 
 
 def test_domain_and_semantic_passes_are_isolated_and_facade_orders_them() -> None:
@@ -92,6 +104,7 @@ def test_uv_tools_are_active_strict_isolated_requirements() -> None:
     [
         ["ruff", "Ruff==0.15.18"],
         ["comfyui-docker-helper==0.5.0"],
+        ["Comfy_CLI>=1.7"],
         ["demo @ https://example.com/demo.whl"],
     ],
 )
@@ -103,6 +116,87 @@ def test_uv_tools_reject_duplicate_reserved_or_direct_sources(
     config = validate_final_config_structure(document)
 
     assert validate_final_config(config)
+
+
+@pytest.mark.parametrize("install_cli", [True, False])
+def test_comfy_cli_generic_tool_owner_is_reserved_in_both_modes(
+    install_cli: bool,
+) -> None:
+    document = _document()
+    document["comfyui"]["install_cli"] = install_cli
+    document["python"] = {"uv_tools": ["Comfy_CLI"]}
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
+    assert diagnostics[0].path == ("python", "uv_tools", 0)
+    assert diagnostics[0].message == (
+        "package comfy-cli is reserved by comfyui.install_cli"
+    )
+
+
+@pytest.mark.parametrize("install_cli", [True, False])
+@pytest.mark.parametrize("group", ["python", "pytorch"])
+def test_comfy_cli_application_owner_is_reserved_in_every_direct_group(
+    install_cli: bool,
+    group: str,
+) -> None:
+    document = _document()
+    document["comfyui"]["install_cli"] = install_cli
+    document.setdefault(group, {})["extra_packages"] = ["Comfy_CLI>=1.7,<2"]
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
+    assert diagnostics[0].path == (group, "extra_packages", 0)
+    assert diagnostics[0].message == (
+        "package comfy-cli is reserved by comfyui.install_cli"
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "UV_CONSTRAINT",
+        "UV_INDEX",
+        "UV_CONFIG_FILE",
+        "UV_TOOL_DIR",
+        "UV_TOOL_BIN_DIR",
+        "PIP_CONSTRAINT",
+        "PIP_INDEX_URL",
+        "PIP_CONFIG_FILE",
+    ],
+)
+def test_system_env_rejects_package_authority_controls(name: str) -> None:
+    document = _document()
+    document["system"] = {"env": {name: "user-value"}}
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert [item.code for item in diagnostics] == ["system.managed_env_override"]
+    assert diagnostics[0].path == ("system", "env", name)
+
+
+def test_system_env_preserves_non_package_runtime_values() -> None:
+    document = _document()
+    document["system"] = {
+        "env": {
+            "APP_PROFILE": "production",
+            "PIPER_MODE": "fast",
+            "UVICORN_WORKERS": "2",
+        }
+    }
+    config = validate_final_config_structure(document)
+
+    assert validate_final_config(config) == ()
+    assert config.system.env == {
+        "APP_PROFILE": "production",
+        "PIPER_MODE": "fast",
+        "UVICORN_WORKERS": "2",
+    }
 
 
 def test_deferred_file_checksum_is_not_in_active_schema() -> None:
@@ -299,14 +393,6 @@ def test_registry_nodes_require_manager_but_direct_git_nodes_do_not() -> None:
     ] == [("comfyui", "custom_nodes", 0, "type")]
 
 
-def test_exact_comfy_cli_prerelease_remains_a_valid_published_selector() -> None:
-    document = _document()
-    document["comfyui"]["cli_version"] = "v2.0RC1"
-    config = validate_final_config_structure(document)
-
-    assert "comfyui.invalid_cli_version" not in _codes(config)
-
-
 def test_exact_registry_prerelease_remains_a_valid_published_selector() -> None:
     document = _document()
     document["comfyui"]["install_manager"] = True
@@ -318,28 +404,15 @@ def test_exact_registry_prerelease_remains_a_valid_published_selector() -> None:
     assert "custom_node.invalid_registry_version" not in _codes(config)
 
 
-@pytest.mark.parametrize(
-    ("target", "code"),
-    [
-        ("cli", "comfyui.invalid_cli_version"),
-        ("registry", "custom_node.invalid_registry_version"),
-    ],
-)
-def test_published_selector_ranges_reject_prerelease_operands(
-    target: str,
-    code: str,
-) -> None:
+def test_registry_selector_ranges_reject_prerelease_operands() -> None:
     document = _document()
-    if target == "cli":
-        document["comfyui"]["cli_version"] = ">=2.0rc1,<3"
-    else:
-        document["comfyui"]["install_manager"] = True
-        document["comfyui"]["custom_nodes"] = [
-            {"type": "registry", "id": "example", "version": ">=1.0.0-rc.1,<2"}
-        ]
+    document["comfyui"]["install_manager"] = True
+    document["comfyui"]["custom_nodes"] = [
+        {"type": "registry", "id": "example", "version": ">=1.0.0-rc.1,<2"}
+    ]
     config = validate_final_config_structure(document)
 
-    assert code in _codes(config)
+    assert "custom_node.invalid_registry_version" in _codes(config)
 
 
 def test_package_ownership_is_normalized_across_groups() -> None:

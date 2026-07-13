@@ -66,7 +66,16 @@ def test_renderer_quotes_container_paths_without_host_projection() -> None:
     assert 'WORKDIR "/workspace data"' in rendered
 
 
-def test_renderer_installs_cdh_first_and_never_forces_tool_collisions() -> None:
+def test_renderer_preserves_non_package_runtime_environment() -> None:
+    rendered = render_build_plan_dockerfile(
+        construct_build_plan(final_config(), accepted_resolution())
+    )
+
+    assert 'ENV ALPHA="first"' in rendered
+    assert 'ENV ZED="last"' in rendered
+
+
+def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
     plan = construct_build_plan(
         final_config(with_uv_tool=True), accepted_resolution(with_uv_tool=True)
     )
@@ -74,13 +83,46 @@ def test_renderer_installs_cdh_first_and_never_forces_tool_collisions() -> None:
     rendered = render_build_plan_dockerfile(plan)
 
     cdh_install = rendered.index("/opt/cdh/wheel/*.whl")
-    tool_install = rendered.index("ruff==0.15.18")
-    assert cdh_install < tool_install
+    cli_install = rendered.index("comfy-cli==1.8.0")
+    generic_install = rendered.index("ruff==0.15.18")
+    application_install = rendered.index("container install-comfyui")
+    assert cdh_install < cli_install < generic_install < application_install
     assert "--force" not in rendered
+    cli_block = rendered[cli_install:generic_install]
+    assert "--with" not in cli_block
+    assert "UV_CONSTRAINT" not in cli_block
+    assert "PIP_CONSTRAINT" not in cli_block
+    assert "/opt/venv" not in cli_block
+    assert (
+        "uv --no-config pip check --python /opt/uv/tools/comfy-cli/bin/python"
+        in cli_block
+    )
+    assert "/opt/cdh/build/comfy-cli-inventory.txt" in cli_block
+    assert "sys._base_executable" in cli_block
+    assert "console_scripts" in cli_block
+    for command in ("comfy", "comfy-cli", "comfycli"):
+        assert f"/opt/uv/bin/{command}" in rendered
+        assert f"/opt/uv/tools/comfy-cli/bin/{command}" in rendered
+    assert " --help" not in rendered
     assert 'UV_TOOL_DIR="/opt/uv/tools"' in rendered
     assert 'UV_TOOL_BIN_DIR="/opt/uv/bin"' in rendered
     assert 'ENV PATH="/opt/uv/bin:/opt/venv/bin:$' + '{PATH}"' in rendered
     assert plan.runtime.launch_command[0] == "/opt/venv/bin/python"
+
+
+def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
+    rendered = render_build_plan_dockerfile(
+        construct_build_plan(
+            final_config(install_cli=False), accepted_resolution(install_cli=False)
+        )
+    )
+
+    assert "uv --no-config tool install" in rendered  # cdh remains a uv tool.
+    assert "comfy-cli==" not in rendered
+    assert "comfy-cli-inventory.txt" not in rendered
+    for command in ("comfy", "comfy-cli", "comfycli"):
+        assert f"test ! -e /opt/uv/bin/{command}" in rendered
+        assert f"test ! -L /opt/uv/bin/{command}" in rendered
 
 
 def test_materializer_writes_deterministic_plan_phases_and_verified_input(

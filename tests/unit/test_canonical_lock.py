@@ -47,6 +47,21 @@ COMMIT_A = "1" * 40
 COMMIT_B = "2" * 40
 
 
+def _comfy_cli_request(**changes: str) -> ComfyCliRequestIdentity:
+    values = {
+        "type": "comfy-cli",
+        "package": "comfy-cli",
+        "policy": "highest-target-compatible-stable",
+        "minimum_version": "1.7.0",
+        "environment": "uv-tool:comfy-cli",
+        "index_url": "https://pypi.org/simple",
+        "python_version": "3.13.14",
+        "platform": "linux/amd64",
+    }
+    values.update(changes)
+    return ComfyCliRequestIdentity.model_validate(values)
+
+
 def _request_digests() -> dict[str, str]:
     return {
         "oci": compute_request_digest(
@@ -75,16 +90,7 @@ def _request_digests() -> dict[str, str]:
                 selector="v0.11.0",
             )
         ),
-        "cli": compute_request_digest(
-            ComfyCliRequestIdentity(
-                type="comfy-cli",
-                package="comfy-cli",
-                selector="latest",
-                index_url="https://pypi.org/simple",
-                python_version="3.13.14",
-                platform="linux/amd64",
-            )
-        ),
+        "cli": compute_request_digest(_comfy_cli_request()),
         "registry": compute_request_digest(
             RegistryRequestIdentity(
                 type="registry", id="example-node", selector="latest"
@@ -174,8 +180,8 @@ def _lock() -> CanonicalLock:
                 type="comfy-cli",
                 request_digest=digests["cli"],
                 package="comfy-cli",
-                version="1.5.3",
-                environment="application",
+                version="1.8.0",
+                environment="uv-tool:comfy-cli",
             ),
             DirectGitLockEntry(
                 type="git",
@@ -647,7 +653,39 @@ def test_invalid_current_lock_rejects_non_exact_resolved_versions(
 
 def test_parser_maps_non_exact_current_identity_to_generic_lock_error() -> None:
     document = dump_canonical_lock_toml(_lock()).replace(
-        'version = "1.5.3"', 'version = "latest"'
+        'version = "1.8.0"', 'version = "latest"'
+    )
+
+    with pytest.raises(CanonicalLockError, match=INVALID_CANONICAL_LOCK_MESSAGE):
+        parse_canonical_lock_toml(document)
+
+
+def test_comfy_cli_request_digest_binds_target_index_policy_and_tool_environment() -> (
+    None
+):
+    request = _comfy_cli_request()
+
+    assert request.model_dump(mode="python") == {
+        "type": "comfy-cli",
+        "package": "comfy-cli",
+        "policy": "highest-target-compatible-stable",
+        "minimum_version": "1.7.0",
+        "environment": "uv-tool:comfy-cli",
+        "index_url": "https://pypi.org/simple",
+        "python_version": "3.13.14",
+        "platform": "linux/amd64",
+    }
+    assert compute_request_digest(request) != compute_request_digest(
+        _comfy_cli_request(index_url="https://packages.example/simple")
+    )
+    assert compute_request_digest(request) != compute_request_digest(
+        _comfy_cli_request(python_version="3.12.13")
+    )
+
+
+def test_comfy_cli_application_environment_is_not_a_current_lock_shape() -> None:
+    document = dump_canonical_lock_toml(_lock()).replace(
+        'environment = "uv-tool:comfy-cli"', 'environment = "application"', 1
     )
 
     with pytest.raises(CanonicalLockError, match=INVALID_CANONICAL_LOCK_MESSAGE):
@@ -740,16 +778,22 @@ def test_uv_oci_requires_exact_resolved_version_and_cuda_forbids_one() -> None:
         )
 
 
-def test_published_cli_and_registry_exact_prereleases_remain_valid() -> None:
+@pytest.mark.parametrize("version", ["1.6.0", "1.8.0rc1", "1.8.0+vendor"])
+def test_comfy_cli_lock_requires_stable_public_floor(version: str) -> None:
     digests = _request_digests()
 
-    cli = ComfyCliLockEntry(
-        type="comfy-cli",
-        request_digest=digests["cli"],
-        package="comfy-cli",
-        version="1.0rc1",
-        environment="application",
-    )
+    with pytest.raises(ValidationError):
+        ComfyCliLockEntry(
+            type="comfy-cli",
+            request_digest=digests["cli"],
+            package="comfy-cli",
+            version=version,
+            environment="uv-tool:comfy-cli",
+        )
+
+
+def test_registry_exact_prereleases_remain_valid() -> None:
+    digests = _request_digests()
     registry = RegistryNodeLockEntry(
         type="registry",
         request_digest=digests["registry"],
@@ -757,7 +801,6 @@ def test_published_cli_and_registry_exact_prereleases_remain_valid() -> None:
         version="1.0.0-rc.1",
     )
 
-    assert cli.version == "1.0rc1"
     assert registry.version == "1.0.0-rc.1"
 
 

@@ -93,7 +93,9 @@ def _requests() -> tuple[ResolverRequestIdentity, ...]:
         ComfyCliRequestIdentity(
             type="comfy-cli",
             package="comfy-cli",
-            selector="1.5.3",
+            policy="highest-target-compatible-stable",
+            minimum_version="1.7.0",
+            environment="uv-tool:comfy-cli",
             index_url="https://pypi.org/simple",
             python_version="3.13.14",
             platform="linux/amd64",
@@ -306,19 +308,13 @@ class FakeAcquirer:
                 ),
             )
         elif isinstance(request, ComfyCliRequestIdentity):
-            version = (
-                "2.0.0"
-                if request.selector == "latest"
-                or any(character in request.selector for character in "<>=!,")
-                else request.selector
-            )
             entries = (
                 ComfyCliLockEntry(
                     type="comfy-cli",
                     request_digest=effective_digest,
                     package="comfy-cli",
-                    version=version,
-                    environment="application",
+                    version="2.0.0",
+                    environment=request.environment,
                 ),
             )
         elif isinstance(request, RegistryRequestIdentity):
@@ -374,9 +370,7 @@ def _fake_uses_provider(request: ResolverRequestIdentity) -> bool:
     if isinstance(request, ComfyUIRequestIdentity):
         return len(request.selector) != 40
     if isinstance(request, ComfyCliRequestIdentity):
-        return request.selector == "latest" or any(
-            character in request.selector for character in "<>=!,"
-        )
+        return True
     if isinstance(request, RegistryRequestIdentity):
         return True
     if isinstance(request, DirectGitRequestIdentity):
@@ -406,7 +400,7 @@ def test_request_table_has_exact_keys_and_stability_for_every_domain() -> None:
         (("oci", "cuda-base"),),
         (("managed-python", "cpython", "linux/amd64"),),
         (("comfyui", "https://github.com/Comfy-Org/ComfyUI.git"),),
-        (("comfy-cli", "comfy-cli", "application"),),
+        (("comfy-cli", "comfy-cli", "uv-tool:comfy-cli"),),
         (("registry", "example-node"),),
         (("git", "https://example.test/node.git"),),
         (
@@ -419,7 +413,7 @@ def test_request_table_has_exact_keys_and_stability_for_every_domain() -> None:
         SelectorStability.MOVING,
         SelectorStability.EXACT,
         SelectorStability.MOVING,
-        SelectorStability.EXACT,
+        SelectorStability.MOVING,
         SelectorStability.MOVING,
         SelectorStability.EXACT,
         SelectorStability.MOVING,
@@ -604,12 +598,11 @@ def test_uv_exact_tag_mismatch_fails_locked_without_provider_calls() -> None:
     assert [item.code for item in raised.value.diagnostics] == ["lock.locked_mismatch"]
 
 
-def test_reconcile_rederives_after_nested_exact_selector_becomes_moving() -> None:
+def test_upgrade_refreshes_the_internal_moving_comfy_cli_request() -> None:
     request = _requests()[3]
     assert isinstance(request, ComfyCliRequestIdentity)
     desired = DesiredResolution.from_request(request)
     existing = _initial_lock((desired,))
-    request.selector = "latest"
     acquirer = FakeAcquirer()
 
     result = reconcile_canonical_lock(
@@ -619,10 +612,10 @@ def test_reconcile_rederives_after_nested_exact_selector_becomes_moving() -> Non
         policy=LockPolicy.UPGRADE,
     )
 
-    assert desired.stability is SelectorStability.EXACT
+    assert desired.stability is SelectorStability.MOVING
     assert acquirer.calls == ["comfy-cli"]
     assert acquirer.provider_calls == ["comfy-cli"]
-    assert result.delta[0].kind is DeltaKind.UPDATED
+    assert result.delta == ()
 
 
 def test_reconcile_rederives_after_nested_python_member_mutation() -> None:
@@ -720,6 +713,7 @@ def test_default_initial_acquisition_is_sorted_and_returns_write_intent() -> Non
         "registry",
     ]
     assert acquirer.provider_calls == [
+        "comfy-cli",
         "comfyui",
         "managed-python",
         "oci",
@@ -756,6 +750,91 @@ def test_default_reuses_matching_entries_and_removes_only_deleted_keys() -> None
     assert result.delta[0].kind is DeltaKind.REMOVED
 
 
+@pytest.mark.parametrize(
+    ("purpose", "write_intent"),
+    [
+        (ReconcilePurpose.APPLY, True),
+        (ReconcilePurpose.CHECK, False),
+        (ReconcilePurpose.DRY_RUN, False),
+    ],
+)
+def test_disabling_comfy_cli_removes_or_reports_only_its_entry(
+    purpose: ReconcilePurpose, write_intent: bool
+) -> None:
+    cli = _desired((_requests()[3],))
+    existing = _initial_lock(cli)
+    acquirer = FakeAcquirer()
+
+    result = reconcile_canonical_lock(
+        (),
+        existing=existing,
+        acquirer=acquirer,
+        purpose=purpose,
+    )
+
+    assert acquirer.calls == []
+    assert [(item.key, item.kind) for item in result.delta] == [
+        (("comfy-cli", "comfy-cli", "uv-tool:comfy-cli"), DeltaKind.REMOVED)
+    ]
+    assert result.write_intent is write_intent
+
+
+def test_locked_disabled_mode_rejects_an_extra_comfy_cli_without_provider_calls() -> (
+    None
+):
+    cli = _desired((_requests()[3],))
+    existing = _initial_lock(cli)
+    acquirer = FakeAcquirer()
+
+    with pytest.raises(CanonicalResolutionError) as raised:
+        reconcile_canonical_lock(
+            (), existing=existing, acquirer=acquirer, policy=LockPolicy.LOCKED
+        )
+
+    assert acquirer.calls == []
+    assert raised.value.diagnostics[0].path[-3:] == (
+        "comfy-cli",
+        "comfy-cli",
+        "uv-tool:comfy-cli",
+    )
+
+
+@pytest.mark.parametrize(
+    ("purpose", "write_intent"),
+    [
+        (ReconcilePurpose.APPLY, True),
+        (ReconcilePurpose.CHECK, False),
+        (ReconcilePurpose.DRY_RUN, False),
+    ],
+)
+def test_enabling_comfy_cli_acquires_exact_entry_in_non_locked_modes(
+    purpose: ReconcilePurpose, write_intent: bool
+) -> None:
+    cli = _desired((_requests()[3],))
+    acquirer = FakeAcquirer()
+
+    result = reconcile_canonical_lock(
+        cli, existing=None, acquirer=acquirer, purpose=purpose
+    )
+
+    assert acquirer.calls == ["comfy-cli"]
+    assert result.lock.entries[0].environment == "uv-tool:comfy-cli"
+    assert result.lock.entries[0].version == "2.0.0"
+    assert result.write_intent is write_intent
+
+
+def test_locked_enabled_mode_reports_missing_without_provider_calls() -> None:
+    cli = _desired((_requests()[3],))
+    acquirer = FakeAcquirer()
+
+    with pytest.raises(CanonicalResolutionError):
+        reconcile_canonical_lock(
+            cli, existing=None, acquirer=acquirer, policy=LockPolicy.LOCKED
+        )
+
+    assert acquirer.calls == []
+
+
 def test_one_changed_group_member_reacquires_the_complete_group_only() -> None:
     desired = _desired()
     existing = _initial_lock(desired)
@@ -788,7 +867,6 @@ def test_one_changed_group_member_reacquires_the_complete_group_only() -> None:
         ("oci", "oci"),
         ("managed-python", "managed-python"),
         ("comfyui", "comfyui"),
-        ("comfy-cli", "comfy-cli"),
         ("registry", "registry"),
         ("git", "git"),
         ("python-package", "pytorch-group"),
@@ -813,7 +891,6 @@ def test_matching_digest_but_incompatible_result_is_reacquired_by_domain(
         "oci",
         "managed-python",
         "comfyui",
-        "comfy-cli",
         "registry",
         "git",
         "python-package",
@@ -852,8 +929,6 @@ def _corrupt_lock_result(lock: CanonicalLock, entry_type: str) -> CanonicalLock:
             data["version"] = "3.12.13"
         elif isinstance(entry, OfficialComfyUILockEntry):
             data["formal_release"] = None
-        elif isinstance(entry, ComfyCliLockEntry):
-            data["version"] = "1.5.4"
         elif isinstance(entry, RegistryNodeLockEntry):
             data["version"] = "1.2.3-rc.1"
         elif isinstance(entry, DirectGitLockEntry):
@@ -1036,8 +1111,15 @@ def test_upgrade_refreshes_all_moving_and_retains_every_exact_entry() -> None:
         policy=LockPolicy.UPGRADE,
     )
 
-    assert acquirer.calls == ["comfyui", "oci", "pytorch-group", "registry"]
+    assert acquirer.calls == [
+        "comfy-cli",
+        "comfyui",
+        "oci",
+        "pytorch-group",
+        "registry",
+    ]
     assert result.provider_calls == (
+        ("comfy-cli", "comfy-cli", "uv-tool:comfy-cli"),
         ("comfyui", "https://github.com/Comfy-Org/ComfyUI.git"),
         ("oci", "cuda-base"),
         ("python-package", "application", "torch"),
@@ -1152,7 +1234,7 @@ def test_non_public_uv_tool_group_acquires_then_reuses_and_locks_without_calls()
         (
             LockPolicy.UPGRADE,
             ReconcilePurpose.DRY_RUN,
-            ["comfyui", "oci", "pytorch-group", "registry"],
+            ["comfy-cli", "comfyui", "oci", "pytorch-group", "registry"],
             False,
         ),
         (LockPolicy.LOCKED, ReconcilePurpose.DRY_RUN, [], False),

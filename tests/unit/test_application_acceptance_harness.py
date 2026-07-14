@@ -710,13 +710,42 @@ def test_application_fixtures_use_generic_names_and_exact_baseline() -> None:
         "application-zero.toml",
         "application-manager-disabled.toml",
         "application-cli-disabled-mixed.toml",
+        "application-py314-full.toml",
+        "application-py314-zero.toml",
+        "application-py314-manager-disabled.toml",
+        "application-py314-cli-disabled-mixed.toml",
     }
 
     dispositions = {
-        "application-full.toml": (True, True, ["git", "registry", "git"]),
-        "application-zero.toml": (False, False, []),
-        "application-manager-disabled.toml": (True, False, []),
+        "application-full.toml": (
+            "3.13.14",
+            True,
+            True,
+            ["git", "registry", "git"],
+        ),
+        "application-zero.toml": ("3.13.14", False, False, []),
+        "application-manager-disabled.toml": ("3.13.14", True, False, []),
         "application-cli-disabled-mixed.toml": (
+            "3.13.14",
+            False,
+            True,
+            ["git", "registry", "git"],
+        ),
+        "application-py314-full.toml": (
+            "3.14.6",
+            True,
+            True,
+            ["git", "registry", "git"],
+        ),
+        "application-py314-zero.toml": ("3.14.6", False, False, []),
+        "application-py314-manager-disabled.toml": (
+            "3.14.6",
+            True,
+            False,
+            [],
+        ),
+        "application-py314-cli-disabled-mixed.toml": (
+            "3.14.6",
             False,
             True,
             ["git", "registry", "git"],
@@ -726,8 +755,16 @@ def test_application_fixtures_use_generic_names_and_exact_baseline() -> None:
     for name in names:
         document = tomllib.loads(fixture_root.joinpath(name).read_text())
         comfyui = document["comfyui"]
-        expected_cli, expected_manager, node_types = dispositions[name]
+        python_version, expected_cli, expected_manager, node_types = dispositions[name]
         assert comfyui["version"] == "0.11.0"
+        if python_version == "3.14.6":
+            assert document["python"] == {
+                "version": "3.14.6",
+                "uv_version": "0.11.28",
+                "uv_tools": [],
+            }
+        else:
+            assert "python" not in document
         assert document["compute_platform"]["cuda"]["version"] == "13.0.3"
         assert document["pytorch"]["version"] == "2.12.1"
         assert comfyui.get("install_cli", True) is expected_cli

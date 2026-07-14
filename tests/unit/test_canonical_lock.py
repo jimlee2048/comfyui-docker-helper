@@ -215,6 +215,45 @@ def _lock() -> CanonicalLock:
     )
 
 
+def test_python_314_managed_identity_round_trips_exactly() -> None:
+    request = ManagedPythonRequestIdentity(
+        type="managed-python",
+        version="3.14.6",
+        implementation="cpython",
+        platform="linux/amd64",
+        libc="gnu",
+        catalog_descriptor_digest=DIGEST_B,
+    )
+    entry = ManagedPythonLockEntry(
+        type="managed-python",
+        request_digest=compute_request_digest(request),
+        version="3.14.6",
+        implementation="cpython",
+        platform="linux/amd64",
+        libc="gnu",
+        provider="uv-managed",
+        catalog_descriptor_digest=DIGEST_B,
+        catalog_key="cpython-3.14.6-linux-x86_64-gnu",
+        catalog_url=(
+            "https://releases.astral.sh/github/python-build-standalone/releases/"
+            "download/20260623/cpython-3.14.6%2B20260623-x86_64-unknown-"
+            "linux-gnu-install_only_stripped.tar.gz"
+        ),
+        pip_version="26.1.2",
+        cdh_version="0.5.0",
+        cdh_source_digest=DIGEST_C,
+        uv_build_version="0.11.28",
+    )
+
+    parsed = parse_canonical_lock_toml(
+        dump_canonical_lock_toml(
+            CanonicalLock(schema_version=1, entries=[entry])
+        ).encode()
+    )
+
+    assert parsed.entries == [entry]
+
+
 def test_requirements_sidecar_round_trips_as_one_strict_canonical_entry() -> None:
     request = ComfyUIRequirementsRequestIdentity(
         type="comfyui-requirements",

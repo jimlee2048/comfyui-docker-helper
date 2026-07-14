@@ -4,9 +4,9 @@ set -euo pipefail
 
 python_version="${1:-}"
 case "$python_version" in
-    3.12 | 3.13) ;;
+    3.12.13 | 3.13.14 | 3.14.6) ;;
     *)
-        echo "usage: $0 <3.12|3.13>" >&2
+        echo "usage: $0 <3.12.13|3.13.14|3.14.6>" >&2
         exit 2
         ;;
 esac

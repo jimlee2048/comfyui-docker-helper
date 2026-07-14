@@ -50,6 +50,10 @@ Concrete smoke inputs live under `tests/fixtures/comfyui-build/`.
 | A2 | zero-node application acceptance | `tests/fixtures/comfyui-build/configs/application-zero.toml` |
 | A3 | Manager-disabled application acceptance | `tests/fixtures/comfyui-build/configs/application-manager-disabled.toml` |
 | A4 | comfy-cli-disabled mixed application acceptance | `tests/fixtures/comfyui-build/configs/application-cli-disabled-mixed.toml` |
+| A5 | Python 3.14 complete application acceptance | `tests/fixtures/comfyui-build/configs/application-py314-full.toml` |
+| A6 | Python 3.14 zero-node application acceptance | `tests/fixtures/comfyui-build/configs/application-py314-zero.toml` |
+| A7 | Python 3.14 Manager-disabled application acceptance | `tests/fixtures/comfyui-build/configs/application-py314-manager-disabled.toml` |
+| A8 | Python 3.14 comfy-cli-disabled mixed acceptance | `tests/fixtures/comfyui-build/configs/application-py314-cli-disabled-mixed.toml` |
 
 The default fixture configs are build-focused. Runtime download behavior,
 including async queueing, `/var/lib/cdh/runtime/state.json`, target-local
@@ -130,28 +134,34 @@ cdh host build -f tests/fixtures/comfyui-build/configs/minimal-pinned-cli-disabl
 
 ### Complete Application Acceptance Matrix
 
-The durable application fixtures all select exact ComfyUI v0.11.0, Python
-3.13.14 through the current default profile, CUDA 13.0.3, and torch 2.12.1.
-Render and build them with the shared fixture scripts directory:
+The durable application fixtures select exact ComfyUI v0.11.0, CUDA 13.0.3,
+and torch 2.12.1. A1-A4 exercise the default Python 3.13.14 profile; A5-A8
+repeat the same dispositions with the additional standard-GIL Python 3.14.6
+profile. Render and build them with the shared fixture scripts directory:
 
 ```bash
 cdh host build -f tests/fixtures/comfyui-build/configs/application-full.toml -t cdh-acceptance:full --scripts-dir tests/fixtures/comfyui-build/scripts --context-dir .cdh/acceptance/application-full
 cdh host build -f tests/fixtures/comfyui-build/configs/application-zero.toml -t cdh-acceptance:zero --context-dir .cdh/acceptance/application-zero
 cdh host build -f tests/fixtures/comfyui-build/configs/application-manager-disabled.toml -t cdh-acceptance:manager-disabled --context-dir .cdh/acceptance/application-manager-disabled
 cdh host build -f tests/fixtures/comfyui-build/configs/application-cli-disabled-mixed.toml -t cdh-acceptance:cli-disabled-mixed --scripts-dir tests/fixtures/comfyui-build/scripts --context-dir .cdh/acceptance/application-cli-disabled-mixed
+cdh host build -f tests/fixtures/comfyui-build/configs/application-py314-full.toml -t cdh-acceptance:py314-full --scripts-dir tests/fixtures/comfyui-build/scripts --context-dir .cdh/acceptance/application-py314-full
+cdh host build -f tests/fixtures/comfyui-build/configs/application-py314-zero.toml -t cdh-acceptance:py314-zero --context-dir .cdh/acceptance/application-py314-zero
+cdh host build -f tests/fixtures/comfyui-build/configs/application-py314-manager-disabled.toml -t cdh-acceptance:py314-manager-disabled --context-dir .cdh/acceptance/application-py314-manager-disabled
+cdh host build -f tests/fixtures/comfyui-build/configs/application-py314-cli-disabled-mixed.toml -t cdh-acceptance:py314-cli-disabled-mixed --scripts-dir tests/fixtures/comfyui-build/scripts --context-dir .cdh/acceptance/application-py314-cli-disabled-mixed
 ```
 
-Pass the four image tags and rendered contexts to the opt-in durable harness:
+Pass the image tags and rendered contexts for the profile under test to the
+opt-in durable harness. The Python 3.14 matrix uses:
 
 ```bash
-CDH_APPLICATION_FULL_IMAGE=cdh-acceptance:full \
-CDH_APPLICATION_FULL_CONTEXT=.cdh/acceptance/application-full \
-CDH_APPLICATION_ZERO_IMAGE=cdh-acceptance:zero \
-CDH_APPLICATION_ZERO_CONTEXT=.cdh/acceptance/application-zero \
-CDH_APPLICATION_MANAGER_DISABLED_IMAGE=cdh-acceptance:manager-disabled \
-CDH_APPLICATION_MANAGER_DISABLED_CONTEXT=.cdh/acceptance/application-manager-disabled \
-CDH_APPLICATION_CLI_DISABLED_MIXED_IMAGE=cdh-acceptance:cli-disabled-mixed \
-CDH_APPLICATION_CLI_DISABLED_MIXED_CONTEXT=.cdh/acceptance/application-cli-disabled-mixed \
+CDH_APPLICATION_PY314_FULL_IMAGE=cdh-acceptance:py314-full \
+CDH_APPLICATION_PY314_FULL_CONTEXT=.cdh/acceptance/application-py314-full \
+CDH_APPLICATION_PY314_ZERO_IMAGE=cdh-acceptance:py314-zero \
+CDH_APPLICATION_PY314_ZERO_CONTEXT=.cdh/acceptance/application-py314-zero \
+CDH_APPLICATION_PY314_MANAGER_DISABLED_IMAGE=cdh-acceptance:py314-manager-disabled \
+CDH_APPLICATION_PY314_MANAGER_DISABLED_CONTEXT=.cdh/acceptance/application-py314-manager-disabled \
+CDH_APPLICATION_PY314_CLI_DISABLED_MIXED_IMAGE=cdh-acceptance:py314-cli-disabled-mixed \
+CDH_APPLICATION_PY314_CLI_DISABLED_MIXED_CONTEXT=.cdh/acceptance/application-py314-cli-disabled-mixed \
 uv run pytest tests/smoke/test_application_acceptance_live.py
 ```
 

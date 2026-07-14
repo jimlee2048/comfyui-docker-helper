@@ -421,7 +421,7 @@ def _completed(stdout: str, *, returncode: int = 0) -> subprocess.CompletedProce
     )
 
 
-@pytest.mark.parametrize("version", ["3.13.14", "3.12.13"])
+@pytest.mark.parametrize("version", ["3.12.13", "3.13.14", "3.14.6"])
 def test_managed_python_selects_exact_uv_catalog_identity(version: str) -> None:
     rows = [
         {

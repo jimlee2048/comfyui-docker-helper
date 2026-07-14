@@ -15,14 +15,16 @@ reload the root config or lock to make planning decisions.
 
 ## Requirements
 
-- Python 3.12 or 3.13;
+- Python 3.12, 3.13, or 3.14;
 - Docker with Buildx for `cdh host build`;
 - NVIDIA Docker support with driver `>=580.65.06` on a Turing-or-newer x86_64
   GPU.
 
-The tested v0.5 planning baseline is CPython 3.13.14 (with 3.12.13 fallback),
-CUDA 13.0.3, PyTorch 2.12.1, torchvision 0.27.1, Ubuntu 24.04, and
-`linux/amd64`. CUDA 13.0.3 derives the internal PyTorch channel `cu130`.
+The tested v0.5 planning baseline is CPython 3.13.14, with 3.12.13 as the
+custom-node compatibility fallback and standard-GIL 3.14.6 as an additional
+tested profile. CUDA 13.0.3, PyTorch 2.12.1, torchvision 0.27.1, Ubuntu 24.04,
+and `linux/amd64` complete the baseline. CUDA 13.0.3 derives the internal
+PyTorch channel `cu130`.
 The default resolved inference group is installed as the complete exact
 distributions `torch==2.12.1+cu130` and `torchvision==0.27.1+cu130` from the
 derived cu130 index.

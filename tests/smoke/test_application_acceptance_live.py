@@ -245,6 +245,7 @@ class _Scenario:
     install_manager: bool
     mixed: bool
     hooks: bool
+    python_version: str
 
 
 _SCENARIOS = (
@@ -257,6 +258,7 @@ _SCENARIOS = (
         True,
         True,
         True,
+        "3.13.14",
     ),
     _Scenario(
         "zero",
@@ -267,6 +269,7 @@ _SCENARIOS = (
         False,
         False,
         False,
+        "3.13.14",
     ),
     _Scenario(
         "manager-disabled",
@@ -277,6 +280,7 @@ _SCENARIOS = (
         False,
         False,
         False,
+        "3.13.14",
     ),
     _Scenario(
         "cli-disabled-mixed",
@@ -287,7 +291,59 @@ _SCENARIOS = (
         True,
         True,
         True,
+        "3.13.14",
     ),
+    _Scenario(
+        "py314-full",
+        "application-py314-full.toml",
+        "CDH_APPLICATION_PY314_FULL_IMAGE",
+        "CDH_APPLICATION_PY314_FULL_CONTEXT",
+        True,
+        True,
+        True,
+        True,
+        "3.14.6",
+    ),
+    _Scenario(
+        "py314-zero",
+        "application-py314-zero.toml",
+        "CDH_APPLICATION_PY314_ZERO_IMAGE",
+        "CDH_APPLICATION_PY314_ZERO_CONTEXT",
+        False,
+        False,
+        False,
+        False,
+        "3.14.6",
+    ),
+    _Scenario(
+        "py314-manager-disabled",
+        "application-py314-manager-disabled.toml",
+        "CDH_APPLICATION_PY314_MANAGER_DISABLED_IMAGE",
+        "CDH_APPLICATION_PY314_MANAGER_DISABLED_CONTEXT",
+        True,
+        False,
+        False,
+        False,
+        "3.14.6",
+    ),
+    _Scenario(
+        "py314-cli-disabled-mixed",
+        "application-py314-cli-disabled-mixed.toml",
+        "CDH_APPLICATION_PY314_CLI_DISABLED_MIXED_IMAGE",
+        "CDH_APPLICATION_PY314_CLI_DISABLED_MIXED_CONTEXT",
+        False,
+        True,
+        True,
+        True,
+        "3.14.6",
+    ),
+)
+
+_FULL_SCENARIOS = tuple(
+    scenario for scenario in _SCENARIOS if scenario.id.endswith("full")
+)
+_MANAGER_DISABLED_SCENARIOS = tuple(
+    scenario for scenario in _SCENARIOS if scenario.id.endswith("manager-disabled")
 )
 
 
@@ -348,7 +404,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     assert binding.config_digest == plan.config_digest
     assert binding.lock_digest == plan.lock_digest
     assert plan.lock_digest == lock_digest
-    assert plan.toolchain.python.version == "3.13.14"
+    assert plan.toolchain.python.version == scenario.python_version
     assert plan.toolchain.python.pip_version == "26.1.2"
     assert plan.toolchain.cuda_version == "13.0.3"
     assert plan.toolchain.pytorch_channel == "cu130"
@@ -366,7 +422,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
         ("torchvision", "0.27.1+cu130"),
     ]
     resolution = tomllib.loads(context.joinpath("pytorch-resolution.toml").read_text())
-    assert resolution["project"]["requires-python"] == "==3.13.14"
+    assert resolution["project"]["requires-python"] == f"=={scenario.python_version}"
     assert resolution["project"]["dependencies"] == [
         "torch==2.12.1+cu130",
         "torchaudio==2.11.0+cu130",
@@ -537,7 +593,8 @@ observed_plan_digest = subprocess.run(
     text=True,
 ).stdout.strip()
 assert observed_plan_digest == os.environ["EXPECTED_BUILD_PLAN_DIGEST"]
-assert plan["toolchain"]["python"]["version"] == "3.13.14"
+expected_python_version = os.environ["EXPECTED_PYTHON_VERSION"]
+assert plan["toolchain"]["python"]["version"] == expected_python_version
 assert plan["toolchain"]["python"]["pip_version"] == "26.1.2"
 assert plan["toolchain"]["pytorch_channel"] == "cu130"
 comfyui = plan["application"]["comfyui"]
@@ -591,7 +648,7 @@ assert managed_python == pathlib.Path(
     "/opt/python",
     plan["toolchain"]["python"]["catalog_key"],
     "bin",
-    "python3.13",
+    f"python{'.'.join(expected_python_version.split('.')[:2])}",
 )
 pip_outputs = []
 for command in (
@@ -651,8 +708,10 @@ subprocess.run(
 
 manager = plan["application"]["comfyui"]["manager"]
 anchor_path = pathlib.Path(
-    "/opt/venv/lib/python3.13/site-packages/"
-    "comfyui-docker-helper-comfyui.pth"
+    "/opt/venv/lib",
+    f"python{'.'.join(expected_python_version.split('.')[:2])}",
+    "site-packages",
+    "comfyui-docker-helper-comfyui.pth",
 )
 cm_cli_path = pathlib.Path("/opt/venv/bin/cm-cli")
 if expected_manager:
@@ -1117,31 +1176,44 @@ def test_image_has_exact_environment_and_disposition(scenario: _Scenario) -> Non
             "EXPECTED_CLI": str(int(scenario.install_cli)),
             "EXPECTED_MANAGER": str(int(scenario.install_manager)),
             "EXPECTED_MIXED": str(int(scenario.mixed)),
+            "EXPECTED_PYTHON_VERSION": scenario.python_version,
             "EXPECTED_BUILD_PLAN_DIGEST": binding.build_plan_digest,
             "EXPECTED_LOCK_DIGEST": lock_digest,
         },
     )
 
 
-def test_primary_image_cpu_audio_api_writable_state_and_clean_shutdown() -> None:
-    _run_disposable(_environment(_SCENARIOS[0].image_variable), _CPU_PROBE)
+@pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
+def test_primary_image_cpu_audio_api_writable_state_and_clean_shutdown(
+    scenario: _Scenario,
+) -> None:
+    _run_disposable(_environment(scenario.image_variable), _CPU_PROBE)
 
 
-def test_manager_disabled_image_api_and_clean_shutdown() -> None:
-    _run_disposable(_environment(_SCENARIOS[2].image_variable), _CPU_PROBE)
+@pytest.mark.parametrize(
+    "scenario", _MANAGER_DISABLED_SCENARIOS, ids=lambda item: item.id
+)
+def test_manager_disabled_image_api_and_clean_shutdown(scenario: _Scenario) -> None:
+    _run_disposable(_environment(scenario.image_variable), _CPU_PROBE)
 
 
-def test_primary_image_comfy_cli_workspace_python_bridge() -> None:
+@pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
+def test_primary_image_comfy_cli_workspace_python_bridge(
+    scenario: _Scenario,
+) -> None:
     _run_disposable(
-        _environment(_SCENARIOS[0].image_variable),
+        _environment(scenario.image_variable),
         _COMFY_CLI_BRIDGE_PROBE,
     )
 
 
 @pytest.mark.gpu
-def test_primary_image_cuda_audio_api_and_clean_shutdown() -> None:
+@pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
+def test_primary_image_cuda_audio_api_and_clean_shutdown(
+    scenario: _Scenario,
+) -> None:
     _run_disposable(
-        _environment(_SCENARIOS[0].image_variable),
+        _environment(scenario.image_variable),
         _GPU_PROBE,
         environment={
             "EXPECTED_GPU_NAME": os.environ.get(

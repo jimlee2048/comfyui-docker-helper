@@ -70,6 +70,7 @@ def final_config(
     with_hook: bool = False,
     with_uv_tool: bool = False,
     install_cli: bool = True,
+    python_version: str = "3.13.14",
 ) -> FinalConfig:
     registry_node: dict[str, object] = {
         "type": "registry",
@@ -88,7 +89,7 @@ def final_config(
                 "ssh": {"enable": True, "port": 2222, "pub_keys": []},
             },
             "python": {
-                "version": "3.13.14",
+                "version": python_version,
                 "uv_version": "0.11.28",
                 "extra_packages": ["NumPy>=2,<3"],
                 "uv_tools": ["Ruff>=0.15,<0.16"] if with_uv_tool else [],
@@ -137,8 +138,13 @@ def accepted_resolution(
     with_uv_tool: bool = False,
     install_cli: bool = True,
     reverse: bool = False,
+    python_version: str = "3.13.14",
 ) -> AcceptedCanonicalLock:
-    config = final_config(with_uv_tool=with_uv_tool, install_cli=install_cli)
+    config = final_config(
+        with_uv_tool=with_uv_tool,
+        install_cli=install_cli,
+        python_version=python_version,
+    )
     configured_members: list[DirectPythonRequestMember] = []
     for index, value in enumerate(config.pytorch.extra_packages):
         diagnostics = []
@@ -226,13 +232,13 @@ def accepted_resolution(
         ManagedPythonLockEntry(
             type="managed-python",
             request_digest=DIGEST_A,
-            version="3.13.14",
+            version=python_version,
             implementation="cpython",
             platform="linux/amd64",
             libc="gnu",
             provider="uv-managed",
             catalog_descriptor_digest=DIGEST_B,
-            catalog_key="cpython-3.13.14-linux-x86_64-gnu",
+            catalog_key=f"cpython-{python_version}-linux-x86_64-gnu",
             catalog_url="https://example.test/python.tar.zst",
             pip_version="26.1.2",
             cdh_version="0.5.0",
@@ -424,6 +430,23 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
         "/workspace/ComfyUI/models/checkpoints/model.safetensors"
     )
     assert "--enable-manager" not in plan.runtime.launch_command
+
+
+def test_constructor_carries_python_314_exact_identity_through_build_plan() -> None:
+    plan = construct_build_plan(
+        final_config(python_version="3.14.6"),
+        accepted_resolution(python_version="3.14.6"),
+    )
+
+    assert plan.toolchain.python.version == "3.14.6"
+    assert plan.toolchain.python.catalog_key == "cpython-3.14.6-linux-x86_64-gnu"
+    assert plan.application.comfyui.requirements.python_version == "3.14.6"
+    assert plan.application.pytorch.python_version == "3.14.6"
+    assert plan.application.comfyui.manager is not None
+    assert plan.application.comfyui.manager.import_anchor == (
+        "/opt/venv/lib/python3.14/site-packages/comfyui-docker-helper-comfyui.pth"
+    )
+    assert plan.toolchain.tool_store.comfy_cli is not None
 
 
 def test_build_plan_binds_optional_manager_capability_to_custom_node_intent() -> None:

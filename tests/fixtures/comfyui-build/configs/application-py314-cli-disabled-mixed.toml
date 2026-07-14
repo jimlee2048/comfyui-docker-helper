@@ -1,0 +1,40 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "13.0.3"
+
+[python]
+version = "3.14.6"
+uv_version = "0.11.28"
+uv_tools = []
+
+[pytorch]
+version = "2.12.1"
+
+[comfyui]
+version = "0.11.0"
+install_cli = false
+install_manager = true
+listen = "0.0.0.0"
+port = 8188
+extra_args = []
+
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
+ref = "609f3afaa74b2f88ef9ce8d939626065e3247469"
+target_dir = "git-custom-scripts"
+pre_install_scripts = ["pre.sh", "pre.py"]
+post_install_scripts = ["post.sh", "post.py"]
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "comfyui-custom-scripts"
+version = "1.2.5"
+
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://github.com/receyuki/comfyui-prompt-reader-node.git"
+ref = "a70cbb0c8d1208a01c0eea72e8f2c3668cac3ba7"
+target_dir = "comfyui-prompt-reader-node"

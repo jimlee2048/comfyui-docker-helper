@@ -42,7 +42,8 @@ def test_supported_python_minors_match_project_metadata() -> None:
     assert "3.11" not in requires_python
     assert "3.12" in requires_python
     assert "3.13" in requires_python
-    assert "3.14" not in requires_python
+    assert "3.14" in requires_python
+    assert "3.15" not in requires_python
     assert {
         classifier
         for classifier in project["classifiers"]
@@ -50,6 +51,7 @@ def test_supported_python_minors_match_project_metadata() -> None:
     } == {
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
     }
 
 

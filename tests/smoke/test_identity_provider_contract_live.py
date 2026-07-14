@@ -67,7 +67,12 @@ def test_live_oci_descriptor_and_linux_amd64_binding(
 
 
 @pytest.mark.parametrize(
-    "version", [DEFAULT_MANAGED_PYTHON_VERSION, FALLBACK_MANAGED_PYTHON_VERSION]
+    "version",
+    [
+        DEFAULT_MANAGED_PYTHON_VERSION,
+        FALLBACK_MANAGED_PYTHON_VERSION,
+        "3.14.6",
+    ],
 )
 def test_live_exact_uv_managed_python_catalog(version: str) -> None:
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:

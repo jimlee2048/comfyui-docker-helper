@@ -46,6 +46,10 @@ Concrete smoke inputs live under `tests/fixtures/comfyui-build/`.
 | S9 | aria2 files | `tests/fixtures/comfyui-build/configs/aria2-files.toml` |
 | S10 | full workflow | `tests/fixtures/comfyui-build/configs/full.toml` |
 | S11 | pinned minimal, comfy-cli disabled | `tests/fixtures/comfyui-build/configs/minimal-pinned-cli-disabled.toml` |
+| A1 | complete application acceptance | `tests/fixtures/comfyui-build/configs/application-full.toml` |
+| A2 | zero-node application acceptance | `tests/fixtures/comfyui-build/configs/application-zero.toml` |
+| A3 | Manager-disabled application acceptance | `tests/fixtures/comfyui-build/configs/application-manager-disabled.toml` |
+| A4 | comfy-cli-disabled mixed application acceptance | `tests/fixtures/comfyui-build/configs/application-cli-disabled-mixed.toml` |
 
 The default fixture configs are build-focused. Runtime download behavior,
 including async queueing, `/var/lib/cdh/runtime/state.json`, target-local
@@ -123,6 +127,44 @@ cdh host build -f tests/fixtures/comfyui-build/configs/full.toml -t cdh-smoke:fu
 ```bash
 cdh host build -f tests/fixtures/comfyui-build/configs/minimal-pinned-cli-disabled.toml -t cdh-smoke:minimal-pinned-cli-disabled --context-dir .cdh/smoke/comfyui-build/minimal-pinned-cli-disabled
 ```
+
+### Complete Application Acceptance Matrix
+
+The durable application fixtures all select exact ComfyUI v0.11.0, Python
+3.13.14 through the current default profile, CUDA 13.0.3, and torch 2.12.1.
+Render and build them with the shared fixture scripts directory:
+
+```bash
+cdh host build -f tests/fixtures/comfyui-build/configs/application-full.toml -t cdh-acceptance:full --scripts-dir tests/fixtures/comfyui-build/scripts --context-dir .cdh/acceptance/application-full
+cdh host build -f tests/fixtures/comfyui-build/configs/application-zero.toml -t cdh-acceptance:zero --context-dir .cdh/acceptance/application-zero
+cdh host build -f tests/fixtures/comfyui-build/configs/application-manager-disabled.toml -t cdh-acceptance:manager-disabled --context-dir .cdh/acceptance/application-manager-disabled
+cdh host build -f tests/fixtures/comfyui-build/configs/application-cli-disabled-mixed.toml -t cdh-acceptance:cli-disabled-mixed --scripts-dir tests/fixtures/comfyui-build/scripts --context-dir .cdh/acceptance/application-cli-disabled-mixed
+```
+
+Pass the four image tags and rendered contexts to the opt-in durable harness:
+
+```bash
+CDH_APPLICATION_FULL_IMAGE=cdh-acceptance:full \
+CDH_APPLICATION_FULL_CONTEXT=.cdh/acceptance/application-full \
+CDH_APPLICATION_ZERO_IMAGE=cdh-acceptance:zero \
+CDH_APPLICATION_ZERO_CONTEXT=.cdh/acceptance/application-zero \
+CDH_APPLICATION_MANAGER_DISABLED_IMAGE=cdh-acceptance:manager-disabled \
+CDH_APPLICATION_MANAGER_DISABLED_CONTEXT=.cdh/acceptance/application-manager-disabled \
+CDH_APPLICATION_CLI_DISABLED_MIXED_IMAGE=cdh-acceptance:cli-disabled-mixed \
+CDH_APPLICATION_CLI_DISABLED_MIXED_CONTEXT=.cdh/acceptance/application-cli-disabled-mixed \
+uv run pytest tests/smoke/test_application_acceptance_live.py
+```
+
+The GPU gate expects `NVIDIA GeForce RTX 5090` by default. Set
+`CDH_APPLICATION_GPU_NAME` when running the same exact image contract on a
+different authorized GPU.
+
+The image checks consume the matching rendered context and bind the in-image
+BuildPlan digest to that context before accepting inventories or runtime
+evidence. Resolver source ownership and every mutation-boundary proof timing
+remain covered by deterministic unit/integration tests; this live harness
+combines those contracts with the exact lock, phase inputs, Dockerfile, image,
+and observed final state instead of duplicating subprocess-timing mocks.
 
 ## Scenario Matrix
 

@@ -938,73 +938,120 @@ for module_name in json.loads(sys.argv[3]):
 
 _COMFYUI_CAPABILITY_CHECK = """\
 import importlib
-import importlib.util
+import importlib.machinery
 import pathlib
 import stat
 import sys
 
+# Prove the checkout's filesystem ownership before involving import machinery.
 workspace_path = pathlib.Path(sys.argv[1])
 workspace_metadata = workspace_path.lstat()
 assert not workspace_path.is_symlink()
 assert stat.S_ISDIR(workspace_metadata.st_mode)
 workspace = workspace_path.resolve(strict=True)
 assert workspace == workspace_path
-sys.path.insert(0, str(workspace))
 
 folder_paths_path = workspace / "folder_paths.py"
 folder_paths_metadata = folder_paths_path.lstat()
 assert not folder_paths_path.is_symlink()
 assert stat.S_ISREG(folder_paths_metadata.st_mode)
 folder_paths = folder_paths_path.resolve(strict=True)
+assert folder_paths == folder_paths_path
 assert folder_paths.is_relative_to(workspace)
-
-folder_paths_spec = importlib.util.find_spec("folder_paths")
-assert folder_paths_spec is not None and folder_paths_spec.origin is not None
-folder_paths_origin = pathlib.Path(folder_paths_spec.origin).resolve(strict=True)
-assert folder_paths_origin == folder_paths
-assert folder_paths_origin.is_relative_to(workspace)
-folder_paths_module = importlib.import_module("folder_paths")
-folder_paths_imported_spec = folder_paths_module.__spec__
-assert folder_paths_imported_spec is not None
-assert folder_paths_imported_spec.name == "folder_paths"
-assert folder_paths_imported_spec.origin is not None
-folder_paths_imported_origin = pathlib.Path(folder_paths_imported_spec.origin).resolve(
-    strict=True
-)
-assert folder_paths_imported_origin == folder_paths
-assert pathlib.Path(folder_paths_module.__file__).resolve(strict=True) == folder_paths
 
 comfy_root_path = workspace / "comfy"
 comfy_root_metadata = comfy_root_path.lstat()
 assert not comfy_root_path.is_symlink()
 assert stat.S_ISDIR(comfy_root_metadata.st_mode)
 comfy_root = comfy_root_path.resolve(strict=True)
+assert comfy_root == comfy_root_path
 assert comfy_root.is_relative_to(workspace)
 comfy_init_path = comfy_root_path / "__init__.py"
-comfy_init_metadata = comfy_init_path.lstat()
-assert not comfy_init_path.is_symlink()
-assert stat.S_ISREG(comfy_init_metadata.st_mode)
-comfy_init = comfy_init_path.resolve(strict=True)
-assert comfy_init.is_relative_to(comfy_root)
-comfy_spec = importlib.util.find_spec("comfy")
-assert comfy_spec is not None and comfy_spec.submodule_search_locations is not None
-comfy_locations = tuple(
-    pathlib.Path(item).resolve(strict=True)
-    for item in comfy_spec.submodule_search_locations
+try:
+    comfy_init_metadata = comfy_init_path.lstat()
+except FileNotFoundError:
+    comfy_init = None
+else:
+    assert not comfy_init_path.is_symlink()
+    assert stat.S_ISREG(comfy_init_metadata.st_mode)
+    comfy_init = comfy_init_path.resolve(strict=True)
+    assert comfy_init == comfy_init_path
+    assert comfy_init.is_relative_to(comfy_root)
+
+def verify_folder_paths_spec(spec):
+    assert spec is not None and spec.name == "folder_paths"
+    assert spec.origin is not None
+    assert spec.origin == str(folder_paths)
+    origin = pathlib.Path(spec.origin).resolve(strict=True)
+    assert origin == folder_paths
+    assert spec.submodule_search_locations is None
+    return origin
+
+def verify_comfy_spec(spec):
+    assert spec is not None and spec.name == "comfy"
+    assert spec.submodule_search_locations is not None
+    raw_locations = tuple(spec.submodule_search_locations)
+    assert raw_locations == (str(comfy_root),)
+    locations = tuple(
+        pathlib.Path(item).resolve(strict=True)
+        for item in raw_locations
+    )
+    assert locations == (comfy_root,)
+    expected_origin = None if comfy_init is None else str(comfy_init)
+    assert spec.origin == expected_origin
+    origin = (
+        None
+        if spec.origin is None
+        else pathlib.Path(spec.origin).resolve(strict=True)
+    )
+    assert origin == comfy_init
+    return locations, origin
+
+# Build the same workspace-first view for Manager-on (.pth present) and
+# Manager-off (no anchor) without normalizing or hiding distinct path aliases.
+workspace_entry = str(workspace)
+launch_path = [workspace_entry]
+launch_path.extend(entry for entry in sys.path if entry != workspace_entry)
+assert launch_path[0] == workspace_entry
+assert launch_path.count(workspace_entry) == 1
+
+# First prove what the standard path finder resolves without executing modules.
+folder_paths_origin = verify_folder_paths_spec(
+    importlib.machinery.PathFinder.find_spec("folder_paths", launch_path)
 )
-assert comfy_locations and all(item == comfy_root for item in comfy_locations)
-assert comfy_spec.origin is not None
-comfy_origin = pathlib.Path(comfy_spec.origin).resolve(strict=True)
-assert comfy_origin == comfy_init
-assert comfy_origin.is_relative_to(comfy_root)
+comfy_locations, comfy_origin = verify_comfy_spec(
+    importlib.machinery.PathFinder.find_spec("comfy", launch_path)
+)
+
+# Then exercise normal imports under that exact launch view and bind the
+# resulting module identities back to the filesystem owners proved above.
+sys.path[:] = launch_path
+folder_paths_module = importlib.import_module("folder_paths")
+folder_paths_imported_origin = verify_folder_paths_spec(folder_paths_module.__spec__)
+assert folder_paths_imported_origin == folder_paths_origin
+assert folder_paths_module.__file__ is not None
+assert folder_paths_module.__file__ == str(folder_paths)
+assert pathlib.Path(folder_paths_module.__file__).resolve(strict=True) == folder_paths
+
 comfy_module = importlib.import_module("comfy")
 comfy_imported_spec = comfy_module.__spec__
-assert comfy_imported_spec is not None and comfy_imported_spec.name == "comfy"
-assert comfy_imported_spec.origin is not None
-assert pathlib.Path(comfy_imported_spec.origin).resolve(strict=True) == comfy_init
-assert pathlib.Path(comfy_module.__file__).resolve(strict=True) == comfy_init
+comfy_imported_locations, comfy_imported_origin = verify_comfy_spec(
+    comfy_imported_spec
+)
+assert comfy_imported_locations == comfy_locations
+assert comfy_imported_origin == comfy_origin
+expected_comfy_file = None if comfy_init is None else str(comfy_init)
+assert comfy_module.__file__ == expected_comfy_file
+comfy_file = (
+    None
+    if comfy_module.__file__ is None
+    else pathlib.Path(comfy_module.__file__).resolve(strict=True)
+)
+assert comfy_file == comfy_init
+comfy_raw_imported_locations = tuple(comfy_module.__path__)
+assert comfy_raw_imported_locations == (str(comfy_root),)
 comfy_imported_locations = tuple(
-    pathlib.Path(item).resolve(strict=True) for item in comfy_module.__path__
+    pathlib.Path(item).resolve(strict=True) for item in comfy_raw_imported_locations
 )
 assert comfy_imported_locations == (comfy_root,)
 """

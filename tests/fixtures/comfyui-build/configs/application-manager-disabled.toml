@@ -1,0 +1,16 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "13.0.3"
+
+[pytorch]
+version = "2.12.1"
+
+[comfyui]
+version = "0.11.0"
+install_cli = true
+install_manager = false
+listen = "0.0.0.0"
+port = 8188
+extra_args = []

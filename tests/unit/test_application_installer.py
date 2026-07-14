@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -105,6 +106,23 @@ def _write_import_fixture(
         virtual_env=virtual_env,
     )
     return application, runtime, workspace, site_packages
+
+
+def _run_comfyui_capability_check(
+    workspace: Path, *, extra_import_roots: tuple[Path, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    program = (
+        "import sys\n"
+        f"sys.path.extend({[os.fspath(path) for path in extra_import_roots]!r})\n"
+        f"exec({application_installer._COMFYUI_CAPABILITY_CHECK!r})\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-I", "-c", program, os.fspath(workspace)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
 
 
 def test_install_uses_one_exact_group_and_explicit_application_interpreter(
@@ -739,6 +757,150 @@ def test_application_import_verification_owner_binds_pytorch_packages(
     site_packages.joinpath("torchaudio").symlink_to(outside, target_is_directory=True)
     with pytest.raises(ContainerCommandError):
         _verify_application_imports(application, runtime, {})
+
+
+@pytest.mark.parametrize(
+    "initialized",
+    [False, True],
+    ids=["formal-v0.11.0-namespace", "initialized"],
+)
+def test_application_import_verification_accepts_supported_comfy_package_shapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initialized: bool,
+) -> None:
+    application, runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
+    if not initialized:
+        workspace.joinpath("comfy/__init__.py").unlink()
+    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
+
+    _verify_application_imports(application, runtime, {})
+
+
+def test_comfyui_capability_promotes_existing_exact_workspace_anchor_once(
+    tmp_path: Path,
+) -> None:
+    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
+    workspace.joinpath("comfy/__init__.py").unlink()
+    first = tmp_path / "first-import-root"
+    second = tmp_path / "second-import-root"
+    first.mkdir()
+    second.mkdir()
+    workspace_entry = os.fspath(workspace)
+    workspace.joinpath("folder_paths.py").write_text(
+        "import sys\n"
+        f"assert sys.path[0] == {workspace_entry!r}\n"
+        f"assert sys.path.count({workspace_entry!r}) == 1\n"
+        f"assert sys.path.index({os.fspath(first)!r}) "
+        f"< sys.path.index({os.fspath(second)!r})\n"
+    )
+
+    completed = _run_comfyui_capability_check(
+        workspace,
+        extra_import_roots=(first, workspace, second, workspace),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_comfyui_capability_accepts_namespace_without_workspace_anchor(
+    tmp_path: Path,
+) -> None:
+    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
+    workspace.joinpath("comfy/__init__.py").unlink()
+
+    completed = _run_comfyui_capability_check(workspace)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "__path__.append('/tmp/comfy-shadow')",
+        "__file__ = '/tmp/comfy-shadow/__init__.py'",
+    ],
+    ids=["runtime-path", "runtime-file"],
+)
+def test_application_import_verification_rejects_runtime_identity_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    application, runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
+    workspace.joinpath("comfy/__init__.py").write_text(f"{mutation}\n")
+    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
+
+    with pytest.raises(ContainerCommandError):
+        _verify_application_imports(application, runtime, {})
+
+
+@pytest.mark.parametrize(
+    "mutation_template",
+    [
+        "__file__ = {init_alias!r}",
+        "__spec__.origin = {init_alias!r}",
+        "__path__[:] = [{root_alias!r}]",
+        "__spec__.submodule_search_locations[:] = [{root_alias!r}]",
+    ],
+    ids=["module-file", "spec-origin", "module-path", "spec-location"],
+)
+def test_comfyui_capability_rejects_post_import_raw_symlink_alias(
+    tmp_path: Path,
+    mutation_template: str,
+) -> None:
+    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
+    alias = tmp_path / "ComfyUI-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    workspace.joinpath("comfy/__init__.py").write_text(
+        mutation_template.format(
+            init_alias=os.fspath(alias / "comfy/__init__.py"),
+            root_alias=os.fspath(alias / "comfy"),
+        )
+        + "\n"
+    )
+
+    completed = _run_comfyui_capability_check(workspace)
+
+    assert completed.returncode != 0
+
+
+@pytest.mark.parametrize("shadow_kind", ["namespace", "regular"])
+def test_comfyui_capability_rejects_mixed_or_shadowed_import_identity(
+    tmp_path: Path,
+    shadow_kind: str,
+) -> None:
+    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
+    workspace.joinpath("comfy/__init__.py").unlink()
+    outside = tmp_path / "outside"
+    shadow = outside / "comfy"
+    shadow.mkdir(parents=True)
+    side_effect = tmp_path / "shadow-imported"
+    if shadow_kind == "regular":
+        shadow.joinpath("__init__.py").write_text(
+            f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
+        )
+
+    completed = _run_comfyui_capability_check(workspace, extra_import_roots=(outside,))
+
+    assert completed.returncode != 0
+    assert not side_effect.exists()
+
+
+def test_comfyui_capability_rejects_distinct_raw_alias_of_namespace_root(
+    tmp_path: Path,
+) -> None:
+    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
+    workspace.joinpath("comfy/__init__.py").unlink()
+    alias = tmp_path / "ComfyUI-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+
+    completed = _run_comfyui_capability_check(
+        workspace,
+        extra_import_roots=(alias,),
+    )
+
+    assert completed.returncode != 0
 
 
 @pytest.mark.parametrize(

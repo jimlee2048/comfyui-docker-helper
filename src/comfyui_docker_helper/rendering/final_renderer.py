@@ -120,6 +120,9 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f" && test -x {_shell_word(plan.toolchain.tool_store.cdh_executable)} \\",
         f" && {_shell_word(plan.toolchain.tool_store.cdh_environment + '/bin/python')} "
         f"-c {_shell_word(inventory_check)} {_shell_word(inventory)} \\",
+        f" && uv --no-config pip check --python "
+        f"{_shell_word(plan.toolchain.tool_store.cdh_environment + '/bin/python')} "
+        "--no-python-downloads \\",
         " && rm -rf /opt/cdh/source /opt/cdh/wheel",
     ]
     if plan.toolchain.tool_store.comfy_cli is not None:
@@ -192,7 +195,9 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             f"{_shell_word(plan.application.python_index_url)} "
             f"{_shell_word(tool.requirement)} \\"
             f"\n && test -x {_shell_word(tool_python)} \\"
-            f"\n && {_shell_word(tool_python)} -c {_shell_word(direct_check)}"
+            f"\n && {_shell_word(tool_python)} -c {_shell_word(direct_check)} \\"
+            f"\n && uv --no-config pip check --python {_shell_word(tool_python)} "
+            "--no-python-downloads"
         )
     if plan.toolchain.tool_store.comfy_cli is None:
         commands = ("comfy", "comfy-cli", "comfycli")

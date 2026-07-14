@@ -52,3 +52,7 @@ capability does not append `--enable-manager`; runtime arguments remain explicit
 under `comfyui.extra_args`. Registry and direct-Git nodes run once in their
 declared mixed order, remain independent of optional comfy-cli, and produce
 verified ordered evidence at `/opt/cdh/build/custom-node-inventory.json`.
+Direct-Git URLs pass through unchanged as acquisition locators; locked exact
+commits, not URL normalization or endpoint claims, identify the content.
+Zero-node builds still emit the exact empty custom-node inventory and the final
+application inventory after the dependency check.

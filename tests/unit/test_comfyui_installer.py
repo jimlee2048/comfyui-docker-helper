@@ -28,6 +28,7 @@ from comfyui_docker_helper.container.comfyui_installer import (
     _rename_noreplace,
     _verify_checkout,
     _verify_floor_ancestry,
+    verify_application_state,
 )
 from comfyui_docker_helper.container.phase_inputs import phase_document
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -157,6 +158,9 @@ def test_checkout_wires_ancestry_after_identity_before_requirements_and_placemen
             events.append("checkout")
             return ""
         if "rev-parse" in command:
+            if "--abbrev-ref" in command:
+                events.append("detached")
+                return "HEAD"
             events.append("head")
             return application.comfyui.commit
         if "get-url" in command:
@@ -192,6 +196,7 @@ def test_checkout_wires_ancestry_after_identity_before_requirements_and_placemen
         "clone",
         "checkout",
         "head",
+        "detached",
         "origin",
         "ancestry",
         "requirements",
@@ -299,6 +304,11 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
     )
     monkeypatch.setattr(
         comfyui_installer,
+        "install_python_extras",
+        lambda *_args, **_kwargs: events.append("extras"),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
         "_install_ordinary_requirements",
         lambda *_args: events.append("ordinary"),
     )
@@ -309,8 +319,8 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
     )
     monkeypatch.setattr(
         comfyui_installer,
-        "_check_application_health",
-        lambda *_args: events.append("health"),
+        "verify_application_environment",
+        lambda *_args, **_kwargs: events.append("health"),
     )
     runtime = ContainerRuntime(
         workspace=Path(plan.application.paths.workspace),
@@ -329,7 +339,10 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
         "checkout",
         "verify",
         "inference",
+        "extras",
+        "health",
         "ordinary",
+        "health",
         "manager",
         "health",
     ]
@@ -373,6 +386,11 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
     )
     monkeypatch.setattr(
         comfyui_installer,
+        "install_python_extras",
+        lambda *_args, **_kwargs: events.append("extras"),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
         "_install_ordinary_requirements",
         lambda *_args: events.append("ordinary"),
     )
@@ -383,8 +401,8 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
     )
     monkeypatch.setattr(
         comfyui_installer,
-        "_check_application_health",
-        lambda *_args: events.append("health"),
+        "verify_application_environment",
+        lambda *_args, **_kwargs: events.append("health"),
     )
     runtime = ContainerRuntime(
         workspace=Path(application.paths.workspace),
@@ -403,9 +421,65 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
         "checkout",
         "verify",
         "inference",
+        "extras",
+        "health",
         "ordinary",
+        "health",
         "manager absent",
         "health",
+    ]
+
+
+def test_final_application_state_rechecks_source_capability_and_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application, runtime = _application(tmp_path)
+    parsed = parse_comfyui_requirements(
+        _REQUIREMENTS,
+        python_version="3.13.14",
+        platform="linux/amd64",
+        protected_names=CUDA_PROTECTED_REQUIREMENTS,
+    )
+    parsed_manager = parse_manager_requirements(
+        _MANAGER_REQUIREMENTS,
+        python_version="3.13.14",
+        platform="linux/amd64",
+    )
+    events: list[object] = []
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_stage_identity",
+        lambda *_args: events.append("source"),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_checkout",
+        lambda *_args: events.append("checkout") or (parsed, parsed_manager),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_manager_capability",
+        lambda *_args: events.append("manager"),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
+        "verify_application_environment",
+        lambda *_args, **kwargs: events.append(
+            (
+                "application",
+                kwargs["ordinary_requirements"],
+                kwargs["write_inventory"],
+            )
+        ),
+    )
+
+    verify_application_state(application, runtime, write_inventory=True)
+
+    assert events == [
+        "source",
+        "checkout",
+        "manager",
+        ("application", parsed.ordinary, True),
     ]
 
 
@@ -784,19 +858,29 @@ def test_registry_manager_capability_captures_and_reuses_immutable_authority(
             or parsed
         ),
     )
+
+    def record_complete_capability(
+        observed_application,
+        observed_manager,
+        observed_parsed,
+        observed_runtime,
+        observed_environ,
+    ) -> None:
+        events.append(
+            (
+                "complete capability",
+                observed_application,
+                observed_manager,
+                observed_parsed,
+                observed_runtime,
+                observed_environ,
+            )
+        )
+
     monkeypatch.setattr(
         comfyui_installer,
-        "_verify_declared_manager_distributions",
-        lambda observed_application, observed_parsed, observed_runtime: events.append(
-            ("distributions", observed_application, observed_parsed, observed_runtime)
-        ),
-    )
-    monkeypatch.setattr(
-        comfyui_installer,
-        "_verify_cm_cli",
-        lambda observed_path, observed_runtime: events.append(
-            ("executable", observed_path, observed_runtime)
-        ),
+        "_verify_manager_capability",
+        record_complete_capability,
     )
 
     authority = comfyui_installer.capture_manager_registry_authority(
@@ -811,11 +895,9 @@ def test_registry_manager_capability_captures_and_reuses_immutable_authority(
 
     assert events == [
         ("requirements", application, manager, runtime.comfyui_path),
-        ("distributions", application, parsed, runtime),
-        ("executable", Path(manager.executable), runtime),
+        ("complete capability", application, manager, parsed, runtime, None),
         ("requirements", application, manager, runtime.comfyui_path),
-        ("distributions", application, parsed, runtime),
-        ("executable", Path(manager.executable), runtime),
+        ("complete capability", application, manager, parsed, runtime, None),
     ]
 
 
@@ -828,11 +910,8 @@ def test_registry_manager_authority_rejects_same_semantics_content_drift(
     requirements = runtime.comfyui_path / "manager_requirements.txt"
     requirements.write_bytes(_MANAGER_REQUIREMENTS)
     monkeypatch.setattr(
-        comfyui_installer,
-        "_verify_declared_manager_distributions",
-        lambda *_args: None,
+        comfyui_installer, "_verify_manager_capability", lambda *_: None
     )
-    monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
 
     authority = comfyui_installer.capture_manager_registry_authority(
         application,
@@ -1006,6 +1085,41 @@ def test_manager_capability_rejects_symlinked_import_root_outside_application(
 
     assert completed.returncode != 0
     assert "Manager import root escapes application site-packages" in completed.stderr
+
+
+def test_manager_capability_rejects_symlink_alias_inside_application_site(
+    tmp_path: Path,
+) -> None:
+    workspace, site_packages = _manager_capability_fixture(tmp_path)
+    alias = site_packages / "manager-alias"
+    alias.mkdir()
+    (site_packages / "comfyui_manager").symlink_to(alias, target_is_directory=True)
+
+    completed = _run_manager_capability_check(workspace, site_packages)
+
+    assert completed.returncode != 0
+    assert "Manager import root escapes application site-packages" in completed.stderr
+
+
+def test_manager_capability_rejects_workspace_first_shadow_without_importing_it(
+    tmp_path: Path,
+) -> None:
+    workspace, site_packages = _manager_capability_fixture(tmp_path)
+    (site_packages / "comfyui_manager").mkdir()
+    shadow = workspace / "comfyui_manager"
+    shadow.mkdir()
+    side_effect = tmp_path / "workspace-manager-imported"
+    shadow.joinpath("__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
+    )
+
+    completed = _run_manager_capability_check(workspace, site_packages)
+
+    assert completed.returncode != 0
+    assert "Manager import locations escape application site-packages" in (
+        completed.stderr
+    )
+    assert not side_effect.exists()
 
 
 def test_comfy_capability_accepts_realistic_checkout_namespace(

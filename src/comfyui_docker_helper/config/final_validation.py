@@ -39,7 +39,10 @@ from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
     is_argv_value,
 )
-from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
+from comfyui_docker_helper.exact_ledger import (
+    COMFYUI_MINIMUM_VERSION,
+    CUDA_PROTECTED_REQUIREMENTS,
+)
 
 _EXACT_RELEASE_PATTERN = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z"
@@ -1072,15 +1075,29 @@ def _package_owner_diagnostics(
 ) -> None:
     application_owners: dict[str, DiagnosticPath] = {
         "torch": ("pytorch", "version"),
+        "pip": ("python", "managed_pip"),
+        "setuptools": ("pytorch", "setuptools_policy"),
         "comfyui-docker-helper": ("cdh",),
         "comfy-cli": ("comfyui", "install_cli"),
     }
+    python_extra_reserved = {
+        name: ("pytorch", "protected_requirements")
+        for name in CUDA_PROTECTED_REQUIREMENTS
+    }
+    python_extra_reserved["torch"] = ("pytorch", "version")
     tool_owners: dict[str, DiagnosticPath] = {
         "comfyui-docker-helper": ("cdh",),
         "comfy-cli": ("comfyui", "install_cli"),
     }
     reserved_owner_paths = frozenset(
-        {("pytorch", "version"), ("cdh",), ("comfyui", "install_cli")}
+        {
+            ("pytorch", "version"),
+            ("pytorch", "protected_requirements"),
+            ("pytorch", "setuptools_policy"),
+            ("python", "managed_pip"),
+            ("cdh",),
+            ("comfyui", "install_cli"),
+        }
     )
     for requirement in requirements:
         owners = (
@@ -1088,7 +1105,11 @@ def _package_owner_diagnostics(
             if requirement.path[:2] == ("python", "uv_tools")
             else application_owners
         )
-        existing = owners.get(requirement.name)
+        existing = (
+            python_extra_reserved.get(requirement.name)
+            if requirement.path[:2] == ("python", "extra_packages")
+            else None
+        ) or owners.get(requirement.name)
         if existing is not None:
             owner_text = (
                 "reserved by"

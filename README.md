@@ -76,10 +76,16 @@ user tool.
 
 Custom nodes run once in their declared Registry/direct-Git order. Registry
 nodes use the verified absolute `cm-cli`, one exact request per process, while
-direct-Git nodes use the declared URL and locked exact commit. cdh rechecks the
-admitted typed set around hooks and writes declaration-ordered evidence to
-`/opt/cdh/build/custom-node-inventory.json`. Registry installs do not invoke the
-optional `comfy`, `comfy-cli`, or `comfycli` commands.
+direct-Git nodes pass the declared URL through unchanged as an acquisition
+locator and use the locked exact commit as content authority; cdh does not
+canonicalize the URL or claim it identifies the actual network endpoint. cdh
+rechecks the admitted typed set around hooks and writes declaration-ordered
+evidence to `/opt/cdh/build/custom-node-inventory.json`. Registry installs do
+not invoke the optional `comfy`, `comfy-cli`, or `comfycli` commands.
+Even with no custom nodes, the same layer validates the custom-node root, writes
+the exact empty inventory, and performs the final application dependency check.
+The final factual application distribution inventory is written separately to
+`/opt/cdh/build/application-inventory.txt`.
 
 See [`examples/full.toml`](examples/full.toml) for all currently active fields.
 

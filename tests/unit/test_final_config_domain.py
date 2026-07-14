@@ -472,6 +472,30 @@ def test_package_ownership_is_normalized_across_groups() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "Torch==2.12.1",
+        "TorchVision==0.27.1",
+        "TorchAudio==2.11.0",
+        "PIP==26.1.2",
+        "Setuptools==81.0.0",
+    ],
+)
+def test_python_extras_reject_reserved_application_package_owners(
+    requirement: str,
+) -> None:
+    document = _document()
+    document["python"] = {"extra_packages": [requirement]}
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (("python", "extra_packages", 0), "python.duplicate_package_owner")
+    ]
+
+
 def test_package_ownership_is_scoped_to_isolated_environment() -> None:
     document = _document()
     document["python"] = {

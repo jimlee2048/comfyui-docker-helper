@@ -392,6 +392,10 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     )
     assert plan.application.python_extras is not None
     assert plan.application.python_extras.packages[0].requirement == "numpy==2.3.1"
+    assert plan.application.pip_version == "26.1.2"
+    assert plan.application.inventory_path == (
+        "/opt/cdh/build/application-inventory.txt"
+    )
     manager = plan.application.comfyui.manager
     assert manager is not None
     assert manager.requirements_path == "manager_requirements.txt"
@@ -485,6 +489,84 @@ def test_build_plan_reserves_comfy_cli_from_every_application_group(
     packages[-1]["name"] = "comfy-cli"
 
     with pytest.raises(ValidationError, match="dedicated optional tool"):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "name", ["torch", "torchvision", "torchaudio", "pip", "setuptools"]
+)
+def test_build_plan_rejects_python_extra_package_owner_overlap(name: str) -> None:
+    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["application"]["python_extras"]["packages"][0]["name"] = name
+
+    with pytest.raises(ValidationError, match="overlap protected package owners"):
+        BuildPlan.model_validate(document)
+
+
+def test_build_plan_rejects_pytorch_discriminator_for_python_extras() -> None:
+    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["application"]["python_extras"]["group"] = "pytorch"
+
+    with pytest.raises(ValidationError, match="application-extra"):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "torch==2.12.1",
+        "torchvision==0.27.1",
+        "torchaudio==2.11.0",
+        "pip==26.1.2",
+        "setuptools==81.0.0",
+    ],
+)
+def test_constructor_rejects_python_extra_package_owner_overlap_before_consumption(
+    requirement: str,
+) -> None:
+    document = final_config().model_dump(mode="python")
+    document["python"]["extra_packages"] = [requirement]
+    forged = validate_final_config_structure(document)
+
+    with pytest.raises(ValueError, match="overlap protected package owners"):
+        construct_build_plan(forged, accepted_resolution())
+
+
+def test_constructor_rejects_python_extra_overlap_with_arbitrary_pytorch_extra() -> (
+    None
+):
+    document = final_config().model_dump(mode="python")
+    document["python"]["extra_packages"] = ["xformers==0.0.35"]
+    document["pytorch"]["extra_packages"].append("XFormers==0.0.35")
+    forged = validate_final_config_structure(document)
+
+    with pytest.raises(ValueError, match="overlap protected package owners"):
+        construct_build_plan(forged, accepted_resolution())
+
+
+def test_build_plan_rejects_python_extra_overlap_with_arbitrary_pytorch_member() -> (
+    None
+):
+    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    xformers = {
+        "name": "xformers",
+        "extras": (),
+        "version": "0.0.35",
+        "environment": "application",
+    }
+    document["application"]["pytorch"]["packages"] = (
+        *document["application"]["pytorch"]["packages"],
+        xformers,
+    )
+    document["application"]["python_extras"]["packages"] = (xformers,)
+
+    with pytest.raises(ValidationError, match="overlap protected package owners"):
         BuildPlan.model_validate(document)
 
 

@@ -306,11 +306,22 @@ class ExactPackagePlan(_PlanModel):
 
 
 class PackageGroupPlan(_PlanModel):
-    group: Literal["application-extra", "pytorch"]
+    group: Literal["application-extra"]
     python_version: str
     platform: Literal["linux/amd64"]
     index_url: str
     packages: tuple[ExactPackagePlan, ...]
+
+    @model_validator(mode="after")
+    def _validate_group_identity(self) -> PackageGroupPlan:
+        names = tuple(package.name for package in self.packages)
+        if len(names) != len(set(names)):
+            raise ValueError("application-extra packages must be unique")
+        if names != tuple(sorted(names)):
+            raise ValueError("application-extra packages must be canonically ordered")
+        if not is_http_url(self.index_url):
+            raise ValueError("application-extra index must be one HTTP(S) URL")
+        return self
 
 
 class PyTorchGroupPlan(_PlanModel):
@@ -352,6 +363,8 @@ class PyTorchGroupPlan(_PlanModel):
         names = tuple(canonicalize_name(package.name) for package in self.packages)
         if "torch" not in names or len(names) != len(set(names)):
             raise ValueError("PyTorch packages must be unique and include torch")
+        if {"pip", "setuptools"}.intersection(names):
+            raise ValueError("PyTorch packages overlap application package owners")
         if names != tuple(sorted(names, key=lambda name: (name != "torch", name))):
             raise ValueError("PyTorch packages must be canonically ordered")
         if any(
@@ -445,12 +458,15 @@ class ApplicationPhase(_PlanModel):
     paths: PathsPlan
     os_packages: tuple[str, ...]
     python_index_url: str
+    pip_version: str
+    inventory_path: Literal["/opt/cdh/build/application-inventory.txt"]
     python_extras: PackageGroupPlan | None
     pytorch: PyTorchGroupPlan
     comfyui: ComfyUIPlan
 
     @model_validator(mode="after")
     def _validate_python_sources(self) -> ApplicationPhase:
+        _exact_distribution_version(self.pip_version)
         if not is_http_url(self.python_index_url):
             raise ValueError("python_index_url must be one HTTP(S) URL")
         if self.pytorch.python_index_url != self.python_index_url:
@@ -461,6 +477,18 @@ class ApplicationPhase(_PlanModel):
             or self.python_extras.platform != self.pytorch.platform
         ):
             raise ValueError("application Python groups must share target and index")
+        python_names = (
+            set()
+            if self.python_extras is None
+            else {package.name for package in self.python_extras.packages}
+        )
+        protected_names = {package.name for package in self.pytorch.packages}
+        overlap = python_names.intersection({*protected_names, "pip", "setuptools"})
+        if overlap:
+            raise ValueError(
+                "application Python extras overlap protected package owners: "
+                f"{sorted(overlap)!r}"
+            )
         requirements = self.comfyui.requirements
         if (
             requirements.python_version != self.pytorch.python_version
@@ -630,6 +658,7 @@ class BuildPlan(_PlanModel):
             or self.toolchain.cuda_image.role != "cuda-base"
             or self.toolchain.uv_image.platform != self.toolchain.platform
             or self.toolchain.cuda_image.platform != self.toolchain.platform
+            or self.application.pip_version != self.toolchain.python.pip_version
         ):
             raise ValueError("PyTorch application target does not match the toolchain")
         if bool(self.application.comfyui.manager) != self.custom_nodes.install_manager:
@@ -659,6 +688,16 @@ class RuntimePlanningProvenance:
     failure_policy_explicit: bool = False
     file_downloader_explicit: tuple[bool, ...] = ()
     file_download_mode_explicit: tuple[bool, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedPackageGroup:
+    """Internal exact package tuple before projection to one public owner type."""
+
+    python_version: str
+    platform: Literal["linux/amd64"]
+    index_url: str
+    packages: tuple[ExactPackagePlan, ...]
 
 
 def construct_build_plan(
@@ -780,20 +819,6 @@ def construct_build_plan(
             inventory_path="/opt/cdh/build/comfy-cli-inventory.txt",
         )
 
-    python_packages = _package_group(
-        config.python.extra_packages,
-        "application-extra",
-        config.python.version,
-        target_platform.value,
-        config.python.index_url,
-        entries,
-        used,
-        package_channel=None,
-    )
-    uv_tools = tuple(
-        _uv_tool(requirement, config.python.version, entries, used)
-        for requirement in config.python.uv_tools
-    )
     configured_members: list[DirectPythonRequestMember] = []
     for index, value in enumerate(config.pytorch.extra_packages):
         diagnostics: list = []
@@ -831,7 +856,39 @@ def construct_build_plan(
         )
     except ComfyUIRequirementsError as error:
         raise ValueError("protected PyTorch requirements conflict") from error
+    python_extra_names: set[str] = set()
+    for index, value in enumerate(config.python.extra_packages):
+        diagnostics = []
+        normalized = validate_direct_requirement(
+            value, ("python", "extra_packages", index), diagnostics
+        )
+        if normalized is None or diagnostics:
+            raise ValueError("validated config contains an invalid package requirement")
+        python_extra_names.add(normalized.name)
+    protected_owner_names = {member.package for member in pytorch_members}
+    overlap = python_extra_names.intersection(
+        {*protected_owner_names, "pip", "setuptools"}
+    )
+    if overlap:
+        raise ValueError(
+            "application Python extras overlap protected package owners: "
+            f"{sorted(overlap)!r}"
+        )
+    uv_tools = tuple(
+        _uv_tool(requirement, config.python.version, entries, used)
+        for requirement in config.python.uv_tools
+    )
     pytorch_requirements = [requirement_text(member) for member in pytorch_members]
+    python_packages = _package_group(
+        config.python.extra_packages,
+        "application-extra",
+        config.python.version,
+        target_platform.value,
+        config.python.index_url,
+        entries,
+        used,
+        package_channel=None,
+    )
     pytorch_packages = _package_group(
         pytorch_requirements,
         "pytorch",
@@ -980,7 +1037,19 @@ def construct_build_plan(
             paths=paths,
             os_packages=(*_DEFAULT_OS_PACKAGES, *config.system.extra_packages),
             python_index_url=config.python.index_url,
-            python_extras=python_packages if python_packages.packages else None,
+            pip_version=python_entry.pip_version,
+            inventory_path="/opt/cdh/build/application-inventory.txt",
+            python_extras=(
+                PackageGroupPlan(
+                    group="application-extra",
+                    python_version=python_packages.python_version,
+                    platform=python_packages.platform,
+                    index_url=python_packages.index_url,
+                    packages=python_packages.packages,
+                )
+                if python_packages.packages
+                else None
+            ),
             pytorch=PyTorchGroupPlan(
                 group="pytorch",
                 backend="cuda",
@@ -1122,7 +1191,7 @@ def _package_group(
     used: set[tuple[str, ...]],
     *,
     package_channel: str | None,
-) -> PackageGroupPlan:
+) -> _ResolvedPackageGroup:
     packages: list[ExactPackagePlan] = []
     for index, value in enumerate(requirements):
         diagnostics = []
@@ -1152,8 +1221,7 @@ def _package_group(
             )
         )
     packages.sort(key=lambda item: (item.name != "torch", item.name))
-    return PackageGroupPlan(
-        group=group,
+    return _ResolvedPackageGroup(
         python_version=python_version,
         platform=platform,
         index_url=index_url,

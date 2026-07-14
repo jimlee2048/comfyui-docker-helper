@@ -14,10 +14,12 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
+from comfyui_docker_helper.exact_ledger import (
+    CUDA_PROTECTED_REQUIREMENTS as CUDA_PROTECTED_REQUIREMENTS,
+)
 
 COMFYUI_REQUIREMENTS_PATH = "requirements.txt"
 COMFYUI_REQUIREMENTS_POLICY_VERSION = 1
-CUDA_PROTECTED_REQUIREMENTS = ("torch", "torchaudio", "torchvision")
 _SOURCE_OPTION = re.compile(
     r"(?:-e(?:ditable)?|-i|--index-url|--extra-index-url|--find-links|"
     r"--trusted-host|--no-index|--pre|--prefer-binary|--only-binary|"
@@ -81,7 +83,7 @@ def parse_comfyui_requirements(
     names = (
         set(_normalized_protected_names(protected_names)) if protected_names else set()
     )
-    environment = _marker_environment(python_version, platform)
+    environment = target_marker_environment(python_version, platform)
     protected: list[DirectPythonRequestMember] = []
     ordinary: list[str] = []
     try:
@@ -142,7 +144,7 @@ def parse_manager_requirements(
     platform: str,
 ) -> ParsedManagerRequirements:
     """Parse checkout-owned Manager requirements without accepting source control."""
-    environment = _marker_environment(python_version, platform)
+    environment = target_marker_environment(python_version, platform)
     rows: list[str] = []
     active: list[DeclaredManagerRequirement] = []
     seen_active: set[str] = set()
@@ -324,7 +326,8 @@ def _normalized_protected_names(names: tuple[str, ...]) -> tuple[str, ...]:
     return normalized
 
 
-def _marker_environment(python_version: str, platform: str) -> dict[str, str]:
+def target_marker_environment(python_version: str, platform: str) -> dict[str, str]:
+    """Return the exact target environment used for PEP 508 marker evaluation."""
     try:
         parsed = Version(python_version)
     except InvalidVersion as error:

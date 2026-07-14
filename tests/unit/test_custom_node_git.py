@@ -338,6 +338,7 @@ def test_direct_git_install_stages_places_and_retains_repository_metadata(
         tmp_path / "constraints.txt",
         {**os.environ, "GIT_ALLOW_PROTOCOL": "file"},
         {},
+        (),
     )
 
     assert _git(target, "rev-parse", "HEAD").decode().strip() == commit
@@ -384,6 +385,7 @@ def test_failed_direct_git_clone_cleans_only_owned_stage(
             tmp_path / "constraints.txt",
             os.environ,
             {},
+            (),
         )
 
     assert unrelated.joinpath("keep").read_text() == "keep"
@@ -433,6 +435,7 @@ def test_stage_replacement_race_fails_without_removing_replacement(
             tmp_path / "constraints.txt",
             os.environ,
             {},
+            (),
         )
 
     assert replacement is not None
@@ -505,6 +508,7 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
         tmp_path / "constraints.txt",
         os.environ,
         {},
+        (),
     )
 
     assert commands[0][-2] == locator

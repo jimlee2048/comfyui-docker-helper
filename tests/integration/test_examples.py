@@ -99,6 +99,22 @@ def test_root_readme_documents_no_root_replanning() -> None:
     assert "separate public/local" in readme
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        Path("README.md"),
+        Path("src/comfyui_docker_helper/templates/cdh-release/README.md"),
+    ],
+)
+def test_release_readmes_document_final_application_evidence(path: Path) -> None:
+    readme = path.read_text(encoding="utf-8")
+
+    assert "/opt/cdh/build/custom-node-inventory.json" in readme
+    assert "/opt/cdh/build/application-inventory.txt" in readme
+    assert "exact empty inventory" in readme
+    assert "pass the declared URL through unchanged" in readme
+
+
 def _read_toml(path: Path) -> dict[str, Any]:
     with path.open("rb") as file:
         return tomllib.load(file)

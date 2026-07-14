@@ -140,7 +140,8 @@ post_install_scripts = []
 [[comfyui.custom_nodes]]
 # Git custom node cloned directly into ComfyUI/custom_nodes.
 type = "git"
-# Required for git nodes. Git URLs must be unique in this file.
+# Required for git nodes. Passed through unchanged as an acquisition locator;
+# Git URLs must be unique in this file.
 url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
 # Default: unset. Branch, tag, or commit checked out after clone when provided.
 ref = "main"

@@ -36,9 +36,12 @@ from comfyui_docker_helper.config.final_validation import is_git_source_url
 from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
 from comfyui_docker_helper.container.application_installer import (
     _isolated_install_environment,
+    verify_application_environment,
 )
 from comfyui_docker_helper.container.comfyui_installer import (
+    capture_application_requirements,
     capture_manager_registry_authority,
+    verify_application_state,
     verify_manager_registry_capability,
 )
 from comfyui_docker_helper.container.phase_inputs import load_phase_input
@@ -111,6 +114,7 @@ def install_custom_nodes(
     custom_nodes_root = _require_real_directory(
         runtime.comfyui_path / "custom_nodes", "custom-nodes root"
     )
+    ordinary_requirements = capture_application_requirements(application, runtime)
     registry_environment = _managed_python_environment(
         runtime,
         application.python_index_url,
@@ -151,6 +155,14 @@ def install_custom_nodes(
                 git_path=git_path,
                 git_environment=git_environment,
             )
+            _verify_application_after_node_mutation(
+                application,
+                runtime,
+                uv_path,
+                constraints_path,
+                environ,
+                ordinary_requirements,
+            )
         # The complete pre phase is a proof boundary even when it was empty.
         _verify_mixed_state(
             custom_nodes_root,
@@ -161,6 +173,14 @@ def install_custom_nodes(
             manager_authority=manager_authority,
             git_path=git_path,
             git_environment=git_environment,
+        )
+        _verify_application_after_node_mutation(
+            application,
+            runtime,
+            uv_path,
+            constraints_path,
+            environ,
+            ordinary_requirements,
         )
 
         if isinstance(node, RegistryNodePlan):
@@ -183,6 +203,7 @@ def install_custom_nodes(
                 constraints_path,
                 git_environment,
                 registry_environment,
+                ordinary_requirements,
             )
 
         admitted.append(node)
@@ -196,6 +217,14 @@ def install_custom_nodes(
             manager_authority=manager_authority,
             git_path=git_path,
             git_environment=git_environment,
+        )
+        _verify_application_after_node_mutation(
+            application,
+            runtime,
+            uv_path,
+            constraints_path,
+            environ,
+            ordinary_requirements,
         )
         for hook in node.post_install:
             run_hook(
@@ -214,6 +243,14 @@ def install_custom_nodes(
                 git_path=git_path,
                 git_environment=git_environment,
             )
+            _verify_application_after_node_mutation(
+                application,
+                runtime,
+                uv_path,
+                constraints_path,
+                environ,
+                ordinary_requirements,
+            )
         # The complete post phase is a proof boundary even when it was empty.
         _verify_mixed_state(
             custom_nodes_root,
@@ -224,6 +261,14 @@ def install_custom_nodes(
             manager_authority=manager_authority,
             git_path=git_path,
             git_environment=git_environment,
+        )
+        _verify_application_after_node_mutation(
+            application,
+            runtime,
+            uv_path,
+            constraints_path,
+            environ,
+            ordinary_requirements,
         )
 
     _verify_mixed_state(
@@ -240,19 +285,32 @@ def install_custom_nodes(
         Path(custom_nodes.custom_node_inventory),
         _custom_node_inventory_bytes(nodes),
     )
-    run_argv(
-        (
-            uv_path,
-            "--no-config",
-            "pip",
-            "check",
-            "--python",
-            runtime.python,
-            "--no-python-downloads",
-        ),
-        cwd=_BUILD_DIRECTORY,
-        env=_isolated_install_environment(environ),
-        description="application dependency verification after custom-node install",
+    verify_application_state(
+        application,
+        runtime,
+        git_path=git_path,
+        uv_path=uv_path,
+        constraints_path=constraints_path,
+        environ=environ,
+        write_inventory=True,
+    )
+
+
+def _verify_application_after_node_mutation(
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    uv_path: Path,
+    constraints_path: Path,
+    environ: Mapping[str, str] | None,
+    ordinary_requirements: tuple[str, ...],
+) -> None:
+    verify_application_environment(
+        application,
+        runtime,
+        uv_path=uv_path,
+        constraints_path=constraints_path,
+        environ=environ,
+        ordinary_requirements=ordinary_requirements,
     )
 
 
@@ -358,6 +416,7 @@ def _install_git_node(
     constraints_path: Path,
     git_environment: Mapping[str, str],
     python_environment: Mapping[str, str],
+    ordinary_requirements: tuple[str, ...],
 ) -> None:
     target = _planned_git_target(node, custom_nodes_root)
     _require_absent(target, f"Git target {target.name}")
@@ -421,6 +480,7 @@ def _install_git_node(
             uv_path,
             constraints_path,
             python_environment,
+            ordinary_requirements,
         )
     finally:
         if not placed and _is_owned_stage(stage, custom_nodes_root, stage_identity):
@@ -435,6 +495,7 @@ def _install_git_root_surfaces(
     uv_path: Path,
     constraints_path: Path,
     python_environment: Mapping[str, str],
+    ordinary_requirements: tuple[str, ...],
 ) -> None:
     requirements = _optional_root_file(target, "requirements.txt")
     if requirements is not None:
@@ -469,6 +530,14 @@ def _install_git_root_surfaces(
                 env=python_environment,
                 description=f"Git node {target.name} requirements install",
                 close_stdin=True,
+            )
+            verify_application_environment(
+                application,
+                runtime,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=python_environment,
+                ordinary_requirements=ordinary_requirements,
             )
     install_script = _optional_root_file(target, "install.py")
     if install_script is not None:

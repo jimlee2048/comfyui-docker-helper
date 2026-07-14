@@ -88,6 +88,12 @@ def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
     generic_install = rendered.index("ruff==0.15.18")
     application_install = rendered.index("container install-comfyui")
     assert cdh_install < cli_install < generic_install < application_install
+    cdh_block = rendered[cdh_install:cli_install]
+    assert (
+        "uv --no-config pip check --python "
+        "/opt/uv/tools/comfyui-docker-helper/bin/python --no-python-downloads"
+        in cdh_block
+    )
     assert "--force" not in rendered
     cli_block = rendered[cli_install:generic_install]
     assert "--with" not in cli_block
@@ -109,6 +115,10 @@ def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
     assert 'UV_TOOL_BIN_DIR="/opt/uv/bin"' in rendered
     assert 'ENV PATH="/opt/uv/bin:/opt/venv/bin:$' + '{PATH}"' in rendered
     assert plan.runtime.launch_command[0] == "/opt/venv/bin/python"
+    assert (
+        "uv --no-config pip check --python /opt/uv/tools/ruff/bin/python "
+        "--no-python-downloads" in rendered
+    )
 
 
 def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
@@ -169,6 +179,46 @@ def test_renderer_always_emits_one_custom_node_layer(node_type: str) -> None:
     rendered = render_build_plan_dockerfile(changed)
 
     assert rendered.count("container install-custom-nodes") == 1
+
+
+@pytest.mark.parametrize(
+    ("install_cli", "install_manager", "node_types"),
+    [
+        (True, True, ("registry",)),
+        (False, True, ("registry",)),
+        (True, True, ("git",)),
+        (False, False, ("git",)),
+        (True, True, ("registry", "git")),
+        (False, True, ("git", "registry")),
+        (True, False, ()),
+    ],
+)
+def test_final_application_mode_matrix_keeps_one_observed_execution_boundary(
+    install_cli: bool,
+    install_manager: bool,
+    node_types: tuple[str, ...],
+) -> None:
+    plan = construct_build_plan(
+        final_config(install_cli=install_cli),
+        accepted_resolution(install_cli=install_cli),
+    )
+    document = plan.model_dump(mode="python")
+    available = {node["type"]: node for node in document["custom_nodes"]["nodes"]}
+    document["custom_nodes"]["nodes"] = tuple(available[item] for item in node_types)
+    document["custom_nodes"]["install_manager"] = install_manager
+    if not install_manager:
+        document["application"]["comfyui"]["manager"] = None
+    changed = BuildPlan.model_validate(document)
+
+    rendered = render_build_plan_dockerfile(changed)
+
+    assert rendered.count("container install-custom-nodes") == 1
+    assert tuple(node.type for node in changed.custom_nodes.nodes) == node_types
+    assert changed.application.inventory_path == (
+        "/opt/cdh/build/application-inventory.txt"
+    )
+    assert (changed.toolchain.tool_store.comfy_cli is not None) is install_cli
+    assert (changed.application.comfyui.manager is not None) is install_manager
 
 
 def test_materializer_writes_deterministic_plan_phases_and_verified_input(

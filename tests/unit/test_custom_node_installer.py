@@ -120,6 +120,11 @@ def _patch_phases(
     monkeypatch.setattr(custom_node_installer, "load_phase_input", load)
     monkeypatch.setattr(
         custom_node_installer,
+        "capture_application_requirements",
+        lambda *_args: ("requests>=2",),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
         "capture_manager_registry_authority",
         lambda *_args: object(),
     )
@@ -127,6 +132,16 @@ def _patch_phases(
         custom_node_installer,
         "verify_manager_registry_capability",
         lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_application_environment",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_application_state",
+        lambda *_args, **_kwargs: None,
     )
 
 
@@ -440,9 +455,9 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "run_argv",
-        lambda argv, **_kwargs: events.append(
-            ("command", tuple(os.fspath(item) for item in argv))
+        "verify_application_state",
+        lambda *_args, **kwargs: events.append(
+            ("application", kwargs["write_inventory"])
         ),
     )
 
@@ -458,8 +473,7 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
         Path("/opt/cdh/build/custom-node-inventory.json"),
         b'{"nodes":[],"schema_version":1}\n',
     )
-    assert events[1][0] == "command"
-    assert events[1][1][1:4] == ("--no-config", "pip", "check")
+    assert events[1] == ("application", True)
 
 
 @pytest.mark.parametrize("url", ["-option", "file:///tmp/node.git", "bad"])
@@ -489,11 +503,18 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
     nested.joinpath("install.py").write_text("raise RuntimeError\n")
     node = _git_node(runtime)
     commands: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    events: list[str] = []
 
     def run(argv, **kwargs):
         commands.append((tuple(os.fspath(item) for item in argv), kwargs))
+        events.append("requirements" if "--requirements" in argv else "install.py")
 
     monkeypatch.setattr(custom_node_installer, "run_argv", run)
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_application_environment",
+        lambda *_args, **_kwargs: events.append("application check"),
+    )
     constraints = tmp_path / "constraints.txt"
     custom_node_installer._install_git_root_surfaces(
         node,
@@ -503,9 +524,11 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
         Path("/usr/local/bin/uv"),
         constraints,
         {"PIP_CONSTRAINT": str(constraints), "UV_CONSTRAINT": str(constraints)},
+        ("requests>=2",),
     )
 
     assert len(commands) == 2
+    assert events == ["requirements", "application check", "install.py"]
     requirements_argv, requirements_kwargs = commands[0]
     assert requirements_argv == (
         "/usr/local/bin/uv",
@@ -545,6 +568,7 @@ def test_git_root_installer_rejects_symlinked_surface(tmp_path: Path) -> None:
             Path("/usr/local/bin/uv"),
             tmp_path / "constraints.txt",
             {},
+            ("requests>=2",),
         )
 
 
@@ -583,6 +607,7 @@ def test_git_requirements_reject_source_control_before_any_install_surface(
             Path("/usr/local/bin/uv"),
             tmp_path / "constraints.txt",
             {},
+            ("requests>=2",),
         )
 
 
@@ -632,13 +657,20 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     )
     monkeypatch.setattr(
         custom_node_installer,
+        "verify_application_environment",
+        lambda *_args, **_kwargs: events.append(("application-check",)),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
         "_write_custom_node_inventory",
         lambda *_args: events.append(("inventory",)),
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "run_argv",
-        lambda *_args, **_kwargs: events.append(("health",)),
+        "verify_application_state",
+        lambda *_args, **kwargs: events.append(
+            ("application", kwargs["write_inventory"])
+        ),
     )
 
     custom_node_installer.install_custom_nodes(
@@ -659,7 +691,8 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         < events.index(("install", "direct"))
         < events.index(("hook", "git-post.py"))
     )
-    assert events[-2:] == [("inventory",), ("health",)]
+    assert events[-2:] == [("inventory",), ("application", True)]
+    assert events.count(("application-check",)) == 12
     assert observed_git_environment["GIT_SSH_COMMAND"] == ("ssh -F /tmp/user-config")
     assert observed_git_environment["HOME"] == "/user/home"
 
@@ -706,6 +739,13 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
         "_write_custom_node_inventory",
         lambda path, content: events.append(("inventory", path, content)),
     )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_application_state",
+        lambda *_args, **kwargs: events.append(
+            ("application", kwargs["write_inventory"])
+        ),
+    )
 
     custom_node_installer.install_custom_nodes(
         "custom.json",
@@ -749,7 +789,7 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
         ("verify", ("first", "second")),
     ]
     commands = [event for event in events if event[0] == "command"]
-    assert len(commands) == 3  # two cm-cli calls and the final uv pip check
+    assert len(commands) == 2
     first_argv, first_kwargs = commands[0][1:]
     assert first_argv == (
         "/opt/venv/bin/cm-cli",
@@ -778,7 +818,7 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
     assert "https://packages.example/simple" not in first_argv
     assert "USER_VALUE" not in first_kwargs["env"]
     assert events[-2][0] == "inventory"
-    assert commands[-1][1][1:4] == ("--no-config", "pip", "check")
+    assert events[-1] == ("application", True)
 
 
 def test_false_zero_stops_before_later_registry_node(
@@ -1112,6 +1152,51 @@ def test_first_pre_hook_manager_mutation_stops_before_second_pre_hook(
     assert hooks == ["first.py"]
 
 
+def test_real_hook_is_reproved_before_the_next_cm_cli_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = _phase(runtime, (_node("first", "1.0.0", pre=("mutate.sh",)),))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    marker = tmp_path / "hook-ran"
+    hook = tmp_path / "mutate.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    events: list[str] = []
+
+    def prove(*_args) -> None:
+        events.append("proof-after-hook" if marker.exists() else "proof-before-hook")
+
+    def install(argv, **_kwargs) -> None:
+        events.append("cm-cli")
+        node_id, version = str(argv[2]).split("@", 1)
+        _write_project(
+            runtime.comfyui_path / "custom_nodes",
+            f"installed-{node_id}",
+            node_id,
+            version,
+        )
+
+    monkeypatch.setattr(
+        custom_node_installer, "verify_manager_registry_capability", prove
+    )
+    monkeypatch.setattr(custom_node_installer, "run_argv", install)
+    monkeypatch.setattr(
+        custom_node_installer, "_write_custom_node_inventory", lambda *_args: None
+    )
+
+    custom_node_installer.install_custom_nodes(
+        "custom.json",
+        "application.json",
+        expected_build_plan_digest=f"sha256:{'c' * 64}",
+        runtime=runtime,
+        hooks_directory=tmp_path,
+    )
+
+    assert marker.exists()
+    assert events.index("proof-after-hook") < events.index("cm-cli")
+
+
 def test_hook_cannot_retarget_requirements_and_installed_manager_together(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1151,6 +1236,7 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
         prove_distributions,
     )
     monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
+    monkeypatch.setattr(comfyui_installer, "run_argv", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(custom_node_installer, "run_hook", retarget)
     monkeypatch.setattr(
         custom_node_installer,

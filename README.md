@@ -74,11 +74,11 @@ explicitly through `comfyui.extra_args` when the selected checkout supports it.
 This application capability is independent of the optional isolated comfy-cli
 user tool.
 
-Registry custom nodes use that verified absolute `cm-cli` directly, one exact
-node request per process. cdh independently verifies each installed root
-`pyproject.toml` identity/version before hooks or a later node, rechecks the
-admitted node set after hooks, and writes the final declaration-ordered evidence
-to `/opt/cdh/build/registry-inventory.json`. Registry builds do not invoke the
+Custom nodes run once in their declared Registry/direct-Git order. Registry
+nodes use the verified absolute `cm-cli`, one exact request per process, while
+direct-Git nodes use the declared URL and locked exact commit. cdh rechecks the
+admitted typed set around hooks and writes declaration-ordered evidence to
+`/opt/cdh/build/custom-node-inventory.json`. Registry installs do not invoke the
 optional `comfy`, `comfy-cli`, or `comfycli` commands.
 
 See [`examples/full.toml`](examples/full.toml) for all currently active fields.

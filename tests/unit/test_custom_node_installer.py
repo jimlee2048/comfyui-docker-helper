@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,15 +11,17 @@ from tests.unit.test_build_plan import accepted_resolution, final_config
 
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
+    CustomNodePlan,
     CustomNodesPhase,
+    GitNodePlan,
     HookPlan,
     RegistryNodePlan,
     construct_build_plan,
 )
-from comfyui_docker_helper.container import comfyui_installer, registry_installer
+from comfyui_docker_helper.container import comfyui_installer, custom_node_installer
 from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallError
-from comfyui_docker_helper.container.registry_installer import (
-    RegistryInstallError,
+from comfyui_docker_helper.container.custom_node_installer import (
+    CustomNodeInstallError,
 )
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
@@ -42,6 +45,28 @@ def _node(
         ),
         post_install=tuple(
             HookPlan(relative_path=value, digest=f"sha256:{'b' * 64}") for value in post
+        ),
+    )
+
+
+def _git_node(
+    runtime: ContainerRuntime,
+    name: str = "direct",
+    *,
+    url: str = "https://example.invalid/Raw/Node.git",
+    pre: tuple[str, ...] = (),
+    post: tuple[str, ...] = (),
+) -> GitNodePlan:
+    return GitNodePlan(
+        type="git",
+        url=url,
+        commit="c" * 40,
+        target=str(runtime.comfyui_path / "custom_nodes" / name),
+        pre_install=tuple(
+            HookPlan(relative_path=value, digest=f"sha256:{'c' * 64}") for value in pre
+        ),
+        post_install=tuple(
+            HookPlan(relative_path=value, digest=f"sha256:{'d' * 64}") for value in post
         ),
     )
 
@@ -74,12 +99,12 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
 
 def _phase(
     runtime: ContainerRuntime,
-    nodes: tuple[RegistryNodePlan, ...],
+    nodes: tuple[CustomNodePlan, ...],
 ) -> CustomNodesPhase:
     return CustomNodesPhase(
         install_manager=True,
         user_directory=str(runtime.comfyui_path / "user"),
-        registry_inventory="/opt/cdh/build/registry-inventory.json",
+        custom_node_inventory="/opt/cdh/build/custom-node-inventory.json",
         nodes=nodes,
     )
 
@@ -92,14 +117,14 @@ def _patch_phases(
     def load(_path, phase, **_kwargs):
         return application if phase == "application" else custom_nodes
 
-    monkeypatch.setattr(registry_installer, "load_phase_input", load)
+    monkeypatch.setattr(custom_node_installer, "load_phase_input", load)
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "capture_manager_registry_authority",
         lambda *_args: object(),
     )
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "verify_manager_registry_capability",
         lambda *_args: None,
     )
@@ -119,13 +144,13 @@ def test_registry_version_comparison_preserves_raw_complete_identity(
         "1.0.0rc1+CUDA.1",
     )
 
-    registry_installer._verify_registry_set(
+    custom_node_installer._verify_registry_set(
         root,
         (_node("Example_Node", "1.0.0-rc.1+cuda.1"),),
     )
 
-    with pytest.raises(RegistryInstallError, match="version does not match"):
-        registry_installer._verify_registry_set(
+    with pytest.raises(CustomNodeInstallError, match="version does not match"):
+        custom_node_installer._verify_registry_set(
             root,
             (_node("Example_Node", "1.0.0-rc.1+cuda.2"),),
         )
@@ -139,8 +164,8 @@ def test_nested_only_registry_metadata_remains_missing(tmp_path: Path) -> None:
         '[project]\nname = "example"\nversion = "1.0.0"\n'
     )
 
-    with pytest.raises(RegistryInstallError, match="is not installed"):
-        registry_installer._verify_registry_set(
+    with pytest.raises(CustomNodeInstallError, match="is not installed"):
+        custom_node_installer._verify_registry_set(
             root,
             (_node("example", "1.0.0"),),
         )
@@ -166,8 +191,8 @@ def test_registry_scanner_rejects_unsafe_immediate_entries(
         metadata.write_text('[project]\nname="example"\nversion="1.0.0"\n')
         child.joinpath("pyproject.toml").symlink_to(metadata)
 
-    with pytest.raises(RegistryInstallError, match=r"symlink|regular"):
-        registry_installer._scan_registry_identities(root)
+    with pytest.raises(CustomNodeInstallError, match=r"symlink|regular"):
+        custom_node_installer._scan_registry_identities(root)
 
 
 def test_registry_scanner_rejects_symlinked_custom_nodes_root(
@@ -178,8 +203,8 @@ def test_registry_scanner_rejects_symlinked_custom_nodes_root(
     root = tmp_path / "custom_nodes"
     root.symlink_to(target, target_is_directory=True)
 
-    with pytest.raises(RegistryInstallError, match="real directory"):
-        registry_installer._scan_registry_identities(root)
+    with pytest.raises(CustomNodeInstallError, match="real directory"):
+        custom_node_installer._scan_registry_identities(root)
 
 
 @pytest.mark.parametrize("kind", ["directory", "fifo"])
@@ -195,8 +220,8 @@ def test_registry_scanner_rejects_non_regular_root_project_metadata(
     else:
         os.mkfifo(project)
 
-    with pytest.raises(RegistryInstallError, match="one regular file"):
-        registry_installer._scan_registry_identities(root)
+    with pytest.raises(CustomNodeInstallError, match="one regular file"):
+        custom_node_installer._scan_registry_identities(root)
 
 
 def test_registry_scanner_rejects_parent_symlink_containment_escape(
@@ -207,8 +232,8 @@ def test_registry_scanner_rejects_parent_symlink_containment_escape(
     alias = tmp_path / "alias"
     alias.symlink_to(real_parent, target_is_directory=True)
 
-    with pytest.raises(RegistryInstallError, match="real directory"):
-        registry_installer._scan_registry_identities(alias / "custom_nodes")
+    with pytest.raises(CustomNodeInstallError, match="real directory"):
+        custom_node_installer._scan_registry_identities(alias / "custom_nodes")
 
 
 @pytest.mark.parametrize(
@@ -229,8 +254,8 @@ def test_registry_scanner_rejects_invalid_root_project_metadata(
     child.mkdir(parents=True)
     child.joinpath("pyproject.toml").write_bytes(content)
 
-    with pytest.raises(RegistryInstallError, match="invalid project identity"):
-        registry_installer._scan_registry_identities(root)
+    with pytest.raises(CustomNodeInstallError, match="invalid project identity"):
+        custom_node_installer._scan_registry_identities(root)
 
 
 def test_registry_scanner_rejects_normalized_duplicate_metadata(tmp_path: Path) -> None:
@@ -239,12 +264,12 @@ def test_registry_scanner_rejects_normalized_duplicate_metadata(tmp_path: Path) 
     _write_project(root, "one", "Example_Node", "1.0.0")
     _write_project(root, "two", "example.node", "2.0.0")
 
-    with pytest.raises(RegistryInstallError, match="duplicated"):
-        registry_installer._scan_registry_identities(root)
+    with pytest.raises(CustomNodeInstallError, match="duplicated"):
+        custom_node_installer._scan_registry_identities(root)
 
 
-def test_registry_inventory_is_canonical_raw_and_minimal() -> None:
-    content = registry_installer._registry_inventory_bytes(
+def test_custom_node_inventory_is_canonical_raw_ordered_and_minimal() -> None:
+    content = custom_node_installer._custom_node_inventory_bytes(
         (
             _node("Example_Node", "1.0.0-rc.1+CUDA.1"),
             _node("second", "2.0.0"),
@@ -268,13 +293,34 @@ def test_registry_inventory_is_canonical_raw_and_minimal() -> None:
     ]
 
 
-def test_registry_inventory_creation_is_exclusive_read_only_and_exact(
+def test_mixed_and_empty_inventory_bytes_preserve_typed_declaration_order(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "registry-inventory.json"
-    content = registry_installer._registry_inventory_bytes((_node("a", "1.0.0"),))
+    _application_phase, runtime = _application(tmp_path)
+    git = _git_node(runtime, url="https://example.invalid/Raw/Node.git/")
 
-    registry_installer._write_registry_inventory(
+    assert custom_node_installer._custom_node_inventory_bytes(()) == (
+        b'{"nodes":[],"schema_version":1}\n'
+    )
+    assert custom_node_installer._custom_node_inventory_bytes(
+        (_node("Example_Node", "1.0.0"), git)
+    ) == (
+        b'{"nodes":[{"control":"direct-cm-cli","id":"Example_Node",'
+        b'"type":"registry","verification":"registry-version",'
+        b'"version":"1.0.0"},{"commit":"cccccccccccccccccccccccccccccccccccccccc",'
+        b'"control":"direct-git","target":"direct","type":"git",'
+        b'"url":"https://example.invalid/Raw/Node.git/",'
+        b'"verification":"git-commit"}],"schema_version":1}\n'
+    )
+
+
+def test_custom_node_inventory_creation_is_exclusive_read_only_and_exact(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "custom-node-inventory.json"
+    content = custom_node_installer._custom_node_inventory_bytes((_node("a", "1.0.0"),))
+
+    custom_node_installer._write_custom_node_inventory(
         path,
         content,
         owner_uid=os.getuid(),
@@ -283,8 +329,8 @@ def test_registry_inventory_creation_is_exclusive_read_only_and_exact(
 
     assert path.read_bytes() == content
     assert stat_mode(path) == 0o444
-    with pytest.raises(RegistryInstallError, match="already exists"):
-        registry_installer._write_registry_inventory(
+    with pytest.raises(CustomNodeInstallError, match="already exists"):
+        custom_node_installer._write_custom_node_inventory(
             path,
             content,
             owner_uid=os.getuid(),
@@ -292,12 +338,12 @@ def test_registry_inventory_creation_is_exclusive_read_only_and_exact(
         )
 
 
-def test_registry_inventory_verification_failure_removes_target_and_temporary(
+def test_custom_node_inventory_verification_failure_removes_target_and_temporary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path = tmp_path / "registry-inventory.json"
-    content = registry_installer._registry_inventory_bytes((_node("a", "1.0.0"),))
+    path = tmp_path / "custom-node-inventory.json"
+    content = custom_node_installer._custom_node_inventory_bytes((_node("a", "1.0.0"),))
     original_read_bytes = Path.read_bytes
 
     def corrupt_target(item: Path) -> bytes:
@@ -307,8 +353,8 @@ def test_registry_inventory_verification_failure_removes_target_and_temporary(
 
     monkeypatch.setattr(Path, "read_bytes", corrupt_target)
 
-    with pytest.raises(RegistryInstallError, match="verification failed"):
-        registry_installer._write_registry_inventory(
+    with pytest.raises(CustomNodeInstallError, match="verification failed"):
+        custom_node_installer._write_custom_node_inventory(
             path,
             content,
             owner_uid=os.getuid(),
@@ -316,11 +362,306 @@ def test_registry_inventory_verification_failure_removes_target_and_temporary(
         )
 
     assert not path.exists()
-    assert not list(tmp_path.glob(".registry-inventory.json.*"))
+    assert not list(tmp_path.glob(".custom-node-inventory.json.*"))
+
+
+def test_inventory_verification_never_unlinks_replacement_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "custom-node-inventory.json"
+    content = custom_node_installer._custom_node_inventory_bytes((_node("a", "1.0.0"),))
+    original_read_bytes = Path.read_bytes
+    replaced = False
+
+    def replace_before_verification(item: Path) -> bytes:
+        nonlocal replaced
+        if item == path and not replaced:
+            replaced = True
+            item.unlink()
+            item.write_bytes(b"replacement")
+        return original_read_bytes(item)
+
+    monkeypatch.setattr(Path, "read_bytes", replace_before_verification)
+
+    with pytest.raises(CustomNodeInstallError, match="verification failed"):
+        custom_node_installer._write_custom_node_inventory(
+            path,
+            content,
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+    assert original_read_bytes(path) == b"replacement"
+    assert not list(tmp_path.glob(".custom-node-inventory.json.*"))
 
 
 def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
+
+
+def test_empty_plan_writes_exact_inventory_then_checks_application(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = _phase(runtime, ())
+    _patch_phases(monkeypatch, application, custom_nodes)
+    unrelated = runtime.comfyui_path / "custom_nodes/unrelated"
+    unrelated.mkdir()
+    unrelated.joinpath("pyproject.toml").write_text("not valid toml =")
+    events: list[object] = []
+    monkeypatch.setattr(
+        custom_node_installer,
+        "capture_manager_registry_authority",
+        lambda *_args: pytest.fail("empty plan must not capture Manager"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_run_git",
+        lambda *_args, **_kwargs: pytest.fail("empty plan must not invoke Git"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_scan_registry_identities",
+        lambda *_args, **_kwargs: pytest.fail(
+            "empty plan must not scan unrelated children"
+        ),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_hook",
+        lambda *_args, **_kwargs: pytest.fail("empty plan must not invoke hooks"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_write_custom_node_inventory",
+        lambda path, content: events.append(("inventory", path, content)),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_argv",
+        lambda argv, **_kwargs: events.append(
+            ("command", tuple(os.fspath(item) for item in argv))
+        ),
+    )
+
+    custom_node_installer.install_custom_nodes(
+        "custom.json",
+        "application.json",
+        expected_build_plan_digest=f"sha256:{'c' * 64}",
+        runtime=runtime,
+    )
+
+    assert events[0] == (
+        "inventory",
+        Path("/opt/cdh/build/custom-node-inventory.json"),
+        b'{"nodes":[],"schema_version":1}\n',
+    )
+    assert events[1][0] == "command"
+    assert events[1][1][1:4] == ("--no-config", "pip", "check")
+
+
+@pytest.mark.parametrize("url", ["-option", "file:///tmp/node.git", "bad"])
+def test_runtime_rejects_forged_unsupported_git_locator(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = _phase(runtime, (_git_node(runtime, url=url),))
+
+    with pytest.raises(CustomNodeInstallError, match="URL is invalid"):
+        custom_node_installer._validate_inputs(custom_nodes, application, runtime)
+
+
+def test_git_installer_runs_only_root_requirements_then_install_py(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    target = runtime.comfyui_path / "custom_nodes/direct"
+    target.mkdir()
+    target.joinpath("requirements.txt").write_text("example==1.0\n")
+    target.joinpath("install.py").write_text("print('root')\n")
+    nested = target / "nested"
+    nested.mkdir()
+    nested.joinpath("requirements.txt").write_text("must-not-run==9\n")
+    nested.joinpath("install.py").write_text("raise RuntimeError\n")
+    node = _git_node(runtime)
+    commands: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def run(argv, **kwargs):
+        commands.append((tuple(os.fspath(item) for item in argv), kwargs))
+
+    monkeypatch.setattr(custom_node_installer, "run_argv", run)
+    constraints = tmp_path / "constraints.txt"
+    custom_node_installer._install_git_root_surfaces(
+        node,
+        target,
+        application,
+        runtime,
+        Path("/usr/local/bin/uv"),
+        constraints,
+        {"PIP_CONSTRAINT": str(constraints), "UV_CONSTRAINT": str(constraints)},
+    )
+
+    assert len(commands) == 2
+    requirements_argv, requirements_kwargs = commands[0]
+    assert requirements_argv == (
+        "/usr/local/bin/uv",
+        "--no-config",
+        "pip",
+        "install",
+        "--python",
+        "/opt/venv/bin/python",
+        "--no-python-downloads",
+        "--default-index",
+        application.python_index_url,
+        "--constraint",
+        str(constraints),
+        "--requirements",
+        str(target / "requirements.txt"),
+    )
+    assert requirements_kwargs["close_stdin"] is True
+    install_argv, install_kwargs = commands[1]
+    assert install_argv == ("/opt/venv/bin/python", str(target / "install.py"))
+    assert install_kwargs["close_stdin"] is True
+
+
+def test_git_root_installer_rejects_symlinked_surface(tmp_path: Path) -> None:
+    application, runtime = _application(tmp_path)
+    target = runtime.comfyui_path / "custom_nodes/direct"
+    target.mkdir()
+    outside = tmp_path / "requirements.txt"
+    outside.write_text("example==1.0\n")
+    target.joinpath("requirements.txt").symlink_to(outside)
+
+    with pytest.raises(CustomNodeInstallError, match="one regular file"):
+        custom_node_installer._install_git_root_surfaces(
+            _git_node(runtime),
+            target,
+            application,
+            runtime,
+            Path("/usr/local/bin/uv"),
+            tmp_path / "constraints.txt",
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "--index-url https://packages.invalid/simple\nexample==1\n",
+        "--extra-index-url https://packages.invalid/simple\nexample==1\n",
+        "-r nested.txt\n",
+        "-c constraints.txt\n",
+        "example @ https://packages.invalid/example.whl\n",
+    ],
+)
+def test_git_requirements_reject_source_control_before_any_install_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requirement: str,
+) -> None:
+    application, runtime = _application(tmp_path)
+    target = runtime.comfyui_path / "custom_nodes/direct"
+    target.mkdir()
+    target.joinpath("requirements.txt").write_text(requirement)
+    target.joinpath("install.py").write_text("raise RuntimeError\n")
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_argv",
+        lambda *_args, **_kwargs: pytest.fail("invalid requirements must not execute"),
+    )
+
+    with pytest.raises(CustomNodeInstallError, match="requirements are invalid"):
+        custom_node_installer._install_git_root_surfaces(
+            _git_node(runtime),
+            target,
+            application,
+            runtime,
+            Path("/usr/local/bin/uv"),
+            tmp_path / "constraints.txt",
+            {},
+        )
+
+
+def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    nodes: tuple[CustomNodePlan, ...] = (
+        _node("first", "1.0.0", post=("first-post.py",)),
+        _git_node(runtime, pre=("git-pre.py",), post=("git-post.py",)),
+        _node("last", "2.0.0"),
+    )
+    custom_nodes = _phase(runtime, nodes)
+    _patch_phases(monkeypatch, application, custom_nodes)
+    events: list[object] = []
+    observed_git_environment: dict[str, str] = {}
+
+    def names(items: Sequence[CustomNodePlan]) -> tuple[str, ...]:
+        return tuple(
+            item.id if isinstance(item, RegistryNodePlan) else item.target
+            for item in items
+        )
+
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_mixed_state",
+        lambda _root, admitted, future, **_kwargs: events.append(
+            ("proof", names(admitted), names(future))
+        ),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_install_registry_node",
+        lambda node, *_args: events.append(("install", node.id)),
+    )
+
+    def install_git(node, *args) -> None:
+        observed_git_environment.update(args[6])
+        events.append(("install", Path(node.target).name))
+
+    monkeypatch.setattr(custom_node_installer, "_install_git_node", install_git)
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_hook",
+        lambda hook, **_kwargs: events.append(("hook", hook)),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_write_custom_node_inventory",
+        lambda *_args: events.append(("inventory",)),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_argv",
+        lambda *_args, **_kwargs: events.append(("health",)),
+    )
+
+    custom_node_installer.install_custom_nodes(
+        "custom.json",
+        "application.json",
+        expected_build_plan_digest=f"sha256:{'c' * 64}",
+        runtime=runtime,
+        environ={"GIT_SSH_COMMAND": "ssh -F /tmp/user-config", "HOME": "/user/home"},
+    )
+
+    assert [event for event in events if event[0] == "install"] == [
+        ("install", "first"),
+        ("install", "direct"),
+        ("install", "last"),
+    ]
+    assert (
+        events.index(("hook", "git-pre.py"))
+        < events.index(("install", "direct"))
+        < events.index(("hook", "git-post.py"))
+    )
+    assert events[-2:] == [("inventory",), ("health",)]
+    assert observed_git_environment["GIT_SSH_COMMAND"] == ("ssh -F /tmp/user-config")
+    assert observed_git_environment["HOME"] == "/user/home"
 
 
 def test_registry_orchestration_uses_one_process_and_admitted_prefix(
@@ -347,26 +688,26 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
         events.append(("command", tuple(str(item) for item in argv), kwargs))
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(registry_installer, "run_argv", run_command)
+    monkeypatch.setattr(custom_node_installer, "run_argv", run_command)
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "run_hook",
         lambda hook, **_kwargs: events.append(("hook", hook)),
     )
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "_verify_registry_set",
         lambda _root, expected, **_kwargs: events.append(
             ("verify", tuple(node.id for node in expected))
         ),
     )
     monkeypatch.setattr(
-        registry_installer,
-        "_write_registry_inventory",
+        custom_node_installer,
+        "_write_custom_node_inventory",
         lambda path, content: events.append(("inventory", path, content)),
     )
 
-    registry_installer.install_registry_nodes(
+    custom_node_installer.install_custom_nodes(
         "custom.json",
         "application.json",
         expected_build_plan_digest=f"sha256:{'c' * 64}",
@@ -389,12 +730,17 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
         (event[0], event[1]) for event in events if event[0] in {"hook", "verify"}
     ]
     assert operations == [
+        ("verify", ()),
         ("hook", "pre.py"),
+        ("verify", ()),
+        ("verify", ()),
         ("verify", ("first",)),
         ("hook", "post.py"),
         ("verify", ("first",)),
         ("verify", ("first",)),
-        ("verify", ("second",)),
+        ("verify", ("first",)),
+        ("verify", ("first",)),
+        ("verify", ("first", "second")),
         ("hook", "one.py"),
         ("verify", ("first", "second")),
         ("hook", "two.py"),
@@ -451,13 +797,13 @@ def test_false_zero_stops_before_later_registry_node(
         commands.append(tuple(str(item) for item in argv))
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(registry_installer, "run_argv", false_zero)
+    monkeypatch.setattr(custom_node_installer, "run_argv", false_zero)
 
     with pytest.raises(
-        RegistryInstallError,
+        CustomNodeInstallError,
         match=r"missing@1\.0\.0 is not installed",
     ):
-        registry_installer.install_registry_nodes(
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
@@ -486,10 +832,10 @@ def test_future_registry_identity_is_rejected_before_admission(
         _write_project(root, "installed-future", "future", "2.0.0")
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(registry_installer, "run_argv", install)
+    monkeypatch.setattr(custom_node_installer, "run_argv", install)
 
-    with pytest.raises(RegistryInstallError, match="admitted declaration prefix"):
-        registry_installer.install_registry_nodes(
+    with pytest.raises(CustomNodeInstallError, match="admitted declaration prefix"):
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
@@ -497,6 +843,77 @@ def test_future_registry_identity_is_rejected_before_admission(
         )
 
     assert commands == ["first@1.0.0"]
+
+
+def test_mixed_proof_excludes_admitted_git_only_after_fresh_git_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    git = _git_node(runtime)
+    target = Path(git.target)
+    target.mkdir()
+    target.joinpath("pyproject.toml").write_text(
+        '[project]\nname="git-project"\nversion="1.0.0"\n'
+    )
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_manager_registry_capability",
+        lambda *_args: events.append("manager"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_git_provenance",
+        lambda *_args, **_kwargs: events.append("git"),
+    )
+
+    def verify_registry(_root, expected, *, excluded_git_targets=()):
+        events.append("registry")
+        assert expected == ()
+        assert excluded_git_targets == [target]
+
+    monkeypatch.setattr(custom_node_installer, "_verify_registry_set", verify_registry)
+
+    custom_node_installer._verify_mixed_state(
+        runtime.comfyui_path / "custom_nodes",
+        (git,),
+        (),
+        application=application,
+        runtime=runtime,
+        manager_authority=object(),
+        git_path=Path("/usr/bin/git"),
+        git_environment={},
+    )
+
+    assert events == ["manager", "git", "registry"]
+
+
+def test_future_git_target_is_rejected_before_its_pre_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    git = _git_node(runtime)
+    Path(git.target).mkdir()
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_manager_registry_capability",
+        lambda *_args: None,
+    )
+
+    with pytest.raises(CustomNodeInstallError, match="future Git target"):
+        custom_node_installer._verify_mixed_state(
+            runtime.comfyui_path / "custom_nodes",
+            (),
+            (git,),
+            application=application,
+            runtime=runtime,
+            manager_authority=object(),
+            git_path=Path("/usr/bin/git"),
+            git_environment={},
+        )
 
 
 def test_runtime_rejects_normalized_duplicate_locked_ids(
@@ -510,13 +927,13 @@ def test_runtime_rejects_normalized_duplicate_locked_ids(
     )
     _patch_phases(monkeypatch, application, custom_nodes)
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "run_argv",
         lambda *_args, **_kwargs: pytest.fail("duplicate phase must not execute"),
     )
 
-    with pytest.raises(RegistryInstallError, match="duplicated in BuildPlan"):
-        registry_installer.install_registry_nodes(
+    with pytest.raises(CustomNodeInstallError, match="duplicated in BuildPlan"):
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
@@ -532,13 +949,13 @@ def test_runtime_rejects_invalid_locked_version_before_execution(
     custom_nodes = _phase(runtime, (_node("example", "not-a-version"),))
     _patch_phases(monkeypatch, application, custom_nodes)
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "run_argv",
         lambda *_args, **_kwargs: pytest.fail("invalid phase must not execute"),
     )
 
-    with pytest.raises(RegistryInstallError, match="invalid locked version"):
-        registry_installer.install_registry_nodes(
+    with pytest.raises(CustomNodeInstallError, match="invalid locked version"):
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
@@ -562,15 +979,17 @@ def test_nonzero_registry_process_stops_before_state_proof_and_later_node(
         commands.append(str(argv[2]))
         raise ContainerCommandError("cm-cli failed")
 
-    monkeypatch.setattr(registry_installer, "run_argv", fail)
+    monkeypatch.setattr(custom_node_installer, "run_argv", fail)
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "_verify_registry_set",
-        lambda *_args: pytest.fail("state proof must not run after nonzero"),
+        lambda _root, expected, **_kwargs: (
+            pytest.fail("state proof must not run after nonzero") if expected else None
+        ),
     )
 
     with pytest.raises(ContainerCommandError, match="cm-cli failed"):
-        registry_installer.install_registry_nodes(
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
@@ -633,15 +1052,15 @@ def test_hook_manager_mutation_fails_at_next_capability_proof(
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "verify_manager_registry_capability",
         verify_capability,
     )
-    monkeypatch.setattr(registry_installer, "run_hook", mutate)
-    monkeypatch.setattr(registry_installer, "run_argv", install)
+    monkeypatch.setattr(custom_node_installer, "run_hook", mutate)
+    monkeypatch.setattr(custom_node_installer, "run_argv", install)
 
     with pytest.raises(ComfyUIInstallError, match="mutated"):
-        registry_installer.install_registry_nodes(
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
@@ -649,6 +1068,48 @@ def test_hook_manager_mutation_fails_at_next_capability_proof(
         )
 
     assert commands == expected_commands
+
+
+def test_first_pre_hook_manager_mutation_stops_before_second_pre_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = _phase(
+        runtime,
+        (_node("first", "1.0.0", pre=("first.py", "second.py")),),
+    )
+    _patch_phases(monkeypatch, application, custom_nodes)
+    valid = {"manager": True}
+    hooks: list[str] = []
+
+    def verify(*_args) -> None:
+        if not valid["manager"]:
+            raise ComfyUIInstallError("Manager capability was mutated")
+
+    def hook(name: str, **_kwargs) -> None:
+        hooks.append(name)
+        valid["manager"] = False
+
+    monkeypatch.setattr(
+        custom_node_installer, "verify_manager_registry_capability", verify
+    )
+    monkeypatch.setattr(custom_node_installer, "run_hook", hook)
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_argv",
+        lambda *_args, **_kwargs: pytest.fail("node install must not begin"),
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="mutated"):
+        custom_node_installer.install_custom_nodes(
+            "custom.json",
+            "application.json",
+            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            runtime=runtime,
+        )
+
+    assert hooks == ["first.py"]
 
 
 def test_hook_cannot_retarget_requirements_and_installed_manager_together(
@@ -675,12 +1136,12 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
         installed["manager_version"] = "9.0.0"
 
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "capture_manager_registry_authority",
         comfyui_installer.capture_manager_registry_authority,
     )
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "verify_manager_registry_capability",
         comfyui_installer.verify_manager_registry_capability,
     )
@@ -690,22 +1151,22 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
         prove_distributions,
     )
     monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
-    monkeypatch.setattr(registry_installer, "run_hook", retarget)
+    monkeypatch.setattr(custom_node_installer, "run_hook", retarget)
     monkeypatch.setattr(
-        registry_installer,
+        custom_node_installer,
         "run_argv",
         lambda *_args, **_kwargs: pytest.fail("retargeted authority must not execute"),
     )
 
     with pytest.raises(ComfyUIInstallError, match="authority changed"):
-        registry_installer.install_registry_nodes(
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
             runtime=runtime,
         )
 
-    assert distribution_proofs == ["4.0.5"]
+    assert distribution_proofs == ["4.0.5", "4.0.5"]
 
 
 @pytest.mark.parametrize("mutation_phase", ["pre", "post"])
@@ -745,22 +1206,15 @@ def test_hook_mutation_of_admitted_identity_fails_before_next_node(
         metadata = runtime.comfyui_path / "custom_nodes/installed-first/pyproject.toml"
         metadata.write_text('[project]\nname="first"\nversion="9.0.0"\n')
 
-    monkeypatch.setattr(registry_installer, "run_argv", install)
-    monkeypatch.setattr(registry_installer, "run_hook", mutate)
+    monkeypatch.setattr(custom_node_installer, "run_argv", install)
+    monkeypatch.setattr(custom_node_installer, "run_hook", mutate)
 
-    with pytest.raises(RegistryInstallError, match="version does not match"):
-        registry_installer.install_registry_nodes(
+    with pytest.raises(CustomNodeInstallError, match="version does not match"):
+        custom_node_installer.install_custom_nodes(
             "custom.json",
             "application.json",
             expected_build_plan_digest=f"sha256:{'c' * 64}",
             runtime=runtime,
         )
 
-    assert commands == (
-        ["first@1.0.0"]
-        if mutation_phase == "post"
-        else [
-            "first@1.0.0",
-            "second@2.0.0",
-        ]
-    )
+    assert commands == ["first@1.0.0"]

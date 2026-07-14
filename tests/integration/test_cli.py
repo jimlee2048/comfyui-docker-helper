@@ -58,7 +58,7 @@ def test_root_command_exposes_current_groups() -> None:
         "entrypoint",
         "install-comfyui",
         "install-inference",
-        "install-registry-nodes",
+        "install-custom-nodes",
     }
 
 
@@ -74,8 +74,8 @@ def test_root_command_exposes_current_groups() -> None:
         (["container", "download-files"], "Usage: cdh container download-files"),
         (["container", "install-inference"], "Usage: cdh container install-inference"),
         (
-            ["container", "install-registry-nodes"],
-            "Usage: cdh container install-registry-nodes",
+            ["container", "install-custom-nodes"],
+            "Usage: cdh container install-custom-nodes",
         ),
         (["container", "entrypoint"], "Usage: cdh container entrypoint"),
     ],
@@ -110,7 +110,7 @@ def test_registry_helper_help_exposes_only_owned_inputs(
 ) -> None:
     result = cli_runner.invoke(
         app,
-        ["container", "install-registry-nodes", "--help"],
+        ["container", "install-custom-nodes", "--help"],
     )
 
     assert result.exit_code == 0

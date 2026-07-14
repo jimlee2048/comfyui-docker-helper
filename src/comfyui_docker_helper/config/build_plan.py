@@ -523,7 +523,7 @@ CustomNodePlan = Annotated[RegistryNodePlan | GitNodePlan, Field(discriminator="
 class CustomNodesPhase(_PlanModel):
     install_manager: bool
     user_directory: str
-    registry_inventory: Literal["/opt/cdh/build/registry-inventory.json"]
+    custom_node_inventory: Literal["/opt/cdh/build/custom-node-inventory.json"]
     nodes: tuple[CustomNodePlan, ...]
 
     @field_validator("user_directory")
@@ -1023,7 +1023,7 @@ def construct_build_plan(
         custom_nodes=CustomNodesPhase(
             install_manager=config.comfyui.install_manager,
             user_directory=str(PurePosixPath(comfyui_path) / "user"),
-            registry_inventory="/opt/cdh/build/registry-inventory.json",
+            custom_node_inventory="/opt/cdh/build/custom-node-inventory.json",
             nodes=custom_nodes,
         ),
         files=FilesPhase(

@@ -1,0 +1,1321 @@
+"""Ordered Registry and direct-Git custom-node installation and proof."""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+import tomllib
+from collections.abc import Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+from packaging.utils import InvalidName, canonicalize_name
+from packaging.version import InvalidVersion, Version
+
+from comfyui_docker_helper.comfyui_requirements import (
+    ComfyUIRequirementsError,
+    ParsedManagerRequirements,
+    parse_ordinary_requirements,
+)
+from comfyui_docker_helper.config.build_plan import (
+    ApplicationPhase,
+    CustomNodePlan,
+    CustomNodesPhase,
+    GitNodePlan,
+    RegistryNodePlan,
+)
+from comfyui_docker_helper.config.final_validation import is_git_source_url
+from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
+from comfyui_docker_helper.container.application_installer import (
+    _isolated_install_environment,
+)
+from comfyui_docker_helper.container.comfyui_installer import (
+    capture_manager_registry_authority,
+    verify_manager_registry_capability,
+)
+from comfyui_docker_helper.container.phase_inputs import load_phase_input
+from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
+from comfyui_docker_helper.errors import ApplicationError
+
+_GIT_PATH = Path("/usr/bin/git")
+_UV_PATH = Path("/usr/local/bin/uv")
+_BUILD_DIRECTORY = Path("/opt/cdh/build")
+_CONSTRAINTS_PATH = _BUILD_DIRECTORY / "python-package-constraints.txt"
+_HOOKS_DIRECTORY = _BUILD_DIRECTORY / "inputs"
+_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+_GITLINK_MODE = b"160000"
+
+
+class CustomNodeInstallError(ApplicationError):
+    """A custom-node process, placement, or proof invariant failed."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservedRegistryIdentity:
+    name: str
+    normalized_name: str
+    version: str
+    parsed_version: Version
+
+
+@dataclass(frozen=True, slots=True)
+class _FilesystemIdentity:
+    device: int
+    inode: int
+
+
+def install_custom_nodes(
+    custom_nodes_phase_path: str | Path,
+    application_phase_path: str | Path,
+    *,
+    expected_build_plan_digest: str,
+    runtime: ContainerRuntime,
+    git_path: Path = _GIT_PATH,
+    uv_path: Path = _UV_PATH,
+    constraints_path: Path = _CONSTRAINTS_PATH,
+    hooks_directory: Path = _HOOKS_DIRECTORY,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Install all custom nodes in one original-order admitted-prefix sequence."""
+    custom_nodes = load_phase_input(
+        custom_nodes_phase_path,
+        "custom-nodes",
+        expected_build_plan_digest=expected_build_plan_digest,
+    )
+    application = load_phase_input(
+        application_phase_path,
+        "application",
+        expected_build_plan_digest=expected_build_plan_digest,
+    )
+    if not isinstance(custom_nodes, CustomNodesPhase) or not isinstance(
+        application, ApplicationPhase
+    ):  # pragma: no cover - strict phase loader owns the types.
+        raise CustomNodeInstallError("invalid custom-node phase inputs")
+    _validate_inputs(custom_nodes, application, runtime)
+
+    nodes = custom_nodes.nodes
+    has_registry = any(isinstance(node, RegistryNodePlan) for node in nodes)
+    manager_authority = (
+        capture_manager_registry_authority(application, runtime)
+        if has_registry
+        else None
+    )
+    custom_nodes_root = _require_real_directory(
+        runtime.comfyui_path / "custom_nodes", "custom-nodes root"
+    )
+    registry_environment = _managed_python_environment(
+        runtime,
+        application.python_index_url,
+        constraints_path,
+        environ,
+    )
+    # Git/SSH interpretation belongs to the caller's environment. In particular,
+    # cdh neither suppresses nor attests user-managed URL rewrites and transports.
+    git_environment = runtime.env(environ)
+    admitted: list[CustomNodePlan] = []
+
+    for index, node in enumerate(nodes):
+        future = nodes[index:]
+        _verify_mixed_state(
+            custom_nodes_root,
+            admitted,
+            future,
+            application=application,
+            runtime=runtime,
+            manager_authority=manager_authority,
+            git_path=git_path,
+            git_environment=git_environment,
+        )
+        for hook in node.pre_install:
+            run_hook(
+                hook.relative_path,
+                scripts_dir=hooks_directory,
+                runtime=runtime,
+                env=environ,
+            )
+            _verify_mixed_state(
+                custom_nodes_root,
+                admitted,
+                future,
+                application=application,
+                runtime=runtime,
+                manager_authority=manager_authority,
+                git_path=git_path,
+                git_environment=git_environment,
+            )
+        # The complete pre phase is a proof boundary even when it was empty.
+        _verify_mixed_state(
+            custom_nodes_root,
+            admitted,
+            future,
+            application=application,
+            runtime=runtime,
+            manager_authority=manager_authority,
+            git_path=git_path,
+            git_environment=git_environment,
+        )
+
+        if isinstance(node, RegistryNodePlan):
+            _install_registry_node(
+                node,
+                custom_nodes,
+                application,
+                runtime,
+                manager_authority,
+                registry_environment,
+            )
+        else:
+            _install_git_node(
+                node,
+                custom_nodes_root,
+                application,
+                runtime,
+                git_path,
+                uv_path,
+                constraints_path,
+                git_environment,
+                registry_environment,
+            )
+
+        admitted.append(node)
+        remaining = nodes[index + 1 :]
+        _verify_mixed_state(
+            custom_nodes_root,
+            admitted,
+            remaining,
+            application=application,
+            runtime=runtime,
+            manager_authority=manager_authority,
+            git_path=git_path,
+            git_environment=git_environment,
+        )
+        for hook in node.post_install:
+            run_hook(
+                hook.relative_path,
+                scripts_dir=hooks_directory,
+                runtime=runtime,
+                env=environ,
+            )
+            _verify_mixed_state(
+                custom_nodes_root,
+                admitted,
+                remaining,
+                application=application,
+                runtime=runtime,
+                manager_authority=manager_authority,
+                git_path=git_path,
+                git_environment=git_environment,
+            )
+        # The complete post phase is a proof boundary even when it was empty.
+        _verify_mixed_state(
+            custom_nodes_root,
+            admitted,
+            remaining,
+            application=application,
+            runtime=runtime,
+            manager_authority=manager_authority,
+            git_path=git_path,
+            git_environment=git_environment,
+        )
+
+    _verify_mixed_state(
+        custom_nodes_root,
+        admitted,
+        (),
+        application=application,
+        runtime=runtime,
+        manager_authority=manager_authority,
+        git_path=git_path,
+        git_environment=git_environment,
+    )
+    _write_custom_node_inventory(
+        Path(custom_nodes.custom_node_inventory),
+        _custom_node_inventory_bytes(nodes),
+    )
+    run_argv(
+        (
+            uv_path,
+            "--no-config",
+            "pip",
+            "check",
+            "--python",
+            runtime.python,
+            "--no-python-downloads",
+        ),
+        cwd=_BUILD_DIRECTORY,
+        env=_isolated_install_environment(environ),
+        description="application dependency verification after custom-node install",
+    )
+
+
+def _validate_inputs(
+    custom_nodes: CustomNodesPhase,
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+) -> None:
+    if runtime.workspace != Path(application.paths.workspace):
+        raise CustomNodeInstallError("custom-node workspace does not match BuildPlan")
+    if runtime.comfyui_path != Path(application.paths.comfyui):
+        raise CustomNodeInstallError(
+            "custom-node ComfyUI path does not match BuildPlan"
+        )
+    if runtime.virtual_env != Path(application.paths.venv):
+        raise CustomNodeInstallError("custom-node venv does not match BuildPlan")
+    if Path(custom_nodes.user_directory) != runtime.comfyui_path / "user":
+        raise CustomNodeInstallError("Registry user directory does not match BuildPlan")
+    if custom_nodes.custom_node_inventory != os.fspath(
+        _BUILD_DIRECTORY / "custom-node-inventory.json"
+    ):
+        raise CustomNodeInstallError(
+            "custom-node inventory path does not match BuildPlan"
+        )
+
+    registry_names: set[str] = set()
+    git_targets: set[Path] = set()
+    has_registry = False
+    custom_root = runtime.comfyui_path / "custom_nodes"
+    for node in custom_nodes.nodes:
+        if isinstance(node, RegistryNodePlan):
+            has_registry = True
+            try:
+                normalized = canonicalize_name(node.id, validate=True)
+                Version(node.version)
+            except InvalidName as error:
+                raise CustomNodeInstallError(
+                    "Registry node has an invalid locked ID"
+                ) from error
+            except InvalidVersion as error:
+                raise CustomNodeInstallError(
+                    f"Registry node {node.id} has an invalid locked version"
+                ) from error
+            if normalized in registry_names:
+                raise CustomNodeInstallError(
+                    f"Registry identity {normalized} is duplicated in BuildPlan"
+                )
+            registry_names.add(normalized)
+        else:
+            if _COMMIT_PATTERN.fullmatch(node.commit) is None:
+                raise CustomNodeInstallError("Git node commit must be exact 40-hex")
+            if not is_git_source_url(node.url):
+                raise CustomNodeInstallError("Git node URL is invalid")
+            target = _planned_git_target(node, custom_root)
+            if target in git_targets:
+                raise CustomNodeInstallError(
+                    f"Git target {target.name} is duplicated in BuildPlan"
+                )
+            git_targets.add(target)
+    if has_registry and (
+        not custom_nodes.install_manager or application.comfyui.manager is None
+    ):
+        raise CustomNodeInstallError("Registry nodes require Manager")
+
+
+def _install_registry_node(
+    node: RegistryNodePlan,
+    custom_nodes: CustomNodesPhase,
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    manager_authority: ParsedManagerRequirements | None,
+    command_environment: Mapping[str, str],
+) -> None:
+    manager = application.comfyui.manager
+    if manager is None or manager_authority is None:  # pragma: no cover - validated.
+        raise CustomNodeInstallError("Registry nodes require Manager")
+    verify_manager_registry_capability(application, runtime, manager_authority)
+    run_argv(
+        (
+            manager.executable,
+            "install",
+            f"{node.id}@{node.version}",
+            "--mode",
+            "cache",
+            "--user-directory",
+            custom_nodes.user_directory,
+            "--exit-on-fail",
+        ),
+        cwd=runtime.comfyui_path,
+        env=command_environment,
+        description=f"Registry node {node.id}@{node.version} install",
+        close_stdin=True,
+    )
+
+
+def _install_git_node(
+    node: GitNodePlan,
+    custom_nodes_root: Path,
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    git_path: Path,
+    uv_path: Path,
+    constraints_path: Path,
+    git_environment: Mapping[str, str],
+    python_environment: Mapping[str, str],
+) -> None:
+    target = _planned_git_target(node, custom_nodes_root)
+    _require_absent(target, f"Git target {target.name}")
+    stage = Path(
+        tempfile.mkdtemp(prefix=f".{target.name}.cdh-stage-", dir=custom_nodes_root)
+    )
+    stage_identity = _capture_owned_stage(stage, custom_nodes_root)
+    placed = False
+    try:
+        _run_git(
+            (git_path, "clone", "--no-checkout", "--", node.url, stage),
+            cwd=custom_nodes_root,
+            env=git_environment,
+            description=f"Git node {target.name} clone",
+        )
+        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
+        _run_git(
+            (git_path, "-C", stage, "checkout", "--detach", node.commit, "--"),
+            cwd=custom_nodes_root,
+            env=git_environment,
+            description=f"Git node {target.name} exact checkout",
+        )
+        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
+        _run_git(
+            (
+                git_path,
+                "-C",
+                stage,
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+                "--checkout",
+            ),
+            cwd=custom_nodes_root,
+            env=git_environment,
+            description=f"Git node {target.name} recursive submodule checkout",
+        )
+        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
+        _verify_git_provenance(
+            node,
+            stage,
+            custom_nodes_root,
+            git_path,
+            git_environment,
+            owned_stage=True,
+            stage_identity=stage_identity,
+        )
+        _require_absent(target, f"Git target {target.name}")
+        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
+        _rename_noreplace(stage, target, stage_identity)
+        placed = True
+        _verify_git_provenance(
+            node, target, custom_nodes_root, git_path, git_environment
+        )
+        _install_git_root_surfaces(
+            node,
+            target,
+            application,
+            runtime,
+            uv_path,
+            constraints_path,
+            python_environment,
+        )
+    finally:
+        if not placed and _is_owned_stage(stage, custom_nodes_root, stage_identity):
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def _install_git_root_surfaces(
+    node: GitNodePlan,
+    target: Path,
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    uv_path: Path,
+    constraints_path: Path,
+    python_environment: Mapping[str, str],
+) -> None:
+    requirements = _optional_root_file(target, "requirements.txt")
+    if requirements is not None:
+        try:
+            requirements_rows = parse_ordinary_requirements(
+                requirements.read_bytes(),
+                python_version=application.pytorch.python_version,
+                platform=application.pytorch.platform,
+            )
+        except (OSError, ComfyUIRequirementsError) as error:
+            raise CustomNodeInstallError(
+                f"Git node {Path(node.target).name} requirements are invalid"
+            ) from error
+        if requirements_rows:
+            run_argv(
+                (
+                    uv_path,
+                    "--no-config",
+                    "pip",
+                    "install",
+                    "--python",
+                    runtime.python,
+                    "--no-python-downloads",
+                    "--default-index",
+                    application.python_index_url,
+                    "--constraint",
+                    constraints_path,
+                    "--requirements",
+                    requirements,
+                ),
+                cwd=target,
+                env=python_environment,
+                description=f"Git node {target.name} requirements install",
+                close_stdin=True,
+            )
+    install_script = _optional_root_file(target, "install.py")
+    if install_script is not None:
+        run_argv(
+            (runtime.python, install_script),
+            cwd=target,
+            env=python_environment,
+            description=f"Git node {target.name} install.py",
+            close_stdin=True,
+        )
+
+
+def _verify_mixed_state(
+    custom_nodes_root: Path,
+    admitted: Sequence[CustomNodePlan],
+    future: Sequence[CustomNodePlan],
+    *,
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    manager_authority: ParsedManagerRequirements | None,
+    git_path: Path,
+    git_environment: Mapping[str, str],
+) -> None:
+    if manager_authority is not None:
+        verify_manager_registry_capability(application, runtime, manager_authority)
+    admitted_git_targets: list[Path] = []
+    for node in admitted:
+        if isinstance(node, GitNodePlan):
+            target = _planned_git_target(node, custom_nodes_root)
+            _verify_git_provenance(
+                node, target, custom_nodes_root, git_path, git_environment
+            )
+            admitted_git_targets.append(target)
+    for node in future:
+        if isinstance(node, GitNodePlan):
+            _require_absent(
+                _planned_git_target(node, custom_nodes_root),
+                f"future Git target {Path(node.target).name}",
+            )
+    if manager_authority is not None:
+        expected_registry = tuple(
+            node for node in admitted if isinstance(node, RegistryNodePlan)
+        )
+        _verify_registry_set(
+            custom_nodes_root,
+            expected_registry,
+            excluded_git_targets=admitted_git_targets,
+        )
+
+
+def _verify_registry_set(
+    custom_nodes_root: Path,
+    expected: Sequence[RegistryNodePlan],
+    *,
+    excluded_git_targets: Sequence[Path] = (),
+) -> None:
+    observed = _scan_registry_identities(
+        custom_nodes_root, excluded_git_targets=excluded_git_targets
+    )
+    for node in expected:
+        normalized = canonicalize_name(node.id, validate=True)
+        identity = observed.get(normalized)
+        if identity is None:
+            raise CustomNodeInstallError(
+                f"Registry node {node.id}@{node.version} is not installed"
+            )
+        try:
+            expected_version = Version(node.version)
+        except InvalidVersion as error:
+            raise CustomNodeInstallError(
+                f"Registry node {node.id} has an invalid locked version"
+            ) from error
+        if identity.parsed_version != expected_version:
+            raise CustomNodeInstallError(
+                f"Registry node {node.id} version does not match BuildPlan"
+            )
+    expected_names = {canonicalize_name(node.id, validate=True) for node in expected}
+    if set(observed) != expected_names:
+        raise CustomNodeInstallError(
+            "installed Registry identities do not match the admitted declaration prefix"
+        )
+
+
+def _scan_registry_identities(
+    custom_nodes_root: Path,
+    *,
+    excluded_git_targets: Sequence[Path] = (),
+) -> dict[str, _ObservedRegistryIdentity]:
+    root = _require_real_directory(custom_nodes_root, "custom-nodes root")
+    excluded = set(excluded_git_targets)
+    if any(path.parent != root for path in excluded):
+        raise CustomNodeInstallError("Git exclusion target escapes custom-nodes root")
+    observed: dict[str, _ObservedRegistryIdentity] = {}
+    try:
+        children = tuple(sorted(root.iterdir(), key=lambda item: item.name))
+    except OSError as error:
+        raise CustomNodeInstallError(
+            "custom-nodes root could not be scanned"
+        ) from error
+    for child in children:
+        if child in excluded:
+            continue
+        try:
+            child_metadata = child.lstat()
+        except OSError as error:
+            raise CustomNodeInstallError(
+                "custom-node entry could not be inspected"
+            ) from error
+        if stat.S_ISLNK(child_metadata.st_mode):
+            raise CustomNodeInstallError("custom-node entries must not be symlinks")
+        if stat.S_ISREG(child_metadata.st_mode):
+            continue
+        if not stat.S_ISDIR(child_metadata.st_mode):
+            raise CustomNodeInstallError(
+                "custom-node entries must be regular files or real directories"
+            )
+        resolved_child = _require_real_directory(child, "custom-node directory")
+        if resolved_child.parent != root:
+            raise CustomNodeInstallError(
+                "custom-node directory escapes the declared root"
+            )
+        project_file = child / "pyproject.toml"
+        try:
+            project_metadata = project_file.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise CustomNodeInstallError(
+                "custom-node metadata could not be inspected"
+            ) from error
+        if stat.S_ISLNK(project_metadata.st_mode) or not stat.S_ISREG(
+            project_metadata.st_mode
+        ):
+            raise CustomNodeInstallError(
+                "custom-node metadata must be one regular file"
+            )
+        try:
+            resolved_project = project_file.resolve(strict=True)
+            content = project_file.read_bytes()
+        except OSError as error:
+            raise CustomNodeInstallError(
+                "custom-node metadata could not be read"
+            ) from error
+        if (
+            resolved_project.parent != resolved_child
+            or not resolved_project.is_relative_to(root)
+        ):
+            raise CustomNodeInstallError(
+                "custom-node metadata escapes the declared root"
+            )
+        identity = _parse_project_identity(content)
+        if identity.normalized_name in observed:
+            raise CustomNodeInstallError(
+                f"Registry identity {identity.normalized_name} is duplicated"
+            )
+        observed[identity.normalized_name] = identity
+    return observed
+
+
+def _verify_git_provenance(
+    node: GitNodePlan,
+    target: Path,
+    custom_nodes_root: Path,
+    git_path: Path,
+    environment: Mapping[str, str],
+    *,
+    owned_stage: bool = False,
+    stage_identity: _FilesystemIdentity | None = None,
+) -> None:
+    root = _require_real_directory(custom_nodes_root, "custom-nodes root")
+    expected_target = _planned_git_target(node, root)
+    if owned_stage:
+        if stage_identity is None:
+            raise CustomNodeInstallError("Git stage identity is unavailable")
+        _verify_owned_stage(target, root, stage_identity)
+    elif target != expected_target:
+        raise CustomNodeInstallError("Git node target does not match BuildPlan")
+    actual = _require_real_directory(target, f"Git node {expected_target.name}")
+    if actual.parent != root:
+        raise CustomNodeInstallError("Git node target escapes custom-nodes root")
+    _verify_repository_root(
+        actual,
+        actual,
+        git_path,
+        environment,
+        description=f"Git node {expected_target.name}",
+    )
+    root_git_directory = _verify_root_git_directory(
+        actual,
+        git_path,
+        environment,
+        description=f"Git node {expected_target.name}",
+    )
+    _verify_exact_detached_head(
+        actual,
+        node.commit,
+        root,
+        git_path,
+        environment,
+        description=f"Git node {expected_target.name}",
+    )
+    _verify_committed_gitlinks(
+        actual,
+        actual,
+        root,
+        git_path,
+        environment,
+        seen={actual},
+        root_git_directory=root_git_directory,
+        description=f"Git node {expected_target.name}",
+    )
+
+
+def _verify_repository_root(
+    repository: Path,
+    expected: Path,
+    git_path: Path,
+    environment: Mapping[str, str],
+    *,
+    description: str,
+) -> None:
+    output = _run_git(
+        (
+            git_path,
+            "-C",
+            repository,
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+        ),
+        cwd=repository,
+        env=environment,
+        description=f"{description} repository-root verification",
+    )
+    if output != os.fsencode(expected) + b"\n":
+        raise CustomNodeInstallError(
+            f"{description} repository root does not match its exact target"
+        )
+
+
+def _verify_root_git_directory(
+    repository: Path,
+    git_path: Path,
+    environment: Mapping[str, str],
+    *,
+    description: str,
+) -> Path:
+    dot_git = repository / ".git"
+    git_directory = _require_real_directory(dot_git, f"{description} .git directory")
+    if git_directory != dot_git:
+        raise CustomNodeInstallError(f"{description} .git directory is not exact")
+    actual_git_directory, common_directory = _git_directory_paths(
+        repository,
+        git_path,
+        environment,
+        description=description,
+    )
+    if actual_git_directory != git_directory or common_directory != git_directory:
+        raise CustomNodeInstallError(
+            f"{description} Git directory escapes its exact root repository"
+        )
+    return git_directory
+
+
+def _verify_submodule_git_directory(
+    repository: Path,
+    root_git_directory: Path,
+    git_path: Path,
+    environment: Mapping[str, str],
+    *,
+    description: str,
+) -> None:
+    dot_git = repository / ".git"
+    try:
+        metadata = dot_git.lstat()
+    except OSError as error:
+        raise CustomNodeInstallError(
+            f"{description} .git file is unavailable"
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise CustomNodeInstallError(
+            f"{description} .git must be one regular non-symlink file"
+        )
+    actual_git_directory, common_directory = _git_directory_paths(
+        repository,
+        git_path,
+        environment,
+        description=description,
+    )
+    if actual_git_directory != common_directory:
+        raise CustomNodeInstallError(f"{description} linked worktree is not permitted")
+    _require_contained_real_directory(
+        actual_git_directory,
+        root_git_directory,
+        f"{description} Git directory",
+    )
+
+
+def _git_directory_paths(
+    repository: Path,
+    git_path: Path,
+    environment: Mapping[str, str],
+    *,
+    description: str,
+) -> tuple[Path, Path]:
+    git_directory = _single_absolute_git_path(
+        _run_git(
+            (git_path, "-C", repository, "rev-parse", "--absolute-git-dir"),
+            cwd=repository,
+            env=environment,
+            description=f"{description} Git-directory verification",
+        ),
+        f"{description} Git directory",
+    )
+    common_directory = _single_absolute_git_path(
+        _run_git(
+            (
+                git_path,
+                "-C",
+                repository,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ),
+            cwd=repository,
+            env=environment,
+            description=f"{description} common-Git-directory verification",
+        ),
+        f"{description} common Git directory",
+    )
+    return git_directory, common_directory
+
+
+def _single_absolute_git_path(output: bytes, subject: str) -> Path:
+    if not output.endswith(b"\n") or output.count(b"\n") != 1:
+        raise CustomNodeInstallError(f"{subject} output is ambiguous")
+    path = Path(os.fsdecode(output[:-1]))
+    if not path.is_absolute():
+        raise CustomNodeInstallError(f"{subject} is not absolute")
+    return path
+
+
+def _require_contained_real_directory(path: Path, root: Path, subject: str) -> Path:
+    root = _require_real_directory(root, "root Git directory")
+    if path == root:
+        raise CustomNodeInstallError(f"{subject} replaces the root Git directory")
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise CustomNodeInstallError(
+            f"{subject} escapes root Git management"
+        ) from error
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise CustomNodeInstallError(f"{subject} is unavailable") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise CustomNodeInstallError(f"{subject} contains a symlink")
+    return _require_real_directory(path, subject)
+
+
+def _verify_exact_detached_head(
+    repository: Path,
+    expected_commit: str,
+    cwd: Path,
+    git_path: Path,
+    environment: Mapping[str, str],
+    *,
+    description: str,
+) -> None:
+    _run_git(
+        (git_path, "-C", repository, "cat-file", "-e", f"{expected_commit}^{{commit}}"),
+        cwd=cwd,
+        env=environment,
+        description=f"{description} locked commit object verification",
+    )
+    head = _run_git(
+        (git_path, "-C", repository, "rev-parse", "--verify", "HEAD"),
+        cwd=cwd,
+        env=environment,
+        description=f"{description} commit verification",
+    )
+    if head != f"{expected_commit}\n".encode("ascii"):
+        raise CustomNodeInstallError(f"{description} commit does not match gitlink")
+    symbolic = _run_git_allowing(
+        (git_path, "-C", repository, "symbolic-ref", "-q", "HEAD"),
+        cwd=cwd,
+        env=environment,
+        description=f"{description} detached HEAD verification",
+        allowed_returncodes=(0, 1),
+    )
+    if symbolic.returncode != 1:
+        raise CustomNodeInstallError(f"{description} HEAD must be detached")
+
+
+def _verify_committed_gitlinks(
+    repository: Path,
+    repository_root: Path,
+    custom_nodes_root: Path,
+    git_path: Path,
+    environment: Mapping[str, str],
+    *,
+    seen: set[Path],
+    root_git_directory: Path,
+    description: str,
+) -> None:
+    tree = _run_git(
+        (git_path, "-C", repository, "ls-tree", "-rz", "--full-tree", "HEAD"),
+        cwd=custom_nodes_root,
+        env=environment,
+        description=f"{description} committed gitlink enumeration",
+    )
+    for record in tree.split(b"\0"):
+        if not record:
+            continue
+        try:
+            header, raw_path = record.split(b"\t", 1)
+            mode, object_type, raw_commit = header.split(b" ", 2)
+        except ValueError as error:
+            raise CustomNodeInstallError(
+                f"{description} committed tree output is invalid"
+            ) from error
+        if mode != _GITLINK_MODE:
+            continue
+        if (
+            object_type != b"commit"
+            or _COMMIT_PATTERN.fullmatch(raw_commit.decode("ascii", errors="ignore"))
+            is None
+        ):
+            raise CustomNodeInstallError(f"{description} gitlink entry is invalid")
+        child_relative = _safe_gitlink_path(raw_path, description)
+        child = repository.joinpath(*child_relative.parts)
+        actual_child = _require_real_directory(child, f"{description} submodule")
+        if (
+            actual_child == repository
+            or not actual_child.is_relative_to(repository_root)
+            or not actual_child.is_relative_to(custom_nodes_root)
+            or actual_child in seen
+        ):
+            raise CustomNodeInstallError(f"{description} submodule path is unsafe")
+        seen.add(actual_child)
+        child_description = f"{description} submodule {child_relative.as_posix()}"
+        _verify_submodule_git_directory(
+            actual_child,
+            root_git_directory,
+            git_path,
+            environment,
+            description=child_description,
+        )
+        _verify_repository_root(
+            actual_child,
+            actual_child,
+            git_path,
+            environment,
+            description=child_description,
+        )
+        expected_commit = raw_commit.decode("ascii")
+        _verify_exact_detached_head(
+            actual_child,
+            expected_commit,
+            custom_nodes_root,
+            git_path,
+            environment,
+            description=child_description,
+        )
+        _verify_committed_gitlinks(
+            actual_child,
+            repository_root,
+            custom_nodes_root,
+            git_path,
+            environment,
+            seen=seen,
+            root_git_directory=root_git_directory,
+            description=child_description,
+        )
+
+
+def _safe_gitlink_path(raw_path: bytes, description: str) -> PurePosixPath:
+    value = os.fsdecode(raw_path)
+    path = PurePosixPath(value)
+    if (
+        not value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise CustomNodeInstallError(f"{description} gitlink path is unsafe")
+    return path
+
+
+def _planned_git_target(node: GitNodePlan, custom_nodes_root: Path) -> Path:
+    target = Path(node.target)
+    if (
+        not target.is_absolute()
+        or target.parent != custom_nodes_root
+        or not is_safe_git_target_dir(target.name)
+    ):
+        raise CustomNodeInstallError(
+            "Git target does not match the safe BuildPlan path"
+        )
+    return target
+
+
+def _optional_root_file(root: Path, name: str) -> Path | None:
+    path = root / name
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise CustomNodeInstallError(
+            f"Git node root {name} could not be inspected"
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise CustomNodeInstallError(f"Git node root {name} must be one regular file")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise CustomNodeInstallError(
+            f"Git node root {name} could not be resolved"
+        ) from error
+    if resolved.parent != root:
+        raise CustomNodeInstallError(f"Git node root {name} escapes its repository")
+    return path
+
+
+def _managed_python_environment(
+    runtime: ContainerRuntime,
+    python_index_url: str,
+    constraints_path: Path,
+    environ: Mapping[str, str] | None,
+) -> dict[str, str]:
+    environment = _isolated_install_environment(environ)
+    environment.update(
+        {
+            "COMFYUI_PATH": os.fspath(runtime.comfyui_path),
+            "PIP_CONSTRAINT": os.fspath(constraints_path),
+            "PIP_CONFIG_FILE": os.devnull,
+            "PIP_INDEX_URL": python_index_url,
+            "UV_CONSTRAINT": os.fspath(constraints_path),
+            "UV_DEFAULT_INDEX": python_index_url,
+            "UV_NO_CONFIG": "1",
+            "VIRTUAL_ENV": os.fspath(runtime.virtual_env),
+            "WORKSPACE": os.fspath(runtime.workspace),
+            "PATH": f"{runtime.virtual_env}/bin:/usr/local/bin:/usr/bin:/bin",
+        }
+    )
+    return environment
+
+
+def _custom_node_inventory_bytes(nodes: Sequence[CustomNodePlan]) -> bytes:
+    entries: list[dict[str, str]] = []
+    for node in nodes:
+        if isinstance(node, RegistryNodePlan):
+            entries.append(
+                {
+                    "type": "registry",
+                    "id": node.id,
+                    "version": node.version,
+                    "verification": "registry-version",
+                    "control": "direct-cm-cli",
+                }
+            )
+        else:
+            entries.append(
+                {
+                    "type": "git",
+                    "url": node.url,
+                    "commit": node.commit,
+                    "target": Path(node.target).name,
+                    "verification": "git-commit",
+                    "control": "direct-git",
+                }
+            )
+    return (
+        json.dumps(
+            {"schema_version": 1, "nodes": entries},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_custom_node_inventory(
+    path: Path,
+    content: bytes,
+    *,
+    owner_uid: int = 0,
+    owner_gid: int = 0,
+) -> None:
+    parent = _require_real_directory(path.parent, "custom-node inventory parent")
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise CustomNodeInstallError(
+            "custom-node inventory target could not be inspected"
+        ) from error
+    else:
+        raise CustomNodeInstallError("custom-node inventory target already exists")
+    temporary: Path | None = None
+    identity: _FilesystemIdentity | None = None
+    linked = False
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "wb") as stream:
+            opened_metadata = os.fstat(stream.fileno())
+            identity = _FilesystemIdentity(
+                opened_metadata.st_dev, opened_metadata.st_ino
+            )
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), 0o444)
+            os.fchown(stream.fileno(), owner_uid, owner_gid)
+        if not _path_has_identity(temporary, identity):
+            raise CustomNodeInstallError(
+                "custom-node inventory temporary identity changed"
+            )
+        os.link(temporary, path, follow_symlinks=False)
+        linked = True
+        if not _path_has_identity(path, identity):
+            raise CustomNodeInstallError(
+                "custom-node inventory linked identity changed"
+            )
+        _unlink_if_identity(temporary, identity)
+        temporary = None
+        metadata = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != owner_uid
+            or metadata.st_gid != owner_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o444
+            or path.read_bytes() != content
+        ):
+            raise CustomNodeInstallError("custom-node inventory verification failed")
+    except CustomNodeInstallError:
+        if linked and identity is not None:
+            _unlink_if_identity(path, identity)
+        raise
+    except OSError as error:
+        if linked and identity is not None:
+            _unlink_if_identity(path, identity)
+        raise CustomNodeInstallError(
+            "custom-node inventory could not be created"
+        ) from error
+    finally:
+        if temporary is not None and identity is not None:
+            _unlink_if_identity(temporary, identity)
+
+
+def _path_has_identity(path: Path, identity: _FilesystemIdentity) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return (metadata.st_dev, metadata.st_ino) == (identity.device, identity.inode)
+
+
+def _unlink_if_identity(path: Path, identity: _FilesystemIdentity) -> None:
+    if not _path_has_identity(path, identity):
+        return
+    with suppress(FileNotFoundError):
+        path.unlink()
+
+
+def _parse_project_identity(content: bytes) -> _ObservedRegistryIdentity:
+    try:
+        document = tomllib.loads(content.decode("utf-8"))
+        project = document["project"]
+        name = project["name"]
+        version = project["version"]
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise TypeError
+        normalized_name = canonicalize_name(name, validate=True)
+        parsed_version = Version(version)
+    except (
+        InvalidName,
+        InvalidVersion,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        tomllib.TOMLDecodeError,
+    ) as error:
+        raise CustomNodeInstallError(
+            "custom-node pyproject.toml has invalid project identity"
+        ) from error
+    return _ObservedRegistryIdentity(
+        name=name,
+        normalized_name=normalized_name,
+        version=version,
+        parsed_version=parsed_version,
+    )
+
+
+def _require_real_directory(path: Path, subject: str) -> Path:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise CustomNodeInstallError(f"{subject} is unavailable") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or resolved != path
+    ):
+        raise CustomNodeInstallError(f"{subject} must be one real directory")
+    return resolved
+
+
+def _require_absent(path: Path, subject: str) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise CustomNodeInstallError(f"{subject} could not be inspected") from error
+    raise CustomNodeInstallError(f"{subject} already exists")
+
+
+def _capture_owned_stage(stage: Path, parent: Path) -> _FilesystemIdentity:
+    _verify_owned_stage(stage, parent)
+    metadata = stage.lstat()
+    return _FilesystemIdentity(metadata.st_dev, metadata.st_ino)
+
+
+def _verify_owned_stage(
+    stage: Path,
+    parent: Path,
+    identity: _FilesystemIdentity | None = None,
+) -> None:
+    if not _is_owned_stage(stage, parent, identity):
+        raise CustomNodeInstallError(
+            "Git stage identity is not one owned same-filesystem sibling"
+        )
+
+
+def _is_owned_stage(
+    stage: Path,
+    parent: Path,
+    identity: _FilesystemIdentity | None = None,
+) -> bool:
+    try:
+        metadata = stage.lstat()
+        resolved = stage.resolve(strict=True)
+        parent_metadata = parent.lstat()
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(metadata.st_mode)
+        and stat.S_ISDIR(metadata.st_mode)
+        and resolved == stage
+        and stage.parent == parent
+        and stage.name.startswith(".")
+        and metadata.st_uid == os.geteuid()
+        and metadata.st_dev == parent_metadata.st_dev
+        and (
+            identity is None
+            or (metadata.st_dev, metadata.st_ino) == (identity.device, identity.inode)
+        )
+    )
+
+
+def _rename_noreplace(
+    source: Path,
+    target: Path,
+    identity: _FilesystemIdentity,
+) -> None:
+    _verify_owned_stage(source, source.parent, identity)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+    except (OSError, AttributeError) as error:  # pragma: no cover - Ubuntu owns it.
+        raise CustomNodeInstallError("atomic Git placement is unavailable") from error
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1)
+    if result == 0:
+        try:
+            metadata = target.lstat()
+        except OSError as error:
+            raise CustomNodeInstallError(
+                "atomic Git placement identity is unavailable"
+            ) from error
+        if (metadata.st_dev, metadata.st_ino) != (identity.device, identity.inode):
+            raise CustomNodeInstallError("atomic Git placement identity changed")
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise CustomNodeInstallError("Git target already exists")
+    raise CustomNodeInstallError(
+        f"atomic Git placement failed: {os.strerror(error_number)}"
+    )
+
+
+def _run_git(
+    argv: Sequence[str | os.PathLike[str]],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    description: str,
+) -> bytes:
+    completed = _run_git_allowing(
+        argv,
+        cwd=cwd,
+        env=env,
+        description=description,
+        allowed_returncodes=(0,),
+    )
+    return completed.stdout
+
+
+def _run_git_allowing(
+    argv: Sequence[str | os.PathLike[str]],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    description: str,
+    allowed_returncodes: Sequence[int],
+) -> subprocess.CompletedProcess[bytes]:
+    command = [os.fspath(item) for item in argv]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=dict(env),
+            check=False,
+            capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CustomNodeInstallError(f"{description} failed to start") from error
+    if completed.returncode not in allowed_returncodes:
+        raise CustomNodeInstallError(
+            f"{description} failed with exit code {completed.returncode}"
+        )
+    return completed

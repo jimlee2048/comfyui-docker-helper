@@ -305,12 +305,46 @@ def test_checkout_owned_manager_capability_flows_only_to_application_phase(
     }
     assert plan["toolchain"]["tool_store"]["comfy_cli"] is None
     assert plan["custom_nodes"]["user_directory"] == "/workspace/ComfyUI/user"
-    assert plan["custom_nodes"]["registry_inventory"] == (
-        "/opt/cdh/build/registry-inventory.json"
+    assert plan["custom_nodes"]["custom_node_inventory"] == (
+        "/opt/cdh/build/custom-node-inventory.json"
     )
     assert "--enable-manager" not in plan["runtime"]["launch_command"]
     phase = json.loads((output / "phases/application.json").read_bytes())
     assert phase["payload"]["comfyui"]["manager"] == manager
+
+
+def test_rendered_context_preserves_raw_git_locator_from_lock_to_plan(
+    tmp_path: Path,
+) -> None:
+    locator = "ssh://Git@Example.invalid:22/Org/Node.git"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[[comfyui.custom_nodes]]
+type = "git"
+url = "{locator}"
+ref = "main"
+target_dir = "direct"
+'''
+    )
+    output = tmp_path / "output"
+
+    _prepare(config, output, FakeAcquirer())
+
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    locked = next(
+        entry for entry in lock.entries if isinstance(entry, DirectGitLockEntry)
+    )
+    plan = json.loads((output / "build-plan.json").read_bytes())
+    planned = plan["custom_nodes"]["nodes"][0]
+    phase = json.loads((output / "phases/custom-nodes.json").read_bytes())
+
+    assert locked.url == locator
+    assert locked.commit == COMMIT
+    assert planned["url"] == locator
+    assert planned["commit"] == locked.commit
+    assert phase["payload"]["nodes"][0] == planned
 
 
 @dataclass

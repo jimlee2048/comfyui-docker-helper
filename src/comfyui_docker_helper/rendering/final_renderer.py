@@ -226,16 +226,15 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         "--resolution-manifest /opt/cdh/build/pyproject.toml "
         "--constraints /opt/cdh/build/python-package-constraints.txt"
     )
-    if any(node.type == "registry" for node in plan.custom_nodes.nodes):
-        lines.append(
-            f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
-            "container install-registry-nodes "
-            "--custom-nodes-phase /opt/cdh/build/phases/custom-nodes.json "
-            "--application-phase /opt/cdh/build/phases/application.json "
-            f"--build-plan-digest {phase_digest} "
-            "--constraints /opt/cdh/build/python-package-constraints.txt "
-            "--hooks-directory /opt/cdh/build/inputs"
-        )
+    lines.append(
+        f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+        "container install-custom-nodes "
+        "--custom-nodes-phase /opt/cdh/build/phases/custom-nodes.json "
+        "--application-phase /opt/cdh/build/phases/application.json "
+        f"--build-plan-digest {phase_digest} "
+        "--constraints /opt/cdh/build/python-package-constraints.txt "
+        "--hooks-directory /opt/cdh/build/inputs"
+    )
     return lines
 
 

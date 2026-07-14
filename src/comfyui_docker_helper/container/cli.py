@@ -10,9 +10,9 @@ from comfyui_docker_helper.container.application_installer import (
     install_inference_group,
 )
 from comfyui_docker_helper.container.comfyui_installer import install_comfyui
+from comfyui_docker_helper.container.custom_node_installer import install_custom_nodes
 from comfyui_docker_helper.container.download_files import download_files
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
-from comfyui_docker_helper.container.registry_installer import install_registry_nodes
 from comfyui_docker_helper.container.runners import ContainerRuntime
 
 app = typer.Typer(
@@ -131,8 +131,8 @@ def install_comfyui_command(
     )
 
 
-@app.command("install-registry-nodes", context_settings=HELP_CONTEXT_SETTINGS)
-def install_registry_nodes_command(
+@app.command("install-custom-nodes", context_settings=HELP_CONTEXT_SETTINGS)
+def install_custom_nodes_command(
     custom_nodes_phase: Annotated[
         Path,
         typer.Option(
@@ -166,8 +166,8 @@ def install_registry_nodes_command(
         ),
     ] = Path("/opt/cdh/build/inputs"),
 ) -> None:
-    """Install exact Registry nodes through checkout-owned Manager cm-cli."""
-    install_registry_nodes(
+    """Install the exact ordered Registry and direct-Git custom nodes."""
+    install_custom_nodes(
         custom_nodes_phase,
         application_phase,
         expected_build_plan_digest=build_plan_digest,

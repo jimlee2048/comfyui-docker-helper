@@ -77,8 +77,10 @@ def parse_comfyui_requirements(
     platform: str,
     protected_names: tuple[str, ...],
 ) -> ParsedComfyUIRequirements:
-    """Parse only PEP 508 rows and project target-active protected members."""
-    names = set(_normalized_protected_names(protected_names))
+    """Parse PEP 508 rows and optionally project target-active protected members."""
+    names = (
+        set(_normalized_protected_names(protected_names)) if protected_names else set()
+    )
     environment = _marker_environment(python_version, platform)
     protected: list[DirectPythonRequestMember] = []
     ordinary: list[str] = []
@@ -116,6 +118,21 @@ def parse_comfyui_requirements(
         protected=merged,
         ordinary=tuple(ordinary),
     )
+
+
+def parse_ordinary_requirements(
+    content: bytes,
+    *,
+    python_version: str,
+    platform: str,
+) -> tuple[str, ...]:
+    """Return strict ordinary rows for a cdh-owned requirements operation."""
+    return parse_comfyui_requirements(
+        content,
+        python_version=python_version,
+        platform=platform,
+        protected_names=(),
+    ).ordinary
 
 
 def parse_manager_requirements(

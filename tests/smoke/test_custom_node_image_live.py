@@ -152,6 +152,8 @@ def prove_git_targets(root, nodes):
         target = pathlib.Path(node["target"])
         assert target.is_absolute()
         assert target.parent == root
+        assert target.name not in {"", ".", ".."}
+        assert re.fullmatch(r"[A-Za-z0-9._-]+", target.name) is not None
         assert target not in proven
         target = require_real_directory(target)
         verify_exact_repository_root(target)
@@ -230,6 +232,7 @@ import importlib.metadata as metadata
 import json
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import tomllib

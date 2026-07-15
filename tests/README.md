@@ -61,11 +61,11 @@ hooks, and downloads. Test modules own assertions about the behavior they
 observe; do not copy either authority into prose.
 
 Durable release runs select one or more catalog IDs with the repeatable
-`--acceptance-scenario ID` option. Supply the selected scenario's image and
-rendered-context environment inputs, then authorize all costs required by the
-test module. Missing inputs for a selected release scenario are failures, not
-skips. Moving-input scenarios are non-blocking canaries and must be reported
-separately from release acceptance.
+`--acceptance-scenario ID` option. Supply the image and rendered-context
+environment inputs for every selected scenario, then authorize all costs
+declared by each selected typed catalog scenario. Missing inputs for a selected
+release scenario are failures, not skips. Moving-input scenarios are
+non-blocking canaries and must be reported separately from release acceptance.
 
 Render each selected context once, build its image once, and reuse both across
 all applicable inspection, CPU, startup, CLI, and GPU probes. Clean-cache

@@ -37,8 +37,37 @@ def test_final_structure_uses_exact_baseline_defaults() -> None:
     assert config.python.version == "3.13.14"
     assert config.python.uv_version == "0.11.28"
     assert config.build.platforms == ["linux/amd64"]
+    assert config.compute_platform.cuda.image_flavor == "cudnn-devel"
+    assert config.compute_platform.cuda.image_distro == "ubuntu24.04"
     assert config.comfyui.install_cli is True
     assert validate_final_config(config) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("image_flavor", "cudnn"),
+        ("image_flavor", 1),
+        ("image_distro", "ubuntu20.04"),
+        ("image_distro", 24),
+    ],
+)
+def test_cuda_image_selectors_reject_values_outside_the_public_enums(
+    field: str,
+    value: object,
+) -> None:
+    document = _document()
+    document["compute_platform"]["cuda"][field] = value
+
+    with pytest.raises(FinalConfigError) as raised:
+        validate_final_config_structure(document)
+
+    assert raised.value.diagnostics[0].path == (
+        "compute_platform",
+        "cuda",
+        field,
+    )
+    assert raised.value.diagnostics[0].code == "schema.literal_error"
 
 
 @pytest.mark.parametrize("value", [0, 1, "true", "false"])

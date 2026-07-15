@@ -38,6 +38,12 @@ context, `--locked` for zero-provider/zero-write verification, and
 The public PyTorch version is a selector. Its CUDA-derived channel, index, and
 target enter the resolver request identity, while the canonical lock and
 BuildPlan retain complete resolved versions such as `2.12.1+cu130`.
+CUDA `image_flavor` and `image_distro` independently select the exact NVIDIA
+image tag; they do not alter the channel derived from the CUDA version. An
+upstream tag or target-platform miss fails resolution without substitution.
+Successfully resolving a `base` or `runtime` image does not promise development
+headers or cuDNN capabilities. Dependent install, build, or runtime gates may
+still fail without fallback.
 
 `full.toml` also demonstrates `[python].uv_tools`. Each entry is resolved and
 locked as an isolated direct package, then installed under `/opt/uv/tools` with

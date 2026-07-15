@@ -5,9 +5,14 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from comfyui_docker_helper.exact_ledger import (
+    DEFAULT_CUDA_IMAGE_DISTRO,
+    DEFAULT_CUDA_IMAGE_FLAVOR,
     DEFAULT_MANAGED_PYTHON_VERSION,
     UV_VERSION,
 )
+
+CudaImageFlavor = Literal["base", "runtime", "devel", "cudnn-runtime", "cudnn-devel"]
+CudaImageDistro = Literal["ubuntu22.04", "ubuntu24.04"]
 
 
 class FinalConfigModel(BaseModel):
@@ -17,9 +22,11 @@ class FinalConfigModel(BaseModel):
 
 
 class FinalCudaConfig(FinalConfigModel):
-    """The sole configured CUDA version authority."""
+    """CUDA version and independent NVIDIA image-packaging selectors."""
 
     version: str
+    image_flavor: CudaImageFlavor = DEFAULT_CUDA_IMAGE_FLAVOR
+    image_distro: CudaImageDistro = DEFAULT_CUDA_IMAGE_DISTRO
 
 
 class FinalComputePlatformConfig(FinalConfigModel):

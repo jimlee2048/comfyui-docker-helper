@@ -12,6 +12,8 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_REPOSITORY,
     CUDA_IMAGE_REPOSITORY,
     CUDA_VERSION,
+    DEFAULT_CUDA_IMAGE_DISTRO,
+    DEFAULT_CUDA_IMAGE_FLAVOR,
     DEFAULT_MANAGED_PYTHON_VERSION,
     FALLBACK_MANAGED_PYTHON_VERSION,
     UV_VERSION,
@@ -49,7 +51,7 @@ CUSTOM_SCRIPTS_URL = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.gi
         (
             "cuda-base",
             CUDA_IMAGE_REPOSITORY,
-            f"{CUDA_VERSION}-cudnn-devel-ubuntu24.04",
+            f"{CUDA_VERSION}-{DEFAULT_CUDA_IMAGE_FLAVOR}-{DEFAULT_CUDA_IMAGE_DISTRO}",
         ),
         ("uv-tool", "ghcr.io/astral-sh/uv", UV_VERSION),
     ],

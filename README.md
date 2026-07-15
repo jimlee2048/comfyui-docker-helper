@@ -44,6 +44,8 @@ type = "cuda"
 
 [compute_platform.cuda]
 version = "13.0.3"
+image_flavor = "cudnn-devel"
+image_distro = "ubuntu24.04"
 
 [python]
 version = "3.13.14"
@@ -222,8 +224,16 @@ documents.
 
 - `[build].platforms` is ordered, non-empty, duplicate-free, and currently
   accepts exactly `["linux/amd64"]`.
-- CUDA version is the sole inference-backend version authority. There is no
-  independent wheel-channel, image-flavor, or distro selector.
+- CUDA version is the sole inference-backend version authority and solely
+  derives the PyTorch channel. `image_flavor` accepts `base`, `runtime`,
+  `devel`, `cudnn-runtime`, or `cudnn-devel` (default), while `image_distro`
+  accepts `ubuntu22.04` or `ubuntu24.04` (default). These selectors construct
+  the exact NVIDIA image tag without changing the PyTorch channel. Validation
+  is structural and offline; a missing upstream tag or `linux/amd64`
+  descriptor fails during provider resolution without fallback.
+  Resolving a `base` or `runtime` image does not promise development headers or
+  cuDNN capabilities; dependent install, build, or runtime gates may still fail
+  without fallback.
 - Direct Python declarations accept bare names, exact stable versions, or
   supported bounded selectors. URL/VCS/local/editable/raw-option forms and
   environment markers are rejected.

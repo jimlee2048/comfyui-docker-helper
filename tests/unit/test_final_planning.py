@@ -17,10 +17,10 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.exact_ledger import (
-    BASE_IMAGE_DISTRO,
-    CUDA_IMAGE_FLAVOR,
     CUDA_IMAGE_REPOSITORY,
     CUDA_VERSION,
+    DEFAULT_CUDA_IMAGE_DISTRO,
+    DEFAULT_CUDA_IMAGE_FLAVOR,
     DEFAULT_MANAGED_PYTHON_VERSION,
     FALLBACK_MANAGED_PYTHON_VERSION,
     PYTORCH_CHANNEL,
@@ -56,8 +56,8 @@ def test_exact_ledger_baseline_derives_one_complete_group() -> None:
     assert planning.backend.target_platform is TargetPlatform.LINUX_AMD64
     assert planning.backend.package_channel == PYTORCH_CHANNEL
     assert planning.backend.base_image == (
-        f"{CUDA_IMAGE_REPOSITORY}:{CUDA_VERSION}-{CUDA_IMAGE_FLAVOR}-"
-        f"{BASE_IMAGE_DISTRO}"
+        f"{CUDA_IMAGE_REPOSITORY}:{CUDA_VERSION}-{DEFAULT_CUDA_IMAGE_FLAVOR}-"
+        f"{DEFAULT_CUDA_IMAGE_DISTRO}"
     )
     assert planning.pytorch_group.python_version == DEFAULT_MANAGED_PYTHON_VERSION
     assert planning.pytorch_group.target_platform is TargetPlatform.LINUX_AMD64
@@ -112,7 +112,8 @@ def test_custom_cuda_version_is_structurally_planned_without_support_status() ->
     assert planning.pytorch_group.python_version == FALLBACK_MANAGED_PYTHON_VERSION
     assert planning.backend.package_channel == "cu129"
     assert planning.backend.base_image == (
-        f"{CUDA_IMAGE_REPOSITORY}:12.9.2-{CUDA_IMAGE_FLAVOR}-{BASE_IMAGE_DISTRO}"
+        f"{CUDA_IMAGE_REPOSITORY}:12.9.2-{DEFAULT_CUDA_IMAGE_FLAVOR}-"
+        f"{DEFAULT_CUDA_IMAGE_DISTRO}"
     )
     assert planning.pytorch_group.package_channel == "cu129"
     assert planning.pytorch_group.index_url == (
@@ -205,23 +206,9 @@ def test_only_cuda_backend_is_structurally_accepted() -> None:
     assert raised.value.diagnostics[0].code == "schema.literal_error"
 
 
-@pytest.mark.parametrize(
-    ("section", "field"),
-    [
-        ("compute_platform.cuda", "image_flavor"),
-        ("compute_platform.cuda", "image_distro"),
-        ("pytorch", "wheel_cuda_version"),
-    ],
-)
-def test_no_parallel_backend_or_image_knobs_are_accepted(
-    section: str,
-    field: str,
-) -> None:
+def test_no_parallel_pytorch_channel_knob_is_accepted() -> None:
     document = _document()
-    target = document
-    for part in section.split("."):
-        target = target[part]
-    target[field] = "parallel-authority"
+    document["pytorch"]["wheel_cuda_version"] = "cu130"
 
     with pytest.raises(FinalConfigError) as raised:
         _config(document)
@@ -252,8 +239,45 @@ def test_backend_adapter_is_pure_and_propagates_exact_target() -> None:
     adapter = CudaBackendAdapter()
 
     version = CudaVersion.from_validated(CUDA_VERSION)
-    first = adapter.derive(version, TargetPlatform.LINUX_AMD64)
-    second = adapter.derive(version, TargetPlatform.LINUX_AMD64)
+    first = adapter.derive(
+        version,
+        TargetPlatform.LINUX_AMD64,
+        image_flavor="cudnn-runtime",
+        image_distro="ubuntu22.04",
+    )
+    second = adapter.derive(
+        version,
+        TargetPlatform.LINUX_AMD64,
+        image_flavor="cudnn-runtime",
+        image_distro="ubuntu22.04",
+    )
 
     assert first == second
     assert first.target_platform is TargetPlatform.LINUX_AMD64
+    assert first.base_image == (
+        f"{CUDA_IMAGE_REPOSITORY}:{CUDA_VERSION}-cudnn-runtime-ubuntu22.04"
+    )
+    assert first.package_channel == PYTORCH_CHANNEL
+
+
+@pytest.mark.parametrize(
+    "image_flavor",
+    ["base", "runtime", "devel", "cudnn-runtime", "cudnn-devel"],
+)
+@pytest.mark.parametrize("image_distro", ["ubuntu22.04", "ubuntu24.04"])
+def test_every_cuda_image_selector_combination_constructs_the_exact_tag(
+    image_flavor: str,
+    image_distro: str,
+) -> None:
+    document = _document()
+    document["compute_platform"]["cuda"].update(
+        image_flavor=image_flavor,
+        image_distro=image_distro,
+    )
+
+    planning = build_final_planning_domain(_config(document))
+
+    assert planning.backend.base_image == (
+        f"{CUDA_IMAGE_REPOSITORY}:{CUDA_VERSION}-{image_flavor}-{image_distro}"
+    )
+    assert planning.backend.package_channel == PYTORCH_CHANNEL

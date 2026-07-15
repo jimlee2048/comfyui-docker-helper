@@ -5,17 +5,17 @@ from enum import StrEnum
 from typing import Literal, Protocol
 
 from comfyui_docker_helper.config.diagnostics import DiagnosticError
-from comfyui_docker_helper.config.final_models import FinalConfig
+from comfyui_docker_helper.config.final_models import (
+    CudaImageDistro,
+    CudaImageFlavor,
+    FinalConfig,
+)
 from comfyui_docker_helper.config.final_validation import (
     NormalizedRequirement,
     validate_final_config,
     validate_final_config_domains,
 )
-from comfyui_docker_helper.exact_ledger import (
-    BASE_IMAGE_DISTRO,
-    CUDA_IMAGE_FLAVOR,
-    CUDA_IMAGE_REPOSITORY,
-)
+from comfyui_docker_helper.exact_ledger import CUDA_IMAGE_REPOSITORY
 
 
 class TargetPlatform(StrEnum):
@@ -71,25 +71,30 @@ class BackendAdapter(Protocol):
         self,
         version: CudaVersion,
         target_platform: TargetPlatform,
+        *,
+        image_flavor: CudaImageFlavor,
+        image_distro: CudaImageDistro,
     ) -> BackendPlan: ...
 
 
 @dataclass(frozen=True, slots=True)
 class CudaBackendAdapter:
-    """Derive NVIDIA CUDA image and PyTorch channel inputs from one version."""
+    """Construct the NVIDIA tag while deriving its PyTorch channel from version."""
 
     def derive(
         self,
         version: CudaVersion,
         target_platform: TargetPlatform,
+        *,
+        image_flavor: CudaImageFlavor,
+        image_distro: CudaImageDistro,
     ) -> BackendPlan:
         return BackendPlan(
             backend="cuda",
             version=version,
             target_platform=target_platform,
             base_image=(
-                f"{CUDA_IMAGE_REPOSITORY}:{version.value}-{CUDA_IMAGE_FLAVOR}-"
-                f"{BASE_IMAGE_DISTRO}"
+                f"{CUDA_IMAGE_REPOSITORY}:{version.value}-{image_flavor}-{image_distro}"
             ),
             package_channel=f"cu{version.major}{version.minor}",
         )
@@ -146,6 +151,8 @@ def build_final_planning_domain(
     backend = (backend_adapter or CudaBackendAdapter()).derive(
         CudaVersion.from_validated(config.compute_platform.cuda.version),
         target_platform,
+        image_flavor=config.compute_platform.cuda.image_flavor,
+        image_distro=config.compute_platform.cuda.image_distro,
     )
     pytorch_extras = tuple(
         _requirement_request(requirement)

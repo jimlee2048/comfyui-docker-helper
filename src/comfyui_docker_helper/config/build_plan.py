@@ -713,6 +713,8 @@ def construct_build_plan(
     backend = CudaBackendAdapter().derive(
         CudaVersion.from_validated(config.compute_platform.cuda.version),
         target_platform,
+        image_flavor=config.compute_platform.cuda.image_flavor,
+        image_distro=config.compute_platform.cuda.image_distro,
     )
     entries = {canonical_entry_key(entry): entry for entry in lock.entries}
     if len(entries) != len(lock.entries):  # defensive after strict reconstruction

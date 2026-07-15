@@ -3,6 +3,8 @@ type = "cuda"
 
 [compute_platform.cuda]
 version = "13.0.3"
+image_flavor = "cudnn-devel"
+image_distro = "ubuntu24.04"
 
 [pytorch]
 version = "2.12.1"

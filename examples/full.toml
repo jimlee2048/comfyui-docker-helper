@@ -9,6 +9,15 @@ type = "cuda"
 [compute_platform.cuda]
 # Required. Numeric CUDA version used in the nvidia/cuda base image tag.
 version = "13.0.3"
+# Default: "cudnn-devel". Supported: "base", "runtime", "devel",
+# "cudnn-runtime", "cudnn-devel".
+# Selecting a resolvable "base" or "runtime" image does not promise development
+# headers or cuDNN; dependent install, build, or runtime gates may fail without
+# fallback.
+image_flavor = "cudnn-devel"
+# Default: "ubuntu24.04". Supported: "ubuntu22.04", "ubuntu24.04".
+# The exact constructed tag must exist upstream for linux/amd64.
+image_distro = "ubuntu24.04"
 
 [system]
 # Default: "/workspace". Must be an absolute POSIX container path.

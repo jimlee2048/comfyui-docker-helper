@@ -79,6 +79,8 @@ def _config(
     with_uv_tool: bool = False,
     install_cli: bool = True,
     install_manager: bool = False,
+    image_flavor: str = "cudnn-devel",
+    image_distro: str = "ubuntu24.04",
 ) -> str:
     uv_tools = 'uv_tools = ["ruff>=0.15,<0.16"]' if with_uv_tool else ""
     return f"""
@@ -86,6 +88,8 @@ def _config(
 type = "cuda"
 [compute_platform.cuda]
 version = "13.0.3"
+image_flavor = "{image_flavor}"
+image_distro = "{image_distro}"
 [python]
 version = "3.13.14"
 uv_version = "0.11.28"
@@ -496,6 +500,76 @@ def test_default_writes_canonical_context_and_second_default_reuses_lock(
     _prepare(config, output, second_fake, overwrite=True)
     assert second_fake.calls == []
     assert _tree(output) == before
+
+
+@pytest.mark.parametrize(
+    ("selector_overrides", "expected_tag"),
+    [
+        ({"image_distro": "ubuntu22.04"}, "13.0.3-cudnn-devel-ubuntu22.04"),
+        ({"image_flavor": "runtime"}, "13.0.3-runtime-ubuntu24.04"),
+    ],
+)
+def test_cuda_selector_change_reconciles_one_exact_oci_identity(
+    tmp_path: Path,
+    selector_overrides: dict[str, str],
+    expected_tag: str,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    initial_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    initial_cuda = next(
+        entry
+        for entry in initial_lock.entries
+        if isinstance(entry, OciLockEntry) and entry.role == "cuda-base"
+    )
+    config.write_text(_config(**selector_overrides))
+
+    locked_fake = FakeAcquirer()
+    with pytest.raises(HostRenderServiceError) as locked:
+        _prepare(
+            config,
+            output,
+            locked_fake,
+            options=PlanningOptions(locked=True),
+            overwrite=True,
+        )
+    assert locked_fake.calls == []
+    assert [item.code for item in locked.value.diagnostics] == ["lock.locked_mismatch"]
+
+    update_fake = FakeAcquirer()
+    prepared = _prepare(config, output, update_fake, overwrite=True)
+    assert update_fake.calls == ["oci"]
+    updated_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    updated_cuda = next(
+        entry
+        for entry in updated_lock.entries
+        if isinstance(entry, OciLockEntry) and entry.role == "cuda-base"
+    )
+    assert updated_cuda.tag == expected_tag
+    assert updated_cuda.request_digest != initial_cuda.request_digest
+    assert updated_cuda.request_digest == compute_request_digest(
+        OciRequestIdentity(
+            type="oci",
+            role="cuda-base",
+            repository="nvidia/cuda",
+            tag=expected_tag,
+            platform="linux/amd64",
+        )
+    )
+    assert prepared.plan.toolchain.pytorch_channel == "cu130"
+    assert prepared.plan.toolchain.cuda_image.reference == (
+        f"nvidia/cuda:{updated_cuda.tag}@{DIGEST_A}"
+    )
+    assert (
+        f"FROM --platform=linux/amd64 nvidia/cuda:{updated_cuda.tag}@{DIGEST_A}"
+        in (output / "Dockerfile").read_text()
+    )
+
+    reuse_fake = FakeAcquirer()
+    _prepare(config, output, reuse_fake, overwrite=True)
+    assert reuse_fake.calls == []
 
 
 def test_upgrade_refreshes_only_moving_requests_and_preserves_exact_results(

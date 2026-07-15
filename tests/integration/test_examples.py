@@ -23,6 +23,8 @@ def test_example_configs_validate_offline(name: str) -> None:
 
     assert result.config.build.platforms == ["linux/amd64"]
     assert result.config.compute_platform.cuda.version == "13.0.3"
+    assert result.config.compute_platform.cuda.image_flavor == "cudnn-devel"
+    assert result.config.compute_platform.cuda.image_distro == "ubuntu24.04"
     assert result.config.pytorch.version == "2.12.1"
     assert result.warnings == ()
 
@@ -62,7 +64,11 @@ def test_full_example_covers_active_top_level_schema() -> None:
         "comfyui",
         "files",
     }
-    assert set(document["compute_platform"]["cuda"]) == {"version"}
+    assert set(document["compute_platform"]["cuda"]) == {
+        "version",
+        "image_flavor",
+        "image_distro",
+    }
     assert set(document["build"]) == {"tags", "output", "platforms"}
     assert document["build"]["platforms"] == ["linux/amd64"]
     assert [node["type"] for node in document["comfyui"]["custom_nodes"]] == [

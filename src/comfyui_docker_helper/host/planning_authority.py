@@ -182,7 +182,10 @@ def build_desired_planning_inputs(
 ) -> DesiredPlanningInputs:
     platform = TargetPlatform(config.build.platforms[0])
     backend = CudaBackendAdapter().derive(
-        CudaVersion.from_validated(config.compute_platform.cuda.version), platform
+        CudaVersion.from_validated(config.compute_platform.cuda.version),
+        platform,
+        image_flavor=config.compute_platform.cuda.image_flavor,
+        image_distro=config.compute_platform.cuda.image_distro,
     )
     repository, tag = backend.base_image.split(":", 1)
     requirements_request = comfyui_requirements_request(config, comfyui_entry)

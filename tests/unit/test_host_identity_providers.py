@@ -178,6 +178,26 @@ def test_oci_tag_movement_returns_current_descriptor_without_local_catalog() -> 
     assert first.resolved_version == second.resolved_version == "0.11.28"
 
 
+def test_oci_missing_tag_is_a_typed_not_found_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, request=request)
+
+    with (
+        _client(handler) as client,
+        pytest.raises(IdentityProviderError) as raised,
+    ):
+        HttpOciIdentityProvider(client).resolve(
+            OciIdentityRequest(
+                "cuda-base",
+                "nvidia/cuda",
+                "13.0.3-cudnn-devel-ubuntu-does-not-exist",
+            )
+        )
+
+    assert raised.value.source == "OCI registry"
+    assert raised.value.kind is ProviderFailureKind.NOT_FOUND
+
+
 def test_oci_bearer_challenge_retries_without_exposing_token() -> None:
     calls: list[httpx.Request] = []
 

@@ -1,4 +1,4 @@
-"""Focused exact identity-provider contracts."""
+"""Exact identity-provider contracts."""
 
 from __future__ import annotations
 

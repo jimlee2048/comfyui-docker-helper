@@ -1,4 +1,4 @@
-"""Focused canonical reconciliation mode and delta contracts."""
+"""Canonical reconciliation mode and delta contracts."""
 
 from __future__ import annotations
 

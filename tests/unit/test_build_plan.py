@@ -1,4 +1,4 @@
-"""Focused BuildPlan construction and binding contracts."""
+"""BuildPlan construction and binding contracts."""
 
 from __future__ import annotations
 

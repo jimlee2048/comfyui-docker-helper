@@ -1,4 +1,4 @@
-"""Focused canonical config-lock v1 contracts."""
+"""Canonical config-lock v1 contracts."""
 
 from __future__ import annotations
 

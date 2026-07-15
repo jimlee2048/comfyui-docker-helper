@@ -1,4 +1,4 @@
-"""Focused provider adapter and exact uv group resolver contracts."""
+"""Provider adapter and exact uv group resolver contracts."""
 
 from __future__ import annotations
 

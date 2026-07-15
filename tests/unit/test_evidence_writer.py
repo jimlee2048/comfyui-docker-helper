@@ -1,4 +1,4 @@
-"""Current anonymous evidence publication and failure contracts."""
+"""Anonymous evidence publication and failure contracts."""
 
 from __future__ import annotations
 

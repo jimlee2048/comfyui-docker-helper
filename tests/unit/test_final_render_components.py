@@ -1,4 +1,4 @@
-"""Focused renderer, materializer, and phase-loader contracts."""
+"""Renderer, materializer, and phase-loader contracts."""
 
 from __future__ import annotations
 

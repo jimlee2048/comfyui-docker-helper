@@ -38,6 +38,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
+from comfyui_docker_helper.config.canonical_request import CanonicalRequestError
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
     CanonicalAcquisitionError,
@@ -475,6 +476,34 @@ def test_planning_options_reject_conflicting_public_modes(
         PlanningOptions(**options)
 
     assert raised.value.diagnostics[0].code == "render.options_conflict"
+
+
+def test_request_diagnostic_is_adapted_without_unexpected_exception_handling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+
+    diagnostic = Diagnostic(
+        path=("pytorch", "extra_packages"),
+        code="pytorch.protected_requirement_conflict",
+        message="protected PyTorch requirements conflict",
+    )
+
+    def reject_request(*_args, **_kwargs):
+        raise CanonicalRequestError((diagnostic,))
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.render_service.build_canonical_request_graph",
+        reject_request,
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, tmp_path / "context", FakeAcquirer())
+
+    assert raised.value.diagnostics == (diagnostic,)
+    assert isinstance(raised.value.__cause__, CanonicalRequestError)
 
 
 def test_default_writes_canonical_context_and_second_default_reuses_lock(

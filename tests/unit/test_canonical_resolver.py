@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import FrozenInstanceError, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
 import pytest
+from pydantic import ValidationError
 
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
@@ -35,6 +36,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     canonical_entry_key,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
+    AcceptedCanonicalLock,
     AcquiredCanonicalEntries,
     CanonicalAcquisitionError,
     CanonicalResolutionError,
@@ -516,7 +518,7 @@ def test_managed_python_result_only_fields_do_not_enter_desired_compatibility(
 
     assert acquirer.calls == []
     assert result.delta == ()
-    assert result.lock.entries == [changed]
+    assert result.lock.entries == (changed,)
 
 
 @pytest.mark.parametrize("policy", [LockPolicy.DEFAULT, LockPolicy.UPGRADE])
@@ -618,76 +620,21 @@ def test_upgrade_refreshes_the_internal_moving_comfy_cli_request() -> None:
     assert result.delta == ()
 
 
-def test_reconcile_rederives_after_nested_python_member_mutation() -> None:
+def test_admitted_request_lock_and_result_are_deeply_immutable() -> None:
     request = _requests()[-1]
-    assert isinstance(request, PyTorchRequestIdentity)
-    exact = PyTorchRequestIdentity.model_validate(
-        {
-            **request.model_dump(),
-            "members": [
-                request.members[0],
-                request.members[1].model_copy(update={"selector": "==0.27.1"}),
-            ],
-        }
-    )
-    desired = DesiredResolution.from_request(exact)
-    existing = _initial_lock((desired,))
-    exact.members[1].selector = "<0.28,>=0.27"
-    acquirer = FakeAcquirer()
+    desired = DesiredResolution.from_request(request)
+    lock = _initial_lock((desired,))
+    accepted = AcceptedCanonicalLock(lock, (), False, (), ())
 
-    result = reconcile_canonical_lock(
-        (desired,),
-        existing=existing,
-        acquirer=acquirer,
-        policy=LockPolicy.UPGRADE,
-    )
-
-    assert desired.stability is SelectorStability.EXACT
-    assert acquirer.calls == ["pytorch-group"]
-    assert len(result.delta) == 3
-
-
-@pytest.mark.parametrize(
-    ("policy", "purpose"),
-    [
-        (LockPolicy.DEFAULT, ReconcilePurpose.APPLY),
-        (LockPolicy.LOCKED, ReconcilePurpose.APPLY),
-        (LockPolicy.UPGRADE, ReconcilePurpose.APPLY),
-        (LockPolicy.DEFAULT, ReconcilePurpose.CHECK),
-        (LockPolicy.DEFAULT, ReconcilePurpose.DRY_RUN),
-        (LockPolicy.UPGRADE, ReconcilePurpose.DRY_RUN),
-        (LockPolicy.LOCKED, ReconcilePurpose.DRY_RUN),
-    ],
-)
-@pytest.mark.parametrize("mutation", ["nested", "duplicate"])
-def test_every_mode_strictly_rebuilds_existing_before_mapping_or_provider_calls(
-    policy: LockPolicy,
-    purpose: ReconcilePurpose,
-    mutation: str,
-) -> None:
-    desired = _desired()
-    existing = _initial_lock(desired)
-    if mutation == "nested":
-        package = next(
-            entry
-            for entry in existing.entries
-            if isinstance(entry, DirectPythonLockEntry)
-        )
-        package.extras.append("Not-Normalized")
-    else:
-        existing.entries.append(existing.entries[0])
-    acquirer = FakeAcquirer()
-
-    with pytest.raises(ValueError):
-        reconcile_canonical_lock(
-            desired,
-            existing=existing,
-            acquirer=acquirer,
-            policy=policy,
-            purpose=purpose,
-        )
-
-    assert acquirer.calls == []
+    assert isinstance(request.members, tuple)
+    assert isinstance(request.members[0].extras, tuple)
+    assert isinstance(lock.entries, tuple)
+    with pytest.raises(ValidationError, match="frozen"):
+        request.members[0].selector = "==9.9.9"
+    with pytest.raises(ValidationError, match="frozen"):
+        lock.entries[0].request_digest = DIGEST_B
+    with pytest.raises(FrozenInstanceError):
+        accepted.lock = CanonicalLock(schema_version=1, entries=())
 
 
 def test_default_initial_acquisition_is_sorted_and_returns_write_intent() -> None:
@@ -1310,52 +1257,6 @@ def test_duplicate_provider_logical_keys_are_not_folded_or_accepted() -> None:
             existing=None,
             acquirer=DuplicateAcquirer(),
         )
-
-
-def test_mutated_nested_provider_entry_is_strictly_rebuilt_before_compatibility() -> (
-    None
-):
-    class MutatedAcquirer(FakeAcquirer):
-        def acquire(
-            self, request: ResolverRequestIdentity, request_digest: str
-        ) -> AcquiredCanonicalEntries:
-            acquired = super().acquire(request, request_digest)
-            entry = acquired.entries[0]
-            assert isinstance(entry, DirectPythonLockEntry)
-            entry.extras.append("Not-Normalized")
-            return acquired
-
-    group = _requests()[-1]
-
-    with pytest.raises(ValueError):
-        reconcile_canonical_lock(
-            (DesiredResolution.from_request(group),),
-            existing=None,
-            acquirer=MutatedAcquirer(),
-        )
-
-
-def test_mutated_local_entry_is_strictly_rebuilt_before_key_comparison() -> None:
-    class MutatedLocalAcquirer(FakeLocalAcquirer):
-        def acquire(
-            self, request: LocalExecutableIdentityRequest
-        ) -> LocalExecutableLockEntry:
-            entry = super().acquire(request)
-            entry.digest = "not-a-digest"
-            return entry
-
-    external = FakeAcquirer()
-
-    with pytest.raises(ValueError):
-        reconcile_canonical_lock(
-            (),
-            local_requests=(_local_request(),),
-            local_acquirer=MutatedLocalAcquirer(),
-            existing=None,
-            acquirer=external,
-        )
-
-    assert external.calls == []
 
 
 def test_check_rejects_nondefault_policy() -> None:

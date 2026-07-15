@@ -251,7 +251,7 @@ def test_python_314_managed_identity_round_trips_exactly() -> None:
         ).encode()
     )
 
-    assert parsed.entries == [entry]
+    assert parsed.entries == (entry,)
 
 
 def test_requirements_sidecar_round_trips_as_one_strict_canonical_entry() -> None:
@@ -516,7 +516,7 @@ def test_generic_python_group_cannot_impersonate_pytorch_group() -> None:
         ],
         lambda members: [
             members[0],
-            members[1].model_copy(update={"extras": ["image", "video"]}),
+            members[1].model_copy(update={"extras": ("image", "video")}),
         ],
         lambda members: [
             *members,
@@ -570,7 +570,7 @@ def test_group_member_order_permutation_property_has_one_digest() -> None:
 
 def test_group_rejects_duplicate_package_with_different_extras() -> None:
     group = _pytorch_group()
-    duplicate = group.members[1].model_copy(update={"extras": ["video"]})
+    duplicate = group.members[1].model_copy(update={"extras": ("video",)})
 
     with pytest.raises(ValidationError, match="each package exactly once"):
         PyTorchRequestIdentity.model_validate(
@@ -631,7 +631,7 @@ def test_direct_python_logical_identity_ignores_extras() -> None:
     package = next(
         entry for entry in lock.entries if isinstance(entry, DirectPythonLockEntry)
     )
-    duplicate = package.model_copy(update={"extras": ["different"]})
+    duplicate = package.model_copy(update={"extras": ("different",)})
 
     with pytest.raises(ValidationError, match="unique logical identities"):
         CanonicalLock(schema_version=1, entries=[*lock.entries, duplicate])
@@ -786,9 +786,13 @@ def test_pytorch_compatibility_without_setuptools_requirement_round_trips() -> N
     compatibility = next(
         item for item in lock.entries if isinstance(item, PyTorchCompatibilityLockEntry)
     )
-    lock.entries[lock.entries.index(compatibility)] = compatibility.model_copy(
-        update={"setuptools_specifier": None}
+    entries = tuple(
+        compatibility.model_copy(update={"setuptools_specifier": None})
+        if item is compatibility
+        else item
+        for item in lock.entries
     )
+    lock = CanonicalLock(schema_version=1, entries=entries)
 
     parsed = parse_canonical_lock_toml(dump_canonical_lock_toml(lock))
 

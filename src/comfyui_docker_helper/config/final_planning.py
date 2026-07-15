@@ -4,16 +4,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
 
-from comfyui_docker_helper.config.diagnostics import DiagnosticError
 from comfyui_docker_helper.config.final_models import (
     CudaImageDistro,
     CudaImageFlavor,
-    FinalConfig,
-)
-from comfyui_docker_helper.config.final_validation import (
-    NormalizedRequirement,
-    validate_final_config,
-    validate_final_config_domains,
 )
 from comfyui_docker_helper.exact_ledger import CUDA_IMAGE_REPOSITORY
 
@@ -98,92 +91,3 @@ class CudaBackendAdapter:
             ),
             package_channel=f"cu{version.major}{version.minor}",
         )
-
-
-@dataclass(frozen=True, slots=True)
-class PackageRequirementRequest:
-    """One normalized direct requirement inside a cohesive resolver group."""
-
-    name: str
-    extras: tuple[str, ...]
-    selector: str
-
-
-@dataclass(frozen=True, slots=True)
-class PackageGroupRequest:
-    """Complete backend package group that the resolver must solve once."""
-
-    owner: Literal["pytorch"]
-    environment: Literal["application"]
-    python_version: str
-    target_platform: TargetPlatform
-    index_url: str
-    package_channel: str
-    requirements: tuple[PackageRequirementRequest, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class FinalPlanningDomain:
-    """Deterministic platform/backend planning result."""
-
-    target_platforms: tuple[TargetPlatform, ...]
-    backend: BackendPlan
-    pytorch_group: PackageGroupRequest
-
-
-class FinalPlanningError(DiagnosticError):
-    """Expected invalid-config failure at the planning boundary."""
-
-
-def build_final_planning_domain(
-    config: FinalConfig,
-    *,
-    backend_adapter: BackendAdapter | None = None,
-) -> FinalPlanningDomain:
-    """Construct target/backend/group requests without providers or I/O."""
-    diagnostics = validate_final_config(config)
-    if diagnostics:
-        raise FinalPlanningError(diagnostics)
-
-    domains = validate_final_config_domains(config)
-    target_platforms = tuple(TargetPlatform(value) for value in config.build.platforms)
-    target_platform = target_platforms[0]
-    backend = (backend_adapter or CudaBackendAdapter()).derive(
-        CudaVersion.from_validated(config.compute_platform.cuda.version),
-        target_platform,
-        image_flavor=config.compute_platform.cuda.image_flavor,
-        image_distro=config.compute_platform.cuda.image_distro,
-    )
-    pytorch_extras = tuple(
-        _requirement_request(requirement)
-        for requirement in domains.package_requirements
-        if requirement.path[:2] == ("pytorch", "extra_packages")
-    )
-    index_url = f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}"
-    pytorch_group = PackageGroupRequest(
-        owner="pytorch",
-        environment="application",
-        python_version=config.python.version,
-        target_platform=target_platform,
-        index_url=index_url,
-        package_channel=backend.package_channel,
-        requirements=(
-            PackageRequirementRequest(
-                name="torch",
-                extras=(),
-                selector=f"=={config.pytorch.version}",
-            ),
-            *pytorch_extras,
-        ),
-    )
-    return FinalPlanningDomain(target_platforms, backend, pytorch_group)
-
-
-def _requirement_request(
-    requirement: NormalizedRequirement,
-) -> PackageRequirementRequest:
-    return PackageRequirementRequest(
-        name=requirement.name,
-        extras=requirement.extras,
-        selector=requirement.specifier,
-    )

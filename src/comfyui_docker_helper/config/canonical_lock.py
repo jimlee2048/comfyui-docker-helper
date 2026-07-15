@@ -58,7 +58,9 @@ class CanonicalLockError(ValueError):
 
 
 class _StrictLockModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, validate_default=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, validate_default=True
+    )
 
 
 class _ResolverEntry(_StrictLockModel):
@@ -74,7 +76,7 @@ class ProtectedRequirementProjection(_StrictLockModel):
     """One target-active normalized protected requirement."""
 
     package: str
-    extras: list[str]
+    extras: tuple[str, ...]
     selector: str
 
     @field_validator("package")
@@ -82,10 +84,10 @@ class ProtectedRequirementProjection(_StrictLockModel):
     def _validate_package(cls, value: str) -> str:
         return _require_normalized_package(value)
 
-    @field_validator("extras")
+    @field_validator("extras", mode="before")
     @classmethod
-    def _validate_extras(cls, value: list[str]) -> list[str]:
-        return _require_normalized_extras(value)
+    def _validate_extras(cls, value: object) -> tuple[str, ...]:
+        return _require_normalized_extras(_require_tuple(value, "extras"))
 
     @field_validator("selector")
     @classmethod
@@ -229,10 +231,10 @@ class ComfyUIRequirementsLockEntry(_ResolverEntry):
     path: Literal["requirements.txt"]
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
-    protected_names: list[str] = Field(min_length=1)
+    protected_names: tuple[str, ...] = Field(min_length=1)
     protected_policy_digest: str
     requirements_digest: str
-    protected: list[ProtectedRequirementProjection]
+    protected: tuple[ProtectedRequirementProjection, ...]
 
     @field_validator("repository")
     @classmethod
@@ -254,23 +256,31 @@ class ComfyUIRequirementsLockEntry(_ResolverEntry):
     def _validate_digest(cls, value: str) -> str:
         return _require_sha256(value)
 
-    @field_validator("protected_names")
+    @field_validator("protected_names", mode="before")
     @classmethod
-    def _validate_protected_names(cls, value: list[str]) -> list[str]:
+    def _validate_protected_names(cls, value: object) -> tuple[str, ...]:
+        value = _require_tuple(value, "protected_names")
         names = [_require_normalized_package(item) for item in value]
         if names != sorted(set(names)):
             raise ValueError("protected_names must be sorted and unique")
-        return names
+        return tuple(names)
 
-    @field_validator("protected")
+    @field_validator("protected", mode="before")
     @classmethod
     def _validate_protected(
-        cls, value: list[ProtectedRequirementProjection]
-    ) -> list[ProtectedRequirementProjection]:
-        packages = [item.package for item in value]
+        cls, value: object
+    ) -> tuple[ProtectedRequirementProjection, ...]:
+        value = _require_tuple(value, "protected")
+        projection = tuple(
+            item
+            if isinstance(item, ProtectedRequirementProjection)
+            else ProtectedRequirementProjection.model_validate(item)
+            for item in value
+        )
+        packages = [item.package for item in projection]
         if packages != sorted(set(packages)):
             raise ValueError("protected projection must be sorted and unique")
-        return value
+        return projection
 
     @model_validator(mode="after")
     def _validate_projection_names(self) -> ComfyUIRequirementsLockEntry:
@@ -339,7 +349,7 @@ class DirectPythonLockEntry(_ResolverEntry):
 
     type: Literal["python-package"]
     package: str
-    extras: list[str]
+    extras: tuple[str, ...]
     version: str = Field(min_length=1)
     environment: str
 
@@ -348,10 +358,10 @@ class DirectPythonLockEntry(_ResolverEntry):
     def _validate_package(cls, value: str) -> str:
         return _require_normalized_package(value)
 
-    @field_validator("extras")
+    @field_validator("extras", mode="before")
     @classmethod
-    def _validate_extras(cls, value: list[str]) -> list[str]:
-        return _require_normalized_extras(value)
+    def _validate_extras(cls, value: object) -> tuple[str, ...]:
+        return _require_normalized_extras(_require_tuple(value, "extras"))
 
     @field_validator("environment")
     @classmethod
@@ -430,7 +440,12 @@ class CanonicalLock(_StrictLockModel):
     """Complete strict canonical config-lock schema v1."""
 
     schema_version: Literal[1]
-    entries: list[CanonicalLockEntry]
+    entries: tuple[CanonicalLockEntry, ...]
+
+    @field_validator("entries", mode="before")
+    @classmethod
+    def _freeze_entries(cls, value: object) -> tuple[object, ...]:
+        return _require_tuple(value, "entries")
 
     @model_validator(mode="after")
     def _validate_entries(self) -> CanonicalLock:
@@ -503,7 +518,7 @@ class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
     path: Literal["requirements.txt"]
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
-    protected_names: list[str] = Field(min_length=1)
+    protected_names: tuple[str, ...] = Field(min_length=1)
     protected_policy_digest: str
 
     @field_validator("repository")
@@ -521,13 +536,14 @@ class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
     def _validate_python_version(cls, value: str) -> str:
         return _require_exact_stable_version(value)
 
-    @field_validator("protected_names")
+    @field_validator("protected_names", mode="before")
     @classmethod
-    def _validate_protected_names(cls, value: list[str]) -> list[str]:
+    def _validate_protected_names(cls, value: object) -> tuple[str, ...]:
+        value = _require_tuple(value, "protected_names")
         names = [_require_normalized_package(item) for item in value]
         if names != sorted(set(names)):
             raise ValueError("protected_names must be sorted and unique")
-        return names
+        return tuple(names)
 
     @field_validator("protected_policy_digest")
     @classmethod
@@ -603,7 +619,7 @@ class DirectPythonRequestMember(_StrictLockModel):
     """One normalized member of a cohesive direct-Python resolution group."""
 
     package: str
-    extras: list[str]
+    extras: tuple[str, ...]
     selector: str
 
     @field_validator("package")
@@ -611,10 +627,10 @@ class DirectPythonRequestMember(_StrictLockModel):
     def _validate_package(cls, value: str) -> str:
         return _require_normalized_package(value)
 
-    @field_validator("extras")
+    @field_validator("extras", mode="before")
     @classmethod
-    def _validate_extras(cls, value: list[str]) -> list[str]:
-        return _require_normalized_extras(value)
+    def _validate_extras(cls, value: object) -> tuple[str, ...]:
+        return _require_normalized_extras(_require_tuple(value, "extras"))
 
     @field_validator("selector")
     @classmethod
@@ -631,22 +647,27 @@ class DirectPythonRequestIdentity(_StrictLockModel):
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
     index_url: str = Field(min_length=1)
-    members: list[DirectPythonRequestMember] = Field(min_length=1)
+    members: tuple[DirectPythonRequestMember, ...] = Field(min_length=1)
 
     @field_validator("environment")
     @classmethod
     def _validate_environment(cls, value: str) -> str:
         return _require_environment(value)
 
-    @field_validator("members")
+    @field_validator("members", mode="before")
     @classmethod
-    def _normalize_members(
-        cls, value: list[DirectPythonRequestMember]
-    ) -> list[DirectPythonRequestMember]:
-        packages = [member.package for member in value]
+    def _normalize_members(cls, value: object) -> tuple[DirectPythonRequestMember, ...]:
+        value = _require_tuple(value, "members")
+        members = tuple(
+            item
+            if isinstance(item, DirectPythonRequestMember)
+            else DirectPythonRequestMember.model_validate(item)
+            for item in value
+        )
+        packages = [member.package for member in members]
         if len(packages) != len(set(packages)):
             raise ValueError("members must contain each package exactly once")
-        return sorted(value, key=lambda member: member.package)
+        return tuple(sorted(members, key=lambda member: member.package))
 
     @field_validator("python_version")
     @classmethod
@@ -687,10 +708,10 @@ class PyTorchRequestIdentity(_StrictLockModel):
     platform: Literal["linux/amd64"]
     python_index_url: str = Field(min_length=1)
     pytorch_index_url: str = Field(min_length=1)
-    upstream_protected: list[ProtectedRequirementProjection] = Field(
-        default_factory=list
+    upstream_protected: tuple[ProtectedRequirementProjection, ...] = Field(
+        default_factory=tuple
     )
-    members: list[DirectPythonRequestMember] = Field(min_length=1)
+    members: tuple[DirectPythonRequestMember, ...] = Field(min_length=1)
 
     @field_validator("channel")
     @classmethod
@@ -699,27 +720,39 @@ class PyTorchRequestIdentity(_StrictLockModel):
             raise ValueError("channel must be one canonical CUDA wheel channel")
         return value
 
-    @field_validator("members")
+    @field_validator("members", mode="before")
     @classmethod
-    def _normalize_members(
-        cls, value: list[DirectPythonRequestMember]
-    ) -> list[DirectPythonRequestMember]:
-        packages = [member.package for member in value]
+    def _normalize_members(cls, value: object) -> tuple[DirectPythonRequestMember, ...]:
+        value = _require_tuple(value, "members")
+        members = tuple(
+            item
+            if isinstance(item, DirectPythonRequestMember)
+            else DirectPythonRequestMember.model_validate(item)
+            for item in value
+        )
+        packages = [member.package for member in members]
         if len(packages) != len(set(packages)):
             raise ValueError("members must contain each package exactly once")
         if "torch" not in packages:
             raise ValueError("pytorch groups must include torch")
-        return sorted(value, key=lambda member: member.package)
+        return tuple(sorted(members, key=lambda member: member.package))
 
-    @field_validator("upstream_protected")
+    @field_validator("upstream_protected", mode="before")
     @classmethod
     def _normalize_upstream_protected(
-        cls, value: list[ProtectedRequirementProjection]
-    ) -> list[ProtectedRequirementProjection]:
-        packages = [member.package for member in value]
+        cls, value: object
+    ) -> tuple[ProtectedRequirementProjection, ...]:
+        value = _require_tuple(value, "upstream_protected")
+        projection = tuple(
+            item
+            if isinstance(item, ProtectedRequirementProjection)
+            else ProtectedRequirementProjection.model_validate(item)
+            for item in value
+        )
+        packages = [member.package for member in projection]
         if packages != sorted(set(packages)):
             raise ValueError("upstream_protected must be sorted and unique")
-        return value
+        return projection
 
     @model_validator(mode="after")
     def _validate_upstream_members(self) -> PyTorchRequestIdentity:
@@ -829,6 +862,64 @@ def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
     if isinstance(entry, PyTorchCompatibilityLockEntry):
         return (entry.type, entry.environment)
     return (entry.type, entry.relative_path)
+
+
+def validate_sha256_digest(value: str) -> str:
+    """Validate one canonical SHA-256 identity at any execution boundary."""
+    return _require_sha256(value)
+
+
+def validate_git_commit(value: str) -> str:
+    """Validate one exact Git commit at any execution boundary."""
+    return _require_commit(value)
+
+
+def validate_exact_stable_version(value: str) -> str:
+    return _require_exact_stable_version(value)
+
+
+def validate_exact_stable_distribution_version(value: str) -> str:
+    return _require_exact_stable_distribution_version(value)
+
+
+def validate_oci_repository(value: str) -> str:
+    return _require_oci_repository(value)
+
+
+def validate_oci_tag(value: str) -> str:
+    return _require_oci_tag(value)
+
+
+def validate_http_url(value: str, field: str) -> str:
+    return _require_http_url(value, field)
+
+
+def validate_git_url(value: str) -> str:
+    return _require_git_url(value)
+
+
+def validate_normalized_package(value: str) -> str:
+    return _require_normalized_package(value)
+
+
+def validate_normalized_extras(value: tuple[str, ...]) -> tuple[str, ...]:
+    return _require_normalized_extras(value)
+
+
+def validate_environment(value: str) -> str:
+    return _require_environment(value)
+
+
+def validate_registry_id(value: str) -> str:
+    return _require_registry_id(value)
+
+
+def validate_exact_registry_version(value: str) -> str:
+    return _require_exact_registry_version(value)
+
+
+def validate_canonical_token(value: str, field: str) -> str:
+    return _require_token(value, field)
 
 
 def _require_sha256(value: str) -> str:
@@ -1025,12 +1116,18 @@ def _require_normalized_package(value: str) -> str:
     return value
 
 
-def _require_normalized_extras(value: list[str]) -> list[str]:
+def _require_normalized_extras(value: tuple[str, ...]) -> tuple[str, ...]:
     if any(_EXTRA_PATTERN.fullmatch(extra) is None for extra in value):
         raise ValueError("extras must contain normalized extra names")
-    if value != sorted(set(value)):
+    if value != tuple(sorted(set(value))):
         raise ValueError("extras must be unique and sorted")
     return value
+
+
+def _require_tuple(value: object, field: str) -> tuple:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field} must be one array")
+    return tuple(value)
 
 
 def _require_environment(value: str) -> str:

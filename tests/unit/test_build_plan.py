@@ -16,12 +16,15 @@ from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
     ExactPackagePlan,
+    RuntimePlanningProvenance,
     build_plan_digest,
-    construct_build_plan,
     dump_build_plan_json,
     manifest_binding,
     parse_build_plan_json,
     parse_manifest_binding_json,
+)
+from comfyui_docker_helper.config.build_plan import (
+    construct_build_plan as _construct_build_plan,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
@@ -40,7 +43,12 @@ from comfyui_docker_helper.config.canonical_lock import (
     PyTorchCompatibilityLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
+    canonical_entry_key,
     compute_request_digest,
+)
+from comfyui_docker_helper.config.canonical_request import (
+    CanonicalRequestGraph,
+    build_canonical_request_graph,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -55,6 +63,7 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
 )
+from comfyui_docker_helper.host.planning_authority import planning_release_inputs
 from comfyui_docker_helper.release_artifacts import release_source_digest
 
 DIGEST_A = f"sha256:{'a' * 64}"
@@ -364,6 +373,30 @@ def accepted_resolution(
                 environment="uv-tool:ruff",
             )
         )
+    staged = {canonical_entry_key(entry): entry for entry in entries}
+    graph = build_canonical_request_graph(
+        config,
+        release=planning_release_inputs(config.python.version),
+        uv_descriptor_digest=DIGEST_B,
+        comfyui_entry=staged[("comfyui", COMFYUI_REPOSITORY)],
+        requirements_entry=staged[("comfyui-requirements", COMFYUI_REPOSITORY)],
+    )
+    digest_by_key = {
+        key: desired.request_digest for desired in graph.desired for key in desired.keys
+    }
+    entries = [
+        type(entry).model_validate(
+            {
+                **entry.model_dump(mode="python"),
+                **(
+                    {"request_digest": digest_by_key[canonical_entry_key(entry)]}
+                    if hasattr(entry, "request_digest")
+                    else {}
+                ),
+            }
+        )
+        for entry in entries
+    ]
     if reverse:
         entries.reverse()
     lock = CanonicalLock(schema_version=1, entries=entries)
@@ -376,8 +409,42 @@ def accepted_resolution(
     )
 
 
+def request_graph(
+    config: FinalConfig, resolution: AcceptedCanonicalLock
+) -> CanonicalRequestGraph:
+    entries = {canonical_entry_key(entry): entry for entry in resolution.lock.entries}
+    return build_canonical_request_graph(
+        config,
+        release=planning_release_inputs(config.python.version),
+        uv_descriptor_digest=entries[("oci", "uv-tool")].descriptor_digest,
+        comfyui_entry=entries[("comfyui", COMFYUI_REPOSITORY)],
+        requirements_entry=entries[("comfyui-requirements", COMFYUI_REPOSITORY)],
+    )
+
+
+def build_plan(
+    config: FinalConfig,
+    resolution: AcceptedCanonicalLock,
+    **kwargs,
+) -> BuildPlan:
+    provenance = kwargs.pop(
+        "runtime_provenance",
+        RuntimePlanningProvenance(
+            failure_policy_explicit=False,
+            file_downloader_explicit=(False,) * len(config.files),
+            file_download_mode_explicit=(False,) * len(config.files),
+        ),
+    )
+    return _construct_build_plan(
+        request_graph(config, resolution),
+        resolution.lock,
+        runtime_provenance=provenance,
+        **kwargs,
+    )
+
+
 def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
 
     assert plan.schema_version == BUILD_PLAN_SCHEMA_VERSION
     assert plan.toolchain.cuda_image.reference == (
@@ -433,7 +500,7 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
 
 
 def test_constructor_carries_python_314_exact_identity_through_build_plan() -> None:
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(python_version="3.14.6"),
         accepted_resolution(python_version="3.14.6"),
     )
@@ -450,7 +517,7 @@ def test_constructor_carries_python_314_exact_identity_through_build_plan() -> N
 
 
 def test_build_plan_binds_optional_manager_capability_to_custom_node_intent() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
     document["application"]["comfyui"]["manager"] = None
 
@@ -464,7 +531,7 @@ def test_build_plan_binds_optional_manager_capability_to_custom_node_intent() ->
 
 
 def test_build_plan_binds_registry_user_directory_to_comfyui() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
     document["custom_nodes"]["user_directory"] = "/workspace/other/user"
 
@@ -473,7 +540,7 @@ def test_build_plan_binds_registry_user_directory_to_comfyui() -> None:
 
 
 def test_constructor_projects_isolated_uv_tool_exact_result() -> None:
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(with_uv_tool=True), accepted_resolution(with_uv_tool=True)
     )
 
@@ -485,8 +552,8 @@ def test_constructor_projects_isolated_uv_tool_exact_result() -> None:
 
 
 def test_constructor_projects_optional_comfy_cli_only_to_the_tool_store() -> None:
-    enabled = construct_build_plan(final_config(), accepted_resolution())
-    disabled = construct_build_plan(
+    enabled = build_plan(final_config(), accepted_resolution())
+    disabled = build_plan(
         final_config(install_cli=False), accepted_resolution(install_cli=False)
     )
 
@@ -502,7 +569,7 @@ def test_constructor_projects_optional_comfy_cli_only_to_the_tool_store() -> Non
 def test_build_plan_reserves_comfy_cli_from_every_application_group(
     group: str,
 ) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
     packages = (
         document["application"]["python_extras"]["packages"]
@@ -519,7 +586,7 @@ def test_build_plan_reserves_comfy_cli_from_every_application_group(
     "name", ["torch", "torchvision", "torchaudio", "pip", "setuptools"]
 )
 def test_build_plan_rejects_python_extra_package_owner_overlap(name: str) -> None:
-    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
         mode="python"
     )
     document["application"]["python_extras"]["packages"][0]["name"] = name
@@ -529,7 +596,7 @@ def test_build_plan_rejects_python_extra_package_owner_overlap(name: str) -> Non
 
 
 def test_build_plan_rejects_pytorch_discriminator_for_python_extras() -> None:
-    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
         mode="python"
     )
     document["application"]["python_extras"]["group"] = "pytorch"
@@ -556,7 +623,7 @@ def test_constructor_rejects_python_extra_package_owner_overlap_before_consumpti
     forged = validate_final_config_structure(document)
 
     with pytest.raises(ValueError, match="overlap protected package owners"):
-        construct_build_plan(forged, accepted_resolution())
+        build_plan(forged, accepted_resolution())
 
 
 def test_constructor_rejects_python_extra_overlap_with_arbitrary_pytorch_extra() -> (
@@ -568,13 +635,13 @@ def test_constructor_rejects_python_extra_overlap_with_arbitrary_pytorch_extra()
     forged = validate_final_config_structure(document)
 
     with pytest.raises(ValueError, match="overlap protected package owners"):
-        construct_build_plan(forged, accepted_resolution())
+        build_plan(forged, accepted_resolution())
 
 
 def test_build_plan_rejects_python_extra_overlap_with_arbitrary_pytorch_member() -> (
     None
 ):
-    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
         mode="python"
     )
     xformers = {
@@ -599,7 +666,7 @@ def test_build_plan_rejects_python_extra_overlap_with_arbitrary_pytorch_member()
 def test_build_plan_never_inherits_user_package_environment_controls(
     name: str,
 ) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
     document["runtime"]["environment"] = ({"name": name, "value": "user-value"},)
 
@@ -608,8 +675,8 @@ def test_build_plan_never_inherits_user_package_environment_controls(
 
 
 def test_plan_bytes_digest_and_lock_order_are_deterministic() -> None:
-    first = construct_build_plan(final_config(), accepted_resolution())
-    second = construct_build_plan(final_config(), accepted_resolution(reverse=True))
+    first = build_plan(final_config(), accepted_resolution())
+    second = build_plan(final_config(), accepted_resolution(reverse=True))
 
     assert first == second
     assert dump_build_plan_json(first) == dump_build_plan_json(second)
@@ -617,7 +684,7 @@ def test_plan_bytes_digest_and_lock_order_are_deterministic() -> None:
 
 
 def test_plan_round_trip_is_strict_and_immutable() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
 
     assert parse_build_plan_json(dump_build_plan_json(plan)) == plan
     with pytest.raises(ValidationError, match="frozen"):
@@ -630,7 +697,7 @@ def test_plan_round_trip_is_strict_and_immutable() -> None:
 
 
 def test_plan_and_manifest_bind_config_lock_and_plan_without_request_digests() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     binding = manifest_binding(plan)
     serialized = dump_build_plan_json(plan)
 
@@ -649,8 +716,8 @@ def test_execution_only_config_change_updates_binding_deterministically() -> Non
     changed_document["build"]["tags"] = ["example:changed"]
     changed = FinalConfig.model_validate(changed_document)
 
-    first = construct_build_plan(config, accepted_resolution())
-    second = construct_build_plan(changed, accepted_resolution())
+    first = build_plan(config, accepted_resolution())
+    second = build_plan(changed, accepted_resolution())
 
     assert first.config_digest != second.config_digest
     assert first.lock_digest == second.lock_digest
@@ -688,7 +755,7 @@ def test_config_lock_identity_mismatches_fail_construction(
     )
 
     with pytest.raises(ValueError, match=message):
-        construct_build_plan(final_config(), changed)
+        build_plan(final_config(), changed)
 
 
 @pytest.mark.parametrize("entry_index", [6, 7])
@@ -710,7 +777,7 @@ def test_build_plan_constructor_rejects_core_channel_mismatch(
     )
 
     with pytest.raises(ValueError, match="does not match PyTorch channel"):
-        construct_build_plan(final_config(), changed)
+        build_plan(final_config(), changed)
 
 
 @pytest.mark.parametrize("entry_index", [6, 7, 10])
@@ -729,7 +796,7 @@ def test_build_plan_constructor_rejects_split_pytorch_request_digest(
     )
 
     with pytest.raises(ValueError, match="must share one request digest"):
-        construct_build_plan(final_config(), changed)
+        build_plan(final_config(), changed)
 
 
 def test_build_plan_constructor_rejects_cohesive_forged_pytorch_request_digest() -> (
@@ -748,7 +815,7 @@ def test_build_plan_constructor_rejects_cohesive_forged_pytorch_request_digest()
     )
 
     with pytest.raises(ValueError, match="must share one request digest"):
-        construct_build_plan(final_config(), changed)
+        build_plan(final_config(), changed)
 
 
 @pytest.mark.parametrize(
@@ -777,7 +844,7 @@ def test_exact_package_plan_rejects_noncanonical_pep503_identity(
 
 
 def test_build_plan_parser_rejects_forged_core_channel() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
     torch = next(
         package
@@ -808,7 +875,7 @@ def test_build_plan_parser_rejects_forged_core_channel() -> None:
 def test_build_plan_parser_rejects_cross_field_authority_forgery(
     mutation: str, message: str
 ) -> None:
-    document = construct_build_plan(final_config(), accepted_resolution()).model_dump(
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
         mode="python"
     )
     pytorch = document["application"]["pytorch"]
@@ -839,15 +906,184 @@ def test_build_plan_parser_rejects_cross_field_authority_forgery(
         BuildPlan.model_validate(document)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("oci-repository", "canonical OCI repository"),
+        ("oci-digest", "digest must be sha256"),
+        ("application-path", "canonical absolute POSIX path"),
+        ("comfyui-repository", "canonical Git source URL"),
+        ("registry-id", "argv-safe Registry ID"),
+        ("git-target", "canonical absolute POSIX path"),
+        ("file-url", "canonical HTTP"),
+        ("launch-executable", "canonical absolute POSIX path"),
+        ("plan-digest", "digest must be sha256"),
+    ],
+)
+def test_build_plan_parser_rejects_execution_sensitive_scalar_forgery(
+    mutation: str, message: str
+) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    if mutation == "oci-repository":
+        document["toolchain"]["cuda_image"]["repository"] = "Invalid/Repository"
+    elif mutation == "oci-digest":
+        document["toolchain"]["uv_image"]["descriptor_digest"] = "bad"
+    elif mutation == "application-path":
+        document["application"]["paths"]["workspace"] = "relative"
+    elif mutation == "comfyui-repository":
+        document["application"]["comfyui"]["repository"] = "file:///tmp/source"
+    elif mutation == "registry-id":
+        document["custom_nodes"]["nodes"][0]["id"] = "-unsafe"
+    elif mutation == "git-target":
+        document["custom_nodes"]["nodes"][1]["target"] = "../escape"
+    elif mutation == "file-url":
+        document["files"]["files"][0]["url"] = "file:///tmp/model"
+    elif mutation == "launch-executable":
+        command = document["runtime"]["launch_command"]
+        document["runtime"]["launch_command"] = ("python", *command[1:])
+    else:
+        document["config_digest"] = "bad"
+
+    with pytest.raises(ValidationError, match=message):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("cuda-repository", "cuda-base image repository does not match"),
+        ("uv-repository", "uv-tool image repository does not match"),
+        ("uv-current-version", "uv image identity does not match"),
+        ("cuda-tag-grammar", "CUDA image tag must match"),
+        ("cuda-derived-channel", "do not match toolchain"),
+        ("comfyui-repository", "official ledger"),
+        ("comfyui-release-floor", "below the supported floor"),
+        ("git-target-sibling", "exact child of ComfyUI custom_nodes"),
+        ("git-target-nested", "exact child of ComfyUI custom_nodes"),
+        ("duplicate-git-target", "Git node targets must be unique"),
+        ("file-target-outside", "strict descendants of ComfyUI"),
+        ("duplicate-file-target", "file targets must be unique"),
+        ("apt-option", "canonical package identity"),
+        ("aria2-option", "canonical aria2 argument"),
+        ("ssh-password-control", "must not contain control"),
+        ("ssh-public-key", "canonical and unique"),
+        ("launch-whitespace", "canonical argv values"),
+    ],
+)
+def test_build_plan_rejects_syntactic_but_semantic_authority_forgery(
+    mutation: str,
+    message: str,
+) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    if mutation == "cuda-repository":
+        document["toolchain"]["cuda_image"]["repository"] = "ghcr.io/attacker/cuda"
+    elif mutation == "uv-repository":
+        document["toolchain"]["uv_image"]["repository"] = "ghcr.io/attacker/uv"
+    elif mutation == "uv-current-version":
+        document["toolchain"]["uv_image"]["tag"] = "0.11.29"
+        document["toolchain"]["uv_image"]["resolved_version"] = "0.11.29"
+    elif mutation == "cuda-tag-grammar":
+        document["toolchain"]["cuda_image"]["tag"] = "13.0.3-cudnn-devel-ubuntu20.04"
+    elif mutation == "cuda-derived-channel":
+        document["toolchain"]["pytorch_channel"] = "cu999"
+        document["application"]["pytorch"]["channel"] = "cu999"
+        document["application"]["pytorch"]["pytorch_index_url"] = (
+            "https://download.pytorch.org/whl/cu999"
+        )
+        for package in document["application"]["pytorch"]["packages"]:
+            if package["name"] in {"torch", "torchvision"}:
+                package["version"] = package["version"].replace("+cu130", "+cu999")
+    elif mutation == "comfyui-repository":
+        document["application"]["comfyui"]["repository"] = (
+            "https://github.com/attacker/ComfyUI.git"
+        )
+    elif mutation == "comfyui-release-floor":
+        document["application"]["comfyui"]["formal_release"] = "0.10.0"
+    elif mutation == "git-target-sibling":
+        document["custom_nodes"]["nodes"][1]["target"] = (
+            "/workspace/ComfyUI/plugins/direct-node"
+        )
+    elif mutation == "git-target-nested":
+        document["custom_nodes"]["nodes"][1]["target"] = (
+            "/workspace/ComfyUI/custom_nodes/nested/direct-node"
+        )
+    elif mutation == "duplicate-git-target":
+        duplicate = dict(document["custom_nodes"]["nodes"][1])
+        duplicate["url"] = "https://example.test/other.git"
+        document["custom_nodes"]["nodes"] = (
+            *document["custom_nodes"]["nodes"],
+            duplicate,
+        )
+    elif mutation == "file-target-outside":
+        document["files"]["files"][0]["target"] = "/workspace/model.safetensors"
+    elif mutation == "duplicate-file-target":
+        document["files"]["files"] = (
+            document["files"]["files"][0],
+            document["files"]["files"][0],
+        )
+    elif mutation == "apt-option":
+        document["application"]["os_packages"] = (
+            *document["application"]["os_packages"],
+            "--allow-unauthenticated",
+        )
+    elif mutation == "aria2-option":
+        document["files"]["downloader"]["aria2"]["min_split_size"] = "--quiet"
+    elif mutation == "ssh-password-control":
+        document["runtime"]["ssh"]["password"] = "secret\ncommand"
+    elif mutation == "ssh-public-key":
+        document["runtime"]["ssh"]["pub_keys"] = ("ssh-ed25519 AAAA invalid",)
+    else:
+        command = document["runtime"]["launch_command"]
+        document["runtime"]["launch_command"] = (*command, "   ")
+
+    with pytest.raises(ValidationError, match=message):
+        BuildPlan.model_validate(document)
+
+
+def test_build_plan_requires_exact_runtime_planning_provenance() -> None:
+    config = final_config()
+    resolution = accepted_resolution()
+    graph = request_graph(config, resolution)
+
+    with pytest.raises(TypeError, match="runtime_provenance"):
+        _construct_build_plan(graph, resolution.lock)
+
+    with pytest.raises(ValueError, match="downloader provenance"):
+        _construct_build_plan(
+            graph,
+            resolution.lock,
+            runtime_provenance=RuntimePlanningProvenance(
+                failure_policy_explicit=False,
+                file_downloader_explicit=(),
+                file_download_mode_explicit=(False,),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="download-mode provenance"):
+        _construct_build_plan(
+            graph,
+            resolution.lock,
+            runtime_provenance=RuntimePlanningProvenance(
+                failure_policy_explicit=False,
+                file_downloader_explicit=(False,),
+                file_download_mode_explicit=(),
+            ),
+        )
+
+
 def test_unused_lock_identity_is_rejected() -> None:
     resolution = accepted_resolution()
     data = resolution.lock.model_dump(mode="python")
-    data["entries"].append(
+    data["entries"] += (
         LocalExecutableLockEntry(
             type="local-executable",
             relative_path="unused.sh",
             digest=DIGEST_A,
-        ).model_dump(mode="python")
+        ).model_dump(mode="python"),
     )
     changed = AcceptedCanonicalLock(
         lock=CanonicalLock.model_validate(data),
@@ -858,11 +1094,11 @@ def test_unused_lock_identity_is_rejected() -> None:
     )
 
     with pytest.raises(ValueError, match="unused identities"):
-        construct_build_plan(final_config(), changed)
+        build_plan(final_config(), changed)
 
 
 def test_active_uv_tools_and_remaining_deferred_fields_are_unambiguous() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = dump_build_plan_json(plan)
 
     assert plan.toolchain.tool_store.uv_tools == ()

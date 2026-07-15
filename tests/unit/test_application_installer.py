@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.unit.test_build_plan import accepted_resolution, final_config
+from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
@@ -19,7 +19,6 @@ from comfyui_docker_helper.config.build_plan import (
     PackageGroupPlan,
     PyTorchGroupPlan,
     build_plan_digest,
-    construct_build_plan,
     managed_constraints_bytes,
 )
 from comfyui_docker_helper.container import application_installer
@@ -47,7 +46,7 @@ from comfyui_docker_helper.pytorch_resolution import (
 
 
 def _write_phases(tmp_path: Path):
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     digest = build_plan_digest(plan)
     application = tmp_path / "application.json"
     toolchain = tmp_path / "toolchain.json"
@@ -61,9 +60,7 @@ def _write_phases(tmp_path: Path):
 
 
 def _application_for_test_interpreter() -> ApplicationPhase:
-    application = construct_build_plan(
-        final_config(), accepted_resolution()
-    ).application
+    application = build_plan(final_config(), accepted_resolution()).application
     python_version = ".".join(str(item) for item in sys.version_info[:3])
     python_minor = ".".join(str(item) for item in sys.version_info[:2])
     document = application.model_dump(mode="python")
@@ -217,7 +214,7 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
 
 
 def test_constraints_are_complete_deterministic_and_read_only(tmp_path: Path) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     constraints = tmp_path / "constraints.txt"
     _write_constraints(
         constraints,
@@ -236,7 +233,7 @@ def test_constraints_are_complete_deterministic_and_read_only(tmp_path: Path) ->
 def test_python_extras_install_exact_results_from_python_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     calls: list[tuple[tuple[str, ...], dict]] = []
     monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
     monkeypatch.setattr(
@@ -281,9 +278,7 @@ def test_runtime_rejects_forged_python_extra_owner_overlap_before_install(
     name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    application = construct_build_plan(
-        final_config(), accepted_resolution()
-    ).application
+    application = build_plan(final_config(), accepted_resolution()).application
     forged_group = PackageGroupPlan.model_construct(
         group="application-extra",
         python_version=application.pytorch.python_version,
@@ -317,9 +312,7 @@ def test_runtime_rejects_forged_python_extra_owner_overlap_before_install(
 def test_runtime_rejects_python_extra_overlap_with_arbitrary_pytorch_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    application = construct_build_plan(
-        final_config(), accepted_resolution()
-    ).application
+    application = build_plan(final_config(), accepted_resolution()).application
     xformers = ExactPackagePlan.model_construct(
         name="xformers",
         extras=(),
@@ -359,7 +352,7 @@ def test_runtime_rejects_python_extra_overlap_with_arbitrary_pytorch_member(
 def test_final_application_verification_checks_direct_identities_and_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.application.model_dump(mode="python")
     document["inventory_path"] = "/opt/cdh/build/application-inventory.txt"
     application = type(plan.application).model_validate(document)
@@ -429,9 +422,7 @@ def test_final_application_verification_checks_direct_identities_and_inventory(
 def test_final_application_verification_reports_missing_setuptools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    application = construct_build_plan(
-        final_config(), accepted_resolution()
-    ).application
+    application = build_plan(final_config(), accepted_resolution()).application
     inventory = (
         ("numpy", "2.3.1"),
         ("pip", "26.1.2"),
@@ -458,9 +449,7 @@ def test_final_application_verification_reports_missing_setuptools(
 def test_final_application_inventory_rejects_observation_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    application = construct_build_plan(
-        final_config(), accepted_resolution()
-    ).application
+    application = build_plan(final_config(), accepted_resolution()).application
     inventory = (
         ("numpy", "2.3.1"),
         ("pip", "26.1.2"),
@@ -503,9 +492,7 @@ def test_final_application_inventory_rejects_observation_drift(
 def test_final_application_verification_rejects_unsatisfied_ordinary_requirement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    application = construct_build_plan(
-        final_config(), accepted_resolution()
-    ).application
+    application = build_plan(final_config(), accepted_resolution()).application
     inventory = (
         ("numpy", "2.3.1"),
         ("pip", "26.1.2"),
@@ -533,9 +520,7 @@ def test_final_application_verification_rejects_unsatisfied_ordinary_requirement
 
 
 def test_ordinary_requirement_verification_uses_the_exact_target_markers() -> None:
-    application = construct_build_plan(
-        final_config(), accepted_resolution()
-    ).application
+    application = build_plan(final_config(), accepted_resolution()).application
 
     _verify_ordinary_requirements(
         application,
@@ -1090,7 +1075,7 @@ def test_application_inventory_never_unlinks_replacement_link(
 
 
 def test_resolution_manifest_rejects_changed_identity(tmp_path: Path) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     manifest = tmp_path / "pyproject.toml"
     manifest.write_text("[project]\nname='changed'\n")
     manifest.chmod(0o444)

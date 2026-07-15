@@ -9,56 +9,36 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from comfyui_docker_helper.comfyui_requirements import (
-    COMFYUI_REQUIREMENTS_PATH,
-    CUDA_PROTECTED_REQUIREMENTS,
-    ComfyUIRequirementsError,
-    merge_pytorch_requirements,
-    protected_policy_digest,
-)
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
-    ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
-    ComfyUIRequirementsRequestIdentity,
-    DirectGitRequestIdentity,
-    DirectPythonRequestIdentity,
-    DirectPythonRequestMember,
-    ManagedPythonRequestIdentity,
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
-    ProtectedRequirementProjection,
-    PyTorchRequestIdentity,
-    RegistryRequestIdentity,
     ResolverRequestIdentity,
     canonical_entry_key,
     compute_request_digest,
+)
+from comfyui_docker_helper.config.canonical_request import (
+    CanonicalRequestGraph,
+    ManagedPythonReleaseInputs,
+    PlanningReleaseInputs,
+    comfyui_requirements_request,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
     CanonicalAcquisitionError,
     CanonicalEntryAcquirer,
     CanonicalResolutionError,
-    DesiredResolution,
     LockPolicy,
-    ManagedPythonReleaseInputs,
     entries_satisfy_request,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_planning import (
-    CudaBackendAdapter,
-    CudaVersion,
-    TargetPlatform,
-)
-from comfyui_docker_helper.config.final_validation import FinalConfigDomainResult
 from comfyui_docker_helper.config.runtime_hooks import CUSTOM_NODE_HOOK_LOCK_PREFIX
 from comfyui_docker_helper.exact_ledger import (
     CDH_VERSION,
-    COMFY_CLI_MINIMUM_VERSION,
-    COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     PIP_VERSION,
     UV_IMAGE_REPOSITORY,
@@ -79,13 +59,11 @@ from comfyui_docker_helper.host.identity_providers import (
     UvManagedPythonIdentityProvider,
 )
 from comfyui_docker_helper.host.uv_runner import locate_host_uv
-from comfyui_docker_helper.release_artifacts import release_source_digest
-
-
-@dataclass(frozen=True, slots=True)
-class DesiredPlanningInputs:
-    desired: tuple[DesiredResolution, ...]
-    local_requests: tuple[LocalExecutableIdentityRequest, ...]
+from comfyui_docker_helper.release_artifacts import (
+    production_inventory,
+    production_requirements_digest,
+    release_source_digest,
+)
 
 
 @dataclass(slots=True)
@@ -170,175 +148,21 @@ def uv_catalog_descriptor_digest(
     return entry.descriptor_digest
 
 
-def build_desired_planning_inputs(
-    config: FinalConfig,
-    domains: FinalConfigDomainResult,
+def build_local_executable_requests(
+    graph: CanonicalRequestGraph,
     *,
     scripts_dir: str | Path,
-    uv_descriptor_digest: str,
-    comfyui_entry: OfficialComfyUILockEntry,
-    requirements_entry: ComfyUIRequirementsLockEntry,
     runtime_hook_requests: tuple[LocalExecutableIdentityRequest, ...] = (),
-) -> DesiredPlanningInputs:
-    platform = TargetPlatform(config.build.platforms[0])
-    backend = CudaBackendAdapter().derive(
-        CudaVersion.from_validated(config.compute_platform.cuda.version),
-        platform,
-        image_flavor=config.compute_platform.cuda.image_flavor,
-        image_distro=config.compute_platform.cuda.image_distro,
-    )
-    repository, tag = backend.base_image.split(":", 1)
-    requirements_request = comfyui_requirements_request(config, comfyui_entry)
-    if not entries_satisfy_request(
-        requirements_request,
-        (requirements_entry,),
-        compute_request_digest(requirements_request),
-    ):
-        raise ValueError("ComfyUI requirements identity does not match final config")
-    requests: list[ResolverRequestIdentity] = [
-        OciRequestIdentity(
-            type="oci",
-            role="cuda-base",
-            repository=repository,
-            tag=tag,
-            platform=platform.value,
-        ),
-        uv_oci_request(config),
-        ManagedPythonRequestIdentity(
-            type="managed-python",
-            version=config.python.version,
-            implementation="cpython",
-            platform=platform.value,
-            libc="gnu",
-            catalog_descriptor_digest=uv_descriptor_digest,
-        ),
-        ComfyUIRequestIdentity(
-            type="comfyui",
-            repository=COMFYUI_REPOSITORY,
-            selector=config.comfyui.version,
-        ),
-        requirements_request,
-    ]
-    if config.comfyui.install_cli:
-        requests.append(
-            ComfyCliRequestIdentity(
-                type="comfy-cli",
-                package="comfy-cli",
-                policy="highest-target-compatible-stable",
-                minimum_version=COMFY_CLI_MINIMUM_VERSION,
-                environment="uv-tool:comfy-cli",
-                index_url=config.python.index_url,
-                python_version=config.python.version,
-                platform=platform.value,
-            )
-        )
-    python_members = _members(domains, "python")
-    if python_members:
-        requests.append(
-            DirectPythonRequestIdentity(
-                type="python-group",
-                environment="application",
-                group="application-extra",
-                python_version=config.python.version,
-                platform=platform.value,
-                index_url=config.python.index_url,
-                members=python_members,
-            )
-        )
-    for member in _members(domains, "python", field="uv_tools"):
-        requests.append(
-            DirectPythonRequestIdentity(
-                type="python-group",
-                environment=f"uv-tool:{member.package}",
-                group="uv-tool",
-                python_version=config.python.version,
-                platform=platform.value,
-                index_url=config.python.index_url,
-                members=[member],
-            )
-        )
-    upstream = tuple(
-        DirectPythonRequestMember(
-            package=item.package,
-            extras=item.extras,
-            selector=item.selector,
-        )
-        for item in requirements_entry.protected
-    )
-    try:
-        pytorch_members = merge_pytorch_requirements(
-            DirectPythonRequestMember(
-                package="torch", extras=[], selector=f"=={config.pytorch.version}"
-            ),
-            upstream,
-            tuple(_members(domains, "pytorch")),
-        )
-    except ComfyUIRequirementsError as error:
-        raise CanonicalResolutionError(
-            (
-                Diagnostic(
-                    path=("config.lock.toml", "pytorch-group"),
-                    code="lock.protected_requirement_conflict",
-                    message=str(error),
-                ),
-            )
-        ) from error
-    requests.append(
-        PyTorchRequestIdentity(
-            type="pytorch-group",
-            environment="application",
-            group="pytorch",
-            backend="cuda",
-            channel=backend.package_channel,
-            python_version=config.python.version,
-            platform=platform.value,
-            python_index_url=config.python.index_url,
-            pytorch_index_url=(
-                f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}"
-            ),
-            upstream_protected=[
-                ProtectedRequirementProjection(
-                    package=item.package,
-                    extras=item.extras,
-                    selector=item.selector,
-                )
-                for item in upstream
-            ],
-            members=list(pytorch_members),
-        )
-    )
-    for node in config.comfyui.custom_nodes:
-        if node.type == "registry":
-            requests.append(
-                RegistryRequestIdentity(
-                    type="registry", id=node.id, selector=node.version or "latest"
-                )
-            )
-        else:
-            requests.append(
-                DirectGitRequestIdentity(
-                    type="git", url=node.url, ref=node.ref or "HEAD"
-                )
-            )
-    release = managed_python_release_inputs()
-    desired = tuple(
-        DesiredResolution.from_request(
-            request,
-            managed_python_release=(
-                release if isinstance(request, ManagedPythonRequestIdentity) else None
-            ),
-        )
-        for request in requests
-    )
+) -> tuple[LocalExecutableIdentityRequest, ...]:
     root = Path(scripts_dir).resolve()
     relative_hooks = sorted(
         {
             hook
-            for node in config.comfyui.custom_nodes
-            for hook in (*node.pre_install_scripts, *node.post_install_scripts)
+            for node in graph.custom_nodes
+            for hook in (*node.pre_install, *node.post_install)
         }
     )
-    local = (
+    return (
         tuple(
             LocalExecutableIdentityRequest(
                 root,
@@ -349,7 +173,6 @@ def build_desired_planning_inputs(
         )
         + runtime_hook_requests
     )
-    return DesiredPlanningInputs(desired, local)
 
 
 def stable_comfyui_entry(
@@ -412,24 +235,6 @@ def stable_comfyui_requirements_entry(
         acquirer,
         ComfyUIRequirementsLockEntry,
         key,
-    )
-
-
-def comfyui_requirements_request(
-    config: FinalConfig,
-    comfyui: OfficialComfyUILockEntry,
-) -> ComfyUIRequirementsRequestIdentity:
-    names = tuple(sorted(CUDA_PROTECTED_REQUIREMENTS))
-    return ComfyUIRequirementsRequestIdentity(
-        type="comfyui-requirements",
-        repository=comfyui.repository,
-        commit=comfyui.commit,
-        floor_commit=COMFYUI_FLOOR_COMMIT,
-        path=COMFYUI_REQUIREMENTS_PATH,
-        python_version=config.python.version,
-        platform=config.build.platforms[0],
-        protected_names=list(names),
-        protected_policy_digest=protected_policy_digest(names),
     )
 
 
@@ -500,18 +305,11 @@ def managed_python_release_inputs() -> ManagedPythonReleaseInputs:
     )
 
 
-def _members(
-    domains: FinalConfigDomainResult,
-    group: str,
-    *,
-    field: str = "extra_packages",
-) -> list[DirectPythonRequestMember]:
-    return [
-        DirectPythonRequestMember(
-            package=item.name,
-            extras=list(item.extras),
-            selector=item.specifier,
-        )
-        for item in domains.package_requirements
-        if item.path[:2] == (group, field)
-    ]
+def planning_release_inputs(python_version: str) -> PlanningReleaseInputs:
+    """Collect exact release-owned request and toolchain artifacts once."""
+    managed = managed_python_release_inputs()
+    return PlanningReleaseInputs(
+        managed_python=managed,
+        requirements_digest=production_requirements_digest(),
+        cdh_closure=production_inventory(python_version),
+    )

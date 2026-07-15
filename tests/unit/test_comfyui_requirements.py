@@ -36,7 +36,7 @@ numpy>=1.25
 """
     )
 
-    assert [item.model_dump() for item in parsed.protected] == [
+    assert [item.model_dump(mode="json") for item in parsed.protected] == [
         {"package": "torch", "extras": [], "selector": ""},
         {"package": "torchaudio", "extras": [], "selector": ""},
         {
@@ -85,7 +85,7 @@ def test_merge_unions_extras_conjoins_selectors_and_treats_bare_as_neutral() -> 
         ),
     )
 
-    assert [item.model_dump() for item in merged] == [
+    assert [item.model_dump(mode="json") for item in merged] == [
         {
             "package": "torch",
             "extras": ["dynamo"],

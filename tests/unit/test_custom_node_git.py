@@ -5,17 +5,18 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.unit.test_build_plan import accepted_resolution, final_config
+from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 from tests.unit.test_custom_node_installer import _application, _patch_phases, _phase
 
 from comfyui_docker_helper.config.build_plan import (
     GitNodePlan,
     HookPlan,
-    construct_build_plan,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     DirectGitLockEntry,
+    DirectGitRequestIdentity,
+    compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -315,7 +316,8 @@ def test_direct_git_install_stages_places_and_retains_repository_metadata(
     application, runtime = _application(tmp_path)
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     target = custom_nodes / "direct"
-    node = GitNodePlan(
+    # The clone fixture supplies a local source after BuildPlan admission.
+    node = GitNodePlan.model_construct(
         type="git",
         url=str(source),
         commit=commit,
@@ -361,7 +363,8 @@ def test_failed_direct_git_clone_cleans_only_owned_stage(
     unrelated = custom_nodes / "unrelated"
     unrelated.mkdir()
     unrelated.joinpath("keep").write_text("keep")
-    node = GitNodePlan(
+    # The failure fixture supplies a missing local source after plan admission.
+    node = GitNodePlan.model_construct(
         type="git",
         url=str(tmp_path / "missing-source"),
         commit="a" * 40,
@@ -453,7 +456,14 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     assert validate_final_config(config) == ()
     resolution = accepted_resolution()
     entries = [
-        entry.model_copy(update={"url": locator})
+        entry.model_copy(
+            update={
+                "url": locator,
+                "request_digest": compute_request_digest(
+                    DirectGitRequestIdentity(type="git", url=locator, ref="2" * 40)
+                ),
+            }
+        )
         if isinstance(entry, DirectGitLockEntry)
         else entry
         for entry in resolution.lock.entries
@@ -465,7 +475,7 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
         provider_calls=resolution.provider_calls,
         local_reads=resolution.local_reads,
     )
-    plan = construct_build_plan(config, changed_resolution)
+    plan = build_plan(config, changed_resolution)
     planned = plan.custom_nodes.nodes[1]
     assert isinstance(planned, GitNodePlan)
     assert config.comfyui.custom_nodes[1].url == locator

@@ -23,6 +23,7 @@ from urllib.parse import quote, urlencode, urlparse
 import httpx
 from packaging.version import InvalidVersion, Version
 
+from comfyui_docker_helper.config.canonical_request import SelectorStability
 from comfyui_docker_helper.config.selector_validation import normalize_registry_version
 from comfyui_docker_helper.config.value_validation import is_argv_value
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
@@ -43,13 +44,6 @@ _OCI_ACCEPT = ", ".join(
     (*sorted(_OCI_INDEX_MEDIA_TYPES), *sorted(_OCI_MANIFEST_MEDIA_TYPES))
 )
 _GIT_TIMEOUT_SECONDS = 30.0
-
-
-class SelectorStability(StrEnum):
-    """Whether a request must be refreshed by upgrade reconciliation."""
-
-    EXACT = "exact"
-    MOVING = "moving"
 
 
 class ProviderFailureKind(StrEnum):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
@@ -34,15 +34,19 @@ from comfyui_docker_helper.config.canonical_lock import (
     RegistryRequestIdentity,
     ResolverRequestIdentity,
     canonical_entry_key,
-    compute_request_digest,
     pytorch_core_version_matches_channel,
     uv_image_version_matches_tag,
+)
+from comfyui_docker_helper.config.canonical_request import (
+    DesiredResolution,
+    ManagedPythonReleaseInputs,
+    SelectorStability,
+    request_keys,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
 from comfyui_docker_helper.host.identity_providers import (
     LocalExecutableIdentityRequest,
-    SelectorStability,
 )
 
 type LockEntryKey = tuple[str, ...]
@@ -76,49 +80,6 @@ class DeltaKind(StrEnum):
 class LockDeltaItem:
     key: LockEntryKey
     kind: DeltaKind
-
-
-@dataclass(frozen=True, slots=True)
-class ManagedPythonReleaseInputs:
-    """Current exact release-owned inputs that constrain managed Python reuse."""
-
-    pip_version: str
-    cdh_version: str
-    cdh_source_digest: str
-    uv_build_version: str
-
-
-@dataclass(frozen=True, slots=True)
-class DesiredResolution:
-    """One provider acquisition unit; Python groups own multiple lock keys."""
-
-    request: ResolverRequestIdentity
-    managed_python_release: ManagedPythonReleaseInputs | None = None
-    keys: tuple[LockEntryKey, ...] = field(init=False)
-    request_digest: str = field(init=False)
-    stability: SelectorStability = field(init=False)
-
-    def __post_init__(self) -> None:
-        if isinstance(self.request, ManagedPythonRequestIdentity):
-            if self.managed_python_release is None:
-                raise ValueError("managed Python requires current release-owned inputs")
-        elif self.managed_python_release is not None:
-            raise ValueError("release-owned inputs apply only to managed Python")
-        object.__setattr__(self, "keys", _request_keys(self.request))
-        object.__setattr__(self, "request_digest", compute_request_digest(self.request))
-        object.__setattr__(self, "stability", _request_stability(self.request))
-
-    @classmethod
-    def from_request(
-        cls,
-        request: ResolverRequestIdentity,
-        *,
-        managed_python_release: ManagedPythonReleaseInputs | None = None,
-    ) -> DesiredResolution:
-        return cls(
-            request=request,
-            managed_python_release=managed_python_release,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,12 +140,7 @@ def reconcile_canonical_lock(
     """Accept one deterministic lock result without performing writes."""
     if purpose is ReconcilePurpose.CHECK and policy is not LockPolicy.DEFAULT:
         raise ValueError("check uses default reconciliation policy")
-    existing = _canonical_lock(existing)
-    ordered = tuple(
-        sorted(
-            (_canonical_desired(item) for item in desired), key=lambda item: item.keys
-        )
-    )
+    ordered = tuple(sorted(desired, key=lambda item: item.keys))
     fixed, local_reads = _acquire_local_entries(local_requests, local_acquirer)
     _validate_desired_keys(ordered, fixed)
     existing_by_key = _entry_map(existing.entries if existing is not None else ())
@@ -231,7 +187,7 @@ def reconcile_canonical_lock(
             continue
         if acquisition.provider_called:
             provider_calls.append(item.keys[0])
-        resolved = rebuild_canonical_entries(acquisition.entries)
+        resolved = acquisition.entries
         resolved_by_key = _entry_map(resolved)
         if not entries_satisfy_request(
             item.request,
@@ -339,11 +295,6 @@ def _acquire_local_entries(
                 )
             )
             continue
-        if entry is not None:
-            canonical = rebuild_canonical_entries((entry,))[0]
-            entry = (
-                canonical if isinstance(canonical, LocalExecutableLockEntry) else None
-            )
         if entry is None or canonical_entry_key(entry) != key:
             raise ValueError("local acquirer returned an incompatible identity")
         entries.append(entry)
@@ -359,7 +310,7 @@ def entries_satisfy_request(
     managed_python_release: ManagedPythonReleaseInputs | None = None,
 ) -> bool:
     """Prove that locally valid resolved entries satisfy one canonical request."""
-    expected_keys = set(_request_keys(request))
+    expected_keys = set(request_keys(request))
     by_key = _entry_map(entries)
     if (
         len(entries) != len(by_key)
@@ -466,25 +417,6 @@ def entries_satisfy_request(
     return not isinstance(request, PyTorchRequestIdentity) or compatibility is not None
 
 
-def _canonical_desired(item: DesiredResolution) -> DesiredResolution:
-    request_type = type(item.request)
-    request = request_type.model_validate(item.request.model_dump(mode="python"))
-    return DesiredResolution.from_request(
-        request,
-        managed_python_release=item.managed_python_release,
-    )
-
-
-def _canonical_lock(existing: CanonicalLock | None) -> CanonicalLock | None:
-    if existing is None:
-        return None
-    dumped = existing.model_dump(mode="python")
-    entries = rebuild_canonical_entries(tuple(existing.entries))
-    _validate_unique_entries(entries)
-    dumped["entries"] = [entry.model_dump(mode="python") for entry in entries]
-    return CanonicalLock.model_validate(dumped, strict=True)
-
-
 def rebuild_canonical_entries(
     entries: tuple[CanonicalLockEntry, ...] | list[CanonicalLockEntry],
 ) -> tuple[CanonicalLockEntry, ...]:
@@ -544,66 +476,6 @@ def _lock_delta(
         if before[key] != after[key]
     )
     return tuple(sorted(items, key=lambda item: item.key))
-
-
-def _request_keys(request: ResolverRequestIdentity) -> tuple[LockEntryKey, ...]:
-    if isinstance(request, OciRequestIdentity):
-        return (("oci", request.role),)
-    if isinstance(request, ManagedPythonRequestIdentity):
-        return (("managed-python", request.implementation, request.platform),)
-    if isinstance(request, ComfyUIRequestIdentity):
-        return (("comfyui", request.repository),)
-    if isinstance(request, ComfyUIRequirementsRequestIdentity):
-        return (("comfyui-requirements", request.repository),)
-    if isinstance(request, ComfyCliRequestIdentity):
-        return (("comfy-cli", request.package, request.environment),)
-    if isinstance(request, RegistryRequestIdentity):
-        return (("registry", request.id),)
-    if isinstance(request, DirectGitRequestIdentity):
-        return (("git", request.url),)
-    keys = tuple(
-        ("python-package", request.environment, member.package)
-        for member in request.members
-    )
-    if isinstance(request, PyTorchRequestIdentity):
-        return (*keys, ("pytorch-compatibility", request.environment))
-    return keys
-
-
-def _request_stability(request: ResolverRequestIdentity) -> SelectorStability:
-    if isinstance(request, OciRequestIdentity):
-        return SelectorStability.MOVING
-    if isinstance(request, ManagedPythonRequestIdentity):
-        return SelectorStability.EXACT
-    if isinstance(request, ComfyUIRequestIdentity):
-        selector = request.selector
-        return (
-            SelectorStability.EXACT
-            if _is_commit(selector) or selector[0].isdigit()
-            else SelectorStability.MOVING
-        )
-    if isinstance(request, ComfyUIRequirementsRequestIdentity):
-        return SelectorStability.MOVING
-    if isinstance(request, ComfyCliRequestIdentity):
-        return SelectorStability.MOVING
-    if isinstance(request, RegistryRequestIdentity):
-        return (
-            SelectorStability.MOVING
-            if request.selector == "latest"
-            or any(character in request.selector for character in "<>=!,")
-            else SelectorStability.EXACT
-        )
-    if isinstance(request, DirectGitRequestIdentity):
-        return (
-            SelectorStability.EXACT
-            if _is_commit(request.ref)
-            else SelectorStability.MOVING
-        )
-    return (
-        SelectorStability.EXACT
-        if all(member.selector.startswith("==") for member in request.members)
-        else SelectorStability.MOVING
-    )
 
 
 def _is_commit(value: str) -> bool:

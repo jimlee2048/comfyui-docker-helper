@@ -21,6 +21,10 @@ from comfyui_docker_helper.config.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
+from comfyui_docker_helper.config.canonical_request import (
+    CanonicalRequestError,
+    build_canonical_request_graph,
+)
 from comfyui_docker_helper.config.canonical_resolver import (
     AcceptedCanonicalLock,
     CanonicalResolutionError,
@@ -36,7 +40,8 @@ from comfyui_docker_helper.config.service import (
 )
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
-    build_desired_planning_inputs,
+    build_local_executable_requests,
+    planning_release_inputs,
     stable_comfyui_entry,
     stable_comfyui_requirements_entry,
     uv_catalog_descriptor_digest,
@@ -147,18 +152,21 @@ def prepare_render_context(
         requirements = stable_comfyui_requirements_entry(
             result.config, comfyui, existing, selected.policy, acquirer
         )
-        desired = build_desired_planning_inputs(
+        graph = build_canonical_request_graph(
             result.config,
-            result.domains,
-            scripts_dir=scripts_dir,
+            release=planning_release_inputs(result.config.python.version),
             uv_descriptor_digest=uv_digest,
             comfyui_entry=comfyui,
             requirements_entry=requirements,
+        )
+        local_requests = build_local_executable_requests(
+            graph,
+            scripts_dir=scripts_dir,
             runtime_hook_requests=runtime_hooks.requests,
         )
         accepted = reconcile_canonical_lock(
-            desired.desired,
-            local_requests=desired.local_requests,
+            graph.desired,
+            local_requests=local_requests,
             local_acquirer=local_acquirer,
             existing=existing,
             acquirer=acquirer,
@@ -166,20 +174,22 @@ def prepare_render_context(
             purpose=selected.purpose,
         )
         plan = construct_build_plan(
-            result.config,
-            accepted,
+            graph,
+            accepted.lock,
             runtime_provenance=_runtime_provenance(result),
         )
     except RuntimeHookInputError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except CanonicalResolutionError as error:
         raise HostRenderServiceError(error.diagnostics) from error
+    except CanonicalRequestError as error:
+        raise HostRenderServiceError(error.diagnostics) from error
 
     sources = tuple(
         LocalMaterializationSource(
             request.canonical_path, request.root / request.relative_path
         )
-        for request in desired.local_requests
+        for request in local_requests
     )
     if selected.check or (selected.locked and not selected.dry_run):
         _check_context(output, plan, accepted.lock, sources)

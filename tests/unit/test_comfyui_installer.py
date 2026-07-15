@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.unit.test_build_plan import accepted_resolution, final_config
+from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.comfyui_requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
@@ -19,7 +19,6 @@ from comfyui_docker_helper.comfyui_requirements import (
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     build_plan_digest,
-    construct_build_plan,
 )
 from comfyui_docker_helper.container import comfyui_installer
 from comfyui_docker_helper.container.comfyui_installer import (
@@ -66,7 +65,7 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     target = workspace / "ComfyUI"
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.application.model_dump(mode="python")
     parsed = parse_comfyui_requirements(
         _REQUIREMENTS,
@@ -76,10 +75,21 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
     )
     document["paths"]["workspace"] = str(workspace)
     document["paths"]["comfyui"] = str(target)
-    document["comfyui"]["repository"] = str(source)
-    document["comfyui"]["commit"] = commit
-    document["comfyui"]["requirements"]["digest"] = parsed.digest
-    application = ApplicationPhase.model_validate(document)
+    paths = plan.application.paths.model_validate(document["paths"])
+    requirements = plan.application.comfyui.requirements.model_copy(
+        update={"digest": parsed.digest}
+    )
+    # The installer fixture substitutes a local source after BuildPlan admission.
+    comfyui = plan.application.comfyui.model_copy(
+        update={
+            "repository": str(source),
+            "commit": commit,
+            "requirements": requirements,
+        }
+    )
+    application = plan.application.model_copy(
+        update={"paths": paths, "comfyui": comfyui}
+    )
     runtime = ContainerRuntime(
         workspace=workspace, comfyui_path=target, virtual_env=Path("/opt/venv")
     )
@@ -224,9 +234,9 @@ def test_checkout_rejects_every_preexisting_target_type(
 
 def test_checkout_failure_cleans_only_owned_stage(tmp_path: Path) -> None:
     application, runtime = _application(tmp_path)
-    document = application.model_dump(mode="python")
-    document["comfyui"]["commit"] = "f" * 40
-    changed = ApplicationPhase.model_validate(document)
+    changed = application.model_copy(
+        update={"comfyui": application.comfyui.model_copy(update={"commit": "f" * 40})}
+    )
     sibling = runtime.workspace / "keep"
     sibling.write_text("keep")
 
@@ -267,7 +277,7 @@ def test_checkout_requirements_tamper_fails_expected_projection(tmp_path: Path) 
 def test_orchestration_verifies_checkout_before_any_package_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     digest = build_plan_digest(plan)
     application_path = tmp_path / "application.json"
     toolchain_path = tmp_path / "toolchain.json"
@@ -351,7 +361,7 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
 def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.application.model_dump(mode="python")
     document["comfyui"]["manager"] = None
     application = ApplicationPhase.model_validate(document)

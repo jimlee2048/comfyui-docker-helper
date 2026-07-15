@@ -503,7 +503,9 @@ def _validate_system_domains(
         )
     for index, package in enumerate(config.system.extra_packages):
         path: DiagnosticPath = ("system", "extra_packages", index)
-        if not _APT_PACKAGE_PATTERN.fullmatch(package):
+        try:
+            validate_apt_package_identity(package)
+        except ValueError:
             diagnostics.append(
                 Diagnostic(
                     path, "system.invalid_apt_package", "must be one apt package name"
@@ -1145,3 +1147,10 @@ def is_oci_tag(value: str) -> bool:
 def is_aria2_argument_value(value: str) -> bool:
     """Return whether a configured aria2 value is an unambiguous argv token."""
     return is_argv_value(value) and not value.startswith("-")
+
+
+def validate_apt_package_identity(value: str) -> str:
+    """Return one argv-safe apt package identity or fail closed."""
+    if _APT_PACKAGE_PATTERN.fullmatch(value) is None:
+        raise ValueError("apt package must be one canonical package identity")
+    return value

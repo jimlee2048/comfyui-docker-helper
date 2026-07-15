@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.unit.test_build_plan import accepted_resolution, final_config
+from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
@@ -16,7 +16,6 @@ from comfyui_docker_helper.config.build_plan import (
     GitNodePlan,
     HookPlan,
     RegistryNodePlan,
-    construct_build_plan,
 )
 from comfyui_docker_helper.container import comfyui_installer, custom_node_installer
 from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallError
@@ -36,7 +35,8 @@ def _node(
     pre: tuple[str, ...] = (),
     post: tuple[str, ...] = (),
 ) -> RegistryNodePlan:
-    return RegistryNodePlan(
+    # Runtime tests construct already-admitted phase values, including forgeries.
+    return RegistryNodePlan.model_construct(
         type="registry",
         id=node_id,
         version=version,
@@ -57,7 +57,8 @@ def _git_node(
     pre: tuple[str, ...] = (),
     post: tuple[str, ...] = (),
 ) -> GitNodePlan:
-    return GitNodePlan(
+    # Runtime tests construct already-admitted phase values, including forgeries.
+    return GitNodePlan.model_construct(
         type="git",
         url=url,
         commit="c" * 40,
@@ -81,7 +82,7 @@ def _write_project(root: Path, directory: str, name: str, version: str) -> Path:
 
 
 def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     workspace = tmp_path / "workspace"
     comfyui = workspace / "ComfyUI"
     comfyui.joinpath("custom_nodes").mkdir(parents=True)

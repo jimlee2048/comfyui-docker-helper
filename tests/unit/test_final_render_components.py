@@ -10,12 +10,11 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import ValidationError
-from tests.unit.test_build_plan import accepted_resolution, final_config
+from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     build_plan_digest,
-    construct_build_plan,
     dump_build_plan_json,
     parse_build_plan_json,
 )
@@ -34,7 +33,7 @@ from comfyui_docker_helper.rendering.final_renderer import (
 
 
 def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
 
     rendered = render_build_plan_dockerfile(plan)
 
@@ -59,9 +58,7 @@ def test_renderer_quotes_container_paths_without_host_projection() -> None:
     document["system"]["workspace"] = "/workspace data"
     changed = FinalConfig.model_validate(document)
 
-    rendered = render_build_plan_dockerfile(
-        construct_build_plan(changed, accepted_resolution())
-    )
+    rendered = render_build_plan_dockerfile(build_plan(changed, accepted_resolution()))
 
     assert 'ENV WORKSPACE="/workspace data"' in rendered
     assert 'WORKDIR "/workspace data"' in rendered
@@ -69,7 +66,7 @@ def test_renderer_quotes_container_paths_without_host_projection() -> None:
 
 def test_renderer_preserves_non_package_runtime_environment() -> None:
     rendered = render_build_plan_dockerfile(
-        construct_build_plan(final_config(), accepted_resolution())
+        build_plan(final_config(), accepted_resolution())
     )
 
     assert 'ENV ALPHA="first"' in rendered
@@ -77,7 +74,7 @@ def test_renderer_preserves_non_package_runtime_environment() -> None:
 
 
 def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(with_uv_tool=True), accepted_resolution(with_uv_tool=True)
     )
 
@@ -123,7 +120,7 @@ def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
 
 def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
     rendered = render_build_plan_dockerfile(
-        construct_build_plan(
+        build_plan(
             final_config(install_cli=False), accepted_resolution(install_cli=False)
         )
     )
@@ -137,7 +134,7 @@ def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
 
 
 def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> None:
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(install_cli=False), accepted_resolution(install_cli=False)
     )
 
@@ -167,7 +164,7 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
 
 @pytest.mark.parametrize("node_type", ["git", "registry", "empty"])
 def test_renderer_always_emits_one_custom_node_layer(node_type: str) -> None:
-    plan = construct_build_plan(final_config(), accepted_resolution())
+    plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
     document["custom_nodes"]["nodes"] = tuple(
         node
@@ -198,7 +195,7 @@ def test_final_application_mode_matrix_keeps_one_observed_execution_boundary(
     install_manager: bool,
     node_types: tuple[str, ...],
 ) -> None:
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(install_cli=install_cli),
         accepted_resolution(install_cli=install_cli),
     )
@@ -231,7 +228,7 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
@@ -353,7 +350,7 @@ def test_phase_loader_rejects_wrong_binding_wrong_phase_and_extra_fields(
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
@@ -404,7 +401,7 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
@@ -444,7 +441,7 @@ def test_parsed_build_plan_rejects_unsafe_hook_paths(
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
@@ -467,7 +464,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
@@ -520,7 +517,7 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
@@ -559,7 +556,7 @@ def test_materializer_rejects_symlink_or_special_destination_components(
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
-    plan = construct_build_plan(
+    plan = build_plan(
         final_config(scripts_dir=scripts, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )

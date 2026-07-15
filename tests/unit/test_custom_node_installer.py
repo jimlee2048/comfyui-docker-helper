@@ -101,6 +101,40 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
     return application, runtime
 
 
+def _local_manager_application(
+    tmp_path: Path,
+) -> tuple[ApplicationPhase, ContainerRuntime, Path]:
+    application, runtime = _application(tmp_path)
+    virtual_env = tmp_path / "venv"
+    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
+    anchor = (
+        virtual_env
+        / "lib"
+        / f"python{python_minor}"
+        / "site-packages"
+        / "comfyui-docker-helper-comfyui.pth"
+    )
+    manager = application.comfyui.manager
+    assert manager is not None
+    application = application.model_copy(
+        update={
+            "paths": application.paths.model_copy(update={"venv": str(virtual_env)}),
+            "comfyui": application.comfyui.model_copy(
+                update={
+                    "manager": manager.model_copy(update={"import_anchor": str(anchor)})
+                }
+            ),
+        }
+    )
+    runtime = ContainerRuntime(
+        workspace=runtime.workspace,
+        comfyui_path=runtime.comfyui_path,
+        virtual_env=virtual_env,
+    )
+    anchor.parent.mkdir(parents=True)
+    return application, runtime, anchor
+
+
 def _phase(
     runtime: ContainerRuntime,
     nodes: tuple[CustomNodePlan, ...],
@@ -583,6 +617,86 @@ def test_enabled_git_only_plan_rejects_manager_mutation_at_next_boundary(
     )
 
     with pytest.raises(ComfyUIInstallError, match="was mutated"):
+        custom_node_installer.install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+        )
+
+
+def test_enabled_git_only_plan_rejects_anchor_drift_at_next_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime, anchor = _local_manager_application(tmp_path)
+    custom_nodes = _phase(runtime, (_git_node(runtime),))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    runtime.comfyui_path.joinpath("manager_requirements.txt").write_text(
+        "comfyui_manager==4.0.5\n"
+    )
+    comfyui_installer._write_import_anchor(
+        anchor,
+        runtime.comfyui_path,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
+    verify_anchor = comfyui_installer._verify_manager_import_anchor
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_manager_import_anchor",
+        lambda observed_application, observed_manager, observed_runtime: verify_anchor(
+            observed_application,
+            observed_manager,
+            observed_runtime,
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        ),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_declared_manager_distributions",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
+    monkeypatch.setattr(
+        comfyui_installer,
+        "run_application_checker",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "capture_manager_authority",
+        comfyui_installer.capture_manager_authority,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_manager_authority",
+        comfyui_installer.verify_manager_authority,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_capability",
+        comfyui_installer.observe_manager_capability,
+    )
+
+    def mutate_anchor(*_args) -> None:
+        anchor.chmod(0o644)
+        anchor.write_text("wrong\n")
+        anchor.chmod(0o444)
+
+    monkeypatch.setattr(custom_node_installer, "_install_git_node", mutate_anchor)
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_git_provenance",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_write_custom_node_inventory",
+        lambda *_args: pytest.fail("anchor drift must prevent evidence"),
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="content does not match"):
         custom_node_installer.install_custom_nodes(
             custom_nodes,
             application,
@@ -1526,6 +1640,13 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
         comfyui_installer,
         "_verify_declared_manager_distributions",
         prove_distributions,
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_manager_import_anchor",
+        lambda _application, observed_manager, _runtime: (
+            Path(observed_manager.import_anchor).parent
+        ),
     )
     monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
     monkeypatch.setattr(

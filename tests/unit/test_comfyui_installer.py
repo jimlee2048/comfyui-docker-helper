@@ -91,6 +91,40 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
     return application, runtime
 
 
+def _local_manager_application(
+    tmp_path: Path,
+) -> tuple[ApplicationPhase, ContainerRuntime, Path]:
+    application, runtime = _application(tmp_path)
+    virtual_env = tmp_path / "venv"
+    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
+    anchor = (
+        virtual_env
+        / "lib"
+        / f"python{python_minor}"
+        / "site-packages"
+        / "comfyui-docker-helper-comfyui.pth"
+    )
+    manager = application.comfyui.manager
+    assert manager is not None
+    application = application.model_copy(
+        update={
+            "paths": application.paths.model_copy(update={"venv": str(virtual_env)}),
+            "comfyui": application.comfyui.model_copy(
+                update={
+                    "manager": manager.model_copy(update={"import_anchor": str(anchor)})
+                }
+            ),
+        }
+    )
+    runtime = ContainerRuntime(
+        workspace=runtime.workspace,
+        comfyui_path=runtime.comfyui_path,
+        virtual_env=virtual_env,
+    )
+    anchor.parent.mkdir(parents=True)
+    return application, runtime, anchor
+
+
 # ComfyUI installation preserves exact checkout, source routing, and capability proofs.
 def test_checkout_is_detached_exact_atomic_and_retains_git_metadata(
     tmp_path: Path,
@@ -557,6 +591,13 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     )
     monkeypatch.setattr(
         comfyui_installer,
+        "_verify_manager_import_anchor",
+        lambda _application, observed_manager, _runtime: (
+            events.append("anchor proof") or Path(observed_manager.import_anchor).parent
+        ),
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
         "_verify_cm_cli",
         lambda path, observed_runtime: events.append(
             f"cm-cli:{path}:{observed_runtime.python}"
@@ -595,6 +636,7 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     assert checker_kwargs["runtime_environment"] is True
     assert events == [
         f"anchor:{manager.import_anchor}:{runtime.comfyui_path}",
+        "anchor proof",
         "declared distributions",
         f"cm-cli:{manager.executable}:{runtime.python}",
     ]
@@ -634,25 +676,80 @@ def test_manager_requirements_fail_closed_before_package_mutation(
 def test_manager_import_anchor_is_exclusive_read_only_and_exact(
     tmp_path: Path,
 ) -> None:
-    site_packages = tmp_path / "venv/lib/python3.13/site-packages"
-    site_packages.mkdir(parents=True)
-    anchor = site_packages / "comfyui-docker-helper-comfyui.pth"
-    workspace = tmp_path / "workspace/ComfyUI"
+    application, runtime, anchor = _local_manager_application(tmp_path)
+    manager = application.comfyui.manager
+    assert manager is not None
 
     comfyui_installer._write_import_anchor(
         anchor,
-        workspace,
+        runtime.comfyui_path,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
+    comfyui_installer._verify_manager_import_anchor(
+        application,
+        manager,
+        runtime,
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
     )
 
-    assert anchor.read_text() == f"{workspace}\n"
+    assert anchor.read_text() == f"{runtime.comfyui_path}\n"
     assert anchor.stat().st_mode & 0o777 == 0o444
     with pytest.raises(ComfyUIInstallError, match="already exists"):
         comfyui_installer._write_import_anchor(
             anchor,
-            workspace,
+            runtime.comfyui_path,
             owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "unavailable"),
+        ("content", "content does not match"),
+        ("mode", "mode must be 0444"),
+        ("owner", "ownership is invalid"),
+        ("symlink", "regular non-symlink"),
+        ("parent", "outside application site-packages"),
+    ],
+)
+def test_manager_import_anchor_verifier_rejects_factual_drift(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    application, runtime, anchor = _local_manager_application(tmp_path)
+    manager = application.comfyui.manager
+    assert manager is not None
+    observed_manager = manager
+    owner_uid = os.getuid()
+    if mutation == "symlink":
+        target = tmp_path / "anchor-target"
+        target.write_text(f"{runtime.comfyui_path}\n")
+        anchor.symlink_to(target)
+    elif mutation == "parent":
+        observed_manager = manager.model_copy(
+            update={
+                "import_anchor": str(tmp_path / "other/site-packages" / anchor.name)
+            }
+        )
+    elif mutation != "missing":
+        anchor.write_text(
+            "wrong\n" if mutation == "content" else f"{runtime.comfyui_path}\n"
+        )
+        anchor.chmod(0o644 if mutation == "mode" else 0o444)
+        if mutation == "owner":
+            owner_uid += 1
+
+    with pytest.raises(ComfyUIInstallError, match=message):
+        comfyui_installer._verify_manager_import_anchor(
+            application,
+            observed_manager,
+            runtime,
+            owner_uid=owner_uid,
             owner_gid=os.getgid(),
         )
 

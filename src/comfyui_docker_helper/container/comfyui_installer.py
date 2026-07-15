@@ -494,8 +494,8 @@ def _verify_manager_capability(
     runtime: ContainerRuntime,
     environ: Mapping[str, str] | None,
 ) -> None:
+    site_packages = _verify_manager_import_anchor(application, manager, runtime)
     _verify_declared_manager_distributions(application, parsed, runtime)
-    site_packages = Path(manager.import_anchor).parent
     run_application_checker(
         runtime,
         "manager",
@@ -510,6 +510,50 @@ def _verify_manager_capability(
         description="Manager application capability verification",
     )
     _verify_cm_cli(Path(manager.executable), runtime)
+
+
+def _verify_manager_import_anchor(
+    application: ApplicationPhase,
+    manager: ManagerCapabilityPlan,
+    runtime: ContainerRuntime,
+    *,
+    owner_uid: int = 0,
+    owner_gid: int = 0,
+) -> Path:
+    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
+    application_venv = Path(application.paths.venv)
+    if runtime.virtual_env != application_venv:
+        raise ComfyUIInstallError(
+            "Manager import anchor runtime does not match the application venv"
+        )
+    expected_parent = (
+        application_venv / "lib" / f"python{python_minor}" / "site-packages"
+    )
+    path = Path(manager.import_anchor)
+    if path.parent != expected_parent:
+        raise ComfyUIInstallError(
+            "Manager import anchor is outside application site-packages"
+        )
+    _require_existing_real_directory(expected_parent)
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise ComfyUIInstallError("Manager import anchor is unavailable") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ComfyUIInstallError(
+            "Manager import anchor must be one regular non-symlink file"
+        )
+    if metadata.st_uid != owner_uid or metadata.st_gid != owner_gid:
+        raise ComfyUIInstallError("Manager import anchor ownership is invalid")
+    if stat.S_IMODE(metadata.st_mode) != 0o444:
+        raise ComfyUIInstallError("Manager import anchor mode must be 0444")
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise ComfyUIInstallError("Manager import anchor could not be read") from error
+    if content != f"{runtime.comfyui_path}\n".encode():
+        raise ComfyUIInstallError("Manager import anchor content does not match")
+    return expected_parent
 
 
 def _verify_declared_manager_distributions(

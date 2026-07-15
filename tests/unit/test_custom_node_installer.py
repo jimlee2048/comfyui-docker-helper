@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Sequence
@@ -82,6 +83,10 @@ def _write_project(root: Path, directory: str, name: str, version: str) -> Path:
         f'[project]\nname = "{name}"\nversion = "{version}"\n'
     )
     return target
+
+
+def _hook_digest(content: bytes) -> str:
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
 def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
@@ -929,7 +934,7 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     monkeypatch.setattr(
         custom_node_installer,
         "run_hook",
-        lambda hook, **_kwargs: events.append(("hook", hook)),
+        lambda hook, **kwargs: events.append(("hook", hook, kwargs["expected_digest"])),
     )
     monkeypatch.setattr(
         custom_node_installer,
@@ -963,10 +968,15 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         ("install", "direct"),
         ("install", "last"),
     ]
+    assert [event for event in events if event[0] == "hook"] == [
+        ("hook", "first-post.py", f"sha256:{'b' * 64}"),
+        ("hook", "git-pre.py", f"sha256:{'c' * 64}"),
+        ("hook", "git-post.py", f"sha256:{'d' * 64}"),
+    ]
     assert (
-        events.index(("hook", "git-pre.py"))
+        events.index(("hook", "git-pre.py", f"sha256:{'c' * 64}"))
         < events.index(("install", "direct"))
-        < events.index(("hook", "git-post.py"))
+        < events.index(("hook", "git-post.py", f"sha256:{'d' * 64}"))
     )
     assert events[-4:] == [
         ("proof", names(nodes), ()),
@@ -1561,11 +1571,21 @@ def test_real_hook_is_reproved_before_the_next_cm_cli_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     application, runtime = _application(tmp_path)
-    custom_nodes = _phase(runtime, (_node("first", "1.0.0", pre=("mutate.sh",)),))
-    _patch_phases(monkeypatch, application, custom_nodes)
     marker = tmp_path / "hook-ran"
     hook = tmp_path / "mutate.sh"
     hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    node = _node("first", "1.0.0", pre=("mutate.sh",)).model_copy(
+        update={
+            "pre_install": (
+                HookPlan(
+                    relative_path="mutate.sh",
+                    digest=_hook_digest(hook.read_bytes()),
+                ),
+            )
+        }
+    )
+    custom_nodes = _phase(runtime, (node,))
+    _patch_phases(monkeypatch, application, custom_nodes)
     events: list[str] = []
 
     def prove(*_args) -> None:
@@ -1596,6 +1616,57 @@ def test_real_hook_is_reproved_before_the_next_cm_cli_process(
 
     assert marker.exists()
     assert events.index("proof-after-hook") < events.index("cm-cli")
+
+
+def test_first_hook_replacement_of_later_regular_hook_fails_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trusted hook cannot substitute later locked executable bytes."""
+    application, runtime = _application(tmp_path)
+    first_path = tmp_path / "first.sh"
+    later_path = tmp_path / "later.sh"
+    replacement_path = tmp_path / "replacement.sh"
+    malicious_marker = tmp_path / "malicious-hook-ran"
+    install_marker = tmp_path / "node-install-ran"
+    malicious = f"touch {malicious_marker}"
+    first_content = (
+        f"printf '%s\\n' '{malicious}' > {replacement_path}\n"
+        f"mv {replacement_path} {later_path}\n"
+    ).encode()
+    later_content = b"true\n"
+    first_path.write_bytes(first_content)
+    later_path.write_bytes(later_content)
+    node = RegistryNodePlan.model_construct(
+        type="registry",
+        id="first",
+        version="1.0.0",
+        pre_install=(
+            HookPlan(relative_path="first.sh", digest=_hook_digest(first_content)),
+            HookPlan(relative_path="later.sh", digest=_hook_digest(later_content)),
+        ),
+        post_install=(),
+    )
+    custom_nodes = _phase(runtime, (node,))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_argv",
+        lambda *_args, **_kwargs: install_marker.touch(),
+    )
+
+    with pytest.raises(ContainerCommandError, match="digest does not match"):
+        custom_node_installer.install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+            hooks_directory=tmp_path,
+        )
+
+    assert later_path.read_text() == f"{malicious}\n"
+    assert later_path.is_file()
+    assert not malicious_marker.exists()
+    assert not install_marker.exists()
 
 
 def test_hook_cannot_retarget_requirements_and_installed_manager_together(

@@ -176,6 +176,7 @@ def install_custom_nodes(
             observations.invalidate_mutation()
             run_hook(
                 hook.relative_path,
+                expected_digest=hook.digest,
                 scripts_dir=hooks_directory,
                 runtime=runtime,
                 env=environ,
@@ -259,6 +260,7 @@ def install_custom_nodes(
             observations.invalidate_mutation()
             run_hook(
                 hook.relative_path,
+                expected_digest=hook.digest,
                 scripts_dir=hooks_directory,
                 runtime=runtime,
                 env=environ,

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
+import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -90,6 +93,7 @@ def run_argv(
     description: str = "command",
     start_new_session: bool = False,
     close_stdin: bool = False,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an argv subprocess with inherited stdout/stderr and strict failure."""
 
@@ -108,6 +112,8 @@ def run_argv(
             run_kwargs["start_new_session"] = True
         if close_stdin:
             run_kwargs["stdin"] = subprocess.DEVNULL
+        if pass_fds:
+            run_kwargs["pass_fds"] = pass_fds
         result = subprocess.run(command, **run_kwargs)
     except FileNotFoundError as error:
         raise ContainerCommandError(
@@ -164,62 +170,214 @@ def start_argv(
 def run_hook(
     hook: str,
     *,
+    expected_digest: str,
     scripts_dir: str | Path,
     runtime: ContainerRuntime = _DEFAULT_RUNTIME,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run one validated hook script with the configured container runtime."""
+    """Run one content-locked hook through an immutable inherited descriptor."""
 
-    script_path = resolve_hook_path(hook, scripts_dir=scripts_dir)
-    hook_env = runtime.env(env)
-    if script_path.suffix == ".sh":
-        argv = ["bash", str(script_path)]
-    elif script_path.suffix == ".py":
-        argv = [str(runtime.python), str(script_path)]
-    else:  # pragma: no cover - resolve_hook_path already rejects this branch.
-        raise ContainerCommandError(f"unsupported hook extension: {hook}")
+    hook_path = _validate_hook_path(hook)
+    _validate_hook_digest(expected_digest)
+    source_fd = _open_hook(hook_path, scripts_dir=scripts_dir)
+    try:
+        sealed_fd = _seal_hook(source_fd, expected_digest=expected_digest, hook=hook)
+    finally:
+        os.close(source_fd)
 
-    return run_argv(
-        argv,
-        cwd=runtime.comfyui_path,
-        env=hook_env,
-        description=f"hook {hook}",
+    try:
+        operand = f"/proc/self/fd/{sealed_fd}"
+        if hook_path.suffix == ".sh":
+            argv = ["bash", operand]
+        else:
+            argv = [str(runtime.python), operand]
+        return run_argv(
+            argv,
+            cwd=runtime.comfyui_path,
+            env=runtime.env(env),
+            description=f"hook {hook}",
+            pass_fds=(sealed_fd,),
+        )
+    finally:
+        os.close(sealed_fd)
+
+
+def _validate_hook_path(hook: str) -> PurePosixPath:
+    path = PurePosixPath(hook)
+    if (
+        not hook
+        or hook.startswith("/")
+        or "\\" in hook
+        or any(ord(character) < 32 or ord(character) == 127 for character in hook)
+        or path.as_posix() != hook
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ContainerCommandError("hook path must be one canonical relative path")
+    if path.suffix not in _HOOK_SUFFIXES:
+        raise ContainerCommandError("hook path must end in .sh or .py")
+    return path
+
+
+def _validate_hook_digest(digest: str) -> None:
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 71
+        or not digest.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in digest[7:])
+    ):
+        raise ContainerCommandError("hook expected digest is invalid")
+
+
+def _open_hook(path: PurePosixPath, *, scripts_dir: str | Path) -> int:
+    scripts_parts = _validate_scripts_root(scripts_dir)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
     )
-
-
-def run_hooks(
-    hooks: Sequence[str],
-    *,
-    scripts_dir: str | Path,
-    runtime: ContainerRuntime = _DEFAULT_RUNTIME,
-    env: Mapping[str, str] | None = None,
-) -> None:
-    """Run hooks in declaration order and stop on the first failure."""
-
-    hook_env = runtime.env(env)
-    for hook in hooks:
-        run_hook(hook, scripts_dir=scripts_dir, runtime=runtime, env=hook_env)
-
-
-def resolve_hook_path(hook: str, *, scripts_dir: str | Path) -> Path:
-    """Resolve a hook path below scripts-dir and repeat runtime validation."""
-
-    hook_path = PurePosixPath(hook)
-    if hook_path.is_absolute():
-        raise ContainerCommandError(
-            f"hook path must be relative to scripts-dir: {hook}"
+    file_flags = (
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    directory_fd: int | None = None
+    source_fd: int | None = None
+    try:
+        directory_fd = os.open("/", directory_flags)
+        for part in (*scripts_parts, *path.parts[:-1]):
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            previous_fd = directory_fd
+            directory_fd = None
+            try:
+                os.close(previous_fd)
+            except OSError:
+                os.close(next_fd)
+                raise
+            directory_fd = next_fd
+        source_fd = os.open(
+            path.parts[-1],
+            file_flags,
+            dir_fd=directory_fd,
         )
-    if ".." in hook_path.parts:
-        raise ContainerCommandError(f"hook path must not contain '..': {hook}")
-    if hook_path.suffix not in _HOOK_SUFFIXES:
-        raise ContainerCommandError(f"hook path must end in .sh or .py: {hook}")
-
-    source = Path(scripts_dir).joinpath(*hook_path.parts)
-    if not source.is_file():
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            raise ContainerCommandError(
+                "hook must reference one regular non-symlink file"
+            )
+        result = source_fd
+        source_fd = None
+        return result
+    except ContainerCommandError:
+        raise
+    except (OSError, TypeError, ValueError) as error:
         raise ContainerCommandError(
-            f"hook script does not exist or is not a file: {hook}"
+            "hook must reference one regular non-symlink file"
+        ) from error
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _validate_scripts_root(scripts_dir: str | Path) -> tuple[str, ...]:
+    value = os.fspath(scripts_dir)
+    if not isinstance(value, str):
+        raise ContainerCommandError(
+            "hook scripts root must be one canonical absolute path"
         )
-    return source
+    path = PurePosixPath(value)
+    if (
+        not value
+        or not path.is_absolute()
+        or value.startswith("//")
+        or "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts[1:])
+    ):
+        raise ContainerCommandError(
+            "hook scripts root must be one canonical absolute path"
+        )
+    return path.parts[1:]
+
+
+def _seal_hook(source_fd: int, *, expected_digest: str, hook: str) -> int:
+    try:
+        import fcntl
+
+        # Standalone Python builds may omit names from the stable Linux UAPI.
+        add_seals = getattr(fcntl, "F_ADD_SEALS", 1033)
+        get_seals = getattr(fcntl, "F_GET_SEALS", 1034)
+        required_seals = (
+            getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+            | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+            | getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+        )
+    except ImportError as error:
+        raise ContainerCommandError(
+            "immutable hook execution is unavailable"
+        ) from error
+
+    sealed_fd: int | None = None
+    complete = False
+    try:
+        sealed_fd = _create_memfd()
+        while chunk := os.read(source_fd, 1024 * 1024):
+            _write_all(sealed_fd, chunk)
+        fcntl.fcntl(sealed_fd, add_seals, required_seals)
+        observed_seals = fcntl.fcntl(sealed_fd, get_seals)
+        if observed_seals & required_seals != required_seals:
+            raise ContainerCommandError("hook content could not be sealed")
+        os.lseek(sealed_fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while chunk := os.read(sealed_fd, 1024 * 1024):
+            digest.update(chunk)
+        observed_digest = f"sha256:{digest.hexdigest()}"
+        if not hmac.compare_digest(observed_digest, expected_digest):
+            raise ContainerCommandError(f"hook digest does not match: {hook}")
+        os.lseek(sealed_fd, 0, os.SEEK_SET)
+        complete = True
+        return sealed_fd
+    except ContainerCommandError:
+        raise
+    except OSError as error:
+        raise ContainerCommandError("hook content could not be sealed") from error
+    finally:
+        if sealed_fd is not None and not complete:
+            os.close(sealed_fd)
+
+
+def _create_memfd() -> int:
+    flags = getattr(os, "MFD_ALLOW_SEALING", 0x0002) | getattr(
+        os, "MFD_CLOEXEC", 0x0001
+    )
+    create = getattr(os, "memfd_create", None)
+    if create is not None:
+        return create("cdh-hook", flags)
+
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        create = libc.memfd_create
+    except (AttributeError, ImportError) as error:
+        raise OSError("memfd_create is unavailable") from error
+    create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
+    create.restype = ctypes.c_int
+    fd = create(b"cdh-hook", flags)
+    if fd < 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    return fd
+
+
+def _write_all(fd: int, content: bytes) -> None:
+    offset = 0
+    while offset < len(content):
+        written = os.write(fd, content[offset:])
+        if written <= 0:
+            raise OSError("short memfd write")
+        offset += written
 
 
 def _format_argv(argv: Sequence[str]) -> str:

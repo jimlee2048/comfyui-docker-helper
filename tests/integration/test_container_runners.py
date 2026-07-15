@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import errno
+import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,10 +14,8 @@ import pytest
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
-    resolve_hook_path,
     run_argv,
     run_hook,
-    run_hooks,
     start_argv,
 )
 
@@ -216,119 +217,209 @@ def test_run_argv_reports_missing_executable(tmp_path: Path) -> None:
         )
 
 
-# Hook runners accept only contained regular scripts and stop on the first failure.
-def test_run_hook_maps_shell_and_python_hooks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+# Hook execution binds the locked bytes to an immutable inherited descriptor.
+@pytest.mark.parametrize("suffix", [".sh", ".py"])
+def test_run_hook_executes_exact_shell_and_python_bytes(
+    tmp_path: Path, suffix: str
 ) -> None:
-    """Map .sh to bash and .py to the venv Python with ComfyUI as cwd."""
+    """Execute exact locked bytes with the suffix-selected interpreter."""
+    _require_linux_memfd()
     scripts = tmp_path / "scripts"
     nested = scripts / "nested"
     nested.mkdir(parents=True)
-    shell_hook = scripts / "before.sh"
-    python_hook = nested / "after.py"
-    shell_hook.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    python_hook.write_text("pass\n", encoding="utf-8")
-    runtime = ContainerRuntime(
-        workspace=tmp_path / "workspace",
-        comfyui_path=tmp_path / "workspace" / "ComfyUI",
-        virtual_env=tmp_path / "venv",
+    marker = tmp_path / f"ran{suffix}"
+    content = (
+        b'printf "shell" > "$HOOK_MARKER"\n'
+        if suffix == ".sh"
+        else (
+            b"import os\nfrom pathlib import Path\n"
+            b'Path(os.environ["HOOK_MARKER"]).write_text("python")\n'
+        )
     )
-    calls: list[tuple[list[str], str, dict[str, str], bool]] = []
-
-    def fake_run(
-        argv: list[str],
-        *,
-        cwd: str,
-        env: dict[str, str],
-        shell: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]:
-        calls.append((argv, cwd, env, shell))
-        assert check is False
-        return subprocess.CompletedProcess(argv, 0)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    hook = nested / f"exact{suffix}"
+    hook.write_bytes(content)
+    runtime = _runtime(tmp_path)
 
     run_hook(
-        "before.sh",
+        f"nested/exact{suffix}",
+        expected_digest=_digest(content),
         scripts_dir=scripts,
         runtime=runtime,
-        env={"PATH": "/usr/bin"},
-    )
-    run_hook(
-        "nested/after.py",
-        scripts_dir=scripts,
-        runtime=runtime,
-        env={"PATH": "/usr/bin"},
+        env={**os.environ, "HOOK_MARKER": str(marker)},
     )
 
-    assert calls[0][0] == ["bash", str(shell_hook)]
-    assert calls[1][0] == [str(runtime.python), str(python_hook)]
-    assert [call[1] for call in calls] == [str(runtime.comfyui_path)] * 2
-    assert [call[3] for call in calls] == [False, False]
-    assert calls[0][2]["WORKSPACE"] == str(runtime.workspace)
-    assert calls[0][2]["COMFYUI_PATH"] == str(runtime.comfyui_path)
-    assert calls[0][2]["VIRTUAL_ENV"] == str(runtime.virtual_env)
+    assert marker.read_text() == ("shell" if suffix == ".sh" else "python")
 
 
-def test_run_hooks_stops_on_first_failure(
+def test_run_hook_rejects_digest_mismatch_before_subprocess(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run hooks serially and stop immediately on failure."""
+    """Do not start mismatched hook bytes."""
+    _require_linux_memfd()
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("first.sh", "second.sh"):
-        (scripts / name).write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    calls: list[list[str]] = []
+    marker = tmp_path / "must-not-run"
+    hook = scripts / "mismatch.sh"
+    hook.write_text(f"touch {marker}\n")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("mismatched hook must not start"),
+    )
 
-    def fake_run(
-        argv: list[str],
-        *,
-        cwd: str,
-        env: dict[str, str],
-        shell: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[bytes]:
-        del cwd, env, shell, check
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 5)
+    with pytest.raises(ContainerCommandError, match="digest does not match"):
+        run_hook(
+            "mismatch.sh",
+            expected_digest=_digest(b"different\n"),
+            scripts_dir=scripts,
+            runtime=_runtime(tmp_path),
+            env=os.environ,
+        )
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(ContainerCommandError, match=r"first\.sh"):
-        run_hooks(("first.sh", "second.sh"), scripts_dir=scripts)
-
-    assert len(calls) == 1
-    assert calls[0][1] == str(scripts / "first.sh")
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize(
     ("hook", "message"),
     [
-        ("/absolute.sh", "relative"),
-        ("../escape.py", "must not contain"),
+        ("/absolute.sh", "canonical relative"),
+        ("../escape.py", "canonical relative"),
+        ("nested//hook.py", "canonical relative"),
         ("notes.txt", "must end"),
-        ("missing.sh", "does not exist"),
+        ("missing.sh", "regular non-symlink"),
     ],
 )
-def test_resolve_hook_path_rejects_invalid_hooks(
+def test_run_hook_rejects_invalid_paths(
     tmp_path: Path,
     hook: str,
     message: str,
 ) -> None:
-    """Repeat runtime hook checks even after host/render validation."""
+    """Repeat canonical path and source admission at execution time."""
     with pytest.raises(ContainerCommandError, match=message):
-        resolve_hook_path(hook, scripts_dir=tmp_path)
+        run_hook(
+            hook,
+            expected_digest=_digest(b"unused"),
+            scripts_dir=tmp_path,
+            runtime=_runtime(tmp_path),
+        )
 
 
-def test_resolve_hook_path_accepts_nested_regular_file(tmp_path: Path) -> None:
-    """Resolve supported hook files below scripts-dir."""
+@pytest.mark.parametrize("symlink_location", ["parent", "leaf"])
+def test_run_hook_rejects_symlinked_component(
+    tmp_path: Path, symlink_location: str
+) -> None:
+    """Reject symlinks in either the directory walk or leaf admission."""
     scripts = tmp_path / "scripts"
-    nested = scripts / "nested"
-    nested.mkdir(parents=True)
-    hook = nested / "hook.py"
-    hook.write_text("pass\n", encoding="utf-8")
+    scripts.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    target.joinpath("hook.sh").write_bytes(b"true\n")
+    if symlink_location == "parent":
+        scripts.joinpath("linked").symlink_to(target, target_is_directory=True)
+        hook = "linked/hook.sh"
+    else:
+        scripts.joinpath("linked.sh").symlink_to(target / "hook.sh")
+        hook = "linked.sh"
 
-    assert resolve_hook_path("nested/hook.py", scripts_dir=scripts) == hook
+    with pytest.raises(ContainerCommandError, match="regular non-symlink"):
+        run_hook(
+            hook,
+            expected_digest=_digest(target.joinpath("hook.sh").read_bytes()),
+            scripts_dir=scripts,
+            runtime=_runtime(tmp_path),
+        )
+
+
+def test_run_hook_rejects_symlinked_scripts_root_ancestor(tmp_path: Path) -> None:
+    """Reject an exact hook when an ancestor of its scripts root is a symlink."""
+    real_parent = tmp_path / "real-parent"
+    scripts = real_parent / "scripts"
+    scripts.mkdir(parents=True)
+    marker = tmp_path / "must-not-run"
+    content = f"touch {marker}\n".encode()
+    scripts.joinpath("exact.sh").write_bytes(content)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(ContainerCommandError, match="regular non-symlink"):
+        run_hook(
+            "exact.sh",
+            expected_digest=_digest(content),
+            scripts_dir=alias / "scripts",
+            runtime=_runtime(tmp_path),
+            env=os.environ,
+        )
+
+    assert not marker.exists()
+
+
+def test_run_hook_executes_sealed_bytes_after_original_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove the inherited script is sealed and independent of its old path."""
+    _require_linux_memfd()
+    import fcntl
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    trusted_marker = tmp_path / "trusted"
+    malicious_marker = tmp_path / "malicious"
+    trusted = f'touch "{trusted_marker}"\n'.encode()
+    malicious = f'touch "{malicious_marker}"\n'.encode()
+    source = scripts / "swap.sh"
+    source.write_bytes(trusted)
+    real_run = subprocess.run
+    observed_seals = 0
+
+    def swap_then_run(command: list[str], **kwargs: object):
+        nonlocal observed_seals
+        pass_fds = kwargs["pass_fds"]
+        assert isinstance(pass_fds, tuple) and len(pass_fds) == 1
+        sealed_fd = pass_fds[0]
+        observed_seals = fcntl.fcntl(sealed_fd, getattr(fcntl, "F_GET_SEALS", 1034))
+        with pytest.raises(OSError) as error:
+            os.write(sealed_fd, b"mutate")
+        assert error.value.errno == errno.EPERM
+        source.write_bytes(malicious)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", swap_then_run)
+
+    run_hook(
+        "swap.sh",
+        expected_digest=_digest(trusted),
+        scripts_dir=scripts,
+        runtime=_runtime(tmp_path),
+        env=os.environ,
+    )
+
+    required = (
+        getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+        | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+        | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+        | getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+    )
+    assert observed_seals & required == required
+    assert trusted_marker.exists()
+    assert not malicious_marker.exists()
+
+
+def _runtime(tmp_path: Path) -> ContainerRuntime:
+    comfyui = tmp_path / "workspace/ComfyUI"
+    comfyui.mkdir(parents=True, exist_ok=True)
+    return ContainerRuntime(
+        workspace=comfyui.parent,
+        comfyui_path=comfyui,
+        virtual_env=Path(sys.executable).parent.parent,
+    )
+
+
+def _digest(content: bytes) -> str:
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def _require_linux_memfd() -> None:
+    if sys.platform != "linux":
+        pytest.skip("sealed hook execution requires Linux")

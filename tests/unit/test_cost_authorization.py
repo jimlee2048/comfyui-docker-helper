@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from tests.acceptance_scenarios import RELEASE_SCENARIOS
 
 _PROJECT_ROOT = Path(__file__).parents[2]
 
 
-def _run_probe(path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+def _run_probe(
+    path: Path,
+    *arguments: str,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         (
             sys.executable,
@@ -27,6 +33,7 @@ def _run_probe(path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
             str(path),
         ),
         cwd=_PROJECT_ROOT,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
@@ -64,6 +71,112 @@ def test_cost_marker_requires_matching_authorization(
     assert authorized.returncode == 0, authorized.stdout + authorized.stderr
     assert token in authorized.stdout
     assert "1 passed" in authorized.stdout
+
+
+def _write_release_probe(path: Path, scenario_id: str) -> str:
+    token = f"EXECUTED_{scenario_id.upper().replace('-', '_')}"
+    path.write_text(
+        "import pytest\n"
+        "from tests.acceptance_scenarios import RELEASE_SCENARIOS\n\n"
+        "scenario = next(item for item in RELEASE_SCENARIOS "
+        f"if item.id == {scenario_id!r})\n\n"
+        "@pytest.mark.acceptance\n"
+        "@pytest.mark.parametrize('scenario', [scenario], ids=lambda item: item.id)\n"
+        "def test_probe(scenario):\n"
+        f"    print({token!r})\n"
+    )
+    return token
+
+
+def _release_environment(scenario_id: str) -> dict[str, str]:
+    scenario = next(item for item in RELEASE_SCENARIOS if item.id == scenario_id)
+    environment = os.environ.copy()
+    assert scenario.image_variable is not None
+    assert scenario.context_variable is not None
+    environment[scenario.image_variable] = "unused-image"
+    environment[scenario.context_variable] = "unused-context"
+    return environment
+
+
+# A selected release uses its catalog cost declaration even when item selection
+# would otherwise omit a GPU-marked proof.
+def test_selected_release_requires_missing_catalog_authorization_before_execution(
+    tmp_path: Path,
+) -> None:
+    scenario_id = "py313-full"
+    probe = tmp_path / "test_release_probe.py"
+    token = _write_release_probe(probe, scenario_id)
+
+    completed = _run_probe(
+        probe,
+        "--acceptance-scenario",
+        scenario_id,
+        "--run-network",
+        "--run-docker",
+        "--run-slow",
+        environment=_release_environment(scenario_id),
+    )
+
+    assert completed.returncode == 4, completed.stdout + completed.stderr
+    assert token not in completed.stdout
+    assert f"{scenario_id}: --run-gpu" in completed.stdout + completed.stderr
+
+
+# The failure reports the complete missing subset without testing every flag
+# combination, while the full declared set permits execution.
+def test_selected_release_reports_missing_costs_and_runs_when_complete(
+    tmp_path: Path,
+) -> None:
+    scenario_id = "py313-zero"
+    probe = tmp_path / "test_release_probe.py"
+    token = _write_release_probe(probe, scenario_id)
+    environment = _release_environment(scenario_id)
+
+    partial = _run_probe(
+        probe,
+        "--acceptance-scenario",
+        scenario_id,
+        "--run-network",
+        environment=environment,
+    )
+    complete = _run_probe(
+        probe,
+        "--acceptance-scenario",
+        scenario_id,
+        "--run-network",
+        "--run-docker",
+        "--run-slow",
+        environment=environment,
+    )
+
+    assert partial.returncode == 4, partial.stdout + partial.stderr
+    assert token not in partial.stdout
+    assert f"{scenario_id}: --run-docker, --run-slow" in partial.stdout + partial.stderr
+    assert complete.returncode == 0, complete.stdout + complete.stderr
+    assert token in complete.stdout
+    assert "1 passed" in complete.stdout
+
+
+# Collection remains an offline planning operation and does not consume cost
+# authorizations for the selected catalog entry.
+def test_selected_release_collect_only_does_not_require_cost_authorization(
+    tmp_path: Path,
+) -> None:
+    scenario_id = "py313-full"
+    probe = tmp_path / "test_release_probe.py"
+    token = _write_release_probe(probe, scenario_id)
+
+    completed = _run_probe(
+        probe,
+        "--collect-only",
+        "--acceptance-scenario",
+        scenario_id,
+        environment=_release_environment(scenario_id),
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert token not in completed.stdout
+    assert "1 test collected" in completed.stdout
 
 
 # A composed test requires every authorization attached to its marker set.

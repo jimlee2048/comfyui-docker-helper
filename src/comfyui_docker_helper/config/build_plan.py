@@ -97,15 +97,6 @@ from comfyui_docker_helper.exact_ledger import (
 BUILD_PLAN_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
 _VENV_PATH = "/opt/venv"
-_DEFAULT_OS_PACKAGES = (
-    "bash",
-    "ca-certificates",
-    "curl",
-    "git",
-    "build-essential",
-    "aria2",
-    "openssh-server",
-)
 
 
 class _PlanModel(BaseModel):

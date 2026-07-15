@@ -10,8 +10,10 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 from tests.acceptance_scenarios import (
     ACCEPTANCE_SCENARIOS,
+    RELEASE_PYTHON_PROFILES,
     RELEASE_SCENARIOS,
     AcceptanceScenario,
     Capability,
@@ -92,6 +94,17 @@ def test_release_matrix_has_exact_dispositions_and_selector_allocation() -> None
         for scenario in RELEASE_SCENARIOS
     ]
     assert len(artifact_inputs) == len(set(artifact_inputs))
+
+
+# Live release-profile gates consume each catalog-owned version once in release order.
+def test_release_python_profiles_are_unique_and_version_ordered() -> None:
+    expected = {scenario.python_version for scenario in RELEASE_SCENARIOS}
+
+    assert set(RELEASE_PYTHON_PROFILES) == expected
+    assert len(RELEASE_PYTHON_PROFILES) == len(set(RELEASE_PYTHON_PROFILES))
+    assert tuple(sorted(RELEASE_PYTHON_PROFILES, key=Version)) == (
+        RELEASE_PYTHON_PROFILES
+    )
 
 
 # Every declared release capability owns a live proof, and each owning probe is

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
+from packaging.version import Version
+
 
 class ScenarioClass(StrEnum):
     RELEASE = "release"
@@ -299,4 +301,11 @@ RELEASE_SCENARIOS = tuple(
     scenario
     for scenario in ACCEPTANCE_SCENARIOS
     if scenario.classification is ScenarioClass.RELEASE
+)
+
+RELEASE_PYTHON_PROFILES = tuple(
+    sorted(
+        dict.fromkeys(scenario.python_version for scenario in RELEASE_SCENARIOS),
+        key=Version,
+    )
 )

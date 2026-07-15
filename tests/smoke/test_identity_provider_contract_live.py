@@ -6,6 +6,7 @@ from typing import Literal
 
 import httpx
 import pytest
+from tests.acceptance_scenarios import RELEASE_PYTHON_PROFILES
 
 from comfyui_docker_helper.exact_ledger import (
     COMFYUI_REPOSITORY,
@@ -13,8 +14,6 @@ from comfyui_docker_helper.exact_ledger import (
     CUDA_VERSION,
     DEFAULT_CUDA_IMAGE_DISTRO,
     DEFAULT_CUDA_IMAGE_FLAVOR,
-    DEFAULT_MANAGED_PYTHON_VERSION,
-    FALLBACK_MANAGED_PYTHON_VERSION,
     UV_VERSION,
 )
 from comfyui_docker_helper.host.identity_providers import (
@@ -66,11 +65,7 @@ def test_live_oci_descriptor_and_linux_amd64_binding(
 
 @pytest.mark.parametrize(
     "version",
-    [
-        DEFAULT_MANAGED_PYTHON_VERSION,
-        FALLBACK_MANAGED_PYTHON_VERSION,
-        "3.14.6",
-    ],
+    RELEASE_PYTHON_PROFILES,
 )
 def test_live_exact_uv_managed_python_catalog(version: str) -> None:
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:

@@ -5,6 +5,7 @@ import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
+from tests.acceptance_scenarios import RELEASE_PYTHON_PROFILES
 
 from comfyui_docker_helper.comfyui_requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
@@ -23,7 +24,6 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     DEFAULT_MANAGED_PYTHON_VERSION,
-    FALLBACK_MANAGED_PYTHON_VERSION,
 )
 from comfyui_docker_helper.host.canonical_acquisition import UvPythonGroupResolver
 from comfyui_docker_helper.host.identity_providers import (
@@ -58,11 +58,7 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
     )
     manager_response.raise_for_status()
 
-    for python_version in (
-        DEFAULT_MANAGED_PYTHON_VERSION,
-        FALLBACK_MANAGED_PYTHON_VERSION,
-        "3.14.6",
-    ):
+    for python_version in RELEASE_PYTHON_PROFILES:
         parsed = parse_comfyui_requirements(
             requirements_response.content,
             python_version=python_version,
@@ -99,7 +95,7 @@ def test_exact_host_uv_resolves_one_real_complete_group() -> None:
         type="python-group",
         environment="application",
         group="application-extra",
-        python_version="3.13.14",
+        python_version=DEFAULT_MANAGED_PYTHON_VERSION,
         platform="linux/amd64",
         index_url="https://pypi.org/simple",
         members=[
@@ -118,11 +114,7 @@ def test_exact_host_uv_resolves_one_real_complete_group() -> None:
 @pytest.mark.smoke
 @pytest.mark.parametrize(
     "python_version",
-    [
-        DEFAULT_MANAGED_PYTHON_VERSION,
-        FALLBACK_MANAGED_PYTHON_VERSION,
-        "3.14.6",
-    ],
+    RELEASE_PYTHON_PROFILES,
 )
 def test_exact_host_uv_resolves_optional_comfy_cli_for_every_target_profile(
     python_version: str,
@@ -154,13 +146,9 @@ def test_exact_host_uv_resolves_optional_comfy_cli_for_every_target_profile(
 @pytest.mark.smoke
 @pytest.mark.parametrize(
     "python_version",
-    [
-        DEFAULT_MANAGED_PYTHON_VERSION,
-        FALLBACK_MANAGED_PYTHON_VERSION,
-        "3.14.6",
-    ],
+    RELEASE_PYTHON_PROFILES,
 )
-def test_exact_host_uv_resolves_d073_cu130_group_for_every_target_profile(
+def test_exact_host_uv_resolves_cu130_pytorch_group_for_every_release_profile(
     python_version: str,
 ) -> None:
     request = PyTorchRequestIdentity(

@@ -589,9 +589,8 @@ def test_post_hook_head_drift_stops_before_next_node(
 
     with pytest.raises(CustomNodeInstallError, match=r"detached|commit"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            phase,
+            application,
             runtime=runtime,
         )
 

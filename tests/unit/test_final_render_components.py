@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 
+from comfyui_docker_helper.application_checkers import APPLICATION_CHECKER_SOURCE
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     build_plan_digest,
@@ -258,6 +259,7 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     assert runtime.config.comfyui.port == 8188
     assert _tree(first) == _tree(second)
     tree = _tree(first)
+    assert tree["checkers/application.py"] == APPLICATION_CHECKER_SOURCE.read_bytes()
     assert "cdh/pyproject.toml" in tree
     assert "cdh/src/comfyui_docker_helper/cli.py" in tree
     assert "cdh-production-requirements.txt" in tree
@@ -285,6 +287,8 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
         "/opt/cdh/build/pyproject.toml" in dockerfile
     )
     assert "container install-comfyui" in dockerfile
+    assert "COPY --chown=0:0 checkers /opt/cdh/build/checkers" in dockerfile
+    assert "/opt/cdh/build/checkers/application.py inventory" in dockerfile
     assert "torch==2.12.1+cu130" not in dockerfile
     assert "UV_CONSTRAINT" not in dockerfile
     assert "PIP_CONSTRAINT" not in dockerfile

@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 
+from comfyui_docker_helper.application_checkers import APPLICATION_CHECKER_SOURCE
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     ExactPackagePlan,
@@ -24,22 +21,18 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.container import application_installer
 from comfyui_docker_helper.container.application_installer import (
     ApplicationInstallError,
-    _isolated_install_environment,
     _verify_application_imports,
     _verify_application_pip_commands,
     _verify_ordinary_requirements,
     _verify_resolution_manifest,
     _write_application_inventory,
     _write_constraints,
+    application_install_environment,
     install_inference_group,
     install_python_extras,
     verify_application_environment,
 )
-from comfyui_docker_helper.container.phase_inputs import phase_document
-from comfyui_docker_helper.container.runners import (
-    ContainerCommandError,
-    ContainerRuntime,
-)
+from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.pytorch_resolution import (
     pytorch_resolution_manifest_bytes,
 )
@@ -48,84 +41,22 @@ from comfyui_docker_helper.pytorch_resolution import (
 def _write_phases(tmp_path: Path):
     plan = build_plan(final_config(), accepted_resolution())
     digest = build_plan_digest(plan)
-    application = tmp_path / "application.json"
-    toolchain = tmp_path / "toolchain.json"
-    application.write_text(
-        phase_document("application", plan.application, digest).model_dump_json()
-    )
-    toolchain.write_text(
-        phase_document("toolchain", plan.toolchain, digest).model_dump_json()
-    )
-    return plan, digest, application, toolchain
+    return plan, digest, plan.application, plan.toolchain
 
 
-def _application_for_test_interpreter() -> ApplicationPhase:
-    application = build_plan(final_config(), accepted_resolution()).application
-    python_version = ".".join(str(item) for item in sys.version_info[:3])
-    python_minor = ".".join(str(item) for item in sys.version_info[:2])
-    document = application.model_dump(mode="python")
-    document["pytorch"]["python_version"] = python_version
-    document["comfyui"]["requirements"]["python_version"] = python_version
-    if document["python_extras"] is not None:
-        document["python_extras"]["python_version"] = python_version
-    manager = document["comfyui"]["manager"]
-    if manager is not None:
-        manager["import_anchor"] = (
-            f"/opt/venv/lib/python{python_minor}/site-packages/"
-            "comfyui-docker-helper-comfyui.pth"
-        )
-    return ApplicationPhase.model_validate(document)
-
-
-def _write_import_fixture(
-    tmp_path: Path,
-) -> tuple[ApplicationPhase, ContainerRuntime, Path, Path]:
-    application = _application_for_test_interpreter()
-    workspace = tmp_path / "ComfyUI"
-    workspace.mkdir()
-    workspace.joinpath("folder_paths.py").write_text("")
-    comfy = workspace / "comfy"
-    comfy.mkdir()
-    comfy.joinpath("__init__.py").write_text("")
-    virtual_env = tmp_path / "venv"
-    virtual_env.joinpath("bin").mkdir(parents=True)
-    virtual_env.joinpath("bin/python").symlink_to(sys.executable)
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    site_packages = virtual_env / "lib" / f"python{python_minor}" / "site-packages"
-    site_packages.mkdir(parents=True)
-    for module in ("torch", "torchaudio", "torchvision"):
-        package = site_packages / module
-        package.mkdir()
-        package.joinpath("__init__.py").write_text("")
-    runtime = ContainerRuntime(
-        workspace=tmp_path,
-        comfyui_path=workspace,
-        virtual_env=virtual_env,
-    )
-    return application, runtime, workspace, site_packages
-
-
-def _run_comfyui_capability_check(
-    workspace: Path, *, extra_import_roots: tuple[Path, ...] = ()
-) -> subprocess.CompletedProcess[str]:
-    program = (
-        "import sys\n"
-        f"sys.path.extend({[os.fspath(path) for path in extra_import_roots]!r})\n"
-        f"exec({application_installer._COMFYUI_CAPABILITY_CHECK!r})\n"
-    )
-    return subprocess.run(
-        [sys.executable, "-I", "-c", program, os.fspath(workspace)],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
+@pytest.fixture(autouse=True)
+def _materialized_checker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        application_installer,
+        "APPLICATION_CHECKER_CONTAINER_PATH",
+        APPLICATION_CHECKER_SOURCE,
     )
 
 
 def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan, digest, application, toolchain = _write_phases(tmp_path)
+    plan, _digest, application, toolchain = _write_phases(tmp_path)
     constraints = tmp_path / "constraints.txt"
     manifest = tmp_path / "pyproject.toml"
     group = plan.application.pytorch
@@ -164,7 +95,6 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     install_inference_group(
         application,
         toolchain,
-        expected_build_plan_digest=digest,
         runtime=runtime,
         constraints_path=constraints,
         resolution_manifest_path=manifest,
@@ -197,11 +127,18 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "PATH": "/usr/bin:/bin",
     }
     verify_argv, _ = calls[1]
-    assert verify_argv[:3] == ("/opt/venv/bin/python", "-I", "-c")
+    assert verify_argv[:4] == (
+        "/opt/venv/bin/python",
+        "-I",
+        str(APPLICATION_CHECKER_SOURCE),
+        "inventory",
+    )
     assert json.loads(verify_argv[4]) == {
-        "torch": "2.12.1+cu130",
-        "torchaudio": "2.11.0+cu130",
-        "torchvision": "0.27.1+cu130",
+        "distributions": {
+            "torch": "2.12.1+cu130",
+            "torchaudio": "2.11.0+cu130",
+            "torchvision": "0.27.1+cu130",
+        }
     }
     assert calls[2][0][:4] == (
         "/usr/local/bin/uv",
@@ -542,396 +479,130 @@ def test_ordinary_requirement_verification_uses_the_exact_target_markers() -> No
         )
 
 
-def _write_pip_fixture(
-    tmp_path: Path,
-) -> tuple[ApplicationPhase, ContainerRuntime, Path, Path]:
-    application = _application_for_test_interpreter()
+def test_pip_verification_constructs_checker_payload_and_command_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep installer coverage at the checker payload and command boundary."""
+    application = build_plan(final_config(), accepted_resolution()).application
     virtual_env = tmp_path / "venv"
     bin_dir = virtual_env / "bin"
     bin_dir.mkdir(parents=True)
-    bin_dir.joinpath("python").symlink_to(sys.executable)
-    virtual_env.joinpath("pyvenv.cfg").write_text(
-        f"home = {Path(sys.executable).resolve().parent}\n"
-        "include-system-site-packages = false\n"
-    )
-    workspace = tmp_path / "ComfyUI"
-    workspace.mkdir()
-    runtime = ContainerRuntime(
-        workspace=tmp_path,
-        comfyui_path=workspace,
-        virtual_env=virtual_env,
-    )
     python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
     site_packages = virtual_env / "lib" / f"python{python_minor}" / "site-packages"
-    package = site_packages / "pip"
-    package.mkdir(parents=True)
-    package.joinpath("__init__.py").write_text("")
-    output = f"pip {application.pip_version} from {package} (python {python_minor})"
-    package.joinpath("__main__.py").write_text(f"print({output!r})\n")
-    metadata = site_packages / f"pip-{application.pip_version}.dist-info"
-    metadata.mkdir()
-    metadata.joinpath("METADATA").write_text(
-        f"Metadata-Version: 2.4\nName: pip\nVersion: {application.pip_version}\n"
+    site_packages.mkdir(parents=True)
+    site_packages.joinpath("pip").mkdir()
+    runtime = ContainerRuntime(
+        comfyui_path=tmp_path / "ComfyUI",
+        virtual_env=virtual_env,
     )
-    record_rows: list[str] = []
+    runtime.comfyui_path.mkdir()
     for name in ("pip", "pip3"):
         command = bin_dir / name
-        command_content = f"#!{runtime.python}\nprint({output!r})\n".encode()
-        command.write_bytes(command_content)
+        command.write_text(f"#!{runtime.python}\n")
         command.chmod(0o755)
-        digest = (
-            base64.urlsafe_b64encode(hashlib.sha256(command_content).digest())
-            .rstrip(b"=")
-            .decode("ascii")
-        )
-        record_rows.append(
-            f"../../../bin/{name},sha256={digest},{len(command_content)}"
-        )
-    metadata.joinpath("RECORD").write_text("\n".join(record_rows) + "\n")
-    return application, runtime, package, workspace
+    checker_calls: list[tuple[object, ...]] = []
+    command_calls: list[tuple[tuple[Path | str, ...], dict[str, str], str]] = []
+    monkeypatch.setattr(
+        application_installer,
+        "run_application_checker",
+        lambda *args, **kwargs: checker_calls.append((*args, kwargs)),
+    )
 
+    def capture(argv, environment, description):
+        command_calls.append((argv, environment, description))
+        return (
+            f"pip {application.pip_version} from {site_packages / 'pip'} "
+            f"(python {python_minor})"
+        )
 
-def test_application_pip_commands_bind_exact_owner_module_and_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    application, runtime, _package, _workspace = _write_pip_fixture(tmp_path)
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
+    monkeypatch.setattr(application_installer, "_capture_application_command", capture)
 
     _verify_application_pip_commands(
         application,
         runtime,
-        {},
+        {"HTTPS_PROXY": "https://proxy.example"},
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
     )
-    expected_version = ".".join(str(item) for item in sys.version_info[:3])
-    expected_minor = ".".join(str(item) for item in sys.version_info[:2])
-    assert application.pytorch.python_version == expected_version
-    assert _package.parent == (
-        runtime.virtual_env / "lib" / f"python{expected_minor}" / "site-packages"
+
+    observed_runtime, capability, expected, kwargs = checker_calls[0]
+    assert observed_runtime is runtime
+    assert capability == "pip"
+    assert expected == {
+        "site_packages": os.fspath(site_packages),
+        "workspace": os.fspath(runtime.comfyui_path),
+        "version": application.pip_version,
+        "commands": [os.fspath(bin_dir / "pip"), os.fspath(bin_dir / "pip3")],
+    }
+    assert kwargs["environ"] == {"HTTPS_PROXY": "https://proxy.example"}
+    assert [call[0] for call in command_calls] == [
+        (bin_dir / "pip", "--version"),
+        (bin_dir / "pip3", "--version"),
+        (runtime.python, "-I", "-m", "pip", "--version"),
+    ]
+    assert all(
+        call[1]["HTTPS_PROXY"] == "https://proxy.example" for call in command_calls
     )
 
 
-def test_application_pip_commands_reject_correct_shebang_fake_script(
+def test_import_verification_constructs_exact_checker_payloads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    application, runtime, package, _workspace = _write_pip_fixture(tmp_path)
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    runtime.virtual_env.joinpath("bin/pip").write_text(
-        f"#!{runtime.python}\n"
-        f"print('pip {application.pip_version} from {package} "
-        f"(python {python_minor})')\n"
-        "# forged after installation\n"
+    """Project versions and runtime paths without repeating checker semantics."""
+    application = build_plan(final_config(), accepted_resolution()).application
+    xformers = ExactPackagePlan.model_construct(
+        name="xformers",
+        extras=(),
+        version="0.0.35+cu130",
+        environment="application",
     )
-    runtime.virtual_env.joinpath("bin/pip").chmod(0o755)
-
-    with pytest.raises(ContainerCommandError):
-        _verify_application_pip_commands(
-            application,
-            runtime,
-            {},
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-        )
-
-
-@pytest.mark.parametrize(
-    "kind", ["missing-command", "symlink-package", "workspace-shadow"]
-)
-def test_application_pip_commands_reject_wrong_owner_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    kind: str,
-) -> None:
-    application, runtime, package, workspace = _write_pip_fixture(tmp_path)
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
-    if kind == "missing-command":
-        runtime.virtual_env.joinpath("bin/pip3").unlink()
-    elif kind == "symlink-package":
-        outside = tmp_path / "outside-pip"
-        package.rename(outside)
-        package.symlink_to(outside, target_is_directory=True)
-    else:
-        shadow = workspace / "pip"
-        shadow.mkdir()
-        shadow.joinpath("__init__.py").write_text("")
-
-    match = "pip3 executable is unavailable" if kind == "missing-command" else None
-    with pytest.raises((ApplicationInstallError, ContainerCommandError), match=match):
-        _verify_application_pip_commands(
-            application,
-            runtime,
-            {},
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-        )
-
-
-def test_application_pip_commands_reject_base_environment_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    application, runtime, _package, _workspace = _write_pip_fixture(tmp_path)
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    base_root = tmp_path / "base/site-packages/pip"
-    base_root.mkdir(parents=True)
-    command = runtime.virtual_env / "bin/pip"
-    command_content = (
-        f"#!{runtime.python}\n"
-        f"print('pip {application.pip_version} from {base_root} "
-        f"(python {python_minor})')\n"
-    ).encode()
-    command.write_bytes(command_content)
-    command.chmod(0o755)
-    digest = (
-        base64.urlsafe_b64encode(hashlib.sha256(command_content).digest())
-        .rstrip(b"=")
-        .decode("ascii")
+    pytorch = PyTorchGroupPlan.model_construct(
+        **{
+            **application.pytorch.__dict__,
+            "packages": (*application.pytorch.packages, xformers),
+        }
     )
-    metadata = next(
-        runtime.virtual_env.glob("lib/python*/site-packages/pip-*.dist-info/RECORD")
+    application = ApplicationPhase.model_construct(
+        **{**application.__dict__, "pytorch": pytorch}
     )
-    rows = metadata.read_text().splitlines()
-    rows[0] = f"../../../bin/pip,sha256={digest},{len(command_content)}"
-    metadata.write_text("\n".join(rows) + "\n")
-
-    with pytest.raises(ApplicationInstallError, match="application pip owner"):
-        _verify_application_pip_commands(
-            application,
-            runtime,
-            {},
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-        )
-
-
-def test_application_pip_commands_report_missing_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    application, runtime, _package, _workspace = _write_pip_fixture(tmp_path)
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
-    runtime.virtual_env.joinpath("bin/pip3").unlink()
-    with pytest.raises(ApplicationInstallError, match="pip3 executable is unavailable"):
-        _verify_application_pip_commands(
-            application,
-            runtime,
-            {},
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-        )
-
-
-def test_application_import_verification_owner_binds_pytorch_packages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    application, runtime, workspace, site_packages = _write_import_fixture(tmp_path)
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
+    runtime = ContainerRuntime(
+        comfyui_path=tmp_path / "ComfyUI",
+        virtual_env=tmp_path / "venv",
+    )
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        application_installer,
+        "run_application_checker",
+        lambda *args, **kwargs: calls.append((*args, kwargs)),
+    )
 
     _verify_application_imports(application, runtime, {})
 
-    workspace.joinpath("torchaudio.py").write_text(
-        "raise AssertionError('workspace shadow was imported')\n"
+    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
+    site_packages = runtime.virtual_env / "lib" / f"python{python_minor}/site-packages"
+    assert calls[0][1:3] == (
+        "pytorch",
+        {
+            "site_packages": os.fspath(site_packages),
+            "workspace": os.fspath(runtime.comfyui_path),
+            "distributions": {
+                "torch": "2.12.1+cu130",
+                "torchaudio": "2.11.0+cu130",
+                "torchvision": "0.27.1+cu130",
+                "xformers": "0.0.35+cu130",
+            },
+            "modules": {
+                "torch": "torch",
+                "torchaudio": "torchaudio",
+                "torchvision": "torchvision",
+            },
+        },
     )
-    with pytest.raises(ContainerCommandError):
-        _verify_application_imports(application, runtime, {})
-
-    workspace.joinpath("torchaudio.py").unlink()
-    outside = tmp_path / "outside-package"
-    site_packages.joinpath("torchaudio").rename(outside)
-    site_packages.joinpath("torchaudio").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ContainerCommandError):
-        _verify_application_imports(application, runtime, {})
-
-
-@pytest.mark.parametrize(
-    "initialized",
-    [False, True],
-    ids=["formal-v0.11.0-namespace", "initialized"],
-)
-def test_application_import_verification_accepts_supported_comfy_package_shapes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    initialized: bool,
-) -> None:
-    application, runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    if not initialized:
-        workspace.joinpath("comfy/__init__.py").unlink()
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
-
-    _verify_application_imports(application, runtime, {})
-
-
-def test_comfyui_capability_promotes_existing_exact_workspace_anchor_once(
-    tmp_path: Path,
-) -> None:
-    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    workspace.joinpath("comfy/__init__.py").unlink()
-    first = tmp_path / "first-import-root"
-    second = tmp_path / "second-import-root"
-    first.mkdir()
-    second.mkdir()
-    workspace_entry = os.fspath(workspace)
-    workspace.joinpath("folder_paths.py").write_text(
-        "import sys\n"
-        f"assert sys.path[0] == {workspace_entry!r}\n"
-        f"assert sys.path.count({workspace_entry!r}) == 1\n"
-        f"assert sys.path.index({os.fspath(first)!r}) "
-        f"< sys.path.index({os.fspath(second)!r})\n"
+    assert calls[1][1:3] == (
+        "comfyui",
+        {"workspace": os.fspath(runtime.comfyui_path)},
     )
-
-    completed = _run_comfyui_capability_check(
-        workspace,
-        extra_import_roots=(first, workspace, second, workspace),
-    )
-
-    assert completed.returncode == 0, completed.stderr
-
-
-def test_comfyui_capability_accepts_namespace_without_workspace_anchor(
-    tmp_path: Path,
-) -> None:
-    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    workspace.joinpath("comfy/__init__.py").unlink()
-
-    completed = _run_comfyui_capability_check(workspace)
-
-    assert completed.returncode == 0, completed.stderr
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "__path__.append('/tmp/comfy-shadow')",
-        "__file__ = '/tmp/comfy-shadow/__init__.py'",
-    ],
-    ids=["runtime-path", "runtime-file"],
-)
-def test_application_import_verification_rejects_runtime_identity_mutation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-) -> None:
-    application, runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    workspace.joinpath("comfy/__init__.py").write_text(f"{mutation}\n")
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
-
-    with pytest.raises(ContainerCommandError):
-        _verify_application_imports(application, runtime, {})
-
-
-@pytest.mark.parametrize(
-    "mutation_template",
-    [
-        "__file__ = {init_alias!r}",
-        "__spec__.origin = {init_alias!r}",
-        "__path__[:] = [{root_alias!r}]",
-        "__spec__.submodule_search_locations[:] = [{root_alias!r}]",
-    ],
-    ids=["module-file", "spec-origin", "module-path", "spec-location"],
-)
-def test_comfyui_capability_rejects_post_import_raw_symlink_alias(
-    tmp_path: Path,
-    mutation_template: str,
-) -> None:
-    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    alias = tmp_path / "ComfyUI-alias"
-    alias.symlink_to(workspace, target_is_directory=True)
-    workspace.joinpath("comfy/__init__.py").write_text(
-        mutation_template.format(
-            init_alias=os.fspath(alias / "comfy/__init__.py"),
-            root_alias=os.fspath(alias / "comfy"),
-        )
-        + "\n"
-    )
-
-    completed = _run_comfyui_capability_check(workspace)
-
-    assert completed.returncode != 0
-
-
-@pytest.mark.parametrize("shadow_kind", ["namespace", "regular"])
-def test_comfyui_capability_rejects_mixed_or_shadowed_import_identity(
-    tmp_path: Path,
-    shadow_kind: str,
-) -> None:
-    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    workspace.joinpath("comfy/__init__.py").unlink()
-    outside = tmp_path / "outside"
-    shadow = outside / "comfy"
-    shadow.mkdir(parents=True)
-    side_effect = tmp_path / "shadow-imported"
-    if shadow_kind == "regular":
-        shadow.joinpath("__init__.py").write_text(
-            f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
-        )
-
-    completed = _run_comfyui_capability_check(workspace, extra_import_roots=(outside,))
-
-    assert completed.returncode != 0
-    assert not side_effect.exists()
-
-
-def test_comfyui_capability_rejects_distinct_raw_alias_of_namespace_root(
-    tmp_path: Path,
-) -> None:
-    _application, _runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    workspace.joinpath("comfy/__init__.py").unlink()
-    alias = tmp_path / "ComfyUI-alias"
-    alias.symlink_to(workspace, target_is_directory=True)
-
-    completed = _run_comfyui_capability_check(
-        workspace,
-        extra_import_roots=(alias,),
-    )
-
-    assert completed.returncode != 0
-
-
-@pytest.mark.parametrize(
-    "escape", ["workspace", "workspace_parent", "folder_paths", "comfy", "comfy_init"]
-)
-def test_application_import_verification_rejects_checkout_symlink_escape(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    escape: str,
-) -> None:
-    application, runtime, workspace, _site_packages = _write_import_fixture(tmp_path)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    if escape == "workspace":
-        relocated = outside / "ComfyUI"
-        workspace.rename(relocated)
-        workspace.symlink_to(relocated, target_is_directory=True)
-    elif escape == "workspace_parent":
-        real_parent = outside / "real-parent"
-        real_parent.mkdir()
-        workspace.rename(real_parent / "ComfyUI")
-        linked_parent = tmp_path / "linked-parent"
-        linked_parent.symlink_to(real_parent, target_is_directory=True)
-        runtime = ContainerRuntime(
-            workspace=runtime.workspace,
-            comfyui_path=linked_parent / "ComfyUI",
-            virtual_env=runtime.virtual_env,
-        )
-    elif escape == "folder_paths":
-        workspace.joinpath("folder_paths.py").unlink()
-        outside.joinpath("folder_paths.py").write_text("")
-        workspace.joinpath("folder_paths.py").symlink_to(outside / "folder_paths.py")
-    elif escape == "comfy":
-        workspace.joinpath("comfy/__init__.py").unlink()
-        workspace.joinpath("comfy").rmdir()
-        outside.joinpath("comfy").mkdir()
-        outside.joinpath("comfy/__init__.py").write_text("")
-        workspace.joinpath("comfy").symlink_to(outside / "comfy")
-    else:
-        workspace.joinpath("comfy/__init__.py").unlink()
-        outside.joinpath("comfy-init.py").write_text("")
-        workspace.joinpath("comfy/__init__.py").symlink_to(outside / "comfy-init.py")
-    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
-
-    with pytest.raises(ContainerCommandError):
-        _verify_application_imports(application, runtime, {})
+    assert calls[1][3]["runtime_environment"] is True
 
 
 def test_application_inventory_creation_is_exclusive_read_only_and_exact(
@@ -1092,10 +763,8 @@ def test_resolution_manifest_rejects_changed_identity(tmp_path: Path) -> None:
 def test_install_rejects_cross_channel_phase_before_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _plan, digest, application, toolchain = _write_phases(tmp_path)
-    document = json.loads(toolchain.read_text())
-    document["payload"]["pytorch_channel"] = "cu129"
-    toolchain.write_text(json.dumps(document))
+    _plan, _digest, application, toolchain = _write_phases(tmp_path)
+    toolchain = toolchain.model_copy(update={"pytorch_channel": "cu129"})
     monkeypatch.setattr(
         application_installer,
         "run_argv",
@@ -1106,7 +775,6 @@ def test_install_rejects_cross_channel_phase_before_running(
         install_inference_group(
             application,
             toolchain,
-            expected_build_plan_digest=digest,
             runtime=ContainerRuntime(virtual_env=Path("/opt/venv")),
             constraints_path=tmp_path / "unused",
             resolution_manifest_path=tmp_path / "unused-manifest",
@@ -1114,7 +782,7 @@ def test_install_rejects_cross_channel_phase_before_running(
 
 
 def test_install_environment_does_not_inherit_package_or_python_configuration() -> None:
-    assert _isolated_install_environment(
+    assert application_install_environment(
         {
             "UV_INDEX": "poison",
             "PIP_INDEX_URL": "poison",
@@ -1122,10 +790,17 @@ def test_install_environment_does_not_inherit_package_or_python_configuration() 
             "PYTHONPATH": "poison",
             "VIRTUAL_ENV": "poison",
             "HTTPS_PROXY": "https://proxy.example",
-        }
+        },
+        constraints_path=Path("/opt/cdh/build/constraints.txt"),
+        comfyui_path=Path("/workspace/ComfyUI"),
+        virtual_env=Path("/opt/venv"),
     ) == {
         "HTTPS_PROXY": "https://proxy.example",
         "HOME": "/root",
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
+        "PIP_CONSTRAINT": "/opt/cdh/build/constraints.txt",
+        "UV_CONSTRAINT": "/opt/cdh/build/constraints.txt",
+        "COMFYUI_PATH": "/workspace/ComfyUI",
+        "VIRTUAL_ENV": "/opt/venv",
     }

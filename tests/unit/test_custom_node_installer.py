@@ -115,10 +115,6 @@ def _patch_phases(
     application: ApplicationPhase,
     custom_nodes: CustomNodesPhase,
 ) -> None:
-    def load(_path, phase, **_kwargs):
-        return application if phase == "application" else custom_nodes
-
-    monkeypatch.setattr(custom_node_installer, "load_phase_input", load)
     monkeypatch.setattr(
         custom_node_installer,
         "capture_application_requirements",
@@ -463,9 +459,8 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
     )
 
     custom_node_installer.install_custom_nodes(
-        "custom.json",
-        "application.json",
-        expected_build_plan_digest=f"sha256:{'c' * 64}",
+        custom_nodes,
+        application,
         runtime=runtime,
     )
 
@@ -675,9 +670,8 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     )
 
     custom_node_installer.install_custom_nodes(
-        "custom.json",
-        "application.json",
-        expected_build_plan_digest=f"sha256:{'c' * 64}",
+        custom_nodes,
+        application,
         runtime=runtime,
         environ={"GIT_SSH_COMMAND": "ssh -F /tmp/user-config", "HOME": "/user/home"},
     )
@@ -749,9 +743,8 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
     )
 
     custom_node_installer.install_custom_nodes(
-        "custom.json",
-        "application.json",
-        expected_build_plan_digest=f"sha256:{'c' * 64}",
+        custom_nodes,
+        application,
         runtime=runtime,
         constraints_path=tmp_path / "constraints.txt",
         environ={
@@ -845,9 +838,8 @@ def test_false_zero_stops_before_later_registry_node(
         match=r"missing@1\.0\.0 is not installed",
     ):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -877,9 +869,8 @@ def test_future_registry_identity_is_rejected_before_admission(
 
     with pytest.raises(CustomNodeInstallError, match="admitted declaration prefix"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -975,9 +966,8 @@ def test_runtime_rejects_normalized_duplicate_locked_ids(
 
     with pytest.raises(CustomNodeInstallError, match="duplicated in BuildPlan"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -997,9 +987,8 @@ def test_runtime_rejects_invalid_locked_version_before_execution(
 
     with pytest.raises(CustomNodeInstallError, match="invalid locked version"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -1031,9 +1020,8 @@ def test_nonzero_registry_process_stops_before_state_proof_and_later_node(
 
     with pytest.raises(ContainerCommandError, match="cm-cli failed"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -1102,9 +1090,8 @@ def test_hook_manager_mutation_fails_at_next_capability_proof(
 
     with pytest.raises(ComfyUIInstallError, match="mutated"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -1144,9 +1131,8 @@ def test_first_pre_hook_manager_mutation_stops_before_second_pre_hook(
 
     with pytest.raises(ComfyUIInstallError, match="mutated"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -1187,9 +1173,8 @@ def test_real_hook_is_reproved_before_the_next_cm_cli_process(
     )
 
     custom_node_installer.install_custom_nodes(
-        "custom.json",
-        "application.json",
-        expected_build_plan_digest=f"sha256:{'c' * 64}",
+        custom_nodes,
+        application,
         runtime=runtime,
         hooks_directory=tmp_path,
     )
@@ -1237,7 +1222,9 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
         prove_distributions,
     )
     monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
-    monkeypatch.setattr(comfyui_installer, "run_argv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        comfyui_installer, "run_application_checker", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(custom_node_installer, "run_hook", retarget)
     monkeypatch.setattr(
         custom_node_installer,
@@ -1247,9 +1234,8 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
 
     with pytest.raises(ComfyUIInstallError, match="authority changed"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 
@@ -1298,9 +1284,8 @@ def test_hook_mutation_of_admitted_identity_fails_before_next_node(
 
     with pytest.raises(CustomNodeInstallError, match="version does not match"):
         custom_node_installer.install_custom_nodes(
-            "custom.json",
-            "application.json",
-            expected_build_plan_digest=f"sha256:{'c' * 64}",
+            custom_nodes,
+            application,
             runtime=runtime,
         )
 

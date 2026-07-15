@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,10 +15,7 @@ from comfyui_docker_helper.comfyui_requirements import (
     parse_comfyui_requirements,
     parse_manager_requirements,
 )
-from comfyui_docker_helper.config.build_plan import (
-    ApplicationPhase,
-    build_plan_digest,
-)
+from comfyui_docker_helper.config.build_plan import ApplicationPhase
 from comfyui_docker_helper.container import comfyui_installer
 from comfyui_docker_helper.container.comfyui_installer import (
     ComfyUIInstallError,
@@ -29,7 +25,6 @@ from comfyui_docker_helper.container.comfyui_installer import (
     _verify_floor_ancestry,
     verify_application_state,
 )
-from comfyui_docker_helper.container.phase_inputs import phase_document
 from comfyui_docker_helper.container.runners import ContainerRuntime
 
 _REQUIREMENTS = b"torch\ntorchvision\ntorchaudio\nnumpy>=1.25\n"
@@ -278,15 +273,6 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
-    digest = build_plan_digest(plan)
-    application_path = tmp_path / "application.json"
-    toolchain_path = tmp_path / "toolchain.json"
-    application_path.write_text(
-        phase_document("application", plan.application, digest).model_dump_json()
-    )
-    toolchain_path.write_text(
-        phase_document("toolchain", plan.toolchain, digest).model_dump_json()
-    )
     events: list[str] = []
     parsed = parse_comfyui_requirements(
         _REQUIREMENTS,
@@ -339,9 +325,8 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
     )
 
     comfyui_installer.install_comfyui(
-        application_path,
-        toolchain_path,
-        expected_build_plan_digest=digest,
+        plan.application,
+        plan.toolchain,
         runtime=runtime,
     )
 
@@ -365,15 +350,6 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
     document = plan.application.model_dump(mode="python")
     document["comfyui"]["manager"] = None
     application = ApplicationPhase.model_validate(document)
-    digest = "sha256:" + "a" * 64
-    application_path = tmp_path / "application.json"
-    toolchain_path = tmp_path / "toolchain.json"
-    application_path.write_text(
-        phase_document("application", application, digest).model_dump_json()
-    )
-    toolchain_path.write_text(
-        phase_document("toolchain", plan.toolchain, digest).model_dump_json()
-    )
     parsed = parse_comfyui_requirements(
         _REQUIREMENTS,
         python_version="3.13.14",
@@ -421,9 +397,8 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
     )
 
     comfyui_installer.install_comfyui(
-        application_path,
-        toolchain_path,
-        expected_build_plan_digest=digest,
+        application,
+        plan.toolchain,
         runtime=runtime,
     )
 
@@ -514,6 +489,9 @@ def test_ordinary_requirements_use_only_python_index_constraints_and_cleanup(
 
     monkeypatch.setattr(comfyui_installer, "_BUILD_DIRECTORY", tmp_path)
     monkeypatch.setattr(comfyui_installer, "run_argv", fake_run_argv)
+    monkeypatch.setattr(
+        comfyui_installer, "run_application_checker", lambda *_args, **_kwargs: None
+    )
 
     comfyui_installer._install_ordinary_requirements(
         application,
@@ -555,6 +533,7 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     constraints = tmp_path / "python-package-constraints.txt"
     constraints.write_text("torch==2.12.1+cu130\n")
     commands: list[tuple[tuple[str, ...], dict]] = []
+    checker_calls: list[tuple[object, ...]] = []
     requirements_paths: list[Path] = []
     events: list[str] = []
 
@@ -569,6 +548,11 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
 
     monkeypatch.setattr(comfyui_installer, "_BUILD_DIRECTORY", tmp_path)
     monkeypatch.setattr(comfyui_installer, "run_argv", fake_run_argv)
+    monkeypatch.setattr(
+        comfyui_installer,
+        "run_application_checker",
+        lambda *args, **kwargs: checker_calls.append((*args, kwargs)),
+    )
     monkeypatch.setattr(
         comfyui_installer,
         "_write_import_anchor",
@@ -597,7 +581,7 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
         {},
     )
 
-    assert len(commands) == 2
+    assert len(commands) == 1
     install, install_kwargs = commands[0]
     assert install[install.index("--default-index") + 1] == (
         application.python_index_url
@@ -606,12 +590,17 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     assert "download.pytorch.org" not in " ".join(install)
     assert install_kwargs["env"]["UV_CONSTRAINT"] == os.fspath(constraints)
     assert install_kwargs["env"]["PIP_CONSTRAINT"] == os.fspath(constraints)
-    verify, verify_kwargs = commands[1]
-    assert verify[0] == os.fspath(runtime.python)
-    assert verify[-2] == os.fspath(Path(manager.import_anchor).parent)
-    assert verify[-1] == manager.import_name
-    assert verify_kwargs["env"]["COMFYUI_PATH"] == os.fspath(runtime.comfyui_path)
-    assert verify_kwargs["env"]["VIRTUAL_ENV"] == os.fspath(runtime.virtual_env)
+    observed_runtime, capability, expected, checker_kwargs = checker_calls[0]
+    assert observed_runtime is runtime
+    assert capability == "manager"
+    assert expected == {
+        "version": "4.0.5",
+        "workspace": os.fspath(runtime.comfyui_path),
+        "site_packages": os.fspath(Path(manager.import_anchor).parent),
+        "import_name": manager.import_name,
+    }
+    assert checker_kwargs["environ"] == {}
+    assert checker_kwargs["runtime_environment"] is True
     assert events == [
         f"anchor:{manager.import_anchor}:{runtime.comfyui_path}",
         "declared distributions",
@@ -975,363 +964,6 @@ def test_cm_cli_accepts_exact_application_shebang_and_owner(tmp_path: Path) -> N
         runtime,
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
-    )
-
-
-def test_manager_verification_programs_are_valid_python() -> None:
-    compile(comfyui_installer._MANAGER_CAPABILITY_CHECK, "<manager-check>", "exec")
-    compile(comfyui_installer._MANAGER_ABSENCE_CHECK, "<manager-absence>", "exec")
-
-
-def test_manager_capability_accepts_realistic_namespace_package(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-
-    namespace_probe = _probe_namespace_file(site_packages, "comfyui_manager")
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert namespace_probe.returncode == 0, namespace_probe.stderr
-    assert completed.returncode == 0, completed.stderr
-
-
-def test_manager_capability_accepts_safe_regular_package_after_validation(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    package = site_packages / "comfyui_manager"
-    package.mkdir()
-    side_effect = tmp_path / "safe-imported"
-    package.joinpath("__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('ok')\n"
-    )
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode == 0, completed.stderr
-    assert side_effect.read_text() == "ok"
-
-
-def test_manager_capability_rejects_outside_regular_without_importing_it(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    outside_root = tmp_path / "outside"
-    outside = outside_root / "comfyui_manager"
-    outside.mkdir(parents=True)
-    side_effect = tmp_path / "outside-imported"
-    outside.joinpath("__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
-    )
-
-    completed = _run_manager_capability_check(
-        workspace,
-        site_packages,
-        extra_import_roots=(outside_root,),
-    )
-
-    assert completed.returncode != 0
-    assert "Manager import locations escape application site-packages" in (
-        completed.stderr
-    )
-    assert not side_effect.exists()
-
-
-def test_manager_capability_rejects_mixed_namespace_locations(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    outside_root = tmp_path / "outside"
-    (outside_root / "comfyui_manager").mkdir(parents=True)
-
-    completed = _run_manager_capability_check(
-        workspace,
-        site_packages,
-        extra_import_roots=(outside_root,),
-    )
-
-    assert completed.returncode != 0
-    assert "Manager import locations escape application site-packages" in (
-        completed.stderr
-    )
-
-
-def test_manager_capability_rejects_regular_symlink_origin_without_importing_it(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    package = site_packages / "comfyui_manager"
-    package.mkdir()
-    side_effect = tmp_path / "symlink-origin-imported"
-    outside_initializer = tmp_path / "outside/__init__.py"
-    outside_initializer.parent.mkdir()
-    outside_initializer.write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
-    )
-    package.joinpath("__init__.py").symlink_to(outside_initializer)
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode != 0
-    assert "Manager import origin escapes application root" in completed.stderr
-    assert not side_effect.exists()
-
-
-def test_manager_capability_rejects_symlinked_import_root_outside_application(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    outside = tmp_path / "outside/comfyui_manager"
-    outside.mkdir(parents=True)
-    (site_packages / "comfyui_manager").symlink_to(
-        outside,
-        target_is_directory=True,
-    )
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode != 0
-    assert "Manager import root escapes application site-packages" in completed.stderr
-
-
-def test_manager_capability_rejects_symlink_alias_inside_application_site(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    alias = site_packages / "manager-alias"
-    alias.mkdir()
-    (site_packages / "comfyui_manager").symlink_to(alias, target_is_directory=True)
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode != 0
-    assert "Manager import root escapes application site-packages" in completed.stderr
-
-
-def test_manager_capability_rejects_workspace_first_shadow_without_importing_it(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    shadow = workspace / "comfyui_manager"
-    shadow.mkdir()
-    side_effect = tmp_path / "workspace-manager-imported"
-    shadow.joinpath("__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
-    )
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode != 0
-    assert "Manager import locations escape application site-packages" in (
-        completed.stderr
-    )
-    assert not side_effect.exists()
-
-
-def test_comfy_capability_accepts_realistic_checkout_namespace(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-
-    namespace_probe = _probe_namespace_file(workspace, "comfy")
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert namespace_probe.returncode == 0, namespace_probe.stderr
-    assert completed.returncode == 0, completed.stderr
-
-
-def test_comfy_capability_accepts_safe_regular_checkout_package(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    side_effect = tmp_path / "safe-comfy-imported"
-    workspace.joinpath("comfy/__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('ok')\n"
-    )
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode == 0, completed.stderr
-    assert side_effect.read_text() == "ok"
-
-
-def test_comfy_capability_rejects_outside_regular_without_importing_it(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    outside_root = tmp_path / "outside"
-    outside = outside_root / "comfy"
-    outside.mkdir(parents=True)
-    side_effect = tmp_path / "outside-comfy-imported"
-    outside.joinpath("__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
-    )
-
-    completed = _run_manager_capability_check(
-        workspace,
-        site_packages,
-        extra_import_roots=(outside_root,),
-    )
-
-    assert completed.returncode != 0
-    assert "ComfyUI comfy import locations escape checkout" in completed.stderr
-    assert not side_effect.exists()
-
-
-def test_comfy_capability_rejects_mixed_namespace_locations(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    outside_root = tmp_path / "outside"
-    (outside_root / "comfy").mkdir(parents=True)
-
-    completed = _run_manager_capability_check(
-        workspace,
-        site_packages,
-        extra_import_roots=(outside_root,),
-    )
-
-    assert completed.returncode != 0
-    assert "ComfyUI comfy import locations escape checkout" in completed.stderr
-
-
-def test_comfy_capability_rejects_symlink_origin_without_importing_it(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    side_effect = tmp_path / "symlink-comfy-origin-imported"
-    outside_initializer = tmp_path / "outside/__init__.py"
-    outside_initializer.parent.mkdir()
-    outside_initializer.write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('bad')\n"
-    )
-    workspace.joinpath("comfy/__init__.py").symlink_to(outside_initializer)
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode != 0
-    assert "ComfyUI comfy import origin escapes checkout root" in completed.stderr
-    assert not side_effect.exists()
-
-
-def test_comfy_capability_rejects_symlinked_root_outside_checkout(
-    tmp_path: Path,
-) -> None:
-    workspace, site_packages = _manager_capability_fixture(tmp_path)
-    (site_packages / "comfyui_manager").mkdir()
-    workspace.joinpath("comfy").rmdir()
-    outside = tmp_path / "outside/comfy"
-    outside.mkdir(parents=True)
-    workspace.joinpath("comfy").symlink_to(outside, target_is_directory=True)
-
-    completed = _run_manager_capability_check(workspace, site_packages)
-
-    assert completed.returncode != 0
-    assert "ComfyUI comfy import root escapes checkout" in completed.stderr
-
-
-def test_disabled_manager_rejects_stray_import_tree_without_importing_it(
-    tmp_path: Path,
-) -> None:
-    import_root = tmp_path / "site-packages"
-    package = import_root / "comfyui_manager"
-    package.mkdir(parents=True)
-    side_effect = tmp_path / "imported"
-    package.joinpath("__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(side_effect)!r}).write_text('imported')\n"
-    )
-    program = (
-        "import sys\n"
-        f"sys.path.insert(0, {str(import_root)!r})\n"
-        f"exec({comfyui_installer._MANAGER_ABSENCE_CHECK!r})\n"
-    )
-
-    completed = subprocess.run(
-        [sys.executable, "-I", "-c", program],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-
-    assert completed.returncode != 0
-    assert "Manager import exists while disabled" in completed.stderr
-    assert not side_effect.exists()
-
-
-def _manager_capability_fixture(tmp_path: Path) -> tuple[Path, Path]:
-    workspace = tmp_path / "ComfyUI"
-    workspace.mkdir()
-    (workspace / "folder_paths.py").write_text("")
-    comfy = workspace / "comfy"
-    comfy.mkdir()
-    site_packages = tmp_path / "venv/lib/python3.13/site-packages"
-    site_packages.mkdir(parents=True)
-    metadata = site_packages / "comfyui_manager-4.0.5.dist-info"
-    metadata.mkdir()
-    metadata.joinpath("METADATA").write_text(
-        "Metadata-Version: 2.4\nName: comfyui-manager\nVersion: 4.0.5\n"
-    )
-    metadata.joinpath("entry_points.txt").write_text(
-        "[console_scripts]\ncm-cli = comfyui_manager.cm_cli.__main__:main\n"
-    )
-    return workspace, site_packages
-
-
-def _run_manager_capability_check(
-    workspace: Path,
-    site_packages: Path,
-    *,
-    extra_import_roots: tuple[Path, ...] = (),
-) -> subprocess.CompletedProcess[str]:
-    import_roots = (workspace, site_packages, *extra_import_roots)
-    program = (
-        "import sys\n"
-        f"sys.path[:0] = {[os.fspath(path) for path in import_roots]!r}\n"
-        f"exec({comfyui_installer._MANAGER_CAPABILITY_CHECK!r})\n"
-    )
-    return subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-c",
-            program,
-            "4.0.5",
-            os.fspath(workspace),
-            os.fspath(site_packages),
-            "comfyui_manager",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-
-
-def _probe_namespace_file(
-    import_root: Path,
-    package_name: str,
-) -> subprocess.CompletedProcess[str]:
-    program = (
-        "import importlib, sys\n"
-        f"sys.path.insert(0, {os.fspath(import_root)!r})\n"
-        f"assert importlib.import_module({package_name!r}).__file__ is None\n"
-    )
-    return subprocess.run(
-        [sys.executable, "-I", "-c", program],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
     )
 
 

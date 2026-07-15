@@ -19,6 +19,9 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from comfyui_docker_helper.application_checkers import (
+    APPLICATION_CHECKER_CONTAINER_PATH,
+)
 from comfyui_docker_helper.comfyui_requirements import target_marker_environment
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
@@ -28,7 +31,6 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
 )
-from comfyui_docker_helper.container.phase_inputs import load_phase_input
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.errors import ApplicationError
 from comfyui_docker_helper.pytorch_resolution import (
@@ -39,6 +41,11 @@ _UV_PATH = Path("/usr/local/bin/uv")
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _CONSTRAINTS_PATH = _BUILD_DIRECTORY / "python-package-constraints.txt"
 _RESOLUTION_MANIFEST_PATH = _BUILD_DIRECTORY / "pyproject.toml"
+_PYTORCH_IMPORT_DISTRIBUTIONS = {
+    "torch": "torch",
+    "torchaudio": "torchaudio",
+    "torchvision": "torchvision",
+}
 _NETWORK_ENVIRONMENT = frozenset(
     {
         "HTTP_PROXY",
@@ -62,10 +69,9 @@ class _InventoryFileIdentity:
 
 
 def install_inference_group(
-    application_phase_path: str | Path,
-    toolchain_phase_path: str | Path,
+    application: ApplicationPhase,
+    toolchain: ToolchainPhase,
     *,
-    expected_build_plan_digest: str,
     runtime: ContainerRuntime,
     uv_path: Path = _UV_PATH,
     constraints_path: Path = _CONSTRAINTS_PATH,
@@ -73,20 +79,6 @@ def install_inference_group(
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Install and verify one BuildPlan-owned exact PyTorch group."""
-    application = load_phase_input(
-        application_phase_path,
-        "application",
-        expected_build_plan_digest=expected_build_plan_digest,
-    )
-    toolchain = load_phase_input(
-        toolchain_phase_path,
-        "toolchain",
-        expected_build_plan_digest=expected_build_plan_digest,
-    )
-    if not isinstance(application, ApplicationPhase) or not isinstance(
-        toolchain, ToolchainPhase
-    ):  # pragma: no cover - phase loader owns this invariant.
-        raise ApplicationInstallError("invalid inference phase inputs")
     _validate_group(application, toolchain, runtime)
     _verify_resolution_manifest(
         resolution_manifest_path, application, expected_owner_uid=0
@@ -108,20 +100,15 @@ def install_inference_group(
             str(resolution_manifest_path),
         ],
         cwd=_BUILD_DIRECTORY,
-        env=_isolated_install_environment(environ),
+        env=application_install_environment(environ),
         description="inference package install",
     )
     expected = {package.name: package.version for package in group.packages}
-    run_argv(
-        [
-            runtime.python,
-            "-I",
-            "-c",
-            _INVENTORY_CHECK,
-            json.dumps(expected),
-        ],
-        cwd=_BUILD_DIRECTORY,
-        env=_isolated_install_environment(environ),
+    run_application_checker(
+        runtime,
+        "inventory",
+        {"distributions": expected},
+        environ=environ,
         description="inference package verification",
     )
     _verify_setuptools_compatibility(application, runtime)
@@ -136,7 +123,7 @@ def install_inference_group(
             "--no-python-downloads",
         ],
         cwd=_BUILD_DIRECTORY,
-        env=_isolated_install_environment(environ),
+        env=application_install_environment(environ),
         description="application dependency verification",
     )
     _write_constraints(
@@ -179,7 +166,7 @@ def install_python_extras(
         ),
         cwd=_BUILD_DIRECTORY,
         env={
-            **_isolated_install_environment(environ),
+            **application_install_environment(environ),
             "PIP_CONSTRAINT": os.fspath(constraints_path),
             "UV_CONSTRAINT": os.fspath(constraints_path),
         },
@@ -244,7 +231,7 @@ def verify_application_environment(
             "--no-python-downloads",
         ),
         cwd=_BUILD_DIRECTORY,
-        env=_isolated_install_environment(environ),
+        env=application_install_environment(environ),
         description="application dependency verification",
     )
     if verify_capabilities:
@@ -493,7 +480,7 @@ def _verify_application_pip_commands(
     owner_uid: int = 0,
     owner_gid: int = 0,
 ) -> None:
-    environment = _isolated_install_environment(environ)
+    environment = application_install_environment(environ)
     python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
     site_packages_path = (
         runtime.virtual_env / "lib" / f"python{python_minor}" / "site-packages"
@@ -535,20 +522,19 @@ def _verify_application_pip_commands(
                 f"application {name} does not target the application interpreter"
             )
         commands.append((path, f"application {name} command verification"))
-    run_argv(
-        (
-            runtime.python,
-            "-I",
-            "-c",
-            _PIP_CAPABILITY_CHECK,
-            os.fspath(site_packages),
-            os.fspath(runtime.comfyui_path),
-            application.pip_version,
-            os.fspath(runtime.virtual_env / "bin/pip"),
-            os.fspath(runtime.virtual_env / "bin/pip3"),
-        ),
-        cwd=_BUILD_DIRECTORY,
-        env=environment,
+    run_application_checker(
+        runtime,
+        "pip",
+        {
+            "site_packages": os.fspath(site_packages),
+            "workspace": os.fspath(runtime.comfyui_path),
+            "version": application.pip_version,
+            "commands": [
+                os.fspath(runtime.virtual_env / "bin/pip"),
+                os.fspath(runtime.virtual_env / "bin/pip3"),
+            ],
+        },
+        environ=environ,
         description="application pip module verification",
     )
     commands.append((runtime.python, "application python -m pip verification"))
@@ -609,91 +595,6 @@ _PIP_VERSION_PATTERN = re.compile(
 )
 
 
-_PIP_CAPABILITY_CHECK = """\
-import base64
-import hashlib
-import importlib
-import importlib.metadata as metadata
-import importlib.util
-import pathlib
-import stat
-import sys
-
-site_packages_path = pathlib.Path(sys.argv[1])
-site_packages_metadata = site_packages_path.lstat()
-assert not site_packages_path.is_symlink()
-assert stat.S_ISDIR(site_packages_metadata.st_mode)
-site_packages = site_packages_path.resolve(strict=True)
-assert site_packages == site_packages_path
-workspace_path = pathlib.Path(sys.argv[2])
-workspace_metadata = workspace_path.lstat()
-assert not workspace_path.is_symlink()
-assert stat.S_ISDIR(workspace_metadata.st_mode)
-workspace = workspace_path.resolve(strict=True)
-assert workspace == workspace_path
-expected_version = sys.argv[3]
-sys.path.insert(0, str(site_packages))
-sys.path.insert(0, str(workspace))
-
-owners = tuple(
-    distribution
-    for distribution in metadata.distributions(path=[str(site_packages)])
-    if distribution.metadata.get("Name") is not None
-    and distribution.metadata["Name"].lower().replace("_", "-").replace(".", "-")
-    == "pip"
-)
-assert len(owners) == 1
-owner = owners[0]
-assert owner.version == expected_version
-assert pathlib.Path(owner.locate_file("")).resolve(strict=True) == site_packages
-for expected_command in (pathlib.Path(item) for item in sys.argv[4:]):
-    owned_files = tuple(
-        item
-        for item in owner.files or ()
-        if pathlib.Path(owner.locate_file(item)).resolve(strict=True)
-        == expected_command
-    )
-    assert len(owned_files) == 1
-    owned_file = owned_files[0]
-    assert owned_file.hash is not None and owned_file.hash.mode == "sha256"
-    digest = base64.urlsafe_b64encode(
-        hashlib.sha256(expected_command.read_bytes()).digest()
-    ).rstrip(b"=").decode("ascii")
-    assert digest == owned_file.hash.value
-
-pip_root_path = site_packages / "pip"
-pip_root_metadata = pip_root_path.lstat()
-assert not pip_root_path.is_symlink()
-assert stat.S_ISDIR(pip_root_metadata.st_mode)
-pip_root = pip_root_path.resolve(strict=True)
-assert pip_root == pip_root_path and pip_root.is_relative_to(site_packages)
-pip_init_path = pip_root_path / "__init__.py"
-pip_init_metadata = pip_init_path.lstat()
-assert not pip_init_path.is_symlink()
-assert stat.S_ISREG(pip_init_metadata.st_mode)
-pip_init = pip_init_path.resolve(strict=True)
-assert pip_init == pip_init_path and pip_init.is_relative_to(pip_root)
-
-def verify_spec(spec):
-    assert spec is not None and spec.name == "pip"
-    assert spec.origin is not None
-    assert pathlib.Path(spec.origin).resolve(strict=True) == pip_init
-    assert spec.submodule_search_locations is not None
-    assert tuple(
-        pathlib.Path(item).resolve(strict=True)
-        for item in spec.submodule_search_locations
-    ) == (pip_root,)
-
-verify_spec(importlib.util.find_spec("pip"))
-module = importlib.import_module("pip")
-verify_spec(module.__spec__)
-assert pathlib.Path(module.__file__).resolve(strict=True) == pip_init
-assert tuple(pathlib.Path(item).resolve(strict=True) for item in module.__path__) == (
-    pip_root,
-)
-"""
-
-
 def _verify_application_imports(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
@@ -703,39 +604,32 @@ def _verify_application_imports(
     site_packages = (
         runtime.virtual_env / "lib" / f"python{python_minor}" / "site-packages"
     )
-    import_names = tuple(
-        package.name
-        for package in application.pytorch.packages
-        if package.name in {"torch", "torchaudio", "torchvision"}
-    )
-    run_argv(
-        (
-            runtime.python,
-            "-I",
-            "-c",
-            _PYTORCH_CAPABILITY_CHECK,
-            os.fspath(site_packages),
-            os.fspath(runtime.comfyui_path),
-            json.dumps(import_names),
-        ),
-        cwd=_BUILD_DIRECTORY,
-        env=_isolated_install_environment(environ),
+    distributions = {
+        package.name: package.version for package in application.pytorch.packages
+    }
+    modules = {
+        module: distribution
+        for module, distribution in _PYTORCH_IMPORT_DISTRIBUTIONS.items()
+        if distribution in distributions
+    }
+    run_application_checker(
+        runtime,
+        "pytorch",
+        {
+            "site_packages": os.fspath(site_packages),
+            "workspace": os.fspath(runtime.comfyui_path),
+            "distributions": distributions,
+            "modules": modules,
+        },
+        environ=environ,
         description="PyTorch import capability verification",
     )
-    run_argv(
-        (
-            runtime.python,
-            "-I",
-            "-c",
-            _COMFYUI_CAPABILITY_CHECK,
-            os.fspath(runtime.comfyui_path),
-        ),
-        cwd=_BUILD_DIRECTORY,
-        env={
-            **_isolated_install_environment(environ),
-            "COMFYUI_PATH": os.fspath(runtime.comfyui_path),
-            "VIRTUAL_ENV": os.fspath(runtime.virtual_env),
-        },
+    run_application_checker(
+        runtime,
+        "comfyui",
+        {"workspace": os.fspath(runtime.comfyui_path)},
+        environ=environ,
+        runtime_environment=True,
         description="ComfyUI import capability verification",
     )
 
@@ -850,9 +744,14 @@ def _unlink_inventory_if_identity(path: Path, identity: _InventoryFileIdentity) 
         path.unlink()
 
 
-def _isolated_install_environment(
+def application_install_environment(
     environ: Mapping[str, str] | None,
+    *,
+    constraints_path: Path | None = None,
+    comfyui_path: Path | None = None,
+    virtual_env: Path | None = None,
 ) -> dict[str, str]:
+    """Build the narrow environment owned by application installation."""
     source = os.environ if environ is None else environ
     result = {
         name: source[name]
@@ -860,198 +759,45 @@ def _isolated_install_environment(
         if source.get(name) is not None
     }
     result.update({"HOME": "/root", "LANG": "C.UTF-8", "PATH": "/usr/bin:/bin"})
+    if constraints_path is not None:
+        result.update(
+            {
+                "PIP_CONSTRAINT": os.fspath(constraints_path),
+                "UV_CONSTRAINT": os.fspath(constraints_path),
+            }
+        )
+    if comfyui_path is not None:
+        result["COMFYUI_PATH"] = os.fspath(comfyui_path)
+    if virtual_env is not None:
+        result["VIRTUAL_ENV"] = os.fspath(virtual_env)
     return result
 
 
-_INVENTORY_CHECK = "; ".join(
-    (
-        "import importlib.metadata as m, json, sys",
-        "expected=json.loads(sys.argv[1])",
-        "actual={name: m.version(name) for name in expected}",
-        "assert actual == expected, (expected, actual)",
+def run_application_checker(
+    runtime: ContainerRuntime,
+    capability: str,
+    expected: Mapping[str, object],
+    *,
+    environ: Mapping[str, str] | None,
+    description: str,
+    checker_path: Path | None = None,
+    runtime_environment: bool = False,
+) -> None:
+    """Execute one materialized checker with the exact application Python."""
+    path = APPLICATION_CHECKER_CONTAINER_PATH if checker_path is None else checker_path
+    run_argv(
+        (
+            runtime.python,
+            "-I",
+            path,
+            capability,
+            json.dumps(expected, sort_keys=True, separators=(",", ":")),
+        ),
+        cwd=_BUILD_DIRECTORY,
+        env=application_install_environment(
+            environ,
+            comfyui_path=runtime.comfyui_path if runtime_environment else None,
+            virtual_env=runtime.virtual_env if runtime_environment else None,
+        ),
+        description=description,
     )
-)
-
-
-_PYTORCH_CAPABILITY_CHECK = """\
-import importlib
-import importlib.util
-import json
-import pathlib
-import stat
-import sys
-
-site_packages_path = pathlib.Path(sys.argv[1])
-site_packages_metadata = site_packages_path.lstat()
-assert not site_packages_path.is_symlink()
-assert stat.S_ISDIR(site_packages_metadata.st_mode)
-site_packages = site_packages_path.resolve(strict=True)
-assert site_packages == site_packages_path
-workspace_path = pathlib.Path(sys.argv[2])
-workspace_metadata = workspace_path.lstat()
-assert not workspace_path.is_symlink()
-assert stat.S_ISDIR(workspace_metadata.st_mode)
-workspace = workspace_path.resolve(strict=True)
-assert workspace == workspace_path
-sys.path.insert(0, str(site_packages))
-sys.path.insert(0, str(workspace))
-
-for module_name in json.loads(sys.argv[3]):
-    expected_root_path = site_packages / module_name
-    expected_root_metadata = expected_root_path.lstat()
-    assert not expected_root_path.is_symlink()
-    assert stat.S_ISDIR(expected_root_metadata.st_mode)
-    expected_root = expected_root_path.resolve(strict=True)
-    assert expected_root == expected_root_path
-    assert expected_root.is_relative_to(site_packages)
-    expected_init_path = expected_root_path / "__init__.py"
-    expected_init_metadata = expected_init_path.lstat()
-    assert not expected_init_path.is_symlink()
-    assert stat.S_ISREG(expected_init_metadata.st_mode)
-    expected_init = expected_init_path.resolve(strict=True)
-    assert expected_init == expected_init_path
-    assert expected_init.is_relative_to(expected_root)
-
-    def verify_spec(spec):
-        assert spec is not None and spec.name == module_name
-        assert spec.origin is not None
-        origin = pathlib.Path(spec.origin).resolve(strict=True)
-        assert origin == expected_init
-        assert spec.submodule_search_locations is not None
-        locations = tuple(
-            pathlib.Path(item).resolve(strict=True)
-            for item in spec.submodule_search_locations
-        )
-        assert locations == (expected_root,)
-
-    module_spec = importlib.util.find_spec(module_name)
-    verify_spec(module_spec)
-    imported = importlib.import_module(module_name)
-    verify_spec(imported.__spec__)
-    assert pathlib.Path(imported.__file__).resolve(strict=True) == expected_init
-    imported_locations = tuple(
-        pathlib.Path(item).resolve(strict=True) for item in imported.__path__
-    )
-    assert imported_locations == (expected_root,)
-"""
-
-
-_COMFYUI_CAPABILITY_CHECK = """\
-import importlib
-import importlib.machinery
-import pathlib
-import stat
-import sys
-
-# Prove the checkout's filesystem ownership before involving import machinery.
-workspace_path = pathlib.Path(sys.argv[1])
-workspace_metadata = workspace_path.lstat()
-assert not workspace_path.is_symlink()
-assert stat.S_ISDIR(workspace_metadata.st_mode)
-workspace = workspace_path.resolve(strict=True)
-assert workspace == workspace_path
-
-folder_paths_path = workspace / "folder_paths.py"
-folder_paths_metadata = folder_paths_path.lstat()
-assert not folder_paths_path.is_symlink()
-assert stat.S_ISREG(folder_paths_metadata.st_mode)
-folder_paths = folder_paths_path.resolve(strict=True)
-assert folder_paths == folder_paths_path
-assert folder_paths.is_relative_to(workspace)
-
-comfy_root_path = workspace / "comfy"
-comfy_root_metadata = comfy_root_path.lstat()
-assert not comfy_root_path.is_symlink()
-assert stat.S_ISDIR(comfy_root_metadata.st_mode)
-comfy_root = comfy_root_path.resolve(strict=True)
-assert comfy_root == comfy_root_path
-assert comfy_root.is_relative_to(workspace)
-comfy_init_path = comfy_root_path / "__init__.py"
-try:
-    comfy_init_metadata = comfy_init_path.lstat()
-except FileNotFoundError:
-    comfy_init = None
-else:
-    assert not comfy_init_path.is_symlink()
-    assert stat.S_ISREG(comfy_init_metadata.st_mode)
-    comfy_init = comfy_init_path.resolve(strict=True)
-    assert comfy_init == comfy_init_path
-    assert comfy_init.is_relative_to(comfy_root)
-
-def verify_folder_paths_spec(spec):
-    assert spec is not None and spec.name == "folder_paths"
-    assert spec.origin is not None
-    assert spec.origin == str(folder_paths)
-    origin = pathlib.Path(spec.origin).resolve(strict=True)
-    assert origin == folder_paths
-    assert spec.submodule_search_locations is None
-    return origin
-
-def verify_comfy_spec(spec):
-    assert spec is not None and spec.name == "comfy"
-    assert spec.submodule_search_locations is not None
-    raw_locations = tuple(spec.submodule_search_locations)
-    assert raw_locations == (str(comfy_root),)
-    locations = tuple(
-        pathlib.Path(item).resolve(strict=True)
-        for item in raw_locations
-    )
-    assert locations == (comfy_root,)
-    expected_origin = None if comfy_init is None else str(comfy_init)
-    assert spec.origin == expected_origin
-    origin = (
-        None
-        if spec.origin is None
-        else pathlib.Path(spec.origin).resolve(strict=True)
-    )
-    assert origin == comfy_init
-    return locations, origin
-
-# Build the same workspace-first view for Manager-on (.pth present) and
-# Manager-off (no anchor) without normalizing or hiding distinct path aliases.
-workspace_entry = str(workspace)
-launch_path = [workspace_entry]
-launch_path.extend(entry for entry in sys.path if entry != workspace_entry)
-assert launch_path[0] == workspace_entry
-assert launch_path.count(workspace_entry) == 1
-
-# First prove what the standard path finder resolves without executing modules.
-folder_paths_origin = verify_folder_paths_spec(
-    importlib.machinery.PathFinder.find_spec("folder_paths", launch_path)
-)
-comfy_locations, comfy_origin = verify_comfy_spec(
-    importlib.machinery.PathFinder.find_spec("comfy", launch_path)
-)
-
-# Then exercise normal imports under that exact launch view and bind the
-# resulting module identities back to the filesystem owners proved above.
-sys.path[:] = launch_path
-folder_paths_module = importlib.import_module("folder_paths")
-folder_paths_imported_origin = verify_folder_paths_spec(folder_paths_module.__spec__)
-assert folder_paths_imported_origin == folder_paths_origin
-assert folder_paths_module.__file__ is not None
-assert folder_paths_module.__file__ == str(folder_paths)
-assert pathlib.Path(folder_paths_module.__file__).resolve(strict=True) == folder_paths
-
-comfy_module = importlib.import_module("comfy")
-comfy_imported_spec = comfy_module.__spec__
-comfy_imported_locations, comfy_imported_origin = verify_comfy_spec(
-    comfy_imported_spec
-)
-assert comfy_imported_locations == comfy_locations
-assert comfy_imported_origin == comfy_origin
-expected_comfy_file = None if comfy_init is None else str(comfy_init)
-assert comfy_module.__file__ == expected_comfy_file
-comfy_file = (
-    None
-    if comfy_module.__file__ is None
-    else pathlib.Path(comfy_module.__file__).resolve(strict=True)
-)
-assert comfy_file == comfy_init
-comfy_raw_imported_locations = tuple(comfy_module.__path__)
-assert comfy_raw_imported_locations == (str(comfy_root),)
-comfy_imported_locations = tuple(
-    pathlib.Path(item).resolve(strict=True) for item in comfy_raw_imported_locations
-)
-assert comfy_imported_locations == (comfy_root,)
-"""

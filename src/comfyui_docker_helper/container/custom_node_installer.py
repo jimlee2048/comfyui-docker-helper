@@ -35,7 +35,7 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.final_validation import is_git_source_url
 from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
 from comfyui_docker_helper.container.application_installer import (
-    _isolated_install_environment,
+    application_install_environment,
     verify_application_environment,
 )
 from comfyui_docker_helper.container.comfyui_installer import (
@@ -44,7 +44,6 @@ from comfyui_docker_helper.container.comfyui_installer import (
     verify_application_state,
     verify_manager_registry_capability,
 )
-from comfyui_docker_helper.container.phase_inputs import load_phase_input
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
 from comfyui_docker_helper.errors import ApplicationError
 
@@ -76,10 +75,9 @@ class _FilesystemIdentity:
 
 
 def install_custom_nodes(
-    custom_nodes_phase_path: str | Path,
-    application_phase_path: str | Path,
+    custom_nodes: CustomNodesPhase,
+    application: ApplicationPhase,
     *,
-    expected_build_plan_digest: str,
     runtime: ContainerRuntime,
     git_path: Path = _GIT_PATH,
     uv_path: Path = _UV_PATH,
@@ -88,20 +86,6 @@ def install_custom_nodes(
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Install all custom nodes in one original-order admitted-prefix sequence."""
-    custom_nodes = load_phase_input(
-        custom_nodes_phase_path,
-        "custom-nodes",
-        expected_build_plan_digest=expected_build_plan_digest,
-    )
-    application = load_phase_input(
-        application_phase_path,
-        "application",
-        expected_build_plan_digest=expected_build_plan_digest,
-    )
-    if not isinstance(custom_nodes, CustomNodesPhase) or not isinstance(
-        application, ApplicationPhase
-    ):  # pragma: no cover - strict phase loader owns the types.
-        raise CustomNodeInstallError("invalid custom-node phase inputs")
     _validate_inputs(custom_nodes, application, runtime)
 
     nodes = custom_nodes.nodes
@@ -1073,7 +1057,7 @@ def _managed_python_environment(
     constraints_path: Path,
     environ: Mapping[str, str] | None,
 ) -> dict[str, str]:
-    environment = _isolated_install_environment(environ)
+    environment = application_install_environment(environ)
     environment.update(
         {
             "COMFYUI_PATH": os.fspath(runtime.comfyui_path),

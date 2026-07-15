@@ -18,6 +18,7 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         "COPY build-plan.json /opt/cdh/build/build-plan.json",
         "COPY manifest-binding.json /opt/cdh/build/manifest-binding.json",
         "COPY phases /opt/cdh/build/phases",
+        "COPY --chown=0:0 checkers /opt/cdh/build/checkers",
         "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
         "COPY cdh /opt/cdh/source",
         "COPY cdh-production-requirements.txt "
@@ -61,11 +62,10 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
     packages = package_separator.join(
         shlex.quote(item) for item in plan.application.os_packages
     )
-    bootstrap_check = "; ".join(
-        (
-            "import importlib.metadata as m",
-            f"assert m.version('pip') == {python.pip_version!r}",
-        )
+    bootstrap_check = json.dumps(
+        {"distributions": {"pip": python.pip_version}},
+        sort_keys=True,
+        separators=(",", ":"),
     )
     inventory_check = "; ".join(
         (
@@ -106,7 +106,8 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f" && {_shell_word(plan.application.paths.venv + '/bin/python')} "
         "-m pip --version \\",
         f" && {_shell_word(plan.application.paths.venv + '/bin/python')} "
-        f"-c {_shell_word(bootstrap_check)} \\",
+        "-I /opt/cdh/build/checkers/application.py inventory "
+        f"{_shell_word(bootstrap_check)} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip')} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip3')}",
         f"RUN uv --no-config build --wheel --python {_shell_word(interpreter)} "

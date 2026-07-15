@@ -28,12 +28,12 @@ from comfyui_docker_helper.config.build_plan import (
     ToolchainPhase,
 )
 from comfyui_docker_helper.container.application_installer import (
-    _isolated_install_environment,
+    application_install_environment,
     install_inference_group,
     install_python_extras,
+    run_application_checker,
     verify_application_environment,
 )
-from comfyui_docker_helper.container.phase_inputs import load_phase_input
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.errors import ApplicationError
 from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
@@ -51,10 +51,9 @@ class ComfyUIInstallError(ApplicationError):
 
 
 def install_comfyui(
-    application_phase_path: str | Path,
-    toolchain_phase_path: str | Path,
+    application: ApplicationPhase,
+    toolchain: ToolchainPhase,
     *,
-    expected_build_plan_digest: str,
     runtime: ContainerRuntime,
     git_path: Path = _GIT_PATH,
     uv_path: Path = _UV_PATH,
@@ -63,19 +62,13 @@ def install_comfyui(
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Verify exact source before installing protected and ordinary requirements."""
-    application, _toolchain = _load_phases(
-        application_phase_path,
-        toolchain_phase_path,
-        expected_build_plan_digest,
-    )
     _validate_paths(application, runtime)
     _checkout_exact(application, runtime, git_path, environ)
     # Repeat verification immediately before the first package mutation.
     parsed, parsed_manager = _verify_checkout(application, runtime)
     install_inference_group(
-        application_phase_path,
-        toolchain_phase_path,
-        expected_build_plan_digest=expected_build_plan_digest,
+        application,
+        toolchain,
         runtime=runtime,
         uv_path=uv_path,
         constraints_path=constraints_path,
@@ -148,7 +141,7 @@ def verify_application_state(
 ) -> None:
     """Re-prove exact source, capabilities, packages, and dependency health."""
     _validate_paths(application, runtime)
-    environment = _isolated_install_environment(environ)
+    environment = application_install_environment(environ)
     _verify_stage_identity(application, runtime.comfyui_path, git_path, environment)
     parsed, parsed_manager = _verify_checkout(application, runtime)
     manager = application.comfyui.manager
@@ -185,24 +178,6 @@ def capture_application_requirements(
     return parsed.ordinary
 
 
-def _load_phases(
-    application_path: str | Path,
-    toolchain_path: str | Path,
-    digest: str,
-) -> tuple[ApplicationPhase, ToolchainPhase]:
-    application = load_phase_input(
-        application_path, "application", expected_build_plan_digest=digest
-    )
-    toolchain = load_phase_input(
-        toolchain_path, "toolchain", expected_build_plan_digest=digest
-    )
-    if not isinstance(application, ApplicationPhase) or not isinstance(
-        toolchain, ToolchainPhase
-    ):  # pragma: no cover - strict phase loader owns the type.
-        raise ComfyUIInstallError("invalid ComfyUI phase inputs")
-    return application, toolchain
-
-
 def _validate_paths(application: ApplicationPhase, runtime: ContainerRuntime) -> None:
     if runtime.comfyui_path != Path(application.paths.comfyui):
         raise ComfyUIInstallError("ComfyUI target does not match BuildPlan")
@@ -222,7 +197,7 @@ def _checkout_exact(
     _require_absent(target)
     parent = _ensure_real_directory(target.parent)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=parent))
-    environment = _isolated_install_environment(environ)
+    environment = application_install_environment(environ)
     try:
         _run_git(
             (
@@ -451,7 +426,9 @@ def _install_ordinary_requirements(
                 temporary,
             ),
             cwd=_BUILD_DIRECTORY,
-            env=_application_install_environment(environ, constraints_path),
+            env=application_install_environment(
+                environ, constraints_path=constraints_path
+            ),
             description="ComfyUI ordinary requirements install",
         )
     finally:
@@ -498,7 +475,9 @@ def _install_manager_capability(
                 temporary,
             ),
             cwd=_BUILD_DIRECTORY,
-            env=_application_install_environment(environ, constraints_path),
+            env=application_install_environment(
+                environ, constraints_path=constraints_path
+            ),
             description="Manager requirements install",
         )
     finally:
@@ -523,23 +502,17 @@ def _verify_manager_capability(
 ) -> None:
     _verify_declared_manager_distributions(application, parsed, runtime)
     site_packages = Path(manager.import_anchor).parent
-    run_argv(
-        (
-            runtime.python,
-            "-I",
-            "-c",
-            _MANAGER_CAPABILITY_CHECK,
-            parsed.manager_version,
-            os.fspath(runtime.comfyui_path),
-            os.fspath(site_packages),
-            manager.import_name,
-        ),
-        cwd=_BUILD_DIRECTORY,
-        env={
-            **_isolated_install_environment(environ),
-            "COMFYUI_PATH": os.fspath(runtime.comfyui_path),
-            "VIRTUAL_ENV": os.fspath(runtime.virtual_env),
+    run_application_checker(
+        runtime,
+        "manager",
+        {
+            "version": parsed.manager_version,
+            "workspace": os.fspath(runtime.comfyui_path),
+            "site_packages": os.fspath(site_packages),
+            "import_name": manager.import_name,
         },
+        environ=environ,
+        runtime_environment=True,
         description="Manager application capability verification",
     )
     _verify_cm_cli(Path(manager.executable), runtime)
@@ -763,26 +736,13 @@ def _verify_manager_absent(
         except OSError as error:
             raise ComfyUIInstallError(f"{subject} could not be inspected") from error
         raise ComfyUIInstallError(f"{subject} exists while Manager is disabled")
-    run_argv(
-        (runtime.python, "-I", "-c", _MANAGER_ABSENCE_CHECK),
-        cwd=_BUILD_DIRECTORY,
-        env=_isolated_install_environment(environ),
+    run_application_checker(
+        runtime,
+        "manager-absent",
+        {},
+        environ=environ,
         description="disabled Manager verification",
     )
-
-
-def _application_install_environment(
-    environ: Mapping[str, str] | None,
-    constraints_path: Path,
-) -> dict[str, str]:
-    result = _isolated_install_environment(environ)
-    result.update(
-        {
-            "PIP_CONSTRAINT": os.fspath(constraints_path),
-            "UV_CONSTRAINT": os.fspath(constraints_path),
-        }
-    )
-    return result
 
 
 def _require_existing_real_directory(path: Path) -> None:
@@ -906,183 +866,3 @@ def _run_git(
             f"{description} failed with exit code {completed.returncode}"
         )
     return completed.stdout.strip()
-
-
-_MANAGER_CAPABILITY_CHECK = """\
-import importlib
-import importlib.metadata as metadata
-import importlib.util
-import pathlib
-import stat
-import sys
-
-expected_version = sys.argv[1]
-workspace_path = pathlib.Path(sys.argv[2])
-workspace_metadata = workspace_path.lstat()
-assert not workspace_path.is_symlink()
-assert stat.S_ISDIR(workspace_metadata.st_mode)
-workspace = workspace_path.resolve(strict=True)
-assert workspace == workspace_path
-site_packages_path = pathlib.Path(sys.argv[3])
-site_packages_metadata = site_packages_path.lstat()
-assert not site_packages_path.is_symlink()
-assert stat.S_ISDIR(site_packages_metadata.st_mode)
-site_packages = site_packages_path.resolve(strict=True)
-assert site_packages == site_packages_path
-manager_name = sys.argv[4]
-
-# Match ComfyUI launch semantics closely enough to expose workspace-first shadows.
-sys.path[:] = [
-    item
-    for item in sys.path
-    if not item
-    or pathlib.Path(item).resolve() not in {workspace, site_packages}
-]
-sys.path.insert(0, str(site_packages))
-sys.path.insert(0, str(workspace))
-
-owners = tuple(
-    distribution
-    for distribution in metadata.distributions(path=[str(site_packages)])
-    if distribution.metadata.get("Name") is not None
-    and distribution.metadata["Name"].lower().replace("_", "-").replace(".", "-")
-    == "comfyui-manager"
-)
-assert len(owners) == 1
-assert owners[0].version == expected_version
-assert pathlib.Path(owners[0].locate_file("")).resolve(strict=True) == site_packages
-
-folder_paths_path = workspace / "folder_paths.py"
-folder_paths_metadata = folder_paths_path.lstat()
-assert not folder_paths_path.is_symlink()
-assert stat.S_ISREG(folder_paths_metadata.st_mode)
-folder_paths = folder_paths_path.resolve(strict=True)
-assert folder_paths == folder_paths_path and folder_paths.is_relative_to(workspace)
-folder_paths_spec = importlib.util.find_spec("folder_paths")
-assert folder_paths_spec is not None and folder_paths_spec.origin is not None
-assert pathlib.Path(folder_paths_spec.origin).resolve(strict=True) == folder_paths
-
-def expected_package(root, name, root_message, origin_message):
-    raw = root / pathlib.Path(*name.split("."))
-    raw_metadata = raw.lstat()
-    assert not raw.is_symlink(), root_message
-    assert stat.S_ISDIR(raw_metadata.st_mode)
-    resolved = raw.resolve(strict=True)
-    assert resolved == raw and resolved.is_relative_to(root), root_message
-    initializer = raw / "__init__.py"
-    if initializer.exists() or initializer.is_symlink():
-        initializer_metadata = initializer.lstat()
-        assert not initializer.is_symlink(), origin_message
-        assert stat.S_ISREG(initializer_metadata.st_mode)
-        expected_origin = initializer.resolve(strict=True)
-        assert expected_origin == initializer, origin_message
-    else:
-        expected_origin = None
-    return resolved, expected_origin
-
-def verify_package_spec(
-    spec, name, expected_root, expected_origin, locations_message, origin_message
-):
-    assert spec is not None and spec.name == name
-    assert spec.submodule_search_locations is not None
-    locations = tuple(
-        pathlib.Path(item).resolve(strict=True)
-        for item in spec.submodule_search_locations
-    )
-    assert locations == (expected_root,), locations_message
-    origin = None if spec.origin is None else pathlib.Path(spec.origin).resolve(
-        strict=True
-    )
-    assert origin == expected_origin, origin_message
-    return locations, origin
-
-manager_root, manager_origin = expected_package(
-    site_packages,
-    manager_name,
-    "Manager import root escapes application site-packages",
-    "Manager import origin escapes application root",
-)
-manager_spec = importlib.util.find_spec(manager_name)
-manager_locations, observed_manager_origin = verify_package_spec(
-    manager_spec,
-    manager_name,
-    manager_root,
-    manager_origin,
-    "Manager import locations escape application site-packages",
-    "Manager import origin escapes application root",
-)
-manager = importlib.import_module(manager_name)
-imported_manager_locations, imported_manager_origin = verify_package_spec(
-    manager.__spec__,
-    manager_name,
-    manager_root,
-    manager_origin,
-    "Manager import locations escape application site-packages",
-    "Manager import origin escapes application root",
-)
-assert imported_manager_locations == manager_locations
-assert imported_manager_origin == observed_manager_origin
-manager_file = (
-    None
-    if manager.__file__ is None
-    else pathlib.Path(manager.__file__).resolve(strict=True)
-)
-assert manager_file == manager_origin
-assert tuple(pathlib.Path(item).resolve(strict=True) for item in manager.__path__) == (
-    manager_root,
-)
-
-comfy_name = "comfy"
-comfy_root, comfy_origin = expected_package(
-    workspace,
-    comfy_name,
-    "ComfyUI comfy import root escapes checkout",
-    "ComfyUI comfy import origin escapes checkout root",
-)
-comfy_spec = importlib.util.find_spec(comfy_name)
-comfy_locations, observed_comfy_origin = verify_package_spec(
-    comfy_spec,
-    comfy_name,
-    comfy_root,
-    comfy_origin,
-    "ComfyUI comfy import locations escape checkout",
-    "ComfyUI comfy import origin escapes checkout root",
-)
-comfy = importlib.import_module(comfy_name)
-imported_comfy_locations, imported_comfy_origin = verify_package_spec(
-    comfy.__spec__,
-    comfy_name,
-    comfy_root,
-    comfy_origin,
-    "ComfyUI comfy import locations escape checkout",
-    "ComfyUI comfy import origin escapes checkout root",
-)
-assert imported_comfy_locations == comfy_locations
-assert imported_comfy_origin == observed_comfy_origin
-comfy_file = (
-    None
-    if comfy.__file__ is None
-    else pathlib.Path(comfy.__file__).resolve(strict=True)
-)
-assert comfy_file == comfy_origin
-assert tuple(pathlib.Path(item).resolve(strict=True) for item in comfy.__path__) == (
-    comfy_root,
-)
-"""
-
-
-_MANAGER_ABSENCE_CHECK = """\
-import importlib.metadata as metadata
-import importlib.util
-
-try:
-    metadata.version("comfyui-manager")
-except metadata.PackageNotFoundError:
-    pass
-else:
-    raise AssertionError("Manager distribution exists while disabled")
-
-assert importlib.util.find_spec("comfyui_manager") is None, (
-    "Manager import exists while disabled"
-)
-"""

@@ -29,7 +29,6 @@ from comfyui_docker_helper.config.url_validation import (
     validate_file_name,
     validate_relative_file_directory,
 )
-from comfyui_docker_helper.container.phase_inputs import load_phase_input
 from comfyui_docker_helper.errors import ApplicationError
 
 
@@ -492,22 +491,8 @@ class _FilesConfig(ConfigModel):
     files: list[_FileConfig]
 
 
-def load_file_download_plan(
-    phase_path: str | Path,
-    *,
-    expected_build_plan_digest: str,
-) -> FileDownloadPlan:
-    """Load only the BuildPlan-owned file phase without root re-planning."""
-    try:
-        payload = load_phase_input(
-            phase_path,
-            "files",
-            expected_build_plan_digest=expected_build_plan_digest,
-        )
-    except ValueError as error:
-        raise DownloadFilesConfigError(str(error)) from error
-    if not isinstance(payload, FilesPhase):
-        raise DownloadFilesConfigError("file phase input has the wrong payload")
+def file_download_plan(payload: FilesPhase) -> FileDownloadPlan:
+    """Project one admitted BuildPlan files phase into downloader inputs."""
     return FileDownloadPlan(
         downloader=DownloaderSettings(
             default=require_downloader_name(payload.downloader.default),
@@ -631,19 +616,14 @@ def process_file_downloads(
 
 
 def download_files(
-    phase_path: str | Path,
+    files: FilesPhase,
     *,
-    expected_build_plan_digest: str,
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
 ) -> tuple[DownloadResult, ...]:
-    """Download files from one digest-bound BuildPlan phase."""
-
-    plan = load_file_download_plan(
-        phase_path,
-        expected_build_plan_digest=expected_build_plan_digest,
-    )
+    """Download files from one admitted BuildPlan phase."""
+    plan = file_download_plan(files)
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 

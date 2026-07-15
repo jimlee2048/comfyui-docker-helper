@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import typer
+from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 from typer.main import get_command
 from typer.testing import CliRunner
 
@@ -14,6 +15,7 @@ from comfyui_docker_helper.cli import app
 from comfyui_docker_helper.config.build_plan import BuildOutputPlan
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container.phase_inputs import (
     load_phase_input,
     phase_document,
@@ -57,7 +59,6 @@ def test_root_command_exposes_current_groups() -> None:
         "download-files",
         "entrypoint",
         "install-comfyui",
-        "install-inference",
         "install-custom-nodes",
     }
 
@@ -72,7 +73,7 @@ def test_root_command_exposes_current_groups() -> None:
         (["host", "build"], "Usage: cdh host build"),
         (["container"], "Usage: cdh container"),
         (["container", "download-files"], "Usage: cdh container download-files"),
-        (["container", "install-inference"], "Usage: cdh container install-inference"),
+        (["container", "install-comfyui"], "Usage: cdh container install-comfyui"),
         (
             ["container", "install-custom-nodes"],
             "Usage: cdh container install-custom-nodes",
@@ -121,6 +122,50 @@ def test_registry_helper_help_exposes_only_owned_inputs(
     assert "--hooks-directory" in result.output
     assert "--config" not in result.output
     assert "--lock" not in result.output
+
+
+def test_install_comfyui_adapter_loads_each_typed_phase_once(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep phase admission at the CLI edge and pass typed values once."""
+    plan = build_plan(final_config(), accepted_resolution())
+    loaded: list[str] = []
+    observed: list[object] = []
+
+    def load(_path, phase, **_kwargs):
+        loaded.append(phase)
+        return plan.application if phase == "application" else plan.toolchain
+
+    monkeypatch.setattr(container_cli, "load_phase_input", load)
+    monkeypatch.setattr(
+        container_cli,
+        "install_comfyui",
+        lambda application, toolchain, **_kwargs: observed.extend(
+            (application, toolchain)
+        ),
+    )
+    monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
+    monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
+    monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "install-comfyui",
+            "--application-phase",
+            "application.json",
+            "--toolchain-phase",
+            "toolchain.json",
+            "--build-plan-digest",
+            "sha256:" + "a" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert loaded == ["application", "toolchain"]
+    assert observed == [plan.application, plan.toolchain]
 
 
 def test_host_hook_option_is_preserved_only_on_render_and_build(

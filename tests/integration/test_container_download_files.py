@@ -20,10 +20,9 @@ from comfyui_docker_helper.container.download_files import (
     FileDownloadItem,
     TransferDownloadFilesError,
     build_file_download_plan,
-    load_file_download_plan,
+    file_download_plan,
     process_file_downloads,
 )
-from comfyui_docker_helper.container.phase_inputs import phase_document
 
 
 class RecordingBackend:
@@ -123,27 +122,8 @@ def test_build_file_download_plan_defaults_to_runtime_comfyui_path(
     assert plan.items[0].target == runtime_comfyui / "models" / "a" / "first.bin"
 
 
-def test_load_file_download_plan_reports_missing_and_invalid_phase(
-    tmp_path: Path,
-) -> None:
-    """Translate phase read and validation errors into helper errors."""
-    with pytest.raises(DownloadFilesConfigError, match="could not read files phase"):
-        load_file_download_plan(
-            tmp_path / "missing.json", expected_build_plan_digest="sha256:expected"
-        )
-
-    phase = tmp_path / "bad.json"
-    phase.write_text("{", encoding="utf-8")
-
-    with pytest.raises(DownloadFilesConfigError, match="Invalid JSON"):
-        load_file_download_plan(phase, expected_build_plan_digest="sha256:expected")
-
-
-def test_load_file_download_plan_consumes_digest_bound_phase(
-    tmp_path: Path,
-) -> None:
+def test_file_download_plan_consumes_typed_phase() -> None:
     """Build a file download plan from one BuildPlan-owned phase only."""
-    digest = "sha256:" + "a" * 64
     payload = FilesPhase(
         downloader=DownloaderPlan(
             default="httpx",
@@ -171,12 +151,7 @@ def test_load_file_download_plan_consumes_digest_bound_phase(
             ),
         ),
     )
-    phase = tmp_path / "files.json"
-    phase.write_text(
-        phase_document("files", payload, digest).model_dump_json(), encoding="utf-8"
-    )
-
-    plan = load_file_download_plan(phase, expected_build_plan_digest=digest)
+    plan = file_download_plan(payload)
 
     assert plan.downloader.default == "httpx"
     assert plan.downloader.httpx.timeout == 42

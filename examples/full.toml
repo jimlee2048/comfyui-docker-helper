@@ -108,7 +108,7 @@ resume_download = true
 tags = ["my-comfy:dev", "registry.example.com/my-comfy:dev"]
 # Default: "load". Supported: "load", "push".
 output = "load"
-# v0.5 accepts exactly this ordered target list.
+# The current schema accepts exactly this ordered target list.
 platforms = ["linux/amd64"]
 
 [comfyui]
@@ -150,7 +150,7 @@ post_install_scripts = []
 # Git custom node cloned directly into ComfyUI/custom_nodes.
 type = "git"
 # Required for git nodes. Passed through unchanged as an acquisition locator;
-# Git URLs must be unique in this file.
+# Git URLs must be unique across the effective merged configuration.
 url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
 # Default: unset. Branch, tag, or commit checked out after clone when provided.
 ref = "main"

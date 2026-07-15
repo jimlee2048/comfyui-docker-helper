@@ -51,7 +51,7 @@ def validate(
         typer.Option(
             "--file",
             "-f",
-            help="TOML configuration file to validate.",
+            help="TOML configuration layer; repeat to merge in order.",
             metavar="CONFIG.TOML",
         ),
     ],
@@ -64,7 +64,7 @@ def validate(
         ),
     ] = _DEFAULT_SCRIPTS_DIR,
 ) -> None:
-    """Validate configuration locally without providers, Docker, or writes."""
+    """Validate configuration locally without network access, Docker, or writes."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     try:
         result = load_validate_config_result(config_files, scripts_dir=scripts_dir)
@@ -84,7 +84,7 @@ def render(
         typer.Option(
             "--file",
             "-f",
-            help="TOML configuration file to render.",
+            help="TOML configuration layer; repeat to merge in order.",
             metavar="CONFIG.TOML",
         ),
     ],
@@ -138,7 +138,7 @@ def render(
         bool,
         typer.Option(
             "--check",
-            help="Validate that root render artifacts are already up to date.",
+            help="Verify that an existing build context is up to date without writing.",
         ),
     ] = False,
     upgrade_lock: Annotated[
@@ -195,7 +195,7 @@ def build(
         typer.Option(
             "--file",
             "-f",
-            help="TOML configuration file to build.",
+            help="TOML configuration layer; repeat to merge in order.",
             metavar="CONFIG.TOML",
         ),
     ],

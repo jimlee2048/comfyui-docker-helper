@@ -1,4 +1,4 @@
-"""Active canonical Planning Authority render/build-context service."""
+"""Canonical lock reconciliation and build-context rendering."""
 
 from __future__ import annotations
 

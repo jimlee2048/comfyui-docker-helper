@@ -62,3 +62,9 @@ Direct-Git URLs pass through unchanged as acquisition locators; locked exact
 commits, not URL normalization or endpoint claims, identify the content.
 Zero-node builds still emit the exact empty custom-node inventory and the final
 application inventory after the dependency check.
+
+The image contains a baked runtime configuration at
+`/opt/cdh/runtime/config.toml`. A mounted `/etc/cdh/runtime/config.toml` can
+override runtime-only ComfyUI, downloader, SSH, and file settings without an
+image rebuild. See the root README for the complete runtime precedence,
+environment-variable, download-state, and lifecycle contracts.

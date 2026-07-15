@@ -50,7 +50,7 @@ def download_files_command(
         ),
     ],
 ) -> None:
-    """Download files from a narrow BuildPlan-owned phase."""
+    """Download files declared by the generated build phase."""
     files = _load_phase(phase, "files", build_plan_digest, FilesPhase)
     download_files(files)
 

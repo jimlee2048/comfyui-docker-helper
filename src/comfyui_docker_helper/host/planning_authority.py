@@ -1,4 +1,4 @@
-"""Active final-config to canonical desired-resolution integration."""
+"""Validated configuration to canonical request integration."""
 
 from __future__ import annotations
 

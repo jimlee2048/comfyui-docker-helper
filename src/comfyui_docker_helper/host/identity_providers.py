@@ -1,4 +1,4 @@
-"""Exact-identity provider seams for the active Planning Authority.
+"""Exact-identity providers for canonical config-lock v1.
 
 Providers return only the identity fields required by canonical config-lock v1
 and stable, credential-free failure categories.

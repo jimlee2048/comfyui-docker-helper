@@ -1,17 +1,20 @@
 # ComfyUI Docker Helper
 
-`comfyui-docker-helper` (`cdh`) validates one strict configuration, resolves
-moving inputs into canonical `config.lock.toml` schema v1, constructs immutable
-BuildPlan schema v1, and materializes a Docker Buildx context.
+`comfyui-docker-helper` (`cdh`) builds customized ComfyUI Docker Buildx images
+from declarative TOML. It manages Python and PyTorch, an official ComfyUI
+checkout, optional Manager and comfy-cli installations, custom nodes, files,
+and runtime hooks.
 
-The active planning chain is:
+One or more configuration layers merge into an effective configuration. cdh
+resolves moving inputs into canonical `config.lock.toml` schema v1, constructs
+immutable BuildPlan schema v1, and materializes a digest-bound build context:
 
 ```text
-validated final config -> canonical lock v1 -> BuildPlan v1 -> phase inputs
+effective config -> canonical lock v1 -> BuildPlan v1 -> build context
 ```
 
-Container build helpers consume only digest-bound phase inputs. They do not
-reload the root config or lock to make planning decisions.
+Image-internal build helpers consume only generated, digest-bound inputs. They
+do not reload host configuration or its lock to make build decisions.
 
 ## Requirements
 
@@ -20,11 +23,10 @@ reload the root config or lock to make planning decisions.
 - NVIDIA Docker support with driver `>=580.65.06` on a Turing-or-newer x86_64
   GPU.
 
-The tested v0.5 planning baseline is CPython 3.13.14, with 3.12.13 as the
-custom-node compatibility fallback and standard-GIL 3.14.6 as an additional
-tested profile. CUDA 13.0.3, PyTorch 2.12.1, torchvision 0.27.1, Ubuntu 24.04,
-and `linux/amd64` complete the baseline. CUDA 13.0.3 derives the internal
-PyTorch channel `cu130`.
+CPython 3.13.14 is the default. CPython 3.12.13 and standard-GIL 3.14.6 are
+explicitly selectable, tested supported profiles; cdh never switches Python
+versions automatically. CUDA 13.0.3, PyTorch 2.12.1, torchvision 0.27.1,
+Ubuntu 24.04, and `linux/amd64` complete the default configuration.
 The default resolved inference group is installed as the complete exact
 distributions `torch==2.12.1+cu130` and `torchvision==0.27.1+cu130` from the
 derived cu130 index.
@@ -83,7 +85,7 @@ nodes use the verified absolute `cm-cli`, one exact request per process, while
 direct-Git nodes pass the declared URL through unchanged as an acquisition
 locator and use the locked exact commit as content authority; cdh does not
 canonicalize the URL or claim it identifies the actual network endpoint. cdh
-rechecks the admitted typed set around hooks and writes declaration-ordered
+verifies the ordered node set around hooks and writes declaration-ordered
 evidence to `/opt/cdh/build/custom-node-inventory.json`. Registry installs do
 not invoke the optional `comfy`, `comfy-cli`, or `comfycli` commands.
 Even with no custom nodes, the same layer validates the custom-node root, writes
@@ -91,7 +93,16 @@ the exact empty inventory, and performs the final application dependency check.
 The final factual application distribution inventory is written separately to
 `/opt/cdh/build/application-inventory.txt`.
 
-See [`examples/full.toml`](examples/full.toml) for all currently active fields.
+See [`examples/full.toml`](examples/full.toml) for the complete current schema.
+
+## Layered host configuration
+
+Repeat `-f/--file` to merge TOML layers in command-line order. Later scalar
+values and table fields override earlier values. Custom nodes merge by Registry
+ID or direct-Git URL, and files merge by `dir` plus `filename`; a later empty
+`custom_nodes = []` or `files = []` resets that collection. Uniqueness and
+cross-field rules are checked against the resulting effective configuration,
+not against each source file in isolation.
 
 ## Validate, render, and build
 
@@ -134,8 +145,8 @@ cdh host build \
 - `--dry-run` applies the selected resolution policy, prints the exact
   BuildPlan preview, and performs no writes or build.
 
-Old, malformed, or future lock schemas fail with one remove-and-regenerate
-diagnostic. There is no compatibility reader or migration path.
+Malformed or unsupported lock schemas fail with an actionable
+remove-and-regenerate diagnostic.
 
 PyTorch configuration versions are selectors, not resolved artifact versions.
 The canonical PyTorch request binds the CUDA-derived channel, both the ordinary
@@ -189,7 +200,93 @@ outside the baked-image replay contract. Updating baked cdh or configured tools
 requires the corresponding config/lock change where applicable and an image
 rebuild; `uv tool upgrade --all` is not an image update mechanism.
 
-## Runtime lifecycle hooks
+## Runtime configuration
+
+Each image contains generated runtime settings at
+`/opt/cdh/runtime/config.toml`. Mount an optional
+`/etc/cdh/runtime/config.toml` to change runtime-only settings without
+rebuilding. Values are applied in this order, with later sources taking
+precedence:
+
+```text
+built-in defaults < baked config < mounted config < environment
+```
+
+Runtime configuration accepts ComfyUI `listen`, `port`, and `extra_args`; cdh
+downloader settings; `system.ssh`; and `files`. Recognized host-only settings
+are ignored with a warning when they appear in runtime TOML. Unknown or
+otherwise unsupported runtime fields are rejected. For example:
+
+```toml
+[comfyui]
+listen = "0.0.0.0"
+port = 8188
+extra_args = ["--preview-method", "auto"]
+
+[cdh]
+default_downloader = "aria2"
+default_download_mode = "sync"
+download_max_attempts = 3
+download_failure_policy = "continue"
+
+[system.ssh]
+enable = false
+port = 22
+```
+
+The environment overrides are:
+
+- `CDH_COMFYUI_LISTEN`, `CDH_COMFYUI_PORT`, and
+  `CDH_COMFYUI_EXTRA_ARGS`;
+- `CDH_DEFAULT_DOWNLOADER`, `CDH_DEFAULT_DOWNLOAD_MODE`,
+  `CDH_DOWNLOAD_MAX_ATTEMPTS`, and `CDH_DOWNLOAD_FAILURE_POLICY`; and
+- `SSH_ENABLE`, `SSH_PORT`, `SSH_PASSWORD`, and `SSH_PUB_KEY`.
+
+`CDH_COMFYUI_EXTRA_ARGS` uses POSIX shell-style word parsing without executing
+a shell. `SSH_PUB_KEY` appends one normalized public key to the configured key
+set.
+
+## Files, downloads, and persistent state
+
+Host `[[files]]` declarations are projected into the generated build phase and
+the baked runtime configuration. At startup, baked and mounted file lists merge
+by `dir` plus `filename`; a mounted `files = []` clears the effective runtime
+list. Every target is relative to `COMFYUI_PATH`.
+
+Synchronous runtime downloads finish before pre-start hooks. Asynchronous
+downloads are accepted into the background queue before ComfyUI starts and may
+continue while it runs. `download_max_attempts` bounds the outer attempts for
+each build or runtime file, and HTTPX `retries` controls retries within each
+outer HTTPX attempt. `download_failure_policy` applies in both contexts: `fail`
+stops the build helper after an exhausted build file, while `continue` reports
+the failure and tries subsequent files. For synchronous runtime files, `fail`
+aborts startup after exhaustion and `continue` tries subsequent items. For
+asynchronous runtime files, `fail` stops the remaining queue without stopping
+ComfyUI, while `continue` tries subsequent queued items.
+
+Runtime reconciliation is persisted at `/var/lib/cdh/runtime/state.json`.
+In-progress transfer data lives in a target-local `.cdh-staging` directory so
+completed targets can be replaced safely. Mount `/var/lib/cdh/runtime`
+separately to preserve reconciliation state, and mount each desired target
+directory to preserve downloaded files. The state file is cdh-owned internal
+state, not user configuration; do not edit it.
+
+## SSH and confidential values
+
+SSH is disabled by default. Enable it with runtime TOML or `SSH_ENABLE=true`
+and provide at least one public key or password, preferably through
+`SSH_PUB_KEY` or `SSH_PASSWORD` at container startup. If SSH is enabled without
+an effective credential, cdh warns and does not start sshd. The entrypoint
+starts, monitors, and stops the foreground sshd process with the rest of the
+container lifecycle.
+
+Prefer runtime injection for confidential values. Ordinary TOML values, URLs,
+environment variables, rendered files, image history, and logs can expose
+their contents when their contract requires it. cdh keeps its own ephemeral
+credentials internal and avoids printing the explicit SSH password, but it
+does not infer that arbitrary configured values are secrets.
+
+## Runtime lifecycle and hooks
 
 Pass `--hooks-dir <dir>` to `cdh host render` or `cdh host build` to bake a
 complete runtime hook tree. When the option is omitted, an existing `./hooks`
@@ -197,11 +294,20 @@ tree is used. The root may contain only `pre-start.d/`, `post-start.d/`, and
 `stop.d/`; files must be regular `.sh` or `.py` files. Symlinks,
 special files, nested directories, and unknown entries are rejected.
 
-Every baked hook is content-locked under a runtime-hook identity, bound into
-BuildPlan, verified while materializing, and copied to
+Every baked hook is verified while materializing and copied to
 `/opt/cdh/runtime/hooks`. Mounted `/etc/cdh/runtime/hooks` remains an external
 runtime input. Baked hooks run before mounted hooks and filenames run in lexical
-order within pre-start, post-start, and stop phase order.
+order within each phase.
+
+Startup completes synchronous downloads, runs pre-start hooks, starts sshd when
+enabled, accepts asynchronous downloads, and then starts ComfyUI. If post-start
+hooks exist, cdh waits for ComfyUI readiness before running them.
+
+On the first `SIGTERM` or `SIGINT`, cdh stops the asynchronous download queue
+and sshd, runs stop hooks while ComfyUI remains alive, then forwards the signal
+to ComfyUI and waits for it for a bounded interval. A second signal cancels the
+remaining stop hooks. The container runtime's stop timeout is independent and
+may still terminate the container if its own deadline expires.
 
 ## Rendered context
 
@@ -222,6 +328,10 @@ documents.
 
 ## Configuration boundaries
 
+- Duplicate, uniqueness, and cross-field checks apply after all host layers
+  have merged. This includes platforms, Python and PyTorch package
+  declarations, uv tools, Registry IDs, direct-Git URLs and targets, and file
+  targets.
 - `[build].platforms` is ordered, non-empty, duplicate-free, and currently
   accepts exactly `["linux/amd64"]`.
 - CUDA version is the sole inference-backend version authority and solely
@@ -248,9 +358,9 @@ documents.
   Runtime `docker run -e` overrides are outside baked-image replay guarantees.
 - Registry custom-node IDs must be valid Python project names. They require
   Manager, preserve their raw locked ID/version,
-  and reject duplicate normalized IDs. Direct Git nodes are independently
-  locked to full commits.
-- HTTPX `retries` remains an active public setting.
+  and reject duplicate normalized IDs. Direct-Git nodes are independently
+  locked to full commits and preserve their declared acquisition URLs.
+- HTTPX `retries` sets the retries within each outer HTTPX download attempt.
 - Ordinary configured values may appear in rendered artifacts or logs when the
   contract requires them. Keep confidential values out of ordinary config
   fields unless that exposure is acceptable.

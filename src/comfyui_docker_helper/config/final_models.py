@@ -1,4 +1,4 @@
-"""Strict public configuration models for the active Planning Authority."""
+"""Strict public configuration models."""
 
 from typing import Annotated, Literal
 
@@ -16,7 +16,7 @@ CudaImageDistro = Literal["ubuntu22.04", "ubuntu24.04"]
 
 
 class FinalConfigModel(BaseModel):
-    """Apply strict structural validation to every final config block."""
+    """Apply strict structural validation to every configuration block."""
 
     model_config = ConfigDict(extra="forbid", strict=True, validate_default=True)
 
@@ -74,7 +74,7 @@ class FinalPyTorchConfig(FinalConfigModel):
 
 
 class FinalAria2Config(FinalConfigModel):
-    """Active aria2 downloader settings."""
+    """aria2 downloader settings."""
 
     rpc_port: int = Field(default=6800, ge=1, le=65535)
     split: int = Field(default=16, ge=1)
@@ -84,7 +84,7 @@ class FinalAria2Config(FinalConfigModel):
 
 
 class FinalHttpxConfig(FinalConfigModel):
-    """HTTPX settings with the currently public retry count."""
+    """HTTPX downloader settings."""
 
     timeout: int | float = Field(default=60, gt=0)
     retries: int = Field(default=3, ge=0)
@@ -98,7 +98,7 @@ class FinalDownloaderConfig(FinalConfigModel):
 
 
 class FinalCdhConfig(FinalConfigModel):
-    """Active cdh-owned transfer settings."""
+    """cdh-owned transfer settings."""
 
     default_downloader: Literal["aria2", "httpx"] = "aria2"
     default_download_mode: Literal["sync", "async"] = "sync"
@@ -171,7 +171,7 @@ class FinalFileConfig(FinalConfigModel):
 
 
 class FinalConfig(FinalConfigModel):
-    """Strict active public configuration schema."""
+    """Strict public configuration schema."""
 
     cdh: FinalCdhConfig = Field(default_factory=FinalCdhConfig)
     compute_platform: FinalComputePlatformConfig

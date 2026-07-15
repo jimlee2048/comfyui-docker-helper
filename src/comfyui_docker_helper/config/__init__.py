@@ -1,4 +1,4 @@
-"""Active final configuration, canonical lock, and BuildPlan authority."""
+"""Public configuration, canonical lock, and BuildPlan interfaces."""
 
 from importlib import import_module
 

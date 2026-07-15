@@ -1,4 +1,4 @@
-"""Active final configuration loading and offline validation service."""
+"""Public configuration loading and offline validation."""
 
 import tomllib
 from collections.abc import Sequence

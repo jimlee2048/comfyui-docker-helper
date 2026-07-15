@@ -1,4 +1,4 @@
-"""Active BuildPlan-only render and materialization components."""
+"""BuildPlan rendering and materialization components."""
 
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,

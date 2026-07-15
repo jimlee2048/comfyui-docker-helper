@@ -13,9 +13,7 @@ from comfyui_docker_helper.version import package_version
 app = typer.Typer(
     cls=ApplicationGroup,
     name="cdh",
-    help=(
-        "Choose whether cdh commands run on the host machine or inside ComfyUI images."
-    ),
+    help="Build ComfyUI images and run their image-internal helpers.",
     no_args_is_help=True,
     add_completion=False,
     context_settings=HELP_CONTEXT_SETTINGS,
@@ -40,7 +38,7 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """Route commands to host or container execution contexts."""
+    """Route host and image-internal commands."""
 
 
 app.add_typer(host_app, name="host", help="commands executed on the host machine")

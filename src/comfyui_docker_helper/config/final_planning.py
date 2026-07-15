@@ -1,4 +1,4 @@
-"""Deterministic platform and backend planning for the active authority."""
+"""Deterministic target-platform and CUDA image selection."""
 
 from dataclasses import dataclass
 from enum import StrEnum
@@ -12,7 +12,7 @@ from comfyui_docker_helper.exact_ledger import CUDA_IMAGE_REPOSITORY
 
 
 class TargetPlatform(StrEnum):
-    """Container target values supported by the v0.5 planning domain."""
+    """Container targets supported by the current build plan."""
 
     LINUX_AMD64 = "linux/amd64"
 

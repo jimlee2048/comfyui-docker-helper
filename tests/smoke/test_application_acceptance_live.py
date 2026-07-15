@@ -16,12 +16,10 @@ from tests.acceptance_scenarios import (
     AcceptanceScenario,
     Capability,
 )
-from tests.smoke.test_comfy_cli_image_live import (
-    _ENABLED_PROBE as _COMFY_CLI_BRIDGE_PROBE,
-)
-from tests.smoke.test_custom_node_image_live import (
-    _GIT_PROOF_SOURCE,
-    _REGISTRY_PROOF_SOURCE,
+from tests.smoke.application_probes import (
+    COMFY_CLI_BRIDGE_PROBE,
+    GIT_PROOF_SOURCE,
+    REGISTRY_PROOF_SOURCE,
 )
 
 from comfyui_docker_helper.config.build_plan import (
@@ -241,23 +239,36 @@ def prove_manager_import(manager_name, manager_root, manager_origin, workspace):
 
 
 _SCENARIOS = RELEASE_SCENARIOS
+_CPU_AUDIO_SCENARIOS = tuple(
+    scenario for scenario in _SCENARIOS if Capability.CPU_AUDIO in scenario.capabilities
+)
+_CLI_SCENARIOS = tuple(
+    scenario for scenario in _SCENARIOS if Capability.CLI in scenario.capabilities
+)
+_GPU_AUDIO_SCENARIOS = tuple(
+    scenario for scenario in _SCENARIOS if Capability.GPU_AUDIO in scenario.capabilities
+)
 
-_FULL_SCENARIOS = tuple(
-    scenario
-    for scenario in _SCENARIOS
-    if {
-        Capability.CLI,
-        Capability.MANAGER,
-        Capability.CUSTOM_NODES,
-        Capability.GPU_AUDIO,
-    }
-    <= scenario.capabilities
-)
-_MANAGER_DISABLED_SCENARIOS = tuple(
-    scenario
-    for scenario in _SCENARIOS
-    if scenario.install_cli and not scenario.install_manager and not scenario.mixed
-)
+# Probe ownership makes live coverage follow the catalog instead of a hard-coded
+# image disposition. The unit contract below fails closed when a release gains a
+# capability without a selected proof.
+RELEASE_PROBE_SCENARIO_IDS = {
+    "image": frozenset(scenario.id for scenario in _SCENARIOS),
+    "cpu_audio_application": frozenset(
+        scenario.id for scenario in _CPU_AUDIO_SCENARIOS
+    ),
+    "cli_bridge": frozenset(scenario.id for scenario in _CLI_SCENARIOS),
+    "gpu_audio": frozenset(scenario.id for scenario in _GPU_AUDIO_SCENARIOS),
+}
+RELEASE_CAPABILITY_PROBE_OWNERS = {
+    Capability.APPLICATION: ("cpu_audio_application",),
+    Capability.CLI: ("cli_bridge",),
+    Capability.MANAGER: ("image", "cpu_audio_application"),
+    Capability.CUSTOM_NODES: ("image",),
+    Capability.HOOKS: ("image",),
+    Capability.CPU_AUDIO: ("cpu_audio_application",),
+    Capability.GPU_AUDIO: ("gpu_audio",),
+}
 
 
 def _environment(name: str) -> str:
@@ -324,6 +335,8 @@ def _node_identity(node: dict[str, object]) -> dict[str, object]:
     return {key: node[key] for key in keys}
 
 
+# Release scenarios reuse one context/image while proving exact application
+# capabilities.
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
 def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     scenario: AcceptanceScenario,
@@ -820,8 +833,8 @@ if test "$EXPECTED_CLI" = 1; then
     "/opt/uv/bin/$command" --help >/dev/null
   done
 fi
-""".replace("__GIT_PROOF_SOURCE__", _GIT_PROOF_SOURCE)
-    .replace("__REGISTRY_PROOF_SOURCE__", _REGISTRY_PROOF_SOURCE)
+""".replace("__GIT_PROOF_SOURCE__", GIT_PROOF_SOURCE)
+    .replace("__REGISTRY_PROOF_SOURCE__", REGISTRY_PROOF_SOURCE)
     .replace("__INVENTORY_OBSERVER_SOURCE__", _INVENTORY_OBSERVER_SOURCE)
     .replace(
         "__MANAGER_FILESYSTEM_PROOF_SOURCE__",
@@ -1000,8 +1013,12 @@ PY
     + _SERVICE_HELPERS
     + r"""
 cd "$COMFYUI_PATH"
+set --
+if test "$EXPECTED_MANAGER" = 1; then
+  set -- --enable-manager
+fi
 launch_application \
-  --listen 127.0.0.1 --port 8291 --disable-auto-launch --cpu
+  --listen 127.0.0.1 --port 8291 --disable-auto-launch --cpu "$@"
 wait_for_readiness
 """
     + _API_AND_WRITABILITY_PROBE
@@ -1124,35 +1141,30 @@ def test_image_has_exact_environment_and_disposition(
     )
 
 
-@pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
-def test_primary_image_cpu_audio_api_writable_state_and_clean_shutdown(
-    scenario: AcceptanceScenario,
-) -> None:
-    _run_disposable(_environment(scenario.image_variable), _CPU_PROBE)
-
-
-@pytest.mark.parametrize(
-    "scenario", _MANAGER_DISABLED_SCENARIOS, ids=lambda item: item.id
-)
-def test_manager_disabled_image_api_and_clean_shutdown(
-    scenario: AcceptanceScenario,
-) -> None:
-    _run_disposable(_environment(scenario.image_variable), _CPU_PROBE)
-
-
-@pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
-def test_primary_image_comfy_cli_workspace_python_bridge(
+@pytest.mark.parametrize("scenario", _CPU_AUDIO_SCENARIOS, ids=lambda item: item.id)
+def test_cpu_audio_api_writable_state_and_clean_shutdown(
     scenario: AcceptanceScenario,
 ) -> None:
     _run_disposable(
         _environment(scenario.image_variable),
-        _COMFY_CLI_BRIDGE_PROBE,
+        _CPU_PROBE,
+        environment={"EXPECTED_MANAGER": str(int(scenario.install_manager))},
+    )
+
+
+@pytest.mark.parametrize("scenario", _CLI_SCENARIOS, ids=lambda item: item.id)
+def test_comfy_cli_workspace_python_bridge(
+    scenario: AcceptanceScenario,
+) -> None:
+    _run_disposable(
+        _environment(scenario.image_variable),
+        COMFY_CLI_BRIDGE_PROBE,
     )
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
-def test_primary_image_cuda_audio_api_and_clean_shutdown(
+@pytest.mark.parametrize("scenario", _GPU_AUDIO_SCENARIOS, ids=lambda item: item.id)
+def test_cuda_audio_api_and_clean_shutdown(
     scenario: AcceptanceScenario,
 ) -> None:
     _run_disposable(

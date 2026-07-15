@@ -1,3 +1,5 @@
+"""Registry and direct-Git custom-node orchestration contracts."""
+
 from __future__ import annotations
 
 import json
@@ -147,13 +149,14 @@ def _patch_phases(
     )
 
 
+# Mixed custom-node installation preserves exact authority at every mutation boundary.
 def test_registry_version_comparison_preserves_raw_complete_identity(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "custom_nodes"
     root.mkdir()
     root.joinpath("example.py").write_text("# built-in example\n")
-    root.joinpath("legacy-node").mkdir()
+    root.joinpath("unmanaged-node").mkdir()
     _write_project(
         root,
         "package",
@@ -285,6 +288,7 @@ def test_registry_scanner_rejects_normalized_duplicate_metadata(tmp_path: Path) 
         custom_node_installer._scan_registry_identities(root)
 
 
+# Inventory evidence is canonical, declaration-ordered, exclusive, and exact.
 def test_custom_node_inventory_is_canonical_raw_ordered_and_minimal() -> None:
     content = custom_node_installer._custom_node_inventory_bytes(
         (
@@ -427,6 +431,7 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
     ]
 
 
+# Runtime admission rejects forged plan identities before invoking installers.
 @pytest.mark.parametrize("url", ["-option", "file:///tmp/node.git", "bad"])
 def test_runtime_rejects_forged_unsupported_git_locator(
     tmp_path: Path,
@@ -554,6 +559,7 @@ def test_git_requirements_reject_source_control_before_any_install_surface(
         )
 
 
+# Mixed execution preserves declaration order and every typed mutation boundary.
 def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -849,6 +855,7 @@ def test_empty_hook_phases_reuse_observations_and_force_fresh_final_evidence(
     ]
 
 
+# Prefix and future-target proofs fail closed before admitting later node identities.
 def test_false_zero_stops_before_later_registry_node(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1071,6 +1078,8 @@ def test_nonzero_registry_process_stops_before_state_proof_and_later_node(
         ("second-post", ["first@1.0.0", "second@2.0.0"]),
     ],
 )
+# Hook mutations dirty observations and force fresh application, Manager, and
+# node proofs.
 def test_hook_manager_mutation_fails_at_next_capability_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

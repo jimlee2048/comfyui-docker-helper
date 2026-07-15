@@ -6,6 +6,7 @@ from importlib import metadata
 from comfyui_docker_helper import version as version_module
 
 
+# Version reporting prefers installed metadata and supports source-tree execution.
 def test_package_version_uses_distribution_metadata(monkeypatch) -> None:
     """Prefer installed package metadata for runtime version reporting."""
 

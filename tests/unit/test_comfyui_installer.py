@@ -91,6 +91,7 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
     return application, runtime
 
 
+# ComfyUI installation preserves exact checkout, source routing, and capability proofs.
 def test_checkout_is_detached_exact_atomic_and_retains_git_metadata(
     tmp_path: Path,
 ) -> None:
@@ -258,6 +259,7 @@ def test_atomic_placement_never_replaces_a_racing_target(tmp_path: Path) -> None
     assert (target / "owner").read_text() == "owner"
 
 
+# Checkout and requirements proofs complete before any application package mutation.
 def test_checkout_requirements_tamper_fails_expected_projection(tmp_path: Path) -> None:
     application, runtime = _application(tmp_path)
     _checkout_exact(application, runtime, Path("/usr/bin/git"), {})
@@ -457,6 +459,7 @@ def test_application_observation_rechecks_source_input_and_environment(
     ]
 
 
+# Ordinary and Manager requirements stay on the Python source with exact constraints.
 def test_ordinary_requirements_use_only_python_index_constraints_and_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -627,6 +630,7 @@ def test_manager_requirements_fail_closed_before_package_mutation(
         _verify_checkout(application, runtime)
 
 
+# Manager capability binds its anchor, distributions, import, and unique cm-cli owner.
 def test_manager_import_anchor_is_exclusive_read_only_and_exact(
     tmp_path: Path,
 ) -> None:
@@ -823,6 +827,7 @@ def test_manager_cm_cli_rejects_unidentifiable_distribution_owner(
         )
 
 
+# Registry installation reuses one immutable observed Manager authority per clean epoch.
 def test_registry_manager_capability_captures_and_reuses_immutable_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

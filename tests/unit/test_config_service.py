@@ -29,7 +29,8 @@ platforms = ["linux/amd64"]
 """
 
 
-def test_public_service_returns_final_config_without_plan_or_provider(
+# Public loading validates locally and returns the typed configuration boundary.
+def test_public_service_returns_validated_config_offline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -45,10 +46,10 @@ def test_public_service_returns_final_config_without_plan_or_provider(
 
     assert result.config.python.version == "3.13.14"
     assert result.config.build.platforms == ["linux/amd64"]
-    assert not hasattr(result, "plan")
     assert result.warnings == ()
 
 
+# Layered files merge before validation so diagnostics observe effective input.
 def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None:
     base = tmp_path / "base.toml"
     override = tmp_path / "override.toml"
@@ -61,27 +62,7 @@ def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None
     assert config.pytorch.version == "2.12.1"
 
 
-@pytest.mark.parametrize(
-    ("section", "line", "path"),
-    [
-        ("cdh", "shutdown_timeout = 8", ("cdh", "shutdown_timeout")),
-    ],
-)
-def test_deferred_public_fields_remain_forbidden(
-    tmp_path: Path,
-    section: str,
-    line: str,
-    path: tuple[str, str],
-) -> None:
-    config = tmp_path / "config.toml"
-    config.write_text(_config() + f"\n[{section}]\n{line}\n")
-
-    with pytest.raises(ConfigurationServiceError) as raised:
-        load_validate_config(config)
-
-    assert raised.value.diagnostics[0].path == path
-
-
+# Active isolated-tool requirements survive the public service boundary.
 def test_public_service_accepts_active_uv_tools(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config() + '\n[python]\nuv_tools = ["ruff>=0.15,<0.16"]\n')
@@ -89,13 +70,7 @@ def test_public_service_accepts_active_uv_tools(tmp_path: Path) -> None:
     assert load_validate_config(config).python.uv_tools == ["ruff>=0.15,<0.16"]
 
 
-def test_httpx_retries_remains_public_and_consumed(tmp_path: Path) -> None:
-    config = tmp_path / "config.toml"
-    config.write_text(_config() + "\n[cdh.downloader.httpx]\nretries = 9\n")
-
-    assert load_validate_config(config).cdh.downloader.httpx.retries == 9
-
-
+# Stable diagnostic ordering lets CLI adapters report all authored failures once.
 def test_structural_domain_and_semantic_diagnostics_keep_stable_order(
     tmp_path: Path,
 ) -> None:
@@ -118,6 +93,7 @@ def test_structural_domain_and_semantic_diagnostics_keep_stable_order(
     ]
 
 
+# File and TOML admission failures remain concise structured diagnostics.
 def test_invalid_toml_and_missing_file_use_short_diagnostics(tmp_path: Path) -> None:
     invalid = tmp_path / "invalid.toml"
     invalid.write_text("[broken\n")

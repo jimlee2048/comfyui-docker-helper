@@ -84,6 +84,7 @@ def make_document() -> dict[str, object]:
     }
 
 
+# Build-time file downloads preserve plan authority, containment, ordering, and policy.
 def test_build_file_download_plan_preserves_order_and_derives_targets(
     tmp_path: Path,
 ) -> None:
@@ -247,6 +248,7 @@ def test_build_file_download_plan_defensively_rejects_invalid_config(
         build_file_download_plan(document, comfyui_path=tmp_path)
 
 
+# Backend dispatch preserves declaration order and explicit overwrite semantics.
 def test_process_file_downloads_selects_backends_and_preserves_order(
     tmp_path: Path,
 ) -> None:
@@ -341,6 +343,7 @@ def test_process_file_downloads_overwrites_existing_regular_file(
     assert target.read_bytes() == b"downloaded:second.bin"
 
 
+# Containment checks reject special targets and symlink escapes before mutation.
 def test_process_file_downloads_rejects_non_regular_existing_target(
     tmp_path: Path,
 ) -> None:
@@ -460,6 +463,7 @@ def test_process_file_downloads_wraps_overwrite_removal_failures(
         )
 
 
+# Retry and failure policy applies consistently without losing later-file ordering.
 def test_process_file_downloads_stops_on_backend_failure(tmp_path: Path) -> None:
     """Fail policy exhausts attempts, removes partials, and stops later files."""
     plan = build_file_download_plan(make_document(), comfyui_path=tmp_path)

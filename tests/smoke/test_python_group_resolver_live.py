@@ -33,6 +33,7 @@ from comfyui_docker_helper.host.identity_providers import (
 from comfyui_docker_helper.host.uv_runner import locate_host_uv
 
 
+# Live resolution proves supported profiles and strict Python/PyTorch source routing.
 @pytest.mark.network
 @pytest.mark.smoke
 def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None:

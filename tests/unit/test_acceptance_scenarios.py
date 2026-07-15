@@ -18,6 +18,10 @@ from tests.acceptance_scenarios import (
     Cost,
     ScenarioClass,
 )
+from tests.smoke.test_application_acceptance_live import (
+    RELEASE_CAPABILITY_PROBE_OWNERS,
+    RELEASE_PROBE_SCENARIO_IDS,
+)
 
 from comfyui_docker_helper.config import load_validate_config_result
 
@@ -88,6 +92,25 @@ def test_release_matrix_has_exact_dispositions_and_selector_allocation() -> None
         for scenario in RELEASE_SCENARIOS
     ]
     assert len(artifact_inputs) == len(set(artifact_inputs))
+
+
+# Every declared release capability owns a live proof, and each owning probe is
+# selected for every release that advertises that capability.
+def test_release_capabilities_have_selected_live_probe_owners() -> None:
+    declared_capabilities = {
+        capability
+        for scenario in RELEASE_SCENARIOS
+        for capability in scenario.capabilities
+    }
+
+    assert set(RELEASE_CAPABILITY_PROBE_OWNERS) == declared_capabilities
+    for scenario in RELEASE_SCENARIOS:
+        for capability in scenario.capabilities:
+            owners = RELEASE_CAPABILITY_PROBE_OWNERS[capability]
+            assert owners
+            assert all(
+                scenario.id in RELEASE_PROBE_SCENARIO_IDS[owner] for owner in owners
+            )
 
 
 # Moving ComfyUI selectors are non-release canaries, never blocking releases.

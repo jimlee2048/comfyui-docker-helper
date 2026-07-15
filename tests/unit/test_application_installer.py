@@ -53,6 +53,8 @@ def _materialized_checker(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+# Application installation consumes one exact source-routed plan and emits exact
+# evidence.
 def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -286,6 +288,7 @@ def test_runtime_rejects_python_extra_overlap_with_arbitrary_pytorch_member(
         install_python_extras(forged, ContainerRuntime())
 
 
+# Final verification observes exact distributions, imports, requirements, and inventory.
 def test_final_application_verification_checks_direct_identities_and_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -605,6 +608,7 @@ def test_import_verification_constructs_exact_checker_payloads(
     assert calls[1][3]["runtime_environment"] is True
 
 
+# Evidence and manifest checks bind installed state before accepting the application.
 def test_application_inventory_creation_is_exclusive_read_only_and_exact(
     tmp_path: Path,
 ) -> None:

@@ -40,6 +40,7 @@ CUSTOM_SCRIPTS_REGISTRY_ID = "comfyui-custom-scripts"
 CUSTOM_SCRIPTS_URL = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
 
 
+# Live providers must return exact upstream identities for every canonical source kind.
 @pytest.mark.parametrize(
     "role,repository,tag",
     [

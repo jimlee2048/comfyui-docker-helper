@@ -32,6 +32,7 @@ def _project_metadata() -> dict[str, object]:
     return pyproject
 
 
+# Published metadata and projected source artifacts stay aligned with release authority.
 def test_supported_python_minors_match_project_metadata() -> None:
     """Package metadata must expose exactly the automated Python minors."""
 
@@ -39,11 +40,10 @@ def test_supported_python_minors_match_project_metadata() -> None:
     project = pyproject["project"]
     requires_python = SpecifierSet(project["requires-python"])
 
-    assert "3.11" not in requires_python
+    assert str(requires_python) == "<3.15,>=3.12"
     assert "3.12" in requires_python
     assert "3.13" in requires_python
     assert "3.14" in requires_python
-    assert "3.15" not in requires_python
     assert {
         classifier
         for classifier in project["classifiers"]

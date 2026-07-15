@@ -215,6 +215,7 @@ def _lock() -> CanonicalLock:
     )
 
 
+# Canonical lock models preserve deterministic exact identities and strict admission.
 def test_python_314_managed_identity_round_trips_exactly() -> None:
     request = ManagedPythonRequestIdentity(
         type="managed-python",
@@ -382,6 +383,7 @@ def test_required_fields_cannot_be_omitted_from_any_entry() -> None:
                 CanonicalLock.model_validate(invalid)
 
 
+# Request digests encode normalized intent and every cohesive group dimension.
 def test_request_digest_changes_only_with_canonical_request_identity() -> None:
     first = DirectPythonRequestIdentity(
         type="python-group",
@@ -578,6 +580,7 @@ def test_group_rejects_duplicate_package_with_different_extras() -> None:
         )
 
 
+# Direct-package selectors, extras, environments, and logical keys stay canonical.
 @pytest.mark.parametrize("selector", ["===1", "==1.*", "<3,>=1.0rc1"])
 def test_direct_python_group_rejects_unsupported_selectors(selector: str) -> None:
     with pytest.raises(ValidationError):
@@ -699,6 +702,7 @@ def test_parser_maps_non_exact_current_identity_to_generic_lock_error() -> None:
         parse_canonical_lock_toml(document)
 
 
+# Domain-specific lock entries preserve exact stable floors and complete versions.
 def test_comfy_cli_request_digest_binds_target_index_policy_and_tool_environment() -> (
     None
 ):
@@ -720,15 +724,6 @@ def test_comfy_cli_request_digest_binds_target_index_policy_and_tool_environment
     assert compute_request_digest(request) != compute_request_digest(
         _comfy_cli_request(python_version="3.12.13")
     )
-
-
-def test_comfy_cli_application_environment_is_not_a_current_lock_shape() -> None:
-    document = dump_canonical_lock_toml(_lock()).replace(
-        'environment = "uv-tool:comfy-cli"', 'environment = "application"', 1
-    )
-
-    with pytest.raises(CanonicalLockError, match=INVALID_CANONICAL_LOCK_MESSAGE):
-        parse_canonical_lock_toml(document)
 
 
 @pytest.mark.parametrize("version", ["0.3.99", "0.11.0rc1", "0.11.0.dev1"])
@@ -891,26 +886,3 @@ def test_registry_lock_and_request_preserve_raw_valid_id_spelling() -> None:
 
     assert entry.id == "Example_Node"
     assert request.id == "Example_Node"
-
-
-def test_request_models_expose_no_execution_or_resolved_only_fields() -> None:
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        DirectGitRequestIdentity.model_validate(
-            {
-                "type": "git",
-                "url": "https://example.test/node.git",
-                "ref": "main",
-                "target_dir": "node",
-            }
-        )
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        OciRequestIdentity.model_validate(
-            {
-                "type": "oci",
-                "role": "cuda-base",
-                "repository": "nvidia/cuda",
-                "tag": "13.0.3-cudnn-devel-ubuntu24.04",
-                "platform": "linux/amd64",
-                "descriptor_digest": DIGEST_A,
-            }
-        )

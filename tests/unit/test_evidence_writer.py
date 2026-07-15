@@ -1,3 +1,5 @@
+"""Atomic evidence-file identity, durability, and race-safety contracts."""
+
 from __future__ import annotations
 
 import os
@@ -13,6 +15,7 @@ from comfyui_docker_helper.container.evidence_writer import (
 )
 
 
+# Evidence placement is exclusive, descriptor-verified, durable, and race-safe.
 def test_evidence_creation_uses_fd_verification_and_exact_durability_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

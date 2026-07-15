@@ -247,6 +247,7 @@ class FakeAcquirer:
         return AcquiredCanonicalEntries(entries, True)
 
 
+# Host rendering reconciles once and atomically publishes one canonical context.
 def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
     tmp_path: Path,
 ) -> None:
@@ -506,6 +507,7 @@ def test_request_diagnostic_is_adapted_without_unexpected_exception_handling(
     assert isinstance(raised.value.__cause__, CanonicalRequestError)
 
 
+# Public planning modes reconcile exact identities and control publication atomically.
 def test_default_writes_canonical_context_and_second_default_reuses_lock(
     tmp_path: Path,
 ) -> None:
@@ -767,12 +769,12 @@ def test_dry_run_resolves_without_writing_and_check_compares_without_writing(
     assert raised.value.diagnostics[0].code == "render.context_changed"
 
 
-def test_old_or_invalid_lock_fails_generically(tmp_path: Path) -> None:
+def test_malformed_lock_fails_generically(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
     output = tmp_path / "context"
     output.mkdir()
-    (output / "config.lock.toml").write_text("[comfyui]\ncommit='legacy'\n")
+    (output / "config.lock.toml").write_text("[invalid]\nvalue='malformed'\n")
 
     with pytest.raises(HostRenderServiceError) as raised:
         _prepare(config, output, FakeAcquirer())
@@ -781,6 +783,7 @@ def test_old_or_invalid_lock_fails_generically(tmp_path: Path) -> None:
     assert "remove" in raised.value.diagnostics[0].message
 
 
+# Runtime hooks/files preserve locked projection, precedence, and source containment.
 def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
     tmp_path: Path,
 ) -> None:
@@ -1047,6 +1050,7 @@ pre_install_scripts = ["runtime-hooks/pre-start.d/10-pre.sh"]
     assert (output / "runtime/hooks/pre-start.d/10-pre.sh").read_text() == "pre\n"
 
 
+# Hook-tree changes respect every no-write mode and closed filesystem validation.
 def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
@@ -1213,6 +1217,7 @@ def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
     )
 
 
+# Context replacement owns unique staging/backup paths and preserves foreign siblings.
 def test_overwrite_uses_unique_owned_backup_and_preserves_sibling(
     tmp_path: Path,
 ) -> None:

@@ -19,6 +19,7 @@ from comfyui_docker_helper.container.runners import (
 )
 
 
+# Process runners preserve exact argv/environment ownership and actionable failures.
 def test_runtime_env_sets_required_container_variables() -> None:
     """Build the helper env expected by scripts and subprocesses."""
     runtime = ContainerRuntime(
@@ -67,6 +68,7 @@ def test_runtime_from_env_fails_closed_without_required_paths(
         ContainerRuntime.from_env(env)
 
 
+# Subprocess execution preserves process-session choices, streams, and diagnostics.
 def test_run_argv_uses_cwd_env_and_inherited_output(
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
@@ -214,6 +216,7 @@ def test_run_argv_reports_missing_executable(tmp_path: Path) -> None:
         )
 
 
+# Hook runners accept only contained regular scripts and stop on the first failure.
 def test_run_hook_maps_shell_and_python_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

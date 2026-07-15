@@ -14,6 +14,7 @@ from comfyui_docker_helper.config.canonical_request import CanonicalRequestError
 from comfyui_docker_helper.config.final_models import FinalConfig
 
 
+# One immutable request graph owns normalized acquisition intent and diagnostics.
 def test_graph_owns_backend_and_complete_pytorch_request_once() -> None:
     graph = request_graph(final_config(), accepted_resolution())
     cuda = graph.request(("oci", "cuda-base"))

@@ -1,18 +1,114 @@
-"""Opt-in disposable-image acceptance for mixed custom-node installs."""
+"""Shell and Python probes shared by durable application image acceptance."""
 
-from __future__ import annotations
+COMFY_CLI_BRIDGE_PROBE = r"""
+set -eu
 
-import os
-import subprocess
-import uuid
+test -x /opt/uv/tools/comfy-cli/bin/python
+test ! -e "$COMFYUI_PATH/.venv"
+test ! -L "$COMFYUI_PATH/.venv"
+test ! -e "$COMFYUI_PATH/venv"
+test ! -L "$COMFYUI_PATH/venv"
 
-import pytest
+/opt/uv/tools/comfy-cli/bin/python -c '
+import importlib.metadata as metadata
+import json
+import pathlib
+import sys
 
-pytestmark = [pytest.mark.smoke, pytest.mark.docker, pytest.mark.slow]
+plan = json.loads(pathlib.Path("/opt/cdh/build/build-plan.json").read_text())
+tool = plan["toolchain"]["tool_store"]["comfy_cli"]
+assert tool is not None
+assert metadata.version("comfy-cli") == tool["version"]
+assert pathlib.Path(sys.prefix) == pathlib.Path("/opt/uv/tools/comfy-cli")
+inventory = pathlib.Path(tool["inventory_path"]).read_text().splitlines()
+assert "comfy-cli==" + tool["version"] in inventory
+'
+uv --no-config pip check \
+  --python /opt/uv/tools/comfy-cli/bin/python \
+  --no-python-downloads
 
-_IMAGE_VARIABLE = "CDH_CUSTOM_NODE_IMAGE"
+for command in comfy comfy-cli comfycli; do
+  public="/opt/uv/bin/$command"
+  owned="/opt/uv/tools/comfy-cli/bin/$command"
+  test -x "$public"
+  test "$(readlink -f "$public")" = "$owned"
+  "$public" --help >/dev/null
+done
 
-_GIT_PROOF_SOURCE = r"""
+/opt/uv/bin/comfy --workspace="$COMFYUI_PATH" launch -- \
+  --listen 127.0.0.1 --port 8199 --disable-auto-launch --cpu &
+launcher="$!"
+application_pid=""
+cleanup() {
+  trap - EXIT INT TERM
+  for pid in "$application_pid" "$launcher"; do
+    test -z "$pid" || kill "$pid" 2>/dev/null || true
+  done
+
+  cleanup_attempt=0
+  while [ "$cleanup_attempt" -lt 10 ]; do
+    alive=""
+    for pid in "$application_pid" "$launcher"; do
+      test -n "$pid" || continue
+      if test -d "/proc/$pid" && \
+        ! grep -q '^State:[[:space:]]*Z' "/proc/$pid/status"; then
+        alive=1
+      fi
+    done
+    test -n "$alive" || break
+    cleanup_attempt=$((cleanup_attempt + 1))
+    sleep 1
+  done
+
+  for pid in "$application_pid" "$launcher"; do
+    test -z "$pid" || kill -KILL "$pid" 2>/dev/null || true
+  done
+  test -z "$application_pid" || wait "$application_pid" 2>/dev/null || true
+  wait "$launcher" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+attempt=0
+while [ "$attempt" -lt 180 ]; do
+  for process in /proc/[0-9]*; do
+    test -r "$process/cmdline" || continue
+    first="$(tr '\000' '\n' < "$process/cmdline" | sed -n '1p')"
+    test "$first" = "/opt/venv/bin/python" || continue
+    tr '\000' '\n' < "$process/cmdline" | grep -Fxq -- main.py || continue
+    test "$(readlink -f "$process/cwd")" = "$COMFYUI_PATH" || continue
+    application_pid="${process##*/}"
+    break
+  done
+  test -z "$application_pid" || break
+  kill -0 "$launcher"
+  attempt=$((attempt + 1))
+  sleep 1
+done
+
+test -n "$application_pid"
+test "$(tr '\000' '\n' < "/proc/$application_pid/cmdline" | sed -n '1p')" = \
+  "/opt/venv/bin/python"
+tr '\000' '\n' < "/proc/$application_pid/cmdline" | grep -Fxq -- main.py
+test "$(readlink -f "/proc/$application_pid/cwd")" = "$COMFYUI_PATH"
+
+attempt=0
+until curl --fail --silent --show-error \
+  http://127.0.0.1:8199/system_stats >/dev/null; do
+  kill -0 "$application_pid"
+  attempt=$((attempt + 1))
+  test "$attempt" -lt 180
+  sleep 1
+done
+
+test ! -e "$COMFYUI_PATH/.venv"
+test ! -L "$COMFYUI_PATH/.venv"
+test ! -e "$COMFYUI_PATH/venv"
+test ! -L "$COMFYUI_PATH/venv"
+"""
+
+GIT_PROOF_SOURCE = r"""
 def require_real_directory(path):
     path = pathlib.Path(path)
     metadata = path.lstat()
@@ -170,7 +266,7 @@ def prove_git_targets(root, nodes):
     return frozenset(proven)
 """
 
-_REGISTRY_PROOF_SOURCE = r"""
+REGISTRY_PROOF_SOURCE = r"""
 def scan_registry_projects_after_git_proof(root, nodes):
     root = require_real_directory(root)
     excluded_git_targets = prove_git_targets(root, nodes)
@@ -210,134 +306,3 @@ def scan_registry_projects_after_git_proof(root, nodes):
     assert projects == expected_projects
     return projects
 """
-
-_CUSTOM_NODE_PROBE = r"""
-set -eu
-
-test ! -e /opt/uv/tools/comfy-cli
-test ! -L /opt/uv/tools/comfy-cli
-for command in comfy comfy-cli comfycli; do
-  test ! -e "/opt/uv/bin/$command"
-  test ! -L "/opt/uv/bin/$command"
-done
-
-inventory=/opt/cdh/build/custom-node-inventory.json
-test -f "$inventory"
-test ! -L "$inventory"
-test "$(stat -c '%a' "$inventory")" = 444
-test "$(stat -c '%u:%g' "$inventory")" = 0:0
-
-/opt/venv/bin/python -I -c '
-import importlib.metadata as metadata
-import json
-import os
-import pathlib
-import re
-import stat
-import subprocess
-import tomllib
-
-from packaging.utils import canonicalize_name
-from packaging.version import Version
-
-__GIT_PROOF_SOURCE__
-__REGISTRY_PROOF_SOURCE__
-
-build = pathlib.Path("/opt/cdh/build")
-plan = json.loads(build.joinpath("build-plan.json").read_text())
-phase = plan["custom_nodes"]
-assert phase["user_directory"] == os.path.join(os.environ["COMFYUI_PATH"], "user")
-assert phase["custom_node_inventory"] == str(
-    build / "custom-node-inventory.json"
-)
-expected = phase["nodes"]
-assert any(node["type"] == "registry" for node in expected)
-assert any(node["type"] == "git" for node in expected)
-
-def inventory_entry(node):
-    if node["type"] == "registry":
-        return {
-            "type": "registry",
-            "id": node["id"],
-            "version": node["version"],
-            "verification": "registry-version",
-            "control": "direct-cm-cli",
-        }
-    return {
-        "type": "git",
-        "url": node["url"],
-        "commit": node["commit"],
-        "target": pathlib.Path(node["target"]).name,
-        "verification": "git-commit",
-        "control": "direct-git",
-    }
-
-expected_inventory = {
-    "schema_version": 1,
-    "nodes": [inventory_entry(node) for node in expected],
-}
-expected_bytes = (
-    json.dumps(
-        expected_inventory,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    + "\n"
-).encode("utf-8")
-observed_bytes = build.joinpath("custom-node-inventory.json").read_bytes()
-assert observed_bytes == expected_bytes
-observed = json.loads(observed_bytes)
-for item in observed["nodes"]:
-    if item["type"] == "registry":
-        assert set(item) == {"type", "id", "version", "verification", "control"}
-    else:
-        assert set(item) == {
-            "type", "url", "commit", "target", "verification", "control"
-        }
-
-root = pathlib.Path(os.environ["COMFYUI_PATH"]) / "custom_nodes"
-scan_registry_projects_after_git_proof(root, expected)
-
-owners = [
-    distribution.metadata["Name"]
-    for distribution in metadata.distributions()
-    for item in distribution.entry_points
-    if item.group == "console_scripts" and item.name == "cm-cli"
-]
-assert owners == ["comfyui-manager"]
-'
-
-uv --no-config pip check --python /opt/venv/bin/python --no-python-downloads
-""".replace("__GIT_PROOF_SOURCE__", _GIT_PROOF_SOURCE).replace(
-    "__REGISTRY_PROOF_SOURCE__", _REGISTRY_PROOF_SOURCE
-)
-
-
-def test_custom_node_image_has_exact_installed_state_and_inventory() -> None:
-    image = os.environ.get(_IMAGE_VARIABLE)
-    if not image:
-        pytest.skip(f"set {_IMAGE_VARIABLE} to a locally built acceptance image")
-    name = f"cdh-custom-node-smoke-{uuid.uuid4().hex[:12]}"
-    try:
-        subprocess.run(
-            [
-                "docker",
-                "run",
-                "--name",
-                name,
-                "--entrypoint",
-                "/bin/sh",
-                image,
-                "-c",
-                _CUSTOM_NODE_PROBE,
-            ],
-            check=True,
-        )
-    finally:
-        subprocess.run(
-            ["docker", "rm", "-f", name],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )

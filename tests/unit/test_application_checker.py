@@ -144,6 +144,7 @@ def _manager_payload(site_packages: Path, workspace: Path) -> dict[str, str]:
     }
 
 
+# The isolated checker validates exact package, import, and application identities.
 def test_checker_is_standalone_linted_python_with_exact_inventory_input(
     tmp_path: Path,
 ) -> None:
@@ -205,6 +206,7 @@ def test_checker_rejects_unknown_or_malformed_typed_inputs(
     assert _run(python, capability, expected).returncode != 0
 
 
+# Pip and PyTorch modes bind distribution metadata, imports, and exact source roots.
 def test_pip_binds_distribution_module_and_recorded_commands(tmp_path: Path) -> None:
     """Bind pip metadata, import origin, and both command bytes to one owner."""
     python, site_packages, workspace, commands = _pip_fixture(tmp_path)
@@ -346,6 +348,7 @@ def test_pytorch_rejects_distribution_only_extra_version_drift(tmp_path: Path) -
     assert completed.returncode != 0
 
 
+# ComfyUI and Manager modes prove checkout-owned capabilities and disabled cleanliness.
 @pytest.mark.parametrize("initialized", [False, True], ids=["namespace", "initialized"])
 def test_comfyui_accepts_supported_checkout_shapes(
     tmp_path: Path,

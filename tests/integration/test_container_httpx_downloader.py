@@ -77,6 +77,7 @@ def make_downloader(
     )
 
 
+# HTTP transfers use bounded retries and atomic staging without leaking partial targets.
 def test_httpx_downloader_streams_to_tmp_then_renames(tmp_path: Path) -> None:
     """HTTPX writes through a tmp file before atomically publishing target."""
     item = make_item(tmp_path)

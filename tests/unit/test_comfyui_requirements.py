@@ -24,6 +24,8 @@ def _parse(content: bytes, *, python_version: str = "3.13.14"):
     )
 
 
+# Requirements projection preserves target markers, protected ownership, and
+# source safety.
 def test_projection_evaluates_target_markers_and_filters_every_protected_row() -> None:
     parsed = _parse(
         b"""

@@ -44,6 +44,7 @@ def _completed(
     return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout)
 
 
+# Host uv execution accepts only the release-owned absolute executable identity.
 def test_locator_verifies_exact_absolute_owned_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

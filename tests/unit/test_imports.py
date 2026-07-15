@@ -22,6 +22,8 @@ def package_module_names() -> list[str]:
     return [comfyui_docker_helper.__name__, *discovered]
 
 
+# Importing public modules must not start processes, network access, or
+# filesystem writes.
 @pytest.mark.parametrize(
     "module_name",
     package_module_names(),

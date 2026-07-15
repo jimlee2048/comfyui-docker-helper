@@ -71,6 +71,7 @@ class FakeResponse:
         return self.payload
 
 
+# Readiness polling is bounded, loopback-only, and coupled to child liveness.
 def test_readiness_constants_are_bounded() -> None:
     assert READINESS_HOST == "127.0.0.1"
     assert READINESS_PATH == "/system_stats"

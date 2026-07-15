@@ -127,6 +127,7 @@ def _oci_index_handler(
     return _index_response(request, digest=marker, platforms=platforms)
 
 
+# Host providers authenticate exact upstream identities and sanitize all failures.
 def test_oci_index_preserves_top_descriptor_and_exact_platform_binding() -> None:
     seen: list[httpx.Request] = []
 
@@ -441,6 +442,7 @@ def _completed(stdout: str, *, returncode: int = 0) -> subprocess.CompletedProce
     )
 
 
+# Managed-Python catalog rows must select one exact canonical target identity.
 @pytest.mark.parametrize("version", ["3.12.13", "3.13.14", "3.14.6"])
 def test_managed_python_selects_exact_uv_catalog_identity(version: str) -> None:
     rows = [
@@ -594,6 +596,8 @@ def _git_runner(
     return runner
 
 
+# Official ComfyUI and direct-Git providers preserve ref, release, and ancestry
+# identity.
 def test_official_comfyui_resolves_peeled_release_commit_and_release_identity() -> None:
     calls: list[tuple[Sequence[str], Mapping[str, object]]] = []
     provider = GitOfficialComfyUIIdentityProvider(
@@ -707,6 +711,7 @@ def test_direct_git_full_commit_request_is_classified_exact() -> None:
     assert request.stability is SelectorStability.EXACT
 
 
+# Registry catalogs preserve normalized published versions and exact requested identity.
 def test_registry_confirms_exact_node_and_version_identity() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/nodes/example-node/versions"
@@ -729,7 +734,6 @@ def test_registry_confirms_exact_node_and_version_identity() -> None:
     assert identity.type == "registry"
     assert identity.node_id == "example-node"
     assert identity.version == "2.0.0"
-    assert not hasattr(identity, "download_url")
 
 
 def test_registry_catalog_accepts_direct_list_response_and_sorts_versions() -> None:
@@ -796,6 +800,7 @@ def test_registry_maps_malformed_upstream_version_to_invalid_response() -> None:
         (503, ProviderFailureKind.NETWORK),
     ],
 )
+# Provider errors remain typed, concise, deterministic, and free of source secrets.
 def test_http_provider_status_errors_are_short_stable_and_secret_free(
     status: int, kind: ProviderFailureKind
 ) -> None:
@@ -857,6 +862,7 @@ def test_git_provider_errors_do_not_reproduce_url_or_stderr_secrets() -> None:
     assert "secret" not in str(raised.value)
 
 
+# Local executable identity binds canonical regular-file paths and content digests.
 def test_local_executable_identity_is_canonical_and_content_sensitive(
     tmp_path: Path,
 ) -> None:

@@ -33,6 +33,7 @@ from comfyui_docker_helper.rendering.final_renderer import (
 )
 
 
+# Rendering consumes literal BuildPlan inputs and materializes them without replanning.
 def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
     plan = build_plan(final_config(), accepted_resolution())
 
@@ -134,6 +135,7 @@ def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
         assert f"test ! -L /opt/uv/bin/{command}" in rendered
 
 
+# Custom-node and application modes render one ordered observed execution boundary.
 def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> None:
     plan = build_plan(
         final_config(install_cli=False), accepted_resolution(install_cli=False)
@@ -219,6 +221,7 @@ def test_final_application_mode_matrix_keeps_one_observed_execution_boundary(
     assert (changed.application.comfyui.manager is not None) is install_manager
 
 
+# Materialization writes deterministic bound phases and rejects altered local inputs.
 def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     tmp_path: Path,
 ) -> None:
@@ -460,6 +463,7 @@ def test_parsed_build_plan_rejects_unsafe_hook_paths(
     assert not (tmp_path / "escape.py").exists()
 
 
+# Source and destination traversal rejects symlinks and special filesystem nodes.
 def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) -> None:
     content = b"hook"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"

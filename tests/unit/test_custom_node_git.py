@@ -1,3 +1,5 @@
+"""Direct-Git custom-node content identity and placement contracts."""
+
 from __future__ import annotations
 
 import os
@@ -128,6 +130,7 @@ def _verify(custom_nodes: Path, node: GitNodePlan) -> None:
     )
 
 
+# Direct-Git identity binds committed recursive content and safe atomic placement.
 def test_real_git_proof_uses_committed_recursive_gitlinks_not_dirty_index(
     tmp_path: Path,
 ) -> None:
@@ -291,6 +294,7 @@ def test_final_proof_rejects_a_different_valid_sibling_repository(
         )
 
 
+# Clone staging is atomic, owns cleanup, and receives the declared locator unchanged.
 def test_atomic_placement_never_replaces_an_existing_target(tmp_path: Path) -> None:
     source = tmp_path / ".stage"
     source.mkdir()
@@ -521,6 +525,7 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     assert f'"url":"{locator}"'.encode() in _custom_node_inventory_bytes((node,))
 
 
+# Mutation after installation invalidates the committed identity before later work.
 @pytest.mark.parametrize("mutation", ["root", "nested"])
 def test_post_hook_head_drift_stops_before_next_node(
     tmp_path: Path,

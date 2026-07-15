@@ -101,6 +101,7 @@ _TORCH_METADATA = "\n".join(
 )
 
 
+# Acquisition adapters preserve exact target/source identity and fail closed on drift.
 def test_torch_metadata_markers_use_deterministic_linux_amd64_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -308,6 +309,7 @@ def test_uv_group_resolver_rejects_failed_or_incomplete_output(
         resolver.resolve(_group())
 
 
+# Adapter projection preserves cohesive provider results without local-label inference.
 def test_pytorch_group_does_not_interpret_arbitrary_extra_local_label() -> None:
     request = PyTorchRequestIdentity.model_validate(
         {
@@ -576,6 +578,8 @@ def test_exact_git_registry_and_comfy_cli_provider_boundaries() -> None:
     assert len(fakes.registry.resolve_calls) == 1
 
 
+# ComfyUI requirement bytes and formal-release identity are acquired as one
+# source proof.
 def test_comfyui_exact_release_maps_to_canonical_tag_ref() -> None:
     fakes = ProviderFakes()
     request = ComfyUIRequestIdentity(
@@ -691,6 +695,8 @@ def test_registry_exact_rejects_mismatched_provider_version() -> None:
         _acquire(request, fakes)
 
 
+# Selector acquisition accepts only compatible exact results and refreshes
+# moving inputs once.
 def test_python_group_rejects_version_outside_member_selector() -> None:
     class MismatchedPythonGroup(FakePythonGroup):
         def resolve(self, request: PythonGroupRequestIdentity) -> ResolvedPythonGroup:

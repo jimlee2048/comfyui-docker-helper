@@ -169,6 +169,7 @@ def make_item(tmp_path: Path, *, overwrite: bool = False) -> FileDownloadItem:
     )
 
 
+# Aria2 transfers own daemon lifecycle, typed failure mapping, and safe sidecar cleanup.
 def test_aria2_downloader_starts_daemon_and_submits_options(
     tmp_path: Path,
 ) -> None:

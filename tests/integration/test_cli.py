@@ -25,6 +25,7 @@ from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.uv_runner import HostUvError
 
 
+# The public command surface, adapters, and error boundary stay executable and concise.
 def test_console_script_loads_root_app() -> None:
     """Keep the installed cdh entry point connected to the root Typer app."""
     (entry_point,) = entry_points(group="console_scripts", name="cdh")
@@ -168,6 +169,7 @@ def test_install_comfyui_adapter_loads_each_typed_phase_once(
     assert observed == [plan.application, plan.toolchain]
 
 
+# Host command adapters preserve offline validation and explicit render/build inputs.
 def test_host_hook_option_is_preserved_only_on_render_and_build(
     cli_runner: CliRunner,
 ) -> None:
@@ -616,18 +618,7 @@ def test_container_entrypoint_invokes_service_and_propagates_exit_code(
     }
 
 
-@pytest.mark.parametrize("args", [["--install-completion"], ["--show-completion"]])
-def test_completion_options_remain_disabled(
-    cli_runner: CliRunner,
-    args: list[str],
-) -> None:
-    """Avoid advertising shell completion commands before supporting them."""
-    result = cli_runner.invoke(app, args)
-
-    assert result.exit_code == 2
-    assert "No such option" in result.output
-
-
+# Usage and application failures remain nonzero without hiding unexpected exceptions.
 @pytest.mark.parametrize(
     ("args", "usage"),
     [

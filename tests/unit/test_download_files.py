@@ -78,6 +78,7 @@ def _aria2_item(comfyui: Path, filename: str) -> FileDownloadItem:
     )
 
 
+# Continue policy applies only to exhausted transfers and always cleans backend residue.
 def test_file_download_continue_policy_keeps_plain_download_error_fatal(
     tmp_path: Path,
 ) -> None:

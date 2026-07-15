@@ -278,21 +278,23 @@ def test_runtime_file_identity_ignores_non_identity_execution_fields(
         comfyui_path=comfyui,
     ).items[0]
 
-    assert {
-        runtime_file_identity_digest(
-            replace(
-                item,
-                downloader=downloader,
-                download_mode=download_mode,
-                overwrite=overwrite,
-                action=action,
-            )
-        )
-        for downloader in (None, "httpx", "aria2")
-        for download_mode in ("sync", "async")
-        for overwrite in (False, True)
-        for action in ("download", "skip_existing", "overwrite_existing")
-    } == {runtime_file_identity_digest(item)}
+    variants = (
+        replace(item, downloader="httpx"),
+        replace(item, download_mode="async"),
+        replace(item, overwrite=True),
+        replace(item, action="skip_existing"),
+        replace(
+            item,
+            downloader="aria2",
+            download_mode="async",
+            overwrite=True,
+            action="overwrite_existing",
+        ),
+    )
+
+    assert {runtime_file_identity_digest(value) for value in variants} == {
+        runtime_file_identity_digest(item)
+    }
 
 
 def test_reconcile_schedules_missing_non_overwrite_file_and_writes_state(

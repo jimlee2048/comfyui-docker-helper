@@ -148,6 +148,7 @@ def _local_request() -> LocalExecutableIdentityRequest:
     )
 
 
+# Reconciliation reuses compatible identities and invokes providers only by mode policy.
 def test_requirements_sidecar_reuses_refreshes_and_locked_never_calls_provider() -> (
     None
 ):
@@ -521,6 +522,7 @@ def test_managed_python_result_only_fields_do_not_enter_desired_compatibility(
     assert result.lock.entries == (changed,)
 
 
+# Exact upstream movement is refreshed only in writable modes and rejected when locked.
 @pytest.mark.parametrize("policy", [LockPolicy.DEFAULT, LockPolicy.UPGRADE])
 def test_uv_exact_tag_mismatch_reacquires_in_mutating_modes(
     policy: LockPolicy,
@@ -637,6 +639,8 @@ def test_admitted_request_lock_and_result_are_deeply_immutable() -> None:
         accepted.lock = CanonicalLock(schema_version=1, entries=())
 
 
+# Default mode acquires, reuses, adds, and removes only the affected canonical
+# identities.
 def test_default_initial_acquisition_is_sorted_and_returns_write_intent() -> None:
     acquirer = FakeAcquirer()
     local = FakeLocalAcquirer()
@@ -782,6 +786,7 @@ def test_locked_enabled_mode_reports_missing_without_provider_calls() -> None:
     assert acquirer.calls == []
 
 
+# Cohesive groups refresh as a unit while unrelated exact results remain reusable.
 def test_one_changed_group_member_reacquires_the_complete_group_only() -> None:
     desired = _desired()
     existing = _initial_lock(desired)
@@ -929,6 +934,7 @@ def test_pytorch_core_channel_mismatch_is_reacquired_or_rejected_without_calls(
     assert torch.version == "2.12.1+cu130"
 
 
+# Local content is always rehashed, while upgrade refreshes only moving external inputs.
 def test_locked_aggregates_entry_set_digest_and_local_content_without_calls() -> None:
     desired = _desired()
     existing = _initial_lock(desired, DIGEST_A)
@@ -1187,6 +1193,7 @@ def test_non_public_uv_tool_group_acquires_then_reuses_and_locks_without_calls()
         (LockPolicy.LOCKED, ReconcilePurpose.DRY_RUN, [], False),
     ],
 )
+# Check and dry-run preserve policy semantics without publishing lock changes.
 def test_check_and_dry_run_apply_policy_without_write(
     policy: LockPolicy,
     purpose: ReconcilePurpose,

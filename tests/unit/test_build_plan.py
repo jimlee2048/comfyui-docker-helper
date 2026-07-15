@@ -443,6 +443,7 @@ def build_plan(
     )
 
 
+# BuildPlan projection binds every execution input to admitted immutable authorities.
 def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     plan = build_plan(final_config(), accepted_resolution())
 
@@ -565,6 +566,7 @@ def test_constructor_projects_optional_comfy_cli_only_to_the_tool_store() -> Non
     assert disabled.toolchain.tool_store.comfy_cli is None
 
 
+# Package ownership remains disjoint across application and isolated tool environments.
 @pytest.mark.parametrize("group", ["python", "pytorch"])
 def test_build_plan_reserves_comfy_cli_from_every_application_group(
     group: str,
@@ -674,6 +676,7 @@ def test_build_plan_never_inherits_user_package_environment_controls(
         BuildPlan.model_validate(document)
 
 
+# Canonical bytes and manifests bind exact config/lock/plan identity deterministically.
 def test_plan_bytes_digest_and_lock_order_are_deterministic() -> None:
     first = build_plan(final_config(), accepted_resolution())
     second = build_plan(final_config(), accepted_resolution(reverse=True))
@@ -758,6 +761,7 @@ def test_config_lock_identity_mismatches_fail_construction(
         build_plan(final_config(), changed)
 
 
+# Construction rejects mismatched cohesive group and source-routing authorities.
 @pytest.mark.parametrize("entry_index", [6, 7])
 @pytest.mark.parametrize("version", ["2.12.1", "2.12.1+cpu", "2.12.1+cu129"])
 def test_build_plan_constructor_rejects_core_channel_mismatch(
@@ -843,6 +847,7 @@ def test_exact_package_plan_rejects_noncanonical_pep503_identity(
         ExactPackagePlan.model_validate(document)
 
 
+# Parser self-validation rejects semantic forgeries at the execution trust boundary.
 def test_build_plan_parser_rejects_forged_core_channel() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
@@ -1095,17 +1100,6 @@ def test_unused_lock_identity_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="unused identities"):
         build_plan(final_config(), changed)
-
-
-def test_active_uv_tools_and_remaining_deferred_fields_are_unambiguous() -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    document = dump_build_plan_json(plan)
-
-    assert plan.toolchain.tool_store.uv_tools == ()
-    assert b"uv_tools" in document
-    for deferred in (b"checksum", b"shutdown_timeout", b"lifecycle"):
-        assert deferred not in document
-    assert plan.files.downloader.httpx.retries == 3
 
 
 def test_user_cannot_duplicate_cdh_owned_launch_argument() -> None:

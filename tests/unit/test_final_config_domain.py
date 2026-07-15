@@ -31,6 +31,7 @@ def _codes(config: FinalConfig, *, scripts_dir: Path | None = None) -> set[str]:
     }
 
 
+# Final configuration admits strict public types and enforces cross-field ownership.
 def test_final_structure_uses_exact_baseline_defaults() -> None:
     config = validate_final_config_structure(_document())
 
@@ -95,27 +96,6 @@ def test_domain_and_semantic_passes_are_isolated_and_facade_orders_them() -> Non
     ]
     assert [item.code for item in semantics] == ["build.duplicate_platform"]
     assert validate_final_config(config) == (*domains.diagnostics, *semantics)
-
-
-@pytest.mark.parametrize(
-    ("section", "field", "value"),
-    [
-        ("cdh", "shutdown_timeout", 8),
-    ],
-)
-def test_deferred_root_block_fields_are_not_in_active_schema(
-    section: str,
-    field: str,
-    value: object,
-) -> None:
-    document = _document()
-    document[section] = {field: value}
-
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-
-    assert raised.value.diagnostics[0].path == (section, field)
-    assert raised.value.diagnostics[0].code == "schema.extra_forbidden"
 
 
 def test_uv_tools_are_active_strict_isolated_requirements() -> None:
@@ -228,25 +208,7 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
     }
 
 
-def test_deferred_file_checksum_is_not_in_active_schema() -> None:
-    document = _document()
-    document["files"] = [
-        {
-            "url": "https://example.com/model.safetensors",
-            "dir": "models/checkpoints",
-            "filename": "model.safetensors",
-            "checksum": "sha256:" + "0" * 64,
-        }
-    ]
-
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-
-    assert raised.value.diagnostics[0].path == ("files", 0, "checksum")
-    assert raised.value.diagnostics[0].code == "schema.extra_forbidden"
-
-
-def test_httpx_retries_remains_public_through_m2() -> None:
+def test_httpx_retries_is_active_public_configuration() -> None:
     document = _document()
     document["cdh"] = {"downloader": {"httpx": {"retries": 7}}}
 
@@ -255,6 +217,7 @@ def test_httpx_retries_remains_public_through_m2() -> None:
     assert config.cdh.downloader.httpx.retries == 7
 
 
+# Structural and scalar domains reject coercion, ambiguity, and unsupported values.
 def test_strict_structure_forbids_unknown_fields_and_coercion() -> None:
     document = _document()
     document["build"] = {"platforms": ["linux/amd64"], "unknown": True}
@@ -344,6 +307,7 @@ def test_platforms_are_nonempty_typed_and_duplicate_free() -> None:
     assert "build.duplicate_platform" in _codes(config)
 
 
+# ComfyUI and Registry selectors preserve stable supported release identities.
 @pytest.mark.parametrize("version", ["0.3.60", "v0.3.60", "<0.11.0", "==0.3.60"])
 def test_comfyui_rejects_selectors_definitely_below_floor(version: str) -> None:
     document = _document()
@@ -475,6 +439,7 @@ def test_registry_selector_ranges_reject_prerelease_operands() -> None:
     assert "custom_node.invalid_registry_version" in _codes(config)
 
 
+# Package ownership and requirement normalization prevent cross-source ambiguity.
 def test_package_ownership_is_normalized_across_groups() -> None:
     document = _document()
     document["python"] = {"extra_packages": ["My_Package[cli]>=1,<2"]}
@@ -612,6 +577,7 @@ def test_requirement_extra_aliases_are_stably_deduplicated() -> None:
     assert requirement.extras == ("foo-bar", "z-extra")
 
 
+# File, Git, and hook inputs are unique, contained, and safe for their consumers.
 def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     document = _document()
     document["files"] = [

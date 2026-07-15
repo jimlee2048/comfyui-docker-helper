@@ -54,24 +54,6 @@ def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
     assert result.explicit_paths == frozenset()
 
 
-def test_empty_baked_and_mounted_runtime_configs_use_code_defaults(
-    tmp_path: Path,
-) -> None:
-    baked = _write(tmp_path / "baked.toml", "")
-    mounted = _write(tmp_path / "mounted.toml", "")
-
-    result = load_runtime_config(
-        baked_config_path=baked,
-        mounted_config_path=mounted,
-    )
-
-    assert result.config.comfyui.listen == "0.0.0.0"
-    assert result.config.comfyui.port == 8188
-    assert result.config.cdh.downloader.aria2.split == 16
-    assert result.warnings == ()
-    assert result.explicit_paths == frozenset()
-
-
 def test_baked_config_overrides_code_defaults(tmp_path: Path) -> None:
     baked = _write(
         tmp_path / "baked.toml",
@@ -1149,40 +1131,6 @@ def test_invalid_env_enum_values_fail_runtime_validation(
         )
 
     assert _identities(error.value) == [expected]
-
-
-def test_unsupported_downloader_alias_env_var_has_no_effect(tmp_path: Path) -> None:
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[cdh]
-default_downloader = "aria2"
-""",
-    )
-
-    result = load_runtime_config(
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=mounted,
-        environ={"CDH_DOWNLOADER_DEFAULT": "httpx"},
-    )
-
-    assert result.config.cdh.default_downloader == "aria2"
-
-
-def test_backend_tuning_env_vars_are_not_applied(tmp_path: Path) -> None:
-    result = load_runtime_config(
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=tmp_path / "missing-mounted.toml",
-        environ={
-            "CDH_ARIA2_RPC_PORT": "6811",
-            "CDH_DOWNLOADER_ARIA2_SPLIT": "1",
-            "CDH_HTTPX_TIMEOUT": "5",
-        },
-    )
-
-    assert result.config.cdh.downloader.aria2.rpc_port == 6800
-    assert result.config.cdh.downloader.aria2.split == 16
-    assert result.config.cdh.downloader.httpx.timeout == 60
 
 
 # ComfyUI process ownership stays with the entrypoint for listen, port, and

@@ -1,4 +1,4 @@
-"""Focused active public-configuration boundary contracts."""
+"""Public-configuration boundary contracts."""
 
 from pathlib import Path
 from typing import Any

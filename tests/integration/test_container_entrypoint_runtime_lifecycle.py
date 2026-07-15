@@ -373,9 +373,7 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
     assert "[hooks.mounted.pre-start.10-fail.sh]" in str(error.value)
 
 
-# Sync transfer failures and async queue startup failures both abort before the
-# application process is spawned.
-# Synchronous transfer failure is fatal before any long-lived service starts.
+# A synchronous download failure aborts before any long-lived service starts.
 def test_file_infrastructure_failure_prevents_application_spawn(
     tmp_path: Path,
 ) -> None:

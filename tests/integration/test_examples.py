@@ -11,7 +11,7 @@ from comfyui_docker_helper.config import load_validate_config_result
 EXAMPLES = Path("examples")
 
 
-# Public examples must remain valid inputs to the active configuration service.
+# Public examples must remain valid inputs to the configuration service.
 @pytest.mark.parametrize("name", ["minimal.toml", "full.toml"])
 def test_example_configs_validate_offline(name: str) -> None:
     result = load_validate_config_result(

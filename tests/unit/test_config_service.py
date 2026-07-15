@@ -1,4 +1,4 @@
-"""Active final configuration service contracts."""
+"""Final configuration service contracts."""
 
 from pathlib import Path
 
@@ -62,7 +62,7 @@ def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None
     assert config.pytorch.version == "2.12.1"
 
 
-# Active isolated-tool requirements survive the public service boundary.
+# Isolated-tool requirements survive the public service boundary.
 def test_public_service_accepts_active_uv_tools(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config() + '\n[python]\nuv_tools = ["ruff>=0.15,<0.16"]\n')

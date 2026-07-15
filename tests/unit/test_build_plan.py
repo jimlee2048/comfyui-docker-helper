@@ -896,6 +896,89 @@ def test_build_plan_parser_preserves_safe_opaque_python_catalog_key() -> None:
     assert parsed.toolchain.python.catalog_key == "alternate.catalog+key"
 
 
+# Container uv selection remains independent from release-owned uv-build, while
+# an exact image tag must still agree with its observed resolved version.
+@pytest.mark.parametrize(
+    ("tag", "resolved_version"),
+    [("latest", "0.11.29"), ("0.11.29", "0.11.29")],
+)
+def test_build_plan_parser_accepts_locked_uv_image_selector(
+    tag: str, resolved_version: str
+) -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    uv_image = document["toolchain"]["uv_image"]
+    uv_image["tag"] = tag
+    uv_image["resolved_version"] = resolved_version
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert parsed.toolchain.uv_image.tag == tag
+    assert parsed.toolchain.uv_image.resolved_version == resolved_version
+
+
+def test_build_plan_parser_rejects_exact_uv_image_version_mismatch() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    uv_image = document["toolchain"]["uv_image"]
+    uv_image["tag"] = "0.11.29"
+    uv_image["resolved_version"] = "0.11.30"
+
+    with pytest.raises(ValidationError, match="does not match its exact tag"):
+        parse_build_plan_json(json.dumps(document))
+
+
+# Serialized toolchain identity enforces the package support range and exact
+# release-owned cdh/uv-build values without a tested-profile allowlist.
+@pytest.mark.parametrize("version", ["3.11.9", "3.15.0"])
+def test_build_plan_parser_rejects_python_outside_package_support(
+    version: str,
+) -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["toolchain"]["python"]["version"] = version
+
+    with pytest.raises(ValidationError, match=r">=3\.12,<3\.15"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_accepts_unlisted_python_patch_inside_support() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    version = "3.13.15"
+    document["toolchain"]["python"]["version"] = version
+    document["application"]["pytorch"]["python_version"] = version
+    document["application"]["python_extras"]["python_version"] = version
+    document["application"]["comfyui"]["requirements"]["python_version"] = version
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert parsed.toolchain.python.version == version
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("cdh_version", "cdh version does not match"),
+        ("uv_build_version", "uv-build version does not match"),
+    ],
+)
+def test_build_plan_parser_rejects_forged_release_owned_python_input(
+    field: str, message: str
+) -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["toolchain"]["python"][field] = "99.0.0"
+
+    with pytest.raises(ValidationError, match=message):
+        parse_build_plan_json(json.dumps(document))
+
+
 def test_build_plan_parser_rejects_forged_core_channel() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
@@ -1008,7 +1091,6 @@ def test_build_plan_parser_allows_arbitrary_exact_pytorch_extra() -> None:
         ("group-python-index", "generic dependencies"),
         ("toolchain-channel", "target does not match"),
         ("toolchain-python", "target does not match"),
-        ("uv-resolved-version", "resolved version does not match"),
         ("duplicate-package", "packages must be unique"),
         ("case-variant-duplicate", "normalized distribution name"),
         ("missing-torch", "packages must be unique"),
@@ -1032,8 +1114,6 @@ def test_build_plan_parser_rejects_cross_field_authority_forgery(
         document["toolchain"]["pytorch_channel"] = "cu129"
     elif mutation == "toolchain-python":
         document["toolchain"]["python"]["version"] = "3.12.13"
-    elif mutation == "uv-resolved-version":
-        document["toolchain"]["uv_image"]["resolved_version"] = "0.11.29"
     elif mutation == "duplicate-package":
         pytorch["packages"] = (pytorch["packages"][0], pytorch["packages"][0])
     elif mutation == "case-variant-duplicate":
@@ -1098,7 +1178,6 @@ def test_build_plan_parser_rejects_execution_sensitive_scalar_forgery(
     [
         ("cuda-repository", "cuda-base image repository does not match"),
         ("uv-repository", "uv-tool image repository does not match"),
-        ("uv-current-version", "uv image identity does not match"),
         ("cuda-tag-grammar", "CUDA image tag must match"),
         ("cuda-derived-channel", "do not match toolchain"),
         ("comfyui-repository", "official ledger"),
@@ -1126,9 +1205,6 @@ def test_build_plan_rejects_syntactic_but_semantic_authority_forgery(
         document["toolchain"]["cuda_image"]["repository"] = "ghcr.io/attacker/cuda"
     elif mutation == "uv-repository":
         document["toolchain"]["uv_image"]["repository"] = "ghcr.io/attacker/uv"
-    elif mutation == "uv-current-version":
-        document["toolchain"]["uv_image"]["tag"] = "0.11.29"
-        document["toolchain"]["uv_image"]["resolved_version"] = "0.11.29"
     elif mutation == "cuda-tag-grammar":
         document["toolchain"]["cuda_image"]["tag"] = "13.0.3-cudnn-devel-ubuntu20.04"
     elif mutation == "cuda-derived-channel":

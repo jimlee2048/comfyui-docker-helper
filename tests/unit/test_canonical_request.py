@@ -9,8 +9,12 @@ from comfyui_docker_helper.comfyui_requirements import ComfyUIRequirementsError
 from comfyui_docker_helper.config.canonical_lock import (
     OciRequestIdentity,
     PyTorchRequestIdentity,
+    ResolverRequestIdentity,
 )
-from comfyui_docker_helper.config.canonical_request import CanonicalRequestError
+from comfyui_docker_helper.config.canonical_request import (
+    CanonicalRequestError,
+    CanonicalRequestGraph,
+)
 from comfyui_docker_helper.config.final_models import (
     CudaImageDistro,
     CudaImageFlavor,
@@ -19,11 +23,19 @@ from comfyui_docker_helper.config.final_models import (
 from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
 
 
+def _request(
+    graph: CanonicalRequestGraph, key: tuple[str, ...]
+) -> ResolverRequestIdentity:
+    matches = tuple(item.request for item in graph.desired if key in item.keys)
+    assert len(matches) == 1
+    return matches[0]
+
+
 # One immutable request graph owns normalized acquisition intent and diagnostics.
 def test_graph_owns_backend_and_complete_pytorch_request_once() -> None:
     graph = request_graph(final_config(), accepted_resolution())
-    cuda = graph.request(("oci", "cuda-base"))
-    pytorch = graph.request(("pytorch-compatibility", "application"))
+    cuda = _request(graph, ("oci", "cuda-base"))
+    pytorch = _request(graph, ("pytorch-compatibility", "application"))
 
     assert isinstance(cuda, OciRequestIdentity)
     assert cuda.tag == "13.0.3-cudnn-devel-ubuntu24.04"
@@ -46,12 +58,12 @@ def test_graph_propagates_each_supported_python_target(python_version: str) -> N
         config,
         accepted_resolution(python_version=python_version),
     )
-    pytorch = graph.request(("pytorch-compatibility", "application"))
+    pytorch = _request(graph, ("pytorch-compatibility", "application"))
 
     assert isinstance(pytorch, PyTorchRequestIdentity)
     assert pytorch.python_version == python_version
     assert (
-        graph.request(("managed-python", "cpython", "linux/amd64")).version
+        _request(graph, ("managed-python", "cpython", "linux/amd64")).version
         == python_version
     )
 
@@ -74,8 +86,8 @@ def test_graph_projects_each_cuda_image_selector_pair(
         FinalConfig.model_validate(document),
         accepted_resolution(),
     )
-    cuda = graph.request(("oci", "cuda-base"))
-    pytorch = graph.request(("pytorch-compatibility", "application"))
+    cuda = _request(graph, ("oci", "cuda-base"))
+    pytorch = _request(graph, ("pytorch-compatibility", "application"))
     expected_tag = f"13.0.3-{image_flavor}-{image_distro}"
 
     assert cuda == OciRequestIdentity(
@@ -102,8 +114,8 @@ def test_graph_derives_nondefault_cuda_tag_channel_and_index_once() -> None:
     document["pytorch"]["index_base_url"] = "https://mirror.example.test/pytorch/"
     config = FinalConfig.model_validate(document)
     graph = request_graph(config, accepted_resolution())
-    cuda = graph.request(("oci", "cuda-base"))
-    pytorch = graph.request(("pytorch-compatibility", "application"))
+    cuda = _request(graph, ("oci", "cuda-base"))
+    pytorch = _request(graph, ("pytorch-compatibility", "application"))
 
     assert isinstance(cuda, OciRequestIdentity)
     assert cuda.tag == "12.9.2-runtime-ubuntu22.04"
@@ -115,7 +127,7 @@ def test_graph_derives_nondefault_cuda_tag_channel_and_index_once() -> None:
 
 def test_graph_and_derived_sequences_are_immutable() -> None:
     graph = request_graph(final_config(), accepted_resolution())
-    pytorch = graph.request(("pytorch-compatibility", "application"))
+    pytorch = _request(graph, ("pytorch-compatibility", "application"))
 
     assert isinstance(graph.desired, tuple)
     assert isinstance(pytorch, PyTorchRequestIdentity)

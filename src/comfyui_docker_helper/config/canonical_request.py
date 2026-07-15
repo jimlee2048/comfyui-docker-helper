@@ -211,14 +211,6 @@ class CanonicalRequestGraph:
     files: tuple[FileRequest, ...]
     runtime: RuntimeRequest
 
-    def request(self, key: LockEntryKey) -> ResolverRequestIdentity:
-        matches = tuple(item.request for item in self.desired if key in item.keys)
-        if len(matches) != 1:
-            raise ValueError(
-                f"canonical request graph has no unique request for {key!r}"
-            )
-        return matches[0]
-
 
 def build_canonical_request_graph(
     config: FinalConfig,
@@ -233,7 +225,6 @@ def build_canonical_request_graph(
     platform = TargetPlatform(config.build.platforms[0])
     backend = CudaBackendAdapter().derive(
         CudaVersion.from_validated(config.compute_platform.cuda.version),
-        platform,
         image_flavor=config.compute_platform.cuda.image_flavor,
         image_distro=config.compute_platform.cuda.image_distro,
     )

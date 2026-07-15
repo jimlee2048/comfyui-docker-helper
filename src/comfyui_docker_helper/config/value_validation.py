@@ -2,6 +2,11 @@
 
 import unicodedata
 
+from packaging.version import InvalidVersion, Version
+
+_MINIMUM_MANAGED_PYTHON = Version("3.12")
+_MAXIMUM_MANAGED_PYTHON = Version("3.15")
+
 
 def has_control_characters(value: str) -> bool:
     """Return whether ``value`` contains a Unicode control character."""
@@ -24,6 +29,17 @@ def validate_managed_python_catalog_key(value: str) -> str:
         or has_control_characters(value)
     ):
         raise ValueError("catalog_key must be one safe path component")
+    return value
+
+
+def validate_managed_python_support_range(value: str) -> str:
+    """Require one managed Python inside the package support range."""
+    try:
+        version = Version(value)
+    except InvalidVersion as error:
+        raise ValueError("managed Python must satisfy >=3.12,<3.15") from error
+    if not _MINIMUM_MANAGED_PYTHON <= version < _MAXIMUM_MANAGED_PYTHON:
+        raise ValueError("managed Python must satisfy >=3.12,<3.15")
     return value
 
 

@@ -42,6 +42,7 @@ from comfyui_docker_helper.config.url_validation import (
 from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
     is_argv_value,
+    validate_managed_python_support_range,
 )
 from comfyui_docker_helper.exact_ledger import (
     COMFYUI_MINIMUM_VERSION,
@@ -294,6 +295,17 @@ def _validate_python_domain(
                 "must be an exact stable CPython major.minor.patch version",
             )
         )
+    else:
+        try:
+            validate_managed_python_support_range(value)
+        except ValueError:
+            diagnostics.append(
+                Diagnostic(
+                    ("python", "version"),
+                    "python.unsupported_version",
+                    "must satisfy the supported range >=3.12,<3.15",
+                )
+            )
     if not is_oci_tag(config.python.uv_version):
         diagnostics.append(
             Diagnostic(

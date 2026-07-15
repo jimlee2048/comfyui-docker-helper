@@ -85,8 +85,10 @@ from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
     is_argv_value,
     validate_managed_python_catalog_key,
+    validate_managed_python_support_range,
 )
 from comfyui_docker_helper.exact_ledger import (
+    CDH_VERSION,
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_MINIMUM_VERSION,
@@ -153,10 +155,6 @@ class ImagePlan(_PlanModel):
         )
         if self.repository != expected_repository:
             raise ValueError(f"{self.role} image repository does not match the ledger")
-        if self.role == "uv-tool" and (
-            self.tag != UV_VERSION or self.resolved_version != UV_VERSION
-        ):
-            raise ValueError("uv image identity does not match the current ledger")
         return self
 
     @property
@@ -178,10 +176,31 @@ class ManagedPythonPlan(_PlanModel):
     cdh_source_digest: str
     uv_build_version: str
 
-    @field_validator("version", "pip_version", "cdh_version", "uv_build_version")
+    @field_validator("version")
     @classmethod
-    def _validate_versions(cls, value: str) -> str:
+    def _validate_version(cls, value: str) -> str:
+        return validate_managed_python_support_range(
+            validate_exact_stable_version(value)
+        )
+
+    @field_validator("pip_version")
+    @classmethod
+    def _validate_pip_version(cls, value: str) -> str:
         return validate_exact_stable_version(value)
+
+    @field_validator("cdh_version")
+    @classmethod
+    def _validate_cdh_version(cls, value: str) -> str:
+        if validate_exact_stable_version(value) != CDH_VERSION:
+            raise ValueError("cdh version does not match the exact ledger")
+        return value
+
+    @field_validator("uv_build_version")
+    @classmethod
+    def _validate_uv_build_version(cls, value: str) -> str:
+        if validate_exact_stable_version(value) != UV_VERSION:
+            raise ValueError("uv-build version does not match the exact ledger")
+        return value
 
     @field_validator("catalog_descriptor_digest", "cdh_source_digest")
     @classmethod

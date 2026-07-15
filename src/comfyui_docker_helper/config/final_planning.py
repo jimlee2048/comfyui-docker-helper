@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, Protocol
 
 from comfyui_docker_helper.config.final_models import (
     CudaImageDistro,
@@ -19,14 +18,6 @@ class TargetPlatform(StrEnum):
 
     LINUX_AMD64 = "linux/amd64"
 
-    @property
-    def operating_system(self) -> Literal["linux"]:
-        return "linux"
-
-    @property
-    def architecture(self) -> Literal["amd64"]:
-        return "amd64"
-
 
 @dataclass(frozen=True, slots=True)
 class CudaVersion:
@@ -35,17 +26,15 @@ class CudaVersion:
     value: str
     major: str
     minor: str
-    patch: str | None
 
     @classmethod
     def from_validated(cls, value: str) -> "CudaVersion":
         """Preserve the full image version while exposing channel components."""
-        major, minor, *remainder = value.split(".")
+        major, minor, *_ = value.split(".")
         return cls(
             value=value,
             major=major,
             minor=minor,
-            patch=remainder[0] if remainder else None,
         )
 
 
@@ -53,27 +42,9 @@ class CudaVersion:
 class BackendPlan:
     """Backend-derived inputs shared by later identity and build planning."""
 
-    backend: Literal["cuda"]
     version: CudaVersion
-    target_platform: TargetPlatform
     base_image: str
     package_channel: str
-
-
-class BackendAdapter(Protocol):
-    """Typed seam for one compute backend's deterministic derivation rules."""
-
-    @property
-    def protected_requirement_names(self) -> tuple[str, ...]: ...
-
-    def derive(
-        self,
-        version: CudaVersion,
-        target_platform: TargetPlatform,
-        *,
-        image_flavor: CudaImageFlavor,
-        image_distro: CudaImageDistro,
-    ) -> BackendPlan: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,15 +59,12 @@ class CudaBackendAdapter:
     def derive(
         self,
         version: CudaVersion,
-        target_platform: TargetPlatform,
         *,
         image_flavor: CudaImageFlavor,
         image_distro: CudaImageDistro,
     ) -> BackendPlan:
         return BackendPlan(
-            backend="cuda",
             version=version,
-            target_platform=target_platform,
             base_image=(
                 f"{CUDA_IMAGE_REPOSITORY}:{version.value}-{image_flavor}-{image_distro}"
             ),

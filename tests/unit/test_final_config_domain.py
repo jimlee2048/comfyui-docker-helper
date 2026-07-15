@@ -279,6 +279,27 @@ def test_python_requires_an_exact_stable_patch(version: str) -> None:
     }
 
 
+@pytest.mark.parametrize("version", ["3.11.9", "3.15.0"])
+def test_python_rejects_versions_outside_package_support(version: str) -> None:
+    document = _document()
+    document["python"] = {"version": version}
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (("python", "version"), "python.unsupported_version")
+    ]
+
+
+def test_python_accepts_unlisted_patch_inside_package_support() -> None:
+    document = _document()
+    document["python"] = {"version": "3.13.15"}
+    config = validate_final_config_structure(document)
+
+    assert validate_final_config(config) == ()
+
+
 @pytest.mark.parametrize("version", ["2.12", "2.12.1rc1", "latest", "v2.12.1"])
 def test_pytorch_requires_an_exact_stable_public_version(version: str) -> None:
     document = _document()

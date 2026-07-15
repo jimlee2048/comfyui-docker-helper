@@ -921,10 +921,6 @@ def validate_exact_registry_version(value: str) -> str:
     return _require_exact_registry_version(value)
 
 
-def validate_canonical_token(value: str, field: str) -> str:
-    return _require_token(value, field)
-
-
 def _require_sha256(value: str) -> str:
     if _SHA256_PATTERN.fullmatch(value) is None:
         raise ValueError("digest must be sha256:<64 lowercase hex>")

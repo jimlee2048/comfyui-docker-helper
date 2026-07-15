@@ -90,6 +90,7 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_MINIMUM_VERSION,
     COMFYUI_REPOSITORY,
     CUDA_IMAGE_REPOSITORY,
+    PIP_VERSION,
     UV_IMAGE_REPOSITORY,
     UV_VERSION,
 )
@@ -885,9 +886,18 @@ class BuildPlan(_PlanModel):
             or self.toolchain.cuda_image.role != "cuda-base"
             or self.toolchain.uv_image.platform != self.toolchain.platform
             or self.toolchain.cuda_image.platform != self.toolchain.platform
-            or self.application.pip_version != self.toolchain.python.pip_version
         ):
             raise ValueError("PyTorch application target does not match the toolchain")
+        if (
+            self.application.pip_version != PIP_VERSION
+            or self.toolchain.python.pip_version != PIP_VERSION
+        ):
+            raise ValueError("pip version does not match the exact ledger")
+        if (
+            self.toolchain.python.catalog_descriptor_digest
+            != self.toolchain.uv_image.descriptor_digest
+        ):
+            raise ValueError("managed Python catalog is not bound to the uv image")
         if bool(self.application.comfyui.manager) != self.custom_nodes.install_manager:
             raise ValueError("Manager capability does not match custom-node intent")
         expected_user_directory = str(

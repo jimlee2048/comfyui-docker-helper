@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -848,6 +849,27 @@ def test_exact_package_plan_rejects_noncanonical_pep503_identity(
 
 
 # Parser self-validation rejects semantic forgeries at the execution trust boundary.
+def test_build_plan_parser_rejects_forged_release_pip_authority() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["application"]["pip_version"] = "99.0.0"
+    document["toolchain"]["python"]["pip_version"] = "99.0.0"
+
+    with pytest.raises(ValidationError, match="pip version does not match"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_rejects_forged_python_catalog_binding() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["toolchain"]["python"]["catalog_descriptor_digest"] = DIGEST_C
+
+    with pytest.raises(ValidationError, match="catalog is not bound"):
+        parse_build_plan_json(json.dumps(document))
+
+
 def test_build_plan_parser_rejects_forged_core_channel() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")

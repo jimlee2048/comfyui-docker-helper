@@ -45,7 +45,7 @@ from comfyui_docker_helper.container.comfyui_installer import (
     verify_manager_registry_authority,
 )
 from comfyui_docker_helper.container.evidence_writer import (
-    EvidenceFileError,
+    ApplicationEvidenceError,
     write_application_evidence,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
@@ -1191,7 +1191,7 @@ def _write_custom_node_inventory(
             owner_uid=owner_uid,
             owner_gid=owner_gid,
         )
-    except EvidenceFileError as error:
+    except ApplicationEvidenceError as error:
         raise CustomNodeInstallError(f"custom-node inventory {error}") from error
 
 

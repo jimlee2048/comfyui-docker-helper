@@ -30,7 +30,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
 )
 from comfyui_docker_helper.container.evidence_writer import (
-    EvidenceFileError,
+    ApplicationEvidenceError,
     write_application_evidence,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
@@ -644,7 +644,7 @@ def _write_application_inventory(
             owner_uid=owner_uid,
             owner_gid=owner_gid,
         )
-    except EvidenceFileError as error:
+    except ApplicationEvidenceError as error:
         raise ApplicationInstallError(f"application inventory {error}") from error
 
 

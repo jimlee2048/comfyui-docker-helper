@@ -27,9 +27,9 @@ CPython 3.13.14 is the default. CPython 3.12.13 and standard-GIL 3.14.6 are
 explicitly selectable, tested supported profiles; cdh never switches Python
 versions automatically. CUDA 13.0.3, PyTorch 2.12.1, torchvision 0.27.1,
 Ubuntu 24.04, and `linux/amd64` complete the default configuration.
-The default resolved inference group is installed as the complete exact
-distributions `torch==2.12.1+cu130` and `torchvision==0.27.1+cu130` from the
-derived cu130 index.
+The default formal-baseline inference group resolves to the complete exact
+distributions `torch==2.12.1+cu130`, `torchvision==0.27.1+cu130`, and
+`torchaudio==2.11.0+cu130` from the derived cu130 index.
 
 ## Install
 

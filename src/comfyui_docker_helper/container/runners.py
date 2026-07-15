@@ -230,7 +230,10 @@ def _open_hook(path: PurePosixPath, *, scripts_dir: str | Path) -> int:
         | getattr(os, "O_CLOEXEC", 0)
     )
     file_flags = (
-        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
     )
     directory_fd: int | None = None
     source_fd: int | None = None

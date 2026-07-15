@@ -354,6 +354,53 @@ def test_run_hook_rejects_symlinked_scripts_root_ancestor(tmp_path: Path) -> Non
     assert not marker.exists()
 
 
+def test_run_hook_rejects_unwritten_later_fifo_without_blocking(
+    tmp_path: Path,
+) -> None:
+    """Fail promptly before subprocess start when a later hook leaf is a FIFO."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO special files are not supported on this platform")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    fifo = scripts / "later.sh"
+    os.mkfifo(fifo)
+    marker = tmp_path / "subprocess-started"
+    script = """
+import pathlib
+import sys
+from comfyui_docker_helper.container import runners
+
+marker = pathlib.Path(sys.argv[2])
+
+def unexpected_subprocess(*args, **kwargs):
+    marker.touch()
+    raise AssertionError("subprocess started")
+
+runners.subprocess.run = unexpected_subprocess
+try:
+    runners.run_hook(
+        "later.sh",
+        expected_digest="sha256:" + "a" * 64,
+        scripts_dir=sys.argv[1],
+    )
+except runners.ContainerCommandError as error:
+    assert str(error) == "hook must reference one regular non-symlink file"
+else:
+    raise AssertionError("FIFO was admitted")
+assert not marker.exists()
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(scripts), str(marker)],
+        check=False,
+        capture_output=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0, result.stderr.decode()
+    assert not marker.exists()
+
+
 def test_run_hook_executes_sealed_bytes_after_original_path_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

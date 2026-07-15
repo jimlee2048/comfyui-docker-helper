@@ -9,8 +9,6 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from contextlib import suppress
-from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 
@@ -30,6 +28,10 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
+)
+from comfyui_docker_helper.container.evidence_writer import (
+    EvidenceFileError,
+    write_application_evidence,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.errors import ApplicationError
@@ -60,12 +62,6 @@ _NETWORK_ENVIRONMENT = frozenset(
 
 class ApplicationInstallError(ApplicationError):
     """An exact application-environment install invariant failed."""
-
-
-@dataclass(frozen=True, slots=True)
-class _InventoryFileIdentity:
-    device: int
-    inode: int
 
 
 def install_inference_group(
@@ -641,107 +637,15 @@ def _write_application_inventory(
     owner_uid: int = 0,
     owner_gid: int = 0,
 ) -> None:
-    parent = _require_real_inventory_parent(path.parent)
     try:
-        path.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError as error:
-        raise ApplicationInstallError(
-            "application inventory target could not be inspected"
-        ) from error
-    else:
-        raise ApplicationInstallError("application inventory already exists")
-    temporary: Path | None = None
-    identity: _InventoryFileIdentity | None = None
-    linked = False
-    try:
-        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
-        temporary = Path(name)
-        with os.fdopen(descriptor, "wb") as stream:
-            opened = os.fstat(stream.fileno())
-            identity = _InventoryFileIdentity(opened.st_dev, opened.st_ino)
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o444)
-            os.fchown(stream.fileno(), owner_uid, owner_gid)
-        if not _inventory_path_has_identity(temporary, identity):
-            raise ApplicationInstallError(
-                "application inventory temporary identity changed"
-            )
-        os.link(temporary, path, follow_symlinks=False)
-        linked = True
-        if not _inventory_path_has_identity(path, identity):
-            raise ApplicationInstallError(
-                "application inventory linked identity changed"
-            )
-        _unlink_inventory_if_identity(temporary, identity)
-        temporary = None
-        result = path.lstat()
-        if (result.st_dev, result.st_ino) != (identity.device, identity.inode):
-            raise ApplicationInstallError(
-                "application inventory target identity changed"
-            )
-        observed_content = path.read_bytes()
-        if not _inventory_path_has_identity(path, identity):
-            raise ApplicationInstallError(
-                "application inventory target identity changed"
-            )
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(result.st_mode)
-            or result.st_uid != owner_uid
-            or result.st_gid != owner_gid
-            or stat.S_IMODE(result.st_mode) != 0o444
-            or observed_content != content
-        ):
-            raise ApplicationInstallError("application inventory verification failed")
-    except FileExistsError as error:
-        raise ApplicationInstallError("application inventory already exists") from error
-    except ApplicationInstallError:
-        if linked and identity is not None:
-            _unlink_inventory_if_identity(path, identity)
-        raise
-    except OSError as error:
-        if linked and identity is not None:
-            _unlink_inventory_if_identity(path, identity)
-        raise ApplicationInstallError(
-            "application inventory could not be written"
-        ) from error
-    finally:
-        if temporary is not None and identity is not None:
-            _unlink_inventory_if_identity(temporary, identity)
-
-
-def _require_real_inventory_parent(path: Path) -> Path:
-    try:
-        metadata = path.lstat()
-        resolved = path.resolve(strict=True)
-    except OSError as error:
-        raise ApplicationInstallError(
-            "application inventory parent is unavailable"
-        ) from error
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode) or resolved != path:
-        raise ApplicationInstallError(
-            "application inventory parent must be one real directory"
+        write_application_evidence(
+            path,
+            content,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
         )
-    return resolved
-
-
-def _inventory_path_has_identity(path: Path, identity: _InventoryFileIdentity) -> bool:
-    try:
-        metadata = path.lstat()
-    except OSError:
-        return False
-    return (metadata.st_dev, metadata.st_ino) == (identity.device, identity.inode)
-
-
-def _unlink_inventory_if_identity(path: Path, identity: _InventoryFileIdentity) -> None:
-    if not _inventory_path_has_identity(path, identity):
-        return
-    with suppress(FileNotFoundError):
-        path.unlink()
+    except EvidenceFileError as error:
+        raise ApplicationInstallError(f"application inventory {error}") from error
 
 
 def application_install_environment(

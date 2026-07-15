@@ -18,6 +18,7 @@ from packaging.utils import InvalidName, canonicalize_name
 
 from comfyui_docker_helper.comfyui_requirements import (
     ComfyUIRequirementsError,
+    ParsedComfyUIRequirements,
     ParsedManagerRequirements,
     parse_comfyui_requirements,
     parse_manager_requirements,
@@ -129,9 +130,10 @@ def install_comfyui(
     )
 
 
-def verify_application_state(
+def observe_application_state(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
+    authority: ParsedComfyUIRequirements,
     *,
     git_path: Path = _GIT_PATH,
     uv_path: Path = _UV_PATH,
@@ -139,31 +141,23 @@ def verify_application_state(
     environ: Mapping[str, str] | None = None,
     write_inventory: bool = False,
 ) -> None:
-    """Re-prove exact source, capabilities, packages, and dependency health."""
+    """Observe complete application health against immutable requirements input."""
     _validate_paths(application, runtime)
     environment = application_install_environment(environ)
     _verify_stage_identity(application, runtime.comfyui_path, git_path, environment)
-    parsed, parsed_manager = _verify_checkout(application, runtime)
-    manager = application.comfyui.manager
-    if manager is None:
-        _verify_manager_absent(application, runtime, environ)
-    else:
-        if parsed_manager is None:
-            raise ComfyUIInstallError("Manager requirements were not verified")
-        _verify_manager_capability(
-            application,
-            manager,
-            parsed_manager,
-            runtime,
-            environ,
-        )
+    current = _verify_requirements(
+        application,
+        runtime.comfyui_path / application.comfyui.requirements.path,
+    )
+    if current != authority:
+        raise ComfyUIInstallError("ComfyUI requirements authority changed")
     verify_application_environment(
         application,
         runtime,
         uv_path=uv_path,
         constraints_path=constraints_path,
         environ=environ,
-        ordinary_requirements=parsed.ordinary,
+        ordinary_requirements=authority.ordinary,
         write_inventory=write_inventory,
     )
 
@@ -171,11 +165,11 @@ def verify_application_state(
 def capture_application_requirements(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
-) -> tuple[str, ...]:
+) -> ParsedComfyUIRequirements:
     """Capture the verified checkout-owned ordinary requirements before hooks."""
     _validate_paths(application, runtime)
     parsed, _parsed_manager = _verify_checkout(application, runtime)
-    return parsed.ordinary
+    return parsed
 
 
 def _validate_paths(application: ApplicationPhase, runtime: ContainerRuntime) -> None:
@@ -601,13 +595,34 @@ def verify_manager_registry_capability(
     runtime: ContainerRuntime,
     authority: ParsedManagerRequirements,
 ) -> None:
-    """Re-prove Manager without allowing hooks to retarget its authority."""
+    """Re-prove both immutable Manager authority and complete capability."""
+    verify_manager_registry_authority(application, runtime, authority)
+    observe_manager_registry_capability(application, runtime, authority)
+
+
+def verify_manager_registry_authority(
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    authority: ParsedManagerRequirements,
+) -> None:
+    """Prove that the current checkout still matches immutable Manager input."""
     manager = application.comfyui.manager
     if manager is None:
         raise ComfyUIInstallError("Manager capability is unavailable")
     current = _read_manager_requirements(application, manager, runtime.comfyui_path)
     if current != authority:
         raise ComfyUIInstallError("Manager requirements authority changed")
+
+
+def observe_manager_registry_capability(
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    authority: ParsedManagerRequirements,
+) -> None:
+    """Observe complete Manager health against an already-admitted authority."""
+    manager = application.comfyui.manager
+    if manager is None:
+        raise ComfyUIInstallError("Manager capability is unavailable")
     _verify_manager_capability(application, manager, authority, runtime, None)
 
 

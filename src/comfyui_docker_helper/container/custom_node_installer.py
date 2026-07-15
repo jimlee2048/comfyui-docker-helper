@@ -12,8 +12,7 @@ import stat
 import subprocess
 import tempfile
 import tomllib
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -22,6 +21,7 @@ from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.comfyui_requirements import (
     ComfyUIRequirementsError,
+    ParsedComfyUIRequirements,
     ParsedManagerRequirements,
     parse_ordinary_requirements,
 )
@@ -36,13 +36,17 @@ from comfyui_docker_helper.config.final_validation import is_git_source_url
 from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
 from comfyui_docker_helper.container.application_installer import (
     application_install_environment,
-    verify_application_environment,
 )
 from comfyui_docker_helper.container.comfyui_installer import (
     capture_application_requirements,
     capture_manager_registry_authority,
-    verify_application_state,
-    verify_manager_registry_capability,
+    observe_application_state,
+    observe_manager_registry_capability,
+    verify_manager_registry_authority,
+)
+from comfyui_docker_helper.container.evidence_writer import (
+    EvidenceFileError,
+    write_application_evidence,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
 from comfyui_docker_helper.errors import ApplicationError
@@ -74,6 +78,43 @@ class _FilesystemIdentity:
     inode: int
 
 
+@dataclass(slots=True)
+class _ObservationEpoch:
+    dirty: int = 0
+    observed: int | None = None
+
+    @classmethod
+    def clean(cls) -> _ObservationEpoch:
+        return cls(observed=0)
+
+    def invalidate(self) -> None:
+        self.dirty += 1
+
+    def observe(self, action: Callable[[], None], *, force: bool = False) -> None:
+        if not force and self.observed == self.dirty:
+            return
+        action()
+        self.observed = self.dirty
+
+
+@dataclass(slots=True)
+class _VerificationObservations:
+    application: _ObservationEpoch
+    manager: _ObservationEpoch | None
+
+    @classmethod
+    def initial(cls, *, has_manager: bool) -> _VerificationObservations:
+        return cls(
+            application=_ObservationEpoch(),
+            manager=_ObservationEpoch.clean() if has_manager else None,
+        )
+
+    def invalidate_mutation(self) -> None:
+        self.application.invalidate()
+        if self.manager is not None:
+            self.manager.invalidate()
+
+
 def install_custom_nodes(
     custom_nodes: CustomNodesPhase,
     application: ApplicationPhase,
@@ -98,7 +139,7 @@ def install_custom_nodes(
     custom_nodes_root = _require_real_directory(
         runtime.comfyui_path / "custom_nodes", "custom-nodes root"
     )
-    ordinary_requirements = capture_application_requirements(application, runtime)
+    application_authority = capture_application_requirements(application, runtime)
     registry_environment = _managed_python_environment(
         runtime,
         application.python_index_url,
@@ -109,10 +150,11 @@ def install_custom_nodes(
     # cdh neither suppresses nor attests user-managed URL rewrites and transports.
     git_environment = runtime.env(environ)
     admitted: list[CustomNodePlan] = []
+    observations = _VerificationObservations.initial(has_manager=has_registry)
 
     for index, node in enumerate(nodes):
         future = nodes[index:]
-        _verify_mixed_state(
+        _verify_boundary(
             custom_nodes_root,
             admitted,
             future,
@@ -121,15 +163,21 @@ def install_custom_nodes(
             manager_authority=manager_authority,
             git_path=git_path,
             git_environment=git_environment,
+            observations=observations,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+            application_authority=application_authority,
         )
         for hook in node.pre_install:
+            observations.invalidate_mutation()
             run_hook(
                 hook.relative_path,
                 scripts_dir=hooks_directory,
                 runtime=runtime,
                 env=environ,
             )
-            _verify_mixed_state(
+            _verify_boundary(
                 custom_nodes_root,
                 admitted,
                 future,
@@ -138,17 +186,14 @@ def install_custom_nodes(
                 manager_authority=manager_authority,
                 git_path=git_path,
                 git_environment=git_environment,
-            )
-            _verify_application_after_node_mutation(
-                application,
-                runtime,
-                uv_path,
-                constraints_path,
-                environ,
-                ordinary_requirements,
+                observations=observations,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+                application_authority=application_authority,
             )
         # The complete pre phase is a proof boundary even when it was empty.
-        _verify_mixed_state(
+        _verify_boundary(
             custom_nodes_root,
             admitted,
             future,
@@ -157,16 +202,14 @@ def install_custom_nodes(
             manager_authority=manager_authority,
             git_path=git_path,
             git_environment=git_environment,
-        )
-        _verify_application_after_node_mutation(
-            application,
-            runtime,
-            uv_path,
-            constraints_path,
-            environ,
-            ordinary_requirements,
+            observations=observations,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+            application_authority=application_authority,
         )
 
+        observations.invalidate_mutation()
         if isinstance(node, RegistryNodePlan):
             _install_registry_node(
                 node,
@@ -187,12 +230,11 @@ def install_custom_nodes(
                 constraints_path,
                 git_environment,
                 registry_environment,
-                ordinary_requirements,
             )
 
         admitted.append(node)
         remaining = nodes[index + 1 :]
-        _verify_mixed_state(
+        _verify_boundary(
             custom_nodes_root,
             admitted,
             remaining,
@@ -201,23 +243,21 @@ def install_custom_nodes(
             manager_authority=manager_authority,
             git_path=git_path,
             git_environment=git_environment,
-        )
-        _verify_application_after_node_mutation(
-            application,
-            runtime,
-            uv_path,
-            constraints_path,
-            environ,
-            ordinary_requirements,
+            observations=observations,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+            application_authority=application_authority,
         )
         for hook in node.post_install:
+            observations.invalidate_mutation()
             run_hook(
                 hook.relative_path,
                 scripts_dir=hooks_directory,
                 runtime=runtime,
                 env=environ,
             )
-            _verify_mixed_state(
+            _verify_boundary(
                 custom_nodes_root,
                 admitted,
                 remaining,
@@ -226,17 +266,14 @@ def install_custom_nodes(
                 manager_authority=manager_authority,
                 git_path=git_path,
                 git_environment=git_environment,
-            )
-            _verify_application_after_node_mutation(
-                application,
-                runtime,
-                uv_path,
-                constraints_path,
-                environ,
-                ordinary_requirements,
+                observations=observations,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+                application_authority=application_authority,
             )
         # The complete post phase is a proof boundary even when it was empty.
-        _verify_mixed_state(
+        _verify_boundary(
             custom_nodes_root,
             admitted,
             remaining,
@@ -245,17 +282,14 @@ def install_custom_nodes(
             manager_authority=manager_authority,
             git_path=git_path,
             git_environment=git_environment,
-        )
-        _verify_application_after_node_mutation(
-            application,
-            runtime,
-            uv_path,
-            constraints_path,
-            environ,
-            ordinary_requirements,
+            observations=observations,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+            application_authority=application_authority,
         )
 
-    _verify_mixed_state(
+    _verify_boundary(
         custom_nodes_root,
         admitted,
         (),
@@ -264,37 +298,30 @@ def install_custom_nodes(
         manager_authority=manager_authority,
         git_path=git_path,
         git_environment=git_environment,
+        observations=observations,
+        uv_path=uv_path,
+        constraints_path=constraints_path,
+        environ=environ,
+        application_authority=application_authority,
+        force_manager=True,
+        observe_application=False,
     )
     _write_custom_node_inventory(
         Path(custom_nodes.custom_node_inventory),
         _custom_node_inventory_bytes(nodes),
     )
-    verify_application_state(
-        application,
-        runtime,
-        git_path=git_path,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-        write_inventory=True,
-    )
-
-
-def _verify_application_after_node_mutation(
-    application: ApplicationPhase,
-    runtime: ContainerRuntime,
-    uv_path: Path,
-    constraints_path: Path,
-    environ: Mapping[str, str] | None,
-    ordinary_requirements: tuple[str, ...],
-) -> None:
-    verify_application_environment(
-        application,
-        runtime,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-        ordinary_requirements=ordinary_requirements,
+    observations.application.observe(
+        lambda: observe_application_state(
+            application,
+            runtime,
+            application_authority,
+            git_path=git_path,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+            write_inventory=True,
+        ),
+        force=True,
     )
 
 
@@ -371,7 +398,6 @@ def _install_registry_node(
     manager = application.comfyui.manager
     if manager is None or manager_authority is None:  # pragma: no cover - validated.
         raise CustomNodeInstallError("Registry nodes require Manager")
-    verify_manager_registry_capability(application, runtime, manager_authority)
     run_argv(
         (
             manager.executable,
@@ -400,7 +426,6 @@ def _install_git_node(
     constraints_path: Path,
     git_environment: Mapping[str, str],
     python_environment: Mapping[str, str],
-    ordinary_requirements: tuple[str, ...],
 ) -> None:
     target = _planned_git_target(node, custom_nodes_root)
     _require_absent(target, f"Git target {target.name}")
@@ -464,7 +489,6 @@ def _install_git_node(
             uv_path,
             constraints_path,
             python_environment,
-            ordinary_requirements,
         )
     finally:
         if not placed and _is_owned_stage(stage, custom_nodes_root, stage_identity):
@@ -479,7 +503,6 @@ def _install_git_root_surfaces(
     uv_path: Path,
     constraints_path: Path,
     python_environment: Mapping[str, str],
-    ordinary_requirements: tuple[str, ...],
 ) -> None:
     requirements = _optional_root_file(target, "requirements.txt")
     if requirements is not None:
@@ -515,14 +538,6 @@ def _install_git_root_surfaces(
                 description=f"Git node {target.name} requirements install",
                 close_stdin=True,
             )
-            verify_application_environment(
-                application,
-                runtime,
-                uv_path=uv_path,
-                constraints_path=constraints_path,
-                environ=python_environment,
-                ordinary_requirements=ordinary_requirements,
-            )
     install_script = _optional_root_file(target, "install.py")
     if install_script is not None:
         run_argv(
@@ -531,6 +546,58 @@ def _install_git_root_surfaces(
             env=python_environment,
             description=f"Git node {target.name} install.py",
             close_stdin=True,
+        )
+
+
+def _verify_boundary(
+    custom_nodes_root: Path,
+    admitted: Sequence[CustomNodePlan],
+    future: Sequence[CustomNodePlan],
+    *,
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    manager_authority: ParsedManagerRequirements | None,
+    git_path: Path,
+    git_environment: Mapping[str, str],
+    observations: _VerificationObservations,
+    uv_path: Path,
+    constraints_path: Path,
+    environ: Mapping[str, str] | None,
+    application_authority: ParsedComfyUIRequirements,
+    force_manager: bool = False,
+    observe_application: bool = True,
+) -> None:
+    _verify_mixed_state(
+        custom_nodes_root,
+        admitted,
+        future,
+        application=application,
+        runtime=runtime,
+        manager_authority=manager_authority,
+        git_path=git_path,
+        git_environment=git_environment,
+    )
+    if manager_authority is not None:
+        manager_epoch = observations.manager
+        if manager_epoch is None:  # pragma: no cover - construction invariant.
+            raise CustomNodeInstallError("Manager observation epoch is unavailable")
+        manager_epoch.observe(
+            lambda: observe_manager_registry_capability(
+                application, runtime, manager_authority
+            ),
+            force=force_manager,
+        )
+    if observe_application:
+        observations.application.observe(
+            lambda: observe_application_state(
+                application,
+                runtime,
+                application_authority,
+                git_path=git_path,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+            )
         )
 
 
@@ -546,7 +613,7 @@ def _verify_mixed_state(
     git_environment: Mapping[str, str],
 ) -> None:
     if manager_authority is not None:
-        verify_manager_registry_capability(application, runtime, manager_authority)
+        verify_manager_registry_authority(application, runtime, manager_authority)
     admitted_git_targets: list[Path] = []
     for node in admitted:
         if isinstance(node, GitNodePlan):
@@ -1117,83 +1184,15 @@ def _write_custom_node_inventory(
     owner_uid: int = 0,
     owner_gid: int = 0,
 ) -> None:
-    parent = _require_real_directory(path.parent, "custom-node inventory parent")
     try:
-        path.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError as error:
-        raise CustomNodeInstallError(
-            "custom-node inventory target could not be inspected"
-        ) from error
-    else:
-        raise CustomNodeInstallError("custom-node inventory target already exists")
-    temporary: Path | None = None
-    identity: _FilesystemIdentity | None = None
-    linked = False
-    try:
-        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
-        temporary = Path(name)
-        with os.fdopen(descriptor, "wb") as stream:
-            opened_metadata = os.fstat(stream.fileno())
-            identity = _FilesystemIdentity(
-                opened_metadata.st_dev, opened_metadata.st_ino
-            )
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o444)
-            os.fchown(stream.fileno(), owner_uid, owner_gid)
-        if not _path_has_identity(temporary, identity):
-            raise CustomNodeInstallError(
-                "custom-node inventory temporary identity changed"
-            )
-        os.link(temporary, path, follow_symlinks=False)
-        linked = True
-        if not _path_has_identity(path, identity):
-            raise CustomNodeInstallError(
-                "custom-node inventory linked identity changed"
-            )
-        _unlink_if_identity(temporary, identity)
-        temporary = None
-        metadata = path.lstat()
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != owner_uid
-            or metadata.st_gid != owner_gid
-            or stat.S_IMODE(metadata.st_mode) != 0o444
-            or path.read_bytes() != content
-        ):
-            raise CustomNodeInstallError("custom-node inventory verification failed")
-    except CustomNodeInstallError:
-        if linked and identity is not None:
-            _unlink_if_identity(path, identity)
-        raise
-    except OSError as error:
-        if linked and identity is not None:
-            _unlink_if_identity(path, identity)
-        raise CustomNodeInstallError(
-            "custom-node inventory could not be created"
-        ) from error
-    finally:
-        if temporary is not None and identity is not None:
-            _unlink_if_identity(temporary, identity)
-
-
-def _path_has_identity(path: Path, identity: _FilesystemIdentity) -> bool:
-    try:
-        metadata = path.lstat()
-    except OSError:
-        return False
-    return (metadata.st_dev, metadata.st_ino) == (identity.device, identity.inode)
-
-
-def _unlink_if_identity(path: Path, identity: _FilesystemIdentity) -> None:
-    if not _path_has_identity(path, identity):
-        return
-    with suppress(FileNotFoundError):
-        path.unlink()
+        write_application_evidence(
+            path,
+            content,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
+    except EvidenceFileError as error:
+        raise CustomNodeInstallError(f"custom-node inventory {error}") from error
 
 
 def _parse_project_identity(content: bytes) -> _ObservedRegistryIdentity:

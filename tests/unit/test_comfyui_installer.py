@@ -23,7 +23,7 @@ from comfyui_docker_helper.container.comfyui_installer import (
     _rename_noreplace,
     _verify_checkout,
     _verify_floor_ancestry,
-    verify_application_state,
+    observe_application_state,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
 
@@ -415,7 +415,7 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
     ]
 
 
-def test_final_application_state_rechecks_source_capability_and_environment(
+def test_application_observation_rechecks_source_input_and_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application, runtime = _application(tmp_path)
@@ -425,11 +425,6 @@ def test_final_application_state_rechecks_source_capability_and_environment(
         platform="linux/amd64",
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
-    parsed_manager = parse_manager_requirements(
-        _MANAGER_REQUIREMENTS,
-        python_version="3.13.14",
-        platform="linux/amd64",
-    )
     events: list[object] = []
     monkeypatch.setattr(
         comfyui_installer,
@@ -438,13 +433,8 @@ def test_final_application_state_rechecks_source_capability_and_environment(
     )
     monkeypatch.setattr(
         comfyui_installer,
-        "_verify_checkout",
-        lambda *_args: events.append("checkout") or (parsed, parsed_manager),
-    )
-    monkeypatch.setattr(
-        comfyui_installer,
-        "_verify_manager_capability",
-        lambda *_args: events.append("manager"),
+        "_verify_requirements",
+        lambda *_args: events.append("requirements") or parsed,
     )
     monkeypatch.setattr(
         comfyui_installer,
@@ -458,12 +448,11 @@ def test_final_application_state_rechecks_source_capability_and_environment(
         ),
     )
 
-    verify_application_state(application, runtime, write_inventory=True)
+    observe_application_state(application, runtime, parsed, write_inventory=True)
 
     assert events == [
         "source",
-        "checkout",
-        "manager",
+        "requirements",
         ("application", parsed.ordinary, True),
     ]
 

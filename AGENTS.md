@@ -63,11 +63,11 @@ Use `pytest` for testing:
 ## Testing Guidelines
 
 - Name test files `test_*.py` and place focused unit coverage in `tests/unit/`.
-- Pytest is configured with strict markers. Mark expensive or environment-dependent tests with the existing markers: `docker`, `network`, `gpu`, `slow`, or `smoke`.
+- Pytest is configured with strict markers. Mark expensive or environment-dependent tests with `docker`, `network`, `gpu`, or `slow`; each cost marker also requires its matching `--run-docker`, `--run-network`, `--run-gpu`, or `--run-slow` authorization. `smoke` classifies smoke coverage but does not authorize external access.
 - Use `tests/integration/` when behavior crosses CLI, rendering, subprocess, or filesystem boundaries.
 - Test the current behavior contract; avoid guard tests that only assert deprecated legacy behavior is absent.
 - Mark temporary development-only tests with a code comment, and remove them before the related work is complete.
-- For quicker local checks, run targeted paths such as `uv run pytest tests/unit` before the full suite.
+- The default `uv run pytest` suite is offline and skips cost-marked tests without their explicit authorizations. For quicker local checks, run targeted paths such as `uv run pytest tests/unit` before the full offline suite. See `tests/README.md` for cost tiers and acceptance execution rules.
 
 
 ## Commit & Pull Request Guidelines

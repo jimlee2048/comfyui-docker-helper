@@ -76,10 +76,11 @@ addopts = [
 markers = [
     "unit: fast tests for isolated units",
     "smoke: lightweight smoke checks or smoke fixture validation",
-    "docker: tests that require Docker",
-    "network: tests that require network access",
-    "gpu: tests that require GPU access",
-    "slow: tests that are intentionally slower than the default suite",
+    "acceptance: tests parameterized by the typed release acceptance catalog",
+    "docker: tests that require Docker and --run-docker authorization",
+    "network: tests that require network access and --run-network authorization",
+    "gpu: tests that require GPU access and --run-gpu authorization",
+    "slow: tests that require --run-slow authorization",
 ]
 testpaths = ["tests"]
 

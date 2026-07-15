@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Literal
 
 import httpx
@@ -35,10 +34,6 @@ from comfyui_docker_helper.host.uv_runner import locate_host_uv
 pytestmark = [
     pytest.mark.smoke,
     pytest.mark.network,
-    pytest.mark.skipif(
-        os.environ.get("CDH_RUN_NETWORK_SMOKE") != "1",
-        reason="set CDH_RUN_NETWORK_SMOKE=1 to run live identity provider smoke",
-    ),
 ]
 
 CUSTOM_SCRIPTS_REGISTRY_ID = "comfyui-custom-scripts"

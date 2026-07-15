@@ -8,10 +8,14 @@ import os
 import subprocess
 import tomllib
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from tests.acceptance_scenarios import (
+    RELEASE_SCENARIOS,
+    AcceptanceScenario,
+    Capability,
+)
 from tests.smoke.test_comfy_cli_image_live import (
     _ENABLED_PROBE as _COMFY_CLI_BRIDGE_PROBE,
 )
@@ -33,6 +37,7 @@ from comfyui_docker_helper.config.canonical_lock import (
 
 pytestmark = [
     pytest.mark.smoke,
+    pytest.mark.acceptance,
     pytest.mark.docker,
     pytest.mark.network,
     pytest.mark.slow,
@@ -235,123 +240,57 @@ def prove_manager_import(manager_name, manager_root, manager_origin, workspace):
 """
 
 
-@dataclass(frozen=True, slots=True)
-class _Scenario:
-    id: str
-    fixture: str
-    image_variable: str
-    context_variable: str
-    install_cli: bool
-    install_manager: bool
-    mixed: bool
-    hooks: bool
-    python_version: str
-
-
-_SCENARIOS = (
-    _Scenario(
-        "full",
-        "application-full.toml",
-        "CDH_APPLICATION_FULL_IMAGE",
-        "CDH_APPLICATION_FULL_CONTEXT",
-        True,
-        True,
-        True,
-        True,
-        "3.13.14",
-    ),
-    _Scenario(
-        "zero",
-        "application-zero.toml",
-        "CDH_APPLICATION_ZERO_IMAGE",
-        "CDH_APPLICATION_ZERO_CONTEXT",
-        False,
-        False,
-        False,
-        False,
-        "3.13.14",
-    ),
-    _Scenario(
-        "manager-disabled",
-        "application-manager-disabled.toml",
-        "CDH_APPLICATION_MANAGER_DISABLED_IMAGE",
-        "CDH_APPLICATION_MANAGER_DISABLED_CONTEXT",
-        True,
-        False,
-        False,
-        False,
-        "3.13.14",
-    ),
-    _Scenario(
-        "cli-disabled-mixed",
-        "application-cli-disabled-mixed.toml",
-        "CDH_APPLICATION_CLI_DISABLED_MIXED_IMAGE",
-        "CDH_APPLICATION_CLI_DISABLED_MIXED_CONTEXT",
-        False,
-        True,
-        True,
-        True,
-        "3.13.14",
-    ),
-    _Scenario(
-        "py314-full",
-        "application-py314-full.toml",
-        "CDH_APPLICATION_PY314_FULL_IMAGE",
-        "CDH_APPLICATION_PY314_FULL_CONTEXT",
-        True,
-        True,
-        True,
-        True,
-        "3.14.6",
-    ),
-    _Scenario(
-        "py314-zero",
-        "application-py314-zero.toml",
-        "CDH_APPLICATION_PY314_ZERO_IMAGE",
-        "CDH_APPLICATION_PY314_ZERO_CONTEXT",
-        False,
-        False,
-        False,
-        False,
-        "3.14.6",
-    ),
-    _Scenario(
-        "py314-manager-disabled",
-        "application-py314-manager-disabled.toml",
-        "CDH_APPLICATION_PY314_MANAGER_DISABLED_IMAGE",
-        "CDH_APPLICATION_PY314_MANAGER_DISABLED_CONTEXT",
-        True,
-        False,
-        False,
-        False,
-        "3.14.6",
-    ),
-    _Scenario(
-        "py314-cli-disabled-mixed",
-        "application-py314-cli-disabled-mixed.toml",
-        "CDH_APPLICATION_PY314_CLI_DISABLED_MIXED_IMAGE",
-        "CDH_APPLICATION_PY314_CLI_DISABLED_MIXED_CONTEXT",
-        False,
-        True,
-        True,
-        True,
-        "3.14.6",
-    ),
-)
+_SCENARIOS = RELEASE_SCENARIOS
 
 _FULL_SCENARIOS = tuple(
-    scenario for scenario in _SCENARIOS if scenario.id.endswith("full")
+    scenario
+    for scenario in _SCENARIOS
+    if {
+        Capability.CLI,
+        Capability.MANAGER,
+        Capability.CUSTOM_NODES,
+        Capability.GPU_AUDIO,
+    }
+    <= scenario.capabilities
 )
 _MANAGER_DISABLED_SCENARIOS = tuple(
-    scenario for scenario in _SCENARIOS if scenario.id.endswith("manager-disabled")
+    scenario
+    for scenario in _SCENARIOS
+    if scenario.install_cli and not scenario.install_manager and not scenario.mixed
 )
 
 
 def _environment(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        pytest.skip(f"set {name} to run this application acceptance disposition")
+        pytest.fail(
+            f"selected release scenario requires environment input {name}",
+            pytrace=False,
+        )
     return value
+
+
+@pytest.fixture(autouse=True)
+def _select_release_scenario(request: pytest.FixtureRequest) -> None:
+    selected = set(request.config.getoption("--acceptance-scenario"))
+    if not hasattr(request.node, "callspec"):
+        return
+    scenario = request.node.callspec.params.get("scenario")
+    if not isinstance(scenario, AcceptanceScenario):
+        return
+    if selected and scenario.id not in selected:
+        pytest.skip("release scenario was not selected")
+    missing = [
+        name
+        for name in (scenario.image_variable, scenario.context_variable)
+        if name is not None and not os.environ.get(name)
+    ]
+    if missing:
+        pytest.fail(
+            "selected release scenario requires environment input(s): "
+            + ", ".join(missing),
+            pytrace=False,
+        )
 
 
 def _expected_nodes(mixed: bool) -> list[dict[str, object]]:
@@ -387,7 +326,7 @@ def _node_identity(node: dict[str, object]) -> dict[str, object]:
 
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
 def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
-    scenario: _Scenario,
+    scenario: AcceptanceScenario,
 ) -> None:
     context = Path(_environment(scenario.context_variable)).resolve(strict=True)
     assert context.joinpath(".cdh-rendered").is_file()
@@ -1158,7 +1097,9 @@ def _run_disposable(
 
 
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
-def test_image_has_exact_environment_and_disposition(scenario: _Scenario) -> None:
+def test_image_has_exact_environment_and_disposition(
+    scenario: AcceptanceScenario,
+) -> None:
     context = Path(_environment(scenario.context_variable)).resolve(strict=True)
     plan = parse_build_plan_json(context.joinpath("build-plan.json").read_bytes())
     lock = parse_canonical_lock_toml(context.joinpath("config.lock.toml").read_bytes())
@@ -1185,7 +1126,7 @@ def test_image_has_exact_environment_and_disposition(scenario: _Scenario) -> Non
 
 @pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
 def test_primary_image_cpu_audio_api_writable_state_and_clean_shutdown(
-    scenario: _Scenario,
+    scenario: AcceptanceScenario,
 ) -> None:
     _run_disposable(_environment(scenario.image_variable), _CPU_PROBE)
 
@@ -1193,13 +1134,15 @@ def test_primary_image_cpu_audio_api_writable_state_and_clean_shutdown(
 @pytest.mark.parametrize(
     "scenario", _MANAGER_DISABLED_SCENARIOS, ids=lambda item: item.id
 )
-def test_manager_disabled_image_api_and_clean_shutdown(scenario: _Scenario) -> None:
+def test_manager_disabled_image_api_and_clean_shutdown(
+    scenario: AcceptanceScenario,
+) -> None:
     _run_disposable(_environment(scenario.image_variable), _CPU_PROBE)
 
 
 @pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
 def test_primary_image_comfy_cli_workspace_python_bridge(
-    scenario: _Scenario,
+    scenario: AcceptanceScenario,
 ) -> None:
     _run_disposable(
         _environment(scenario.image_variable),
@@ -1210,7 +1153,7 @@ def test_primary_image_comfy_cli_workspace_python_bridge(
 @pytest.mark.gpu
 @pytest.mark.parametrize("scenario", _FULL_SCENARIOS, ids=lambda item: item.id)
 def test_primary_image_cuda_audio_api_and_clean_shutdown(
-    scenario: _Scenario,
+    scenario: AcceptanceScenario,
 ) -> None:
     _run_disposable(
         _environment(scenario.image_variable),

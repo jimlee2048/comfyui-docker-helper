@@ -23,7 +23,7 @@ extra_args = []
 [[files]]
 url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
 dir = "models/cdh-smoke"
-filename = "httpx-readme.md"
+filename = "httpx-redirect-readme.md"
 overwrite = false
 downloader = "httpx"
 download_mode = "sync"
@@ -31,7 +31,7 @@ download_mode = "sync"
 [[files]]
 url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts/raw/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
 dir = "models/cdh-smoke"
-filename = "httpx-readme.md"
+filename = "httpx-repeat-readme.md"
 overwrite = true
 downloader = "httpx"
 download_mode = "sync"

@@ -9,9 +9,11 @@ from typer.testing import CliRunner
 
 from tests.acceptance_scenarios import (
     RELEASE_SCENARIOS,
+    AcceptanceProbe,
     AcceptanceScenario,
     Cost,
     ScenarioClass,
+    required_release_probes,
 )
 
 _COST_AUTHORIZATIONS = {
@@ -27,8 +29,6 @@ def _selected_release_ids(config: pytest.Config) -> set[str]:
 
 
 def _release_scenario_parameter(item: pytest.Item) -> AcceptanceScenario | None:
-    if item.get_closest_marker("acceptance") is None:
-        return None
     callspec = getattr(item, "callspec", None)
     if callspec is None:
         return None
@@ -37,7 +37,34 @@ def _release_scenario_parameter(item: pytest.Item) -> AcceptanceScenario | None:
         return None
     if scenario.classification is not ScenarioClass.RELEASE:
         return None
+    if not any(scenario is candidate for candidate in RELEASE_SCENARIOS):
+        return None
     return scenario
+
+
+def _function_acceptance_probes(item: pytest.Item) -> tuple[AcceptanceProbe, ...]:
+    markers = tuple(
+        marker
+        for node, marker in item.iter_markers_with_node(name="acceptance")
+        if node is item
+    )
+    if not markers:
+        return ()
+    if len(markers) != 1:
+        raise pytest.UsageError(
+            f"acceptance item has multiple function probe markers: {item.nodeid}"
+        )
+    probes = markers[0].kwargs.get("probes")
+    if (
+        not isinstance(probes, tuple)
+        or not probes
+        or any(not isinstance(probe, AcceptanceProbe) for probe in probes)
+        or len(probes) != len(set(probes))
+    ):
+        raise pytest.UsageError(
+            f"acceptance item has invalid function probes: {item.nodeid}"
+        )
+    return probes
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -113,21 +140,39 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     selected = _selected_release_ids(session.config)
     if not selected:
         return
-    surviving = {
-        scenario.id: scenario
-        for item in session.items
-        if (scenario := _release_scenario_parameter(item)) is not None
-        and scenario.id in selected
-    }
-    if missing := selected - surviving.keys():
-        values = ", ".join(sorted(missing))
+    scenarios_by_id = {scenario.id: scenario for scenario in RELEASE_SCENARIOS}
+    actual_by_scenario = {scenario_id: set() for scenario_id in selected}
+    for item in session.items:
+        scenario = _release_scenario_parameter(item)
+        if scenario is None or scenario.id not in selected:
+            continue
+        actual_by_scenario[scenario.id].update(_function_acceptance_probes(item))
+
+    mismatches = []
+    for scenario_id in sorted(selected):
+        expected = set(required_release_probes(scenarios_by_id[scenario_id]))
+        actual = actual_by_scenario[scenario_id]
+        details = []
+        if missing := expected - actual:
+            details.append(
+                "missing " + ", ".join(sorted(probe.value for probe in missing))
+            )
+        if unexpected := actual - expected:
+            details.append(
+                "unexpected " + ", ".join(sorted(probe.value for probe in unexpected))
+            )
+        if details:
+            mismatches.append(f"{scenario_id}: {', '.join(details)}")
+    if mismatches:
         raise pytest.UsageError(
-            "selected release acceptance scenario has no collected acceptance "
-            f"item: {values}"
+            "selected release acceptance probes do not match collected items: "
+            + "; ".join(mismatches)
         )
+
     missing_inputs = {
         name
-        for scenario in surviving.values()
+        for scenario_id in selected
+        for scenario in (scenarios_by_id[scenario_id],)
         for name in (scenario.image_variable, scenario.context_variable)
         if name is not None and not os.environ.get(name)
     }

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from tests.acceptance_scenarios import (
     RELEASE_SCENARIOS,
+    AcceptanceProbe,
     AcceptanceScenario,
     Capability,
 )
@@ -249,27 +250,6 @@ _GPU_AUDIO_SCENARIOS = tuple(
     scenario for scenario in _SCENARIOS if Capability.GPU_AUDIO in scenario.capabilities
 )
 
-# Probe ownership makes live coverage follow the catalog instead of a hard-coded
-# image disposition. The unit contract below fails closed when a release gains a
-# capability without a selected proof.
-RELEASE_PROBE_SCENARIO_IDS = {
-    "image": frozenset(scenario.id for scenario in _SCENARIOS),
-    "cpu_audio_application": frozenset(
-        scenario.id for scenario in _CPU_AUDIO_SCENARIOS
-    ),
-    "cli_bridge": frozenset(scenario.id for scenario in _CLI_SCENARIOS),
-    "gpu_audio": frozenset(scenario.id for scenario in _GPU_AUDIO_SCENARIOS),
-}
-RELEASE_CAPABILITY_PROBE_OWNERS = {
-    Capability.APPLICATION: ("cpu_audio_application",),
-    Capability.CLI: ("cli_bridge",),
-    Capability.MANAGER: ("image", "cpu_audio_application"),
-    Capability.CUSTOM_NODES: ("image",),
-    Capability.HOOKS: ("image",),
-    Capability.CPU_AUDIO: ("cpu_audio_application",),
-    Capability.GPU_AUDIO: ("gpu_audio",),
-}
-
 
 def _environment(name: str) -> str:
     value = os.environ.get(name)
@@ -337,6 +317,7 @@ def _node_identity(node: dict[str, object]) -> dict[str, object]:
 
 # Release scenarios reuse one context/image while proving exact application
 # capabilities.
+@pytest.mark.acceptance(probes=(AcceptanceProbe.CONTEXT,))
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
 def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     scenario: AcceptanceScenario,
@@ -1113,6 +1094,7 @@ def _run_disposable(
         )
 
 
+@pytest.mark.acceptance(probes=(AcceptanceProbe.IMAGE,))
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
 def test_image_has_exact_environment_and_disposition(
     scenario: AcceptanceScenario,
@@ -1141,6 +1123,7 @@ def test_image_has_exact_environment_and_disposition(
     )
 
 
+@pytest.mark.acceptance(probes=(AcceptanceProbe.CPU_AUDIO_APPLICATION,))
 @pytest.mark.parametrize("scenario", _CPU_AUDIO_SCENARIOS, ids=lambda item: item.id)
 def test_cpu_audio_api_writable_state_and_clean_shutdown(
     scenario: AcceptanceScenario,
@@ -1152,6 +1135,7 @@ def test_cpu_audio_api_writable_state_and_clean_shutdown(
     )
 
 
+@pytest.mark.acceptance(probes=(AcceptanceProbe.CLI_BRIDGE,))
 @pytest.mark.parametrize("scenario", _CLI_SCENARIOS, ids=lambda item: item.id)
 def test_comfy_cli_workspace_python_bridge(
     scenario: AcceptanceScenario,
@@ -1163,6 +1147,7 @@ def test_comfy_cli_workspace_python_bridge(
 
 
 @pytest.mark.gpu
+@pytest.mark.acceptance(probes=(AcceptanceProbe.CUDA_AUDIO,))
 @pytest.mark.parametrize("scenario", _GPU_AUDIO_SCENARIOS, ids=lambda item: item.id)
 def test_cuda_audio_api_and_clean_shutdown(
     scenario: AcceptanceScenario,

@@ -9,6 +9,7 @@ from pathlib import Path
 from packaging.specifiers import SpecifierSet
 
 from comfyui_docker_helper.exact_ledger import (
+    CDH_VERSION,
     UV_BUILD_REQUIREMENT,
     UV_RUNTIME_REQUIREMENT,
 )
@@ -55,12 +56,12 @@ def test_supported_python_minors_match_project_metadata() -> None:
     }
 
 
-def test_exact_v05_project_toolchain_metadata() -> None:
-    """The package carries the exact release-owned host toolchain ledger."""
+def test_project_release_identity_matches_toolchain_metadata() -> None:
+    """Package metadata matches the current release and host toolchain ledger."""
 
     pyproject = _project_metadata()
 
-    assert pyproject["project"]["version"] == "0.5.0"
+    assert pyproject["project"]["version"] == CDH_VERSION
     assert UV_RUNTIME_REQUIREMENT in pyproject["project"]["dependencies"]
     assert pyproject["build-system"]["requires"] == [UV_BUILD_REQUIREMENT]
 

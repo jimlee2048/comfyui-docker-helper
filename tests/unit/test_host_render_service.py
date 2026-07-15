@@ -1,4 +1,4 @@
-"""Active canonical render-service mode and atomic context contracts."""
+"""Canonical render-service modes and atomic context contracts."""
 
 from __future__ import annotations
 

@@ -15,14 +15,12 @@ from tests.acceptance_scenarios import (
     ACCEPTANCE_SCENARIOS,
     RELEASE_PYTHON_PROFILES,
     RELEASE_SCENARIOS,
+    AcceptanceProbe,
     AcceptanceScenario,
     Capability,
     Cost,
     ScenarioClass,
-)
-from tests.smoke.test_application_acceptance_live import (
-    RELEASE_CAPABILITY_PROBE_OWNERS,
-    RELEASE_PROBE_SCENARIO_IDS,
+    required_release_probes,
 )
 
 from comfyui_docker_helper.config import load_validate_config_result
@@ -107,23 +105,19 @@ def test_release_python_profiles_are_unique_and_version_ordered() -> None:
     )
 
 
-# Every declared release capability owns a live proof, and each owning probe is
-# selected for every release that advertises that capability.
-def test_release_capabilities_have_selected_live_probe_owners() -> None:
-    declared_capabilities = {
-        capability
-        for scenario in RELEASE_SCENARIOS
-        for capability in scenario.capabilities
-    }
-
-    assert set(RELEASE_CAPABILITY_PROBE_OWNERS) == declared_capabilities
+# Release probes are unique typed identities derived from each catalog capability set.
+def test_release_probe_policy_is_typed_unique_and_capability_derived() -> None:
     for scenario in RELEASE_SCENARIOS:
-        for capability in scenario.capabilities:
-            owners = RELEASE_CAPABILITY_PROBE_OWNERS[capability]
-            assert owners
-            assert all(
-                scenario.id in RELEASE_PROBE_SCENARIO_IDS[owner] for owner in owners
-            )
+        probes = required_release_probes(scenario)
+        assert len(probes) == len(set(probes))
+        assert all(isinstance(probe, AcceptanceProbe) for probe in probes)
+        assert {AcceptanceProbe.CONTEXT, AcceptanceProbe.IMAGE} <= set(probes)
+        assert (AcceptanceProbe.CLI_BRIDGE in probes) is (
+            Capability.CLI in scenario.capabilities
+        )
+        assert (AcceptanceProbe.CUDA_AUDIO in probes) is (
+            Capability.GPU_AUDIO in scenario.capabilities
+        )
 
 
 # Moving ComfyUI selectors are non-release canaries, never blocking releases.
@@ -168,8 +162,7 @@ def test_selected_release_scenario_requires_all_artifact_inputs(
             scenario.id,
             "-k",
             scenario.id,
-            "tests/smoke/test_application_acceptance_live.py::"
-            "test_rendered_context_routes_exact_lock_plan_and_single_node_layer",
+            "tests/smoke/test_application_acceptance_live.py",
         ),
         cwd=_PROJECT_ROOT,
         env=environment,
@@ -185,18 +178,19 @@ def test_selected_release_scenario_requires_all_artifact_inputs(
     )
 
 
-# Scenario selection cannot turn a deselected release into a successful no-op.
+# Selected releases must retain exactly their catalog-required real probes.
 @pytest.mark.parametrize(
-    ("selected_id", "expression", "expected_status"),
+    ("selected_id", "expression", "expected_fragment"),
     [
-        ("py313-zero", "py313-full", 4),
-        ("py313-full", "py313-full", 0),
+        ("py313-full", "py313-full", None),
+        ("py313-full", "py313-full and not cuda_audio", "missing cuda-audio"),
+        ("py313-zero", "py313-full", "py313-zero: missing"),
     ],
 )
-def test_selected_release_scenario_survives_item_deselection(
+def test_selected_release_collection_matches_required_probes(
     selected_id: str,
     expression: str,
-    expected_status: int,
+    expected_fragment: str | None,
 ) -> None:
     selected = next(item for item in RELEASE_SCENARIOS if item.id == selected_id)
     environment = os.environ.copy()
@@ -224,12 +218,11 @@ def test_selected_release_scenario_survives_item_deselection(
         text=True,
     )
 
-    assert completed.returncode == expected_status, completed.stdout + completed.stderr
-    if expected_status:
-        assert (
-            "selected release acceptance scenario has no collected acceptance item: "
-            f"{selected_id}"
-        ) in completed.stdout + completed.stderr
+    expected_status = 0 if expected_fragment is None else 4
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == expected_status, output
+    if expected_fragment is not None:
+        assert expected_fragment in output
 
 
 # Every public fixture validates offline and every local hook reference exists.

@@ -26,6 +26,14 @@ class Capability(StrEnum):
     GPU_AUDIO = "gpu-audio"
 
 
+class AcceptanceProbe(StrEnum):
+    CONTEXT = "context"
+    IMAGE = "image"
+    CPU_AUDIO_APPLICATION = "cpu-audio-application"
+    CLI_BRIDGE = "cli-bridge"
+    CUDA_AUDIO = "cuda-audio"
+
+
 class Cost(StrEnum):
     NETWORK = "network"
     DOCKER = "docker"
@@ -309,3 +317,30 @@ RELEASE_PYTHON_PROFILES = tuple(
         key=Version,
     )
 )
+
+_BASE_RELEASE_PROBES = frozenset({AcceptanceProbe.CONTEXT, AcceptanceProbe.IMAGE})
+_REQUIRED_PROBES_BY_CAPABILITY = {
+    Capability.APPLICATION: frozenset({AcceptanceProbe.CPU_AUDIO_APPLICATION}),
+    Capability.CLI: frozenset({AcceptanceProbe.CLI_BRIDGE}),
+    Capability.MANAGER: frozenset(
+        {AcceptanceProbe.IMAGE, AcceptanceProbe.CPU_AUDIO_APPLICATION}
+    ),
+    Capability.CUSTOM_NODES: frozenset({AcceptanceProbe.IMAGE}),
+    Capability.HOOKS: frozenset({AcceptanceProbe.IMAGE}),
+    Capability.CPU_AUDIO: frozenset({AcceptanceProbe.CPU_AUDIO_APPLICATION}),
+    Capability.GPU_AUDIO: frozenset({AcceptanceProbe.CUDA_AUDIO}),
+}
+
+
+def required_release_probes(
+    scenario: AcceptanceScenario,
+) -> tuple[AcceptanceProbe, ...]:
+    probes = set(_BASE_RELEASE_PROBES)
+    for capability in scenario.capabilities:
+        try:
+            probes.update(_REQUIRED_PROBES_BY_CAPABILITY[capability])
+        except KeyError as error:
+            raise ValueError(
+                f"release capability has no acceptance probe: {capability.value}"
+            ) from error
+    return tuple(sorted(probes, key=lambda probe: probe.value))

@@ -39,10 +39,11 @@ from comfyui_docker_helper.container.application_installer import (
 )
 from comfyui_docker_helper.container.comfyui_installer import (
     capture_application_requirements,
-    capture_manager_registry_authority,
+    capture_manager_authority,
     observe_application_state,
-    observe_manager_registry_capability,
-    verify_manager_registry_authority,
+    observe_manager_absence,
+    observe_manager_capability,
+    verify_manager_authority,
 )
 from comfyui_docker_helper.container.evidence_writer import (
     ApplicationEvidenceError,
@@ -103,10 +104,10 @@ class _VerificationObservations:
     manager: _ObservationEpoch | None
 
     @classmethod
-    def initial(cls, *, has_manager: bool) -> _VerificationObservations:
+    def initial(cls, *, has_manager_observer: bool) -> _VerificationObservations:
         return cls(
             application=_ObservationEpoch(),
-            manager=_ObservationEpoch.clean() if has_manager else None,
+            manager=_ObservationEpoch.clean() if has_manager_observer else None,
         )
 
     def invalidate_mutation(self) -> None:
@@ -131,11 +132,12 @@ def install_custom_nodes(
 
     nodes = custom_nodes.nodes
     has_registry = any(isinstance(node, RegistryNodePlan) for node in nodes)
-    manager_authority = (
-        capture_manager_registry_authority(application, runtime)
-        if has_registry
-        else None
-    )
+    manager_authority: ParsedManagerRequirements | None = None
+    if nodes:
+        if application.comfyui.manager is None:
+            observe_manager_absence(application, runtime, environ)
+        else:
+            manager_authority = capture_manager_authority(application, runtime)
     custom_nodes_root = _require_real_directory(
         runtime.comfyui_path / "custom_nodes", "custom-nodes root"
     )
@@ -150,7 +152,7 @@ def install_custom_nodes(
     # cdh neither suppresses nor attests user-managed URL rewrites and transports.
     git_environment = runtime.env(environ)
     admitted: list[CustomNodePlan] = []
-    observations = _VerificationObservations.initial(has_manager=has_registry)
+    observations = _VerificationObservations.initial(has_manager_observer=bool(nodes))
 
     for index, node in enumerate(nodes):
         future = nodes[index:]
@@ -161,6 +163,7 @@ def install_custom_nodes(
             application=application,
             runtime=runtime,
             manager_authority=manager_authority,
+            has_registry=has_registry,
             git_path=git_path,
             git_environment=git_environment,
             observations=observations,
@@ -184,6 +187,7 @@ def install_custom_nodes(
                 application=application,
                 runtime=runtime,
                 manager_authority=manager_authority,
+                has_registry=has_registry,
                 git_path=git_path,
                 git_environment=git_environment,
                 observations=observations,
@@ -200,6 +204,7 @@ def install_custom_nodes(
             application=application,
             runtime=runtime,
             manager_authority=manager_authority,
+            has_registry=has_registry,
             git_path=git_path,
             git_environment=git_environment,
             observations=observations,
@@ -241,6 +246,7 @@ def install_custom_nodes(
             application=application,
             runtime=runtime,
             manager_authority=manager_authority,
+            has_registry=has_registry,
             git_path=git_path,
             git_environment=git_environment,
             observations=observations,
@@ -264,6 +270,7 @@ def install_custom_nodes(
                 application=application,
                 runtime=runtime,
                 manager_authority=manager_authority,
+                has_registry=has_registry,
                 git_path=git_path,
                 git_environment=git_environment,
                 observations=observations,
@@ -280,6 +287,7 @@ def install_custom_nodes(
             application=application,
             runtime=runtime,
             manager_authority=manager_authority,
+            has_registry=has_registry,
             git_path=git_path,
             git_environment=git_environment,
             observations=observations,
@@ -296,6 +304,7 @@ def install_custom_nodes(
         application=application,
         runtime=runtime,
         manager_authority=manager_authority,
+        has_registry=has_registry,
         git_path=git_path,
         git_environment=git_environment,
         observations=observations,
@@ -330,6 +339,12 @@ def _validate_inputs(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
 ) -> None:
+    if custom_nodes.nodes and (
+        custom_nodes.install_manager != (application.comfyui.manager is not None)
+    ):
+        raise CustomNodeInstallError(
+            "custom-node Manager state does not match application phase"
+        )
     if runtime.workspace != Path(application.paths.workspace):
         raise CustomNodeInstallError("custom-node workspace does not match BuildPlan")
     if runtime.comfyui_path != Path(application.paths.comfyui):
@@ -557,6 +572,7 @@ def _verify_boundary(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     manager_authority: ParsedManagerRequirements | None,
+    has_registry: bool,
     git_path: Path,
     git_environment: Mapping[str, str],
     observations: _VerificationObservations,
@@ -574,16 +590,17 @@ def _verify_boundary(
         application=application,
         runtime=runtime,
         manager_authority=manager_authority,
+        has_registry=has_registry,
         git_path=git_path,
         git_environment=git_environment,
     )
-    if manager_authority is not None:
-        manager_epoch = observations.manager
-        if manager_epoch is None:  # pragma: no cover - construction invariant.
-            raise CustomNodeInstallError("Manager observation epoch is unavailable")
+    manager_epoch = observations.manager
+    if manager_epoch is not None:
         manager_epoch.observe(
-            lambda: observe_manager_registry_capability(
-                application, runtime, manager_authority
+            lambda: (
+                observe_manager_absence(application, runtime, environ)
+                if manager_authority is None
+                else observe_manager_capability(application, runtime, manager_authority)
             ),
             force=force_manager,
         )
@@ -609,11 +626,12 @@ def _verify_mixed_state(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     manager_authority: ParsedManagerRequirements | None,
+    has_registry: bool,
     git_path: Path,
     git_environment: Mapping[str, str],
 ) -> None:
     if manager_authority is not None:
-        verify_manager_registry_authority(application, runtime, manager_authority)
+        verify_manager_authority(application, runtime, manager_authority)
     admitted_git_targets: list[Path] = []
     for node in admitted:
         if isinstance(node, GitNodePlan):
@@ -628,7 +646,7 @@ def _verify_mixed_state(
                 _planned_git_target(node, custom_nodes_root),
                 f"future Git target {Path(node.target).name}",
             )
-    if manager_authority is not None:
+    if has_registry:
         expected_registry = tuple(
             node for node in admitted if isinstance(node, RegistryNodePlan)
         )

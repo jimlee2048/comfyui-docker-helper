@@ -827,8 +827,8 @@ def test_manager_cm_cli_rejects_unidentifiable_distribution_owner(
         )
 
 
-# Registry installation reuses one immutable observed Manager authority per clean epoch.
-def test_registry_manager_capability_captures_and_reuses_immutable_authority(
+# Custom-node installation reuses one immutable Manager authority per clean epoch.
+def test_manager_capability_captures_and_reuses_immutable_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -876,15 +876,12 @@ def test_registry_manager_capability_captures_and_reuses_immutable_authority(
         record_complete_capability,
     )
 
-    authority = comfyui_installer.capture_manager_registry_authority(
+    authority = comfyui_installer.capture_manager_authority(
         application,
         runtime,
     )
-    comfyui_installer.verify_manager_registry_capability(
-        application,
-        runtime,
-        authority,
-    )
+    comfyui_installer.verify_manager_authority(application, runtime, authority)
+    comfyui_installer.observe_manager_capability(application, runtime, authority)
 
     assert events == [
         ("requirements", application, manager, runtime.comfyui_path),
@@ -894,7 +891,7 @@ def test_registry_manager_capability_captures_and_reuses_immutable_authority(
     ]
 
 
-def test_registry_manager_authority_rejects_same_semantics_content_drift(
+def test_manager_authority_rejects_same_semantics_content_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -906,7 +903,7 @@ def test_registry_manager_authority_rejects_same_semantics_content_drift(
         comfyui_installer, "_verify_manager_capability", lambda *_: None
     )
 
-    authority = comfyui_installer.capture_manager_registry_authority(
+    authority = comfyui_installer.capture_manager_authority(
         application,
         runtime,
     )
@@ -915,11 +912,7 @@ def test_registry_manager_authority_rejects_same_semantics_content_drift(
     )
 
     with pytest.raises(ComfyUIInstallError, match="authority changed"):
-        comfyui_installer.verify_manager_registry_capability(
-            application,
-            runtime,
-            authority,
-        )
+        comfyui_installer.verify_manager_authority(application, runtime, authority)
 
 
 @pytest.mark.parametrize("kind", ["wrong-shebang", "not-executable", "symlink"])

@@ -104,9 +104,11 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
 def _phase(
     runtime: ContainerRuntime,
     nodes: tuple[CustomNodePlan, ...],
+    *,
+    install_manager: bool = True,
 ) -> CustomNodesPhase:
     return CustomNodesPhase(
-        install_manager=True,
+        install_manager=install_manager,
         user_directory=str(runtime.comfyui_path / "user"),
         custom_node_inventory="/opt/cdh/build/custom-node-inventory.json",
         nodes=nodes,
@@ -129,17 +131,22 @@ def _patch_phases(
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "capture_manager_registry_authority",
+        "capture_manager_authority",
         lambda *_args: object(),
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "verify_manager_registry_authority",
+        "verify_manager_authority",
         lambda *_args: None,
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "observe_manager_registry_capability",
+        "observe_manager_capability",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_absence",
         lambda *_args: None,
     )
     monkeypatch.setattr(
@@ -376,8 +383,18 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
     events: list[object] = []
     monkeypatch.setattr(
         custom_node_installer,
-        "capture_manager_registry_authority",
+        "capture_manager_authority",
         lambda *_args: pytest.fail("empty plan must not capture Manager"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_capability",
+        lambda *_args: pytest.fail("empty plan must not prove enabled Manager"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_absence",
+        lambda *_args: pytest.fail("empty plan must not prove disabled Manager"),
     )
     monkeypatch.setattr(
         custom_node_installer,
@@ -429,6 +446,202 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
         ),
         ("application", True),
     ]
+
+
+# Nonempty execution admits one consistent Manager desired state before mutation.
+@pytest.mark.parametrize("manager_enabled", [False, True])
+def test_nonempty_plan_rejects_manager_phase_mismatch_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manager_enabled: bool,
+) -> None:
+    application, runtime = _application(tmp_path)
+    if not manager_enabled:
+        document = application.model_dump(mode="python")
+        document["comfyui"]["manager"] = None
+        application = ApplicationPhase.model_validate(document)
+    custom_nodes = _phase(
+        runtime,
+        (_git_node(runtime, pre=("must-not-run.py",)),),
+        install_manager=not manager_enabled,
+    )
+    for name in (
+        "capture_application_requirements",
+        "capture_manager_authority",
+        "observe_manager_absence",
+        "run_hook",
+        "_install_git_node",
+    ):
+        monkeypatch.setattr(
+            custom_node_installer,
+            name,
+            lambda *_args, **_kwargs: pytest.fail(
+                "phase mismatch must fail before mutation or observation"
+            ),
+        )
+
+    with pytest.raises(CustomNodeInstallError, match="does not match application"):
+        custom_node_installer.install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+        )
+
+
+def test_enabled_git_only_plan_observes_manager_without_registry_scanning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = _phase(runtime, (_git_node(runtime),))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        custom_node_installer,
+        "capture_manager_authority",
+        lambda *_args: events.append("capture-manager") or object(),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "verify_manager_authority",
+        lambda *_args: events.append("verify-manager-authority"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_capability",
+        lambda *_args: events.append("observe-manager"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_install_git_node",
+        lambda *_args: events.append("install-git"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_git_provenance",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_scan_registry_identities",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Git-only plans must not enter Registry scanning"
+        ),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_write_custom_node_inventory",
+        lambda *_args: events.append("inventory"),
+    )
+
+    custom_node_installer.install_custom_nodes(
+        custom_nodes,
+        application,
+        runtime=runtime,
+    )
+
+    assert events.count("capture-manager") == 1
+    assert events.count("install-git") == 1
+    assert events.count("verify-manager-authority") == 5
+    assert events.count("observe-manager") == 2
+    assert events[-2:] == ["observe-manager", "inventory"]
+
+
+def test_enabled_git_only_plan_rejects_manager_mutation_at_next_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = _phase(runtime, (_git_node(runtime),))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    manager_valid = True
+
+    def observe_manager(*_args) -> None:
+        if not manager_valid:
+            raise ComfyUIInstallError("Manager capability was mutated")
+
+    def install_git(*_args) -> None:
+        nonlocal manager_valid
+        manager_valid = False
+
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_capability",
+        observe_manager,
+    )
+    monkeypatch.setattr(custom_node_installer, "_install_git_node", install_git)
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_mixed_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_write_custom_node_inventory",
+        lambda *_args: pytest.fail("invalid Manager state must prevent evidence"),
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="was mutated"):
+        custom_node_installer.install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+        )
+
+
+def test_disabled_git_only_plan_rejects_manager_introduction_at_next_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    document = application.model_dump(mode="python")
+    document["comfyui"]["manager"] = None
+    application = ApplicationPhase.model_validate(document)
+    custom_nodes = _phase(
+        runtime,
+        (_git_node(runtime),),
+        install_manager=False,
+    )
+    _patch_phases(monkeypatch, application, custom_nodes)
+    manager_present = False
+    absence_observations = 0
+
+    def observe_absence(*_args) -> None:
+        nonlocal absence_observations
+        absence_observations += 1
+        if manager_present:
+            raise ComfyUIInstallError("Manager exists while disabled")
+
+    def install_git(*_args) -> None:
+        nonlocal manager_present
+        manager_present = True
+
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_absence",
+        observe_absence,
+    )
+    monkeypatch.setattr(custom_node_installer, "_install_git_node", install_git)
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_mixed_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_write_custom_node_inventory",
+        lambda *_args: pytest.fail("invalid Manager state must prevent evidence"),
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="exists while disabled"):
+        custom_node_installer.install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+        )
+
+    assert absence_observations == 2
 
 
 # Runtime admission rejects forged plan identities before invoking installers.
@@ -615,7 +828,7 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "observe_manager_registry_capability",
+        "observe_manager_capability",
         lambda *_args: events.append(("manager-check",)),
     )
     monkeypatch.setattr(
@@ -810,7 +1023,7 @@ def test_empty_hook_phases_reuse_observations_and_force_fresh_final_evidence(
 
     monkeypatch.setattr(
         custom_node_installer,
-        "observe_manager_registry_capability",
+        "observe_manager_capability",
         observe_manager,
     )
 
@@ -933,7 +1146,7 @@ def test_mixed_proof_excludes_admitted_git_only_after_fresh_git_proof(
 
     monkeypatch.setattr(
         custom_node_installer,
-        "verify_manager_registry_authority",
+        "verify_manager_authority",
         lambda *_args: events.append("manager"),
     )
     monkeypatch.setattr(
@@ -952,10 +1165,11 @@ def test_mixed_proof_excludes_admitted_git_only_after_fresh_git_proof(
     custom_node_installer._verify_mixed_state(
         runtime.comfyui_path / "custom_nodes",
         (git,),
-        (),
+        (_node("future-registry", "1.0.0"),),
         application=application,
         runtime=runtime,
         manager_authority=object(),
+        has_registry=True,
         git_path=Path("/usr/bin/git"),
         git_environment={},
     )
@@ -972,7 +1186,7 @@ def test_future_git_target_is_rejected_before_its_pre_hooks(
     Path(git.target).mkdir()
     monkeypatch.setattr(
         custom_node_installer,
-        "verify_manager_registry_authority",
+        "verify_manager_authority",
         lambda *_args: None,
     )
 
@@ -984,6 +1198,7 @@ def test_future_git_target_is_rejected_before_its_pre_hooks(
             application=application,
             runtime=runtime,
             manager_authority=object(),
+            has_registry=False,
             git_path=Path("/usr/bin/git"),
             git_environment={},
         )
@@ -1125,7 +1340,7 @@ def test_hook_manager_mutation_fails_at_next_capability_proof(
 
     monkeypatch.setattr(
         custom_node_installer,
-        "observe_manager_registry_capability",
+        "observe_manager_capability",
         verify_capability,
     )
     monkeypatch.setattr(custom_node_installer, "run_hook", mutate)
@@ -1162,9 +1377,7 @@ def test_first_pre_hook_manager_mutation_stops_before_second_pre_hook(
         hooks.append(name)
         valid["manager"] = False
 
-    monkeypatch.setattr(
-        custom_node_installer, "observe_manager_registry_capability", verify
-    )
+    monkeypatch.setattr(custom_node_installer, "observe_manager_capability", verify)
     monkeypatch.setattr(custom_node_installer, "run_hook", hook)
     monkeypatch.setattr(
         custom_node_installer,
@@ -1254,9 +1467,7 @@ def test_real_hook_is_reproved_before_the_next_cm_cli_process(
             version,
         )
 
-    monkeypatch.setattr(
-        custom_node_installer, "observe_manager_registry_capability", prove
-    )
+    monkeypatch.setattr(custom_node_installer, "observe_manager_capability", prove)
     monkeypatch.setattr(custom_node_installer, "run_argv", install)
     monkeypatch.setattr(
         custom_node_installer, "_write_custom_node_inventory", lambda *_args: None
@@ -1298,18 +1509,18 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
 
     monkeypatch.setattr(
         custom_node_installer,
-        "capture_manager_registry_authority",
-        comfyui_installer.capture_manager_registry_authority,
+        "capture_manager_authority",
+        comfyui_installer.capture_manager_authority,
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "verify_manager_registry_authority",
-        comfyui_installer.verify_manager_registry_authority,
+        "verify_manager_authority",
+        comfyui_installer.verify_manager_authority,
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "observe_manager_registry_capability",
-        comfyui_installer.observe_manager_registry_capability,
+        "observe_manager_capability",
+        comfyui_installer.observe_manager_capability,
     )
     monkeypatch.setattr(
         comfyui_installer,

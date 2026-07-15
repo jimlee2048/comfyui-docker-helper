@@ -577,11 +577,11 @@ def _verify_declared_manager_distributions(
         raise ComfyUIInstallError("Manager cm-cli console ownership is invalid")
 
 
-def capture_manager_registry_authority(
+def capture_manager_authority(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
 ) -> ParsedManagerRequirements:
-    """Capture and prove the immutable Manager authority before Registry hooks."""
+    """Capture and prove the immutable Manager desired-state authority."""
     manager = application.comfyui.manager
     if manager is None:
         raise ComfyUIInstallError("Manager capability is unavailable")
@@ -590,17 +590,7 @@ def capture_manager_registry_authority(
     return parsed
 
 
-def verify_manager_registry_capability(
-    application: ApplicationPhase,
-    runtime: ContainerRuntime,
-    authority: ParsedManagerRequirements,
-) -> None:
-    """Re-prove both immutable Manager authority and complete capability."""
-    verify_manager_registry_authority(application, runtime, authority)
-    observe_manager_registry_capability(application, runtime, authority)
-
-
-def verify_manager_registry_authority(
+def verify_manager_authority(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     authority: ParsedManagerRequirements,
@@ -614,7 +604,7 @@ def verify_manager_registry_authority(
         raise ComfyUIInstallError("Manager requirements authority changed")
 
 
-def observe_manager_registry_capability(
+def observe_manager_capability(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     authority: ParsedManagerRequirements,
@@ -624,6 +614,15 @@ def observe_manager_registry_capability(
     if manager is None:
         raise ComfyUIInstallError("Manager capability is unavailable")
     _verify_manager_capability(application, manager, authority, runtime, None)
+
+
+def observe_manager_absence(
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Observe the complete disabled Manager desired-state contract."""
+    _verify_manager_absent(application, runtime, environ)
 
 
 def _read_manager_requirements(

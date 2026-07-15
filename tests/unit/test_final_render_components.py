@@ -1,4 +1,4 @@
-"""Renderer, materializer, and phase-loader contracts."""
+"""Renderer, materializer, and phase-admission contracts."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
-from comfyui_docker_helper.container.phase_inputs import load_phase_input
+from comfyui_docker_helper.container.phase_inputs import PhaseInputAdmission
 from comfyui_docker_helper.rendering import final_materializer
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
@@ -60,10 +60,15 @@ def test_renderer_quotes_container_paths_without_host_projection() -> None:
     document["system"]["workspace"] = "/workspace data"
     changed = FinalConfig.model_validate(document)
 
-    rendered = render_build_plan_dockerfile(build_plan(changed, accepted_resolution()))
+    plan = build_plan(changed, accepted_resolution())
+    rendered = render_build_plan_dockerfile(plan)
+    launch_comfyui = PurePosixPath(plan.runtime.launch_command[1]).parent
 
     assert 'ENV WORKSPACE="/workspace data"' in rendered
     assert 'WORKDIR "/workspace data"' in rendered
+    assert f"ENV COMFYUI_PATH={json.dumps(str(launch_comfyui))}" in rendered
+    assert 'ENV VIRTUAL_ENV="/opt/venv"' in rendered
+    assert 'ENV PATH="/opt/uv/bin:/opt/venv/bin:${PATH}"' in rendered
 
 
 def test_renderer_preserves_non_package_runtime_environment() -> None:
@@ -297,57 +302,27 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     assert "PIP_CONSTRAINT" not in dockerfile
 
     expected = build_plan_digest(plan)
+    admission = PhaseInputAdmission.from_path(
+        first / "build-plan.json",
+        expected_build_plan_digest=expected,
+    )
+    assert admission.load(first / "phases/build.json", "build") == plan.build
     assert (
-        load_phase_input(
-            first / "phases/build.json",
-            "build",
-            expected_build_plan_digest=expected,
-        )
-        == plan.build
+        admission.load(first / "phases/toolchain.json", "toolchain") == plan.toolchain
     )
     assert (
-        load_phase_input(
-            first / "phases/toolchain.json",
-            "toolchain",
-            expected_build_plan_digest=expected,
-        )
-        == plan.toolchain
-    )
-    assert (
-        load_phase_input(
-            first / "phases/application.json",
-            "application",
-            expected_build_plan_digest=expected,
-        )
+        admission.load(first / "phases/application.json", "application")
         == plan.application
     )
     assert (
-        load_phase_input(
-            first / "phases/custom-nodes.json",
-            "custom-nodes",
-            expected_build_plan_digest=expected,
-        )
+        admission.load(first / "phases/custom-nodes.json", "custom-nodes")
         == plan.custom_nodes
     )
-    assert (
-        load_phase_input(
-            first / "phases/files.json",
-            "files",
-            expected_build_plan_digest=expected,
-        )
-        == plan.files
-    )
-    assert (
-        load_phase_input(
-            first / "phases/runtime.json",
-            "runtime",
-            expected_build_plan_digest=expected,
-        )
-        == plan.runtime
-    )
+    assert admission.load(first / "phases/files.json", "files") == plan.files
+    assert admission.load(first / "phases/runtime.json", "runtime") == plan.runtime
 
 
-def test_phase_loader_rejects_wrong_binding_wrong_phase_and_extra_fields(
+def test_phase_admission_rejects_wrong_binding_wrong_phase_and_extra_fields(
     tmp_path: Path,
 ) -> None:
     content = b"#!/bin/sh\n"
@@ -374,28 +349,63 @@ def test_phase_loader_rejects_wrong_binding_wrong_phase_and_extra_fields(
     )
     phase_path = output / "phases/toolchain.json"
 
-    with pytest.raises(ValueError, match="different BuildPlan"):
-        load_phase_input(
-            phase_path,
-            "toolchain",
+    with pytest.raises(ValueError, match="expected digest"):
+        PhaseInputAdmission.from_path(
+            output / "build-plan.json",
             expected_build_plan_digest=f"sha256:{'0' * 64}",
         )
+    admission = PhaseInputAdmission.from_path(
+        output / "build-plan.json",
+        expected_build_plan_digest=build_plan_digest(plan),
+    )
     with pytest.raises(ValidationError):
-        load_phase_input(
-            phase_path,
-            "files",
-            expected_build_plan_digest=build_plan_digest(plan),
-        )
+        admission.load(phase_path, "files")
 
     document = json.loads(phase_path.read_text())
     document["unknown"] = True
     phase_path.write_text(json.dumps(document))
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        load_phase_input(
-            phase_path,
-            "toolchain",
+        admission.load(phase_path, "toolchain")
+
+
+# Canonical plan bytes and matching plan fields, not phase self-labels, authorize
+# each installer input.
+def test_phase_admission_rejects_changed_canonical_plan_under_literal_digest(
+    tmp_path: Path,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    output = tmp_path / "output"
+    output.mkdir()
+    materialize_build_plan(plan, output)
+    document = json.loads((output / "build-plan.json").read_bytes())
+    document["runtime"]["environment"][0]["value"] = "changed"
+    (output / "build-plan.json").write_text(json.dumps(document))
+
+    with pytest.raises(ValueError, match="expected digest"):
+        PhaseInputAdmission.from_path(
+            output / "build-plan.json",
             expected_build_plan_digest=build_plan_digest(plan),
         )
+
+
+def test_phase_admission_rejects_self_labelled_substituted_payload(
+    tmp_path: Path,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    output = tmp_path / "output"
+    output.mkdir()
+    materialize_build_plan(plan, output)
+    phase_path = output / "phases/application.json"
+    document = json.loads(phase_path.read_bytes())
+    document["payload"]["os_packages"].append("zlib1g")
+    phase_path.write_text(json.dumps(document))
+    admission = PhaseInputAdmission.from_path(
+        output / "build-plan.json",
+        expected_build_plan_digest=build_plan_digest(plan),
+    )
+
+    with pytest.raises(ValueError, match="does not match the canonical BuildPlan"):
+        admission.load(phase_path, "application")
 
 
 def test_materializer_rejects_missing_extra_or_changed_local_sources(

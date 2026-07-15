@@ -342,6 +342,12 @@ class PathsPlan(_PlanModel):
     def _validate_path(cls, value: str) -> str:
         return _absolute_posix_path(value, "application path")
 
+    @model_validator(mode="after")
+    def _validate_distinct_roots(self) -> PathsPlan:
+        if self.comfyui == self.workspace:
+            raise ValueError("ComfyUI and workspace paths must be different")
+        return self
+
 
 class ExactPackagePlan(_PlanModel):
     name: str
@@ -983,6 +989,14 @@ class BuildPlan(_PlanModel):
             raise ValueError("file targets must be strict descendants of ComfyUI")
         if len(file_targets) != len(set(file_targets)):
             raise ValueError("file targets must be unique")
+        expected_launch_head = (
+            str(PurePosixPath(self.application.paths.venv) / "bin" / "python"),
+            str(PurePosixPath(self.application.paths.comfyui) / "main.py"),
+        )
+        if self.runtime.launch_command[:2] != expected_launch_head:
+            raise ValueError(
+                "runtime launch executable and script must match the application"
+            )
         return self
 
 

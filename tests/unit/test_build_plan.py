@@ -860,6 +860,49 @@ def test_build_plan_parser_rejects_forged_release_pip_authority() -> None:
         parse_build_plan_json(json.dumps(document))
 
 
+# Application roots stay distinct while arbitrary absolute non-equal layouts
+# remain valid serialized execution plans.
+def test_build_plan_parser_rejects_equal_workspace_and_comfyui_paths() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["application"]["paths"]["workspace"] = document["application"]["paths"][
+        "comfyui"
+    ]
+
+    with pytest.raises(ValidationError, match="paths must be different"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_accepts_alternate_absolute_workspace_layout() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["application"]["paths"]["workspace"] = "/srv/work area"
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert parsed.application.paths.workspace == "/srv/work area"
+
+
+# Runtime launch identity cannot diverge from the admitted application owners.
+@pytest.mark.parametrize(
+    ("index", "value"),
+    [(0, "/usr/bin/python3"), (1, "/tmp/other-main.py")],
+)
+def test_build_plan_parser_binds_runtime_launch_identity_to_application(
+    index: int,
+    value: str,
+) -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["runtime"]["launch_command"][index] = value
+
+    with pytest.raises(ValidationError, match="must match the application"):
+        parse_build_plan_json(json.dumps(document))
+
+
 def test_build_plan_parser_rejects_forged_python_catalog_binding() -> None:
     document = json.loads(
         dump_build_plan_json(build_plan(final_config(), accepted_resolution()))

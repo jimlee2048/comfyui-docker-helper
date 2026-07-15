@@ -1,5 +1,6 @@
 """Smoke tests for the CLI skeleton and shared error boundary."""
 
+import json
 from contextlib import contextmanager
 from importlib.metadata import entry_points, version
 from pathlib import Path
@@ -12,17 +13,19 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config.build_plan import BuildOutputPlan
+from comfyui_docker_helper.config.build_plan import BuildOutputPlan, build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.container import cli as container_cli
+from comfyui_docker_helper.container import phase_inputs as phase_inputs_module
 from comfyui_docker_helper.container.phase_inputs import (
-    load_phase_input,
+    BuildPhaseDocument,
     phase_document,
 )
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.uv_runner import HostUvError
+from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
 
 
 # The public command surface, adapters, and error boundary stay executable and concise.
@@ -125,48 +128,130 @@ def test_registry_helper_help_exposes_only_owned_inputs(
     assert "--lock" not in result.output
 
 
-def test_install_comfyui_adapter_loads_each_typed_phase_once(
+@pytest.mark.parametrize(
+    "command",
+    ["download-files", "install-comfyui", "install-custom-nodes"],
+)
+def test_container_phase_consumers_admit_one_canonical_plan_per_invocation(
+    command: str,
     cli_runner: CliRunner,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep phase admission at the CLI edge and pass typed values once."""
+    """Admit every installer input once at the CLI edge as narrow phases."""
     plan = build_plan(final_config(), accepted_resolution())
-    loaded: list[str] = []
-    observed: list[object] = []
+    context = tmp_path / "context"
+    context.mkdir()
+    materialize_build_plan(plan, context)
+    parse_count = 0
+    parse = phase_inputs_module.parse_build_plan_json
 
-    def load(_path, phase, **_kwargs):
-        loaded.append(phase)
-        return plan.application if phase == "application" else plan.toolchain
+    def counted_parse(document):
+        nonlocal parse_count
+        parse_count += 1
+        return parse(document)
 
-    monkeypatch.setattr(container_cli, "load_phase_input", load)
+    observed: list[tuple[object, ...]] = []
+    monkeypatch.setattr(phase_inputs_module, "parse_build_plan_json", counted_parse)
+    monkeypatch.setattr(
+        container_cli, "MATERIALIZED_BUILD_PLAN_PATH", context / "build-plan.json"
+    )
+    monkeypatch.setattr(
+        container_cli,
+        "download_files",
+        lambda files: observed.append((files,)),
+    )
     monkeypatch.setattr(
         container_cli,
         "install_comfyui",
-        lambda application, toolchain, **_kwargs: observed.extend(
+        lambda application, toolchain, **_kwargs: observed.append(
             (application, toolchain)
+        ),
+    )
+    monkeypatch.setattr(
+        container_cli,
+        "install_custom_nodes",
+        lambda custom_nodes, application, **_kwargs: observed.append(
+            (custom_nodes, application)
         ),
     )
     monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
     monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
     monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
+    phase_dir = context / "phases"
+    arguments = {
+        "download-files": [
+            "--phase",
+            str(phase_dir / "files.json"),
+        ],
+        "install-comfyui": [
+            "--application-phase",
+            str(phase_dir / "application.json"),
+            "--toolchain-phase",
+            str(phase_dir / "toolchain.json"),
+        ],
+        "install-custom-nodes": [
+            "--custom-nodes-phase",
+            str(phase_dir / "custom-nodes.json"),
+            "--application-phase",
+            str(phase_dir / "application.json"),
+        ],
+    }
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            command,
+            *arguments[command],
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert parse_count == 1
+    assert (
+        observed
+        == {
+            "download-files": [(plan.files,)],
+            "install-comfyui": [(plan.application, plan.toolchain)],
+            "install-custom-nodes": [(plan.custom_nodes, plan.application)],
+        }[command]
+    )
+
+
+def test_container_phase_admission_hides_invalid_plan_secret_values(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "password-sentinel-do-not-print"
+    plan = build_plan(final_config(), accepted_resolution())
+    context = tmp_path / "context"
+    context.mkdir()
+    materialize_build_plan(plan, context)
+    plan_path = context / "build-plan.json"
+    document = json.loads(plan_path.read_bytes())
+    document["runtime"]["ssh"]["password"] = f"{sentinel}\n"
+    plan_path.write_text(json.dumps(document))
+    monkeypatch.setattr(container_cli, "MATERIALIZED_BUILD_PLAN_PATH", plan_path)
 
     result = cli_runner.invoke(
         app,
         [
             "container",
-            "install-comfyui",
-            "--application-phase",
-            "application.json",
-            "--toolchain-phase",
-            "toolchain.json",
+            "download-files",
+            "--phase",
+            str(context / "phases/files.json"),
             "--build-plan-digest",
-            "sha256:" + "a" * 64,
+            build_plan_digest(plan),
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    assert loaded == ["application", "toolchain"]
-    assert observed == [plan.application, plan.toolchain]
+    assert result.exit_code == 1
+    assert result.output == "Error: canonical BuildPlan is invalid\n"
+    assert sentinel not in result.output
+    assert sentinel not in str(result.exception)
 
 
 # Host command adapters preserve offline validation and explicit render/build inputs.
@@ -501,11 +586,9 @@ platforms = ["linux/amd64"]
     assert configuration_build.output == plan_build.output
     assert configuration_build.platforms == list(plan_build.platforms)
     assert (
-        load_phase_input(
-            context / "phases" / "build.json",
-            "build",
-            expected_build_plan_digest=plan_digest,
-        )
+        BuildPhaseDocument.model_validate_json(
+            (context / "phases" / "build.json").read_bytes()
+        ).payload
         == plan_build
     )
     assert seen["buildx"] == {

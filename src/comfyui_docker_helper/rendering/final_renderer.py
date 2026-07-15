@@ -2,12 +2,18 @@
 
 import json
 import shlex
+from pathlib import PurePosixPath
 
 from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
 
 
 def render_build_plan_dockerfile(plan: BuildPlan) -> str:
     """Render literal locked image identities and materialized phase inputs."""
+    launch_python = PurePosixPath(plan.runtime.launch_command[0])
+    launch_script = PurePosixPath(plan.runtime.launch_command[1])
+    runtime_venv = launch_python.parent.parent
+    runtime_comfyui = launch_script.parent
+    runtime_path = f"/opt/uv/bin:{launch_python.parent.as_posix()}:${{PATH}}"
     lines = [
         "# syntax=docker/dockerfile:1.7",
         f"FROM --platform={plan.toolchain.platform} "
@@ -33,12 +39,12 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         lines.append("COPY runtime/hooks /opt/cdh/runtime/hooks")
     lines.extend(
         (
-            f"ENV VIRTUAL_ENV={_docker_word(plan.application.paths.venv)}",
+            f"ENV VIRTUAL_ENV={_docker_word(runtime_venv.as_posix())}",
             f"ENV UV_TOOL_DIR={_docker_word(plan.toolchain.tool_store.tool_dir)}",
             f"ENV UV_TOOL_BIN_DIR={_docker_word(plan.toolchain.tool_store.bin_dir)}",
-            'ENV PATH="/opt/uv/bin:/opt/venv/bin:${PATH}"',
+            f"ENV PATH={_docker_word(runtime_path)}",
             f"ENV WORKSPACE={_docker_word(plan.application.paths.workspace)}",
-            f"ENV COMFYUI_PATH={_docker_word(plan.application.paths.comfyui)}",
+            f"ENV COMFYUI_PATH={_docker_word(runtime_comfyui.as_posix())}",
             f"WORKDIR {_docker_word(plan.application.paths.workspace)}",
         )
     )

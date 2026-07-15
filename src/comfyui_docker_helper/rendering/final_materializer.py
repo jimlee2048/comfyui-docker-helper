@@ -201,8 +201,13 @@ def _expected_hooks(
 
 def _runtime_config_bytes(plan: BuildPlan) -> bytes:
     command = plan.runtime.launch_command
+    expected_launch_head = (
+        str(PurePosixPath(plan.application.paths.venv) / "bin" / "python"),
+        str(PurePosixPath(plan.application.paths.comfyui) / "main.py"),
+    )
     if (
         len(command) < 7
+        or command[:2] != expected_launch_head
         or command[2] != "--listen"
         or command[4] != "--port"
         or command[6] != "--disable-auto-launch"
@@ -222,7 +227,7 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
     }
     if plan.runtime.download_failure_policy is not None:
         cdh["download_failure_policy"] = plan.runtime.download_failure_policy
-    comfyui_root = PurePosixPath(plan.application.paths.comfyui)
+    comfyui_root = PurePosixPath(command[1]).parent
     files = []
     for item in plan.files.files:
         target = PurePosixPath(item.target)

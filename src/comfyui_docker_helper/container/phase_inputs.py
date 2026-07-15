@@ -1,22 +1,27 @@
-"""Strict BuildPlan-derived phase loaders; no root config or lock re-planning."""
+"""Strict BuildPlan-derived phase admission without config or lock re-planning."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     BuildOutputPlan,
+    BuildPlan,
     CustomNodesPhase,
     FilesPhase,
     RuntimePhase,
     ToolchainPhase,
+    build_plan_digest,
+    parse_build_plan_json,
 )
 
 _PHASE_SCHEMA_VERSION = 1
+MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
 type PhasePayload = (
     BuildOutputPlan
     | ToolchainPhase
@@ -75,6 +80,15 @@ _PHASE_TYPES: dict[
     "runtime": (RuntimePhaseDocument, TypeAdapter(RuntimePhaseDocument)),
 }
 
+_PLAN_PHASE_FIELDS = {
+    "build": "build",
+    "toolchain": "toolchain",
+    "application": "application",
+    "custom-nodes": "custom_nodes",
+    "files": "files",
+    "runtime": "runtime",
+}
+
 
 def phase_document(
     phase: str,
@@ -90,21 +104,46 @@ def phase_document(
     )
 
 
-def load_phase_input(
-    path: str | Path,
-    phase: str,
-    *,
-    expected_build_plan_digest: str,
-) -> BaseModel:
-    """Load one narrow phase and verify that it belongs to the expected plan."""
-    _, adapter = _phase_type(phase)
-    try:
-        document = adapter.validate_json(Path(path).read_bytes())
-    except OSError as error:
-        raise ValueError(f"could not read {phase} phase input") from error
-    if document.build_plan_digest != expected_build_plan_digest:
-        raise ValueError(f"{phase} phase input belongs to a different BuildPlan")
-    return document.payload
+@dataclass(frozen=True, slots=True)
+class PhaseInputAdmission:
+    """Invocation-scoped admission of narrow phases from one canonical plan."""
+
+    _plan: BuildPlan
+    _build_plan_digest: str
+
+    @classmethod
+    def from_path(
+        cls,
+        build_plan_path: str | Path,
+        *,
+        expected_build_plan_digest: str,
+    ) -> PhaseInputAdmission:
+        try:
+            plan = parse_build_plan_json(Path(build_plan_path).read_bytes())
+        except OSError as error:
+            raise ValueError("could not read canonical BuildPlan") from error
+        except ValidationError as error:
+            raise ValueError("canonical BuildPlan is invalid") from error
+        observed_digest = build_plan_digest(plan)
+        if observed_digest != expected_build_plan_digest:
+            raise ValueError("canonical BuildPlan does not match the expected digest")
+        return cls(plan, observed_digest)
+
+    def load(self, path: str | Path, phase: str) -> PhasePayload:
+        """Return one typed payload only after exact plan-field admission."""
+        _, adapter = _phase_type(phase)
+        try:
+            document = adapter.validate_json(Path(path).read_bytes())
+        except OSError as error:
+            raise ValueError(f"could not read {phase} phase input") from error
+        if document.build_plan_digest != self._build_plan_digest:
+            raise ValueError(f"{phase} phase input belongs to a different BuildPlan")
+        expected_payload = getattr(self._plan, _PLAN_PHASE_FIELDS[phase])
+        if document.payload != expected_payload:
+            raise ValueError(
+                f"{phase} phase input does not match the canonical BuildPlan"
+            )
+        return document.payload
 
 
 def _phase_type(phase: str) -> tuple[type[BaseModel], TypeAdapter[BaseModel]]:

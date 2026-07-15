@@ -16,7 +16,11 @@ from comfyui_docker_helper.container.comfyui_installer import install_comfyui
 from comfyui_docker_helper.container.custom_node_installer import install_custom_nodes
 from comfyui_docker_helper.container.download_files import download_files
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
-from comfyui_docker_helper.container.phase_inputs import load_phase_input
+from comfyui_docker_helper.container.phase_inputs import (
+    MATERIALIZED_BUILD_PLAN_PATH,
+    PhaseInputAdmission,
+    PhasePayload,
+)
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
@@ -51,7 +55,10 @@ def download_files_command(
     ],
 ) -> None:
     """Download files declared by the generated build phase."""
-    files = _load_phase(phase, "files", build_plan_digest, FilesPhase)
+    (files,) = _admit_phases(
+        ((phase, "files", FilesPhase),),
+        build_plan_digest,
+    )
     download_files(files)
 
 
@@ -87,11 +94,12 @@ def install_comfyui_command(
     ] = Path("/opt/cdh/build/pyproject.toml"),
 ) -> None:
     """Install exact official ComfyUI and its complete requirements."""
-    application = _load_phase(
-        application_phase, "application", build_plan_digest, ApplicationPhase
-    )
-    toolchain = _load_phase(
-        toolchain_phase, "toolchain", build_plan_digest, ToolchainPhase
+    application, toolchain = _admit_phases(
+        (
+            (application_phase, "application", ApplicationPhase),
+            (toolchain_phase, "toolchain", ToolchainPhase),
+        ),
+        build_plan_digest,
     )
     install_comfyui(
         application,
@@ -138,11 +146,12 @@ def install_custom_nodes_command(
     ] = Path("/opt/cdh/build/inputs"),
 ) -> None:
     """Install the exact ordered Registry and direct-Git custom nodes."""
-    custom_nodes = _load_phase(
-        custom_nodes_phase, "custom-nodes", build_plan_digest, CustomNodesPhase
-    )
-    application = _load_phase(
-        application_phase, "application", build_plan_digest, ApplicationPhase
+    custom_nodes, application = _admit_phases(
+        (
+            (custom_nodes_phase, "custom-nodes", CustomNodesPhase),
+            (application_phase, "application", ApplicationPhase),
+        ),
+        build_plan_digest,
     )
     install_custom_nodes(
         custom_nodes,
@@ -161,18 +170,19 @@ def entrypoint_command() -> None:
     raise typer.Exit(code=run_entrypoint(runtime=runtime))
 
 
-def _load_phase[
-    Phase: (ApplicationPhase, CustomNodesPhase, FilesPhase, ToolchainPhase)
-](
-    path: Path,
-    name: str,
+def _admit_phases(
+    inputs: tuple[tuple[Path, str, type[PhasePayload]], ...],
     digest: str,
-    expected_type: type[Phase],
-) -> Phase:
+) -> tuple[PhasePayload, ...]:
     try:
-        phase = load_phase_input(path, name, expected_build_plan_digest=digest)
+        admission = PhaseInputAdmission.from_path(
+            MATERIALIZED_BUILD_PLAN_PATH,
+            expected_build_plan_digest=digest,
+        )
+        phases = tuple(admission.load(path, name) for path, name, _ in inputs)
     except ValueError as error:
         raise ContainerCommandError(str(error)) from error
-    if not isinstance(phase, expected_type):  # pragma: no cover - schema owns it.
-        raise ContainerCommandError(f"{name} phase input has the wrong payload")
-    return phase
+    for phase, (_, name, expected_type) in zip(phases, inputs, strict=True):
+        if not isinstance(phase, expected_type):  # pragma: no cover - schema owns it.
+            raise ContainerCommandError(f"{name} phase input has the wrong payload")
+    return phases

@@ -518,6 +518,7 @@ def test_constructor_carries_python_314_exact_identity_through_build_plan() -> N
     assert plan.toolchain.tool_store.comfy_cli is not None
 
 
+# Serialized node and hook authorities reject unsafe execution combinations.
 def test_build_plan_binds_optional_manager_capability_to_custom_node_intent() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
@@ -527,9 +528,105 @@ def test_build_plan_binds_optional_manager_capability_to_custom_node_intent() ->
         BuildPlan.model_validate(document)
 
     document["custom_nodes"]["install_manager"] = False
+    document["custom_nodes"]["nodes"] = tuple(
+        node for node in document["custom_nodes"]["nodes"] if node["type"] == "git"
+    )
     disabled = BuildPlan.model_validate(document)
 
     assert disabled.application.comfyui.manager is None
+
+
+def test_build_plan_parser_rejects_registry_without_manager_or_unique_identity() -> (
+    None
+):
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["application"]["comfyui"]["manager"] = None
+    document["custom_nodes"]["install_manager"] = False
+
+    with pytest.raises(ValidationError, match="Registry nodes require Manager"):
+        parse_build_plan_json(json.dumps(document))
+
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    duplicate = dict(document["custom_nodes"]["nodes"][0])
+    duplicate["id"] = "Registry_Node"
+    document["custom_nodes"]["nodes"] = (
+        *document["custom_nodes"]["nodes"],
+        duplicate,
+    )
+
+    with pytest.raises(ValidationError, match="identities must be unique"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_enforces_complete_hook_tree_identity() -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["custom_nodes"]["nodes"][0]["pre_install"] = (
+        {"relative_path": "hooks/install.txt", "digest": DIGEST_A},
+    )
+    with pytest.raises(ValidationError, match=r"must end in \.sh or \.py"):
+        parse_build_plan_json(json.dumps(document))
+
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["custom_nodes"]["nodes"][0]["pre_install"] = (
+        {"relative_path": "hooks/install.py", "digest": DIGEST_A},
+    )
+    document["custom_nodes"]["nodes"][1]["post_install"] = (
+        {"relative_path": "hooks/install.py", "digest": DIGEST_B},
+    )
+    with pytest.raises(ValidationError, match="conflicting digests"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_accepts_reused_custom_hook_and_separate_tree_path() -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    hook = {"relative_path": "pre-start.d/shared.py", "digest": DIGEST_A}
+    document["custom_nodes"]["nodes"][0]["pre_install"] = (hook,)
+    document["custom_nodes"]["nodes"][1]["post_install"] = (hook,)
+    document["runtime"]["hooks"] = (hook,)
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert parsed.custom_nodes.nodes[0].pre_install[0].digest == DIGEST_A
+    assert parsed.runtime.hooks[0].relative_path == "pre-start.d/shared.py"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["unknown.d/hook.sh", "pre-start.d/nested/hook.sh"],
+)
+def test_build_plan_parser_rejects_invalid_runtime_hook_identity(
+    relative_path: str,
+) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["runtime"]["hooks"] = (
+        {"relative_path": relative_path, "digest": DIGEST_A},
+    )
+
+    with pytest.raises(ValidationError, match="phase directory and filename"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_rejects_duplicate_runtime_hook_identity() -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    hook = {"relative_path": "stop.d/cleanup.sh", "digest": DIGEST_A}
+    document["runtime"]["hooks"] = (hook, hook)
+
+    with pytest.raises(ValidationError, match="runtime hook identities must be unique"):
+        parse_build_plan_json(json.dumps(document))
 
 
 def test_build_plan_binds_registry_user_directory_to_comfyui() -> None:

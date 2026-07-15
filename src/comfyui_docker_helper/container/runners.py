@@ -11,9 +11,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from comfyui_docker_helper.config.hook_validation import (
+    validate_hook_digest,
+    validate_hook_relative_path,
+)
 from comfyui_docker_helper.errors import ApplicationError
-
-_HOOK_SUFFIXES = frozenset({".py", ".sh"})
 
 
 class ContainerCommandError(ApplicationError):
@@ -203,29 +205,20 @@ def run_hook(
 
 
 def _validate_hook_path(hook: str) -> PurePosixPath:
-    path = PurePosixPath(hook)
-    if (
-        not hook
-        or hook.startswith("/")
-        or "\\" in hook
-        or any(ord(character) < 32 or ord(character) == 127 for character in hook)
-        or path.as_posix() != hook
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ContainerCommandError("hook path must be one canonical relative path")
-    if path.suffix not in _HOOK_SUFFIXES:
-        raise ContainerCommandError("hook path must end in .sh or .py")
-    return path
+    try:
+        return PurePosixPath(validate_hook_relative_path(hook))
+    except (TypeError, ValueError) as error:
+        message = str(error)
+        if "canonical safe POSIX path" in message:
+            message = "hook path must be one canonical relative path"
+        raise ContainerCommandError(message) from error
 
 
 def _validate_hook_digest(digest: str) -> None:
-    if (
-        not isinstance(digest, str)
-        or len(digest) != 71
-        or not digest.startswith("sha256:")
-        or any(character not in "0123456789abcdef" for character in digest[7:])
-    ):
-        raise ContainerCommandError("hook expected digest is invalid")
+    try:
+        validate_hook_digest(digest)
+    except (TypeError, ValueError) as error:
+        raise ContainerCommandError("hook expected digest is invalid") from error
 
 
 def _open_hook(path: PurePosixPath, *, scripts_dir: str | Path) -> int:

@@ -220,6 +220,7 @@ def test_container_phase_consumers_admit_one_canonical_plan_per_invocation(
     )
 
 
+# CLI admission reports canonical-plan failures without disclosing plan values.
 def test_container_phase_admission_hides_invalid_plan_secret_values(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -252,6 +253,38 @@ def test_container_phase_admission_hides_invalid_plan_secret_values(
     assert result.output == "Error: canonical BuildPlan is invalid\n"
     assert sentinel not in result.output
     assert sentinel not in str(result.exception)
+
+
+def test_container_phase_cli_rejects_registry_without_manager(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    context = tmp_path / "context"
+    context.mkdir()
+    materialize_build_plan(plan, context)
+    plan_path = context / "build-plan.json"
+    document = json.loads(plan_path.read_bytes())
+    document["application"]["comfyui"]["manager"] = None
+    document["custom_nodes"]["install_manager"] = False
+    plan_path.write_text(json.dumps(document))
+    monkeypatch.setattr(container_cli, "MATERIALIZED_BUILD_PLAN_PATH", plan_path)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "download-files",
+            "--phase",
+            str(context / "phases/files.json"),
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.output == "Error: canonical BuildPlan is invalid\n"
 
 
 # Host command adapters preserve offline validation and explicit render/build inputs.

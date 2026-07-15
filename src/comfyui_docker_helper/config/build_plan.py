@@ -72,9 +72,17 @@ from comfyui_docker_helper.config.final_validation import (
     is_aria2_argument_value,
     is_managed_environment_name,
 )
+from comfyui_docker_helper.config.hook_validation import (
+    hook_lock_identity,
+    materialized_hook_identity,
+    validate_hook_digest,
+    validate_hook_relative_path,
+)
 from comfyui_docker_helper.config.os_packages import validate_apt_package_identity
+from comfyui_docker_helper.config.registry_validation import (
+    validate_registry_node_authority,
+)
 from comfyui_docker_helper.config.runtime_hooks import (
-    CUSTOM_NODE_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
 )
@@ -691,22 +699,12 @@ class HookPlan(_PlanModel):
     @field_validator("digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
-        return validate_sha256_digest(value)
+        return validate_hook_digest(value)
 
     @field_validator("relative_path")
     @classmethod
     def _validate_relative_path(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if (
-            not value
-            or value.startswith("/")
-            or "\\" in value
-            or has_control_characters(value)
-            or path.as_posix() != value
-            or any(part in {"", ".", ".."} for part in path.parts)
-        ):
-            raise ValueError("relative_path must be one canonical safe POSIX path")
-        return value
+        return validate_hook_relative_path(value)
 
 
 class RegistryNodePlan(_PlanModel):
@@ -945,6 +943,16 @@ class BuildPlan(_PlanModel):
             raise ValueError("managed Python catalog is not bound to the uv image")
         if bool(self.application.comfyui.manager) != self.custom_nodes.install_manager:
             raise ValueError("Manager capability does not match custom-node intent")
+        registry_ids = (
+            node.id
+            for node in self.custom_nodes.nodes
+            if isinstance(node, RegistryNodePlan)
+        )
+        validate_registry_node_authority(
+            registry_ids,
+            install_manager=self.custom_nodes.install_manager,
+            has_manager_plan=self.application.comfyui.manager is not None,
+        )
         expected_user_directory = str(
             PurePosixPath(self.application.paths.comfyui) / "user"
         )
@@ -980,6 +988,8 @@ class BuildPlan(_PlanModel):
         if len(git_targets) != len(set(git_targets)):
             raise ValueError("Git node targets must be unique")
 
+        build_plan_hook_identities(self.custom_nodes, self.runtime)
+
         comfyui_root = PurePosixPath(self.application.paths.comfyui)
         file_targets = tuple(PurePosixPath(item.target) for item in self.files.files)
         if any(
@@ -998,6 +1008,35 @@ class BuildPlan(_PlanModel):
                 "runtime launch executable and script must match the application"
             )
         return self
+
+
+def build_plan_hook_identities(
+    custom_nodes: CustomNodesPhase,
+    runtime: RuntimePhase,
+) -> tuple[dict[str, HookPlan], dict[str, HookPlan]]:
+    """Validate and group the complete materialized hook-tree authority."""
+    custom: dict[str, HookPlan] = {}
+    destinations: set[PurePosixPath] = set()
+    for node in custom_nodes.nodes:
+        for hook in (*node.pre_install, *node.post_install):
+            identity = hook_lock_identity("custom", hook.relative_path)
+            existing = custom.get(identity)
+            if existing is not None and existing.digest != hook.digest:
+                raise ValueError("custom hook identity has conflicting digests")
+            custom[identity] = hook
+            destinations.add(materialized_hook_identity("custom", hook.relative_path))
+
+    runtime_hooks: dict[str, HookPlan] = {}
+    for hook in runtime.hooks:
+        identity = hook_lock_identity("runtime", hook.relative_path)
+        destination = materialized_hook_identity("runtime", hook.relative_path)
+        if identity in runtime_hooks:
+            raise ValueError("runtime hook identities must be unique")
+        if destination in destinations:
+            raise ValueError("materialized hook identities must be unique")
+        runtime_hooks[identity] = hook
+        destinations.add(destination)
+    return custom, runtime_hooks
 
 
 class ManifestBinding(_PlanModel):
@@ -1594,7 +1633,7 @@ def _hook(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
 ) -> HookPlan:
-    identity_path = f"{CUSTOM_NODE_HOOK_LOCK_PREFIX}/{relative_path}"
+    identity_path = hook_lock_identity("custom", relative_path)
     entry = _take(
         entries,
         used,
@@ -1627,9 +1666,12 @@ def _runtime_hooks(
     )
     for key in runtime_keys:
         entry = _take(entries, used, key, LocalExecutableLockEntry)
+        relative_path = entry.relative_path.removeprefix(prefix)
         hooks.append(
             HookPlan(
-                relative_path=entry.relative_path.removeprefix(prefix),
+                relative_path=hook_lock_identity("runtime", relative_path).removeprefix(
+                    prefix
+                ),
                 digest=entry.digest,
             )
         )

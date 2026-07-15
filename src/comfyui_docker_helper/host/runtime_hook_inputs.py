@@ -7,8 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.hook_validation import (
+    hook_lock_identity,
+    validate_hook_relative_path,
+)
 from comfyui_docker_helper.config.runtime_hooks import (
-    RUNTIME_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
     RUNTIME_HOOK_SUPPORTED_SUFFIXES,
     runtime_hook_phase_directory_list,
@@ -18,7 +21,6 @@ from comfyui_docker_helper.host.identity_providers import (
 )
 
 _DEFAULT_RUNTIME_HOOKS_DIR = Path("./hooks")
-_RUNTIME_HOOK_IDENTITY_ROOT = PurePosixPath(RUNTIME_HOOK_LOCK_PREFIX)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +140,8 @@ def discover_runtime_hook_inputs(
     requests = tuple(
         LocalExecutableIdentityRequest(
             root,
-            relative,
-            _RUNTIME_HOOK_IDENTITY_ROOT / relative,
+            PurePosixPath(validate_hook_relative_path(relative.as_posix())),
+            PurePosixPath(hook_lock_identity("runtime", relative.as_posix())),
         )
         for relative in sorted(relative_files, key=PurePosixPath.as_posix)
     )

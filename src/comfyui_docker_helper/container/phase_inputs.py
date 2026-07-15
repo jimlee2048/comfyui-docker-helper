@@ -19,6 +19,7 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_digest,
     parse_build_plan_json,
 )
+from comfyui_docker_helper.container.file_admission import read_regular_absolute_file
 
 _PHASE_SCHEMA_VERSION = 1
 MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
@@ -119,11 +120,11 @@ class PhaseInputAdmission:
         expected_build_plan_digest: str,
     ) -> PhaseInputAdmission:
         try:
-            plan = parse_build_plan_json(Path(build_plan_path).read_bytes())
-        except OSError as error:
-            raise ValueError("could not read canonical BuildPlan") from error
+            plan = parse_build_plan_json(read_regular_absolute_file(build_plan_path))
         except ValidationError as error:
             raise ValueError("canonical BuildPlan is invalid") from error
+        except (OSError, ValueError) as error:
+            raise ValueError("could not read canonical BuildPlan") from error
         observed_digest = build_plan_digest(plan)
         if observed_digest != expected_build_plan_digest:
             raise ValueError("canonical BuildPlan does not match the expected digest")
@@ -133,8 +134,10 @@ class PhaseInputAdmission:
         """Return one typed payload only after exact plan-field admission."""
         _, adapter = _phase_type(phase)
         try:
-            document = adapter.validate_json(Path(path).read_bytes())
-        except OSError as error:
+            document = adapter.validate_json(read_regular_absolute_file(path))
+        except ValidationError:
+            raise
+        except (OSError, ValueError) as error:
             raise ValueError(f"could not read {phase} phase input") from error
         if document.build_plan_digest != self._build_plan_digest:
             raise ValueError(f"{phase} phase input belongs to a different BuildPlan")

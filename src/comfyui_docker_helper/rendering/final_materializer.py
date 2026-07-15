@@ -19,6 +19,7 @@ from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
     build_plan_digest,
+    build_plan_hook_identities,
     dump_build_plan_json,
     manifest_binding,
 )
@@ -182,21 +183,10 @@ def _materialize_cdh_release(plan: BuildPlan, target: Path) -> None:
 def _expected_hooks(
     plan: BuildPlan,
 ) -> tuple[dict[str, HookPlan], dict[str, HookPlan]]:
-    custom: dict[str, HookPlan] = {}
-    for node in plan.custom_nodes.nodes:
-        for hook in (*node.pre_install, *node.post_install):
-            identity_path = f"{CUSTOM_NODE_HOOK_LOCK_PREFIX}/{hook.relative_path}"
-            existing = custom.get(identity_path)
-            if existing is not None and existing != hook:
-                raise FinalMaterializationError("hook identity has conflicting digests")
-            custom[identity_path] = hook
-    runtime = {
-        f"{RUNTIME_HOOK_LOCK_PREFIX}/{hook.relative_path}": hook
-        for hook in plan.runtime.hooks
-    }
-    if len(runtime) != len(plan.runtime.hooks) or set(custom) & set(runtime):
-        raise FinalMaterializationError("hook identity has conflicting paths")
-    return custom, runtime
+    try:
+        return build_plan_hook_identities(plan.custom_nodes, plan.runtime)
+    except ValueError as error:
+        raise FinalMaterializationError("hook identity is invalid") from error
 
 
 def _runtime_config_bytes(plan: BuildPlan) -> bytes:

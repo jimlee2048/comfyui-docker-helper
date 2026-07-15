@@ -1038,12 +1038,15 @@ pre_install_scripts = ["runtime-hooks/pre-start.d/10-pre.sh"]
         for entry in lock.entries
         if isinstance(entry, LocalExecutableLockEntry)
     }
+    custom_identity = "custom-node-hooks/runtime-hooks/pre-start.d/10-pre.sh"
+    runtime_identity = "runtime-hooks/pre-start.d/10-pre.sh"
     assert paths == {
-        "custom-node-hooks/runtime-hooks/pre-start.d/10-pre.sh",
-        "runtime-hooks/pre-start.d/10-pre.sh",
+        custom_identity,
+        runtime_identity,
         "runtime-hooks/post-start.d/20-post.py",
         "runtime-hooks/stop.d/30-stop.sh",
     }
+    assert custom_identity != runtime_identity
     assert (output / "inputs/runtime-hooks/pre-start.d/10-pre.sh").read_text() == (
         "custom\n"
     )

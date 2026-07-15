@@ -36,7 +36,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.runtime_hooks import CUSTOM_NODE_HOOK_LOCK_PREFIX
+from comfyui_docker_helper.config.hook_validation import hook_lock_identity
 from comfyui_docker_helper.exact_ledger import (
     CDH_VERSION,
     COMFYUI_REPOSITORY,
@@ -167,7 +167,7 @@ def build_local_executable_requests(
             LocalExecutableIdentityRequest(
                 root,
                 PurePosixPath(path),
-                PurePosixPath(CUSTOM_NODE_HOOK_LOCK_PREFIX) / path,
+                PurePosixPath(hook_lock_identity("custom", path)),
             )
             for path in relative_hooks
         )

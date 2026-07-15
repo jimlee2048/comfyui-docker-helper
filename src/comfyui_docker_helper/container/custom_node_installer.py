@@ -16,7 +16,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.comfyui_requirements import (
@@ -32,7 +31,11 @@ from comfyui_docker_helper.config.build_plan import (
     GitNodePlan,
     RegistryNodePlan,
 )
+from comfyui_docker_helper.config.canonical_lock import normalized_registry_id
 from comfyui_docker_helper.config.final_validation import is_git_source_url
+from comfyui_docker_helper.config.registry_validation import (
+    validate_registry_node_authority,
+)
 from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
 from comfyui_docker_helper.container.application_installer import (
     application_install_environment,
@@ -364,29 +367,32 @@ def _validate_inputs(
             "custom-node inventory path does not match BuildPlan"
         )
 
-    registry_names: set[str] = set()
     git_targets: set[Path] = set()
-    has_registry = False
     custom_root = runtime.comfyui_path / "custom_nodes"
+    registry_nodes = tuple(
+        node for node in custom_nodes.nodes if isinstance(node, RegistryNodePlan)
+    )
+    try:
+        validate_registry_node_authority(
+            (node.id for node in registry_nodes),
+            install_manager=custom_nodes.install_manager,
+            has_manager_plan=application.comfyui.manager is not None,
+        )
+    except ValueError as error:
+        message = str(error)
+        if "must be unique" in message:
+            message = "Registry identity is duplicated in BuildPlan"
+        elif "Registry nodes require Manager" not in message:
+            message = "Registry node has an invalid locked ID"
+        raise CustomNodeInstallError(message) from error
     for node in custom_nodes.nodes:
         if isinstance(node, RegistryNodePlan):
-            has_registry = True
             try:
-                normalized = canonicalize_name(node.id, validate=True)
                 Version(node.version)
-            except InvalidName as error:
-                raise CustomNodeInstallError(
-                    "Registry node has an invalid locked ID"
-                ) from error
             except InvalidVersion as error:
                 raise CustomNodeInstallError(
                     f"Registry node {node.id} has an invalid locked version"
                 ) from error
-            if normalized in registry_names:
-                raise CustomNodeInstallError(
-                    f"Registry identity {normalized} is duplicated in BuildPlan"
-                )
-            registry_names.add(normalized)
         else:
             if _COMMIT_PATTERN.fullmatch(node.commit) is None:
                 raise CustomNodeInstallError("Git node commit must be exact 40-hex")
@@ -398,10 +404,6 @@ def _validate_inputs(
                     f"Git target {target.name} is duplicated in BuildPlan"
                 )
             git_targets.add(target)
-    if has_registry and (
-        not custom_nodes.install_manager or application.comfyui.manager is None
-    ):
-        raise CustomNodeInstallError("Registry nodes require Manager")
 
 
 def _install_registry_node(
@@ -669,7 +671,7 @@ def _verify_registry_set(
         custom_nodes_root, excluded_git_targets=excluded_git_targets
     )
     for node in expected:
-        normalized = canonicalize_name(node.id, validate=True)
+        normalized = normalized_registry_id(node.id)
         identity = observed.get(normalized)
         if identity is None:
             raise CustomNodeInstallError(
@@ -685,7 +687,7 @@ def _verify_registry_set(
             raise CustomNodeInstallError(
                 f"Registry node {node.id} version does not match BuildPlan"
             )
-    expected_names = {canonicalize_name(node.id, validate=True) for node in expected}
+    expected_names = {normalized_registry_id(node.id) for node in expected}
     if set(observed) != expected_names:
         raise CustomNodeInstallError(
             "installed Registry identities do not match the admitted declaration prefix"
@@ -1223,11 +1225,10 @@ def _parse_project_identity(content: bytes) -> _ObservedRegistryIdentity:
         version = project["version"]
         if not isinstance(name, str) or not isinstance(version, str):
             raise TypeError
-        normalized_name = canonicalize_name(name, validate=True)
+        normalized_name = normalized_registry_id(name)
         parsed_version = Version(version)
     except (
-        InvalidName,
-        InvalidVersion,
+        ValueError,
         KeyError,
         TypeError,
         UnicodeDecodeError,

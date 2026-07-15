@@ -917,6 +917,11 @@ def validate_registry_id(value: str) -> str:
     return _require_registry_id(value)
 
 
+def normalized_registry_id(value: str) -> str:
+    """Return the shared normalized identity for one valid Registry ID."""
+    return canonicalize_name(validate_registry_id(value), validate=True)
+
+
 def validate_exact_registry_version(value: str) -> str:
     return _require_exact_registry_version(value)
 

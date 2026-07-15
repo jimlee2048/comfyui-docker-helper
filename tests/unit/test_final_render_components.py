@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
@@ -15,12 +17,14 @@ from tests.unit.test_build_plan import accepted_resolution, build_plan, final_co
 from comfyui_docker_helper.application_checkers import APPLICATION_CHECKER_SOURCE
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
+    HookPlan,
     build_plan_digest,
     dump_build_plan_json,
     parse_build_plan_json,
 )
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
+from comfyui_docker_helper.container import file_admission
 from comfyui_docker_helper.container.phase_inputs import PhaseInputAdmission
 from comfyui_docker_helper.rendering import final_materializer
 from comfyui_docker_helper.rendering.final_materializer import (
@@ -406,6 +410,187 @@ def test_phase_admission_rejects_self_labelled_substituted_payload(
 
     with pytest.raises(ValueError, match="does not match the canonical BuildPlan"):
         admission.load(phase_path, "application")
+
+
+# Descriptor-relative phase admission rejects substituted and blocking inputs.
+def test_phase_admission_rejects_leaf_and_ancestor_symlinks(tmp_path: Path) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    context = tmp_path / "context"
+    context.mkdir()
+    materialize_build_plan(plan, context)
+    digest = build_plan_digest(plan)
+
+    leaf_link = tmp_path / "build-plan-link.json"
+    leaf_link.symlink_to(context / "build-plan.json")
+    with pytest.raises(ValueError, match="could not read canonical BuildPlan"):
+        PhaseInputAdmission.from_path(
+            leaf_link,
+            expected_build_plan_digest=digest,
+        )
+
+    ancestor_link = tmp_path / "context-link"
+    ancestor_link.symlink_to(context, target_is_directory=True)
+    with pytest.raises(ValueError, match="could not read canonical BuildPlan"):
+        PhaseInputAdmission.from_path(
+            ancestor_link / "build-plan.json",
+            expected_build_plan_digest=digest,
+        )
+
+    admission = PhaseInputAdmission.from_path(
+        context / "build-plan.json",
+        expected_build_plan_digest=digest,
+    )
+    phase_link = tmp_path / "phase-link.json"
+    phase_link.symlink_to(context / "phases/files.json")
+    with pytest.raises(ValueError, match="could not read files phase input"):
+        admission.load(phase_link, "files")
+
+
+def test_phase_admission_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "build-plan.fifo"
+    os.mkfifo(fifo)
+    script = """
+import sys
+from comfyui_docker_helper.container.phase_inputs import PhaseInputAdmission
+
+try:
+    PhaseInputAdmission.from_path(
+        sys.argv[1], expected_build_plan_digest="sha256:" + "a" * 64
+    )
+except ValueError as error:
+    assert str(error) == "could not read canonical BuildPlan"
+else:
+    raise AssertionError("FIFO was admitted")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(fifo)],
+        check=False,
+        capture_output=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0, result.stderr.decode()
+
+    plan = build_plan(final_config(), accepted_resolution())
+    context = tmp_path / "context"
+    context.mkdir()
+    materialize_build_plan(plan, context)
+    phase_fifo = context / "phases/files.json"
+    phase_fifo.unlink()
+    os.mkfifo(phase_fifo)
+    phase_script = """
+import sys
+from comfyui_docker_helper.container.phase_inputs import PhaseInputAdmission
+
+admission = PhaseInputAdmission.from_path(
+    sys.argv[1], expected_build_plan_digest=sys.argv[2]
+)
+try:
+    admission.load(sys.argv[3], "files")
+except ValueError as error:
+    assert str(error) == "could not read files phase input"
+else:
+    raise AssertionError("FIFO was admitted")
+"""
+
+    phase_result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            phase_script,
+            str(context / "build-plan.json"),
+            build_plan_digest(plan),
+            str(phase_fifo),
+        ],
+        check=False,
+        capture_output=True,
+        timeout=3,
+    )
+
+    assert phase_result.returncode == 0, phase_result.stderr.decode()
+
+
+def test_file_admission_attempts_every_close_and_preserves_primary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fifo = tmp_path / "input.fifo"
+    os.mkfifo(fifo)
+    real_close = os.close
+    closed: list[int] = []
+
+    def close_then_report_first_error(descriptor: int) -> None:
+        real_close(descriptor)
+        closed.append(descriptor)
+        if len(closed) == 1:
+            raise OSError("close sentinel")
+
+    monkeypatch.setattr(
+        file_admission, "_close_descriptor", close_then_report_first_error
+    )
+
+    with pytest.raises(OSError, match="materialized input must be a regular file"):
+        file_admission.read_regular_absolute_file(fifo)
+
+    assert len(closed) >= 3
+    assert len(closed) == len(set(closed))
+
+
+def test_file_admission_reports_local_close_error_inside_outer_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "input.json"
+    source.write_bytes(b"{}")
+    real_close = os.close
+    closed: list[int] = []
+
+    def close_then_report_first_error(descriptor: int) -> None:
+        real_close(descriptor)
+        closed.append(descriptor)
+        if len(closed) == 1:
+            raise OSError("close sentinel")
+
+    monkeypatch.setattr(
+        file_admission, "_close_descriptor", close_then_report_first_error
+    )
+
+    try:
+        raise RuntimeError("outer sentinel")
+    except RuntimeError:
+        with pytest.raises(OSError, match="close sentinel"):
+            file_admission.read_regular_absolute_file(source)
+
+    assert len(closed) >= 3
+    assert len(closed) == len(set(closed))
+
+
+def test_materializer_direct_call_reuses_shared_runtime_hook_identity(
+    tmp_path: Path,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    forged = plan.model_copy(
+        update={
+            "runtime": plan.runtime.model_copy(
+                update={
+                    "hooks": (
+                        HookPlan.model_construct(
+                            relative_path="pre-start.d/nested/hook.py",
+                            digest=f"sha256:{'a' * 64}",
+                        ),
+                    )
+                }
+            )
+        }
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+
+    with pytest.raises(FinalMaterializationError, match="hook identity is invalid"):
+        materialize_build_plan(forged, output)
+
+    assert tuple(output.iterdir()) == ()
 
 
 def test_materializer_rejects_missing_extra_or_changed_local_sources(

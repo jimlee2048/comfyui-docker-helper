@@ -24,6 +24,7 @@ from comfyui_docker_helper.config.final_models import (
     FinalGitCustomNodeConfig,
     FinalRegistryCustomNodeConfig,
 )
+from comfyui_docker_helper.config.hook_validation import validate_hook_relative_path
 from comfyui_docker_helper.config.os_packages import (
     DEFAULT_OS_PACKAGES,
     validate_apt_package_identity,
@@ -57,7 +58,6 @@ _ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _OCI_TAG_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z")
 _SCP_GIT_URL_PATTERN = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+:[^\s:][^\s]*\Z")
 _GIT_REF_FORBIDDEN_CHARACTERS = frozenset(" ~^:?*[\\")
-_HOOK_SUFFIXES = frozenset({".py", ".sh"})
 _CONTROLLED_LAUNCH_FLAGS = frozenset(
     {"--listen", "--port", "--auto-launch", "--disable-auto-launch"}
 )
@@ -975,22 +975,16 @@ def _validate_hook(
     root: Path | None,
     diagnostics: list[Diagnostic],
 ) -> None:
-    hook = PurePosixPath(value)
-    if (
-        not value
-        or has_control_characters(value)
-        or hook.is_absolute()
-        or hook.as_posix() != value
-        or "." in hook.parts
-        or ".." in hook.parts
-    ):
+    try:
+        hook = PurePosixPath(validate_hook_relative_path(value))
+    except ValueError as error:
+        if "must end" in str(error):
+            diagnostics.append(
+                Diagnostic(path, "hook.unsupported_extension", "must end in .sh or .py")
+            )
+            return
         diagnostics.append(
             Diagnostic(path, "hook.invalid_path", "must be a normalized relative path")
-        )
-        return
-    if hook.suffix not in _HOOK_SUFFIXES:
-        diagnostics.append(
-            Diagnostic(path, "hook.unsupported_extension", "must end in .sh or .py")
         )
         return
     if root is None:

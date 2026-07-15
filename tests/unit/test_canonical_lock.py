@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from copy import deepcopy
 from itertools import permutations
@@ -700,6 +701,35 @@ def test_parser_maps_non_exact_current_identity_to_generic_lock_error() -> None:
 
     with pytest.raises(CanonicalLockError, match=INVALID_CANONICAL_LOCK_MESSAGE):
         parse_canonical_lock_toml(document)
+
+
+# Canonical-lock parsing applies the same safe catalog-key boundary as provider
+# admission without constraining safe opaque provider identities.
+@pytest.mark.parametrize(
+    "catalog_key",
+    ["", ".", "..", "../python", "python/key", "python\\key", " key", "key ", "key\n"],
+)
+def test_managed_python_lock_rejects_unsafe_catalog_key(catalog_key: str) -> None:
+    document = dump_canonical_lock_toml(_lock()).replace(
+        'catalog_key = "cpython-3.13.14-linux-x86_64-gnu"',
+        f"catalog_key = {json.dumps(catalog_key)}",
+    )
+
+    with pytest.raises(CanonicalLockError, match=INVALID_CANONICAL_LOCK_MESSAGE):
+        parse_canonical_lock_toml(document.encode("utf-8"))
+
+
+def test_managed_python_lock_preserves_safe_opaque_catalog_key() -> None:
+    document = dump_canonical_lock_toml(_lock()).replace(
+        'catalog_key = "cpython-3.13.14-linux-x86_64-gnu"',
+        'catalog_key = "alternate.catalog+key"',
+    )
+    parsed = parse_canonical_lock_toml(document.encode("utf-8"))
+    python = next(
+        item for item in parsed.entries if isinstance(item, ManagedPythonLockEntry)
+    )
+
+    assert python.catalog_key == "alternate.catalog+key"
 
 
 # Domain-specific lock entries preserve exact stable floors and complete versions.

@@ -16,6 +16,7 @@ from comfyui_docker_helper.config.final_models import (
     CudaImageFlavor,
     FinalConfig,
 )
+from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
 
 
 # One immutable request graph owns normalized acquisition intent and diagnostics.
@@ -35,6 +36,7 @@ def test_graph_owns_backend_and_complete_pytorch_request_once() -> None:
         "torchvision",
     )
     assert pytorch.members[2].extras == ("image",)
+    assert graph.application.os_packages == (*DEFAULT_OS_PACKAGES, "ffmpeg")
 
 
 @pytest.mark.parametrize("python_version", ["3.12.13", "3.13.14", "3.14.6"])

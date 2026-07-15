@@ -14,6 +14,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from comfyui_docker_helper.comfyui_requirements import protected_policy_digest
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     CanonicalLockEntry,
@@ -42,7 +43,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
     pytorch_index_matches_channel,
     uv_image_version_matches_tag,
-    validate_canonical_token,
     validate_environment,
     validate_exact_registry_version,
     validate_exact_stable_distribution_version,
@@ -67,11 +67,12 @@ from comfyui_docker_helper.config.canonical_resolver import (
     entries_satisfy_request,
 )
 from comfyui_docker_helper.config.final_models import CudaImageDistro, CudaImageFlavor
+from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
 from comfyui_docker_helper.config.final_validation import (
     is_aria2_argument_value,
     is_managed_environment_name,
-    validate_apt_package_identity,
 )
+from comfyui_docker_helper.config.os_packages import validate_apt_package_identity
 from comfyui_docker_helper.config.runtime_hooks import (
     CUSTOM_NODE_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
@@ -83,6 +84,7 @@ from comfyui_docker_helper.config.url_validation import is_http_url
 from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
     is_argv_value,
+    validate_managed_python_catalog_key,
 )
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
@@ -189,7 +191,7 @@ class ManagedPythonPlan(_PlanModel):
     @field_validator("catalog_key")
     @classmethod
     def _validate_catalog_key(cls, value: str) -> str:
-        return validate_canonical_token(value, "catalog_key")
+        return validate_managed_python_catalog_key(value)
 
     @field_validator("catalog_url")
     @classmethod
@@ -627,6 +629,24 @@ class ApplicationPhase(_PlanModel):
             or requirements.floor_commit != self.comfyui.floor_commit
         ):
             raise ValueError("ComfyUI requirements target must match PyTorch")
+        adapter_protected_names = CudaBackendAdapter().protected_requirement_names
+        if requirements.protected_names != adapter_protected_names:
+            raise ValueError("ComfyUI protected names do not match the backend adapter")
+        if requirements.protected_policy_digest != protected_policy_digest(
+            adapter_protected_names
+        ):
+            raise ValueError(
+                "ComfyUI protected policy digest does not match the backend adapter"
+            )
+        resolved_pytorch_names = {package.name for package in self.pytorch.packages}
+        unresolved = {item.package for item in requirements.protected}.difference(
+            resolved_pytorch_names
+        )
+        if unresolved:
+            raise ValueError(
+                "ComfyUI protected requirements are missing exact PyTorch results: "
+                f"{sorted(unresolved)!r}"
+            )
         manager = self.comfyui.manager
         if manager is not None:
             python_minor = ".".join(self.pytorch.python_version.split(".")[:2])

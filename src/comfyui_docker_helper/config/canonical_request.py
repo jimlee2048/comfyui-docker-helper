@@ -11,7 +11,6 @@ from typing import Literal
 
 from comfyui_docker_helper.comfyui_requirements import (
     COMFYUI_REQUIREMENTS_PATH,
-    CUDA_PROTECTED_REQUIREMENTS,
     ComfyUIRequirementsError,
     merge_pytorch_requirements,
     protected_policy_digest,
@@ -45,6 +44,7 @@ from comfyui_docker_helper.config.final_validation import (
     FinalConfigDomainResult,
     validate_final_config_domains,
 )
+from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
@@ -56,15 +56,6 @@ from comfyui_docker_helper.exact_ledger import (
 type LockEntryKey = tuple[str, ...]
 
 _VENV_PATH = "/opt/venv"
-_DEFAULT_OS_PACKAGES = (
-    "bash",
-    "ca-certificates",
-    "curl",
-    "git",
-    "build-essential",
-    "aria2",
-    "openssh-server",
-)
 
 
 class CanonicalRequestError(DiagnosticError):
@@ -466,7 +457,7 @@ def build_canonical_request_graph(
         application=ApplicationRequest(
             workspace=workspace,
             comfyui_path=comfyui_path,
-            os_packages=(*_DEFAULT_OS_PACKAGES, *config.system.extra_packages),
+            os_packages=(*DEFAULT_OS_PACKAGES, *config.system.extra_packages),
             python_index_url=config.python.index_url,
             install_manager=config.comfyui.install_manager,
         ),
@@ -499,7 +490,7 @@ def comfyui_requirements_request(
     config: FinalConfig,
     comfyui: OfficialComfyUILockEntry,
 ) -> ComfyUIRequirementsRequestIdentity:
-    names = tuple(sorted(CUDA_PROTECTED_REQUIREMENTS))
+    names = CudaBackendAdapter().protected_requirement_names
     return ComfyUIRequirementsRequestIdentity(
         type="comfyui-requirements",
         repository=comfyui.repository,

@@ -208,6 +208,41 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
     }
 
 
+# Public OS-package diagnostics cover the effective default-plus-user set and
+# enforce canonical lowercase Debian identities before planning.
+def test_system_extra_package_rejects_default_collision() -> None:
+    document = _document()
+    document["system"] = {"extra_packages": ["bash"]}
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (("system", "extra_packages", 0), "system.duplicate_apt_package")
+    ]
+
+
+@pytest.mark.parametrize("package", ["Bash", "x"])
+def test_system_extra_package_rejects_noncanonical_debian_name(package: str) -> None:
+    document = _document()
+    document["system"] = {"extra_packages": [package]}
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (("system", "extra_packages", 0), "system.invalid_apt_package")
+    ]
+
+
+def test_system_extra_package_accepts_lowercase_debian_punctuation() -> None:
+    document = _document()
+    document["system"] = {"extra_packages": ["libfoo+bar.1-dev"]}
+    config = validate_final_config_structure(document)
+
+    assert validate_final_config(config) == ()
+
+
 def test_httpx_retries_is_active_public_configuration() -> None:
     document = _document()
     document["cdh"] = {"downloader": {"httpx": {"retries": 7}}}

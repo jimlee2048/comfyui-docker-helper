@@ -26,7 +26,10 @@ from comfyui_docker_helper.config.selector_validation import (
     normalize_registry_version,
 )
 from comfyui_docker_helper.config.url_validation import is_http_url
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.value_validation import (
+    has_control_characters,
+    validate_managed_python_catalog_key,
+)
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_MINIMUM_VERSION,
@@ -169,7 +172,7 @@ class ManagedPythonLockEntry(_ResolverEntry):
     @field_validator("catalog_key")
     @classmethod
     def _validate_catalog_key(cls, value: str) -> str:
-        return _require_token(value, "catalog_key")
+        return validate_managed_python_catalog_key(value)
 
     @field_validator("catalog_url")
     @classmethod

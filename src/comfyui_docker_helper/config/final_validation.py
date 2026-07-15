@@ -24,6 +24,10 @@ from comfyui_docker_helper.config.final_models import (
     FinalGitCustomNodeConfig,
     FinalRegistryCustomNodeConfig,
 )
+from comfyui_docker_helper.config.os_packages import (
+    DEFAULT_OS_PACKAGES,
+    validate_apt_package_identity,
+)
 from comfyui_docker_helper.config.selector_validation import (
     normalize_comfyui_version,
     normalize_registry_version,
@@ -49,7 +53,6 @@ _EXACT_RELEASE_PATTERN = re.compile(
 )
 _CUDA_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_APT_PACKAGE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+.-]*\Z")
 _OCI_TAG_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z")
 _SCP_GIT_URL_PATTERN = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+:[^\s:][^\s]*\Z")
 _GIT_REF_FORBIDDEN_CHARACTERS = frozenset(" ~^:?*[\\")
@@ -198,6 +201,7 @@ def validate_final_config_semantics(
         "system.duplicate_apt_package",
         "package names must be unique",
         diagnostics,
+        initial_seen=frozenset(DEFAULT_OS_PACKAGES),
     )
     _duplicate_diagnostics(
         domains.registry_ids,
@@ -1062,8 +1066,9 @@ def _duplicate_diagnostics(
     diagnostics: list[Diagnostic],
     *,
     normalize: Callable[[str], str] | None = None,
+    initial_seen: frozenset[str] = frozenset(),
 ) -> None:
-    seen: set[str] = set()
+    seen = set(initial_seen)
     for item in values:
         value = item.value if normalize is None else normalize(item.value)
         if value in seen:
@@ -1147,10 +1152,3 @@ def is_oci_tag(value: str) -> bool:
 def is_aria2_argument_value(value: str) -> bool:
     """Return whether a configured aria2 value is an unambiguous argv token."""
     return is_argv_value(value) and not value.startswith("-")
-
-
-def validate_apt_package_identity(value: str) -> str:
-    """Return one argv-safe apt package identity or fail closed."""
-    if _APT_PACKAGE_PATTERN.fullmatch(value) is None:
-        raise ValueError("apt package must be one canonical package identity")
-    return value

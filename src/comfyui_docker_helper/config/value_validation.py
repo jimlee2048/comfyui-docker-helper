@@ -13,6 +13,20 @@ def is_argv_value(value: str) -> bool:
     return bool(value.strip()) and not has_control_characters(value)
 
 
+def validate_managed_python_catalog_key(value: str) -> str:
+    """Return one opaque, safe managed-Python catalog path component."""
+    if (
+        not value
+        or value in {".", ".."}
+        or value != value.strip()
+        or "/" in value
+        or "\\" in value
+        or has_control_characters(value)
+    ):
+        raise ValueError("catalog_key must be one safe path component")
+    return value
+
+
 def replace_control_characters(value: str, replacement: str = " ") -> str:
     """Replace control characters without classifying the surrounding text."""
     return "".join(

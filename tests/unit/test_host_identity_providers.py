@@ -566,6 +566,61 @@ def test_managed_python_maps_malformed_catalog_rows_to_invalid_response(
     assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
 
 
+# Provider admission rejects catalog keys that could escape the managed root,
+# while retaining safe opaque result identities.
+@pytest.mark.parametrize(
+    "catalog_key",
+    ["", ".", "..", "../python", "python/key", "python\\key", " key", "key ", "key\n"],
+)
+def test_managed_python_maps_unsafe_catalog_key_to_invalid_response(
+    catalog_key: str,
+) -> None:
+    version = "3.13.14"
+    row = {
+        "key": catalog_key,
+        "version": version,
+        "path": None,
+        "url": "https://releases.astral.sh/python.tar.gz",
+        "os": "linux",
+        "variant": "default",
+        "implementation": "cpython",
+        "arch": "x86_64",
+        "libc": "gnu",
+    }
+    provider = UvManagedPythonIdentityProvider(
+        HostUvRunner(Path("/owned/uv")),
+        runner=lambda *args, **kwargs: _completed(json.dumps([row])),
+    )
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(ManagedPythonIdentityRequest(version, INDEX_DIGEST_A))
+
+    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
+
+
+def test_managed_python_preserves_safe_opaque_catalog_key() -> None:
+    version = "3.13.14"
+    row = {
+        "key": "alternate.catalog+key",
+        "version": version,
+        "path": None,
+        "url": "https://releases.astral.sh/python.tar.gz",
+        "os": "linux",
+        "variant": "default",
+        "implementation": "cpython",
+        "arch": "x86_64",
+        "libc": "gnu",
+    }
+    provider = UvManagedPythonIdentityProvider(
+        HostUvRunner(Path("/owned/uv")),
+        runner=lambda *args, **kwargs: _completed(json.dumps([row])),
+    )
+
+    identity = provider.resolve(ManagedPythonIdentityRequest(version, INDEX_DIGEST_A))
+
+    assert identity.catalog_key == "alternate.catalog+key"
+
+
 def test_managed_python_rejects_invalid_catalog_descriptor_before_uv() -> None:
     called = False
 

@@ -8,7 +8,10 @@ from comfyui_docker_helper.config.final_models import (
     CudaImageDistro,
     CudaImageFlavor,
 )
-from comfyui_docker_helper.exact_ledger import CUDA_IMAGE_REPOSITORY
+from comfyui_docker_helper.exact_ledger import (
+    CUDA_IMAGE_REPOSITORY,
+    CUDA_PROTECTED_REQUIREMENTS,
+)
 
 
 class TargetPlatform(StrEnum):
@@ -60,6 +63,9 @@ class BackendPlan:
 class BackendAdapter(Protocol):
     """Typed seam for one compute backend's deterministic derivation rules."""
 
+    @property
+    def protected_requirement_names(self) -> tuple[str, ...]: ...
+
     def derive(
         self,
         version: CudaVersion,
@@ -73,6 +79,11 @@ class BackendAdapter(Protocol):
 @dataclass(frozen=True, slots=True)
 class CudaBackendAdapter:
     """Construct the NVIDIA tag while deriving its PyTorch channel from version."""
+
+    @property
+    def protected_requirement_names(self) -> tuple[str, ...]:
+        """Return the complete direct-package source-ownership policy."""
+        return tuple(sorted(CUDA_PROTECTED_REQUIREMENTS))
 
     def derive(
         self,

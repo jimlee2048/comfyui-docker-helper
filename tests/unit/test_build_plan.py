@@ -870,6 +870,32 @@ def test_build_plan_parser_rejects_forged_python_catalog_binding() -> None:
         parse_build_plan_json(json.dumps(document))
 
 
+# BuildPlan independently reuses the managed-Python catalog path-component
+# admission rule before renderer path composition.
+@pytest.mark.parametrize("catalog_key", ["..", "../python", "python/key", "key\\name"])
+def test_build_plan_parser_rejects_unsafe_python_catalog_key(
+    catalog_key: str,
+) -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["toolchain"]["python"]["catalog_key"] = catalog_key
+
+    with pytest.raises(ValidationError, match="safe path component"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_preserves_safe_opaque_python_catalog_key() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["toolchain"]["python"]["catalog_key"] = "alternate.catalog+key"
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert parsed.toolchain.python.catalog_key == "alternate.catalog+key"
+
+
 def test_build_plan_parser_rejects_forged_core_channel() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
@@ -882,6 +908,96 @@ def test_build_plan_parser_rejects_forged_core_channel() -> None:
 
     with pytest.raises(ValidationError, match="does not match the group channel"):
         BuildPlan.model_validate(document)
+
+
+# Serialized application phases bind protected source ownership to the complete
+# backend policy and to exact members of the resolved PyTorch group.
+def test_build_plan_parser_rejects_protected_projection_member_without_result() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    packages = document["application"]["pytorch"]["packages"]
+    document["application"]["pytorch"]["packages"] = [
+        package for package in packages if package["name"] != "torchaudio"
+    ]
+
+    with pytest.raises(ValidationError, match="missing exact PyTorch results"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_rejects_cohesively_shrunk_protected_policy() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    requirements = document["application"]["comfyui"]["requirements"]
+    requirements["protected_names"] = ["torch"]
+    requirements["protected_policy_digest"] = protected_policy_digest(("torch",))
+    requirements["protected"] = [
+        item for item in requirements["protected"] if item["package"] == "torch"
+    ]
+    document["application"]["pytorch"]["packages"] = [
+        package
+        for package in document["application"]["pytorch"]["packages"]
+        if package["name"] == "torch"
+    ]
+
+    with pytest.raises(ValidationError, match="do not match the backend adapter"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_rejects_wrong_protected_policy_digest() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["application"]["comfyui"]["requirements"]["protected_policy_digest"] = (
+        DIGEST_C
+    )
+
+    with pytest.raises(ValidationError, match="digest does not match"):
+        parse_build_plan_json(json.dumps(document))
+
+
+def test_build_plan_parser_allows_adapter_member_absent_from_upstream_and_config() -> (
+    None
+):
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    requirements = document["application"]["comfyui"]["requirements"]
+    requirements["protected"] = [
+        item for item in requirements["protected"] if item["package"] != "torchaudio"
+    ]
+    document["application"]["pytorch"]["packages"] = [
+        package
+        for package in document["application"]["pytorch"]["packages"]
+        if package["name"] != "torchaudio"
+    ]
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert parsed.application.comfyui.requirements.protected_names == (
+        "torch",
+        "torchaudio",
+        "torchvision",
+    )
+
+
+def test_build_plan_parser_allows_arbitrary_exact_pytorch_extra() -> None:
+    document = json.loads(
+        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
+    )
+    document["application"]["pytorch"]["packages"].append(
+        {
+            "name": "xformers",
+            "extras": (),
+            "version": "0.0.35+cu130",
+            "environment": "application",
+        }
+    )
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert parsed.application.pytorch.packages[-1].name == "xformers"
 
 
 @pytest.mark.parametrize(

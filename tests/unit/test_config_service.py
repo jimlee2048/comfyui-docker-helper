@@ -62,6 +62,22 @@ def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None
     assert config.pytorch.version == "2.12.1"
 
 
+def test_layered_documents_report_default_os_package_collision(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config())
+    override.write_text('[system]\nextra_packages = ["bash"]\n')
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config([base, override])
+
+    assert [(item.path, item.code) for item in raised.value.diagnostics] == [
+        (("system", "extra_packages", 0), "system.duplicate_apt_package")
+    ]
+
+
 # Isolated-tool requirements survive the public service boundary.
 def test_public_service_accepts_active_uv_tools(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"

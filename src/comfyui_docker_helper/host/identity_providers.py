@@ -25,7 +25,10 @@ from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.config.canonical_request import SelectorStability
 from comfyui_docker_helper.config.selector_validation import normalize_registry_version
-from comfyui_docker_helper.config.value_validation import is_argv_value
+from comfyui_docker_helper.config.value_validation import (
+    is_argv_value,
+    validate_managed_python_catalog_key,
+)
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.uv_runner import HostUvRunner
 
@@ -889,6 +892,12 @@ def _validate_managed_python_catalog_row(row: object, source: str) -> None:
         "libc",
     ):
         _required_string(row, field, source)
+    try:
+        validate_managed_python_catalog_key(str(row["key"]))
+    except ValueError as error:
+        raise IdentityProviderError(
+            source, ProviderFailureKind.INVALID_RESPONSE
+        ) from error
     _parsed_exact_version_response(row["version"], source)
     if urlparse(str(row["url"])).scheme != "https":
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)

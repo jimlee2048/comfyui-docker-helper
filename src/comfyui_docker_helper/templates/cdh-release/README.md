@@ -323,8 +323,7 @@ A rendered context contains:
 
 The context does not contain a root `config.toml`, and the Dockerfile has no ARG
 that can override lock-authoritative image identities. Host-local source paths
-and resolver `request_digest` values are excluded from BuildPlan and phase
-documents.
+and resolver `request_digest` values are excluded from the BuildPlan.
 
 ## Configuration boundaries
 

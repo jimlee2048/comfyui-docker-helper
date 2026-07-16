@@ -23,9 +23,22 @@ _COST_AUTHORIZATIONS = {
     Cost.SLOW: "--run-slow",
 }
 
+_VALIDATED_RELEASE_SCENARIOS = pytest.StashKey[dict[str, AcceptanceScenario]]()
+
 
 def _selected_release_ids(config: pytest.Config) -> set[str]:
     return set(config.getoption("--acceptance-scenario"))
+
+
+def _selected_release_scenarios(
+    config: pytest.Config,
+) -> dict[str, AcceptanceScenario]:
+    scenarios_by_id = {scenario.id: scenario for scenario in RELEASE_SCENARIOS}
+    selected = _selected_release_ids(config)
+    if unknown := selected - scenarios_by_id.keys():
+        values = ", ".join(sorted(unknown))
+        raise pytest.UsageError(f"unknown release acceptance scenario: {values}")
+    return {scenario_id: scenarios_by_id[scenario_id] for scenario_id in selected}
 
 
 def _release_scenario_parameter(item: pytest.Item) -> AcceptanceScenario | None:
@@ -86,41 +99,40 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    selected_scenarios = _selected_release_scenarios(config)
+    config.stash[_VALIDATED_RELEASE_SCENARIOS] = selected_scenarios
+    if not selected_scenarios or config.getoption("collectonly"):
+        return
+    missing_by_scenario = {
+        scenario_id: tuple(
+            sorted(
+                _COST_AUTHORIZATIONS[capability]
+                for capability in scenario.costs
+                if not config.getoption(_COST_AUTHORIZATIONS[capability])
+            )
+        )
+        for scenario_id, scenario in sorted(selected_scenarios.items())
+    }
+    missing_by_scenario = {
+        scenario_id: options
+        for scenario_id, options in missing_by_scenario.items()
+        if options
+    }
+    if missing_by_scenario:
+        details = "; ".join(
+            f"{scenario_id}: {', '.join(options)}"
+            for scenario_id, options in missing_by_scenario.items()
+        )
+        raise pytest.UsageError(
+            "selected release acceptance scenario requires cost "
+            f"authorization(s): {details}"
+        )
+
+
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    selected = _selected_release_ids(config)
-    if selected:
-        scenarios_by_id = {scenario.id: scenario for scenario in RELEASE_SCENARIOS}
-        known = scenarios_by_id.keys()
-        if unknown := selected - known:
-            values = ", ".join(sorted(unknown))
-            raise pytest.UsageError(f"unknown release acceptance scenario: {values}")
-        if not config.getoption("collectonly"):
-            missing_by_scenario = {
-                scenario_id: tuple(
-                    sorted(
-                        _COST_AUTHORIZATIONS[capability]
-                        for capability in scenarios_by_id[scenario_id].costs
-                        if not config.getoption(_COST_AUTHORIZATIONS[capability])
-                    )
-                )
-                for scenario_id in sorted(selected)
-            }
-            missing_by_scenario = {
-                scenario_id: options
-                for scenario_id, options in missing_by_scenario.items()
-                if options
-            }
-            if missing_by_scenario:
-                details = "; ".join(
-                    f"{scenario_id}: {', '.join(options)}"
-                    for scenario_id, options in missing_by_scenario.items()
-                )
-                raise pytest.UsageError(
-                    "selected release acceptance scenario requires cost "
-                    f"authorization(s): {details}"
-                )
     for item in items:
         missing = [
             option
@@ -137,20 +149,19 @@ def pytest_collection_modifyitems(
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
-    selected = _selected_release_ids(session.config)
-    if not selected:
+    selected_scenarios = session.config.stash[_VALIDATED_RELEASE_SCENARIOS]
+    if not selected_scenarios:
         return
-    scenarios_by_id = {scenario.id: scenario for scenario in RELEASE_SCENARIOS}
-    actual_by_scenario = {scenario_id: set() for scenario_id in selected}
+    actual_by_scenario = {scenario_id: set() for scenario_id in selected_scenarios}
     for item in session.items:
         scenario = _release_scenario_parameter(item)
-        if scenario is None or scenario.id not in selected:
+        if scenario is None or scenario.id not in selected_scenarios:
             continue
         actual_by_scenario[scenario.id].update(_function_acceptance_probes(item))
 
     mismatches = []
-    for scenario_id in sorted(selected):
-        expected = set(required_release_probes(scenarios_by_id[scenario_id]))
+    for scenario_id, scenario in sorted(selected_scenarios.items()):
+        expected = set(required_release_probes(scenario))
         actual = actual_by_scenario[scenario_id]
         details = []
         if missing := expected - actual:
@@ -171,8 +182,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
     missing_inputs = {
         name
-        for scenario_id in selected
-        for scenario in (scenarios_by_id[scenario_id],)
+        for scenario in selected_scenarios.values()
         for name in (scenario.image_variable, scenario.context_variable)
         if name is not None and not os.environ.get(name)
     }

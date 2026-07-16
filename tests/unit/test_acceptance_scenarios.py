@@ -132,6 +132,70 @@ def test_moving_inputs_are_classified_only_as_canaries() -> None:
             assert scenario not in RELEASE_SCENARIOS
 
 
+# Unknown selections stop at the public pytest boundary with one usage diagnostic.
+def test_unknown_release_scenario_reports_concise_usage_error() -> None:
+    diagnostic = "unknown release acceptance scenario: does-not-exist"
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--collect-only",
+            "--acceptance-scenario",
+            "does-not-exist",
+            "tests/smoke/test_application_acceptance_live.py",
+        ),
+        cwd=_PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == pytest.ExitCode.USAGE_ERROR
+    assert completed.stdout == ""
+    assert completed.stderr.strip() == f"ERROR: {diagnostic}"
+
+
+# Cost admission precedes artifact admission so one actionable preflight error wins.
+def test_selected_release_reports_cost_before_missing_artifact_inputs() -> None:
+    scenario = next(item for item in RELEASE_SCENARIOS if item.id == "py313-full")
+    environment = os.environ.copy()
+    assert scenario.image_variable is not None
+    assert scenario.context_variable is not None
+    environment.pop(scenario.image_variable, None)
+    environment.pop(scenario.context_variable, None)
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--run-network",
+            "--run-docker",
+            "--run-slow",
+            "--acceptance-scenario",
+            scenario.id,
+            "-k",
+            scenario.id,
+            "tests/smoke/test_application_acceptance_live.py",
+        ),
+        cwd=_PROJECT_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    diagnostic = (
+        "selected release acceptance scenario requires cost authorization(s): "
+        f"{scenario.id}: --run-gpu"
+    )
+    assert completed.returncode == pytest.ExitCode.USAGE_ERROR
+    assert completed.stdout == ""
+    assert completed.stderr.strip() == f"ERROR: {diagnostic}"
+
+
 # Selected releases fail closed before external work when either input is absent.
 @pytest.mark.parametrize("missing_kind", ["image", "context"])
 def test_selected_release_scenario_requires_all_artifact_inputs(

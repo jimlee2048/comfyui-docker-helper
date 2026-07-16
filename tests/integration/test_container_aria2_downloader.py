@@ -161,7 +161,6 @@ def make_item(tmp_path: Path, *, overwrite: bool = False) -> FileDownloadItem:
     target.parent.mkdir(parents=True)
     return FileDownloadItem(
         url="https://example.test/model.safetensors",
-        directory="models",
         filename="model.safetensors",
         target=target,
         overwrite=overwrite,

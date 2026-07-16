@@ -16,12 +16,10 @@ from comfyui_docker_helper.cli import app
 from comfyui_docker_helper.config.build_plan import BuildOutputPlan, build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.final_models import FinalConfig
+from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
-from comfyui_docker_helper.container import phase_inputs as phase_inputs_module
-from comfyui_docker_helper.container.phase_inputs import (
-    BuildPhaseDocument,
-    phase_document,
-)
+from comfyui_docker_helper.container import download_files as download_files_module
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.uv_runner import HostUvError
@@ -99,15 +97,14 @@ def test_help_succeeds(
     assert usage in result.output
 
 
-def test_container_helper_help_exposes_phase_binding(cli_runner: CliRunner) -> None:
-    """Container build helpers accept only digest-bound phase inputs."""
+def test_container_helper_help_exposes_build_plan_binding(
+    cli_runner: CliRunner,
+) -> None:
+    """Container build helpers require the Dockerfile-bound plan digest."""
     result = cli_runner.invoke(app, ["container", "download-files", "--help"])
 
     assert result.exit_code == 0
-    assert "--phase" in result.output
     assert "--build-plan-digest" in result.output
-    assert "--config" not in result.output
-    assert "--lock" not in result.output
 
 
 def test_registry_helper_help_exposes_only_owned_inputs(
@@ -119,32 +116,28 @@ def test_registry_helper_help_exposes_only_owned_inputs(
     )
 
     assert result.exit_code == 0
-    assert "--custom-nodes-phase" in result.output
-    assert "--application-phase" in result.output
     assert "--build-plan-digest" in result.output
     assert "--constraints" in result.output
     assert "--hooks-directory" in result.output
-    assert "--config" not in result.output
-    assert "--lock" not in result.output
 
 
 @pytest.mark.parametrize(
     "command",
     ["download-files", "install-comfyui", "install-custom-nodes"],
 )
-def test_container_phase_consumers_admit_one_canonical_plan_per_invocation(
+def test_container_commands_admit_one_canonical_plan_per_invocation(
     command: str,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admit every installer input once at the CLI edge as narrow phases."""
+    """Parse one plan and pass only each command's typed projection."""
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
     context.mkdir()
     materialize_build_plan(plan, context)
     parse_count = 0
-    parse = phase_inputs_module.parse_build_plan_json
+    parse = build_plan_input_module.parse_build_plan_json
 
     def counted_parse(document):
         nonlocal parse_count
@@ -152,14 +145,18 @@ def test_container_phase_consumers_admit_one_canonical_plan_per_invocation(
         return parse(document)
 
     observed: list[tuple[object, ...]] = []
-    monkeypatch.setattr(phase_inputs_module, "parse_build_plan_json", counted_parse)
+    monkeypatch.setattr(
+        build_plan_input_module,
+        "parse_build_plan_json",
+        counted_parse,
+    )
     monkeypatch.setattr(
         container_cli, "MATERIALIZED_BUILD_PLAN_PATH", context / "build-plan.json"
     )
     monkeypatch.setattr(
         container_cli,
         "download_files",
-        lambda files: observed.append((files,)),
+        lambda files, root: observed.append((files, root)),
     )
     monkeypatch.setattr(
         container_cli,
@@ -178,31 +175,11 @@ def test_container_phase_consumers_admit_one_canonical_plan_per_invocation(
     monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
     monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
     monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
-    phase_dir = context / "phases"
-    arguments = {
-        "download-files": [
-            "--phase",
-            str(phase_dir / "files.json"),
-        ],
-        "install-comfyui": [
-            "--application-phase",
-            str(phase_dir / "application.json"),
-            "--toolchain-phase",
-            str(phase_dir / "toolchain.json"),
-        ],
-        "install-custom-nodes": [
-            "--custom-nodes-phase",
-            str(phase_dir / "custom-nodes.json"),
-            "--application-phase",
-            str(phase_dir / "application.json"),
-        ],
-    }
     result = cli_runner.invoke(
         app,
         [
             "container",
             command,
-            *arguments[command],
             "--build-plan-digest",
             build_plan_digest(plan),
         ],
@@ -213,15 +190,63 @@ def test_container_phase_consumers_admit_one_canonical_plan_per_invocation(
     assert (
         observed
         == {
-            "download-files": [(plan.files,)],
+            "download-files": [
+                (plan.files, plan.application.paths.comfyui),
+            ],
             "install-comfyui": [(plan.application, plan.toolchain)],
             "install-custom-nodes": [(plan.custom_nodes, plan.application)],
         }[command]
     )
 
 
+def test_download_files_executes_authenticated_plan_with_custom_root(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Carry a custom root through materialization, admission, and download."""
+    document = final_config().model_dump(mode="python")
+    custom_root = tmp_path / "custom workspace"
+    document["system"]["workspace"] = str(custom_root.parent)
+    document["system"]["comfyui_path"] = str(custom_root)
+    document["cdh"]["default_downloader"] = "httpx"
+    config = FinalConfig.model_validate(document)
+    plan = build_plan(config, accepted_resolution())
+    context = tmp_path / "context"
+    context.mkdir()
+    materialize_build_plan(plan, context)
+
+    class WritingBackend:
+        def download(self, item, settings) -> None:
+            del settings
+            item.target.write_bytes(b"authenticated-plan")
+
+    monkeypatch.setattr(
+        container_cli, "MATERIALIZED_BUILD_PLAN_PATH", context / "build-plan.json"
+    )
+    monkeypatch.setattr(
+        download_files_module,
+        "HttpxDownloader",
+        lambda **_kwargs: WritingBackend(),
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    target = custom_root / "models" / "checkpoints" / "model.safetensors"
+    assert target.read_bytes() == b"authenticated-plan"
+
+
 # CLI admission reports canonical-plan failures without disclosing plan values.
-def test_container_phase_admission_hides_invalid_plan_secret_values(
+def test_container_plan_admission_hides_invalid_plan_secret_values(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,8 +267,6 @@ def test_container_phase_admission_hides_invalid_plan_secret_values(
         [
             "container",
             "download-files",
-            "--phase",
-            str(context / "phases/files.json"),
             "--build-plan-digest",
             build_plan_digest(plan),
         ],
@@ -255,7 +278,7 @@ def test_container_phase_admission_hides_invalid_plan_secret_values(
     assert sentinel not in str(result.exception)
 
 
-def test_container_phase_cli_rejects_registry_without_manager(
+def test_container_cli_rejects_registry_without_manager(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -276,8 +299,6 @@ def test_container_phase_cli_rejects_registry_without_manager(
         [
             "container",
             "download-files",
-            "--phase",
-            str(context / "phases/files.json"),
             "--build-plan-digest",
             build_plan_digest(plan),
         ],
@@ -525,7 +546,7 @@ def test_render_materialization_error_is_short_and_has_no_traceback(
     assert "Traceback" not in result.output
 
 
-def test_build_overrides_flow_through_plan_phase_and_buildx(
+def test_build_overrides_flow_through_plan_and_buildx(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -554,7 +575,6 @@ output = "load"
 platforms = ["linux/amd64"]
 """
     )
-    plan_digest = f"sha256:{'a' * 64}"
     plan_build = BuildOutputPlan(
         tags=("cli:first", "cli:second"),
         output="push",
@@ -565,10 +585,6 @@ platforms = ["linux/amd64"]
         seen["hooks_dir"] = kwargs["hooks_dir"]
         configuration = kwargs["configuration_result"]
         seen["configuration_build"] = configuration.config.build
-        phase = phase_document("build", plan_build, plan_digest)
-        phase_path = context / "phases" / "build.json"
-        phase_path.parent.mkdir(parents=True)
-        phase_path.write_text(phase.model_dump_json())
         return SimpleNamespace(
             warnings=(),
             plan=SimpleNamespace(build=plan_build),
@@ -618,12 +634,6 @@ platforms = ["linux/amd64"]
     assert configuration_build.tags == list(plan_build.tags)
     assert configuration_build.output == plan_build.output
     assert configuration_build.platforms == list(plan_build.platforms)
-    assert (
-        BuildPhaseDocument.model_validate_json(
-            (context / "phases" / "build.json").read_bytes()
-        ).payload
-        == plan_build
-    )
     assert seen["buildx"] == {
         "image_tags": plan_build.tags,
         "output": plan_build.output,

@@ -314,8 +314,8 @@ may still terminate the container if its own deadline expires.
 A rendered context contains:
 
 - `config.lock.toml`, used only by the host for later reconciliation;
-- `build-plan.json` and `manifest-binding.json`;
-- digest-bound JSON documents under `phases/`;
+- one digest-bound canonical `build-plan.json`, used by build-time helpers, and
+  `manifest-binding.json`;
 - verified referenced hook bytes under `inputs/`, when configured; and
 - a BuildPlan-derived `runtime/config.toml` plus content-locked `runtime/hooks`
   when configured, copied to the paths consumed by the entrypoint; and

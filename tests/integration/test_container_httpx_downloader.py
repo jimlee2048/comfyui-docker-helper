@@ -53,7 +53,6 @@ def make_item(
     target.parent.mkdir(parents=True)
     return FileDownloadItem(
         url=url,
-        directory="models",
         filename="file.bin",
         target=target,
         overwrite=False,

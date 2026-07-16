@@ -8,7 +8,7 @@ from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
 
 
 def render_build_plan_dockerfile(plan: BuildPlan) -> str:
-    """Render literal locked image identities and materialized phase inputs."""
+    """Render literal locked image identities and BuildPlan inputs."""
     launch_python = PurePosixPath(plan.runtime.launch_command[0])
     launch_script = PurePosixPath(plan.runtime.launch_command[1])
     runtime_venv = launch_python.parent.parent
@@ -23,7 +23,6 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         "COPY --from=uv /uv /uvx /usr/local/bin/",
         "COPY build-plan.json /opt/cdh/build/build-plan.json",
         "COPY manifest-binding.json /opt/cdh/build/manifest-binding.json",
-        "COPY phases /opt/cdh/build/phases",
         "COPY --chown=0:0 checkers /opt/cdh/build/checkers",
         "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
         "COPY cdh /opt/cdh/source",
@@ -228,22 +227,18 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
                 )
             )
         )
-    phase_digest = _shell_word(build_plan_digest(plan))
+    plan_digest = _shell_word(build_plan_digest(plan))
     lines.append(
         f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
         "container install-comfyui "
-        "--application-phase /opt/cdh/build/phases/application.json "
-        "--toolchain-phase /opt/cdh/build/phases/toolchain.json "
-        f"--build-plan-digest {phase_digest} "
+        f"--build-plan-digest {plan_digest} "
         "--resolution-manifest /opt/cdh/build/pyproject.toml "
         "--constraints /opt/cdh/build/python-package-constraints.txt"
     )
     lines.append(
         f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
         "container install-custom-nodes "
-        "--custom-nodes-phase /opt/cdh/build/phases/custom-nodes.json "
-        "--application-phase /opt/cdh/build/phases/application.json "
-        f"--build-plan-digest {phase_digest} "
+        f"--build-plan-digest {plan_digest} "
         "--constraints /opt/cdh/build/python-package-constraints.txt "
         "--hooks-directory /opt/cdh/build/inputs"
     )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import subprocess
 import tomllib
@@ -24,9 +23,9 @@ from tests.smoke.application_probes import (
 )
 
 from comfyui_docker_helper.config.build_plan import (
+    ManifestBinding,
     build_plan_digest,
     parse_build_plan_json,
-    parse_manifest_binding_json,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliLockEntry,
@@ -326,7 +325,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     assert context.joinpath(".cdh-rendered").is_file()
     plan = parse_build_plan_json(context.joinpath("build-plan.json").read_bytes())
     lock = parse_canonical_lock_toml(context.joinpath("config.lock.toml").read_bytes())
-    binding = parse_manifest_binding_json(
+    binding = ManifestBinding.model_validate_json(
         context.joinpath("manifest-binding.json").read_bytes()
     )
     canonical_lock_bytes = dump_canonical_lock_toml(lock).encode("utf-8")
@@ -435,24 +434,9 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     else:
         assert cli_plan is None
 
-    for phase_name in (
-        "application",
-        "build",
-        "custom-nodes",
-        "files",
-        "runtime",
-        "toolchain",
-    ):
-        phase = json.loads(
-            context.joinpath("phases", f"{phase_name}.json").read_bytes()
-        )
-        plan_key = phase_name.replace("-", "_")
-        assert phase["build_plan_digest"] == binding.build_plan_digest
-        assert phase["payload"] == plan.model_dump(mode="json")[plan_key]
-
     dockerfile = context.joinpath("Dockerfile").read_text()
     assert dockerfile.count("container install-custom-nodes") == 1
-    assert dockerfile.count("--custom-nodes-phase") == 1
+    assert dockerfile.count(f"--build-plan-digest {binding.build_plan_digest}") == 2
     assert ("COPY inputs /opt/cdh/build/inputs" in dockerfile) is scenario.hooks
     assert "comfy node" not in dockerfile
     assert "comfy install" not in dockerfile
@@ -1102,7 +1086,7 @@ def test_image_has_exact_environment_and_disposition(
     context = Path(_environment(scenario.context_variable)).resolve(strict=True)
     plan = parse_build_plan_json(context.joinpath("build-plan.json").read_bytes())
     lock = parse_canonical_lock_toml(context.joinpath("config.lock.toml").read_bytes())
-    binding = parse_manifest_binding_json(
+    binding = ManifestBinding.model_validate_json(
         context.joinpath("manifest-binding.json").read_bytes()
     )
     lock_bytes = dump_canonical_lock_toml(lock).encode("utf-8")

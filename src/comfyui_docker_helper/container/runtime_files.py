@@ -1020,7 +1020,6 @@ def _runtime_staging_download_item(
 ) -> FileDownloadItem:
     return FileDownloadItem(
         url=item.url,
-        directory=item.directory,
         filename=item.filename,
         target=_runtime_staging_target(item),
         overwrite=_runtime_staging_overwrite(downloader, settings),

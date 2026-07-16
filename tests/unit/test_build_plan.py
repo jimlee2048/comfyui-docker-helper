@@ -17,12 +17,12 @@ from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
     ExactPackagePlan,
+    ManifestBinding,
     RuntimePlanningProvenance,
     build_plan_digest,
     dump_build_plan_json,
     manifest_binding,
     parse_build_plan_json,
-    parse_manifest_binding_json,
 )
 from comfyui_docker_helper.config.build_plan import (
     construct_build_plan as _construct_build_plan,
@@ -55,7 +55,8 @@ from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLoc
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.final_validation import (
     validate_direct_requirement,
-    validate_final_config,
+    validate_final_config_domains,
+    validate_final_config_semantics,
     validate_final_config_structure,
 )
 from comfyui_docker_helper.exact_ledger import (
@@ -138,7 +139,11 @@ def final_config(
             ],
         }
     )
-    assert validate_final_config(config, scripts_dir=scripts_dir) == ()
+    domains = validate_final_config_domains(config, scripts_dir=scripts_dir)
+    assert (
+        *domains.diagnostics,
+        *validate_final_config_semantics(config, domains),
+    ) == ()
     return config
 
 
@@ -805,7 +810,7 @@ def test_plan_and_manifest_bind_config_lock_and_plan_without_request_digests() -
     assert binding.build_plan_digest == build_plan_digest(plan)
     assert binding.config_digest == plan.config_digest
     assert binding.lock_digest == plan.lock_digest
-    assert parse_manifest_binding_json(binding.model_dump_json()) == binding
+    assert ManifestBinding.model_validate_json(binding.model_dump_json()) == binding
     assert b"request_digest" not in serialized
     assert b"config.lock" not in serialized
     assert b"host" not in serialized
@@ -1461,6 +1466,10 @@ def test_user_cannot_duplicate_cdh_owned_launch_argument() -> None:
     document["comfyui"]["extra_args"] = ["--disable-auto-launch"]
     config = FinalConfig.model_validate(document)
 
-    diagnostics = validate_final_config(config)
+    domains = validate_final_config_domains(config)
+    diagnostics = (
+        *domains.diagnostics,
+        *validate_final_config_semantics(config, domains),
+    )
 
     assert [item.code for item in diagnostics] == ["comfyui.controlled_extra_arg"]

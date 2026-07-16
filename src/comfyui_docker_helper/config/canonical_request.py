@@ -108,15 +108,6 @@ class DesiredResolution:
         object.__setattr__(self, "request_digest", compute_request_digest(self.request))
         object.__setattr__(self, "stability", request_stability(self.request))
 
-    @classmethod
-    def from_request(
-        cls,
-        request: ResolverRequestIdentity,
-        *,
-        managed_python_release: ManagedPythonReleaseInputs | None = None,
-    ) -> DesiredResolution:
-        return cls(request=request, managed_python_release=managed_python_release)
-
 
 @dataclass(frozen=True, slots=True)
 class BuildRequest:
@@ -212,6 +203,26 @@ class CanonicalRequestGraph:
     runtime: RuntimeRequest
 
 
+def uv_oci_request(config: FinalConfig) -> OciRequestIdentity:
+    """Build the canonical uv image request shared by staging and reconciliation."""
+    return OciRequestIdentity(
+        type="oci",
+        role="uv-tool",
+        repository=UV_IMAGE_REPOSITORY,
+        tag=config.python.uv_version,
+        platform=TargetPlatform(config.build.platforms[0]).value,
+    )
+
+
+def comfyui_request(config: FinalConfig) -> ComfyUIRequestIdentity:
+    """Build the canonical ComfyUI request shared by staging and reconciliation."""
+    return ComfyUIRequestIdentity(
+        type="comfyui",
+        repository=COMFYUI_REPOSITORY,
+        selector=config.comfyui.version,
+    )
+
+
 def build_canonical_request_graph(
     config: FinalConfig,
     *,
@@ -253,13 +264,7 @@ def build_canonical_request_graph(
             tag=tag,
             platform=platform.value,
         ),
-        OciRequestIdentity(
-            type="oci",
-            role="uv-tool",
-            repository=UV_IMAGE_REPOSITORY,
-            tag=config.python.uv_version,
-            platform=platform.value,
-        ),
+        uv_oci_request(config),
         ManagedPythonRequestIdentity(
             type="managed-python",
             version=config.python.version,
@@ -268,11 +273,7 @@ def build_canonical_request_graph(
             libc="gnu",
             catalog_descriptor_digest=uv_descriptor_digest,
         ),
-        ComfyUIRequestIdentity(
-            type="comfyui",
-            repository=COMFYUI_REPOSITORY,
-            selector=config.comfyui.version,
-        ),
+        comfyui_request(config),
         requirements_request,
     ]
     if config.comfyui.install_cli:
@@ -401,7 +402,7 @@ def build_canonical_request_graph(
             nodes.append(GitNodeRequest("git", node.url, ref, target, pre, post))
 
     desired = tuple(
-        DesiredResolution.from_request(
+        DesiredResolution(
             request,
             managed_python_release=(
                 release.managed_python

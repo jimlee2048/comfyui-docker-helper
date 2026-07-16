@@ -1469,10 +1469,6 @@ def manifest_binding(plan: BuildPlan) -> ManifestBinding:
     )
 
 
-def parse_manifest_binding_json(document: str | bytes) -> ManifestBinding:
-    return ManifestBinding.model_validate_json(document)
-
-
 def _take(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],

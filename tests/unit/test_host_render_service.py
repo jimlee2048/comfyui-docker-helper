@@ -288,7 +288,7 @@ def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
     assert "ruff==0.15.18" in dockerfile
 
 
-def test_checkout_owned_manager_capability_flows_only_to_application_phase(
+def test_checkout_owned_manager_capability_flows_to_application_plan(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "config.toml"
@@ -315,8 +315,6 @@ def test_checkout_owned_manager_capability_flows_only_to_application_phase(
         "/opt/cdh/build/custom-node-inventory.json"
     )
     assert "--enable-manager" not in plan["runtime"]["launch_command"]
-    phase = json.loads((output / "phases/application.json").read_bytes())
-    assert phase["payload"]["comfyui"]["manager"] == manager
 
 
 def test_rendered_context_preserves_raw_git_locator_from_lock_to_plan(
@@ -344,13 +342,10 @@ target_dir = "direct"
     )
     plan = json.loads((output / "build-plan.json").read_bytes())
     planned = plan["custom_nodes"]["nodes"][0]
-    phase = json.loads((output / "phases/custom-nodes.json").read_bytes())
-
     assert locked.url == locator
     assert locked.commit == COMMIT
     assert planned["url"] == locator
     assert planned["commit"] == locked.commit
-    assert phase["payload"]["nodes"][0] == planned
 
 
 @dataclass
@@ -520,7 +515,6 @@ def test_default_writes_canonical_context_and_second_default_reuses_lock(
 
     assert prepared.plan.toolchain.platform == "linux/amd64"
     assert (output / "build-plan.json").is_file()
-    assert (output / "phases/application.json").is_file()
     lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     assert lock.schema_version == 1
     assert not (output / "config.toml").exists()

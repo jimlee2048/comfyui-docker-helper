@@ -20,11 +20,11 @@ cdh host render \
   --overwrite
 ```
 
-The output contains canonical `config.lock.toml`, `build-plan.json`,
-`manifest-binding.json`, narrow `phases/*.json`, a BuildPlan-derived runtime
-config, verified referenced build-hook bytes, content-locked baked runtime
-hooks, and a Dockerfile with literal digest-qualified `FROM` references. It
-does not copy root config into the container-helper authority.
+The output contains canonical `config.lock.toml`, one canonical
+`build-plan.json`, `manifest-binding.json`, a BuildPlan-derived runtime config,
+verified referenced build-hook bytes, content-locked baked runtime hooks, and a
+Dockerfile with literal digest-qualified `FROM` references. It does not copy
+root config into the container-helper authority.
 
 The optional `--hooks-dir` tree may contain only regular `.sh` or
 `.py` files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`.

@@ -9,7 +9,6 @@ from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigError,
-    validate_final_config,
     validate_final_config_domains,
     validate_final_config_semantics,
     validate_final_config_structure,
@@ -26,9 +25,17 @@ def _document() -> dict[str, Any]:
 
 def _codes(config: FinalConfig, *, scripts_dir: Path | None = None) -> set[str]:
     return {
-        diagnostic.code
-        for diagnostic in validate_final_config(config, scripts_dir=scripts_dir)
+        diagnostic.code for diagnostic in _diagnostics(config, scripts_dir=scripts_dir)
     }
+
+
+def _diagnostics(
+    config: FinalConfig,
+    *,
+    scripts_dir: Path | None = None,
+) -> tuple[Diagnostic, ...]:
+    domains = validate_final_config_domains(config, scripts_dir=scripts_dir)
+    return (*domains.diagnostics, *validate_final_config_semantics(config, domains))
 
 
 # Final configuration admits strict public types and enforces cross-field ownership.
@@ -41,7 +48,7 @@ def test_final_structure_uses_exact_baseline_defaults() -> None:
     assert config.compute_platform.cuda.image_flavor == "cudnn-devel"
     assert config.compute_platform.cuda.image_distro == "ubuntu24.04"
     assert config.comfyui.install_cli is True
-    assert validate_final_config(config) == ()
+    assert _diagnostics(config) == ()
 
 
 @pytest.mark.parametrize(
@@ -82,7 +89,7 @@ def test_install_cli_is_a_strict_boolean(value: object) -> None:
     assert raised.value.diagnostics[0].path == ("comfyui", "install_cli")
 
 
-def test_domain_and_semantic_passes_are_isolated_and_facade_orders_them() -> None:
+def test_domain_and_semantic_passes_are_isolated_and_ordered() -> None:
     document = _document()
     document["compute_platform"]["cuda"]["version"] = "bad"
     document["build"] = {"platforms": ["linux/amd64", "linux/amd64"]}
@@ -95,7 +102,7 @@ def test_domain_and_semantic_passes_are_isolated_and_facade_orders_them() -> Non
         "compute_platform.invalid_cuda_version"
     ]
     assert [item.code for item in semantics] == ["build.duplicate_platform"]
-    assert validate_final_config(config) == (*domains.diagnostics, *semantics)
+    assert _diagnostics(config) == (*domains.diagnostics, *semantics)
 
 
 def test_uv_tools_are_active_strict_isolated_requirements() -> None:
@@ -105,7 +112,7 @@ def test_uv_tools_are_active_strict_isolated_requirements() -> None:
     config = validate_final_config_structure(document)
 
     assert config.python.uv_tools == ["Ruff==0.15.18", "mypy[dmypy]>=1,<2"]
-    assert validate_final_config(config) == ()
+    assert _diagnostics(config) == ()
 
 
 @pytest.mark.parametrize(
@@ -124,7 +131,7 @@ def test_uv_tools_reject_duplicate_reserved_or_direct_sources(
     document["python"] = {"uv_tools": uv_tools}
     config = validate_final_config_structure(document)
 
-    assert validate_final_config(config)
+    assert _diagnostics(config)
 
 
 @pytest.mark.parametrize("install_cli", [True, False])
@@ -136,7 +143,7 @@ def test_comfy_cli_generic_tool_owner_is_reserved_in_both_modes(
     document["python"] = {"uv_tools": ["Comfy_CLI"]}
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
     assert diagnostics[0].path == ("python", "uv_tools", 0)
@@ -156,7 +163,7 @@ def test_comfy_cli_application_owner_is_reserved_in_every_direct_group(
     document.setdefault(group, {})["extra_packages"] = ["Comfy_CLI>=1.7,<2"]
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
     assert diagnostics[0].path == (group, "extra_packages", 0)
@@ -183,7 +190,7 @@ def test_system_env_rejects_package_authority_controls(name: str) -> None:
     document["system"] = {"env": {name: "user-value"}}
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [item.code for item in diagnostics] == ["system.managed_env_override"]
     assert diagnostics[0].path == ("system", "env", name)
@@ -200,7 +207,7 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
     }
     config = validate_final_config_structure(document)
 
-    assert validate_final_config(config) == ()
+    assert _diagnostics(config) == ()
     assert config.system.env == {
         "APP_PROFILE": "production",
         "PIPER_MODE": "fast",
@@ -215,7 +222,7 @@ def test_system_extra_package_rejects_default_collision() -> None:
     document["system"] = {"extra_packages": ["bash"]}
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [(item.path, item.code) for item in diagnostics] == [
         (("system", "extra_packages", 0), "system.duplicate_apt_package")
@@ -228,7 +235,7 @@ def test_system_extra_package_rejects_noncanonical_debian_name(package: str) -> 
     document["system"] = {"extra_packages": [package]}
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [(item.path, item.code) for item in diagnostics] == [
         (("system", "extra_packages", 0), "system.invalid_apt_package")
@@ -240,7 +247,7 @@ def test_system_extra_package_accepts_lowercase_debian_punctuation() -> None:
     document["system"] = {"extra_packages": ["libfoo+bar.1-dev"]}
     config = validate_final_config_structure(document)
 
-    assert validate_final_config(config) == ()
+    assert _diagnostics(config) == ()
 
 
 def test_httpx_retries_is_active_public_configuration() -> None:
@@ -285,7 +292,7 @@ def test_python_rejects_versions_outside_package_support(version: str) -> None:
     document["python"] = {"version": version}
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [(item.path, item.code) for item in diagnostics] == [
         (("python", "version"), "python.unsupported_version")
@@ -297,7 +304,7 @@ def test_python_accepts_unlisted_patch_inside_package_support() -> None:
     document["python"] = {"version": "3.13.15"}
     config = validate_final_config_structure(document)
 
-    assert validate_final_config(config) == ()
+    assert _diagnostics(config) == ()
 
 
 @pytest.mark.parametrize("version", ["2.12", "2.12.1rc1", "latest", "v2.12.1"])
@@ -436,7 +443,7 @@ def test_registry_nodes_require_manager_but_direct_git_nodes_do_not() -> None:
         {"type": "registry", "id": "example-node", "version": "1.0.0"}
     ]
     registry_config = validate_final_config_structure(document)
-    diagnostics = validate_final_config(registry_config)
+    diagnostics = _diagnostics(registry_config)
     assert [
         item.path for item in diagnostics if item.code == "custom_node.manager_required"
     ] == [("comfyui", "custom_nodes", 0, "type")]
@@ -462,7 +469,7 @@ def test_registry_duplicate_ids_use_normalized_project_identity() -> None:
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert config.comfyui.custom_nodes[0].id == "Example_Node"
     assert [
@@ -502,7 +509,7 @@ def test_package_ownership_is_normalized_across_groups() -> None:
     document["pytorch"]["extra_packages"] = ["my-package==1.5", "torch==2.12.1"]
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     domains = validate_final_config_domains(config)
     assert "python.duplicate_package_owner" not in {
@@ -539,7 +546,7 @@ def test_python_extras_reject_reserved_application_package_owners(
     document["python"] = {"extra_packages": [requirement]}
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [(item.path, item.code) for item in diagnostics] == [
         (("python", "extra_packages", 0), "python.duplicate_package_owner")
@@ -554,7 +561,7 @@ def test_package_ownership_is_scoped_to_isolated_environment() -> None:
     }
     config = validate_final_config_structure(document)
 
-    assert validate_final_config(config) == ()
+    assert _diagnostics(config) == ()
 
 
 @pytest.mark.parametrize(
@@ -642,7 +649,7 @@ def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [
         item.path for item in diagnostics if item.code == "file.duplicate_target"
@@ -657,7 +664,7 @@ def test_duplicate_effective_git_targets_are_rejected() -> None:
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config)
+    diagnostics = _diagnostics(config)
 
     assert [
         item.path
@@ -736,7 +743,7 @@ def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config(config, scripts_dir=tmp_path)
+    diagnostics = _diagnostics(config, scripts_dir=tmp_path)
 
     assert [
         item.path for item in diagnostics if item.code == "hook.source_not_regular"

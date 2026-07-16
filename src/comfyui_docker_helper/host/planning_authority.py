@@ -11,10 +11,8 @@ import httpx
 
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
-    ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     OciLockEntry,
-    OciRequestIdentity,
     OfficialComfyUILockEntry,
     ResolverRequestIdentity,
     canonical_entry_key,
@@ -24,7 +22,11 @@ from comfyui_docker_helper.config.canonical_request import (
     CanonicalRequestGraph,
     ManagedPythonReleaseInputs,
     PlanningReleaseInputs,
+    SelectorStability,
+    comfyui_request,
     comfyui_requirements_request,
+    request_stability,
+    uv_oci_request,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
@@ -41,7 +43,6 @@ from comfyui_docker_helper.exact_ledger import (
     CDH_VERSION,
     COMFYUI_REPOSITORY,
     PIP_VERSION,
-    UV_IMAGE_REPOSITORY,
     UV_VERSION,
 )
 from comfyui_docker_helper.host.canonical_acquisition import (
@@ -182,20 +183,14 @@ def stable_comfyui_entry(
     acquirer: CachingCanonicalAcquirer,
 ) -> OfficialComfyUILockEntry:
     """Stabilize the exact source identity needed by downstream requests."""
-    request = ComfyUIRequestIdentity(
-        type="comfyui", repository=COMFYUI_REPOSITORY, selector=config.comfyui.version
-    )
+    request = comfyui_request(config)
     digest = compute_request_digest(request)
     current = _existing_entry(existing, ("comfyui", COMFYUI_REPOSITORY))
-    moving = (
-        not (
-            len(request.selector) == 40
-            and all(character in "0123456789abcdef" for character in request.selector)
-        )
-        and not request.selector[0].isdigit()
-    )
     if (
-        (policy is not LockPolicy.UPGRADE or not moving)
+        (
+            policy is not LockPolicy.UPGRADE
+            or request_stability(request) is SelectorStability.EXACT
+        )
         and isinstance(current, OfficialComfyUILockEntry)
         and entries_satisfy_request(request, (current,), digest)
     ):
@@ -284,16 +279,6 @@ def _acquire_stable_entry(
     if not entries_satisfy_request(request, acquired.entries, digest):
         raise ValueError("provider returned an incompatible staged identity")
     return acquired.entries[0]
-
-
-def uv_oci_request(config: FinalConfig) -> OciRequestIdentity:
-    return OciRequestIdentity(
-        type="oci",
-        role="uv-tool",
-        repository=UV_IMAGE_REPOSITORY,
-        tag=config.python.uv_version,
-        platform="linux/amd64",
-    )
 
 
 def managed_python_release_inputs() -> ManagedPythonReleaseInputs:

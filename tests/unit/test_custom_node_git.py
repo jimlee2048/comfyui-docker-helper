@@ -22,7 +22,10 @@ from comfyui_docker_helper.config.canonical_lock import (
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_validation import validate_final_config
+from comfyui_docker_helper.config.final_validation import (
+    validate_final_config_domains,
+    validate_final_config_semantics,
+)
 from comfyui_docker_helper.container import custom_node_installer
 from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,
@@ -454,7 +457,11 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     config_document = final_config().model_dump(mode="python")
     config_document["comfyui"]["custom_nodes"][1]["url"] = locator
     config = FinalConfig.model_validate(config_document)
-    assert validate_final_config(config) == ()
+    domains = validate_final_config_domains(config)
+    assert (
+        *domains.diagnostics,
+        *validate_final_config_semantics(config, domains),
+    ) == ()
     resolution = accepted_resolution()
     entries = [
         entry.model_copy(

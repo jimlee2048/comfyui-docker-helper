@@ -25,7 +25,7 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.container import file_admission
-from comfyui_docker_helper.container.phase_inputs import PhaseInputAdmission
+from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 from comfyui_docker_helper.rendering import final_materializer
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
@@ -160,12 +160,7 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
         line for line in rendered.splitlines() if "install-custom-nodes" in line
     )
     assert custom_node_line.startswith("RUN /opt/uv/bin/cdh container")
-    assert "--custom-nodes-phase /opt/cdh/build/phases/custom-nodes.json" in (
-        custom_node_line
-    )
-    assert "--application-phase /opt/cdh/build/phases/application.json" in (
-        custom_node_line
-    )
+    assert f"--build-plan-digest {build_plan_digest(plan)}" in custom_node_line
     assert "--constraints /opt/cdh/build/python-package-constraints.txt" in (
         custom_node_line
     )
@@ -230,8 +225,8 @@ def test_final_application_mode_matrix_keeps_one_observed_execution_boundary(
     assert (changed.application.comfyui.manager is not None) is install_manager
 
 
-# Materialization writes deterministic bound phases and rejects altered local inputs.
-def test_materializer_writes_deterministic_plan_phases_and_verified_input(
+# Materialization writes one deterministic BuildPlan and verified local inputs.
+def test_materializer_writes_deterministic_plan_and_verified_input(
     tmp_path: Path,
 ) -> None:
     content = b"#!/usr/bin/env python3\n"
@@ -306,75 +301,23 @@ def test_materializer_writes_deterministic_plan_phases_and_verified_input(
     assert "PIP_CONSTRAINT" not in dockerfile
 
     expected = build_plan_digest(plan)
-    admission = PhaseInputAdmission.from_path(
+    admission = BuildPlanInputAdmission.from_path(
         first / "build-plan.json",
         expected_build_plan_digest=expected,
     )
-    assert admission.load(first / "phases/build.json", "build") == plan.build
-    assert (
-        admission.load(first / "phases/toolchain.json", "toolchain") == plan.toolchain
+    assert admission.comfyui_install() == (plan.application, plan.toolchain)
+    assert admission.custom_node_install() == (
+        plan.custom_nodes,
+        plan.application,
     )
-    assert (
-        admission.load(first / "phases/application.json", "application")
-        == plan.application
+    assert admission.file_downloads() == (
+        plan.files,
+        plan.application.paths.comfyui,
     )
-    assert (
-        admission.load(first / "phases/custom-nodes.json", "custom-nodes")
-        == plan.custom_nodes
-    )
-    assert admission.load(first / "phases/files.json", "files") == plan.files
-    assert admission.load(first / "phases/runtime.json", "runtime") == plan.runtime
 
 
-def test_phase_admission_rejects_wrong_binding_wrong_phase_and_extra_fields(
-    tmp_path: Path,
-) -> None:
-    content = b"#!/bin/sh\n"
-    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    scripts = tmp_path / "scripts"
-    source = scripts / "hooks/pre.py"
-    source.parent.mkdir(parents=True)
-    source.write_bytes(content)
-    source.chmod(0o755)
-    plan = build_plan(
-        final_config(scripts_dir=scripts, with_hook=True),
-        accepted_resolution(hook_digest=digest),
-    )
-    output = tmp_path / "output"
-    output.mkdir()
-    materialize_build_plan(
-        plan,
-        output,
-        local_sources=(
-            LocalMaterializationSource(
-                PurePosixPath("custom-node-hooks/hooks/pre.py"), source
-            ),
-        ),
-    )
-    phase_path = output / "phases/toolchain.json"
-
-    with pytest.raises(ValueError, match="expected digest"):
-        PhaseInputAdmission.from_path(
-            output / "build-plan.json",
-            expected_build_plan_digest=f"sha256:{'0' * 64}",
-        )
-    admission = PhaseInputAdmission.from_path(
-        output / "build-plan.json",
-        expected_build_plan_digest=build_plan_digest(plan),
-    )
-    with pytest.raises(ValidationError):
-        admission.load(phase_path, "files")
-
-    document = json.loads(phase_path.read_text())
-    document["unknown"] = True
-    phase_path.write_text(json.dumps(document))
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        admission.load(phase_path, "toolchain")
-
-
-# Canonical plan bytes and matching plan fields, not phase self-labels, authorize
-# each installer input.
-def test_phase_admission_rejects_changed_canonical_plan_under_literal_digest(
+# Canonical plan bytes bound to the Dockerfile literal authorize each installer input.
+def test_build_plan_admission_rejects_changed_plan_under_literal_digest(
     tmp_path: Path,
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
@@ -386,34 +329,16 @@ def test_phase_admission_rejects_changed_canonical_plan_under_literal_digest(
     (output / "build-plan.json").write_text(json.dumps(document))
 
     with pytest.raises(ValueError, match="expected digest"):
-        PhaseInputAdmission.from_path(
+        BuildPlanInputAdmission.from_path(
             output / "build-plan.json",
             expected_build_plan_digest=build_plan_digest(plan),
         )
 
 
-def test_phase_admission_rejects_self_labelled_substituted_payload(
+# Descriptor-relative BuildPlan admission rejects substituted inputs.
+def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
     tmp_path: Path,
 ) -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    output = tmp_path / "output"
-    output.mkdir()
-    materialize_build_plan(plan, output)
-    phase_path = output / "phases/application.json"
-    document = json.loads(phase_path.read_bytes())
-    document["payload"]["os_packages"].append("zlib1g")
-    phase_path.write_text(json.dumps(document))
-    admission = PhaseInputAdmission.from_path(
-        output / "build-plan.json",
-        expected_build_plan_digest=build_plan_digest(plan),
-    )
-
-    with pytest.raises(ValueError, match="does not match the canonical BuildPlan"):
-        admission.load(phase_path, "application")
-
-
-# Descriptor-relative phase admission rejects substituted and blocking inputs.
-def test_phase_admission_rejects_leaf_and_ancestor_symlinks(tmp_path: Path) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
     context.mkdir()
@@ -423,7 +348,7 @@ def test_phase_admission_rejects_leaf_and_ancestor_symlinks(tmp_path: Path) -> N
     leaf_link = tmp_path / "build-plan-link.json"
     leaf_link.symlink_to(context / "build-plan.json")
     with pytest.raises(ValueError, match="could not read canonical BuildPlan"):
-        PhaseInputAdmission.from_path(
+        BuildPlanInputAdmission.from_path(
             leaf_link,
             expected_build_plan_digest=digest,
         )
@@ -431,30 +356,21 @@ def test_phase_admission_rejects_leaf_and_ancestor_symlinks(tmp_path: Path) -> N
     ancestor_link = tmp_path / "context-link"
     ancestor_link.symlink_to(context, target_is_directory=True)
     with pytest.raises(ValueError, match="could not read canonical BuildPlan"):
-        PhaseInputAdmission.from_path(
+        BuildPlanInputAdmission.from_path(
             ancestor_link / "build-plan.json",
             expected_build_plan_digest=digest,
         )
 
-    admission = PhaseInputAdmission.from_path(
-        context / "build-plan.json",
-        expected_build_plan_digest=digest,
-    )
-    phase_link = tmp_path / "phase-link.json"
-    phase_link.symlink_to(context / "phases/files.json")
-    with pytest.raises(ValueError, match="could not read files phase input"):
-        admission.load(phase_link, "files")
 
-
-def test_phase_admission_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+def test_build_plan_admission_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     fifo = tmp_path / "build-plan.fifo"
     os.mkfifo(fifo)
     script = """
 import sys
-from comfyui_docker_helper.container.phase_inputs import PhaseInputAdmission
+from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 
 try:
-    PhaseInputAdmission.from_path(
+    BuildPlanInputAdmission.from_path(
         sys.argv[1], expected_build_plan_digest="sha256:" + "a" * 64
     )
 except ValueError as error:
@@ -471,44 +387,6 @@ else:
     )
 
     assert result.returncode == 0, result.stderr.decode()
-
-    plan = build_plan(final_config(), accepted_resolution())
-    context = tmp_path / "context"
-    context.mkdir()
-    materialize_build_plan(plan, context)
-    phase_fifo = context / "phases/files.json"
-    phase_fifo.unlink()
-    os.mkfifo(phase_fifo)
-    phase_script = """
-import sys
-from comfyui_docker_helper.container.phase_inputs import PhaseInputAdmission
-
-admission = PhaseInputAdmission.from_path(
-    sys.argv[1], expected_build_plan_digest=sys.argv[2]
-)
-try:
-    admission.load(sys.argv[3], "files")
-except ValueError as error:
-    assert str(error) == "could not read files phase input"
-else:
-    raise AssertionError("FIFO was admitted")
-"""
-
-    phase_result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            phase_script,
-            str(context / "build-plan.json"),
-            build_plan_digest(plan),
-            str(phase_fifo),
-        ],
-        check=False,
-        capture_output=True,
-        timeout=3,
-    )
-
-    assert phase_result.returncode == 0, phase_result.stderr.decode()
 
 
 def test_file_admission_attempts_every_close_and_preserves_primary_error(

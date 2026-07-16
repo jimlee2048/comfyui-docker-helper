@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 import stat
 import subprocess
@@ -18,22 +17,13 @@ from typing import Literal, Protocol
 
 import aria2p
 import httpx
-from pydantic import Field, ValidationError
 
 from comfyui_docker_helper.config.build_plan import FilesPhase
-from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
-    is_http_url,
     require_downloader_name,
-    validate_file_name,
-    validate_relative_file_directory,
 )
 from comfyui_docker_helper.errors import ApplicationError
-
-
-class DownloadFilesConfigError(ApplicationError):
-    """A user-facing generated file-download config failure."""
 
 
 class DownloadFilesError(ApplicationError):
@@ -88,7 +78,6 @@ class FileDownloadItem:
     """One resolved container file download item."""
 
     url: str
-    directory: str
     filename: str
     target: Path
     overwrite: bool
@@ -99,6 +88,7 @@ class FileDownloadItem:
 class FileDownloadPlan:
     """Ordered file downloads and backend settings."""
 
+    comfyui_root: Path
     downloader: DownloaderSettings
     items: tuple[FileDownloadItem, ...]
     download_max_attempts: int = 3
@@ -453,47 +443,13 @@ class Aria2Downloader:
             raise DownloadCancelled("download cancelled")
 
 
-class _Aria2Config(ConfigModel):
-    rpc_port: int = Field(ge=1, le=65535)
-    split: int = Field(gt=0)
-    max_connection_per_server: int = Field(gt=0)
-    min_split_size: str
-    resume_download: bool
-
-
-class _HttpxConfig(ConfigModel):
-    timeout: int | float = Field(gt=0)
-    retries: int = Field(ge=0)
-
-
-class _DownloaderConfig(ConfigModel):
-    default: DownloaderName
-    aria2: _Aria2Config
-    httpx: _HttpxConfig
-
-
-class _CdhConfig(ConfigModel):
-    download_max_attempts: int = Field(default=3, ge=1)
-    download_failure_policy: Literal["continue", "fail"] = "fail"
-
-
-class _FileConfig(ConfigModel):
-    url: str
-    dir: str
-    filename: str
-    overwrite: bool
-    downloader: DownloaderName
-
-
-class _FilesConfig(ConfigModel):
-    cdh: _CdhConfig = Field(default_factory=_CdhConfig)
-    downloader: _DownloaderConfig
-    files: list[_FileConfig]
-
-
-def file_download_plan(payload: FilesPhase) -> FileDownloadPlan:
+def file_download_plan(
+    payload: FilesPhase,
+    comfyui_root: str | Path,
+) -> FileDownloadPlan:
     """Project one admitted BuildPlan files phase into downloader inputs."""
-    return FileDownloadPlan(
+    plan = FileDownloadPlan(
+        comfyui_root=Path(comfyui_root),
         downloader=DownloaderSettings(
             default=require_downloader_name(payload.downloader.default),
             aria2=Aria2DownloadSettings(
@@ -513,7 +469,6 @@ def file_download_plan(payload: FilesPhase) -> FileDownloadPlan:
         items=tuple(
             FileDownloadItem(
                 url=item.url,
-                directory=str(Path(item.target).parent),
                 filename=Path(item.target).name,
                 target=Path(item.target),
                 overwrite=item.overwrite,
@@ -524,49 +479,8 @@ def file_download_plan(payload: FilesPhase) -> FileDownloadPlan:
         download_max_attempts=payload.download_max_attempts,
         download_failure_policy=payload.download_failure_policy,
     )
-
-
-def build_file_download_plan(
-    document: Mapping[str, object],
-    *,
-    comfyui_path: str | Path | None = None,
-) -> FileDownloadPlan:
-    """Validate file-download helper data and derive container targets."""
-
-    try:
-        config = _FilesConfig.model_validate(document)
-    except ValidationError as error:
-        raise DownloadFilesConfigError(
-            f"file-download config validation failed: {error}"
-        ) from error
-
-    downloader = DownloaderSettings(
-        default=require_downloader_name(config.downloader.default),
-        aria2=Aria2DownloadSettings(
-            rpc_port=config.downloader.aria2.rpc_port,
-            split=config.downloader.aria2.split,
-            max_connection_per_server=(
-                config.downloader.aria2.max_connection_per_server
-            ),
-            min_split_size=config.downloader.aria2.min_split_size,
-            resume_download=config.downloader.aria2.resume_download,
-        ),
-        httpx=HttpxDownloadSettings(
-            timeout=config.downloader.httpx.timeout,
-            retries=config.downloader.httpx.retries,
-        ),
-    )
-    resolved_comfyui_path = _resolve_comfyui_path(comfyui_path)
-    items = tuple(
-        _build_file_item(file, comfyui_path=resolved_comfyui_path)
-        for file in config.files
-    )
-    return FileDownloadPlan(
-        downloader=downloader,
-        items=items,
-        download_max_attempts=config.cdh.download_max_attempts,
-        download_failure_policy=config.cdh.download_failure_policy,
-    )
+    _validate_download_plan(plan)
+    return plan
 
 
 def process_file_downloads(
@@ -577,10 +491,11 @@ def process_file_downloads(
 ) -> tuple[DownloadResult, ...]:
     """Process file downloads serially with common preflight semantics."""
 
+    _validate_download_plan(plan)
     results: list[DownloadResult] = []
     for index, item in enumerate(plan.items, 1):
         log(f"Processing file {index}/{len(plan.items)}: {item.target}")
-        if _preflight_file(item, log=log):
+        if _preflight_file(item, root=plan.comfyui_root, log=log):
             results.append(DownloadResult(item=item, status=DownloadStatus.SKIPPED))
             continue
 
@@ -617,13 +532,14 @@ def process_file_downloads(
 
 def download_files(
     files: FilesPhase,
+    comfyui_root: str | Path,
     *,
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
 ) -> tuple[DownloadResult, ...]:
     """Download files from one admitted BuildPlan phase."""
-    plan = file_download_plan(files)
+    plan = file_download_plan(files, comfyui_root)
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 
@@ -748,24 +664,6 @@ class _RetryableDownloadError(Exception):
     """Internal retryable HTTP failure marker."""
 
 
-def _build_file_item(
-    file: _FileConfig,
-    *,
-    comfyui_path: Path,
-) -> FileDownloadItem:
-    _validate_url(file.url)
-    directory = _validate_relative_path(file.dir, field="dir")
-    filename = _validate_filename(file.filename)
-    return FileDownloadItem(
-        url=file.url,
-        directory=file.dir,
-        filename=file.filename,
-        target=comfyui_path.joinpath(*directory.parts, filename.name),
-        overwrite=file.overwrite,
-        downloader=require_downloader_name(file.downloader),
-    )
-
-
 def _download_with_policy(
     item: FileDownloadItem,
     backend: DownloadBackend,
@@ -818,8 +716,13 @@ def _cleanup_failed_path(path: Path, *, log: Logger) -> None:
         log(f"WARNING: failed download artifact could not be removed: {path}: {error}")
 
 
-def _preflight_file(item: FileDownloadItem, *, log: Logger) -> bool:
-    _validate_existing_target_parent_contained(item)
+def _preflight_file(
+    item: FileDownloadItem,
+    *,
+    root: Path,
+    log: Logger,
+) -> bool:
+    _validate_existing_target_parent_contained(item, root=root)
     try:
         item.target.parent.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -827,7 +730,7 @@ def _preflight_file(item: FileDownloadItem, *, log: Logger) -> bool:
             f"download target parent cannot be created: {item.target.parent}: {error}"
         ) from error
 
-    _validate_target_parent_contained(item)
+    _validate_target_parent_contained(item, root=root)
 
     try:
         mode = item.target.lstat().st_mode
@@ -857,8 +760,33 @@ def _preflight_file(item: FileDownloadItem, *, log: Logger) -> bool:
     return False
 
 
-def _validate_target_parent_contained(item: FileDownloadItem) -> None:
-    root = _item_comfyui_root(item)
+def _validate_download_plan(plan: FileDownloadPlan) -> None:
+    for item in plan.items:
+        _relative_target(item, root=plan.comfyui_root)
+
+
+def _relative_target(item: FileDownloadItem, *, root: Path) -> Path:
+    if not root.is_absolute() or not item.target.is_absolute():
+        raise DownloadFilesError("download root and target must be absolute paths")
+    try:
+        relative = item.target.relative_to(root)
+    except ValueError as error:
+        raise DownloadFilesError(
+            f"download target escapes COMFYUI_PATH: {item.target}"
+        ) from error
+    if not relative.parts or ".." in relative.parts:
+        raise DownloadFilesError(
+            f"download target must be a strict descendant of COMFYUI_PATH: "
+            f"{item.target}"
+        )
+    return relative
+
+
+def _validate_target_parent_contained(
+    item: FileDownloadItem,
+    *,
+    root: Path,
+) -> None:
     try:
         resolved_root = root.resolve(strict=True)
         resolved_parent = item.target.parent.resolve(strict=True)
@@ -873,8 +801,11 @@ def _validate_target_parent_contained(item: FileDownloadItem) -> None:
         ) from error
 
 
-def _validate_existing_target_parent_contained(item: FileDownloadItem) -> None:
-    root = _item_comfyui_root(item)
+def _validate_existing_target_parent_contained(
+    item: FileDownloadItem,
+    *,
+    root: Path,
+) -> None:
     try:
         resolved_root = root.resolve(strict=False)
     except OSError as error:
@@ -883,7 +814,8 @@ def _validate_existing_target_parent_contained(item: FileDownloadItem) -> None:
         ) from error
 
     current = root
-    for part in PurePosixPath(item.directory).parts:
+    relative_parent = _relative_target(item, root=root).parent
+    for part in PurePosixPath(relative_parent).parts:
         current = current / part
         if not current.exists() and not current.is_symlink():
             return
@@ -898,45 +830,6 @@ def _validate_existing_target_parent_contained(item: FileDownloadItem) -> None:
             raise DownloadFilesError(
                 f"download target parent cannot be resolved: {current}: {error}"
             ) from error
-
-
-def _item_comfyui_root(item: FileDownloadItem) -> Path:
-    directory = PurePosixPath(item.directory)
-    return item.target.parents[len(directory.parts)]
-
-
-def _resolve_comfyui_path(comfyui_path: str | Path | None) -> Path:
-    if comfyui_path is not None:
-        return Path(comfyui_path)
-    return Path(os.environ.get("COMFYUI_PATH", "/workspace/ComfyUI"))
-
-
-def _validate_url(value: str) -> None:
-    if not is_http_url(value):
-        raise DownloadFilesConfigError(
-            f"url must be an HTTP(S) URL with a host: {value}"
-        )
-
-
-def _validate_relative_path(value: str, *, field: str) -> PurePosixPath:
-    result = validate_relative_file_directory(value)
-    if result.path is not None:
-        return result.path
-    if result.code == "absolute_directory":
-        raise DownloadFilesConfigError(f"{field} must be relative: {value}")
-    if result.code == "parent_directory_segment":
-        raise DownloadFilesConfigError(f"{field} must not contain '..': {value}")
-    message = result.message or "must be a valid relative path"
-    raise DownloadFilesConfigError(f"{field} {message}: {value}")
-
-
-def _validate_filename(value: str) -> PurePosixPath:
-    result = validate_file_name(value)
-    if result.filename is None:
-        if "\\" in value:
-            raise DownloadFilesConfigError(f"filename must not contain '\\': {value}")
-        raise DownloadFilesConfigError(f"filename must be one path component: {value}")
-    return PurePosixPath(result.filename)
 
 
 def _raise_for_http_status(response: httpx.Response) -> None:

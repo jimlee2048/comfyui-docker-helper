@@ -18,7 +18,6 @@ from comfyui_docker_helper.application_checkers import (
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
-    build_plan_digest,
     build_plan_hook_identities,
     dump_build_plan_json,
     manifest_binding,
@@ -27,7 +26,6 @@ from comfyui_docker_helper.config.runtime_hooks import (
     CUSTOM_NODE_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )
-from comfyui_docker_helper.container.phase_inputs import phase_document
 from comfyui_docker_helper.pytorch_resolution import (
     pytorch_resolution_manifest_bytes,
 )
@@ -76,28 +74,12 @@ def materialize_build_plan(
                 "local materialization sources must exactly match locked inputs"
             )
         _write(target / "build-plan.json", dump_build_plan_json(plan), root=target)
-        digest = build_plan_digest(plan)
         binding = manifest_binding(plan)
         _write(
             target / "manifest-binding.json",
             _json_bytes(binding.model_dump(mode="json")),
             root=target,
         )
-        phases = {
-            "build": plan.build,
-            "toolchain": plan.toolchain,
-            "application": plan.application,
-            "custom-nodes": plan.custom_nodes,
-            "files": plan.files,
-            "runtime": plan.runtime,
-        }
-        for name, payload in phases.items():
-            document = phase_document(name, payload, digest)
-            _write(
-                target / "phases" / f"{name}.json",
-                _json_bytes(document.model_dump(mode="json")),
-                root=target,
-            )
         for relative_path, hook in expected.items():
             source = sources[relative_path].source_path
             content = _verified_source(source, hook.digest)

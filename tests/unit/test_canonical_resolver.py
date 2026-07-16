@@ -132,7 +132,7 @@ def _desired(
     requests: tuple[ResolverRequestIdentity, ...] | None = None,
 ) -> tuple[DesiredResolution, ...]:
     return tuple(
-        DesiredResolution.from_request(
+        DesiredResolution(
             item,
             managed_python_release=(
                 RELEASE if isinstance(item, ManagedPythonRequestIdentity) else None
@@ -434,7 +434,7 @@ def test_desired_resolution_derivations_cannot_be_supplied_or_mutated() -> None:
             stability=SelectorStability.EXACT,
         )
 
-    desired = DesiredResolution.from_request(request)
+    desired = DesiredResolution(request)
     with pytest.raises(AttributeError):
         desired.stability = SelectorStability.EXACT
 
@@ -444,10 +444,10 @@ def test_managed_python_requires_typed_release_owned_compatibility() -> None:
     assert isinstance(request, ManagedPythonRequestIdentity)
 
     with pytest.raises(ValueError, match="release-owned inputs"):
-        DesiredResolution.from_request(request)
+        DesiredResolution(request)
 
     with pytest.raises(ValueError, match="only to managed Python"):
-        DesiredResolution.from_request(_requests()[0], managed_python_release=RELEASE)
+        DesiredResolution(_requests()[0], managed_python_release=RELEASE)
 
 
 @pytest.mark.parametrize(
@@ -469,12 +469,10 @@ def test_release_owned_input_change_invalidates_managed_python_without_digest_ab
 ) -> None:
     request = _requests()[1]
     assert isinstance(request, ManagedPythonRequestIdentity)
-    previous = DesiredResolution.from_request(request, managed_python_release=RELEASE)
+    previous = DesiredResolution(request, managed_python_release=RELEASE)
     existing = _initial_lock((previous,))
     current_release = replace(RELEASE, **{field_name: new_value})
-    current = DesiredResolution.from_request(
-        request, managed_python_release=current_release
-    )
+    current = DesiredResolution(request, managed_python_release=current_release)
     acquirer = FakeAcquirer(release=current_release)
 
     assert current.request_digest == previous.request_digest
@@ -534,7 +532,7 @@ def test_uv_exact_tag_mismatch_reacquires_in_mutating_modes(
         tag="0.11.28",
         platform="linux/amd64",
     )
-    desired = (DesiredResolution.from_request(request),)
+    desired = (DesiredResolution(request),)
     existing = CanonicalLock(
         schema_version=1,
         entries=[
@@ -571,7 +569,7 @@ def test_uv_exact_tag_mismatch_fails_locked_without_provider_calls() -> None:
         tag="0.11.28",
         platform="linux/amd64",
     )
-    desired = (DesiredResolution.from_request(request),)
+    desired = (DesiredResolution(request),)
     existing = CanonicalLock(
         schema_version=1,
         entries=[
@@ -605,7 +603,7 @@ def test_uv_exact_tag_mismatch_fails_locked_without_provider_calls() -> None:
 def test_upgrade_refreshes_the_internal_moving_comfy_cli_request() -> None:
     request = _requests()[3]
     assert isinstance(request, ComfyCliRequestIdentity)
-    desired = DesiredResolution.from_request(request)
+    desired = DesiredResolution(request)
     existing = _initial_lock((desired,))
     acquirer = FakeAcquirer()
 
@@ -624,7 +622,7 @@ def test_upgrade_refreshes_the_internal_moving_comfy_cli_request() -> None:
 
 def test_admitted_request_lock_and_result_are_deeply_immutable() -> None:
     request = _requests()[-1]
-    desired = DesiredResolution.from_request(request)
+    desired = DesiredResolution(request)
     lock = _initial_lock((desired,))
     accepted = AcceptedCanonicalLock(lock, (), False, (), ())
 
@@ -941,7 +939,7 @@ def test_locked_aggregates_entry_set_digest_and_local_content_without_calls() ->
     changed = list(desired)
     git = changed[5].request
     assert isinstance(git, DirectGitRequestIdentity)
-    changed[5] = DesiredResolution.from_request(
+    changed[5] = DesiredResolution(
         DirectGitRequestIdentity(type="git", url=git.url, ref=COMMIT_B)
     )
     acquirer = FakeAcquirer()
@@ -1101,7 +1099,7 @@ def test_upgrade_retains_an_unchanged_all_exact_python_group_without_uv_call() -
             ],
         }
     )
-    desired = (DesiredResolution.from_request(exact_group),)
+    desired = (DesiredResolution(exact_group),)
     existing = _initial_lock(desired)
     acquirer = FakeAcquirer()
 
@@ -1132,7 +1130,7 @@ def test_non_public_uv_tool_group_acquires_then_reuses_and_locks_without_calls()
             DirectPythonRequestMember(package="ruff", extras=[], selector="==0.12.0")
         ],
     )
-    desired = (DesiredResolution.from_request(request),)
+    desired = (DesiredResolution(request),)
 
     @dataclass
     class UvToolAcquirer:
@@ -1260,7 +1258,7 @@ def test_duplicate_provider_logical_keys_are_not_folded_or_accepted() -> None:
 
     with pytest.raises(ValueError, match="unique logical identities"):
         reconcile_canonical_lock(
-            (DesiredResolution.from_request(request),),
+            (DesiredResolution(request),),
             existing=None,
             acquirer=DuplicateAcquirer(),
         )

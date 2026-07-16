@@ -257,16 +257,6 @@ def validate_final_config_semantics(
     return tuple(diagnostics)
 
 
-def validate_final_config(
-    config: FinalConfig,
-    *,
-    scripts_dir: str | Path | None = None,
-) -> tuple[Diagnostic, ...]:
-    """Run the focused domain pass, then the one semantic pass."""
-    domains = validate_final_config_domains(config, scripts_dir=scripts_dir)
-    return (*domains.diagnostics, *validate_final_config_semantics(config, domains))
-
-
 def _validate_platform_domain(
     config: FinalConfig,
     diagnostics: list[Diagnostic],

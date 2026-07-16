@@ -59,7 +59,6 @@ def _settings() -> DownloaderSettings:
 def _item(comfyui: Path, filename: str) -> FileDownloadItem:
     return FileDownloadItem(
         url=f"https://example.com/{filename}",
-        directory="models",
         filename=filename,
         target=comfyui / "models" / filename,
         overwrite=False,
@@ -70,7 +69,6 @@ def _item(comfyui: Path, filename: str) -> FileDownloadItem:
 def _aria2_item(comfyui: Path, filename: str) -> FileDownloadItem:
     return FileDownloadItem(
         url=f"https://example.com/{filename}",
-        directory="models",
         filename=filename,
         target=comfyui / "models" / filename,
         overwrite=False,
@@ -92,6 +90,7 @@ def test_file_download_continue_policy_keeps_plain_download_error_fatal(
     with pytest.raises(DownloadFilesError, match="local setup failed"):
         process_file_downloads(
             FileDownloadPlan(
+                comfyui_root=comfyui,
                 downloader=_settings(),
                 items=(first, second),
                 download_max_attempts=2,
@@ -118,6 +117,7 @@ def test_file_download_continue_policy_handles_transfer_error(
 
     results = process_file_downloads(
         FileDownloadPlan(
+            comfyui_root=comfyui,
             downloader=_settings(),
             items=(first, second),
             download_max_attempts=2,
@@ -153,6 +153,7 @@ def test_file_download_continue_policy_cleans_failed_aria2_sidecar(
 
     results = process_file_downloads(
         FileDownloadPlan(
+            comfyui_root=comfyui,
             downloader=_settings(),
             items=(first, second),
             download_max_attempts=1,

@@ -222,8 +222,10 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
             del settings
             with item.sink.open_for_write() as output:
                 output.write(b"authenticated-plan")
-            return download_files_module.TransportResult(
-                length=len(b"authenticated-plan")
+            return download_files_module.TransportSuccess(
+                length=len(b"authenticated-plan"),
+                namespace="httpx",
+                http_status=200,
             )
 
     monkeypatch.setattr(

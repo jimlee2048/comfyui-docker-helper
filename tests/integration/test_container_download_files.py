@@ -23,8 +23,11 @@ from comfyui_docker_helper.container.download_files import (
     FileDownloadPlan,
     HttpxDownloadSettings,
     TransferDownloadFilesError,
+    TransportDiagnostic,
+    TransportOutcome,
     TransportRequest,
-    TransportResult,
+    TransportRetryable,
+    TransportSuccess,
     file_download_plan,
     process_file_downloads,
 )
@@ -41,14 +44,16 @@ class RecordingBackend:
         self,
         request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> TransportResult:
+    ) -> TransportOutcome:
         self.calls.append(request)
         with request.sink.open_for_write() as output:
             output.write(b"downloaded")
         if self.fail_times:
             self.fail_times -= 1
-            raise TransferDownloadFilesError("network failed")
-        return TransportResult(length=len(b"downloaded"))
+            return TransportRetryable(TransportDiagnostic("httpx", "network failed"))
+        return TransportSuccess(
+            length=len(b"downloaded"), namespace="httpx", http_status=200
+        )
 
 
 def _settings() -> DownloaderSettings:
@@ -254,7 +259,7 @@ def test_build_batch_rechecks_every_required_final(tmp_path: Path) -> None:
     outside.write_bytes(b"outside")
 
     class MutatingBackend(RecordingBackend):
-        def download(self, request, settings) -> TransportResult:
+        def download(self, request, settings) -> TransportSuccess:
             result = super().download(request, settings)
             if len(self.calls) == 2:
                 first.target.unlink()

@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
+import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
 import pytest
 
+from comfyui_docker_helper.container import download_files as download_files_module
 from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
     DownloadFilesError,
     HttpxDownloader,
     HttpxDownloadSettings,
-    TerminalTransferDownloadFilesError,
-    TransferDownloadFilesError,
+    TransportCancelled,
+    TransportOrdinaryTerminal,
     TransportRequest,
+    TransportRetryable,
+    TransportSuccess,
 )
 from comfyui_docker_helper.container.transfer_core import (
     FileTransferRequest,
@@ -26,14 +33,15 @@ from comfyui_docker_helper.container.transfer_core import (
 )
 
 
-class IteratorStream(httpx.SyncByteStream):
+class IteratorStream(httpx.AsyncByteStream):
     """HTTPX byte stream backed by an iterator factory."""
 
     def __init__(self, chunks: Callable[[], Iterator[bytes]]) -> None:
         self._chunks = chunks
 
-    def __iter__(self) -> Iterator[bytes]:
-        return self._chunks()
+    async def __aiter__(self):
+        for chunk in self._chunks():
+            yield chunk
 
 
 class PathSink:
@@ -72,13 +80,11 @@ def _downloader(
     transport: httpx.MockTransport,
     *,
     logs: list[str] | None = None,
-    sleeps: list[float] | None = None,
     monotonic: Callable[[], float] | None = None,
 ) -> HttpxDownloader:
     return HttpxDownloader(
         transport=transport,
         log=(logs if logs is not None else []).append,
-        sleep=(sleeps if sleeps is not None else []).append,
         monotonic=monotonic or (lambda: 0.0),
     )
 
@@ -104,7 +110,10 @@ def test_httpx_writes_only_supplied_staging_and_reports_length(tmp_path: Path) -
 
     result = downloader.download(request, _settings())
 
+    assert isinstance(result, TransportSuccess)
     assert result.length == len(b"downloaded")
+    assert result.namespace == "httpx"
+    assert result.http_status == 200
     assert request.sink.display_path.read_bytes() == b"downloaded"
     assert not final.exists()
     assert not request.sink.display_path.with_suffix(".tmp").exists()
@@ -125,8 +134,27 @@ def test_httpx_follows_redirects_without_changing_supplied_target(
     result = _downloader(httpx.MockTransport(handler)).download(request, _settings())
 
     assert requests == ["https://example.test/redirect", "https://example.test/final"]
+    assert isinstance(result, TransportSuccess)
     assert result.length == 5
+    assert result.http_status == 200
     assert request.sink.display_path.read_bytes() == b"final"
+
+
+def test_httpx_preserves_terminal_status_after_redirect(tmp_path: Path) -> None:
+    """Redirect handling retains the exact final response status."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/redirect":
+            return httpx.Response(302, headers={"Location": "/missing"})
+        return httpx.Response(404)
+
+    result = _downloader(httpx.MockTransport(handler)).download(
+        _request(tmp_path, url="https://example.test/redirect"),
+        _settings(),
+    )
+
+    assert isinstance(result, TransportOrdinaryTerminal)
+    assert result.http_status == 404
 
 
 @pytest.mark.parametrize("status", [408, 429, 500, 503])
@@ -142,14 +170,18 @@ def test_httpx_retryable_response_is_one_adapter_attempt(
         calls += 1
         return httpx.Response(status, content=b"retry")
 
-    with pytest.raises(TransferDownloadFilesError, match="retryable status"):
-        _downloader(httpx.MockTransport(handler)).download(request, _settings())
+    result = _downloader(httpx.MockTransport(handler)).download(request, _settings())
 
     assert calls == 1
+    assert isinstance(result, TransportRetryable)
+    assert result.http_status == status
 
 
 # Public HTTPX retries execute clean attempts against the same safe sink.
-def test_httpx_retries_clean_same_supplied_sink_before_success(tmp_path: Path) -> None:
+def test_httpx_retries_clean_same_supplied_sink_before_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     request = _request(tmp_path)
     sleeps: list[float] = []
     attempts = 0
@@ -161,11 +193,16 @@ def test_httpx_retries_clean_same_supplied_sink_before_success(tmp_path: Path) -
             return httpx.Response(503, content=b"partial")
         return httpx.Response(200, content=b"complete")
 
-    result = _downloader(
-        httpx.MockTransport(handler),
-        sleeps=sleeps,
-    ).download(request, _settings(retries=2))
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
 
+    monkeypatch.setattr(download_files_module.asyncio, "sleep", record_sleep)
+
+    result = _downloader(httpx.MockTransport(handler)).download(
+        request, _settings(retries=2)
+    )
+
+    assert isinstance(result, TransportSuccess)
     assert attempts == 3
     assert sleeps == [1.0, 2.0]
     assert result.length == len(b"complete")
@@ -180,10 +217,12 @@ def test_httpx_non_retryable_response_is_terminal(
 ) -> None:
     request = _request(tmp_path)
 
-    with pytest.raises(TerminalTransferDownloadFilesError, match=str(status)):
-        _downloader(
-            httpx.MockTransport(lambda _: httpx.Response(status, content=b"terminal"))
-        ).download(request, _settings())
+    result = _downloader(
+        httpx.MockTransport(lambda _: httpx.Response(status, content=b"terminal"))
+    ).download(request, _settings())
+
+    assert isinstance(result, TransportOrdinaryTerminal)
+    assert result.http_status == status
 
 
 def test_httpx_stream_failure_leaves_exact_partial_for_core_disposition(
@@ -199,10 +238,275 @@ def test_httpx_stream_failure_leaves_exact_partial_for_core_disposition(
         lambda _: httpx.Response(200, stream=IteratorStream(chunks))
     )
 
-    with pytest.raises(TransferDownloadFilesError, match="stream failed"):
-        _downloader(transport).download(request, _settings())
+    result = _downloader(transport).download(request, _settings())
 
+    assert isinstance(result, TransportRetryable)
+    assert result.http_status is None
     assert request.sink.display_path.is_file()
+
+
+def test_httpx_local_protocol_error_fails_closed(tmp_path: Path) -> None:
+    """Local request/protocol invariants never enter ordinary retry policy."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError("invalid local request")
+
+    with pytest.raises(DownloadFilesError, match="transport invariant"):
+        _downloader(httpx.MockTransport(handler)).download(
+            _request(tmp_path),
+            _settings(),
+        )
+
+
+def test_httpx_cancellation_before_start_returns_cancelled(tmp_path: Path) -> None:
+    """Pre-start cancellation never opens the remote transport."""
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=b"late")
+
+    downloader = _downloader(httpx.MockTransport(handler))
+    downloader.cancel()
+
+    result = downloader.download(_request(tmp_path), _settings())
+
+    assert isinstance(result, TransportCancelled)
+    assert calls == 0
+
+
+def test_httpx_cancel_between_task_creation_and_registration_is_observed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation wins even before the top-level task registers itself."""
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=b"late")
+
+    downloader = _downloader(httpx.MockTransport(handler))
+    original_run = asyncio.run
+
+    def cancel_then_run(coroutine):
+        downloader.cancel()
+        return original_run(coroutine)
+
+    monkeypatch.setattr(download_files_module.asyncio, "run", cancel_then_run)
+
+    result = downloader.download(_request(tmp_path), _settings())
+
+    assert isinstance(result, TransportCancelled)
+    assert calls == 0
+
+
+def test_httpx_cancellation_during_stream_is_not_success(tmp_path: Path) -> None:
+    """An active stream observes cancellation before writing later bytes."""
+    request = _request(tmp_path)
+    downloader: HttpxDownloader
+
+    def chunks() -> Iterator[bytes]:
+        yield b"partial"
+        downloader.cancel()
+        yield b"late"
+
+    downloader = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, stream=IteratorStream(chunks))
+        )
+    )
+
+    result = downloader.download(request, _settings())
+
+    assert isinstance(result, TransportCancelled)
+    assert request.sink.display_path.read_bytes() in {b"", b"partial"}
+
+
+def test_httpx_stalled_response_body_cancels_within_a_fixed_bound(
+    tmp_path: Path,
+) -> None:
+    """A real partial HTTP body cannot strand the synchronous caller on cancel."""
+    partial_sent = threading.Event()
+    server_done = threading.Event()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(2.0)
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(2.0)
+                received = b""
+                while b"\r\n\r\n" not in received:
+                    received += connection.recv(4096)
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Length: 1048576\r\n"
+                    b"Content-Type: application/octet-stream\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b"partial"
+                )
+                partial_sent.set()
+                while connection.recv(4096):
+                    pass
+        except (OSError, TimeoutError):
+            pass
+        finally:
+            listener.close()
+            server_done.set()
+
+    server = threading.Thread(target=serve, name="httpx-test-server")
+    server.start()
+    downloader = HttpxDownloader(log=lambda _: None)
+    results: list[object] = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            downloader.download(
+                _request(tmp_path, url=f"http://127.0.0.1:{port}/stalled"),
+                _settings(),
+            )
+        ),
+        name="httpx-test-download",
+    )
+    worker.start()
+    assert partial_sent.wait(1.0)
+
+    started = time.monotonic()
+    downloader.cancel()
+    downloader.cancel()
+    worker.join(1.0)
+    elapsed = time.monotonic() - started
+    server.join(2.0)
+
+    assert elapsed < 1.0
+    assert not worker.is_alive()
+    assert server_done.is_set()
+    assert len(results) == 1
+    assert isinstance(results[0], TransportCancelled)
+    assert not any(
+        thread.name.startswith("cdh-httpx") for thread in threading.enumerate()
+    )
+
+
+def test_httpx_unrequested_task_cancellation_fails_closed(tmp_path: Path) -> None:
+    """Only the adapter cancellation token may produce a cancelled outcome."""
+
+    class UnexpectedCancellation(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if False:
+                yield b""
+            raise asyncio.CancelledError
+
+    downloader = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, stream=UnexpectedCancellation())
+        )
+    )
+
+    with pytest.raises(DownloadFilesError, match="without a cdh cancellation"):
+        downloader.download(_request(tmp_path), _settings())
+
+
+def test_httpx_completed_result_precedes_later_repeated_cancel(tmp_path: Path) -> None:
+    """Cancellation after conclusive completion cannot rewrite success."""
+    downloader = _downloader(
+        httpx.MockTransport(lambda _: httpx.Response(200, content=b"complete"))
+    )
+
+    result = downloader.download(_request(tmp_path), _settings())
+    downloader.cancel()
+    downloader.cancel()
+
+    assert isinstance(result, TransportSuccess)
+    assert result.length == len(b"complete")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("timed out"),
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectError("name resolution failed"),
+    ],
+)
+def test_httpx_timeout_connection_and_dns_failures_are_retryable(
+    tmp_path: Path,
+    error: httpx.RequestError,
+) -> None:
+    """Observable transient transport failures stay policy-eligible."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise error
+
+    result = _downloader(httpx.MockTransport(handler)).download(
+        _request(tmp_path), _settings()
+    )
+
+    assert isinstance(result, TransportRetryable)
+    assert result.http_status is None
+
+
+def test_httpx_too_many_redirects_is_ordinary_terminal(tmp_path: Path) -> None:
+    """Redirect exhaustion is terminal without inventing an HTTP status."""
+    result = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(302, headers={"Location": "/again"})
+        )
+    ).download(_request(tmp_path), _settings())
+
+    assert isinstance(result, TransportOrdinaryTerminal)
+    assert result.http_status is None
+
+
+def test_httpx_decoding_failure_fails_closed(tmp_path: Path) -> None:
+    """Malformed response decoding is not guessed into remote retry policy."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.DecodingError("malformed content encoding")
+
+    with pytest.raises(DownloadFilesError, match="transport invariant"):
+        _downloader(httpx.MockTransport(handler)).download(
+            _request(tmp_path), _settings()
+        )
+
+
+def test_httpx_cancellation_interrupts_inherited_retry_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured inner retry delay remains promptly cancellable."""
+    entered_sleep = threading.Event()
+
+    async def stalled_sleep(_: float) -> None:
+        entered_sleep.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(download_files_module.asyncio, "sleep", stalled_sleep)
+    downloader = HttpxDownloader(
+        transport=httpx.MockTransport(lambda _: httpx.Response(503)),
+        log=lambda _: None,
+    )
+    results: list[object] = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            downloader.download(_request(tmp_path), _settings(retries=2))
+        )
+    )
+    worker.start()
+    assert entered_sleep.wait(1.0)
+    downloader.cancel()
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert len(results) == 1
+    assert isinstance(results[0], TransportCancelled)
 
 
 def test_httpx_progress_logs_name_supplied_staging(tmp_path: Path) -> None:

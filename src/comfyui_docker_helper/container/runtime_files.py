@@ -22,14 +22,8 @@ from comfyui_docker_helper.config.url_validation import DownloaderName
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloaderFactory,
-    DownloadBackend,
     DownloadBackendPreparer,
-    DownloadCancelled,
-    DownloaderSettings,
     HttpxDownloader,
-    Logger,
-    TerminalTransferDownloadFilesError,
-    TransferDownloadFilesError,
 )
 from comfyui_docker_helper.container.runtime_diagnostics import (
     runtime_error_reason,
@@ -44,11 +38,17 @@ from comfyui_docker_helper.container.runtime_state import (
 )
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
+    DownloadBackend,
+    DownloadCancelled,
+    DownloaderSettings,
     DownloadStatus,
     FileTransferOutcome,
     FileTransferRequest,
     HttpxDownloadSettings,
+    Logger,
     StagingDisposition,
+    TerminalTransferDownloadFilesError,
+    TransferDownloadFilesError,
     TransferIdentity,
     admitted_regular_final,
     project_transfer_identity,

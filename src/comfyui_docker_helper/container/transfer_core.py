@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Literal, Protocol
 
 from comfyui_docker_helper.config.file_checksum import (
     validate_canonical_file_checksum,
@@ -237,10 +237,131 @@ class TransportRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class TransportResult:
-    """Transport metadata checked against the produced staging inode."""
+class TransportDiagnostic:
+    """Backend-namespaced, non-policy diagnostic summary."""
+
+    namespace: Literal["httpx", "aria2"]
+    summary: str
+
+    def __post_init__(self) -> None:
+        _validate_transport_namespace(self.namespace)
+        if type(self.summary) is not str or not self.summary.strip():
+            raise ValueError("transport diagnostic summary must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
+class TransportSuccess:
+    """Completed transport metadata checked against supplied staging."""
 
     length: int
+    namespace: Literal["httpx", "aria2"]
+    http_status: int | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.length, bool) or not isinstance(self.length, int):
+            raise ValueError("transport length must be an integer")
+        if self.length < 0:
+            raise ValueError("transport length must not be negative")
+        _validate_transport_namespace(self.namespace)
+        _validate_transport_http_status(self.http_status)
+        if self.http_status is not None and self.http_status >= 400:
+            raise ValueError("successful transport cannot carry an error HTTP status")
+        if self.namespace == "aria2" and self.http_status is not None:
+            raise ValueError("aria2 transport outcomes cannot carry HTTP status")
+        if self.namespace == "httpx" and self.http_status is None:
+            raise ValueError("successful HTTPX transport must carry exact HTTP status")
+
+
+@dataclass(frozen=True, slots=True)
+class TransportRetryable:
+    """Expected remote failure eligible for caller-owned retry policy."""
+
+    diagnostic: TransportDiagnostic
+    http_status: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_transport_diagnostic(self.diagnostic)
+        _validate_transport_http_status(self.http_status)
+        _validate_failure_http_semantics(
+            self.diagnostic,
+            self.http_status,
+            retryable=True,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TransportOrdinaryTerminal:
+    """Expected remote failure ineligible for another transport attempt."""
+
+    diagnostic: TransportDiagnostic
+    http_status: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_transport_diagnostic(self.diagnostic)
+        _validate_transport_http_status(self.http_status)
+        _validate_failure_http_semantics(
+            self.diagnostic,
+            self.http_status,
+            retryable=False,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TransportCancelled:
+    """Cooperative cancellation observed before conclusive completion."""
+
+    diagnostic: TransportDiagnostic
+
+    def __post_init__(self) -> None:
+        _validate_transport_diagnostic(self.diagnostic)
+
+
+type TransportOutcome = (
+    TransportSuccess
+    | TransportRetryable
+    | TransportOrdinaryTerminal
+    | TransportCancelled
+)
+
+
+def _validate_transport_http_status(status: int | None) -> None:
+    if status is None:
+        return
+    if isinstance(status, bool) or not isinstance(status, int):
+        raise ValueError("transport HTTP status must be an integer")
+    if not 100 <= status <= 599:
+        raise ValueError("transport HTTP status is outside the valid range")
+
+
+def _validate_transport_diagnostic(diagnostic: TransportDiagnostic) -> None:
+    if not isinstance(diagnostic, TransportDiagnostic):
+        raise ValueError("transport diagnostic has an invalid type")
+    TransportDiagnostic.__post_init__(diagnostic)
+
+
+def _validate_transport_namespace(namespace: object) -> None:
+    if type(namespace) is not str or namespace not in {"httpx", "aria2"}:
+        raise ValueError("transport namespace is invalid")
+
+
+def _validate_failure_http_semantics(
+    diagnostic: TransportDiagnostic,
+    status: int | None,
+    *,
+    retryable: bool,
+) -> None:
+    if diagnostic.namespace == "aria2":
+        if status is not None:
+            raise ValueError("aria2 transport outcomes cannot carry HTTP status")
+        return
+    if status is None:
+        return
+    if retryable:
+        if status not in {408, 429} and not 500 <= status <= 599:
+            raise ValueError("HTTPX retryable outcome has a terminal HTTP status")
+        return
+    if not 400 <= status <= 499 or status in {408, 429}:
+        raise ValueError("HTTPX terminal outcome has a retryable HTTP status")
 
 
 class DownloadBackend(Protocol):
@@ -250,7 +371,7 @@ class DownloadBackend(Protocol):
         self,
         request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> TransportResult: ...
+    ) -> TransportOutcome: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,7 +577,9 @@ def transfer_file(
         )
         transport_request = TransportRequest(url=request.url, sink=sink)
         try:
-            transport = backend.download(transport_request, settings)
+            transport = _require_transport_success(
+                backend.download(transport_request, settings)
+            )
             control = _capture_control_if_present(
                 staging,
                 target_parent_fd=anchor.parent.fd,
@@ -743,9 +866,35 @@ def _admit_staging(
     return staging, control
 
 
+def _require_transport_success(outcome: TransportOutcome) -> TransportSuccess:
+    """Project adapter semantics without inspecting backend observations."""
+    try:
+        if isinstance(outcome, TransportSuccess):
+            TransportSuccess.__post_init__(outcome)
+        elif isinstance(outcome, TransportRetryable):
+            TransportRetryable.__post_init__(outcome)
+        elif isinstance(outcome, TransportOrdinaryTerminal):
+            TransportOrdinaryTerminal.__post_init__(outcome)
+        elif isinstance(outcome, TransportCancelled):
+            TransportCancelled.__post_init__(outcome)
+    except (TypeError, ValueError) as error:
+        raise DownloadFilesError(
+            "transport adapter returned an invalid outcome"
+        ) from error
+    if isinstance(outcome, TransportSuccess):
+        return outcome
+    if isinstance(outcome, TransportRetryable):
+        raise TransferDownloadFilesError(outcome.diagnostic.summary)
+    if isinstance(outcome, TransportOrdinaryTerminal):
+        raise TerminalTransferDownloadFilesError(outcome.diagnostic.summary)
+    if isinstance(outcome, TransportCancelled):
+        raise DownloadCancelled(outcome.diagnostic.summary)
+    raise DownloadFilesError("transport adapter returned an invalid outcome")
+
+
 def _verify_and_place(
     request: FileTransferRequest,
-    transport: TransportResult,
+    transport: TransportSuccess,
     *,
     anchor: _TargetAnchor,
     staging: _OwnedLeaf,

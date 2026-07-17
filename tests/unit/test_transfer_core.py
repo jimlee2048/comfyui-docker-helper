@@ -6,6 +6,7 @@ import hashlib
 import os
 import stat
 import subprocess
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pytest
 from comfyui_docker_helper.container import transfer_core
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
+    DownloadCancelled,
     DownloaderSettings,
     DownloadFilesError,
     DownloadStatus,
@@ -23,8 +25,12 @@ from comfyui_docker_helper.container.transfer_core import (
     StagingDisposition,
     TerminalTransferDownloadFilesError,
     TransferDownloadFilesError,
+    TransportCancelled,
+    TransportDiagnostic,
+    TransportOrdinaryTerminal,
     TransportRequest,
-    TransportResult,
+    TransportRetryable,
+    TransportSuccess,
     VerificationStatus,
     transfer_file,
     transfer_staging_target,
@@ -44,14 +50,16 @@ class BytesBackend:
         self,
         request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> TransportResult:
+    ) -> TransportSuccess:
         del settings
         self.calls.append(request)
         with request.sink.open_for_write() as output:
             output.write(self.content)
         if self.error is not None:
             raise self.error
-        return TransportResult(length=len(self.content))
+        return TransportSuccess(
+            length=len(self.content), namespace="httpx", http_status=200
+        )
 
 
 def _settings() -> DownloaderSettings:
@@ -205,6 +213,107 @@ def test_failed_replacement_preserves_old_final_and_cleans_only_owned_staging(
     assert not transfer_staging_target(request).exists()
 
 
+# The core projects semantic adapter outcomes without backend-specific policy.
+@pytest.mark.parametrize(
+    ("outcome", "expected_error"),
+    [
+        (
+            TransportRetryable(
+                TransportDiagnostic("httpx", "remote retryable failure")
+            ),
+            TransferDownloadFilesError,
+        ),
+        (
+            TransportOrdinaryTerminal(
+                TransportDiagnostic("aria2", "remote terminal failure")
+            ),
+            TerminalTransferDownloadFilesError,
+        ),
+        (
+            TransportCancelled(TransportDiagnostic("httpx", "download cancelled")),
+            DownloadCancelled,
+        ),
+    ],
+)
+def test_transfer_core_projects_non_success_transport_outcomes(
+    tmp_path: Path,
+    outcome: TransportRetryable | TransportOrdinaryTerminal | TransportCancelled,
+    expected_error: type[DownloadFilesError],
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    request = _request(root)
+
+    class OutcomeBackend:
+        def download(self, transport_request, settings):
+            del transport_request, settings
+            return outcome
+
+    with pytest.raises(expected_error):
+        transfer_file(request, backend=OutcomeBackend(), settings=_settings())
+
+    assert not request.target.exists()
+    assert not transfer_staging_target(request).exists()
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: TransportDiagnostic("unknown", "summary"),
+        lambda: TransportDiagnostic("httpx", ""),
+        lambda: TransportDiagnostic("aria2", "   "),
+        lambda: TransportDiagnostic("httpx", 1),
+        lambda: TransportSuccess(length=1, namespace="httpx", http_status=404),
+        lambda: TransportSuccess(length=1, namespace="aria2", http_status=200),
+        lambda: TransportSuccess(length=1, namespace="httpx", http_status=None),
+        lambda: TransportRetryable(
+            TransportDiagnostic("httpx", "retry"), http_status=404
+        ),
+        lambda: TransportRetryable(
+            TransportDiagnostic("aria2", "retry"), http_status=503
+        ),
+        lambda: TransportOrdinaryTerminal(
+            TransportDiagnostic("httpx", "terminal"), http_status=408
+        ),
+        lambda: TransportOrdinaryTerminal(
+            TransportDiagnostic("httpx", "terminal"), http_status=503
+        ),
+        lambda: TransportOrdinaryTerminal(
+            TransportDiagnostic("aria2", "terminal"), http_status=404
+        ),
+    ],
+)
+def test_transport_outcomes_reject_semantically_invalid_combinations(
+    factory: Callable[[], object],
+) -> None:
+    """Typed outcomes admit only backend-capable status/category combinations."""
+    with pytest.raises(ValueError):
+        factory()
+
+
+def test_transfer_core_revalidates_outcome_before_placement(tmp_path: Path) -> None:
+    """A corrupted adapter result fails closed before staged bytes can be placed."""
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    request = _request(root)
+    outcome = TransportRetryable(
+        TransportDiagnostic("httpx", "remote retryable failure"),
+        http_status=503,
+    )
+    object.__setattr__(outcome, "http_status", 404)
+
+    class InvalidOutcomeBackend:
+        def download(self, transport_request, settings):
+            del transport_request, settings
+            return outcome
+
+    with pytest.raises(DownloadFilesError, match="invalid outcome"):
+        transfer_file(request, backend=InvalidOutcomeBackend(), settings=_settings())
+
+    assert not request.target.exists()
+    assert not transfer_staging_target(request).exists()
+
+
 def test_checksum_mismatch_always_discards_invalid_preserved_staging(
     tmp_path: Path,
 ) -> None:
@@ -317,7 +426,7 @@ def test_unsafe_new_control_never_redirects_cleanup(tmp_path: Path) -> None:
     external.write_bytes(b"external")
 
     class UnsafeControlBackend(BytesBackend):
-        def download(self, request, settings) -> TransportResult:
+        def download(self, request, settings) -> TransportSuccess:
             result = super().download(request, settings)
             Path(f"{request.sink.display_path}.aria2").symlink_to(external)
             return result
@@ -518,7 +627,7 @@ def test_external_transport_path_uses_held_parent_descriptor(tmp_path: Path) -> 
     source.write_bytes(b"external transport")
 
     class ExternalBackend:
-        def download(self, transport, settings) -> TransportResult:
+        def download(self, transport, settings) -> TransportSuccess:
             del settings
             (root / "models").rename(detached)
             (root / "models").symlink_to(outside, target_is_directory=True)
@@ -530,7 +639,11 @@ def test_external_transport_path_uses_held_parent_descriptor(tmp_path: Path) -> 
                 ],
                 check=True,
             )
-            return TransportResult(length=transport.sink.current_length())
+            return TransportSuccess(
+                length=transport.sink.current_length(),
+                namespace="aria2",
+                http_status=None,
+            )
 
     with pytest.raises(DownloadFilesError, match="directory changed"):
         transfer_file(request, backend=ExternalBackend(), settings=_settings())
@@ -562,9 +675,9 @@ def test_transport_length_mismatch_is_retryable_and_never_placed(
     request = _request(root)
 
     class WrongLengthBackend(BytesBackend):
-        def download(self, request, settings) -> TransportResult:
+        def download(self, request, settings) -> TransportSuccess:
             super().download(request, settings)
-            return TransportResult(length=999)
+            return TransportSuccess(length=999, namespace="httpx", http_status=200)
 
     with pytest.raises(TransferDownloadFilesError, match="length"):
         transfer_file(request, backend=WrongLengthBackend(b"new"), settings=_settings())
@@ -929,7 +1042,7 @@ def test_created_target_directory_chain_is_durable_before_transfer(
         original_fsync(fd)
 
     class ObserveDurabilityBackend(BytesBackend):
-        def download(self, request, settings) -> TransportResult:
+        def download(self, request, settings) -> TransportSuccess:
             assert [path.name for path in durable_directories] == [
                 "nested",
                 "models",

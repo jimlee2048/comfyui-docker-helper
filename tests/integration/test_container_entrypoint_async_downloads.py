@@ -18,7 +18,7 @@ from comfyui_docker_helper.container.download_files import (
     DownloaderSettings,
     TransferDownloadFilesError,
     TransportRequest,
-    TransportResult,
+    TransportSuccess,
 )
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -75,7 +75,7 @@ class AsyncBackend:
         self,
         item: TransportRequest,
         settings: DownloaderSettings,
-    ) -> TransportResult:
+    ) -> TransportSuccess:
         self.calls.append((item, settings))
         self.entered.set()
         if self.block:
@@ -91,7 +91,7 @@ class AsyncBackend:
         payload = self.payloads.get(filename, b"downloaded")
         with item.sink.open_for_write() as output:
             output.write(payload)
-        return TransportResult(length=len(payload))
+        return TransportSuccess(length=len(payload), namespace="httpx", http_status=200)
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -306,7 +306,7 @@ def test_interrupted_async_download_restarts_without_exposing_partial_final(
             self,
             item: TransportRequest,
             settings: DownloaderSettings,
-        ) -> TransportResult:
+        ) -> TransportSuccess:
             self.calls.append((item, settings))
             self.entered.set()
             self.release.wait(timeout=1)
@@ -315,7 +315,9 @@ def test_interrupted_async_download_restarts_without_exposing_partial_final(
             payload = self.payloads.get(_source_filename(item), b"downloaded")
             with item.sink.open_for_write() as output:
                 output.write(payload)
-            return TransportResult(length=len(payload))
+            return TransportSuccess(
+                length=len(payload), namespace="httpx", http_status=200
+            )
 
     runtime = _runtime(tmp_path)
     config = _write(

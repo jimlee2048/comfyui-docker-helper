@@ -11,16 +11,6 @@ from types import TracebackType
 import pytest
 
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
-from comfyui_docker_helper.container.download_files import (
-    DownloadCancelled,
-    DownloaderSettings,
-    DownloadFilesError,
-    Logger,
-    TerminalTransferDownloadFilesError,
-    TransferDownloadFilesError,
-    TransportRequest,
-    TransportResult,
-)
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
     RuntimeFilePlan,
@@ -40,7 +30,17 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeState,
 )
 from comfyui_docker_helper.container.transfer_core import (
+    DownloaderSettings,
+    DownloadFilesError,
     DownloadStatus,
+    Logger,
+    TransportCancelled,
+    TransportDiagnostic,
+    TransportOrdinaryTerminal,
+    TransportOutcome,
+    TransportRequest,
+    TransportRetryable,
+    TransportSuccess,
     VerificationStatus,
 )
 
@@ -133,7 +133,7 @@ class FakeBackend:
         self,
         payload: bytes = b"downloaded",
         *,
-        failures: list[Exception] | None = None,
+        failures: list[Exception | TransportOutcome] | None = None,
     ) -> None:
         self.payload = payload
         self.failures = failures or []
@@ -146,13 +146,18 @@ class FakeBackend:
         self,
         request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> TransportResult:
+    ) -> TransportOutcome:
         self.calls.append((request, settings))
         with request.sink.open_for_write() as output:
             output.write(self.payload)
         if self.failures:
-            raise self.failures.pop(0)
-        return TransportResult(length=len(self.payload))
+            failure = self.failures.pop(0)
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+        return TransportSuccess(
+            length=len(self.payload), namespace="httpx", http_status=200
+        )
 
     def prepare(self, settings: DownloaderSettings) -> None:
         self.prepare_calls.append(settings)
@@ -455,7 +460,9 @@ def test_runtime_consumer_selects_backends_and_returns_typed_outcomes(
 
 def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"))
-    backend = FakeBackend(failures=[TransferDownloadFilesError("temporary")])
+    backend = FakeBackend(
+        failures=[TransportRetryable(TransportDiagnostic("httpx", "temporary"))]
+    )
 
     result = process_runtime_file_downloads(
         plan,
@@ -478,8 +485,8 @@ def test_runtime_continue_applies_only_after_retryable_exhaustion(
     )
     backend = FakeBackend(
         failures=[
-            TransferDownloadFilesError("temporary"),
-            TransferDownloadFilesError("temporary"),
+            TransportRetryable(TransportDiagnostic("httpx", "temporary")),
+            TransportRetryable(TransportDiagnostic("httpx", "temporary")),
         ]
     )
 
@@ -498,8 +505,8 @@ def test_runtime_fail_policy_stops_after_retryable_exhaustion(tmp_path: Path) ->
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"), _file("b.bin"))
     backend = FakeBackend(
         failures=[
-            TransferDownloadFilesError("temporary"),
-            TransferDownloadFilesError("temporary"),
+            TransportRetryable(TransportDiagnostic("httpx", "temporary")),
+            TransportRetryable(TransportDiagnostic("httpx", "temporary")),
         ]
     )
 
@@ -522,7 +529,9 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
     policy: str,
 ) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"), _file("b.bin"))
-    backend = FakeBackend(failures=[TerminalTransferDownloadFilesError("not found")])
+    backend = FakeBackend(
+        failures=[TransportOrdinaryTerminal(TransportDiagnostic("aria2", "not found"))]
+    )
 
     if policy == "fail":
         with pytest.raises(RuntimeFileDownloadError):
@@ -564,7 +573,9 @@ def test_runtime_cancelled_transfer_stops_without_exhausted_failure(
     tmp_path: Path,
 ) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"), _file("b.bin"))
-    backend = FakeBackend(failures=[DownloadCancelled("cancelled")])
+    backend = FakeBackend(
+        failures=[TransportCancelled(TransportDiagnostic("httpx", "cancelled"))]
+    )
     statuses: list[str] = []
 
     results = process_runtime_file_downloads(
@@ -634,7 +645,7 @@ def test_startup_observer_runs_after_backend_prepare_before_transfer(
             super().prepare(settings)
             events.append("prepare")
 
-        def download(self, request, settings) -> TransportResult:
+        def download(self, request, settings) -> TransportSuccess:
             events.append("download")
             return super().download(request, settings)
 

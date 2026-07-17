@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import subprocess
 import threading
@@ -9,9 +10,10 @@ import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from types import TracebackType
-from typing import Protocol
+from typing import Literal, Protocol
 
 import aria2p
 import httpx
@@ -33,11 +35,15 @@ from comfyui_docker_helper.container.transfer_core import (
     HttpxDownloadSettings,
     Logger,
     StagingDisposition,
-    TerminalTransferDownloadFilesError,
     TransferDownloadFilesError,
+    TransportCancelled,
+    TransportDiagnostic,
+    TransportOrdinaryTerminal,
+    TransportOutcome,
     TransportRequest,
-    TransportResult,
+    TransportRetryable,
     TransportSink,
+    TransportSuccess,
     transfer_file,
     verify_required_final,
 )
@@ -92,88 +98,152 @@ class HttpxDownloader:
     def __init__(
         self,
         *,
-        transport: httpx.BaseTransport | None = None,
-        sleep: Sleep = time.sleep,
+        transport: httpx.AsyncBaseTransport | None = None,
         monotonic: Monotonic = time.monotonic,
         log: Logger = print,
     ) -> None:
         self._transport = transport
-        self._sleep = sleep
         self._monotonic = monotonic
         self._log = log
         self._cancel_requested = threading.Event()
-        self._client_lock = threading.Lock()
-        self._active_client: httpx.Client | None = None
+        self._active_lock = threading.Lock()
+        self._active: (
+            tuple[
+                asyncio.AbstractEventLoop,
+                asyncio.Task[TransportOutcome],
+            ]
+            | None
+        ) = None
 
     def download(
         self,
         request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> TransportResult:
+    ) -> TransportOutcome:
         """Write HTTP attempts to the exact core-owned staging inode."""
+        return asyncio.run(self._download(request, settings))
+
+    async def _download(
+        self,
+        request: TransportRequest,
+        settings: DownloaderSettings,
+    ) -> TransportOutcome:
+        task = asyncio.current_task()
+        if task is None:
+            raise DownloadFilesError("HTTP download task could not be identified")
+        loop = asyncio.get_running_loop()
+        with self._active_lock:
+            if self._cancel_requested.is_set():
+                return _transport_cancelled("httpx")
+            self._active = (loop, task)
+        try:
+            outcome = await self._download_attempts(request, settings)
+            # This lock acquisition is the terminal linearization point. A cancel
+            # observed first wins; after this point the task does not suspend again.
+            with self._active_lock:
+                if self._cancel_requested.is_set():
+                    return _transport_cancelled("httpx")
+            return outcome
+        except asyncio.CancelledError as error:
+            if self._cancel_requested.is_set():
+                return _transport_cancelled("httpx")
+            raise DownloadFilesError(
+                "HTTP download task was cancelled without a cdh cancellation request"
+            ) from error
+        finally:
+            with self._active_lock:
+                if self._active == (loop, task):
+                    self._active = None
+
+    async def _download_attempts(
+        self,
+        request: TransportRequest,
+        settings: DownloaderSettings,
+    ) -> TransportOutcome:
         attempts = settings.httpx.retries + 1
         for attempt in range(attempts):
-            self._raise_if_cancelled()
+            if self._cancel_requested.is_set():
+                return _transport_cancelled("httpx")
             try:
-                length = self._download_once(request, settings)
-                self._raise_if_cancelled()
-                return TransportResult(length=length)
-            except DownloadCancelled:
-                raise
-            except _RetryableDownloadError as error:
-                if attempt + 1 >= attempts:
-                    raise TransferDownloadFilesError(str(error)) from error
-                delay = _backoff_delay(attempt)
-                self._log(
-                    f"Retrying HTTP download in {delay}s after failure: {request.url}"
-                )
-                self._sleep(delay)
-            except DownloadFilesError:
-                raise
+                outcome = await self._download_once(request, settings)
             except OSError as error:
                 raise DownloadFilesError(
                     "HTTP download failed while writing supplied staging "
                     f"{request.sink.display_path}: {error}"
                 ) from error
+            if not isinstance(outcome, TransportRetryable):
+                return outcome
+            if attempt + 1 >= attempts:
+                return outcome
+            delay = _backoff_delay(attempt)
+            self._log(
+                f"Retrying HTTP download in {delay}s after failure: {request.url}"
+            )
+            await asyncio.sleep(delay)
         raise AssertionError("HTTPX attempt loop produced no outcome")
 
-    def _download_once(
+    async def _download_once(
         self,
         request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> int:
+    ) -> TransportOutcome:
         timeout = httpx.Timeout(settings.httpx.timeout)
         try:
-            with httpx.Client(
-                follow_redirects=True,
-                timeout=timeout,
-                transport=self._transport,
-            ) as client:
-                self._set_active_client(client)
-                with client.stream("GET", request.url) as response:
-                    self._raise_if_cancelled()
-                    _raise_for_http_status(response)
-                    return self._write_response(response, request.sink)
-        except DownloadCancelled:
-            raise
-        except (httpx.TimeoutException, httpx.TransportError) as error:
-            self._raise_if_cancelled()
-            raise _RetryableDownloadError(
-                f"HTTP download failed for {request.url}: {error}"
+            async with (
+                httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=timeout,
+                    transport=self._transport,
+                ) as client,
+                client.stream("GET", request.url) as response,
+            ):
+                failure = _http_failure_outcome(response)
+                if failure is not None:
+                    return failure
+                length = await self._write_response(response, request.sink)
+                return TransportSuccess(
+                    length=length,
+                    namespace="httpx",
+                    http_status=response.status_code,
+                )
+        except httpx.TooManyRedirects:
+            return TransportOrdinaryTerminal(
+                diagnostic=TransportDiagnostic(
+                    namespace="httpx",
+                    summary=f"HTTP download exceeded redirect limits: {request.url}",
+                ),
+                http_status=None,
+            )
+        except (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.ProxyError,
+            httpx.RemoteProtocolError,
+        ) as error:
+            if self._cancel_requested.is_set():
+                return _transport_cancelled("httpx")
+            return TransportRetryable(
+                diagnostic=TransportDiagnostic(
+                    namespace="httpx",
+                    summary=f"HTTP transport failed for {request.url}: {error}",
+                )
+            )
+        except (httpx.TransportError, httpx.RequestError) as error:
+            raise DownloadFilesError(
+                f"HTTP transport invariant failed for {request.url}: {error}"
             ) from error
-        finally:
-            self._set_active_client(None)
 
-    def _set_active_client(self, client: httpx.Client | None) -> None:
-        with self._client_lock:
-            self._active_client = client
-
-    def _write_response(self, response: httpx.Response, sink: TransportSink) -> int:
+    async def _write_response(
+        self,
+        response: httpx.Response,
+        sink: TransportSink,
+    ) -> int:
         downloaded = 0
         last_log = self._monotonic()
         with sink.open_for_write() as output:
-            for chunk in response.iter_bytes(chunk_size=self.chunk_size):
-                self._raise_if_cancelled()
+            async for chunk in response.aiter_bytes(chunk_size=self.chunk_size):
+                if self._cancel_requested.is_set():
+                    raise asyncio.CancelledError
                 if not chunk:
                     continue
                 output.write(chunk)
@@ -185,16 +255,24 @@ class HttpxDownloader:
         return downloaded
 
     def cancel(self) -> None:
-        self._cancel_requested.set()
-        with self._client_lock:
-            client = self._active_client
-        if client is not None:
-            with suppress(Exception):
-                client.close()
+        with self._active_lock:
+            if self._cancel_requested.is_set():
+                return
+            self._cancel_requested.set()
+            active = self._active
+        if active is not None:
+            loop, task = active
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(task.cancel)
 
-    def _raise_if_cancelled(self) -> None:
-        if self._cancel_requested.is_set():
-            raise DownloadCancelled("download cancelled")
+
+class _Aria2LifecycleState(Enum):
+    NEW = auto()
+    STARTING = auto()
+    READY = auto()
+    CLOSING = auto()
+    CLEANUP_FAILED = auto()
+    CLOSED = auto()
 
 
 class Aria2Downloader:
@@ -212,7 +290,7 @@ class Aria2Downloader:
         client_factory: Aria2ClientFactory = aria2p.Client,
         api_factory: Aria2ApiFactory = aria2p.API,
         secret_factory: SecretFactory = lambda: secrets.token_urlsafe(32),
-        sleep: Sleep = time.sleep,
+        cancel_wait: CancellationWait | None = None,
         monotonic: Monotonic = time.monotonic,
         log: Logger = print,
     ) -> None:
@@ -220,13 +298,20 @@ class Aria2Downloader:
         self._client_factory = client_factory
         self._api_factory = api_factory
         self._secret_factory = secret_factory
-        self._sleep = sleep
         self._monotonic = monotonic
         self._log = log
         self._process: Aria2Process | None = None
         self._client: Aria2Client | None = None
         self._api: Aria2Api | None = None
+        self._started_settings: Aria2DownloadSettings | None = None
+        self._state = _Aria2LifecycleState.NEW
+        self._close_requested = False
+        self._lifecycle = threading.Condition(threading.RLock())
+        self._teardown_generation = 0
+        self._completed_teardown_generation = 0
+        self._teardown_error: BaseException | None = None
         self._cancel_requested = threading.Event()
+        self._cancel_wait = cancel_wait or self._cancel_requested.wait
 
     def __enter__(self) -> Aria2Downloader:
         return self
@@ -241,24 +326,32 @@ class Aria2Downloader:
         self.close()
 
     def prepare(self, settings: DownloaderSettings) -> None:
-        self._raise_if_cancelled()
+        self._raise_prepare_cancelled()
         self._ensure_started(settings)
 
     def download(
         self,
         request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> TransportResult:
-        self._raise_if_cancelled()
-        api = self._ensure_started(settings)
+    ) -> TransportOutcome:
+        if self._cancel_requested.is_set():
+            return _transport_cancelled("aria2")
+        try:
+            api = self._ensure_started(settings)
+        except DownloadCancelled:
+            return _transport_cancelled("aria2")
         options = _aria2_options(request, settings.aria2)
         try:
             download = api.add_uris([request.url], options=options)
         except Exception as error:
+            if self._cancel_requested.is_set():
+                return _transport_cancelled("aria2")
             raise DownloadFilesError(
                 f"aria2 RPC submit failed for {request.url}: {error}"
             ) from error
-        self._wait_for_download(download, request)
+        transport = self._wait_for_download(download, request)
+        if transport is not None:
+            return transport
         try:
             length = request.sink.current_length()
         except DownloadFilesError:
@@ -267,69 +360,182 @@ class Aria2Downloader:
             raise DownloadFilesError(
                 f"aria2 supplied staging cannot be inspected: {error}"
             ) from error
-        return TransportResult(length=length)
+        return TransportSuccess(length=length, namespace="aria2", http_status=None)
 
     def close(self) -> None:
-        client = self._client
-        process = self._process
-        self._api = None
-        self._client = None
-        self._process = None
-        if client is not None:
-            with suppress(Exception):
-                client.shutdown()
-        if process is None:
-            return
+        self._close_until(self._monotonic() + self.shutdown_timeout_seconds)
+
+    def _close_until(self, deadline: float) -> None:
+        waiting_generation: int | None = None
+        with self._lifecycle:
+            self._close_requested = True
+            self._lifecycle.notify_all()
+            while True:
+                if self._state is _Aria2LifecycleState.STARTING:
+                    self._wait_for_lifecycle_change(deadline)
+                    continue
+                if self._state is _Aria2LifecycleState.CLOSING:
+                    waiting_generation = self._teardown_generation
+                    self._wait_for_lifecycle_change(deadline)
+                    if (
+                        self._completed_teardown_generation == waiting_generation
+                        and self._state is not _Aria2LifecycleState.CLOSING
+                    ):
+                        if self._teardown_error is not None:
+                            raise self._teardown_error
+                        return
+                    continue
+                if self._process is None:
+                    self._api = None
+                    self._client = None
+                    self._started_settings = None
+                    self._state = _Aria2LifecycleState.CLOSED
+                    self._teardown_error = None
+                    self._lifecycle.notify_all()
+                    return
+                process = self._process
+                client = self._client
+                self._api = None
+                self._state = _Aria2LifecycleState.CLOSING
+                self._teardown_generation += 1
+                generation = self._teardown_generation
+                self._teardown_error = None
+                self._lifecycle.notify_all()
+                break
+
+        cleanup_error: BaseException | None = None
         try:
-            process.wait(timeout=self.shutdown_timeout_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:
-            return
-        try:
-            process.terminate()
-            process.wait(timeout=self.shutdown_timeout_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:
-            return
-        try:
-            process.kill()
-            process.wait(timeout=self.shutdown_timeout_seconds)
-        except Exception:
-            pass
+            self._shutdown_process(client, process, deadline=deadline)
+        except BaseException as error:
+            cleanup_error = error
+        finally:
+            cleanup_error = self._publish_teardown_result(
+                process,
+                generation=generation,
+                error=cleanup_error,
+            )
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    def _publish_teardown_result(
+        self,
+        process: Aria2Process,
+        *,
+        generation: int,
+        error: BaseException | None,
+    ) -> BaseException | None:
+        with self._lifecycle:
+            if self._process is not process and error is None:
+                error = DownloadFilesError(
+                    "aria2 lifecycle lost the exact child during teardown"
+                )
+            if error is None:
+                self._process = None
+                self._client = None
+                self._api = None
+                self._started_settings = None
+                self._state = _Aria2LifecycleState.CLOSED
+            else:
+                # Retain the exact child and client so a later close can retry reap.
+                self._state = _Aria2LifecycleState.CLEANUP_FAILED
+            self._completed_teardown_generation = generation
+            self._teardown_error = error
+            self._lifecycle.notify_all()
+        return error
 
     def cancel(self) -> None:
-        self._cancel_requested.set()
+        with self._lifecycle:
+            self._cancel_requested.set()
+            self._lifecycle.notify_all()
         self.close()
 
     def _ensure_started(self, settings: DownloaderSettings) -> Aria2Api:
-        if self._api is not None:
-            return self._api
-        secret = self._secret_factory()
-        argv = _aria2_daemon_argv(settings.aria2, secret)
+        self._raise_prepare_cancelled()
+        deadline = self._monotonic() + self.startup_timeout_seconds
+        with self._lifecycle:
+            while True:
+                if self._cancel_requested.is_set():
+                    raise DownloadCancelled("aria2 download cancelled")
+                if self._close_requested or self._state is _Aria2LifecycleState.CLOSED:
+                    raise DownloadFilesError("aria2 adapter is already closed")
+                if self._state is _Aria2LifecycleState.STARTING:
+                    self._wait_for_lifecycle_change(deadline)
+                    continue
+                if self._state is _Aria2LifecycleState.CLOSING:
+                    self._wait_for_lifecycle_change(deadline)
+                    continue
+                if self._state is _Aria2LifecycleState.CLEANUP_FAILED:
+                    raise DownloadFilesError(
+                        "aria2 daemon cleanup must succeed before reuse"
+                    )
+                if self._state is _Aria2LifecycleState.READY:
+                    if self._started_settings != settings.aria2:
+                        raise DownloadFilesError(
+                            "aria2 adapter cannot reuse a daemon with "
+                            "different settings"
+                        )
+                    self._fail_if_daemon_exited_locked("during daemon reuse")
+                    if self._api is None:
+                        raise DownloadFilesError("aria2 RPC API is not ready")
+                    return self._api
+                self._state = _Aria2LifecycleState.STARTING
+                self._started_settings = settings.aria2
+                self._lifecycle.notify_all()
+                break
+
         try:
+            try:
+                secret = self._secret_factory()
+            except Exception as error:
+                raise DownloadFilesError(
+                    "aria2 RPC secret generation failed"
+                ) from error
+            argv = _aria2_daemon_argv(settings.aria2, secret)
             process = self._process_factory(argv)
-        except FileNotFoundError as error:
-            raise DownloadFilesError("aria2c executable not found") from error
-        except OSError as error:
-            raise DownloadFilesError(f"aria2c failed to start: {error}") from error
-        self._process = process
+        except BaseException as error:
+            self._finish_start_without_process()
+            if isinstance(error, FileNotFoundError):
+                raise DownloadFilesError("aria2c executable not found") from error
+            if isinstance(error, OSError):
+                raise DownloadFilesError(f"aria2c failed to start: {error}") from error
+            if isinstance(error, DownloadFilesError):
+                raise
+            if isinstance(error, Exception):
+                raise DownloadFilesError("aria2 daemon startup failed") from error
+            raise
+
+        client: Aria2Client | None = None
         try:
+            with self._lifecycle:
+                self._process = process
+                self._lifecycle.notify_all()
             client = self._client_factory(
                 host="http://localhost",
                 port=settings.aria2.rpc_port,
                 secret=secret,
                 timeout=self.rpc_timeout_seconds,
             )
+            with self._lifecycle:
+                self._client = client
+                self._lifecycle.notify_all()
             api = self._api_factory(client)
-            self._client = client
-            self._api = api
             self._wait_until_ready(client, settings.aria2.rpc_port)
-        except Exception:
-            self.close()
+            with self._lifecycle:
+                if self._cancel_requested.is_set() or self._close_requested:
+                    raise DownloadCancelled("aria2 download cancelled")
+                self._api = api
+                self._state = _Aria2LifecycleState.READY
+                self._lifecycle.notify_all()
+        except BaseException as error:
+            self._publish_failed_start(process, client)
+            # Teardown publishes CLEANUP_FAILED and retains the exact child before
+            # an interruption escapes. Preserve the startup exception as the cause.
+            with suppress(BaseException):
+                self._close_until(self._monotonic() + self.shutdown_timeout_seconds)
+            if isinstance(error, (DownloadFilesError, DownloadCancelled)):
+                raise
+            if isinstance(error, Exception):
+                raise DownloadFilesError("aria2 daemon startup failed") from error
             raise
         self._log(f"aria2 RPC daemon started on port {settings.aria2.rpc_port}")
         return api
@@ -338,7 +544,7 @@ class Aria2Downloader:
         deadline = self._monotonic() + self.startup_timeout_seconds
         last_error: Exception | None = None
         while True:
-            self._raise_if_cancelled()
+            self._raise_prepare_cancelled()
             self._fail_if_daemon_exited("before RPC became ready")
             try:
                 client.get_version()
@@ -349,38 +555,66 @@ class Aria2Downloader:
                 raise DownloadFilesError(
                     f"aria2 RPC did not become ready on configured port {port}"
                 ) from last_error
-            self._sleep(self.poll_interval_seconds)
+            if self._cancel_wait(self.poll_interval_seconds):
+                raise DownloadCancelled("aria2 download cancelled")
 
     def _wait_for_download(
         self,
         download: Aria2Download,
         request: TransportRequest,
-    ) -> None:
+    ) -> TransportOutcome | None:
         while True:
-            self._raise_if_cancelled()
-            self._fail_if_daemon_exited(f"while downloading {request.url}")
+            with self._lifecycle:
+                if self._cancel_requested.is_set():
+                    return _transport_cancelled("aria2")
+                self._fail_if_daemon_exited_locked(f"while downloading {request.url}")
             try:
                 download.update()
             except Exception as error:
-                raise DownloadFilesError(
-                    f"aria2 RPC disconnected while downloading {request.url}: {error}"
-                ) from error
-            status = download.status
-            if download.is_complete or status == "complete":
-                self._log(f"aria2 download complete: {request.sink.display_path}")
-                return
-            if download.is_removed or status == "removed":
-                raise TransferDownloadFilesError(
-                    f"aria2 download was removed: {request.url}"
-                )
-            if status == "error":
-                message = download.error_message or "unknown aria2 error"
-                raise TransferDownloadFilesError(
-                    f"aria2 download failed for {request.url}: {message}"
-                )
-            self._sleep(self.poll_interval_seconds)
+                with self._lifecycle:
+                    if self._cancel_requested.is_set():
+                        return _transport_cancelled("aria2")
+                    raise DownloadFilesError(
+                        "aria2 RPC disconnected while downloading "
+                        f"{request.url}: {error}"
+                    ) from error
+            try:
+                status = download.status
+            except Exception as error:
+                with self._lifecycle:
+                    if self._cancel_requested.is_set():
+                        return _transport_cancelled("aria2")
+                    raise DownloadFilesError(
+                        "aria2 RPC returned a malformed download status"
+                    ) from error
+            with self._lifecycle:
+                if self._cancel_requested.is_set():
+                    return _transport_cancelled("aria2")
+                if not isinstance(status, str):
+                    raise DownloadFilesError(
+                        "aria2 RPC returned a malformed download status"
+                    )
+                if status == "complete":
+                    self._log(f"aria2 download complete: {request.sink.display_path}")
+                    return None
+                if status == "removed":
+                    raise DownloadFilesError(
+                        "aria2 unexpectedly removed an active download"
+                    )
+                if status == "error":
+                    return _classify_aria2_error(download)
+                if status not in {"active", "waiting"}:
+                    raise DownloadFilesError(
+                        "aria2 RPC returned an unexpected download status"
+                    )
+            if self._cancel_wait(self.poll_interval_seconds):
+                return _transport_cancelled("aria2")
 
     def _fail_if_daemon_exited(self, detail: str) -> None:
+        with self._lifecycle:
+            self._fail_if_daemon_exited_locked(detail)
+
+    def _fail_if_daemon_exited_locked(self, detail: str) -> None:
         process = self._process
         if process is None:
             raise DownloadFilesError("aria2 daemon is not running")
@@ -390,9 +624,97 @@ class Aria2Downloader:
                 f"aria2 daemon exited with code {returncode} {detail}"
             )
 
-    def _raise_if_cancelled(self) -> None:
+    def _raise_prepare_cancelled(self) -> None:
         if self._cancel_requested.is_set():
             raise DownloadCancelled("download cancelled")
+
+    def _finish_start_without_process(self) -> None:
+        with self._lifecycle:
+            self._started_settings = None
+            self._state = (
+                _Aria2LifecycleState.CLOSED
+                if self._close_requested
+                else _Aria2LifecycleState.NEW
+            )
+            self._lifecycle.notify_all()
+
+    def _publish_failed_start(
+        self,
+        process: Aria2Process,
+        client: Aria2Client | None,
+    ) -> None:
+        with self._lifecycle:
+            if self._process is None:
+                self._process = process
+            elif self._process is not process:
+                raise DownloadFilesError(
+                    "aria2 lifecycle lost the exact child during startup"
+                )
+            if client is not None:
+                if self._client is None:
+                    self._client = client
+                elif self._client is not client:
+                    raise DownloadFilesError(
+                        "aria2 lifecycle changed RPC client during startup"
+                    )
+            if self._state is _Aria2LifecycleState.STARTING:
+                self._state = _Aria2LifecycleState.READY
+            self._close_requested = True
+            self._lifecycle.notify_all()
+
+    def _wait_for_lifecycle_change(self, deadline: float) -> None:
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            raise DownloadFilesError(
+                "aria2 lifecycle did not settle within its deadline"
+            )
+        self._lifecycle.wait(remaining)
+
+    def _shutdown_process(
+        self,
+        client: Aria2Client | None,
+        process: Aria2Process,
+        *,
+        deadline: float,
+    ) -> None:
+        """Stop and reap one exact child within one total deadline."""
+        if process.poll() is not None:
+            if not _wait_for_aria2_process(
+                process, _remaining_deadline(deadline, self._monotonic)
+            ):
+                raise DownloadFilesError("aria2 daemon could not be reaped")
+            return
+
+        if client is not None:
+            rpc_shutdown = threading.Thread(
+                target=_shutdown_aria2_rpc,
+                args=(client,),
+                daemon=True,
+                name="cdh-aria2-rpc-shutdown",
+            )
+            rpc_shutdown.start()
+            rpc_shutdown.join(_shutdown_stage_timeout(deadline, self._monotonic, 4))
+            if _wait_for_aria2_process(
+                process,
+                _shutdown_stage_timeout(deadline, self._monotonic, 3),
+            ):
+                return
+
+        process.terminate()
+        if _wait_for_aria2_process(
+            process,
+            _shutdown_stage_timeout(deadline, self._monotonic, 2),
+        ):
+            return
+
+        process.kill()
+        if not _wait_for_aria2_process(
+            process,
+            _remaining_deadline(deadline, self._monotonic),
+        ):
+            raise DownloadFilesError(
+                "aria2 daemon did not exit within the shutdown deadline"
+            )
 
 
 def file_download_plan(
@@ -543,8 +865,8 @@ def _validate_download_plan(plan: FileDownloadPlan) -> None:
             )
 
 
-class Sleep(Protocol):
-    def __call__(self, seconds: float) -> None: ...
+class CancellationWait(Protocol):
+    def __call__(self, timeout: float) -> bool: ...
 
 
 class Monotonic(Protocol):
@@ -584,9 +906,7 @@ class Aria2ClientFactory(Protocol):
 
 class Aria2Download(Protocol):
     status: str
-    is_complete: bool
-    is_removed: bool
-    error_message: str | None
+    error_code: str | None
 
     def update(self) -> None: ...
 
@@ -617,20 +937,110 @@ class Aria2DownloaderFactory(Protocol):
     def __call__(self, *, log: Logger) -> ManagedDownloadBackend: ...
 
 
-class _RetryableDownloadError(Exception):
-    """Internal retryable HTTP transport marker."""
-
-
-def _raise_for_http_status(response: httpx.Response) -> None:
+def _http_failure_outcome(
+    response: httpx.Response,
+) -> TransportRetryable | TransportOrdinaryTerminal | None:
     status = response.status_code
     if status in {408, 429} or 500 <= status <= 599:
-        raise _RetryableDownloadError(
-            f"HTTP download got retryable status {status}: {response.url}"
+        return TransportRetryable(
+            diagnostic=TransportDiagnostic(
+                namespace="httpx",
+                summary=(
+                    f"HTTP download got retryable status {status}: {response.url}"
+                ),
+            ),
+            http_status=status,
         )
     if 400 <= status <= 599:
-        raise TerminalTransferDownloadFilesError(
-            f"HTTP download got non-retryable status {status}: {response.url}"
+        return TransportOrdinaryTerminal(
+            diagnostic=TransportDiagnostic(
+                namespace="httpx",
+                summary=(
+                    f"HTTP download got non-retryable status {status}: {response.url}"
+                ),
+            ),
+            http_status=status,
         )
+    return None
+
+
+def _transport_cancelled(
+    namespace: Literal["httpx", "aria2"],
+) -> TransportCancelled:
+    return TransportCancelled(
+        diagnostic=TransportDiagnostic(
+            namespace=namespace,
+            summary=f"{namespace} download cancelled",
+        )
+    )
+
+
+def _classify_aria2_error(download: Aria2Download) -> TransportOutcome:
+    """Map only aria2's deliberately small stable machine-code allowlist."""
+    try:
+        code = download.error_code
+    except Exception as error:
+        raise DownloadFilesError(
+            "aria2 RPC returned malformed error metadata"
+        ) from error
+    if not isinstance(code, str):
+        raise DownloadFilesError("aria2 RPC returned malformed error metadata")
+
+    retryable_summaries = {
+        "2": "aria2 reported a timeout",
+        "6": "aria2 reported a network failure",
+        "19": "aria2 reported a name-resolution failure",
+        "29": "aria2 reported temporary server unavailability",
+    }
+    terminal_summaries = {
+        "3": "aria2 reported that the remote resource was not found",
+        "4": "aria2 reported that the remote resource was not found",
+        "23": "aria2 reported too many redirects",
+        "24": "aria2 reported an HTTP authorization failure",
+        "22": "aria2 reported an indeterminate HTTP failure",
+    }
+    if code in retryable_summaries:
+        return TransportRetryable(
+            diagnostic=TransportDiagnostic(
+                namespace="aria2",
+                summary=retryable_summaries[code],
+            ),
+            http_status=None,
+        )
+    if code in terminal_summaries:
+        return TransportOrdinaryTerminal(
+            diagnostic=TransportDiagnostic(
+                namespace="aria2",
+                summary=terminal_summaries[code],
+            ),
+            http_status=None,
+        )
+    raise DownloadFilesError("aria2 reported an unclassified transport failure")
+
+
+def _shutdown_aria2_rpc(client: Aria2Client) -> None:
+    with suppress(Exception):
+        client.shutdown()
+
+
+def _wait_for_aria2_process(process: Aria2Process, timeout: float) -> bool:
+    try:
+        process.wait(timeout=max(0.0, timeout))
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _shutdown_stage_timeout(
+    deadline: float,
+    monotonic: Monotonic,
+    stages: int,
+) -> float:
+    return _remaining_deadline(deadline, monotonic) / stages
+
+
+def _remaining_deadline(deadline: float, monotonic: Monotonic) -> float:
+    return max(0.0, deadline - monotonic())
 
 
 def _aria2_options(

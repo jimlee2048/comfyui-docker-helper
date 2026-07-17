@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from comfyui_docker_helper.config.build_plan import (
     FilesPhase,
     HttpxPlan,
 )
+from comfyui_docker_helper.container import attempt_coordinator
 from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
@@ -22,7 +24,9 @@ from comfyui_docker_helper.container.download_files import (
     FileDownloadItem,
     FileDownloadPlan,
     HttpxDownloadSettings,
+    TransportCancelled,
     TransportDiagnostic,
+    TransportOrdinaryTerminal,
     TransportOutcome,
     TransportRequest,
     TransportRetryable,
@@ -30,7 +34,11 @@ from comfyui_docker_helper.container.download_files import (
     file_download_plan,
     process_file_downloads,
 )
-from comfyui_docker_helper.container.transfer_core import TransferDownloadFilesError
+from comfyui_docker_helper.container.transfer_core import (
+    DownloadCancelled,
+    TerminalTransferDownloadFilesError,
+    TransferDownloadFilesError,
+)
 
 
 class RecordingBackend:
@@ -78,6 +86,20 @@ def _item(root: Path, name: str, *, downloader: str = "httpx") -> FileDownloadIt
         overwrite=False,
         downloader=downloader,
     )
+
+
+def _disable_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep orchestration tests focused on policy rather than elapsed time."""
+    monkeypatch.setattr(
+        attempt_coordinator,
+        "_default_cancellable_wait",
+        lambda _timeout, _cancel_requested: False,
+    )
+
+
+def _owned_staging_leaves(root: Path) -> tuple[Path, ...]:
+    staging = root / "models" / ".cdh-staging"
+    return tuple(staging.iterdir()) if staging.exists() else ()
 
 
 def test_file_download_plan_projects_checksum_without_runtime_failure_policy() -> None:
@@ -179,29 +201,65 @@ def test_build_orchestrator_preserves_order_and_places_via_shared_core(
     assert httpx.calls[0].sink.display_path != first.target
 
 
-def test_build_retries_retryable_transfer_then_succeeds(tmp_path: Path) -> None:
-    root = tmp_path / "ComfyUI"
-    root.mkdir()
-    item = _item(root, "model.bin")
-    backend = RecordingBackend(fail_times=2)
-
-    results = process_file_downloads(
-        FileDownloadPlan(root, _settings(), (item,), 3),
-        backends={"httpx": backend},
-        log=lambda _: None,
-    )
-
-    assert results[0].status is DownloadStatus.DOWNLOADED
-    assert len(backend.calls) == 3
-
-
-def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
+def test_build_grants_each_declared_file_a_fresh_attempt_budget(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A retry used by one file must not consume the next file's budget."""
+    _disable_retry_delay(monkeypatch)
     root = tmp_path / "ComfyUI"
     root.mkdir()
     first = _item(root, "first.bin")
     second = _item(root, "second.bin")
+
+    class RetryEachFileOnce(RecordingBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: set[str] = set()
+
+        def download(self, request, settings):
+            self.calls.append(request)
+            with request.sink.open_for_write() as output:
+                output.write(b"downloaded")
+            if request.url not in self.seen:
+                self.seen.add(request.url)
+                return TransportRetryable(
+                    TransportDiagnostic("httpx", "network failed")
+                )
+            return TransportSuccess(
+                length=len(b"downloaded"), namespace="httpx", http_status=200
+            )
+
+    backend = RetryEachFileOnce()
+
+    results = process_file_downloads(
+        FileDownloadPlan(root, _settings(), (first, second), 2),
+        backends={"httpx": backend},
+        log=lambda _: None,
+    )
+
+    assert [call.url for call in backend.calls] == [
+        first.url,
+        first.url,
+        second.url,
+        second.url,
+    ]
+    assert [result.item for result in results] == [first, second]
+    assert all(result.status is DownloadStatus.DOWNLOADED for result in results)
+
+
+def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exhaustion preserves an old final and stops later declarations."""
+    _disable_retry_delay(monkeypatch)
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    first = replace(_item(root, "first.bin"), overwrite=True)
+    second = _item(root, "second.bin")
+    first.target.parent.mkdir()
+    first.target.write_bytes(b"old")
     backend = RecordingBackend(fail_times=3)
 
     with pytest.raises(TransferDownloadFilesError, match="network failed"):
@@ -212,8 +270,81 @@ def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
         )
 
     assert len(backend.calls) == 2
+    assert first.target.read_bytes() == b"old"
+    assert not second.target.exists()
+    assert _owned_staging_leaves(root) == ()
+
+
+def test_successful_replacement_returns_stable_observation_and_cleans_staging(
+    tmp_path: Path,
+) -> None:
+    """Build success exposes the shared core's final result without artifacts."""
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    item = replace(_item(root, "model.bin"), overwrite=True)
+    item.target.parent.mkdir()
+    item.target.write_bytes(b"old")
+
+    (result,) = process_file_downloads(
+        FileDownloadPlan(root, _settings(), (item,), 1),
+        backends={"httpx": RecordingBackend()},
+        log=lambda _: None,
+    )
+
+    assert result.item == item
+    assert result.outcome.target == item.target
+    assert result.outcome.observed_length == len(b"downloaded")
+    assert item.target.read_bytes() == b"downloaded"
+    assert _owned_staging_leaves(root) == ()
+
+
+@pytest.mark.parametrize(
+    ("terminal_outcome", "expected_error"),
+    [
+        (
+            TransportOrdinaryTerminal(
+                TransportDiagnostic("httpx", "not found"),
+                http_status=404,
+            ),
+            TerminalTransferDownloadFilesError,
+        ),
+        (
+            TransportCancelled(TransportDiagnostic("httpx", "cancelled")),
+            DownloadCancelled,
+        ),
+    ],
+)
+def test_build_terminal_outcomes_are_fatal_and_stop_declaration_order(
+    tmp_path: Path,
+    terminal_outcome: TransportOutcome,
+    expected_error: type[Exception],
+) -> None:
+    """Ordinary terminal and cancellation cannot become build success."""
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    first = _item(root, "first.bin")
+    second = _item(root, "second.bin")
+
+    class TerminalBackend(RecordingBackend):
+        def download(self, request, settings):
+            self.calls.append(request)
+            with request.sink.open_for_write() as output:
+                output.write(b"partial")
+            return terminal_outcome
+
+    backend = TerminalBackend()
+
+    with pytest.raises(expected_error):
+        process_file_downloads(
+            FileDownloadPlan(root, _settings(), (first, second), 3),
+            backends={"httpx": backend},
+            log=lambda _: None,
+        )
+
+    assert [call.url for call in backend.calls] == [first.url]
     assert not first.target.exists()
     assert not second.target.exists()
+    assert _owned_staging_leaves(root) == ()
 
 
 def test_build_existing_regular_skip_does_not_call_backend(tmp_path: Path) -> None:

@@ -122,9 +122,11 @@ def test_entrypoint_starts_with_defaults_without_runtime_config(
 ) -> None:
     runtime = _runtime(tmp_path)
     calls: list[SpawnCall] = []
+    state_path = tmp_path / "state" / "state.json"
 
     exit_code = run_entrypoint(
         runtime=runtime,
+        runtime_state_path=state_path,
         baked_config_path=_missing_baked_config(tmp_path),
         mounted_config_path=_missing_mounted_config(tmp_path),
         baked_hooks_path=_missing_baked_hooks(tmp_path),
@@ -147,6 +149,7 @@ def test_entrypoint_starts_with_defaults_without_runtime_config(
             shell=False,
         )
     ]
+    assert not state_path.parent.exists()
 
 
 # Existing state remains an admission boundary even when the effective desired

@@ -201,6 +201,107 @@ def _run_with_real_async_queue(
     )
 
 
+# Mixed-mode scheduling coverage proves mode partitioning keeps declaration
+# order within each queue and completes sync files before async acceptance.
+def test_mixed_runtime_downloads_preserve_queue_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_downloader = "httpx"
+
+[[files]]
+url = "https://example.com/async-a.bin"
+dir = "models"
+filename = "async-a.bin"
+download_mode = "async"
+
+[[files]]
+url = "https://example.com/sync-a.bin"
+dir = "models"
+filename = "sync-a.bin"
+download_mode = "sync"
+
+[[files]]
+url = "https://example.com/async-b.bin"
+dir = "models"
+filename = "async-b.bin"
+download_mode = "async"
+
+[[files]]
+url = "https://example.com/sync-b.bin"
+dir = "models"
+filename = "sync-b.bin"
+download_mode = "sync"
+""",
+    )
+    state_path = tmp_path / "state.json"
+    backend = AsyncBackend()
+    _install_async_backend(monkeypatch, backend)
+    events: list[str] = []
+    async_filenames: list[str] = []
+
+    class AcceptedQueue:
+        def request_stop(self) -> None:
+            pytest.fail("a completed test queue must not be stopped")
+
+        def terminate_backends(self) -> None:
+            pytest.fail("a completed test queue has no active backend")
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    def async_starter(
+        plan: RuntimeFilePlan,
+        **kwargs: object,
+    ) -> AcceptedQueue:
+        del kwargs
+        assert [_source_filename(call[0]) for call in backend.calls] == [
+            "sync-a.bin",
+            "sync-b.bin",
+        ]
+        events.append("async-accepted")
+        async_filenames.extend(item.filename for item in plan.items)
+        return AcceptedQueue()
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        events.append("spawn")
+        return FakeChild(0)
+
+    assert (
+        _run_with_real_async_queue(
+            runtime=runtime,
+            config=config,
+            state_path=state_path,
+            runner=runner,
+            runtime_async_queue_starter=async_starter,
+        )
+        == 0
+    )
+
+    assert async_filenames == ["async-a.bin", "async-b.bin"]
+    assert events == ["async-accepted", "spawn"]
+    entries = _state_by_target(state_path)
+    assert [
+        entries[f"models/{name}"].status
+        for name in ("sync-a.bin", "sync-b.bin", "async-a.bin", "async-b.bin")
+    ] == ["completed", "completed", "pending", "pending"]
+
+
 # Async queue acceptance coverage proves startup hooks and readiness are not
 # blocked by in-flight downloads, while completion still updates final state.
 def test_actual_async_queue_acceptance_does_not_block_startup_hooks_or_completion(
@@ -733,3 +834,72 @@ filename = "b.bin"
         assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
     else:
         assert not (runtime.comfyui_path / "models" / "b.bin").exists()
+
+
+# Cross-start accounting coverage proves persisted history does not consume a
+# later container start's per-file attempt budget.
+def test_sync_attempt_budget_resets_for_each_container_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_download_mode = "sync"
+default_downloader = "httpx"
+download_max_attempts = 2
+download_failure_policy = "continue"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    state_path = tmp_path / "state.json"
+    backend = AsyncBackend()
+    backend.failures["model.bin"] = None
+    _install_async_backend(monkeypatch, backend)
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return FakeChild(0)
+
+    assert (
+        _run_with_real_async_queue(
+            runtime=runtime,
+            config=config,
+            state_path=state_path,
+            runner=runner,
+        )
+        == 0
+    )
+    first = load_runtime_state(state_path)
+    first_entry = next(iter(first.downloads.entries.values()))
+    assert len(backend.calls) == 2
+    assert first_entry.status == "exhausted"
+    assert first_entry.attempts == 2
+
+    assert (
+        _run_with_real_async_queue(
+            runtime=runtime,
+            config=config,
+            state_path=state_path,
+            runner=runner,
+        )
+        == 0
+    )
+    second = load_runtime_state(state_path)
+    second_entry = next(iter(second.downloads.entries.values()))
+    assert len(backend.calls) == 4
+    assert second.run_id != first.run_id
+    assert second_entry.status == "exhausted"
+    assert second_entry.attempts == 2

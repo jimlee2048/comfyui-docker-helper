@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
@@ -41,21 +41,30 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeDownloadDigestKey,
     RuntimeDownloadEntry,
     RuntimeDownloadsState,
+    RuntimeResumeState,
     RuntimeState,
+    RuntimeStateError,
+    failed_runtime_download_entry,
+    runtime_download_desired_identity_digest,
 )
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
     DownloadBackend,
     DownloaderSettings,
+    DownloadFilesError,
     DownloadStatus,
     FileTransferOutcome,
     FileTransferRequest,
     HttpxDownloadSettings,
     Logger,
+    ResumeAuthority,
     StagingDisposition,
     TransferDownloadFilesError,
     TransferIdentity,
+    _admit_preserved_transfer,
     admitted_regular_final,
+    confirm_indexed_transfer_artifacts_absent,
+    discard_preserved_transfer,
     project_transfer_identity,
 )
 
@@ -80,6 +89,7 @@ class RuntimeDownloadStateObserver(Protocol):
         status: RuntimeDownloadObservedStatus,
         *,
         error: object | None = None,
+        resume_authority: ResumeAuthority | None = None,
     ) -> None: ...
 
 
@@ -96,6 +106,7 @@ class RuntimeFilePlanItem:
     checksum: str | None
     download_mode: Literal["sync", "async"]
     downloader: DownloaderName | None
+    resume_authority: ResumeAuthority | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +133,7 @@ class RuntimeFileReconciliationItem:
 
     item: RuntimeFilePlanItem
     digest: RuntimeDownloadDigestKey
-    status: Literal["pending", "completed", "skipped"]
+    status: Literal["pending", "completed"]
     scheduled: bool
     staging_target: Path
     previous_entry: RuntimeDownloadEntry | None
@@ -130,13 +141,13 @@ class RuntimeFileReconciliationItem:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeFileReconciliation:
-    """Pure runtime file reconciliation result for state and execution planning."""
+    """Runtime state and execution plan after bounded indexed reconciliation."""
 
     state: RuntimeState
     download_plan: RuntimeFilePlan
     items: tuple[RuntimeFileReconciliationItem, ...]
     stale_entry_digests: frozenset[str]
-    stale_staging_candidates: tuple[Path, ...]
+    cleanup_pending_digests: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +334,8 @@ def process_runtime_file_downloads(
                 pending=len(plan.items) - index,
             )
             raise
+        except RuntimeStateError:
+            raise
         except Exception as error:
             _notify_runtime_download_state(
                 state_observer,
@@ -357,6 +370,24 @@ def runtime_file_identity_digest(
     return _runtime_transfer_identity(item).digest
 
 
+def runtime_file_state_identity_digest(
+    item: RuntimeFilePlanItem,
+    *,
+    default_downloader: DownloaderName | None = None,
+) -> RuntimeDownloadDigestKey:
+    """Return runtime desired identity without changing transfer staging identity."""
+    downloader = item.downloader or default_downloader
+    if downloader is None:
+        raise RuntimeStateError("runtime desired identity requires a downloader")
+    return runtime_download_desired_identity_digest(
+        source=item.url,
+        target=item.relative_target,
+        checksum=item.checksum,
+        overwrite=item.overwrite,
+        downloader=downloader,
+    )
+
+
 def runtime_file_staging_target(item: RuntimeFilePlanItem) -> Path:
     """Return shared desired-identity staging for reconciliation."""
     return _runtime_transfer_identity(item).staging_target
@@ -377,24 +408,51 @@ def reconcile_runtime_file_plan(
     *,
     now: datetime,
     comfyui_path: str | Path,
+    default_downloader: DownloaderName,
+    resume_download: bool,
 ) -> RuntimeFileReconciliation:
-    """Reconcile desired runtime files against final files and persisted state."""
+    """Reconcile desired files and execute exact state-indexed stale cleanup."""
     root = Path(comfyui_path)
-    current_digests = {runtime_file_identity_digest(item): item for item in plan.items}
+    admitted_items = tuple(
+        replace(item, downloader=item.downloader or default_downloader)
+        for item in plan.items
+    )
+    current_digests = {
+        runtime_file_state_identity_digest(item): item for item in admitted_items
+    }
     stale_entry_digests = frozenset(
         digest for digest in state.downloads.entries if digest not in current_digests
     )
 
+    state_namespaces = _validate_runtime_state_entries(root, state)
+    current_namespaces = {runtime_file_identity_digest(item) for item in admitted_items}
+
     items: list[RuntimeFileReconciliationItem] = []
     scheduled_items: list[RuntimeFilePlanItem] = []
     entries: dict[RuntimeDownloadDigestKey, RuntimeDownloadEntry] = {}
+    cleanup_pending_digests: set[str] = set()
 
-    for item in plan.items:
-        digest = runtime_file_identity_digest(item)
+    for digest in sorted(stale_entry_digests):
+        entry = state.downloads.entries[digest]
+        pending = _reconcile_stale_runtime_entry(
+            root,
+            entry,
+            now=now,
+        )
+        if pending is not None:
+            if state_namespaces[digest] in current_namespaces:
+                raise DownloadFilesError(
+                    "current runtime transfer namespace has unresolved stale cleanup"
+                )
+            entries[digest] = pending
+            cleanup_pending_digests.add(digest)
+
+    for item in admitted_items:
+        digest = runtime_file_state_identity_digest(item)
         previous_entry = state.downloads.entries.get(digest)
         final_exists = admitted_regular_final(root, item.target)
 
-        status: Literal["pending", "completed", "skipped"] = (
+        status: Literal["pending", "completed"] = (
             "completed"
             if previous_entry is not None
             and previous_entry.status == "completed"
@@ -404,8 +462,20 @@ def reconcile_runtime_file_plan(
         )
         scheduled = status == "pending"
 
+        resume_authority: ResumeAuthority | None = None
         if scheduled:
-            scheduled_items.append(item)
+            resume_authority = _current_resume_authority(
+                root,
+                item,
+                previous_entry,
+                resume_download=resume_download,
+            )
+            scheduled_items.append(
+                replace(
+                    item,
+                    resume_authority=resume_authority,
+                )
+            )
 
         entry = _runtime_download_entry_for_reconciliation(
             item,
@@ -413,6 +483,7 @@ def reconcile_runtime_file_plan(
             status=status,
             state=state,
             now=now,
+            resume_authority=resume_authority,
         )
         entries[digest] = entry
         items.append(
@@ -437,13 +508,7 @@ def reconcile_runtime_file_plan(
         download_plan=RuntimeFilePlan(items=tuple(scheduled_items)),
         items=tuple(items),
         stale_entry_digests=stale_entry_digests,
-        stale_staging_candidates=tuple(
-            _stale_runtime_file_staging_candidates(
-                state,
-                stale_entry_digests=stale_entry_digests,
-                root=root,
-            )
-        ),
+        cleanup_pending_digests=frozenset(cleanup_pending_digests),
     )
 
 
@@ -451,41 +516,242 @@ def _runtime_download_entry_for_reconciliation(
     item: RuntimeFilePlanItem,
     previous_entry: RuntimeDownloadEntry | None,
     *,
-    status: Literal["pending", "completed", "skipped"],
+    status: Literal["pending", "completed"],
     state: RuntimeState,
     now: datetime,
+    resume_authority: ResumeAuthority | None,
 ) -> RuntimeDownloadEntry:
     attempts = previous_entry.attempts if previous_entry is not None else 0
     attempt_run_id = (
         previous_entry.attempt_run_id if previous_entry is not None else state.run_id
     )
     return RuntimeDownloadEntry(
+        source=item.url,
         target=item.relative_target,
+        checksum=item.checksum,
+        overwrite=item.overwrite,
+        downloader=item.downloader,
         download_mode=item.download_mode,
         status=status,
         attempts=attempts,
         attempt_run_id=attempt_run_id,
+        resume=(
+            RuntimeResumeState.from_authority(resume_authority)
+            if resume_authority is not None
+            else None
+        ),
         last_error=None,
         updated_at=now,
     )
 
 
-def _stale_runtime_file_staging_candidates(
+def _validate_runtime_state_entries(
+    root: Path,
+    state: RuntimeState,
+) -> dict[str, str]:
+    namespaces: dict[str, str] = {}
+    namespace_owners: dict[str, str] = {}
+    for digest, entry in state.downloads.entries.items():
+        expected = runtime_download_desired_identity_digest(
+            source=entry.source,
+            target=entry.target,
+            checksum=entry.checksum,
+            overwrite=entry.overwrite,
+            downloader=entry.downloader,
+        )
+        if expected != digest:
+            raise RuntimeStateError(
+                "runtime state is invalid; remove the state file and restart"
+            )
+        transfer_digest = _entry_transfer_identity(root, entry).digest
+        owner = namespace_owners.get(transfer_digest)
+        if owner is not None and owner != digest:
+            raise RuntimeStateError(
+                "runtime state is invalid; remove the state file and restart"
+            )
+        namespace_owners[transfer_digest] = digest
+        namespaces[digest] = transfer_digest
+    return namespaces
+
+
+def validate_runtime_file_state_plan(
+    plan: RuntimeFilePlan,
     state: RuntimeState,
     *,
-    stale_entry_digests: frozenset[str],
+    comfyui_path: str | Path,
+    default_downloader: DownloaderName,
+    expected_run_id: str,
+) -> None:
+    """Re-admit an execution plan against the complete canonical state identity."""
+    root = Path(comfyui_path)
+    _validate_runtime_state_entries(root, state)
+    if state.run_id != expected_run_id:
+        raise RuntimeStateError("runtime download state belongs to another start")
+    for item in plan.items:
+        admitted = replace(item, downloader=item.downloader or default_downloader)
+        digest = runtime_file_state_identity_digest(admitted)
+        try:
+            entry = state.downloads.entries[digest]
+        except KeyError as error:
+            raise RuntimeStateError(
+                f"runtime download state entry is missing for {item.relative_target}"
+            ) from error
+        expected_resume = _entry_resume_authority(root, entry)
+        if (
+            entry.source != admitted.url
+            or entry.target != admitted.relative_target
+            or entry.checksum != admitted.checksum
+            or entry.overwrite != admitted.overwrite
+            or entry.downloader != admitted.downloader
+            or entry.download_mode != admitted.download_mode
+            or expected_resume != admitted.resume_authority
+            or entry.status != "pending"
+            or entry.attempt_run_id != expected_run_id
+            or entry.attempts != 0
+        ):
+            raise RuntimeStateError(
+                f"runtime download state identity differs for {item.relative_target}"
+            )
+
+
+def _reconcile_stale_runtime_entry(
     root: Path,
-) -> tuple[Path, ...]:
-    candidates: list[Path] = []
-    for digest in sorted(stale_entry_digests):
-        entry = state.downloads.entries[digest]
-        target = root.joinpath(*PurePosixPath(entry.target).parts)
-        candidates.append(
-            target.parent
-            / ".cdh-staging"
-            / f"cdh-{digest.removeprefix('sha256:')}.part"
+    entry: RuntimeDownloadEntry,
+    *,
+    now: datetime,
+) -> RuntimeDownloadEntry | None:
+    target = root.joinpath(*PurePosixPath(entry.target).parts)
+    transfer_digest = _entry_transfer_identity(root, entry).digest
+    authority = _entry_resume_authority(root, entry)
+    try:
+        absent = confirm_indexed_transfer_artifacts_absent(
+            root=root,
+            target=target,
+            identity_digest=transfer_digest,
         )
-    return tuple(candidates)
+    except (DownloadFilesError, OSError) as error:
+        return failed_runtime_download_entry(
+            entry,
+            status="cleanup_pending",
+            last_error=error,
+            updated_at=now,
+            resume_authority=authority,
+        )
+    if absent:
+        return None
+    if authority is not None:
+        request = FileTransferRequest(
+            root=root,
+            url=entry.source,
+            target=target,
+            overwrite=entry.overwrite,
+            expected_checksum=entry.checksum,
+            staging_disposition=StagingDisposition.PRESERVE,
+            resume_authority=authority,
+        )
+        try:
+            discard_preserved_transfer(request)
+        except (DownloadFilesError, OSError) as error:
+            return failed_runtime_download_entry(
+                entry,
+                status="cleanup_pending",
+                last_error=error,
+                updated_at=now,
+                resume_authority=authority,
+            )
+        return None
+
+    return failed_runtime_download_entry(
+        entry,
+        status="cleanup_pending",
+        last_error="interrupted transfer lacks exact artifact authority",
+        updated_at=now,
+    )
+
+
+def _current_resume_authority(
+    root: Path,
+    item: RuntimeFilePlanItem,
+    entry: RuntimeDownloadEntry | None,
+    *,
+    resume_download: bool,
+) -> ResumeAuthority | None:
+    transfer_digest = runtime_file_identity_digest(item)
+    authority = _entry_resume_authority(root, entry)
+    request: FileTransferRequest | None = None
+    artifact_admission: Literal["absent", "partial", "complete"] | None = None
+    if authority is not None:
+        request = FileTransferRequest(
+            root=root,
+            url=item.url,
+            target=item.target,
+            overwrite=item.overwrite,
+            expected_checksum=item.checksum,
+            staging_disposition=StagingDisposition.PRESERVE,
+            resume_authority=authority,
+        )
+        try:
+            artifact_admission = _admit_preserved_transfer(request)
+        except (DownloadFilesError, OSError) as error:
+            raise DownloadFilesError(
+                "current runtime resume artifacts failed exact admission"
+            ) from error
+    may_resume = (
+        authority is not None
+        and artifact_admission == "complete"
+        and item.downloader == "aria2"
+        and resume_download
+        and entry is not None
+        and entry.status != "cleanup_pending"
+    )
+    if may_resume:
+        return authority
+
+    target = item.target
+    try:
+        absent = confirm_indexed_transfer_artifacts_absent(
+            root=root,
+            target=target,
+            identity_digest=transfer_digest,
+        )
+    except (DownloadFilesError, OSError) as error:
+        raise DownloadFilesError(
+            "current runtime transfer cleanup could not be established"
+        ) from error
+    if absent:
+        return None
+    if authority is None:
+        raise DownloadFilesError(
+            "current runtime transfer namespace lacks exact cleanup authority"
+        )
+    assert request is not None
+    try:
+        discard_preserved_transfer(request)
+    except (DownloadFilesError, OSError) as error:
+        raise DownloadFilesError("current runtime transfer cleanup failed") from error
+    return None
+
+
+def _entry_transfer_identity(
+    root: Path,
+    entry: RuntimeDownloadEntry,
+) -> TransferIdentity:
+    target = root.joinpath(*PurePosixPath(entry.target).parts)
+    return project_transfer_identity(
+        root=root,
+        url=entry.source,
+        target=target,
+        expected_checksum=entry.checksum,
+    )
+
+
+def _entry_resume_authority(
+    root: Path,
+    entry: RuntimeDownloadEntry | None,
+) -> ResumeAuthority | None:
+    if entry is None or entry.resume is None:
+        return None
+    return entry.resume.as_authority(_entry_transfer_identity(root, entry).digest)
 
 
 def download_runtime_files(
@@ -618,7 +884,12 @@ def _download_runtime_file_with_policy(
         target=item.target,
         overwrite=item.overwrite,
         expected_checksum=item.checksum,
-        staging_disposition=StagingDisposition.CLEAN,
+        staging_disposition=(
+            StagingDisposition.PRESERVE
+            if item.resume_authority is not None
+            else StagingDisposition.CLEAN
+        ),
+        resume_authority=item.resume_authority,
     )
 
     def observe_start(attempt: int) -> None:
@@ -634,7 +905,13 @@ def _download_runtime_file_with_policy(
         attempt: int,
         error: TransferDownloadFilesError,
     ) -> None:
-        _notify_runtime_download_state(state_observer, item, "failed", error=error)
+        _notify_runtime_download_state(
+            state_observer,
+            item,
+            "failed",
+            error=error,
+            resume_authority=error.resume_authority,
+        )
         log(
             "Runtime download attempt failed: "
             f"mode={item.download_mode} target={item.relative_target} "
@@ -651,14 +928,30 @@ def _download_runtime_file_with_policy(
         cancel_requested=cancel_requested,
         attempt_start_observer=observe_start,
         retry_observer=observe_retry,
+        continuation_owner=True,
         log=log,
     )
     if isinstance(result, AttemptSucceeded):
         return result.attempts, result.outcome
     if isinstance(result, AttemptCancelled):
+        _notify_runtime_download_state(
+            state_observer,
+            item,
+            "failed",
+            error="download cancelled",
+            resume_authority=result.resume_authority,
+        )
         raise RuntimeFileDownloadCancelled
     error = result.error
-    _notify_runtime_download_state(state_observer, item, "exhausted", error=error)
+    _notify_runtime_download_state(
+        state_observer,
+        item,
+        "exhausted",
+        error=error,
+        resume_authority=(
+            result.resume_authority if isinstance(result, AttemptExhausted) else None
+        ),
+    )
     if isinstance(result, (AttemptOrdinaryTerminal, AttemptExhausted)):
         _apply_runtime_item_failure_policy(
             item,
@@ -760,10 +1053,16 @@ def _notify_runtime_download_state(
     status: RuntimeDownloadObservedStatus,
     *,
     error: object | None = None,
+    resume_authority: ResumeAuthority | None = None,
 ) -> None:
     if state_observer is None:
         return
-    state_observer(item, status, error=error)
+    state_observer(
+        item,
+        status,
+        error=error,
+        resume_authority=resume_authority,
+    )
 
 
 def merge_runtime_file_items(

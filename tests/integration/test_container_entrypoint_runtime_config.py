@@ -149,6 +149,34 @@ def test_entrypoint_starts_with_defaults_without_runtime_config(
     ]
 
 
+# Existing state remains an admission boundary even when the effective desired
+# file list is empty, and invalid bytes cannot reach child startup or mutation.
+def test_empty_file_plan_rejects_invalid_existing_runtime_state(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    state_path = _write(tmp_path / "state.json", "{not-json")
+    calls: list[SpawnCall] = []
+
+    with pytest.raises(
+        EntrypointError,
+        match=r"runtime state failed: runtime state is invalid; remove .* and restart",
+    ):
+        run_entrypoint(
+            runtime=runtime,
+            runtime_state_path=state_path,
+            baked_config_path=_missing_baked_config(tmp_path),
+            mounted_config_path=_missing_mounted_config(tmp_path),
+            baked_hooks_path=_missing_baked_hooks(tmp_path),
+            mounted_hooks_path=_missing_mounted_hooks(tmp_path),
+            environ={"PATH": "/usr/bin"},
+            runner=_recording_runner(calls),
+        )
+
+    assert calls == []
+    assert state_path.read_text(encoding="utf-8") == "{not-json"
+
+
 def test_baked_runtime_config_feeds_entrypoint_argv(tmp_path: Path) -> None:
     baked = _write(
         tmp_path / "baked.toml",

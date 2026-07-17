@@ -30,7 +30,12 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
 )
-from comfyui_docker_helper.container.runtime_state import load_runtime_state
+from comfyui_docker_helper.container.runtime_state import (
+    RuntimeDownloadsState,
+    RuntimeState,
+    load_runtime_state,
+    write_runtime_state,
+)
 from comfyui_docker_helper.container.transfer_core import TransferDownloadFilesError
 
 
@@ -295,6 +300,74 @@ filename = "model.bin"
     assert _state_by_target(state_path)["models/model.bin"].status == "completed"
 
 
+def test_async_queue_rejects_replaced_start_generation_before_thread(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_download_mode = "async"
+default_downloader = "httpx"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    state_path = tmp_path / "state.json"
+    starter_calls = 0
+
+    def replace_generation_then_start(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        expected_run_id: str,
+        log: Logger,
+    ):
+        nonlocal starter_calls
+        starter_calls += 1
+        state = load_runtime_state(runtime_state_path)
+        entries = dict(state.downloads.entries)
+        digest, entry = next(iter(entries.items()))
+        entries[digest] = entry.model_copy(update={"attempts": 1})
+        write_runtime_state(
+            runtime_state_path,
+            RuntimeState(
+                schema_version=state.schema_version,
+                updated_at=state.updated_at,
+                run_id=state.run_id,
+                downloads=RuntimeDownloadsState(entries=entries),
+            ),
+        )
+        return entrypoint_module.start_runtime_async_download_queue(
+            plan,
+            config=config,
+            runtime=runtime,
+            runtime_state_path=runtime_state_path,
+            expected_run_id=expected_run_id,
+            log=log,
+        )
+
+    with pytest.raises(
+        entrypoint_module.EntrypointError,
+        match="async runtime download queue failed to start",
+    ):
+        _run_with_real_async_queue(
+            runtime=runtime,
+            config=config,
+            state_path=state_path,
+            runner=lambda *_args, **_kwargs: pytest.fail("runner must not start"),
+            runtime_async_queue_starter=replace_generation_then_start,
+        )
+
+    assert starter_calls == 1
+
+
 # Restart coverage protects staging isolation: interrupted async downloads remain
 # resumable without exposing partial files at their final targets.
 def test_interrupted_async_download_restarts_without_exposing_partial_final(
@@ -365,6 +438,7 @@ filename = "model.bin"
         config: RuntimeConfig,
         runtime: ContainerRuntime,
         runtime_state_path: Path,
+        expected_run_id: str,
         log: Logger,
     ) -> CancelOnStopHandle:
         return CancelOnStopHandle(
@@ -373,6 +447,7 @@ filename = "model.bin"
                 config=config,
                 runtime=runtime,
                 runtime_state_path=runtime_state_path,
+                expected_run_id=expected_run_id,
                 log=log,
             )
         )
@@ -419,7 +494,7 @@ filename = "model.bin"
     assert backend.cancelled is True
     assert not (runtime.comfyui_path / "models" / "model.bin").exists()
     interrupted_entries = _state_by_target(state_path)
-    assert interrupted_entries["models/model.bin"].status == "downloading"
+    assert interrupted_entries["models/model.bin"].status == "failed"
 
     resumed = AsyncBackend()
     resumed.payloads["model.bin"] = b"resumed"
@@ -458,9 +533,9 @@ filename = "model.bin"
     assert completed_entries["models/model.bin"].status == "completed"
 
 
-# Scheduling and cleanup coverage keeps missing/stale state behavior and
-# cdh-owned staging-file garbage collection tied to the real async queue.
-def test_missing_and_stale_state_schedule_async_downloads(
+# Restart coverage proves that a completed entry with a missing final is
+# rescheduled through the real async queue.
+def test_missing_completed_final_schedules_async_download(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

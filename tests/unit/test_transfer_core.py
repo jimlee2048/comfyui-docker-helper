@@ -800,11 +800,11 @@ def test_successor_requires_old_control_to_be_unlinked(tmp_path: Path) -> None:
     assert not staging.exists()
 
 
-def test_first_control_generation_requires_effective_uid_owner(
+def test_terminal_artifacts_require_effective_uid_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Terminal capture rejects a regular control owned outside the admitted UID."""
+    """Terminal capture rejects transfer artifacts outside the effective UID."""
     root = tmp_path / "ComfyUI"
     root.mkdir()
     request = _request(root)
@@ -822,7 +822,7 @@ def test_first_control_generation_requires_effective_uid_owner(
             observed_uid = admitted_uid + 1
             return TransportSuccess(length=outcome.length, namespace="aria2")
 
-    with pytest.raises(DownloadFilesError, match="effective user"):
+    with pytest.raises(DownloadFilesError, match="unexpected owner"):
         transfer_file(
             request,
             backend=OwnerDriftBackend(b"partial"),
@@ -967,6 +967,26 @@ def test_preserved_staging_rejects_hardlink_alias(tmp_path: Path) -> None:
 
     assert request.target.read_bytes() == b"final"
     assert staging.read_bytes() == b"final"
+
+
+def test_preserved_staging_rejects_wrong_owner_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    request = _preserved_request(root)
+    staging = transfer_staging_target(request)
+    backend = BytesBackend(b"new")
+    actual_uid = staging.stat().st_uid
+    monkeypatch.setattr(transfer_core.os, "geteuid", lambda: actual_uid + 1)
+
+    with pytest.raises(DownloadFilesError, match="unexpected owner"):
+        transfer_file(request, backend=backend, settings=_settings())
+
+    assert backend.calls == []
+    assert staging.read_bytes() == b"prior partial"
+    assert Path(f"{staging}.aria2").read_bytes() == b"aria2 control"
 
 
 # Resume control state must also be an unaliased authority-bound inode.

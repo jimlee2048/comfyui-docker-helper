@@ -430,9 +430,10 @@ download_mode = "async"
         config: RuntimeConfig,
         runtime: ContainerRuntime,
         runtime_state_path: Path,
+        expected_run_id: str,
         log: Logger,
     ) -> FakeAsyncHandle:
-        del config, runtime, runtime_state_path, log
+        del config, runtime, runtime_state_path, expected_run_id, log
         assert [item.filename for item in plan.items] == ["async.bin"]
         assert events == ["sync-download", "pre-start", "ssh-start"]
         events.append("async-start")
@@ -928,9 +929,10 @@ filename = "async.bin"
         config: RuntimeConfig,
         runtime: ContainerRuntime,
         runtime_state_path: Path,
+        expected_run_id: str,
         log: Logger,
     ) -> FakeAsyncHandle:
-        del config, runtime, runtime_state_path, log
+        del config, runtime, runtime_state_path, expected_run_id, log
         assert [item.filename for item in plan.items] == ["async.bin"]
         events.append("async-start")
         return FakeAsyncHandle(events)

@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import stat
 from contextlib import suppress
@@ -755,26 +756,203 @@ def discard_preserved_transfer(request: FileTransferRequest) -> None:
         target=request.target,
         expected_checksum=request.expected_checksum,
     )
+    authority = request.resume_authority
+    if authority.identity_digest != identity.digest:
+        raise DownloadFilesError(
+            "preserved download cleanup lacks same-identity ownership authority"
+        )
     anchor = _TargetAnchor(root=request.root, target=request.target, create=False)
     staging: _OwnedLeaf | None = None
     control: _OwnedLeaf | None = None
     try:
         staging_anchor = anchor.add_staging_directory(create=False)
         anchor.verify_visible()
-        staging, control = _admit_staging(
-            request,
-            identity,
-            staging_anchor=staging_anchor,
-            target_parent_fd=anchor.parent.fd,
-            target_name=anchor.target_name,
-            initial=_stat_leaf(anchor.parent.fd, anchor.target_name),
+        temp_name = f"{identity.staging_name}.aria2__temp"
+        if _stat_leaf(staging_anchor.fd, temp_name) is not None:
+            raise DownloadFilesError(
+                "foreign aria2 temporary control artifact exists: "
+                f"{identity.staging_target}.aria2__temp"
+            )
+        staging = _admit_cleanup_leaf(
+            staging_anchor.fd,
+            identity.staging_name,
+            identity.staging_target,
+            expected_device=authority.staging_device,
+            expected_inode=authority.staging_inode,
         )
-        _cleanup_owned_transfer(staging, control)
+        control_name = f"{identity.staging_name}.aria2"
+        control = _admit_cleanup_leaf(
+            staging_anchor.fd,
+            control_name,
+            Path(f"{identity.staging_target}.aria2"),
+            expected_device=authority.control_device,
+            expected_inode=authority.control_inode,
+        )
+        _cleanup_owned_artifacts(
+            staging_anchor.fd,
+            tuple(leaf for leaf in (control, staging) if leaf is not None),
+        )
     finally:
         if control is not None:
             control.close()
         if staging is not None:
             staging.close()
+        anchor.close()
+
+
+def _admit_preserved_transfer(
+    request: FileTransferRequest,
+) -> Literal["absent", "partial", "complete"]:
+    """Non-mutating admission of persisted exact resume artifacts."""
+    if (
+        request.staging_disposition is not StagingDisposition.PRESERVE
+        or request.resume_authority is None
+    ):
+        raise DownloadFilesError(
+            "preserved download admission requires exact resume authority"
+        )
+    identity = project_transfer_identity(
+        root=request.root,
+        url=request.url,
+        target=request.target,
+        expected_checksum=request.expected_checksum,
+    )
+    authority = request.resume_authority
+    if authority.identity_digest != identity.digest:
+        raise DownloadFilesError(
+            "preserved download admission lacks same-identity ownership authority"
+        )
+    try:
+        anchor = _TargetAnchor(root=request.root, target=request.target, create=False)
+    except _MissingDirectory:
+        return "absent"
+    staging: _OwnedLeaf | None = None
+    control: _OwnedLeaf | None = None
+    try:
+        try:
+            staging_anchor = anchor.add_staging_directory(create=False)
+        except _MissingDirectory:
+            anchor.verify_visible()
+            return "absent"
+        anchor.verify_visible()
+        temp_name = f"{identity.staging_name}.aria2__temp"
+        if _stat_leaf(staging_anchor.fd, temp_name) is not None:
+            raise DownloadFilesError(
+                "foreign aria2 temporary control artifact exists: "
+                f"{identity.staging_target}.aria2__temp"
+            )
+        staging = _admit_cleanup_leaf(
+            staging_anchor.fd,
+            identity.staging_name,
+            identity.staging_target,
+            expected_device=authority.staging_device,
+            expected_inode=authority.staging_inode,
+        )
+        control = _admit_cleanup_leaf(
+            staging_anchor.fd,
+            f"{identity.staging_name}.aria2",
+            Path(f"{identity.staging_target}.aria2"),
+            expected_device=authority.control_device,
+            expected_inode=authority.control_inode,
+        )
+        anchor.verify_visible()
+        if staging is not None and control is not None:
+            return "complete"
+        if staging is None and control is None:
+            return "absent"
+        return "partial"
+    finally:
+        if control is not None:
+            control.close()
+        if staging is not None:
+            staging.close()
+        anchor.close()
+
+
+def _admit_cleanup_leaf(
+    directory_fd: int,
+    name: str,
+    display: Path,
+    *,
+    expected_device: int | None,
+    expected_inode: int | None,
+) -> _OwnedLeaf | None:
+    observed = _stat_leaf(directory_fd, name)
+    if observed is None:
+        return None
+    if expected_device is None or expected_inode is None:
+        raise DownloadFilesError(
+            "preserved download cleanup lacks authority for existing artifact: "
+            f"{display}"
+        )
+    leaf = _open_owned_leaf(directory_fd, name, display)
+    if (leaf.metadata.st_dev, leaf.metadata.st_ino) != (
+        expected_device,
+        expected_inode,
+    ):
+        leaf.close()
+        raise DownloadFilesError(
+            f"preserved download cleanup identity does not match authority: {display}"
+        )
+    return leaf
+
+
+def _cleanup_owned_artifacts(
+    directory_fd: int,
+    leaves: tuple[_OwnedLeaf, ...],
+) -> None:
+    for leaf in leaves:
+        _unlink_owned_leaf(leaf)
+    try:
+        os.fsync(directory_fd)
+    except OSError as error:
+        raise DownloadFilesError(
+            f"download staging cleanup could not be made durable: {error}"
+        ) from error
+
+
+def confirm_indexed_transfer_artifacts_absent(
+    *,
+    root: Path,
+    target: Path,
+    identity_digest: str,
+) -> bool:
+    """Durably confirm one state-indexed transfer namespace has no artifacts."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity_digest):
+        raise DownloadFilesError("runtime transfer identity digest is invalid")
+    suffix = identity_digest.removeprefix("sha256:")
+    staging_name = f"cdh-{suffix}.part"
+    names = (staging_name, f"{staging_name}.aria2", f"{staging_name}.aria2__temp")
+    try:
+        anchor = _TargetAnchor(root=root, target=target, create=False)
+    except _MissingDirectory:
+        return True
+    try:
+        try:
+            staging_anchor = anchor.add_staging_directory(create=False)
+        except _MissingDirectory:
+            try:
+                os.fsync(anchor.parent.fd)
+            except OSError as error:
+                raise DownloadFilesError(
+                    f"download staging absence could not be made durable: {error}"
+                ) from error
+            anchor.verify_visible()
+            return _stat_leaf(anchor.parent.fd, ".cdh-staging") is None
+        anchor.verify_visible()
+        if any(_stat_leaf(staging_anchor.fd, name) is not None for name in names):
+            return False
+        try:
+            os.fsync(staging_anchor.fd)
+        except OSError as error:
+            raise DownloadFilesError(
+                f"download staging absence could not be made durable: {error}"
+            ) from error
+        anchor.verify_visible()
+        return not any(
+            _stat_leaf(staging_anchor.fd, name) is not None for name in names
+        )
+    finally:
         anchor.close()
 
 
@@ -939,12 +1117,6 @@ def _admit_staging(
                 control_name,
                 Path(f"{identity.staging_target}.aria2"),
             )
-            if control.metadata.st_uid != os.geteuid():
-                control.close()
-                staging.close()
-                raise DownloadFilesError(
-                    "preserved aria2 control is not owned by the effective user"
-                )
             if (
                 expected_control == (None, None)
                 or (
@@ -1850,6 +2022,8 @@ def _require_safe_staging_metadata(metadata: os.stat_result, display: Path) -> N
         raise DownloadFilesError(
             f"download staging is not an unaliased regular file: {display}"
         )
+    if metadata.st_uid != os.geteuid():
+        raise DownloadFilesError(f"download staging has an unexpected owner: {display}")
 
 
 def _require_safe_final_metadata(

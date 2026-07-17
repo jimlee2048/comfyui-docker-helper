@@ -656,6 +656,29 @@ def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     ] == [("files", 1, "filename")]
 
 
+def test_file_target_rejects_only_the_exact_internal_staging_leaf() -> None:
+    document = _document()
+    document["files"] = [
+        {
+            "url": "https://example.com/reserved",
+            "dir": "models",
+            "filename": ".cdh-staging",
+        },
+        {
+            "url": "https://example.com/ordinary",
+            "dir": ".cdh-staging",
+            "filename": ".cdh-staging.part",
+        },
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [
+        (item.path, item.code) for item in diagnostics if item.code.startswith("file.")
+    ] == [(("files", 0, "filename"), "file.invalid_filename")]
+
+
 def test_duplicate_effective_git_targets_are_rejected() -> None:
     document = _document()
     document["comfyui"]["custom_nodes"] = [

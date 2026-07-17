@@ -66,6 +66,7 @@ from comfyui_docker_helper.config.canonical_request import (
 from comfyui_docker_helper.config.canonical_resolver import (
     entries_satisfy_request,
 )
+from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
 from comfyui_docker_helper.config.final_models import CudaImageDistro, CudaImageFlavor
 from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
 from comfyui_docker_helper.config.final_validation import (
@@ -88,7 +89,10 @@ from comfyui_docker_helper.config.runtime_hooks import (
 )
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
 from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
-from comfyui_docker_helper.config.url_validation import is_http_url
+from comfyui_docker_helper.config.url_validation import (
+    is_http_url,
+    is_reserved_file_target_name,
+)
 from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
     is_argv_value,
@@ -794,6 +798,7 @@ class FilePlan(_PlanModel):
     url: str
     target: str
     overwrite: bool
+    checksum: str | None = None
     downloader: Literal["aria2", "httpx"]
     download_mode: Literal["sync", "async"]
     downloader_explicit: bool
@@ -807,7 +812,17 @@ class FilePlan(_PlanModel):
     @field_validator("target")
     @classmethod
     def _validate_target(cls, value: str) -> str:
-        return _absolute_posix_path(value, "file target")
+        target = _absolute_posix_path(value, "file target")
+        if is_reserved_file_target_name(PurePosixPath(target).name):
+            raise ValueError("file target uses the reserved staging filename")
+        return target
+
+    @field_validator("checksum")
+    @classmethod
+    def _validate_checksum(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_canonical_file_checksum(value)
 
 
 class FilesPhase(_PlanModel):
@@ -1410,6 +1425,7 @@ def _project_files(
                 url=item.url,
                 target=item.target,
                 overwrite=item.overwrite,
+                checksum=item.checksum,
                 downloader=item.downloader,
                 download_mode=item.download_mode,
                 downloader_explicit=downloader_explicit[index],

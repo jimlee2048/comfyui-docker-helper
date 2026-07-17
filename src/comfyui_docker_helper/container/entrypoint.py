@@ -50,7 +50,6 @@ from comfyui_docker_helper.container.runtime_files import (
     download_runtime_files,
     reconcile_runtime_file_plan,
     runtime_file_identity_digest,
-    runtime_file_staging_target,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     BAKED_RUNTIME_HOOKS_PATH,
@@ -131,7 +130,6 @@ class RuntimeDownloadRunner(Protocol):
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
-        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
 
 
@@ -691,10 +689,6 @@ def _activate_runtime_file_plan(
         config=config,
         log=print,
         state_observer=state_writer,
-        extra_protected_staging_targets=tuple(
-            runtime_file_staging_target(item, runtime_file_identity_digest(item))
-            for item in queues.async_plan.items
-        ),
     )
     return queues
 
@@ -1039,14 +1033,12 @@ def _call_runtime_downloader(
     config: RuntimeConfig,
     log: Logger,
     state_observer: RuntimeDownloadStateObserver,
-    extra_protected_staging_targets: tuple[Path, ...] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     return runtime_downloader(
         plan,
         config=config,
         log=log,
         state_observer=state_observer,
-        extra_protected_staging_targets=extra_protected_staging_targets,
     )
 
 

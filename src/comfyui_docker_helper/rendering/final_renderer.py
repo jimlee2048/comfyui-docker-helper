@@ -242,6 +242,12 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         "--constraints /opt/cdh/build/python-package-constraints.txt "
         "--hooks-directory /opt/cdh/build/inputs"
     )
+    if plan.files.files:
+        lines.append(
+            f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+            "container download-files "
+            f"--build-plan-digest {plan_digest}"
+        )
     return lines
 
 

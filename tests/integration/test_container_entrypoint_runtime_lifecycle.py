@@ -109,11 +109,13 @@ class SignalOnFirstWaitChild(FakeChild):
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
-    return ContainerRuntime(
+    runtime = ContainerRuntime(
         workspace=tmp_path / "workspace",
         comfyui_path=tmp_path / "workspace" / "ComfyUI",
         virtual_env=tmp_path / "venv",
     )
+    runtime.comfyui_path.mkdir(parents=True)
+    return runtime
 
 
 def _write(path: Path, document: str) -> Path:
@@ -200,9 +202,8 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
-        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log, state_observer, extra_protected_staging_targets
+        del config, log, state_observer
         assert len(plan.items) == 1
         assert plan.items[0].target == (
             runtime.comfyui_path / "models" / "checkpoints" / "model.bin"
@@ -312,9 +313,8 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
-        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log, state_observer, extra_protected_staging_targets
+        del plan, config, log, state_observer
         events.append("download")
         return ()
 
@@ -409,9 +409,8 @@ filename = "model.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
-        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log, state_observer, extra_protected_staging_targets
+        del config, log, state_observer
         assert len(plan.items) == 1
         events.append("sync-download")
         raise RuntimeFileDownloadError(
@@ -873,9 +872,8 @@ def test_startup_shutdown_during_download_prevents_spawn_and_stop_hooks(
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
-        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log, state_observer, extra_protected_staging_targets
+        del plan, config, log, state_observer
         events.append("download")
         handler = handlers[signal.SIGTERM]
         assert callable(handler)

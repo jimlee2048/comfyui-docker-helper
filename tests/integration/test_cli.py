@@ -212,14 +212,19 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
     document["cdh"]["default_downloader"] = "httpx"
     config = FinalConfig.model_validate(document)
     plan = build_plan(config, accepted_resolution())
+    custom_root.mkdir(parents=True)
     context = tmp_path / "context"
     context.mkdir()
     materialize_build_plan(plan, context)
 
     class WritingBackend:
-        def download(self, item, settings) -> None:
+        def download(self, item, settings):
             del settings
-            item.target.write_bytes(b"authenticated-plan")
+            with item.sink.open_for_write() as output:
+                output.write(b"authenticated-plan")
+            return download_files_module.TransportResult(
+                length=len(b"authenticated-plan")
+            )
 
     monkeypatch.setattr(
         container_cli, "MATERIALIZED_BUILD_PLAN_PATH", context / "build-plan.json"

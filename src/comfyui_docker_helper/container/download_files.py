@@ -1,19 +1,17 @@
-"""Container-side file download planning and common processing."""
+"""Container-side file transport adapters and build orchestration."""
 
 from __future__ import annotations
 
 import secrets
-import stat
 import subprocess
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import TracebackType
-from typing import Literal, Protocol
+from typing import Protocol
 
 import aria2p
 import httpx
@@ -23,94 +21,60 @@ from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
     require_downloader_name,
 )
-from comfyui_docker_helper.errors import ApplicationError
-
-
-class DownloadFilesError(ApplicationError):
-    """A user-facing file-download processing failure."""
-
-
-class TransferDownloadFilesError(DownloadFilesError):
-    """A source or transport download failure eligible for retry/continue policy."""
-
-
-class DownloadCancelled(DownloadFilesError):
-    """A cooperative download cancellation request was observed."""
-
-
-class DownloadStatus(StrEnum):
-    """Common per-item processing result."""
-
-    SKIPPED = "skipped"
-    DOWNLOADED = "downloaded"
-
-
-@dataclass(frozen=True, slots=True)
-class Aria2DownloadSettings:
-    """Normalized aria2 helper settings."""
-
-    rpc_port: int
-    split: int
-    max_connection_per_server: int
-    min_split_size: str
-    resume_download: bool
-
-
-@dataclass(frozen=True, slots=True)
-class HttpxDownloadSettings:
-    """Normalized httpx helper settings."""
-
-    timeout: int | float
-    retries: int
-
-
-@dataclass(frozen=True, slots=True)
-class DownloaderSettings:
-    """Normalized downloader settings for both backends."""
-
-    default: DownloaderName
-    aria2: Aria2DownloadSettings
-    httpx: HttpxDownloadSettings
+from comfyui_docker_helper.container.transfer_core import (
+    Aria2DownloadSettings,
+    DownloadBackend,
+    DownloadCancelled,
+    DownloaderSettings,
+    DownloadFilesError,
+    DownloadStatus,
+    FileTransferOutcome,
+    FileTransferRequest,
+    HttpxDownloadSettings,
+    Logger,
+    StagingDisposition,
+    TerminalTransferDownloadFilesError,
+    TransferDownloadFilesError,
+    TransportRequest,
+    TransportResult,
+    TransportSink,
+    transfer_file,
+    verify_required_final,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class FileDownloadItem:
-    """One resolved container file download item."""
+    """One resolved build-time file request."""
 
     url: str
     filename: str
     target: Path
     overwrite: bool
     downloader: DownloaderName
+    checksum: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FileDownloadPlan:
-    """Ordered file downloads and backend settings."""
+    """Ordered required build files and transport settings."""
 
     comfyui_root: Path
     downloader: DownloaderSettings
     items: tuple[FileDownloadItem, ...]
     download_max_attempts: int = 3
-    download_failure_policy: Literal["continue", "fail"] = "fail"
 
 
 @dataclass(frozen=True, slots=True)
 class DownloadResult:
-    """One common processing result."""
+    """One required build-file outcome with expected/observed evidence."""
 
     item: FileDownloadItem
-    status: DownloadStatus
+    outcome: FileTransferOutcome
 
-
-class DownloadBackend(Protocol):
-    """Backend interface implemented by concrete downloaders."""
-
-    def download(
-        self,
-        item: FileDownloadItem,
-        settings: DownloaderSettings,
-    ) -> None: ...
+    @property
+    def status(self) -> DownloadStatus:
+        return self.outcome.status
 
 
 class DownloadBackendPreparer(Protocol):
@@ -120,7 +84,7 @@ class DownloadBackendPreparer(Protocol):
 
 
 class HttpxDownloader:
-    """HTTPX streaming downloader with retries and temporary-file replacement."""
+    """HTTPX adapter that writes one response to supplied staging."""
 
     chunk_size = 1024 * 1024
     progress_interval_seconds = 5.0
@@ -143,48 +107,41 @@ class HttpxDownloader:
 
     def download(
         self,
-        item: FileDownloadItem,
+        request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> None:
-        self._raise_if_cancelled()
-        tmp_path = _tmp_path(item.target)
-        _remove_stale_tmp(tmp_path)
-
+    ) -> TransportResult:
+        """Write HTTP attempts to the exact core-owned staging inode."""
         attempts = settings.httpx.retries + 1
         for attempt in range(attempts):
             self._raise_if_cancelled()
             try:
-                self._download_once(item, settings, tmp_path)
+                length = self._download_once(request, settings)
                 self._raise_if_cancelled()
-                tmp_path.replace(item.target)
-                return
+                return TransportResult(length=length)
             except DownloadCancelled:
-                _cleanup_tmp(tmp_path)
                 raise
             except _RetryableDownloadError as error:
-                _cleanup_tmp(tmp_path)
                 if attempt + 1 >= attempts:
                     raise TransferDownloadFilesError(str(error)) from error
                 delay = _backoff_delay(attempt)
                 self._log(
-                    f"Retrying HTTP download in {delay}s after failure: {item.url}"
+                    f"Retrying HTTP download in {delay}s after failure: {request.url}"
                 )
                 self._sleep(delay)
             except DownloadFilesError:
-                _cleanup_tmp(tmp_path)
                 raise
             except OSError as error:
-                _cleanup_tmp(tmp_path)
                 raise DownloadFilesError(
-                    f"HTTP download failed while writing {item.target}: {error}"
+                    "HTTP download failed while writing supplied staging "
+                    f"{request.sink.display_path}: {error}"
                 ) from error
+        raise AssertionError("HTTPX attempt loop produced no outcome")
 
     def _download_once(
         self,
-        item: FileDownloadItem,
+        request: TransportRequest,
         settings: DownloaderSettings,
-        tmp_path: Path,
-    ) -> None:
+    ) -> int:
         timeout = httpx.Timeout(settings.httpx.timeout)
         try:
             with httpx.Client(
@@ -193,16 +150,16 @@ class HttpxDownloader:
                 transport=self._transport,
             ) as client:
                 self._set_active_client(client)
-                with client.stream("GET", item.url) as response:
+                with client.stream("GET", request.url) as response:
                     self._raise_if_cancelled()
                     _raise_for_http_status(response)
-                    self._write_response(response, tmp_path)
+                    return self._write_response(response, request.sink)
         except DownloadCancelled:
             raise
         except (httpx.TimeoutException, httpx.TransportError) as error:
             self._raise_if_cancelled()
             raise _RetryableDownloadError(
-                f"HTTP download failed for {item.url}: {error}"
+                f"HTTP download failed for {request.url}: {error}"
             ) from error
         finally:
             self._set_active_client(None)
@@ -211,10 +168,10 @@ class HttpxDownloader:
         with self._client_lock:
             self._active_client = client
 
-    def _write_response(self, response: httpx.Response, tmp_path: Path) -> None:
+    def _write_response(self, response: httpx.Response, sink: TransportSink) -> int:
         downloaded = 0
         last_log = self._monotonic()
-        with tmp_path.open("wb") as output:
+        with sink.open_for_write() as output:
             for chunk in response.iter_bytes(chunk_size=self.chunk_size):
                 self._raise_if_cancelled()
                 if not chunk:
@@ -223,8 +180,9 @@ class HttpxDownloader:
                 downloaded += len(chunk)
                 now = self._monotonic()
                 if now - last_log >= self.progress_interval_seconds:
-                    self._log(f"Downloaded {downloaded} bytes to {tmp_path}")
+                    self._log(f"Downloaded {downloaded} bytes to {sink.display_path}")
                     last_log = now
+        return downloaded
 
     def cancel(self) -> None:
         self._cancel_requested.set()
@@ -240,7 +198,7 @@ class HttpxDownloader:
 
 
 class Aria2Downloader:
-    """aria2 RPC downloader with one temporary local daemon per context."""
+    """aria2 RPC adapter that writes only to supplied staging."""
 
     startup_timeout_seconds = 10.0
     poll_interval_seconds = 0.5
@@ -288,21 +246,28 @@ class Aria2Downloader:
 
     def download(
         self,
-        item: FileDownloadItem,
+        request: TransportRequest,
         settings: DownloaderSettings,
-    ) -> None:
+    ) -> TransportResult:
         self._raise_if_cancelled()
         api = self._ensure_started(settings)
-        _remove_aria2_control_file(item)
-        options = _aria2_options(item, settings.aria2)
+        options = _aria2_options(request, settings.aria2)
         try:
-            download = api.add_uris([item.url], options=options)
+            download = api.add_uris([request.url], options=options)
         except Exception as error:
             raise DownloadFilesError(
-                f"aria2 RPC submit failed for {item.url}: {error}"
+                f"aria2 RPC submit failed for {request.url}: {error}"
             ) from error
-
-        self._wait_for_download(download, item)
+        self._wait_for_download(download, request)
+        try:
+            length = request.sink.current_length()
+        except DownloadFilesError:
+            raise
+        except OSError as error:
+            raise DownloadFilesError(
+                f"aria2 supplied staging cannot be inspected: {error}"
+            ) from error
+        return TransportResult(length=length)
 
     def close(self) -> None:
         client = self._client
@@ -310,14 +275,11 @@ class Aria2Downloader:
         self._api = None
         self._client = None
         self._process = None
-
         if client is not None:
             with suppress(Exception):
                 client.shutdown()
-
         if process is None:
             return
-
         try:
             process.wait(timeout=self.shutdown_timeout_seconds)
             return
@@ -325,7 +287,6 @@ class Aria2Downloader:
             pass
         except Exception:
             return
-
         try:
             process.terminate()
             process.wait(timeout=self.shutdown_timeout_seconds)
@@ -334,7 +295,6 @@ class Aria2Downloader:
             pass
         except Exception:
             return
-
         try:
             process.kill()
             process.wait(timeout=self.shutdown_timeout_seconds)
@@ -348,7 +308,6 @@ class Aria2Downloader:
     def _ensure_started(self, settings: DownloaderSettings) -> Aria2Api:
         if self._api is not None:
             return self._api
-
         secret = self._secret_factory()
         argv = _aria2_daemon_argv(settings.aria2, secret)
         try:
@@ -357,7 +316,6 @@ class Aria2Downloader:
             raise DownloadFilesError("aria2c executable not found") from error
         except OSError as error:
             raise DownloadFilesError(f"aria2c failed to start: {error}") from error
-
         self._process = process
         try:
             client = self._client_factory(
@@ -373,14 +331,12 @@ class Aria2Downloader:
         except Exception:
             self.close()
             raise
-
         self._log(f"aria2 RPC daemon started on port {settings.aria2.rpc_port}")
         return api
 
     def _wait_until_ready(self, client: Aria2Client, port: int) -> None:
         deadline = self._monotonic() + self.startup_timeout_seconds
         last_error: Exception | None = None
-
         while True:
             self._raise_if_cancelled()
             self._fail_if_daemon_exited("before RPC became ready")
@@ -389,43 +345,39 @@ class Aria2Downloader:
                 return
             except Exception as error:
                 last_error = error
-
             if self._monotonic() >= deadline:
                 raise DownloadFilesError(
                     f"aria2 RPC did not become ready on configured port {port}"
                 ) from last_error
-
             self._sleep(self.poll_interval_seconds)
 
     def _wait_for_download(
         self,
         download: Aria2Download,
-        item: FileDownloadItem,
+        request: TransportRequest,
     ) -> None:
         while True:
             self._raise_if_cancelled()
-            self._fail_if_daemon_exited(f"while downloading {item.url}")
+            self._fail_if_daemon_exited(f"while downloading {request.url}")
             try:
                 download.update()
             except Exception as error:
                 raise DownloadFilesError(
-                    f"aria2 RPC disconnected while downloading {item.url}: {error}"
+                    f"aria2 RPC disconnected while downloading {request.url}: {error}"
                 ) from error
-
             status = download.status
             if download.is_complete or status == "complete":
-                self._log(f"aria2 download complete: {item.target}")
+                self._log(f"aria2 download complete: {request.sink.display_path}")
                 return
             if download.is_removed or status == "removed":
                 raise TransferDownloadFilesError(
-                    f"aria2 download was removed: {item.url}"
+                    f"aria2 download was removed: {request.url}"
                 )
             if status == "error":
                 message = download.error_message or "unknown aria2 error"
                 raise TransferDownloadFilesError(
-                    f"aria2 download failed for {item.url}: {message}"
+                    f"aria2 download failed for {request.url}: {message}"
                 )
-
             self._sleep(self.poll_interval_seconds)
 
     def _fail_if_daemon_exited(self, detail: str) -> None:
@@ -447,7 +399,7 @@ def file_download_plan(
     payload: FilesPhase,
     comfyui_root: str | Path,
 ) -> FileDownloadPlan:
-    """Project one admitted BuildPlan files phase into downloader inputs."""
+    """Project admitted BuildPlan file inputs without runtime failure policy."""
     plan = FileDownloadPlan(
         comfyui_root=Path(comfyui_root),
         downloader=DownloaderSettings(
@@ -473,11 +425,11 @@ def file_download_plan(
                 target=Path(item.target),
                 overwrite=item.overwrite,
                 downloader=require_downloader_name(item.downloader),
+                checksum=item.checksum,
             )
             for item in payload.files
         ),
         download_max_attempts=payload.download_max_attempts,
-        download_failure_policy=payload.download_failure_policy,
     )
     _validate_download_plan(plan)
     return plan
@@ -489,45 +441,38 @@ def process_file_downloads(
     backends: Mapping[str, DownloadBackend],
     log: Logger = print,
 ) -> tuple[DownloadResult, ...]:
-    """Process file downloads serially with common preflight semantics."""
-
+    """Process required build files serially; every failure remains fatal."""
     _validate_download_plan(plan)
     results: list[DownloadResult] = []
     for index, item in enumerate(plan.items, 1):
-        log(f"Processing file {index}/{len(plan.items)}: {item.target}")
-        if _preflight_file(item, root=plan.comfyui_root, log=log):
-            results.append(DownloadResult(item=item, status=DownloadStatus.SKIPPED))
-            continue
-
+        log(f"Processing required build file {index}/{len(plan.items)}: {item.target}")
         try:
             backend = backends[item.downloader]
         except KeyError as error:
             raise DownloadFilesError(
                 f"download backend is not configured: {item.downloader}"
             ) from error
-
-        log(f"Downloading file with {item.downloader}: {item.url}")
-        try:
-            _download_with_policy(
-                item,
-                backend,
-                plan,
-                log=log,
-            )
-        except TransferDownloadFilesError as error:
-            if plan.download_failure_policy == "fail":
-                raise
-            _cleanup_failed_target(item, log=log)
-            log(
-                "WARNING: download failed after "
-                f"{plan.download_max_attempts} attempt(s), continuing: "
-                f"{item.target}: {error}"
-            )
-            continue
-        log(f"Downloaded file: {item.target}")
-        results.append(DownloadResult(item=item, status=DownloadStatus.DOWNLOADED))
-
+        outcome = _download_with_policy(item, backend, plan, log=log)
+        if outcome.status is DownloadStatus.SKIPPED:
+            log(f"Required build file already present: {item.target}")
+        else:
+            log(f"Required build file placed: {item.target}")
+        _verify_build_file_postcondition(plan, item)
+        results.append(DownloadResult(item=item, outcome=outcome))
+    for item in plan.items:
+        _verify_build_file_postcondition(plan, item)
     return tuple(results)
+
+
+def _verify_build_file_postcondition(
+    plan: FileDownloadPlan,
+    item: FileDownloadItem,
+) -> None:
+    verify_required_final(
+        root=plan.comfyui_root,
+        target=item.target,
+        expected_checksum=item.checksum,
+    )
 
 
 def download_files(
@@ -538,72 +483,95 @@ def download_files(
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
 ) -> tuple[DownloadResult, ...]:
-    """Download files from one admitted BuildPlan phase."""
+    """Download required build files from one admitted BuildPlan phase."""
     plan = file_download_plan(files, comfyui_root)
     httpx_backend = httpx_downloader or HttpxDownloader(log=log)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
-
     if not any(item.downloader == "aria2" for item in plan.items):
         return process_file_downloads(plan, backends=backends, log=log)
-
     with aria2_downloader_factory(log=log) as aria2_backend:
         backends["aria2"] = aria2_backend
         return process_file_downloads(plan, backends=backends, log=log)
 
 
-class Logger(Protocol):
-    """Minimal logger protocol used by the file helper."""
+def _download_with_policy(
+    item: FileDownloadItem,
+    backend: DownloadBackend,
+    plan: FileDownloadPlan,
+    *,
+    log: Logger,
+) -> FileTransferOutcome:
+    settings = plan.downloader
+    request = FileTransferRequest(
+        root=plan.comfyui_root,
+        url=item.url,
+        target=item.target,
+        overwrite=item.overwrite,
+        expected_checksum=item.checksum,
+        staging_disposition=StagingDisposition.CLEAN,
+    )
+    for attempt in range(1, plan.download_max_attempts + 1):
+        try:
+            return transfer_file(request, backend=backend, settings=settings)
+        except TransferDownloadFilesError as error:
+            if attempt >= plan.download_max_attempts:
+                raise
+            log(
+                f"Retrying required build file after attempt "
+                f"{attempt}/{plan.download_max_attempts} failed: "
+                f"{item.target}: {error}"
+            )
+    raise AssertionError("build transfer attempt loop produced no outcome")
 
-    def __call__(self, message: str) -> None: ...
+
+def _validate_download_plan(plan: FileDownloadPlan) -> None:
+    if not plan.comfyui_root.is_absolute():
+        raise DownloadFilesError("download root must be an absolute path")
+    for item in plan.items:
+        if not item.target.is_absolute():
+            raise DownloadFilesError("download target must be an absolute path")
+        try:
+            relative = item.target.relative_to(plan.comfyui_root)
+        except ValueError as error:
+            raise DownloadFilesError(
+                f"download target escapes COMFYUI_PATH: {item.target}"
+            ) from error
+        if not relative.parts or ".." in relative.parts:
+            raise DownloadFilesError(
+                "download target must be a strict descendant of COMFYUI_PATH: "
+                f"{item.target}"
+            )
 
 
 class Sleep(Protocol):
-    """Injectable sleep function for retry backoff."""
-
     def __call__(self, seconds: float) -> None: ...
 
 
 class Monotonic(Protocol):
-    """Injectable monotonic clock for progress logging."""
-
     def __call__(self) -> float: ...
 
 
 class SecretFactory(Protocol):
-    """Injectable aria2 RPC secret generator."""
-
     def __call__(self) -> str: ...
 
 
 class Aria2Process(Protocol):
-    """Minimal process interface used to manage aria2c."""
-
     def poll(self) -> int | None: ...
-
     def wait(self, timeout: float | None = None) -> int: ...
-
     def terminate(self) -> None: ...
-
     def kill(self) -> None: ...
 
 
 class ProcessFactory(Protocol):
-    """Injectable aria2c process factory."""
-
     def __call__(self, argv: Sequence[str]) -> Aria2Process: ...
 
 
 class Aria2Client(Protocol):
-    """Minimal aria2p client interface."""
-
     def get_version(self) -> object: ...
-
     def shutdown(self) -> object: ...
 
 
 class Aria2ClientFactory(Protocol):
-    """Injectable aria2p client factory."""
-
     def __call__(
         self,
         *,
@@ -615,8 +583,6 @@ class Aria2ClientFactory(Protocol):
 
 
 class Aria2Download(Protocol):
-    """Minimal aria2p download interface."""
-
     status: str
     is_complete: bool
     is_removed: bool
@@ -626,8 +592,6 @@ class Aria2Download(Protocol):
 
 
 class Aria2Api(Protocol):
-    """Minimal aria2p API interface."""
-
     def add_uris(
         self,
         uris: list[str],
@@ -636,16 +600,11 @@ class Aria2Api(Protocol):
 
 
 class Aria2ApiFactory(Protocol):
-    """Injectable aria2p API factory."""
-
     def __call__(self, client: Aria2Client) -> Aria2Api: ...
 
 
 class ManagedDownloadBackend(DownloadBackend, Protocol):
-    """Download backend with context-managed cleanup."""
-
     def __enter__(self) -> ManagedDownloadBackend: ...
-
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
@@ -655,181 +614,11 @@ class ManagedDownloadBackend(DownloadBackend, Protocol):
 
 
 class Aria2DownloaderFactory(Protocol):
-    """Factory for managed aria2 downloader instances."""
-
     def __call__(self, *, log: Logger) -> ManagedDownloadBackend: ...
 
 
 class _RetryableDownloadError(Exception):
-    """Internal retryable HTTP failure marker."""
-
-
-def _download_with_policy(
-    item: FileDownloadItem,
-    backend: DownloadBackend,
-    plan: FileDownloadPlan,
-    *,
-    log: Logger,
-) -> None:
-    settings = _single_host_attempt_settings(plan.downloader)
-    attempts = plan.download_max_attempts
-    for attempt in range(1, attempts + 1):
-        try:
-            backend.download(item, settings)
-            return
-        except TransferDownloadFilesError as error:
-            _cleanup_failed_target(item, log=log)
-            if attempt >= attempts:
-                raise
-            log(
-                f"Retrying file download after attempt {attempt}/{attempts} failed: "
-                f"{item.target}: {error}"
-            )
-        except DownloadFilesError:
-            _cleanup_failed_target(item, log=log)
-            raise
-
-
-def _single_host_attempt_settings(settings: DownloaderSettings) -> DownloaderSettings:
-    """Keep host build policy attempts from multiplying backend HTTPX retries."""
-    return DownloaderSettings(
-        default=settings.default,
-        aria2=settings.aria2,
-        httpx=HttpxDownloadSettings(
-            timeout=settings.httpx.timeout,
-            retries=0,
-        ),
-    )
-
-
-def _cleanup_failed_target(item: FileDownloadItem, *, log: Logger) -> None:
-    _cleanup_failed_path(item.target, log=log)
-    if item.downloader == "aria2":
-        _cleanup_failed_path(_aria2_control_path(item.target), log=log)
-
-
-def _cleanup_failed_path(path: Path, *, log: Logger) -> None:
-    try:
-        if path.exists() or path.is_symlink():
-            path.unlink()
-    except OSError as error:
-        log(f"WARNING: failed download artifact could not be removed: {path}: {error}")
-
-
-def _preflight_file(
-    item: FileDownloadItem,
-    *,
-    root: Path,
-    log: Logger,
-) -> bool:
-    _validate_existing_target_parent_contained(item, root=root)
-    try:
-        item.target.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise DownloadFilesError(
-            f"download target parent cannot be created: {item.target.parent}: {error}"
-        ) from error
-
-    _validate_target_parent_contained(item, root=root)
-
-    try:
-        mode = item.target.lstat().st_mode
-    except FileNotFoundError:
-        return False
-    except OSError as error:
-        raise DownloadFilesError(
-            f"download target cannot be inspected: {item.target}: {error}"
-        ) from error
-
-    if not stat.S_ISREG(mode):
-        raise DownloadFilesError(
-            f"download target exists but is not a regular file: {item.target}"
-        )
-
-    if not item.overwrite:
-        log(f"Skipping existing file: {item.target}")
-        return True
-
-    log(f"Removing existing file before overwrite: {item.target}")
-    try:
-        item.target.unlink()
-    except OSError as error:
-        raise DownloadFilesError(
-            f"download target cannot be removed for overwrite: {item.target}: {error}"
-        ) from error
-    return False
-
-
-def _validate_download_plan(plan: FileDownloadPlan) -> None:
-    for item in plan.items:
-        _relative_target(item, root=plan.comfyui_root)
-
-
-def _relative_target(item: FileDownloadItem, *, root: Path) -> Path:
-    if not root.is_absolute() or not item.target.is_absolute():
-        raise DownloadFilesError("download root and target must be absolute paths")
-    try:
-        relative = item.target.relative_to(root)
-    except ValueError as error:
-        raise DownloadFilesError(
-            f"download target escapes COMFYUI_PATH: {item.target}"
-        ) from error
-    if not relative.parts or ".." in relative.parts:
-        raise DownloadFilesError(
-            f"download target must be a strict descendant of COMFYUI_PATH: "
-            f"{item.target}"
-        )
-    return relative
-
-
-def _validate_target_parent_contained(
-    item: FileDownloadItem,
-    *,
-    root: Path,
-) -> None:
-    try:
-        resolved_root = root.resolve(strict=True)
-        resolved_parent = item.target.parent.resolve(strict=True)
-        resolved_parent.relative_to(resolved_root)
-    except ValueError as error:
-        raise DownloadFilesError(
-            f"download target parent escapes COMFYUI_PATH: {item.target.parent}"
-        ) from error
-    except OSError as error:
-        raise DownloadFilesError(
-            f"download target parent cannot be resolved: {item.target.parent}: {error}"
-        ) from error
-
-
-def _validate_existing_target_parent_contained(
-    item: FileDownloadItem,
-    *,
-    root: Path,
-) -> None:
-    try:
-        resolved_root = root.resolve(strict=False)
-    except OSError as error:
-        raise DownloadFilesError(
-            f"COMFYUI_PATH cannot be resolved before download: {root}: {error}"
-        ) from error
-
-    current = root
-    relative_parent = _relative_target(item, root=root).parent
-    for part in PurePosixPath(relative_parent).parts:
-        current = current / part
-        if not current.exists() and not current.is_symlink():
-            return
-        try:
-            resolved_current = current.resolve(strict=True)
-            resolved_current.relative_to(resolved_root)
-        except ValueError as error:
-            raise DownloadFilesError(
-                f"download target parent escapes COMFYUI_PATH: {current}"
-            ) from error
-        except OSError as error:
-            raise DownloadFilesError(
-                f"download target parent cannot be resolved: {current}: {error}"
-            ) from error
+    """Internal retryable HTTP transport marker."""
 
 
 def _raise_for_http_status(response: httpx.Response) -> None:
@@ -839,53 +628,33 @@ def _raise_for_http_status(response: httpx.Response) -> None:
             f"HTTP download got retryable status {status}: {response.url}"
         )
     if 400 <= status <= 599:
-        raise TransferDownloadFilesError(
+        raise TerminalTransferDownloadFilesError(
             f"HTTP download got non-retryable status {status}: {response.url}"
         )
 
 
-def _tmp_path(target: Path) -> Path:
-    return target.with_name(f"{target.name}.tmp")
-
-
-def _aria2_control_path(target: Path) -> Path:
-    return Path(f"{target}.aria2")
-
-
-def _remove_aria2_control_file(item: FileDownloadItem) -> None:
-    if not item.overwrite:
-        return
-    control_path = _aria2_control_path(item.target)
-    try:
-        if control_path.exists() or control_path.is_symlink():
-            control_path.unlink()
-    except OSError as error:
-        raise DownloadFilesError(
-            f"aria2 control file cannot be removed for overwrite: {control_path}: "
-            f"{error}"
-        ) from error
-
-
 def _aria2_options(
-    item: FileDownloadItem,
+    request: TransportRequest,
     settings: Aria2DownloadSettings,
 ) -> dict[str, str]:
     return {
-        "dir": str(item.target.parent),
-        "out": item.target.name,
+        "dir": request.sink.aria2_directory,
+        "out": request.sink.aria2_name,
         "split": str(settings.split),
         "max-connection-per-server": str(settings.max_connection_per_server),
         "min-split-size": settings.min_split_size,
-        "continue": _aria2_bool(settings.resume_download),
+        "continue": _aria2_bool(
+            settings.resume_download and request.sink.resume_allowed
+        ),
+        "auto-file-renaming": "false",
+        "allow-overwrite": "true",
     }
 
 
-def _aria2_daemon_argv(
-    settings: Aria2DownloadSettings,
-    secret: str,
-) -> list[str]:
+def _aria2_daemon_argv(settings: Aria2DownloadSettings, secret: str) -> list[str]:
     return [
         "aria2c",
+        "--no-conf=true",
         "--enable-rpc=true",
         "--rpc-listen-all=false",
         f"--rpc-listen-port={settings.rpc_port}",
@@ -897,24 +666,6 @@ def _aria2_daemon_argv(
 
 def _aria2_bool(value: bool) -> str:
     return "true" if value else "false"
-
-
-def _remove_stale_tmp(tmp_path: Path) -> None:
-    try:
-        if tmp_path.exists() or tmp_path.is_symlink():
-            tmp_path.unlink()
-    except OSError as error:
-        raise DownloadFilesError(
-            f"stale HTTP tmp file cannot be removed: {tmp_path}: {error}"
-        ) from error
-
-
-def _cleanup_tmp(tmp_path: Path) -> None:
-    try:
-        if tmp_path.exists() or tmp_path.is_symlink():
-            tmp_path.unlink()
-    except OSError:
-        pass
 
 
 def _backoff_delay(attempt: int) -> float:

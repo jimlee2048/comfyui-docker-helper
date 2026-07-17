@@ -85,7 +85,7 @@ def normalize_runtime_file_filename(
         Diagnostic(
             path,
             "runtime_file.invalid_filename",
-            "must be one nonempty filename component",
+            result.message or "must be one nonempty filename component",
         )
     )
     return None

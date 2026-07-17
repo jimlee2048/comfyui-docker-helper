@@ -264,11 +264,13 @@ class EventStderr(StringIO):
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
-    return ContainerRuntime(
+    runtime = ContainerRuntime(
         workspace=tmp_path / "workspace",
         comfyui_path=tmp_path / "workspace" / "ComfyUI",
         virtual_env=tmp_path / "venv",
     )
+    runtime.comfyui_path.mkdir(parents=True)
+    return runtime
 
 
 def _write(path: Path, document: str) -> Path:

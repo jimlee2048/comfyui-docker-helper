@@ -13,8 +13,8 @@ from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
     DownloadFilesError,
-    FileDownloadItem,
     HttpxDownloadSettings,
+    TransportRequest,
 )
 
 
@@ -155,20 +155,31 @@ def make_settings(
     )
 
 
-def make_item(tmp_path: Path, *, overwrite: bool = False) -> FileDownloadItem:
-    """Return one resolved aria2 item."""
-    target = tmp_path / "models" / "model.safetensors"
+class Aria2TestSink:
+    """Expose only the descriptor-derived aria2 adapter contract."""
+
+    def __init__(self, target: Path, *, resume_allowed: bool = True) -> None:
+        self.display_path = target
+        self.aria2_directory = "/proc/123/fd/9"
+        self.aria2_name = target.name
+        self.resume_allowed = resume_allowed
+
+    def current_length(self) -> int:
+        return self.display_path.stat().st_size
+
+
+def make_item(tmp_path: Path, *, resume_allowed: bool = True) -> TransportRequest:
+    """Return one core-supplied aria2 staging request."""
+    target = tmp_path / "models" / ".cdh-staging" / "cdh-model.part"
     target.parent.mkdir(parents=True)
-    return FileDownloadItem(
+    target.write_bytes(b"complete")
+    return TransportRequest(
         url="https://example.test/model.safetensors",
-        filename="model.safetensors",
-        target=target,
-        overwrite=overwrite,
-        downloader="aria2",
+        sink=Aria2TestSink(target, resume_allowed=resume_allowed),
     )
 
 
-# Aria2 transfers own daemon lifecycle, typed failure mapping, and safe sidecar cleanup.
+# Aria2 owns daemon/RPC mechanics and writes only to supplied staging.
 def test_aria2_downloader_starts_daemon_and_submits_options(
     tmp_path: Path,
 ) -> None:
@@ -206,11 +217,12 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
         log=logs.append,
     )
 
-    downloader.download(item, settings)
+    result = downloader.download(item, settings)
 
     assert argv_calls == [
         [
             "aria2c",
+            "--no-conf=true",
             "--enable-rpc=true",
             "--rpc-listen-all=false",
             "--rpc-listen-port=6811",
@@ -226,15 +238,18 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
         (
             ["https://example.test/model.safetensors"],
             {
-                "dir": str(item.target.parent),
-                "out": "model.safetensors",
+                "dir": item.sink.aria2_directory,
+                "out": item.sink.aria2_name,
                 "split": "8",
                 "max-connection-per-server": "4",
                 "min-split-size": "2M",
                 "continue": "true",
+                "auto-file-renaming": "false",
+                "allow-overwrite": "true",
             },
         )
     ]
+    assert result.length == len(b"complete")
     assert secret not in repr(settings)
     assert secret not in repr(item)
     assert secret not in repr(downloader)
@@ -398,10 +413,10 @@ def test_aria2_downloader_reports_startup_port_failure(tmp_path: Path) -> None:
         downloader.download(make_item(tmp_path), make_settings())
 
 
-def test_aria2_downloader_removes_control_file_on_overwrite(tmp_path: Path) -> None:
-    """Overwrite removes target.aria2 before submitting aria2 work."""
-    item = make_item(tmp_path, overwrite=True)
-    control_file = Path(f"{item.target}.aria2")
+def test_aria2_downloader_does_not_own_control_file_cleanup(tmp_path: Path) -> None:
+    """Leave supplied staging/control lifecycle to the shared transfer core."""
+    item = make_item(tmp_path)
+    control_file = Path(f"{item.sink.display_path}.aria2")
     control_file.write_text("partial\n", encoding="utf-8")
     api = FakeApi(FakeDownload(["complete"]))
     downloader = Aria2Downloader(
@@ -415,31 +430,5 @@ def test_aria2_downloader_removes_control_file_on_overwrite(tmp_path: Path) -> N
 
     downloader.download(item, make_settings(resume_download=False))
 
-    assert not control_file.exists()
-    assert api.calls[0][1]["continue"] == "false"
-
-
-def test_aria2_downloader_removes_symlinked_control_file_on_overwrite(
-    tmp_path: Path,
-) -> None:
-    """Remove broken target.aria2 symlinks when overwrite=true."""
-    item = make_item(tmp_path, overwrite=True)
-    control_file = Path(f"{item.target}.aria2")
-    control_file.symlink_to(tmp_path / "missing-control-state")
-    api = FakeApi(FakeDownload(["complete"]))
-    downloader = Aria2Downloader(
-        process_factory=lambda _: FakeProcess(),
-        client_factory=lambda **kwargs: FakeClient(**kwargs),
-        api_factory=lambda _: api,
-        secret_factory=lambda: "s",
-        sleep=lambda _: None,
-        log=lambda _: None,
-    )
-
-    assert not control_file.exists()
-    assert control_file.is_symlink()
-
-    downloader.download(item, make_settings(resume_download=False))
-
-    assert not control_file.is_symlink()
+    assert control_file.read_text(encoding="utf-8") == "partial\n"
     assert api.calls[0][1]["continue"] == "false"

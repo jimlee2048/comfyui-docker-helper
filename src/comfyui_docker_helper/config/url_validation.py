@@ -11,6 +11,7 @@ from comfyui_docker_helper.config.value_validation import has_control_characters
 type DownloaderName = Literal["aria2", "httpx"]
 
 DOWNLOADERS: frozenset[DownloaderName] = frozenset({"aria2", "httpx"})
+TRANSFER_STAGING_DIRECTORY_NAME = ".cdh-staging"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,4 +141,15 @@ def validate_file_name(value: str) -> FilenameValidationResult:
             "invalid_filename",
             "must be one nonempty filename component",
         )
+    if is_reserved_file_target_name(value):
+        return FilenameValidationResult(
+            None,
+            "invalid_filename",
+            f"must not use reserved filename {TRANSFER_STAGING_DIRECTORY_NAME}",
+        )
     return FilenameValidationResult(value)
+
+
+def is_reserved_file_target_name(value: str) -> bool:
+    """Return whether one final leaf conflicts with transfer staging authority."""
+    return value == TRANSFER_STAGING_DIRECTORY_NAME

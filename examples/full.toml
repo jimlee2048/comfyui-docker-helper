@@ -167,7 +167,11 @@ url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md
 dir = "models/example-docs"
 # Required. Must be a single filename component.
 filename = "comfyui-readme-aria2.md"
-# Default: false. Existing targets are skipped unless true.
+# Optional. Trusted SHA-256 obtained independently from the download origin.
+# Hex case is normalized to lowercase; cdh never fetches or infers this value.
+# checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# Default: false. Permits replacement of unknown or mismatching content. A
+# matching configured checksum always keeps the existing regular file.
 overwrite = false
 # Default: cdh.default_downloader. Supported: "aria2", "httpx".
 downloader = "aria2"

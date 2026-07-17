@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
-import stat
-import time
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
-from pydantic import ValidationError
+from pydantic import ValidationError, field_validator
 
 from comfyui_docker_helper.config import Diagnostic
+from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime_file_validation import (
     normalize_runtime_file_path,
@@ -27,16 +22,13 @@ from comfyui_docker_helper.config.url_validation import DownloaderName
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloaderFactory,
-    Aria2DownloadSettings,
     DownloadBackend,
     DownloadBackendPreparer,
     DownloadCancelled,
     DownloaderSettings,
-    DownloadStatus,
-    FileDownloadItem,
     HttpxDownloader,
-    HttpxDownloadSettings,
     Logger,
+    TerminalTransferDownloadFilesError,
     TransferDownloadFilesError,
 )
 from comfyui_docker_helper.container.runtime_diagnostics import (
@@ -50,13 +42,20 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeDownloadsState,
     RuntimeState,
 )
-
-RUNTIME_FILE_IDENTITY_SCHEMA_VERSION = 1
-RUNTIME_STAGING_STALE_SECONDS = 24 * 60 * 60
-_CDH_STAGING_ARTIFACT_RE = re.compile(r"^cdh-[0-9a-f]{64}\.part(?:\..+)?$")
+from comfyui_docker_helper.container.transfer_core import (
+    Aria2DownloadSettings,
+    DownloadStatus,
+    FileTransferOutcome,
+    FileTransferRequest,
+    HttpxDownloadSettings,
+    StagingDisposition,
+    TransferIdentity,
+    admitted_regular_final,
+    project_transfer_identity,
+    transfer_file,
+)
 
 type RuntimeFilePath = tuple[str | int, ...]
-type RuntimeStagingClock = Callable[[], float]
 type RuntimeDownloadStartupObserver = Callable[[], None]
 type RuntimeDownloadCancelRequested = Callable[[], bool]
 type RuntimeDownloadBackendObserver = Callable[[DownloadBackend], None]
@@ -90,9 +89,9 @@ class RuntimeFilePlanItem:
     relative_target: str
     target: Path
     overwrite: bool
+    checksum: str | None
     download_mode: Literal["sync", "async"]
     downloader: DownloaderName | None
-    action: Literal["download", "skip_existing", "overwrite_existing"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +109,7 @@ class RuntimeFileDownloadResult:
     backend: DownloaderName
     staging_target: Path
     status: DownloadStatus
+    outcome: FileTransferOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,8 +170,16 @@ class _RuntimeFilePatch(ConfigModel):
     filename: str
     url: str | None = None
     overwrite: bool | None = None
+    checksum: str | None = None
     downloader: DownloaderName | None = None
     download_mode: Literal["sync", "async"] | None = None
+
+    @field_validator("checksum")
+    @classmethod
+    def _normalize_checksum(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_file_checksum(value)
 
 
 class _RuntimeFilesDocument(ConfigModel):
@@ -183,8 +191,16 @@ class _RuntimeFileConfig(ConfigModel):
     filename: str
     url: str
     overwrite: bool = False
+    checksum: str | None = None
     downloader: DownloaderName | None = None
     download_mode: Literal["sync", "async"] | None = None
+
+    @field_validator("checksum")
+    @classmethod
+    def _normalize_checksum(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_file_checksum(value)
 
 
 def build_runtime_file_plan(
@@ -216,11 +232,6 @@ def build_runtime_file_plan(
 
         directory, relative_target = normalized
         target = root.joinpath(*PurePosixPath(relative_target).parts)
-        action = _target_action(root, target, directory, config.overwrite, path)
-        if isinstance(action, Diagnostic):
-            diagnostics.append(action)
-            continue
-
         items.append(
             RuntimeFilePlanItem(
                 url=config.url,
@@ -229,9 +240,9 @@ def build_runtime_file_plan(
                 relative_target=relative_target,
                 target=target,
                 overwrite=config.overwrite,
+                checksum=config.checksum,
                 download_mode=config.download_mode or default_download_mode,
                 downloader=config.downloader,
-                action=action,
             )
         )
 
@@ -246,37 +257,20 @@ def process_runtime_file_downloads(
     config: RuntimeConfig,
     backends: Mapping[str, DownloadBackend],
     log: Logger = print,
-    staging_cleanup_clock: RuntimeStagingClock = time.time,
     state_observer: RuntimeDownloadStateObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
-    extra_protected_staging_targets: Iterable[Path] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
-    """Transfer runtime files to cdh-owned staging targets."""
+    """Run runtime policy around the shared transfer core."""
     settings = runtime_downloader_settings(config)
     is_cancelled = cancel_requested or _runtime_download_not_cancelled
     results: list[RuntimeFileDownloadResult] = []
-    current_staging_targets = tuple(
-        _runtime_staging_target(item) for item in plan.items
-    ) + tuple(extra_protected_staging_targets)
 
     for index, item in enumerate(plan.items, 1):
         if is_cancelled():
             break
         backend_name = _effective_downloader(item, config)
-        staging_target = _runtime_staging_target(item)
-        if item.action == "skip_existing":
-            log(f"Skipping existing runtime file: {item.target}")
-            results.append(
-                RuntimeFileDownloadResult(
-                    item=item,
-                    backend=backend_name,
-                    staging_target=staging_target,
-                    status=DownloadStatus.SKIPPED,
-                )
-            )
-            continue
-
+        staging_target = runtime_file_staging_target(item)
         try:
             backend = backends[backend_name]
         except KeyError as error:
@@ -290,29 +284,14 @@ def process_runtime_file_downloads(
                 )
             ) from error
 
-        staging_item = _runtime_staging_download_item(
-            item,
-            backend_name,
-            settings=settings,
-        )
-
-        transfer_completed = False
         try:
-            _prepare_staging_parent(
-                item,
-                staging_item.target.parent,
-                ("files", index - 1),
-                current_staging_targets=current_staging_targets,
-                clock=staging_cleanup_clock,
-            )
             log(
-                f"Downloading runtime file {index}/{len(plan.items)} "
-                f"with {backend_name}"
+                f"Processing runtime file {index}/{len(plan.items)} with {backend_name}"
             )
             _observe_cancellable_runtime_backend(backend, backend_observer)
-            attempts_used = _download_runtime_file_with_policy(
+            attempts_used, outcome = _download_runtime_file_with_policy(
                 item,
-                staging_item,
+                backend_name,
                 backend,
                 settings,
                 ("files", index - 1),
@@ -321,36 +300,17 @@ def process_runtime_file_downloads(
                 state_observer=state_observer,
                 cancel_requested=is_cancelled,
             )
-            transfer_completed = True
             _raise_if_runtime_download_cancelled(is_cancelled)
-            _place_staged_runtime_file(item, staging_item.target, ("files", index - 1))
-            if not item.target.is_file() or item.target.is_symlink():
-                raise RuntimeFileDownloadError(
-                    (
-                        Diagnostic(
-                            path=("files", index - 1, "target"),
-                            code="runtime_file.final_target_not_regular",
-                            message=(
-                                "final target is not a regular file after placement"
-                            ),
-                        ),
-                    )
-                )
             _notify_runtime_download_state(state_observer, item, "completed")
             log(
                 "Runtime download completed: "
                 f"mode={item.download_mode} target={item.relative_target} "
                 f"backend={backend_name} attempts={attempts_used} "
-                "status=completed"
+                f"status={outcome.status} verification={outcome.verification}"
             )
-            _remove_empty_staging_parent(staging_item.target.parent)
         except _RuntimeDownloadContinued:
-            _cleanup_current_staging(staging_item.target)
-            _remove_empty_staging_parent(staging_item.target.parent)
             continue
         except RuntimeFileDownloadCancelled:
-            _cleanup_current_staging(staging_item.target)
-            _remove_empty_staging_parent(staging_item.target.parent)
             break
         except _RuntimeDownloadExhaustedFailure:
             _log_async_queue_stopping_after_exhausted_failure(
@@ -359,27 +319,23 @@ def process_runtime_file_downloads(
                 config=config,
                 pending=len(plan.items) - index,
             )
-            _cleanup_current_staging(staging_item.target)
-            _remove_empty_staging_parent(staging_item.target.parent)
             raise
         except Exception as error:
-            if transfer_completed:
-                _notify_runtime_download_state(
-                    state_observer,
-                    item,
-                    "exhausted",
-                    error=error,
-                )
-            _cleanup_current_staging(staging_item.target)
-            _remove_empty_staging_parent(staging_item.target.parent)
+            _notify_runtime_download_state(
+                state_observer,
+                item,
+                "exhausted",
+                error=error,
+            )
             raise
 
         results.append(
             RuntimeFileDownloadResult(
                 item=item,
                 backend=backend_name,
-                staging_target=staging_item.target,
-                status=DownloadStatus.DOWNLOADED,
+                staging_target=staging_target,
+                status=outcome.status,
+                outcome=outcome,
             )
         )
 
@@ -388,32 +344,28 @@ def process_runtime_file_downloads(
 
 def canonical_runtime_file_identity_bytes(item: RuntimeFilePlanItem) -> bytes:
     """Return canonical runtime file identity bytes for digesting."""
-    payload = {
-        "schema_version": RUNTIME_FILE_IDENTITY_SCHEMA_VERSION,
-        "source": item.url,
-        "source_type": "url",
-        "target": item.relative_target,
-    }
-    return json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
+    return _runtime_transfer_identity(item).canonical_bytes
 
 
 def runtime_file_identity_digest(
     item: RuntimeFilePlanItem,
 ) -> RuntimeDownloadDigestKey:
     """Return the stable source-target identity digest for a runtime file item."""
-    digest = hashlib.sha256(canonical_runtime_file_identity_bytes(item)).hexdigest()
-    return f"sha256:{digest}"
+    return _runtime_transfer_identity(item).digest
 
 
-def runtime_file_staging_target(item: RuntimeFilePlanItem, digest: str) -> Path:
-    """Return the digest-named target-local staging path for reconciliation."""
-    digest_suffix = digest.removeprefix("sha256:")
-    return item.target.parent / ".cdh-staging" / f"cdh-{digest_suffix}.part"
+def runtime_file_staging_target(item: RuntimeFilePlanItem) -> Path:
+    """Return shared desired-identity staging for reconciliation."""
+    return _runtime_transfer_identity(item).staging_target
+
+
+def _runtime_transfer_identity(item: RuntimeFilePlanItem) -> TransferIdentity:
+    return project_transfer_identity(
+        root=_runtime_item_root(item),
+        url=item.url,
+        target=item.target,
+        expected_checksum=item.checksum,
+    )
 
 
 def reconcile_runtime_file_plan(
@@ -426,7 +378,6 @@ def reconcile_runtime_file_plan(
     """Reconcile desired runtime files against final files and persisted state."""
     root = Path(comfyui_path)
     current_digests = {runtime_file_identity_digest(item): item for item in plan.items}
-    current_targets = {item.relative_target: item for item in plan.items}
     stale_entry_digests = frozenset(
         digest for digest in state.downloads.entries if digest not in current_digests
     )
@@ -438,25 +389,20 @@ def reconcile_runtime_file_plan(
     for item in plan.items:
         digest = runtime_file_identity_digest(item)
         previous_entry = state.downloads.entries.get(digest)
-        final_exists = item.target.is_file() and not item.target.is_symlink()
+        final_exists = admitted_regular_final(root, item.target)
 
-        if not item.overwrite:
-            scheduled = not final_exists
-            status: Literal["pending", "completed", "skipped"] = (
-                "pending" if scheduled else "skipped"
-            )
-        else:
-            status = (
-                "completed"
-                if previous_entry is not None
-                and previous_entry.status == "completed"
-                and final_exists
-                else "pending"
-            )
-            scheduled = status == "pending"
+        status: Literal["pending", "completed", "skipped"] = (
+            "completed"
+            if previous_entry is not None
+            and previous_entry.status == "completed"
+            and final_exists
+            and item.checksum is None
+            else "pending"
+        )
+        scheduled = status == "pending"
 
         if scheduled:
-            scheduled_items.append(_runtime_file_scheduled_item(item))
+            scheduled_items.append(item)
 
         entry = _runtime_download_entry_for_reconciliation(
             item,
@@ -472,7 +418,7 @@ def reconcile_runtime_file_plan(
                 digest=digest,
                 status=status,
                 scheduled=scheduled,
-                staging_target=runtime_file_staging_target(item, digest),
+                staging_target=runtime_file_staging_target(item),
                 previous_entry=previous_entry,
             )
         )
@@ -492,7 +438,6 @@ def reconcile_runtime_file_plan(
             _stale_runtime_file_staging_candidates(
                 state,
                 stale_entry_digests=stale_entry_digests,
-                current_targets=current_targets,
                 root=root,
             )
         ),
@@ -522,28 +467,15 @@ def _runtime_download_entry_for_reconciliation(
     )
 
 
-def _runtime_file_scheduled_item(item: RuntimeFilePlanItem) -> RuntimeFilePlanItem:
-    return replace(
-        item,
-        action="overwrite_existing" if item.overwrite else "download",
-    )
-
-
 def _stale_runtime_file_staging_candidates(
     state: RuntimeState,
     *,
     stale_entry_digests: frozenset[str],
-    current_targets: Mapping[str, RuntimeFilePlanItem],
     root: Path,
 ) -> tuple[Path, ...]:
     candidates: list[Path] = []
     for digest in sorted(stale_entry_digests):
         entry = state.downloads.entries[digest]
-        target_item = current_targets.get(entry.target)
-        if target_item is not None:
-            candidates.append(runtime_file_staging_target(target_item, digest))
-            continue
-
         target = root.joinpath(*PurePosixPath(entry.target).parts)
         candidates.append(
             target.parent
@@ -560,12 +492,10 @@ def download_runtime_files(
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     log: Logger = print,
-    staging_cleanup_clock: RuntimeStagingClock = time.time,
     state_observer: RuntimeDownloadStateObserver | None = None,
     startup_observer: RuntimeDownloadStartupObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
-    extra_protected_staging_targets: Iterable[Path] = (),
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
     is_cancelled = cancel_requested or _runtime_download_not_cancelled
@@ -587,11 +517,9 @@ def download_runtime_files(
             config=config,
             backends=backends,
             log=log,
-            staging_cleanup_clock=staging_cleanup_clock,
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
-            extra_protected_staging_targets=extra_protected_staging_targets,
         )
 
     with aria2_downloader_factory(log=log) as aria2_backend:
@@ -606,11 +534,9 @@ def download_runtime_files(
             config=config,
             backends=backends,
             log=log,
-            staging_cleanup_clock=staging_cleanup_clock,
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
-            extra_protected_staging_targets=extra_protected_staging_targets,
         )
 
 
@@ -623,8 +549,6 @@ def _prepare_runtime_download_backends(
     settings = runtime_downloader_settings(config)
     prepared: set[DownloaderName] = set()
     for item in plan.items:
-        if item.action == "skip_existing":
-            continue
         backend_name = _effective_downloader(item, config)
         if backend_name in prepared:
             continue
@@ -673,7 +597,7 @@ class _RuntimeDownloadExhaustedFailure(RuntimeFileDownloadError):
 
 def _download_runtime_file_with_policy(
     item: RuntimeFilePlanItem,
-    staging_item: FileDownloadItem,
+    backend_name: DownloaderName,
     backend: DownloadBackend,
     settings: DownloaderSettings,
     path: RuntimeFilePath,
@@ -682,26 +606,20 @@ def _download_runtime_file_with_policy(
     log: Logger,
     state_observer: RuntimeDownloadStateObserver | None,
     cancel_requested: RuntimeDownloadCancelRequested,
-) -> int:
-    attempt_settings = _single_runtime_attempt_settings(settings)
+) -> tuple[int, FileTransferOutcome]:
     attempts = config.cdh.download_max_attempts
-    backend_name = staging_item.downloader
     source_host = runtime_source_host(item.url)
     identity = short_runtime_identity(runtime_file_identity_digest(item))
+    transfer_request = FileTransferRequest(
+        root=_runtime_item_root(item),
+        url=item.url,
+        target=item.target,
+        overwrite=item.overwrite,
+        expected_checksum=item.checksum,
+        staging_disposition=StagingDisposition.CLEAN,
+    )
     for attempt in range(1, attempts + 1):
         _raise_if_runtime_download_cancelled(cancel_requested)
-        if _runtime_attempt_requires_clean_staging(staging_item, settings):
-            _cleanup_current_staging(staging_item.target)
-        if _runtime_resume_state_blocks_backend(staging_item, settings):
-            raise RuntimeFileDownloadError(
-                (
-                    Diagnostic(
-                        path=(*path, "target"),
-                        code="runtime_file.invalid_resume_staging",
-                        message="invalid staged resume state could not be cleaned",
-                    ),
-                )
-            )
         try:
             log(
                 "Runtime download attempt: "
@@ -711,13 +629,32 @@ def _download_runtime_file_with_policy(
             )
             _notify_runtime_download_state(state_observer, item, "downloading")
             _raise_if_runtime_download_cancelled(cancel_requested)
-            backend.download(staging_item, attempt_settings)
+            outcome = transfer_file(
+                transfer_request,
+                backend=backend,
+                settings=settings,
+            )
             _raise_if_runtime_download_cancelled(cancel_requested)
-            return attempt
+            return attempt, outcome
         except RuntimeFileDownloadCancelled:
             raise
         except DownloadCancelled as error:
             raise RuntimeFileDownloadCancelled from error
+        except TerminalTransferDownloadFilesError as error:
+            _notify_runtime_download_state(
+                state_observer,
+                item,
+                "exhausted",
+                error=error,
+            )
+            _apply_runtime_item_failure_policy(
+                item,
+                error,
+                attempts=attempt,
+                config=config,
+                path=path,
+                log=log,
+            )
         except TransferDownloadFilesError as error:
             _raise_if_runtime_download_cancelled(cancel_requested)
             if attempt < attempts:
@@ -745,49 +682,50 @@ def _download_runtime_file_with_policy(
                 "exhausted",
                 error=error,
             )
-            log(
-                "WARNING: Runtime download exhausted: "
-                f"mode={item.download_mode} target={item.relative_target} "
-                f"backend={backend_name} attempts={attempts}/{attempts} "
-                f"policy={config.cdh.download_failure_policy} status=exhausted "
-                f"reason={runtime_error_reason(error)}"
-            )
-            if config.cdh.download_failure_policy == "continue":
-                log(
-                    "WARNING: runtime file download failed after "
-                    f"{attempts} attempt(s), continuing: "
-                    f"target={item.relative_target} "
-                    f"reason={runtime_error_reason(error)}"
-                )
-                raise _RuntimeDownloadContinued from error
-            raise _RuntimeDownloadExhaustedFailure(
-                (
-                    Diagnostic(
-                        path=(*path, "target"),
-                        code="runtime_file.download_failed",
-                        message=(
-                            "runtime file download failed after "
-                            f"{attempts} attempt(s): {error}"
-                        ),
-                    ),
-                )
-            ) from error
-        except Exception as error:
-            _raise_if_runtime_download_cancelled(cancel_requested)
-            _notify_runtime_download_state(
-                state_observer,
+            _apply_runtime_item_failure_policy(
                 item,
-                "exhausted",
-                error=error,
+                error,
+                attempts=attempts,
+                config=config,
+                path=path,
+                log=log,
             )
-            log(
-                "WARNING: Runtime download exhausted: "
-                f"mode={item.download_mode} target={item.relative_target} "
-                f"backend={backend_name} attempts={attempt}/{attempts} "
-                f"policy={config.cdh.download_failure_policy} status=exhausted "
-                f"reason={runtime_error_reason(error)}"
-            )
-            raise
+
+
+def _apply_runtime_item_failure_policy(
+    item: RuntimeFilePlanItem,
+    error: Exception,
+    *,
+    attempts: int,
+    config: RuntimeConfig,
+    path: RuntimeFilePath,
+    log: Logger,
+) -> None:
+    log(
+        "WARNING: Runtime download exhausted: "
+        f"mode={item.download_mode} target={item.relative_target} "
+        f"attempts={attempts}/{config.cdh.download_max_attempts} "
+        f"policy={config.cdh.download_failure_policy} status=exhausted "
+        f"reason={runtime_error_reason(error)}"
+    )
+    if config.cdh.download_failure_policy == "continue":
+        log(
+            "WARNING: runtime file download failed after "
+            f"{attempts} attempt(s), continuing: target={item.relative_target} "
+            f"reason={runtime_error_reason(error)}"
+        )
+        raise _RuntimeDownloadContinued from error
+    raise _RuntimeDownloadExhaustedFailure(
+        (
+            Diagnostic(
+                path=(*path, "target"),
+                code="runtime_file.download_failed",
+                message=(
+                    f"runtime file download failed after {attempts} attempt(s): {error}"
+                ),
+            ),
+        )
+    ) from error
 
 
 def _log_async_queue_stopping_after_exhausted_failure(
@@ -854,80 +792,6 @@ def _notify_runtime_download_state(
     if state_observer is None:
         return
     state_observer(item, status, error=error)
-
-
-def _single_runtime_attempt_settings(
-    settings: DownloaderSettings,
-) -> DownloaderSettings:
-    """Keep runtime policy attempts from multiplying backend HTTPX retries."""
-    return DownloaderSettings(
-        default=settings.default,
-        aria2=settings.aria2,
-        httpx=HttpxDownloadSettings(
-            timeout=settings.httpx.timeout,
-            retries=0,
-        ),
-    )
-
-
-def _runtime_attempt_requires_clean_staging(
-    item: FileDownloadItem,
-    settings: DownloaderSettings,
-) -> bool:
-    if item.downloader == "httpx":
-        return True
-    if item.downloader != "aria2":
-        return False
-    if not settings.aria2.resume_download:
-        return True
-    return not _runtime_resume_state_is_valid_or_absent(item.target)
-
-
-def _runtime_resume_state_is_valid_or_absent(staging_target: Path) -> bool:
-    try:
-        mode = staging_target.lstat().st_mode
-    except FileNotFoundError:
-        return not _current_staging_sidecars_exist(staging_target)
-    except OSError:
-        return False
-    if not stat.S_ISREG(mode):
-        return False
-    try:
-        with staging_target.open("rb") as staged_file:
-            staged_file.read(0)
-    except OSError:
-        return False
-    return True
-
-
-def _current_staging_sidecars_exist(staging_target: Path) -> bool:
-    if not _is_real_cdh_staging_directory(staging_target.parent):
-        return False
-
-    staging_prefix = _cdh_staging_prefix(staging_target)
-    if staging_prefix is None:
-        return False
-
-    try:
-        entries = tuple(staging_target.parent.iterdir())
-    except OSError:
-        return True
-
-    return any(
-        path != staging_target and _cdh_staging_prefix(path) == staging_prefix
-        for path in entries
-    )
-
-
-def _runtime_resume_state_blocks_backend(
-    item: FileDownloadItem,
-    settings: DownloaderSettings,
-) -> bool:
-    return (
-        item.downloader == "aria2"
-        and settings.aria2.resume_download
-        and not _runtime_resume_state_is_valid_or_absent(item.target)
-    )
 
 
 def merge_runtime_file_items(
@@ -1005,326 +869,12 @@ def _effective_downloader(
 
 
 def _requires_aria2_backend(plan: RuntimeFilePlan, config: RuntimeConfig) -> bool:
-    return any(
-        item.action != "skip_existing"
-        and _effective_downloader(item, config) == "aria2"
-        for item in plan.items
-    )
-
-
-def _runtime_staging_download_item(
-    item: RuntimeFilePlanItem,
-    downloader: DownloaderName,
-    *,
-    settings: DownloaderSettings,
-) -> FileDownloadItem:
-    return FileDownloadItem(
-        url=item.url,
-        filename=item.filename,
-        target=_runtime_staging_target(item),
-        overwrite=_runtime_staging_overwrite(downloader, settings),
-        downloader=downloader,
-    )
-
-
-def _runtime_staging_overwrite(
-    downloader: DownloaderName,
-    settings: DownloaderSettings,
-) -> bool:
-    return downloader == "aria2" and not settings.aria2.resume_download
-
-
-def _runtime_staging_target(item: RuntimeFilePlanItem) -> Path:
-    return runtime_file_staging_target(item, runtime_file_identity_digest(item))
-
-
-def _prepare_staging_parent(
-    item: RuntimeFilePlanItem,
-    staging_parent: Path,
-    path: RuntimeFilePath,
-    *,
-    current_staging_targets: Iterable[Path],
-    clock: RuntimeStagingClock,
-) -> None:
-    target_parent_error = _validate_existing_parent_contained(
-        _runtime_item_root(item),
-        PurePosixPath(item.directory),
-        path,
-    )
-    if target_parent_error is not None:
-        raise RuntimeFileDownloadError((target_parent_error,))
-
-    try:
-        staging_parent.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise RuntimeFileDownloadError(
-            (
-                Diagnostic(
-                    path=(*path, "target"),
-                    code="runtime_file.staging_parent_failed",
-                    message=f"staging parent could not be created: {error}",
-                ),
-            )
-        ) from error
-
-    _validate_staging_parent(staging_parent, path)
-    target_parent_error = _validate_resolved_target_parent_contained(item, path)
-    if target_parent_error is not None:
-        raise RuntimeFileDownloadError((target_parent_error,))
-    _cleanup_stale_staging_files(
-        staging_parent,
-        current_staging_targets=current_staging_targets,
-        clock=clock,
-    )
-
-
-def _validate_staging_parent(
-    staging_parent: Path,
-    path: RuntimeFilePath,
-) -> None:
-    try:
-        mode = staging_parent.lstat().st_mode
-    except OSError as error:
-        raise RuntimeFileDownloadError(
-            (
-                Diagnostic(
-                    path=(*path, "target"),
-                    code="runtime_file.staging_parent_inspect_failed",
-                    message=f"staging parent could not be inspected: {error}",
-                ),
-            )
-        ) from error
-
-    if not stat.S_ISDIR(mode):
-        raise RuntimeFileDownloadError(
-            (
-                Diagnostic(
-                    path=(*path, "target"),
-                    code="runtime_file.staging_parent_invalid",
-                    message="staging parent must be a real directory",
-                ),
-            )
-        )
-
-
-def _place_staged_runtime_file(
-    item: RuntimeFilePlanItem,
-    staging_target: Path,
-    path: RuntimeFilePath,
-) -> None:
-    staging_error = _validate_staging_target(staging_target, path)
-    if staging_error is not None:
-        raise RuntimeFileDownloadError((staging_error,))
-
-    existing_error = _validate_final_target_before_replace(item, path)
-    if existing_error is not None:
-        raise RuntimeFileDownloadError((existing_error,))
-
-    target_parent_error = _validate_resolved_target_parent_contained(item, path)
-    if target_parent_error is not None:
-        raise RuntimeFileDownloadError((target_parent_error,))
-
-    try:
-        staging_target.replace(item.target)
-    except OSError as error:
-        raise RuntimeFileDownloadError(
-            (
-                Diagnostic(
-                    path=(*path, "target"),
-                    code="runtime_file.final_replace_failed",
-                    message=f"staged file could not be placed at final target: {error}",
-                ),
-            )
-        ) from error
-
-
-def _validate_staging_target(
-    staging_target: Path,
-    path: RuntimeFilePath,
-) -> Diagnostic | None:
-    try:
-        mode = staging_target.lstat().st_mode
-    except FileNotFoundError:
-        return Diagnostic(
-            path=(*path, "target"),
-            code="runtime_file.staging_missing",
-            message="download backend did not produce a regular staging file",
-        )
-    except OSError as error:
-        return Diagnostic(
-            path=(*path, "target"),
-            code="runtime_file.staging_inspect_failed",
-            message=f"staging file could not be inspected: {error}",
-        )
-
-    if not stat.S_ISREG(mode):
-        return Diagnostic(
-            path=(*path, "target"),
-            code="runtime_file.non_regular_staging",
-            message="download backend did not produce a regular staging file",
-        )
-    return None
-
-
-def _validate_resolved_target_parent_contained(
-    item: RuntimeFilePlanItem,
-    path: RuntimeFilePath,
-) -> Diagnostic | None:
-    root = _runtime_item_root(item)
-    try:
-        resolved_root = root.resolve(strict=False)
-    except OSError as error:
-        return Diagnostic(
-            (*path, "target"),
-            "runtime_file.root_resolution_failed",
-            f"COMFYUI_PATH cannot be resolved: {error}",
-        )
-
-    try:
-        item.target.parent.resolve(strict=True).relative_to(resolved_root)
-    except ValueError:
-        return Diagnostic(
-            (*path, "target"),
-            "runtime_file.symlink_escape",
-            "target parent must not escape COMFYUI_PATH",
-        )
-    except OSError as error:
-        return Diagnostic(
-            (*path, "target"),
-            "runtime_file.parent_resolution_failed",
-            f"target parent cannot be resolved: {error}",
-        )
-    return None
+    return any(_effective_downloader(item, config) == "aria2" for item in plan.items)
 
 
 def _runtime_item_root(item: RuntimeFilePlanItem) -> Path:
     relative_parts = PurePosixPath(item.relative_target).parts
     return item.target.parents[len(relative_parts) - 1]
-
-
-def _validate_final_target_before_replace(
-    item: RuntimeFilePlanItem,
-    path: RuntimeFilePath,
-) -> Diagnostic | None:
-    try:
-        mode = item.target.lstat().st_mode
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        return Diagnostic(
-            path=(*path, "target"),
-            code="runtime_file.final_target_inspect_failed",
-            message=f"final target could not be inspected before placement: {error}",
-        )
-
-    if not stat.S_ISREG(mode):
-        return Diagnostic(
-            path=(*path, "target"),
-            code="runtime_file.non_regular_target",
-            message="final target exists but is not a regular file",
-        )
-    if not item.overwrite:
-        return Diagnostic(
-            path=(*path, "target"),
-            code="runtime_file.final_target_exists",
-            message="final target appeared before placement and overwrite is false",
-        )
-    return None
-
-
-def _cleanup_stale_staging_files(
-    staging_parent: Path,
-    *,
-    current_staging_targets: Iterable[Path],
-    clock: RuntimeStagingClock,
-) -> None:
-    if not _is_real_cdh_staging_directory(staging_parent):
-        return
-
-    try:
-        entries = tuple(staging_parent.iterdir())
-    except FileNotFoundError:
-        return
-    except OSError:
-        return
-
-    current_prefixes = {
-        _cdh_staging_prefix(path) for path in current_staging_targets
-    } - {None}
-    stale_before = clock() - RUNTIME_STAGING_STALE_SECONDS
-
-    for entry in entries:
-        if not _is_cdh_staging_artifact(entry):
-            continue
-        if _cdh_staging_prefix(entry) in current_prefixes:
-            continue
-        try:
-            stat_result = entry.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(stat_result.st_mode):
-            continue
-        if stat_result.st_mtime >= stale_before:
-            continue
-        with suppress(OSError):
-            entry.unlink()
-
-
-def _cleanup_current_staging(staging_target: Path) -> None:
-    if not _is_real_cdh_staging_directory(staging_target.parent):
-        return
-
-    staging_prefix = _cdh_staging_prefix(staging_target)
-    if staging_prefix is None:
-        return
-
-    try:
-        entries = tuple(staging_target.parent.iterdir())
-    except OSError:
-        return
-
-    for path in entries:
-        if _cdh_staging_prefix(path) != staging_prefix:
-            continue
-        try:
-            mode = path.lstat().st_mode
-            if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
-                path.unlink()
-            elif stat.S_ISDIR(mode):
-                path.rmdir()
-        except OSError:
-            pass
-
-
-def _is_cdh_staging_artifact(path: Path) -> bool:
-    if path.parent.name != ".cdh-staging":
-        return False
-    return _CDH_STAGING_ARTIFACT_RE.fullmatch(path.name) is not None
-
-
-def _cdh_staging_prefix(path: Path) -> str | None:
-    if not _is_cdh_staging_artifact(path):
-        return None
-    return path.name[: len("cdh-") + 64 + len(".")]
-
-
-def _remove_empty_staging_parent(staging_parent: Path) -> None:
-    if not _is_real_cdh_staging_directory(staging_parent):
-        return
-    with suppress(OSError):
-        staging_parent.rmdir()
-
-
-def _is_real_cdh_staging_directory(path: Path) -> bool:
-    return path.name == ".cdh-staging" and _is_real_directory(path)
-
-
-def _is_real_directory(path: Path) -> bool:
-    try:
-        mode = path.lstat().st_mode
-    except OSError:
-        return False
-    return stat.S_ISDIR(mode)
 
 
 def _merge_key(
@@ -1344,74 +894,6 @@ def _normalize_runtime_file_path(
     diagnostics: list[Diagnostic],
 ) -> tuple[PurePosixPath, str] | None:
     return normalize_runtime_file_path(item.dir, item.filename, path, diagnostics)
-
-
-def _target_action(
-    root: Path,
-    target: Path,
-    directory: PurePosixPath,
-    overwrite: bool,
-    path: RuntimeFilePath,
-) -> Literal["download", "skip_existing", "overwrite_existing"] | Diagnostic:
-    parent_error = _validate_existing_parent_contained(root, directory, path)
-    if parent_error is not None:
-        return parent_error
-
-    try:
-        mode = target.lstat().st_mode
-    except FileNotFoundError:
-        return "download"
-    except OSError as error:
-        return Diagnostic(
-            (*path, "target"),
-            "runtime_file.target_inspection_failed",
-            f"target cannot be inspected: {error}",
-        )
-
-    if not target.is_file() or target.is_symlink():
-        return Diagnostic(
-            (*path, "target"),
-            "runtime_file.non_regular_target",
-            "existing target must be a regular file",
-        )
-    del mode
-    return "overwrite_existing" if overwrite else "skip_existing"
-
-
-def _validate_existing_parent_contained(
-    root: Path,
-    directory: PurePosixPath,
-    path: RuntimeFilePath,
-) -> Diagnostic | None:
-    try:
-        resolved_root = root.resolve(strict=False)
-    except OSError as error:
-        return Diagnostic(
-            (*path, "target"),
-            "runtime_file.root_resolution_failed",
-            f"COMFYUI_PATH cannot be resolved: {error}",
-        )
-
-    current = root
-    for part in directory.parts:
-        current = current / part
-        if not current.exists() and not current.is_symlink():
-            return None
-        try:
-            current.resolve(strict=True).relative_to(resolved_root)
-        except ValueError:
-            return Diagnostic(
-                (*path, "target"),
-                "runtime_file.symlink_escape",
-                "target parent must not escape COMFYUI_PATH",
-            )
-        except OSError as error:
-            return Diagnostic(
-                (*path, "target"),
-                "runtime_file.parent_resolution_failed",
-                f"target parent cannot be resolved: {error}",
-            )
-    return None
 
 
 def _diagnostics_from_validation_error(

@@ -1,4 +1,4 @@
-"""HTTPX file downloader tests."""
+"""HTTPX supplied-staging transport adapter tests."""
 
 from __future__ import annotations
 
@@ -12,9 +12,17 @@ from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
     DownloadFilesError,
-    FileDownloadItem,
     HttpxDownloader,
     HttpxDownloadSettings,
+    TerminalTransferDownloadFilesError,
+    TransferDownloadFilesError,
+    TransportRequest,
+)
+from comfyui_docker_helper.container.transfer_core import (
+    FileTransferRequest,
+    StagingDisposition,
+    transfer_file,
+    transfer_staging_target,
 )
 
 
@@ -28,8 +36,17 @@ class IteratorStream(httpx.SyncByteStream):
         return self._chunks()
 
 
-def make_settings(*, retries: int = 2, timeout: int | float = 30) -> DownloaderSettings:
-    """Return normalized downloader settings for HTTPX tests."""
+class PathSink:
+    """Test sink exposing only the safe adapter operations."""
+
+    def __init__(self, path: Path) -> None:
+        self.display_path = path
+
+    def open_for_write(self):
+        return self.display_path.open("wb")
+
+
+def _settings(*, retries: int = 0) -> DownloaderSettings:
     return DownloaderSettings(
         default="httpx",
         aria2=Aria2DownloadSettings(
@@ -39,256 +56,259 @@ def make_settings(*, retries: int = 2, timeout: int | float = 30) -> DownloaderS
             min_split_size="2M",
             resume_download=False,
         ),
-        httpx=HttpxDownloadSettings(timeout=timeout, retries=retries),
+        httpx=HttpxDownloadSettings(timeout=30, retries=retries),
     )
 
 
-def make_item(
-    tmp_path: Path,
-    *,
-    url: str = "https://example.test/file.bin",
-) -> FileDownloadItem:
-    """Return one resolved file item with an existing target parent."""
-    target = tmp_path / "models" / "file.bin"
-    target.parent.mkdir(parents=True)
-    return FileDownloadItem(
-        url=url,
-        filename="file.bin",
-        target=target,
-        overwrite=False,
-        downloader="httpx",
-    )
+def _request(
+    tmp_path: Path, *, url: str = "https://example.test/file.bin"
+) -> TransportRequest:
+    staging = tmp_path / "models" / ".cdh-staging" / "cdh-test.part"
+    staging.parent.mkdir(parents=True)
+    return TransportRequest(url=url, sink=PathSink(staging))
 
 
-def make_downloader(
+def _downloader(
     transport: httpx.MockTransport,
     *,
-    sleeps: list[float] | None = None,
     logs: list[str] | None = None,
+    sleeps: list[float] | None = None,
     monotonic: Callable[[], float] | None = None,
 ) -> HttpxDownloader:
-    """Build an HTTPX downloader with test doubles for side effects."""
     return HttpxDownloader(
         transport=transport,
-        sleep=(sleeps if sleeps is not None else []).append,
         log=(logs if logs is not None else []).append,
+        sleep=(sleeps if sleeps is not None else []).append,
         monotonic=monotonic or (lambda: 0.0),
     )
 
 
-# HTTP transfers use bounded retries and atomic staging without leaking partial targets.
-def test_httpx_downloader_streams_to_tmp_then_renames(tmp_path: Path) -> None:
-    """HTTPX writes through a tmp file before atomically publishing target."""
-    item = make_item(tmp_path)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == item.url
-        return httpx.Response(200, content=b"downloaded")
-
-    downloader = make_downloader(httpx.MockTransport(handler))
-
-    downloader.download(item, make_settings())
-
-    assert item.target.read_bytes() == b"downloaded"
-    assert not item.target.with_name("file.bin.tmp").exists()
+def _core_request(root: Path) -> FileTransferRequest:
+    return FileTransferRequest(
+        root=root,
+        url="https://example.test/file.bin",
+        target=root / "models" / "file.bin",
+        overwrite=True,
+        expected_checksum=None,
+        staging_disposition=StagingDisposition.CLEAN,
+    )
 
 
-def test_httpx_downloader_follows_redirects(tmp_path: Path) -> None:
-    """Allow HTTP redirects while retaining one final target write."""
-    item = make_item(tmp_path, url="https://example.test/redirect")
+# The adapter owns HTTP mechanics only; the shared core owns final placement.
+def test_httpx_writes_only_supplied_staging_and_reports_length(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    final = tmp_path / "models" / "file.bin"
+    downloader = _downloader(
+        httpx.MockTransport(lambda _: httpx.Response(200, content=b"downloaded"))
+    )
+
+    result = downloader.download(request, _settings())
+
+    assert result.length == len(b"downloaded")
+    assert request.sink.display_path.read_bytes() == b"downloaded"
+    assert not final.exists()
+    assert not request.sink.display_path.with_suffix(".tmp").exists()
+
+
+def test_httpx_follows_redirects_without_changing_supplied_target(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path, url="https://example.test/redirect")
     requests: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(str(request.url))
-        if request.url.path == "/redirect":
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        requests.append(str(http_request.url))
+        if http_request.url.path == "/redirect":
             return httpx.Response(302, headers={"Location": "/final"})
         return httpx.Response(200, content=b"final")
 
-    downloader = make_downloader(httpx.MockTransport(handler))
-
-    downloader.download(item, make_settings())
+    result = _downloader(httpx.MockTransport(handler)).download(request, _settings())
 
     assert requests == ["https://example.test/redirect", "https://example.test/final"]
-    assert item.target.read_bytes() == b"final"
+    assert result.length == 5
+    assert request.sink.display_path.read_bytes() == b"final"
 
 
-def test_httpx_downloader_removes_stale_tmp_before_download(tmp_path: Path) -> None:
-    """Remove stale tmp files before beginning a new HTTPX attempt."""
-    item = make_item(tmp_path)
-    tmp_file = item.target.with_name("file.bin.tmp")
-    tmp_file.write_bytes(b"stale")
-    downloader = make_downloader(
-        httpx.MockTransport(lambda _: httpx.Response(200, content=b"fresh"))
-    )
-
-    downloader.download(item, make_settings())
-
-    assert item.target.read_bytes() == b"fresh"
-    assert not tmp_file.exists()
-
-
-def test_httpx_downloader_removes_broken_tmp_symlink_before_write(
+@pytest.mark.parametrize("status", [408, 429, 500, 503])
+def test_httpx_retryable_response_is_one_adapter_attempt(
     tmp_path: Path,
+    status: int,
 ) -> None:
-    """Remove tmp symlinks before streaming so writes stay in target tree."""
-    item = make_item(tmp_path)
-    outside_dir = tmp_path / "outside"
-    outside_dir.mkdir()
-    outside_file = outside_dir / "escaped.bin"
-    tmp_file = item.target.with_name("file.bin.tmp")
-    tmp_file.symlink_to(outside_file)
-
-    def chunks() -> Iterator[bytes]:
-        assert not outside_file.exists()
-        assert tmp_file.exists()
-        assert not tmp_file.is_symlink()
-        yield b"fresh"
+    request = _request(tmp_path)
+    calls = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, stream=IteratorStream(chunks))
-
-    downloader = make_downloader(httpx.MockTransport(handler))
-
-    assert not tmp_file.exists()
-    assert tmp_file.is_symlink()
-
-    downloader.download(item, make_settings())
-
-    assert item.target.read_bytes() == b"fresh"
-    assert not tmp_file.exists()
-    assert not tmp_file.is_symlink()
-    assert not outside_file.exists()
-
-
-def test_httpx_downloader_does_not_retry_non_retryable_status(
-    tmp_path: Path,
-) -> None:
-    """Ordinary 4xx responses are terminal and leave no partial file."""
-    item = make_item(tmp_path)
-    sleeps: list[float] = []
-    requests = 0
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal requests
-        requests += 1
-        return httpx.Response(404, content=b"missing")
-
-    downloader = make_downloader(httpx.MockTransport(handler), sleeps=sleeps)
-
-    with pytest.raises(DownloadFilesError, match="non-retryable status 404"):
-        downloader.download(item, make_settings(retries=3))
-
-    assert requests == 1
-    assert sleeps == []
-    assert not item.target.exists()
-    assert not item.target.with_name("file.bin.tmp").exists()
-
-
-def test_httpx_downloader_retries_retryable_status_then_succeeds(
-    tmp_path: Path,
-) -> None:
-    """Retry 408/429/5xx responses with deterministic backoff."""
-    item = make_item(tmp_path)
-    sleeps: list[float] = []
-    statuses = [503, 429, 200]
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        status = statuses.pop(0)
-        if status == 200:
-            return httpx.Response(status, content=b"ok")
+        nonlocal calls
+        calls += 1
         return httpx.Response(status, content=b"retry")
 
-    downloader = make_downloader(httpx.MockTransport(handler), sleeps=sleeps)
+    with pytest.raises(TransferDownloadFilesError, match="retryable status"):
+        _downloader(httpx.MockTransport(handler)).download(request, _settings())
 
-    downloader.download(item, make_settings(retries=3))
-
-    assert item.target.read_bytes() == b"ok"
-    assert sleeps == [1.0, 2.0]
+    assert calls == 1
 
 
-def test_httpx_downloader_retries_timeout_and_transport_errors(
-    tmp_path: Path,
-) -> None:
-    """Retry HTTPX timeout and transport exceptions before succeeding."""
-    item = make_item(tmp_path)
+# Public HTTPX retries execute clean attempts against the same safe sink.
+def test_httpx_retries_clean_same_supplied_sink_before_success(tmp_path: Path) -> None:
+    request = _request(tmp_path)
     sleeps: list[float] = []
-    errors: list[Exception | None] = [
-        httpx.ConnectTimeout("timed out"),
-        httpx.TransportError("connection reset"),
-        None,
-    ]
+    attempts = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
-        error = errors.pop(0)
-        if error is not None:
-            raise error
-        return httpx.Response(200, content=b"ok")
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(503, content=b"partial")
+        return httpx.Response(200, content=b"complete")
 
-    downloader = make_downloader(httpx.MockTransport(handler), sleeps=sleeps)
+    result = _downloader(
+        httpx.MockTransport(handler),
+        sleeps=sleeps,
+    ).download(request, _settings(retries=2))
 
-    downloader.download(item, make_settings(retries=2))
-
-    assert item.target.read_bytes() == b"ok"
+    assert attempts == 3
     assert sleeps == [1.0, 2.0]
+    assert result.length == len(b"complete")
+    assert request.sink.display_path.read_bytes() == b"complete"
 
 
-def test_httpx_downloader_exhausts_retries_and_cleans_tmp(tmp_path: Path) -> None:
-    """Surface retry exhaustion and remove partial HTTPX tmp state."""
-    item = make_item(tmp_path)
-    sleeps: list[float] = []
+# Ordinary request failures are terminal so an orchestrator will not retry them.
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_httpx_non_retryable_response_is_terminal(
+    tmp_path: Path,
+    status: int,
+) -> None:
+    request = _request(tmp_path)
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, content=b"server error")
-
-    downloader = make_downloader(httpx.MockTransport(handler), sleeps=sleeps)
-
-    with pytest.raises(DownloadFilesError, match="retryable status 500"):
-        downloader.download(item, make_settings(retries=2))
-
-    assert sleeps == [1.0, 2.0]
-    assert not item.target.exists()
-    assert not item.target.with_name("file.bin.tmp").exists()
+    with pytest.raises(TerminalTransferDownloadFilesError, match=str(status)):
+        _downloader(
+            httpx.MockTransport(lambda _: httpx.Response(status, content=b"terminal"))
+        ).download(request, _settings())
 
 
-def test_httpx_downloader_cleans_tmp_on_stream_failure(
+def test_httpx_stream_failure_leaves_exact_partial_for_core_disposition(
     tmp_path: Path,
 ) -> None:
-    """Remove tmp files when response streaming fails after bytes were written."""
-    item = make_item(tmp_path)
-    sleeps: list[float] = []
+    request = _request(tmp_path)
 
     def chunks() -> Iterator[bytes]:
         yield b"partial"
         raise httpx.ReadError("stream failed")
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, stream=IteratorStream(chunks))
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, stream=IteratorStream(chunks))
+    )
 
-    downloader = make_downloader(httpx.MockTransport(handler), sleeps=sleeps)
+    with pytest.raises(TransferDownloadFilesError, match="stream failed"):
+        _downloader(transport).download(request, _settings())
 
-    with pytest.raises(DownloadFilesError, match="stream failed"):
-        downloader.download(item, make_settings(retries=1))
-
-    assert sleeps == [1.0]
-    assert not item.target.exists()
-    assert not item.target.with_name("file.bin.tmp").exists()
+    assert request.sink.display_path.is_file()
 
 
-def test_httpx_downloader_rate_limits_progress_logs(tmp_path: Path) -> None:
-    """Emit progress logs only when the configured interval has elapsed."""
-    item = make_item(tmp_path)
+def test_httpx_progress_logs_name_supplied_staging(tmp_path: Path) -> None:
+    request = _request(tmp_path)
     logs: list[str] = []
     clock_values = iter([0.0, 1.0, 4.0, 6.0])
-
-    downloader = make_downloader(
+    downloader = _downloader(
         httpx.MockTransport(lambda _: httpx.Response(200, content=b"abc")),
         logs=logs,
         monotonic=lambda: next(clock_values),
     )
     downloader.chunk_size = 1
 
-    downloader.download(item, make_settings())
+    downloader.download(request, _settings())
 
-    assert len(logs) == 1
-    assert "Downloaded" in logs[0]
-    assert item.target.read_bytes() == b"abc"
+    assert logs == [f"Downloaded 3 bytes to {request.sink.display_path}"]
+
+
+def test_httpx_write_failure_is_local_and_does_not_place_a_final(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    request.sink.display_path.mkdir()
+
+    with pytest.raises(DownloadFilesError, match="supplied staging"):
+        _downloader(
+            httpx.MockTransport(lambda _: httpx.Response(200, content=b"data"))
+        ).download(request, _settings())
+
+    assert not (tmp_path / "models" / "file.bin").exists()
+
+
+# Root replacement after admission cannot redirect the real HTTPX adapter.
+def test_httpx_root_replacement_race_cannot_escape_held_descriptor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    request = _core_request(root)
+    detached = tmp_path / "detached-root"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        root.rename(detached)
+        root.symlink_to(outside, target_is_directory=True)
+        return httpx.Response(200, content=b"downloaded")
+
+    with pytest.raises(DownloadFilesError, match="directory changed"):
+        transfer_file(
+            request,
+            backend=_downloader(httpx.MockTransport(handler)),
+            settings=_settings(),
+        )
+
+    assert tuple(outside.iterdir()) == ()
+    assert not (detached / "models" / "file.bin").exists()
+
+
+# Intermediate replacement likewise cannot redirect staged bytes or cleanup.
+def test_httpx_intermediate_parent_race_cannot_escape_held_descriptor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    (root / "models").mkdir(parents=True)
+    request = _core_request(root)
+    detached = root / "detached-models"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        (root / "models").rename(detached)
+        (root / "models").symlink_to(outside, target_is_directory=True)
+        return httpx.Response(200, content=b"downloaded")
+
+    with pytest.raises(DownloadFilesError, match="directory changed"):
+        transfer_file(
+            request,
+            backend=_downloader(httpx.MockTransport(handler)),
+            settings=_settings(),
+        )
+
+    assert tuple(outside.iterdir()) == ()
+    assert not (detached / "file.bin").exists()
+
+
+# Replacing the staging leaf cannot redirect HTTPX through a symlink.
+def test_httpx_staging_leaf_race_never_writes_external_target(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    request = _core_request(root)
+    external = tmp_path / "external.bin"
+    external.write_bytes(b"external")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        staging = transfer_staging_target(request)
+        staging.unlink()
+        staging.symlink_to(external)
+        return httpx.Response(200, content=b"downloaded")
+
+    with pytest.raises(DownloadFilesError, match="identity changed"):
+        transfer_file(
+            request,
+            backend=_downloader(httpx.MockTransport(handler)),
+            settings=_settings(),
+        )
+
+    assert external.read_bytes() == b"external"
+    assert not request.target.exists()

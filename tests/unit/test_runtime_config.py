@@ -725,6 +725,28 @@ filename = "model.bin"
     ]
 
 
+def test_runtime_file_rejects_reserved_staging_final_leaf(tmp_path: Path) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = ".cdh-staging"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "filename"), "runtime_file.invalid_filename")
+    ]
+
+
 def test_invalid_mounted_runtime_file_after_baked_reports_authored_index(
     tmp_path: Path,
 ) -> None:

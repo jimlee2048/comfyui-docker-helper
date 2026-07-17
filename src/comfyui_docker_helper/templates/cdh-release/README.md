@@ -251,22 +251,33 @@ set.
 Host `[[files]]` declarations are projected into the generated build phase and
 the baked runtime configuration. At startup, baked and mounted file lists merge
 by `dir` plus `filename`; a mounted `files = []` clears the effective runtime
-list. Every target is relative to `COMFYUI_PATH`.
+list. Every target is relative to `COMFYUI_PATH`. An optional
+`checksum = "sha256:<64 hexadecimal digits>"` declares trusted content identity.
+Obtain that digest from a source independent enough for your threat model; cdh
+does not fetch or infer a digest from the download origin.
 
 Synchronous runtime downloads finish before pre-start hooks. Asynchronous
 downloads are accepted into the background queue before ComfyUI starts and may
-continue while it runs. `download_max_attempts` bounds the outer attempts for
-each build or runtime file, and HTTPX `retries` controls retries within each
-outer HTTPX attempt. `download_failure_policy` applies in both contexts: `fail`
-stops the build helper after an exhausted build file, while `continue` reports
-the failure and tries subsequent files. For synchronous runtime files, `fail`
-aborts startup after exhaustion and `continue` tries subsequent items. For
-asynchronous runtime files, `fail` stops the remaining queue without stopping
-ComfyUI, while `continue` tries subsequent queued items.
+continue while it runs. `download_max_attempts` bounds outer attempts for each
+build or runtime file, while HTTPX `retries` controls clean retries inside each
+outer HTTPX attempt. Every build-time file is required, so an exhausted or
+terminal build transfer always fails the Docker build;
+`download_failure_policy` applies only at runtime. For synchronous runtime
+files, `fail` aborts startup after exhaustion and `continue` tries subsequent
+items. For asynchronous runtime files, `fail` stops the remaining queue without
+stopping ComfyUI, while `continue` tries subsequent queued items.
+
+With a checksum, an existing matching regular file is verified and kept
+regardless of `overwrite`. A mismatch is preserved and fails when `overwrite`
+is false; when true, only a fully downloaded and verified replacement is
+atomically placed. Without a checksum, an existing file is skipped as
+unverified when `overwrite` is false, while a successful atomic replacement is
+transport-complete but does not claim content authenticity when it is true.
 
 Runtime reconciliation is persisted at `/var/lib/cdh/runtime/state.json`.
-In-progress transfer data lives in a target-local `.cdh-staging` directory so
-completed targets can be replaced safely. Mount `/var/lib/cdh/runtime`
+In-progress transfer data lives in a deterministic target-local `.cdh-staging`
+path so completed targets remain untouched until durable atomic replacement.
+Mount `/var/lib/cdh/runtime`
 separately to preserve reconciliation state, and mount each desired target
 directory to preserve downloaded files. The state file is cdh-owned internal
 state, not user configuration; do not edit it.

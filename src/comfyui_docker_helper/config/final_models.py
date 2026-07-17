@@ -2,8 +2,9 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
 from comfyui_docker_helper.exact_ledger import (
     DEFAULT_CUDA_IMAGE_DISTRO,
     DEFAULT_CUDA_IMAGE_FLAVOR,
@@ -160,14 +161,22 @@ class FinalComfyUIConfig(FinalConfigModel):
 
 
 class FinalFileConfig(FinalConfigModel):
-    """A required file transfer request without the deferred checksum field."""
+    """A required file transfer request with optional trusted content identity."""
 
     url: str
     dir: str
     filename: str
     overwrite: bool = False
+    checksum: str | None = None
     downloader: Literal["aria2", "httpx"] | None = None
     download_mode: Literal["sync", "async"] | None = None
+
+    @field_validator("checksum")
+    @classmethod
+    def _normalize_checksum(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_file_checksum(value)
 
 
 class FinalConfig(FinalConfigModel):

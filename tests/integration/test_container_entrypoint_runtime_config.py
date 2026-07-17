@@ -52,11 +52,13 @@ class FakeChild:
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
-    return ContainerRuntime(
+    runtime = ContainerRuntime(
         workspace=tmp_path / "workspace",
         comfyui_path=tmp_path / "workspace" / "ComfyUI",
         virtual_env=tmp_path / "venv",
     )
+    runtime.comfyui_path.mkdir(parents=True)
+    return runtime
 
 
 def _write(path: Path, document: str) -> Path:
@@ -286,9 +288,8 @@ extra_args = ["--preview-method", "auto"]
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
-        extra_protected_staging_targets: tuple[Path, ...] = (),
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del log, state_observer, extra_protected_staging_targets
+        del log, state_observer
         events.append("download")
         downloader_plans.append(plan)
         downloader_configs.append(config)

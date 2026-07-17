@@ -1,9 +1,9 @@
-"""Container-side file download planning and common processing tests."""
+"""Required build-file orchestration through the shared transfer core."""
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
-from typing import Literal
 
 import pytest
 
@@ -23,74 +23,60 @@ from comfyui_docker_helper.container.download_files import (
     FileDownloadPlan,
     HttpxDownloadSettings,
     TransferDownloadFilesError,
+    TransportRequest,
+    TransportResult,
     file_download_plan,
     process_file_downloads,
 )
 
 
 class RecordingBackend:
-    """Fake backend that records orchestration order and retry settings."""
+    """Write supplied bytes and record only the adapter-visible request."""
 
-    def __init__(self, *, fail_on: str | None = None, fail_times: int = 0) -> None:
-        self.fail_on = fail_on
+    def __init__(self, *, fail_times: int = 0) -> None:
         self.fail_times = fail_times
-        self.calls: list[FileDownloadItem] = []
-        self.retries_seen: list[int] = []
+        self.calls: list[TransportRequest] = []
 
-    def download(self, item, settings) -> None:
-        self.retries_seen.append(settings.httpx.retries)
-        self.calls.append(item)
-        if item.filename == self.fail_on and self.fail_times:
+    def download(
+        self,
+        request: TransportRequest,
+        settings: DownloaderSettings,
+    ) -> TransportResult:
+        self.calls.append(request)
+        with request.sink.open_for_write() as output:
+            output.write(b"downloaded")
+        if self.fail_times:
             self.fail_times -= 1
-            item.target.write_bytes(f"partial:{item.filename}".encode())
-            raise TransferDownloadFilesError(f"backend failed: {item.filename}")
-        item.target.write_bytes(f"downloaded:{item.filename}".encode())
+            raise TransferDownloadFilesError("network failed")
+        return TransportResult(length=len(b"downloaded"))
 
 
-def make_plan(
-    comfyui_path: Path,
-    *,
-    download_max_attempts: int = 3,
-    download_failure_policy: Literal["continue", "fail"] = "fail",
-    first_directory: str = "models/a",
-) -> FileDownloadPlan:
-    """Build the typed runtime plan consumed by the downloader orchestrator."""
-    return FileDownloadPlan(
-        comfyui_root=comfyui_path,
-        downloader=DownloaderSettings(
-            default="httpx",
-            aria2=Aria2DownloadSettings(
-                rpc_port=6811,
-                split=8,
-                max_connection_per_server=4,
-                min_split_size="2M",
-                resume_download=False,
-            ),
-            httpx=HttpxDownloadSettings(timeout=90.5, retries=5),
+def _settings() -> DownloaderSettings:
+    return DownloaderSettings(
+        default="httpx",
+        aria2=Aria2DownloadSettings(
+            rpc_port=6811,
+            split=8,
+            max_connection_per_server=4,
+            min_split_size="2M",
+            resume_download=False,
         ),
-        items=(
-            FileDownloadItem(
-                url="https://example.com/first.bin",
-                filename="first.bin",
-                target=comfyui_path / first_directory / "first.bin",
-                overwrite=False,
-                downloader="httpx",
-            ),
-            FileDownloadItem(
-                url="https://example.com/second.bin",
-                filename="second.bin",
-                target=comfyui_path / "models/b/second.bin",
-                overwrite=True,
-                downloader="aria2",
-            ),
-        ),
-        download_max_attempts=download_max_attempts,
-        download_failure_policy=download_failure_policy,
+        httpx=HttpxDownloadSettings(timeout=90.5, retries=5),
     )
 
 
-def test_file_download_plan_consumes_typed_phase_and_authoritative_root() -> None:
-    """Build downloader inputs from one typed phase and its admitted root."""
+def _item(root: Path, name: str, *, downloader: str = "httpx") -> FileDownloadItem:
+    return FileDownloadItem(
+        url=f"https://example.test/{name}",
+        filename=name,
+        target=root / "models" / name,
+        overwrite=False,
+        downloader=downloader,
+    )
+
+
+def test_file_download_plan_projects_checksum_without_runtime_failure_policy() -> None:
+    checksum = f"sha256:{hashlib.sha256(b'downloaded').hexdigest()}"
     payload = FilesPhase(
         downloader=DownloaderPlan(
             default="httpx",
@@ -105,12 +91,13 @@ def test_file_download_plan_consumes_typed_phase_and_authoritative_root() -> Non
         ),
         default_download_mode="sync",
         download_max_attempts=3,
-        download_failure_policy="fail",
+        download_failure_policy="continue",
         files=(
             FilePlan(
-                url="https://example.com/model.bin",
-                target="/workspace/ComfyUI/models/checkpoints/model.bin",
+                url="https://example.test/model.bin",
+                target="/workspace/ComfyUI/models/model.bin",
                 overwrite=True,
+                checksum=checksum,
                 downloader="httpx",
                 download_mode="sync",
                 downloader_explicit=True,
@@ -118,27 +105,15 @@ def test_file_download_plan_consumes_typed_phase_and_authoritative_root() -> Non
             ),
         ),
     )
+
     plan = file_download_plan(payload, "/workspace/ComfyUI")
 
-    assert plan.comfyui_root == Path("/workspace/ComfyUI")
-    assert plan.downloader.default == "httpx"
-    assert plan.downloader.httpx.timeout == 42
-    assert plan.downloader.httpx.retries == 4
+    assert plan.items[0].checksum == checksum
     assert plan.download_max_attempts == 3
-    assert plan.download_failure_policy == "fail"
-    assert plan.items[0].filename == "model.bin"
-    assert plan.items[0].downloader == "httpx"
-    assert plan.items[0].target == Path(
-        "/workspace/ComfyUI/models/checkpoints/model.bin"
-    )
+    assert not hasattr(plan, "download_failure_policy")
 
 
-def test_file_download_plan_rejects_target_outside_root_before_mutation(
-    tmp_path: Path,
-) -> None:
-    """Reject a mismatched admitted root before creating paths or calling a backend."""
-    root = tmp_path / "ComfyUI"
-    outside_target = tmp_path / "outside" / "model.bin"
+def test_file_download_plan_rejects_target_outside_admitted_root() -> None:
     payload = FilesPhase(
         downloader=DownloaderPlan(
             default="httpx",
@@ -149,15 +124,15 @@ def test_file_download_plan_rejects_target_outside_root_before_mutation(
                 min_split_size="1M",
                 resume_download=True,
             ),
-            httpx=HttpxPlan(timeout=42, retries=4),
+            httpx=HttpxPlan(timeout=42, retries=0),
         ),
         default_download_mode="sync",
-        download_max_attempts=3,
+        download_max_attempts=1,
         download_failure_policy="fail",
         files=(
             FilePlan(
-                url="https://example.com/model.bin",
-                target=str(outside_target),
+                url="https://example.test/model.bin",
+                target="/outside/model.bin",
                 overwrite=False,
                 downloader="httpx",
                 download_mode="sync",
@@ -168,18 +143,17 @@ def test_file_download_plan_rejects_target_outside_root_before_mutation(
     )
 
     with pytest.raises(DownloadFilesError, match="escapes COMFYUI_PATH"):
-        file_download_plan(payload, root)
-
-    assert not root.exists()
-    assert not outside_target.parent.exists()
+        file_download_plan(payload, "/workspace/ComfyUI")
 
 
-# Backend dispatch preserves declaration order and explicit overwrite semantics.
-def test_process_file_downloads_selects_backends_and_preserves_order(
+def test_build_orchestrator_preserves_order_and_places_via_shared_core(
     tmp_path: Path,
 ) -> None:
-    """Create target parents and dispatch to selected backends in file order."""
-    plan = make_plan(tmp_path)
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    first = _item(root, "first.bin")
+    second = _item(root, "second.bin", downloader="aria2")
+    plan = FileDownloadPlan(root, _settings(), (first, second), 2)
     httpx = RecordingBackend()
     aria2 = RecordingBackend()
 
@@ -193,282 +167,106 @@ def test_process_file_downloads_selects_backends_and_preserves_order(
         DownloadStatus.DOWNLOADED,
         DownloadStatus.DOWNLOADED,
     ]
-    assert [item.filename for item in httpx.calls] == ["first.bin"]
-    assert [item.filename for item in aria2.calls] == ["second.bin"]
-    assert httpx.retries_seen == [0]
-    assert aria2.retries_seen == [0]
-    assert plan.items[0].target.read_bytes() == b"downloaded:first.bin"
-    assert plan.items[1].target.read_bytes() == b"downloaded:second.bin"
+    assert first.target.read_bytes() == b"downloaded"
+    assert second.target.read_bytes() == b"downloaded"
+    assert httpx.calls[0].sink.display_path.parent.name == ".cdh-staging"
+    assert aria2.calls[0].sink.display_path.parent.name == ".cdh-staging"
+    assert httpx.calls[0].sink.display_path != first.target
 
 
-def test_process_file_downloads_creates_missing_comfyui_path(
-    tmp_path: Path,
-) -> None:
-    """Allow safe first-use creation of COMFYUI_PATH and target parents."""
-    comfyui_path = tmp_path / "runtime" / "ComfyUI"
-    plan = make_plan(comfyui_path)
+def test_build_retries_retryable_transfer_then_succeeds(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    item = _item(root, "model.bin")
+    backend = RecordingBackend(fail_times=2)
 
-    process_file_downloads(
-        plan,
-        backends={"httpx": RecordingBackend(), "aria2": RecordingBackend()},
+    results = process_file_downloads(
+        FileDownloadPlan(root, _settings(), (item,), 3),
+        backends={"httpx": backend},
         log=lambda _: None,
     )
 
-    assert (comfyui_path / "models" / "a" / "first.bin").read_bytes() == (
-        b"downloaded:first.bin"
-    )
-    assert (comfyui_path / "models" / "b" / "second.bin").read_bytes() == (
-        b"downloaded:second.bin"
-    )
+    assert results[0].status is DownloadStatus.DOWNLOADED
+    assert len(backend.calls) == 3
 
 
-def test_process_file_downloads_skips_existing_without_overwrite(
+def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
     tmp_path: Path,
 ) -> None:
-    """Existing regular targets with overwrite=false are skipped."""
-    plan = make_plan(tmp_path)
-    plan.items[0].target.parent.mkdir(parents=True)
-    plan.items[0].target.write_text("keep\n", encoding="utf-8")
-    httpx = RecordingBackend()
-    aria2 = RecordingBackend()
-    logs: list[str] = []
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    first = _item(root, "first.bin")
+    second = _item(root, "second.bin")
+    backend = RecordingBackend(fail_times=3)
 
-    results = process_file_downloads(
-        plan,
-        backends={"httpx": httpx, "aria2": aria2},
-        log=logs.append,
-    )
+    with pytest.raises(TransferDownloadFilesError, match="network failed"):
+        process_file_downloads(
+            FileDownloadPlan(root, _settings(), (first, second), 2),
+            backends={"httpx": backend},
+            log=lambda _: None,
+        )
 
-    assert [result.status for result in results] == [
-        DownloadStatus.SKIPPED,
-        DownloadStatus.DOWNLOADED,
-    ]
-    assert httpx.calls == []
-    assert plan.items[0].target.read_text(encoding="utf-8") == "keep\n"
-    assert any("Skipping existing file" in line for line in logs)
+    assert len(backend.calls) == 2
+    assert not first.target.exists()
+    assert not second.target.exists()
 
 
-def test_process_file_downloads_overwrites_existing_regular_file(
-    tmp_path: Path,
-) -> None:
-    """Existing regular targets with overwrite=true are removed before backend."""
-    plan = make_plan(tmp_path)
-    target = plan.items[1].target
-    target.parent.mkdir(parents=True)
-    target.write_text("old\n", encoding="utf-8")
-    aria2 = RecordingBackend()
+def test_build_existing_regular_skip_does_not_call_backend(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    item = _item(root, "model.bin")
+    item.target.parent.mkdir(parents=True)
+    item.target.write_bytes(b"keep")
+    backend = RecordingBackend()
 
-    process_file_downloads(
-        plan,
-        backends={"httpx": RecordingBackend(), "aria2": aria2},
+    result = process_file_downloads(
+        FileDownloadPlan(root, _settings(), (item,), 1),
+        backends={"httpx": backend},
         log=lambda _: None,
-    )
+    )[0]
 
-    assert [item.filename for item in aria2.calls] == ["second.bin"]
-    assert target.read_bytes() == b"downloaded:second.bin"
+    assert result.status is DownloadStatus.SKIPPED
+    assert result.outcome.observed_checksum is None
+    assert backend.calls == []
+    assert item.target.read_bytes() == b"keep"
 
 
-# Containment checks reject special targets and symlink escapes before mutation.
-def test_process_file_downloads_rejects_non_regular_existing_target(
-    tmp_path: Path,
-) -> None:
-    """Do not let directories or special files reach a backend as targets."""
-    plan = make_plan(tmp_path)
-    plan.items[0].target.mkdir(parents=True)
+def test_build_missing_backend_is_terminal_before_mutation(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    item = _item(root, "model.bin")
 
-    with pytest.raises(DownloadFilesError, match="not a regular file"):
+    with pytest.raises(DownloadFilesError, match="not configured"):
         process_file_downloads(
-            plan,
-            backends={"httpx": RecordingBackend(), "aria2": RecordingBackend()},
+            FileDownloadPlan(root, _settings(), (item,), 1),
+            backends={},
+        )
+
+    assert not item.target.parent.exists()
+
+
+# Batch postconditions catch an earlier required final changed by later work.
+def test_build_batch_rechecks_every_required_final(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    first = _item(root, "first.bin")
+    second = _item(root, "second.bin")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+
+    class MutatingBackend(RecordingBackend):
+        def download(self, request, settings) -> TransportResult:
+            result = super().download(request, settings)
+            if len(self.calls) == 2:
+                first.target.unlink()
+                first.target.symlink_to(outside)
+            return result
+
+    with pytest.raises(DownloadFilesError, match=r"required.*regular"):
+        process_file_downloads(
+            FileDownloadPlan(root, _settings(), (first, second), 1),
+            backends={"httpx": MutatingBackend()},
             log=lambda _: None,
         )
 
-
-def test_process_file_downloads_rejects_broken_leaf_symlink(
-    tmp_path: Path,
-) -> None:
-    """Reject leaf symlinks even when Path.exists() would report false."""
-    plan = make_plan(tmp_path)
-    target = plan.items[0].target
-    target.parent.mkdir(parents=True)
-    target.symlink_to(tmp_path / "outside-missing.bin")
-
-    with pytest.raises(DownloadFilesError, match="not a regular file"):
-        process_file_downloads(
-            plan,
-            backends={"httpx": RecordingBackend(), "aria2": RecordingBackend()},
-            log=lambda _: None,
-        )
-
-
-def test_process_file_downloads_rejects_symlink_parent_escape(
-    tmp_path: Path,
-) -> None:
-    """Reject existing parent symlinks that resolve outside COMFYUI_PATH."""
-    plan = make_plan(tmp_path / "ComfyUI")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    symlink_parent = plan.items[0].target.parent
-    symlink_parent.parent.mkdir(parents=True)
-    symlink_parent.symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(DownloadFilesError, match="escapes COMFYUI_PATH"):
-        process_file_downloads(
-            plan,
-            backends={"httpx": RecordingBackend(), "aria2": RecordingBackend()},
-            log=lambda _: None,
-        )
-
-    assert not (outside / plan.items[0].filename).exists()
-
-
-def test_process_file_downloads_rejects_symlink_escape_before_mutation(
-    tmp_path: Path,
-) -> None:
-    """Reject existing symlink ancestors before creating escaped directories."""
-    plan = make_plan(
-        tmp_path / "ComfyUI",
-        first_directory="models/checkpoints",
-    )
-    comfyui_path = tmp_path / "ComfyUI"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (comfyui_path / "models").parent.mkdir(parents=True)
-    (comfyui_path / "models").symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(DownloadFilesError, match="escapes COMFYUI_PATH"):
-        process_file_downloads(
-            plan,
-            backends={"httpx": RecordingBackend(), "aria2": RecordingBackend()},
-            log=lambda _: None,
-        )
-
-    assert not (outside / "checkpoints").exists()
-
-
-def test_process_file_downloads_wraps_parent_creation_failures(
-    tmp_path: Path,
-) -> None:
-    """Report target parent creation failures as helper errors."""
-    plan = make_plan(tmp_path)
-    blocking_parent = plan.items[0].target.parent
-    blocking_parent.parent.mkdir(parents=True)
-    blocking_parent.write_text("not a directory\n", encoding="utf-8")
-
-    with pytest.raises(DownloadFilesError, match="parent cannot be created"):
-        process_file_downloads(
-            plan,
-            backends={"httpx": RecordingBackend(), "aria2": RecordingBackend()},
-            log=lambda _: None,
-        )
-
-
-def test_process_file_downloads_wraps_overwrite_removal_failures(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Report overwrite cleanup failures as helper errors."""
-    plan = make_plan(tmp_path)
-    target = plan.items[1].target
-    target.parent.mkdir(parents=True)
-    target.write_text("old\n", encoding="utf-8")
-    original_unlink = Path.unlink
-
-    def fail_unlink(self: Path) -> None:
-        if self == target:
-            raise PermissionError("blocked")
-        original_unlink(self)
-
-    monkeypatch.setattr(Path, "unlink", fail_unlink)
-
-    with pytest.raises(DownloadFilesError, match="cannot be removed"):
-        process_file_downloads(
-            plan,
-            backends={"httpx": RecordingBackend(), "aria2": RecordingBackend()},
-            log=lambda _: None,
-        )
-
-
-# Retry and failure policy applies consistently without losing later-file ordering.
-def test_process_file_downloads_stops_on_backend_failure(tmp_path: Path) -> None:
-    """Fail policy exhausts attempts, removes partials, and stops later files."""
-    plan = make_plan(tmp_path)
-    httpx = RecordingBackend(fail_on="first.bin", fail_times=3)
-    aria2 = RecordingBackend()
-
-    with pytest.raises(DownloadFilesError, match="backend failed"):
-        process_file_downloads(
-            plan,
-            backends={"httpx": httpx, "aria2": aria2},
-            log=lambda _: None,
-        )
-
-    assert [item.filename for item in httpx.calls] == [
-        "first.bin",
-        "first.bin",
-        "first.bin",
-    ]
-    assert aria2.calls == []
-    assert not plan.items[0].target.exists()
-
-
-def test_process_file_downloads_retries_until_success(tmp_path: Path) -> None:
-    """Retry a failed item up to the configured total attempt count."""
-    plan = make_plan(tmp_path, download_max_attempts=3)
-    httpx = RecordingBackend(fail_on="first.bin", fail_times=2)
-
-    results = process_file_downloads(
-        plan,
-        backends={"httpx": httpx, "aria2": RecordingBackend()},
-        log=lambda _: None,
-    )
-
-    assert [result.status for result in results] == [
-        DownloadStatus.DOWNLOADED,
-        DownloadStatus.DOWNLOADED,
-    ]
-    assert [item.filename for item in httpx.calls] == [
-        "first.bin",
-        "first.bin",
-        "first.bin",
-    ]
-    assert plan.items[0].target.read_bytes() == b"downloaded:first.bin"
-
-
-def test_process_file_downloads_continue_policy_logs_and_processes_later_files(
-    tmp_path: Path,
-) -> None:
-    """Continue policy drops failed results but preserves later file processing."""
-    plan = make_plan(
-        tmp_path,
-        download_max_attempts=2,
-        download_failure_policy="continue",
-    )
-    httpx = RecordingBackend(fail_on="first.bin", fail_times=2)
-    aria2 = RecordingBackend()
-    logs: list[str] = []
-
-    results = process_file_downloads(
-        plan,
-        backends={"httpx": httpx, "aria2": aria2},
-        log=logs.append,
-    )
-
-    assert [result.item.filename for result in results] == ["second.bin"]
-    assert [result.status for result in results] == [DownloadStatus.DOWNLOADED]
-    assert [item.filename for item in httpx.calls] == ["first.bin", "first.bin"]
-    assert [item.filename for item in aria2.calls] == ["second.bin"]
-    assert not plan.items[0].target.exists()
-    assert any("WARNING: download failed after 2 attempt(s)" in line for line in logs)
-
-
-def test_process_file_downloads_requires_configured_backend(tmp_path: Path) -> None:
-    """Report missing backend implementations as helper errors."""
-    plan = make_plan(tmp_path)
-
-    with pytest.raises(DownloadFilesError, match="backend is not configured"):
-        process_file_downloads(
-            plan,
-            backends={"httpx": RecordingBackend()},
-            log=lambda _: None,
-        )
+    assert first.target.is_symlink()
+    assert second.target.read_bytes() == b"downloaded"

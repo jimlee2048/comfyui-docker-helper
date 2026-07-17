@@ -143,6 +143,7 @@ def test_runtime_state_rejects_extra_fields_and_invalid_digest_key() -> None:
         "models/",
         "/models/model.bin",
         "a\\b",
+        "models/.cdh-staging",
     ],
 )
 def test_runtime_download_entry_rejects_invalid_target_paths(target: str) -> None:

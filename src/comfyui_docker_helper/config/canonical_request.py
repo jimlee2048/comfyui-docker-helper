@@ -144,6 +144,7 @@ class FileRequest:
     url: str
     target: str
     overwrite: bool
+    checksum: str | None
     downloader: Literal["aria2", "httpx"]
     download_mode: Literal["sync", "async"]
 
@@ -432,6 +433,7 @@ def build_canonical_request_graph(
             url=item.url,
             target=str(PurePosixPath(comfyui_path) / item.dir / item.filename),
             overwrite=item.overwrite,
+            checksum=item.checksum,
             downloader=item.downloader or downloader.default,
             download_mode=item.download_mode or downloader.default_download_mode,
         )

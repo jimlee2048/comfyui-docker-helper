@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import signal
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -14,9 +14,11 @@ from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container import entrypoint as entrypoint_module
 from comfyui_docker_helper.container import runtime_files as runtime_files_module
 from comfyui_docker_helper.container.download_files import (
+    DownloadCancelled,
     DownloaderSettings,
-    FileDownloadItem,
     TransferDownloadFilesError,
+    TransportRequest,
+    TransportResult,
 )
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -30,8 +32,6 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime_state import load_runtime_state
-
-STALE_CLEANUP_NOW = 2_000_000.0
 
 
 class FakeChild:
@@ -59,7 +59,7 @@ class FakeChild:
 
 class AsyncBackend:
     def __init__(self) -> None:
-        self.calls: list[tuple[FileDownloadItem, DownloaderSettings]] = []
+        self.calls: list[tuple[TransportRequest, DownloaderSettings]] = []
         self.payloads: dict[str, bytes] = {}
         self.failures: dict[str, int | None] = {}
         self.entered = entrypoint_module.threading.Event()
@@ -73,28 +73,35 @@ class AsyncBackend:
 
     def download(
         self,
-        item: FileDownloadItem,
+        item: TransportRequest,
         settings: DownloaderSettings,
-    ) -> None:
+    ) -> TransportResult:
         self.calls.append((item, settings))
         self.entered.set()
         if self.block:
             self.release.wait(timeout=1)
-        remaining = self.failures.get(item.filename, 0)
+        filename = _source_filename(item)
+        remaining = self.failures.get(filename, 0)
         if remaining is None or remaining > 0:
             if remaining is not None:
-                self.failures[item.filename] = remaining - 1
-            item.target.write_bytes(b"partial")
-            raise TransferDownloadFilesError(f"failed {item.filename}")
-        item.target.write_bytes(self.payloads.get(item.filename, b"downloaded"))
+                self.failures[filename] = remaining - 1
+            with item.sink.open_for_write() as output:
+                output.write(b"partial")
+            raise TransferDownloadFilesError(f"failed {filename}")
+        payload = self.payloads.get(filename, b"downloaded")
+        with item.sink.open_for_write() as output:
+            output.write(payload)
+        return TransportResult(length=len(payload))
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
-    return ContainerRuntime(
+    runtime = ContainerRuntime(
         workspace=tmp_path / "workspace",
         comfyui_path=tmp_path / "workspace" / "ComfyUI",
         virtual_env=tmp_path / "venv",
     )
+    runtime.comfyui_path.mkdir(parents=True)
+    return runtime
 
 
 def _write(path: Path, document: str) -> Path:
@@ -121,23 +128,12 @@ def _install_async_backend(
     )
 
 
-def _install_staging_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert runtime_files_module.download_runtime_files.__kwdefaults__ is not None
-    monkeypatch.setitem(
-        runtime_files_module.download_runtime_files.__kwdefaults__,
-        "staging_cleanup_clock",
-        lambda: STALE_CLEANUP_NOW,
-    )
-
-
 def _staging_target(item: RuntimeFilePlanItem) -> Path:
-    return runtime_files_module.runtime_file_staging_target(
-        item, runtime_files_module.runtime_file_identity_digest(item)
-    )
+    return runtime_files_module.runtime_file_staging_target(item)
 
 
-def _touch_mtime(path: Path, mtime: float) -> None:
-    os.utime(path, (mtime, mtime), follow_symlinks=False)
+def _source_filename(request: TransportRequest) -> str:
+    return Path(urlsplit(request.url).path).name
 
 
 def _capture_signal_handlers(
@@ -308,15 +304,18 @@ def test_interrupted_async_download_restarts_without_exposing_partial_final(
     class BlockingUntilCancelledBackend(AsyncBackend):
         def download(
             self,
-            item: FileDownloadItem,
+            item: TransportRequest,
             settings: DownloaderSettings,
-        ) -> None:
+        ) -> TransportResult:
             self.calls.append((item, settings))
             self.entered.set()
             self.release.wait(timeout=1)
             if self.cancelled:
-                return
-            item.target.write_bytes(self.payloads.get(item.filename, b"downloaded"))
+                raise DownloadCancelled("cancelled")
+            payload = self.payloads.get(_source_filename(item), b"downloaded")
+            with item.sink.open_for_write() as output:
+                output.write(payload)
+            return TransportResult(length=len(payload))
 
     runtime = _runtime(tmp_path)
     config = _write(
@@ -530,82 +529,9 @@ overwrite = true
         == 0
     )
 
-    assert [call[0].filename for call in retry_backend.calls] == ["model.bin"]
+    assert [_source_filename(call[0]) for call in retry_backend.calls] == ["model.bin"]
     assert (runtime.comfyui_path / "models" / "model.bin").read_bytes() == b"second"
     assert _state_by_target(state_path)["models/model.bin"].status == "completed"
-
-
-def test_stale_cdh_owned_staging_cleanup_preserves_fresh_and_unrecognized_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    config = _write(
-        tmp_path / "runtime.toml",
-        """
-[cdh]
-default_download_mode = "async"
-default_downloader = "httpx"
-
-[[files]]
-url = "https://example.com/model.bin"
-dir = "models"
-filename = "model.bin"
-""",
-    )
-    staging_dir = runtime.comfyui_path / "models" / ".cdh-staging"
-    staging_dir.mkdir(parents=True)
-    stale = staging_dir / f"cdh-{'a' * 64}.part"
-    stale_sidecar = staging_dir / f"cdh-{'a' * 64}.part.aria2"
-    fresh = staging_dir / f"cdh-{'b' * 64}.part"
-    unrecognized = staging_dir / "user-partial.bin"
-    for path in (stale, stale_sidecar, fresh, unrecognized):
-        path.write_bytes(b"keep-or-clean")
-    _touch_mtime(stale, STALE_CLEANUP_NOW - (25 * 60 * 60))
-    _touch_mtime(stale_sidecar, STALE_CLEANUP_NOW - (25 * 60 * 60))
-    _touch_mtime(fresh, STALE_CLEANUP_NOW - (23 * 60 * 60))
-    _touch_mtime(unrecognized, STALE_CLEANUP_NOW - (25 * 60 * 60))
-
-    backend = AsyncBackend()
-    backend.payloads["model.bin"] = b"downloaded"
-    _install_async_backend(monkeypatch, backend)
-    _install_staging_clock(monkeypatch)
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-
-        class Child(FakeChild):
-            def wait(self) -> int:
-                _eventually(
-                    lambda: (runtime.comfyui_path / "models" / "model.bin").is_file()
-                )
-                return super().wait()
-
-        return Child(0)
-
-    assert (
-        _run_with_real_async_queue(
-            runtime=runtime,
-            config=config,
-            state_path=tmp_path / "state.json",
-            runner=runner,
-        )
-        == 0
-    )
-
-    assert not stale.exists()
-    assert not stale_sidecar.exists()
-    assert fresh.read_bytes() == b"keep-or-clean"
-    assert unrecognized.read_bytes() == b"keep-or-clean"
-    assert (runtime.comfyui_path / "models" / "model.bin").read_bytes() == (
-        b"downloaded"
-    )
 
 
 # Exhausted-policy coverage pins async failure semantics: ComfyUI keeps running,
@@ -698,7 +624,7 @@ filename = "b.bin"
     )
 
     assert events == ["spawn"]
-    assert [call[0].filename for call in backend.calls] == expected_calls
+    assert [_source_filename(call[0]) for call in backend.calls] == expected_calls
     entries = _state_by_target(state_path)
     assert {target: entries[target].status for target in expected_statuses} == (
         expected_statuses

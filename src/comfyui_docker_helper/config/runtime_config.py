@@ -8,13 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticPath,
     DiagnosticSeverity,
 )
+from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
 from comfyui_docker_helper.config.merge import merge_toml_documents
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime_file_validation import (
@@ -121,8 +122,16 @@ class _RuntimeFilePatch(ConfigModel):
     dir: str
     filename: str
     overwrite: bool | None = None
+    checksum: str | None = None
     downloader: DownloaderName | None = None
     download_mode: Literal["sync", "async"] | None = None
+
+    @field_validator("checksum")
+    @classmethod
+    def _normalize_checksum(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_file_checksum(value)
 
 
 class _RuntimeConfigPatch(ConfigModel):

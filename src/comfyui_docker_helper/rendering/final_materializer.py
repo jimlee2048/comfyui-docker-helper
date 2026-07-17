@@ -215,6 +215,8 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
             "filename": relative.name,
             "overwrite": item.overwrite,
         }
+        if item.checksum is not None:
+            runtime_item["checksum"] = item.checksum
         if item.downloader_explicit:
             runtime_item["downloader"] = item.downloader
         if item.download_mode_explicit:

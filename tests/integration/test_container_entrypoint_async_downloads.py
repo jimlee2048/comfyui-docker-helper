@@ -16,7 +16,6 @@ from comfyui_docker_helper.container import runtime_files as runtime_files_modul
 from comfyui_docker_helper.container.download_files import (
     DownloadCancelled,
     DownloaderSettings,
-    TransferDownloadFilesError,
     TransportRequest,
     TransportSuccess,
 )
@@ -32,6 +31,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime_state import load_runtime_state
+from comfyui_docker_helper.container.transfer_core import TransferDownloadFilesError
 
 
 class FakeChild:
@@ -608,7 +608,8 @@ filename = "b.bin"
                             if target in expected_statuses
                         }
                         == expected_statuses
-                    )
+                    ),
+                    timeout=2.5,
                 )
                 return super().wait()
 

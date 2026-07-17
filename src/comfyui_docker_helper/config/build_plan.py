@@ -785,7 +785,6 @@ class Aria2Plan(_PlanModel):
 
 class HttpxPlan(_PlanModel):
     timeout: int | float = Field(gt=0)
-    retries: int = Field(ge=0)
 
 
 class DownloaderPlan(_PlanModel):
@@ -1414,7 +1413,6 @@ def _project_files(
             ),
             httpx=HttpxPlan(
                 timeout=request.httpx_timeout,
-                retries=request.httpx_retries,
             ),
         ),
         default_download_mode=request.default_download_mode,

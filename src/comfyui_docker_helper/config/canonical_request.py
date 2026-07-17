@@ -136,7 +136,6 @@ class DownloaderRequest:
     aria2_min_split_size: str
     aria2_resume_download: bool
     httpx_timeout: int | float
-    httpx_retries: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,7 +425,6 @@ def build_canonical_request_graph(
         aria2_min_split_size=config.cdh.downloader.aria2.min_split_size,
         aria2_resume_download=config.cdh.downloader.aria2.resume_download,
         httpx_timeout=config.cdh.downloader.httpx.timeout,
-        httpx_retries=config.cdh.downloader.httpx.retries,
     )
     files = tuple(
         FileRequest(

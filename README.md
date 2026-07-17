@@ -258,10 +258,10 @@ does not fetch or infer a digest from the download origin.
 
 Synchronous runtime downloads finish before pre-start hooks. Asynchronous
 downloads are accepted into the background queue before ComfyUI starts and may
-continue while it runs. `download_max_attempts` bounds outer attempts for each
-build or runtime file, while HTTPX `retries` controls clean retries inside each
-outer HTTPX attempt. Every build-time file is required, so an exhausted or
-terminal build transfer always fails the Docker build;
+continue while it runs. `download_max_attempts` is the total transport-attempt
+budget for each build or runtime file, including the first attempt. Every
+build-time file is required, so an exhausted or terminal build transfer always
+fails the Docker build;
 `download_failure_policy` applies only at runtime. For synchronous runtime
 files, `fail` aborts startup after exhaustion and `continue` tries subsequent
 items. For asynchronous runtime files, `fail` stops the remaining queue without
@@ -370,7 +370,6 @@ and resolver `request_digest` values are excluded from the BuildPlan.
   Manager, preserve their raw locked ID/version,
   and reject duplicate normalized IDs. Direct-Git nodes are independently
   locked to full commits and preserve their declared acquisition URLs.
-- HTTPX `retries` sets the retries within each outer HTTPX download attempt.
 - Ordinary configured values may appear in rendered artifacts or logs when the
   contract requires them. Keep confidential values out of ordinary config
   fields unless that exposure is acceptable.

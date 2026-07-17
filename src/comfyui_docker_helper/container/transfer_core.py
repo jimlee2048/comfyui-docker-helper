@@ -6,6 +6,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import math
 import os
 import secrets
 import stat
@@ -32,6 +33,17 @@ class DownloadFilesError(ApplicationError):
 class TransferDownloadFilesError(DownloadFilesError):
     """A transport or integrity failure eligible for another attempt."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+        resume_authority: ResumeAuthority | None = None,
+    ) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        self.resume_authority = resume_authority
+        super().__init__(message)
+
 
 class TerminalTransferDownloadFilesError(DownloadFilesError):
     """An ordinary item failure that must not consume another attempt."""
@@ -39,6 +51,19 @@ class TerminalTransferDownloadFilesError(DownloadFilesError):
 
 class DownloadCancelled(DownloadFilesError):
     """A cooperative transport cancellation request was observed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resume_authority: ResumeAuthority | None = None,
+    ) -> None:
+        self.resume_authority = resume_authority
+        super().__init__(message)
+
+
+class ResumeRejectedDownloadFilesError(DownloadFilesError):
+    """An admitted resumable request was rejected after exact cleanup."""
 
 
 class _PlacementUncertain(DownloadFilesError):
@@ -82,7 +107,6 @@ class HttpxDownloadSettings:
     """Normalized HTTPX transport settings."""
 
     timeout: int | float
-    retries: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,10 +302,25 @@ class TransportRetryable:
 
     diagnostic: TransportDiagnostic
     http_status: int | None = None
+    retry_after_seconds: float | None = None
 
     def __post_init__(self) -> None:
         _validate_transport_diagnostic(self.diagnostic)
         _validate_transport_http_status(self.http_status)
+        if self.retry_after_seconds is not None:
+            if (
+                isinstance(self.retry_after_seconds, bool)
+                or not isinstance(self.retry_after_seconds, (int, float))
+                or not math.isfinite(self.retry_after_seconds)
+                or self.retry_after_seconds < 0
+            ):
+                raise ValueError(
+                    "transport Retry-After must be finite and non-negative"
+                )
+            if self.diagnostic.namespace != "httpx" or self.http_status is None:
+                raise ValueError(
+                    "only an HTTPX response may carry normalized Retry-After"
+                )
         _validate_failure_http_semantics(
             self.diagnostic,
             self.http_status,
@@ -316,11 +355,24 @@ class TransportCancelled:
         _validate_transport_diagnostic(self.diagnostic)
 
 
+@dataclass(frozen=True, slots=True)
+class TransportResumeRejected:
+    """aria2 rejected one request that used exact admitted resume authority."""
+
+    diagnostic: TransportDiagnostic
+
+    def __post_init__(self) -> None:
+        _validate_transport_diagnostic(self.diagnostic)
+        if self.diagnostic.namespace != "aria2":
+            raise ValueError("only aria2 may reject a resumed transport request")
+
+
 type TransportOutcome = (
     TransportSuccess
     | TransportRetryable
     | TransportOrdinaryTerminal
     | TransportCancelled
+    | TransportResumeRejected
 )
 
 
@@ -385,6 +437,8 @@ class FileTransferRequest:
     expected_checksum: str | None
     staging_disposition: StagingDisposition
     resume_authority: ResumeAuthority | None = None
+    preserve_on_retryable: bool = False
+    preserve_on_cancellation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,11 +509,11 @@ class _TargetAnchor:
     def parent(self) -> _DirectoryAnchor:
         return self._target_parent
 
-    def add_staging_directory(self) -> _DirectoryAnchor:
+    def add_staging_directory(self, *, create: bool = True) -> _DirectoryAnchor:
         fd, created = _open_child_directory(
             self.parent.fd,
             ".cdh-staging",
-            create=True,
+            create=create,
         )
         anchor = _DirectoryAnchor(
             self.target.parent / ".cdh-staging",
@@ -577,14 +631,27 @@ def transfer_file(
         )
         transport_request = TransportRequest(url=request.url, sink=sink)
         try:
-            transport = _require_transport_success(
-                backend.download(transport_request, settings)
+            raw_transport = backend.download(transport_request, settings)
+            validated_transport = _validate_transport_outcome(raw_transport)
+        except Exception:
+            _cleanup_after_unquiescent_transport_failure(staging, control)
+            raise
+        try:
+            control = _reconcile_control_after_transport(
+                request,
+                validated_transport,
+                anchor=anchor,
+                staging=staging,
+                control=control,
+                initial=initial,
             )
-            control = _capture_control_if_present(
-                staging,
-                target_parent_fd=anchor.parent.fd,
-                target_name=anchor.target_name,
-            )
+        except Exception:
+            # A failed lineage proof never authorizes touching a possibly replaced
+            # control name. The still-held staging inode remains exact.
+            _cleanup_owned_transfer(staging, None)
+            raise
+        try:
+            transport = _require_transport_success(validated_transport)
             outcome = _verify_and_place(
                 request,
                 transport,
@@ -594,28 +661,56 @@ def transfer_file(
             )
         except _PlacementUncertain:
             raise
+        except _TransportRetryableObserved as observed:
+            authority = None
+            if request.preserve_on_retryable:
+                _require_owned_leaf_visible(staging)
+                if control is None:
+                    raise DownloadFilesError(
+                        "resumable aria2 failure did not leave exact control state"
+                    ) from None
+                _require_owned_leaf_visible(control)
+                authority = _resume_authority(identity, staging, control)
+            else:
+                _cleanup_owned_transfer(staging, control)
+            raise TransferDownloadFilesError(
+                observed.outcome.diagnostic.summary,
+                retry_after_seconds=observed.outcome.retry_after_seconds,
+                resume_authority=authority,
+            ) from None
+        except _TransportCancelledObserved as observed:
+            authority = None
+            if request.preserve_on_cancellation:
+                _require_owned_leaf_visible(staging)
+                if control is None:
+                    raise DownloadFilesError(
+                        "cancelled aria2 transfer did not leave exact control state"
+                    ) from None
+                _require_owned_leaf_visible(control)
+                authority = _resume_authority(identity, staging, control)
+            else:
+                _cleanup_owned_transfer(staging, control)
+            raise DownloadCancelled(
+                observed.outcome.diagnostic.summary,
+                resume_authority=authority,
+            ) from None
+        except _TransportResumeRejectedObserved as observed:
+            if request.resume_authority is None or not sink.resume_allowed:
+                _cleanup_owned_transfer(staging, control)
+                raise DownloadFilesError(
+                    "transport rejected resume without exact admitted authority"
+                ) from None
+            _cleanup_owned_transfer(staging, control)
+            raise ResumeRejectedDownloadFilesError(
+                observed.outcome.diagnostic.summary
+            ) from None
         except _ChecksumMismatch:
-            control = control or _capture_control_for_failure(
-                staging,
-                target_parent_fd=anchor.parent.fd,
-                target_name=anchor.target_name,
-            )
             _cleanup_owned_transfer(staging, control)
             raise TransferDownloadFilesError(
                 f"download checksum does not match expected identity: {request.target}"
             ) from None
-        except Exception as error:
-            control = control or _capture_control_for_failure(
-                staging,
-                target_parent_fd=anchor.parent.fd,
-                target_name=anchor.target_name,
-            )
-            if _must_clean_failure(request, error):
-                _cleanup_owned_transfer(staging, control)
-            else:
-                _require_owned_leaf_visible(staging)
-                if control is not None:
-                    _require_owned_leaf_visible(control)
+        except Exception:
+            _cleanup_owned_transfer(staging, control)
             raise
 
         if control is not None:
@@ -643,6 +738,44 @@ def transfer_staging_target(request: FileTransferRequest) -> Path:
         target=request.target,
         expected_checksum=request.expected_checksum,
     ).staging_target
+
+
+def discard_preserved_transfer(request: FileTransferRequest) -> None:
+    """Remove one exact authority-proven partial without touching foreign leaves."""
+    if (
+        request.staging_disposition is not StagingDisposition.PRESERVE
+        or request.resume_authority is None
+    ):
+        raise DownloadFilesError(
+            "preserved download cleanup requires exact resume authority"
+        )
+    identity = project_transfer_identity(
+        root=request.root,
+        url=request.url,
+        target=request.target,
+        expected_checksum=request.expected_checksum,
+    )
+    anchor = _TargetAnchor(root=request.root, target=request.target, create=False)
+    staging: _OwnedLeaf | None = None
+    control: _OwnedLeaf | None = None
+    try:
+        staging_anchor = anchor.add_staging_directory(create=False)
+        anchor.verify_visible()
+        staging, control = _admit_staging(
+            request,
+            identity,
+            staging_anchor=staging_anchor,
+            target_parent_fd=anchor.parent.fd,
+            target_name=anchor.target_name,
+            initial=_stat_leaf(anchor.parent.fd, anchor.target_name),
+        )
+        _cleanup_owned_transfer(staging, control)
+    finally:
+        if control is not None:
+            control.close()
+        if staging is not None:
+            staging.close()
+        anchor.close()
 
 
 def admitted_regular_final(root: Path, target: Path) -> bool:
@@ -769,6 +902,12 @@ def _admit_staging(
     initial: os.stat_result | None,
 ) -> tuple[_OwnedLeaf, _OwnedLeaf | None]:
     control_name = f"{identity.staging_name}.aria2"
+    temp_name = f"{control_name}__temp"
+    if _stat_leaf(staging_anchor.fd, temp_name) is not None:
+        raise DownloadFilesError(
+            "foreign aria2 temporary control artifact exists: "
+            f"{identity.staging_target}.aria2__temp"
+        )
     if request.staging_disposition is StagingDisposition.PRESERVE:
         authority = request.resume_authority
         if authority is None or authority.identity_digest != identity.digest:
@@ -791,16 +930,21 @@ def _admit_staging(
         control_metadata = _stat_leaf(staging_anchor.fd, control_name)
         expected_control = (authority.control_device, authority.control_inode)
         control: _OwnedLeaf | None = None
-        if control_metadata is None:
-            if expected_control != (None, None):
-                staging.close()
-                raise DownloadFilesError("preserved aria2 control state is missing")
+        if expected_control == (None, None) or control_metadata is None:
+            staging.close()
+            raise DownloadFilesError("preserved aria2 control state is missing")
         else:
             control = _open_owned_leaf(
                 staging_anchor.fd,
                 control_name,
                 Path(f"{identity.staging_target}.aria2"),
             )
+            if control.metadata.st_uid != os.geteuid():
+                control.close()
+                staging.close()
+                raise DownloadFilesError(
+                    "preserved aria2 control is not owned by the effective user"
+                )
             if (
                 expected_control == (None, None)
                 or (
@@ -866,8 +1010,8 @@ def _admit_staging(
     return staging, control
 
 
-def _require_transport_success(outcome: TransportOutcome) -> TransportSuccess:
-    """Project adapter semantics without inspecting backend observations."""
+def _validate_transport_outcome(outcome: TransportOutcome) -> TransportOutcome:
+    """Validate one typed terminal adapter result before filesystem admission."""
     try:
         if isinstance(outcome, TransportSuccess):
             TransportSuccess.__post_init__(outcome)
@@ -877,19 +1021,77 @@ def _require_transport_success(outcome: TransportOutcome) -> TransportSuccess:
             TransportOrdinaryTerminal.__post_init__(outcome)
         elif isinstance(outcome, TransportCancelled):
             TransportCancelled.__post_init__(outcome)
+        elif isinstance(outcome, TransportResumeRejected):
+            TransportResumeRejected.__post_init__(outcome)
     except (TypeError, ValueError) as error:
         raise DownloadFilesError(
             "transport adapter returned an invalid outcome"
         ) from error
+    if not isinstance(
+        outcome,
+        (
+            TransportSuccess,
+            TransportRetryable,
+            TransportOrdinaryTerminal,
+            TransportCancelled,
+            TransportResumeRejected,
+        ),
+    ):
+        raise DownloadFilesError("transport adapter returned an invalid outcome")
+    return outcome
+
+
+def _require_transport_success(outcome: TransportOutcome) -> TransportSuccess:
+    """Project already-validated adapter semantics without backend policy."""
     if isinstance(outcome, TransportSuccess):
         return outcome
     if isinstance(outcome, TransportRetryable):
-        raise TransferDownloadFilesError(outcome.diagnostic.summary)
+        raise _TransportRetryableObserved(outcome)
     if isinstance(outcome, TransportOrdinaryTerminal):
         raise TerminalTransferDownloadFilesError(outcome.diagnostic.summary)
     if isinstance(outcome, TransportCancelled):
-        raise DownloadCancelled(outcome.diagnostic.summary)
+        raise _TransportCancelledObserved(outcome)
+    if isinstance(outcome, TransportResumeRejected):
+        raise _TransportResumeRejectedObserved(outcome)
     raise DownloadFilesError("transport adapter returned an invalid outcome")
+
+
+class _TransportRetryableObserved(Exception):
+    """Internal typed handoff before core-owned cleanup or preservation."""
+
+    def __init__(self, outcome: TransportRetryable) -> None:
+        self.outcome = outcome
+        super().__init__(outcome.diagnostic.summary)
+
+
+class _TransportCancelledObserved(Exception):
+    """Internal typed handoff before core-owned cleanup or preservation."""
+
+    def __init__(self, outcome: TransportCancelled) -> None:
+        self.outcome = outcome
+        super().__init__(outcome.diagnostic.summary)
+
+
+class _TransportResumeRejectedObserved(Exception):
+    """Internal typed handoff before core-owned exact resume cleanup."""
+
+    def __init__(self, outcome: TransportResumeRejected) -> None:
+        self.outcome = outcome
+        super().__init__(outcome.diagnostic.summary)
+
+
+def _resume_authority(
+    identity: TransferIdentity,
+    staging: _OwnedLeaf,
+    control: _OwnedLeaf | None,
+) -> ResumeAuthority:
+    return ResumeAuthority(
+        identity_digest=identity.digest,
+        staging_device=staging.metadata.st_dev,
+        staging_inode=staging.metadata.st_ino,
+        control_device=control.metadata.st_dev if control is not None else None,
+        control_inode=control.metadata.st_ino if control is not None else None,
+    )
 
 
 def _verify_and_place(
@@ -1210,42 +1412,285 @@ def _hash_fd(fd: int) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _capture_control_if_present(
+def _cleanup_after_unquiescent_transport_failure(
     staging: _OwnedLeaf,
+    control: _OwnedLeaf | None,
+) -> None:
+    """Clean only identities still exact before a typed quiescent result exists."""
+    exact_control = None
+    if control is not None:
+        observed = _stat_leaf(control.directory_fd, control.name)
+        current = os.fstat(control.fd)
+        if observed is not None and _same_inode(observed, current):
+            exact_control = control
+    _cleanup_owned_transfer(staging, exact_control)
+
+
+def _reconcile_control_after_transport(
+    request: FileTransferRequest,
+    outcome: TransportOutcome,
     *,
-    target_parent_fd: int,
-    target_name: str,
+    anchor: _TargetAnchor,
+    staging: _OwnedLeaf,
+    control: _OwnedLeaf | None,
+    initial: os.stat_result | None,
 ) -> _OwnedLeaf | None:
-    control_name = f"{staging.display_path.name}.aria2"
-    metadata = _stat_leaf(staging.directory_fd, control_name)
-    if metadata is None:
-        return None
-    display = Path(f"{staging.display_path}.aria2")
-    control = _open_owned_leaf(staging.directory_fd, control_name, display)
-    target = _stat_leaf(target_parent_fd, target_name)
-    if _same_inode(control.metadata, staging.metadata) or (
-        target is not None and _same_inode(control.metadata, target)
-    ):
+    """Admit one aria2 atomic-save generation after typed item quiescence."""
+    control_name = f"{staging.name}.aria2"
+    temp_name = f"{control_name}__temp"
+    mutation_authorized = _transport_namespace(outcome) == "aria2"
+    target = _stat_leaf(anchor.parent.fd, anchor.target_name)
+    _require_transfer_path_stable(anchor, staging, initial=initial, target=target)
+
+    temp_metadata = _stat_leaf(staging.directory_fd, temp_name)
+    if temp_metadata is not None:
+        if not mutation_authorized:
+            raise DownloadFilesError(
+                "non-aria2 transport left an unauthorized temporary control artifact"
+            )
+        current_control = _stat_leaf(staging.directory_fd, control_name)
+        protected = [os.fstat(staging.fd)]
+        if target is not None:
+            protected.append(target)
+        if current_control is not None:
+            protected.append(current_control)
+        if control is not None:
+            protected.append(os.fstat(control.fd))
+        temp = _capture_managed_control_leaf(
+            staging.directory_fd,
+            temp_name,
+            Path(f"{staging.display_path}.aria2__temp"),
+            anchor=anchor,
+            staging=staging,
+            initial=initial,
+            protected=protected,
+        )
+        try:
+            _unlink_owned_leaf(temp)
+            os.fsync(temp.directory_fd)
+        except OSError as error:
+            raise DownloadFilesError(
+                f"aria2 temporary control cleanup is not durable: {error}"
+            ) from error
+        finally:
+            temp.close()
+        raise DownloadFilesError(
+            "aria2 left a temporary control artifact after the item became quiescent"
+        )
+
+    observed = _stat_leaf(staging.directory_fd, control_name)
+    preserve_required = (
+        isinstance(outcome, TransportRetryable) and request.preserve_on_retryable
+    ) or (isinstance(outcome, TransportCancelled) and request.preserve_on_cancellation)
+    if observed is None:
+        if control is None:
+            if preserve_required:
+                raise DownloadFilesError(
+                    "resumable aria2 failure did not leave exact control state"
+                )
+            return None
+        old = os.fstat(control.fd)
+        if old.st_nlink != 0:
+            raise DownloadFilesError(
+                "aria2 control disappeared without unlinking the held generation"
+            )
+        if preserve_required:
+            raise DownloadFilesError(
+                "resumable aria2 failure lost its exact control generation"
+            )
         control.close()
-        raise DownloadFilesError(f"aria2 control aliases protected data: {display}")
-    return control
+        return None
 
+    if not mutation_authorized:
+        raise DownloadFilesError(
+            "non-aria2 transport left an unauthorized control artifact"
+        )
 
-def _capture_control_for_failure(
-    staging: _OwnedLeaf,
-    *,
-    target_parent_fd: int,
-    target_name: str,
-) -> _OwnedLeaf | None:
+    if control is not None and _same_inode(observed, os.fstat(control.fd)):
+        _stabilize_managed_control_leaf(
+            control,
+            anchor=anchor,
+            staging=staging,
+            initial=initial,
+            protected=[os.fstat(staging.fd), *([target] if target is not None else [])],
+            expected=control.metadata,
+        )
+        _require_control_temp_absent(staging.directory_fd, temp_name)
+        return control
+
+    old_metadata = os.fstat(control.fd) if control is not None else None
+    if old_metadata is not None and old_metadata.st_nlink != 0:
+        raise DownloadFilesError(
+            "aria2 replaced control without unlinking the held generation"
+        )
+    protected = [os.fstat(staging.fd)]
+    if target is not None:
+        protected.append(target)
+    if old_metadata is not None:
+        protected.append(old_metadata)
+    successor = _capture_managed_control_leaf(
+        staging.directory_fd,
+        control_name,
+        Path(f"{staging.display_path}.aria2"),
+        anchor=anchor,
+        staging=staging,
+        initial=initial,
+        protected=protected,
+    )
+    if control is not None and os.fstat(control.fd).st_nlink != 0:
+        successor.close()
+        raise DownloadFilesError(
+            "aria2 old control generation was relinked during successor admission"
+        )
     try:
-        return _capture_control_if_present(
-            staging,
-            target_parent_fd=target_parent_fd,
-            target_name=target_name,
+        _require_control_temp_absent(staging.directory_fd, temp_name)
+    except Exception:
+        successor.close()
+        raise
+    if control is not None:
+        control.close()
+    return successor
+
+
+def _transport_namespace(outcome: TransportOutcome) -> Literal["httpx", "aria2"]:
+    if isinstance(outcome, TransportSuccess):
+        return outcome.namespace
+    return outcome.diagnostic.namespace
+
+
+def _capture_managed_control_leaf(
+    directory_fd: int,
+    name: str,
+    display: Path,
+    *,
+    anchor: _TargetAnchor,
+    staging: _OwnedLeaf,
+    initial: os.stat_result | None,
+    protected: list[os.stat_result],
+) -> _OwnedLeaf:
+    leaf = _open_owned_leaf(directory_fd, name, display)
+    try:
+        _stabilize_managed_control_leaf(
+            leaf,
+            anchor=anchor,
+            staging=staging,
+            initial=initial,
+            protected=protected,
         )
     except Exception:
-        _cleanup_owned_transfer(staging, None)
+        leaf.close()
         raise
+    return leaf
+
+
+def _stabilize_managed_control_leaf(
+    leaf: _OwnedLeaf,
+    *,
+    anchor: _TargetAnchor,
+    staging: _OwnedLeaf,
+    initial: os.stat_result | None,
+    protected: list[os.stat_result],
+    expected: os.stat_result | None = None,
+) -> None:
+    before = os.fstat(leaf.fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise DownloadFilesError(
+            f"aria2 control is not an unaliased regular file: {leaf.display_path}"
+        )
+    if before.st_uid != os.geteuid():
+        raise DownloadFilesError(
+            f"aria2 control is not owned by the effective user: {leaf.display_path}"
+        )
+    if expected is not None and not _same_control_metadata(expected, before):
+        raise DownloadFilesError(
+            f"aria2 held control changed during transport: {leaf.display_path}"
+        )
+    if any(_same_inode(before, metadata) for metadata in protected):
+        raise DownloadFilesError(
+            f"aria2 control aliases protected data: {leaf.display_path}"
+        )
+    _require_transfer_path_stable(
+        anchor,
+        staging,
+        initial=initial,
+        target=_stat_leaf(anchor.parent.fd, anchor.target_name),
+    )
+    _require_same_leaf(leaf.directory_fd, leaf.name, before)
+    try:
+        os.fsync(leaf.directory_fd)
+    except OSError as error:
+        raise DownloadFilesError(
+            f"aria2 control generation is not durable: {leaf.display_path}: {error}"
+        ) from error
+    after = os.fstat(leaf.fd)
+    observed = _stat_leaf(leaf.directory_fd, leaf.name)
+    if (
+        observed is None
+        or not _same_control_metadata(before, after)
+        or not _same_control_metadata(before, observed)
+        or after.st_uid != os.geteuid()
+        or observed.st_uid != os.geteuid()
+    ):
+        raise DownloadFilesError(
+            f"aria2 control changed during generation admission: {leaf.display_path}"
+        )
+    _require_transfer_path_stable(
+        anchor,
+        staging,
+        initial=initial,
+        target=_stat_leaf(anchor.parent.fd, anchor.target_name),
+    )
+
+
+def _same_control_metadata(
+    expected: os.stat_result,
+    observed: os.stat_result,
+) -> bool:
+    return (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_mode,
+        expected.st_nlink,
+        expected.st_uid,
+        expected.st_gid,
+        expected.st_size,
+        expected.st_mtime_ns,
+        expected.st_ctime_ns,
+    ) == (
+        observed.st_dev,
+        observed.st_ino,
+        observed.st_mode,
+        observed.st_nlink,
+        observed.st_uid,
+        observed.st_gid,
+        observed.st_size,
+        observed.st_mtime_ns,
+        observed.st_ctime_ns,
+    )
+
+
+def _require_control_temp_absent(directory_fd: int, temp_name: str) -> None:
+    if _stat_leaf(directory_fd, temp_name) is not None:
+        raise DownloadFilesError(
+            "aria2 temporary control appeared during generation admission"
+        )
+
+
+def _require_transfer_path_stable(
+    anchor: _TargetAnchor,
+    staging: _OwnedLeaf,
+    *,
+    initial: os.stat_result | None,
+    target: os.stat_result | None,
+) -> None:
+    anchor.verify_visible()
+    _require_owned_leaf_visible(staging)
+    current_staging = os.fstat(staging.fd)
+    _require_safe_staging_metadata(current_staging, staging.display_path)
+    if not _same_optional_stat(initial, target):
+        raise DownloadFilesError(
+            f"download target changed during transport: {anchor.target}"
+        )
 
 
 def _open_owned_leaf(directory_fd: int, name: str, display: Path) -> _OwnedLeaf:
@@ -1290,12 +1735,6 @@ def _open_regular_leaf(directory_fd: int, name: str, label: str) -> int:
         os.close(fd)
         raise DownloadFilesError(f"{label} is not an unaliased regular file: {name}")
     return fd
-
-
-def _must_clean_failure(request: FileTransferRequest, error: Exception) -> bool:
-    if request.staging_disposition is StagingDisposition.CLEAN:
-        return True
-    return not isinstance(error, (TransferDownloadFilesError, DownloadCancelled))
 
 
 def _cleanup_owned_transfer(

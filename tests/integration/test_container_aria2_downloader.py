@@ -18,6 +18,7 @@ from comfyui_docker_helper.container.download_files import (
     TransportCancelled,
     TransportOrdinaryTerminal,
     TransportRequest,
+    TransportResumeRejected,
     TransportRetryable,
     TransportSuccess,
 )
@@ -182,7 +183,7 @@ def make_settings(
             min_split_size="2M",
             resume_download=resume_download,
         ),
-        httpx=HttpxDownloadSettings(timeout=60, retries=3),
+        httpx=HttpxDownloadSettings(timeout=60),
     )
 
 
@@ -278,6 +279,7 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
             "--rpc-listen-port=6811",
             "--rpc-secret=test-secret",
             "--disable-ipv6=true",
+            "--auto-save-interval=0",
             "--console-log-level=notice",
         ]
     ]
@@ -294,6 +296,10 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
                 "max-connection-per-server": "4",
                 "min-split-size": "2M",
                 "continue": "true",
+                "max-tries": "1",
+                "always-resume": "true",
+                "retry-wait": "0",
+                "max-file-not-found": "0",
                 "auto-file-renaming": "false",
                 "allow-overwrite": "true",
             },
@@ -442,6 +448,55 @@ def test_aria2_error_message_is_never_read_for_classification(
     assert result.diagnostic.summary == "aria2 reported an indeterminate HTTP failure"
 
 
+def test_aria2_code_eight_is_typed_only_for_an_admitted_resumed_request(
+    tmp_path: Path,
+) -> None:
+    """Machine code 8 has resume meaning only when the supplied sink resumed."""
+    download = FakeDownload(
+        ["error"],
+        error_code="8",
+        error_message="human text must not be policy input",
+    )
+    del download.error_message
+    api = FakeApi(download)
+    downloader = Aria2Downloader(
+        process_factory=lambda _: FakeProcess(),
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: api,
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+
+    result = downloader.download(
+        make_item(tmp_path, resume_allowed=True),
+        make_settings(),
+    )
+
+    assert isinstance(result, TransportResumeRejected)
+    assert result.diagnostic.summary == (
+        "aria2 reported that the remote server rejected resume"
+    )
+
+
+def test_aria2_code_eight_on_clean_request_fails_closed(tmp_path: Path) -> None:
+    """A clean request cannot manufacture a resume-rejected policy event."""
+    downloader = Aria2Downloader(
+        process_factory=lambda _: FakeProcess(),
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(FakeDownload(["error"], error_code="8")),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+
+    with pytest.raises(DownloadFilesError, match="without an admitted resumed"):
+        downloader.download(
+            make_item(tmp_path, resume_allowed=False),
+            make_settings(),
+        )
+
+
 @pytest.mark.parametrize("code", [None, 2, "", "1", "5", "32", "999", "02"])
 def test_aria2_missing_or_unclassified_error_code_fails_closed(
     tmp_path: Path,
@@ -459,6 +514,26 @@ def test_aria2_missing_or_unclassified_error_code_fails_closed(
 
     with pytest.raises(DownloadFilesError, match=r"malformed|unclassified"):
         downloader.download(make_item(tmp_path), make_settings())
+
+
+def test_aria2_code_eight_requires_resume_to_be_enabled_in_settings(
+    tmp_path: Path,
+) -> None:
+    """Sink authority alone is insufficient when the submitted item stayed clean."""
+    downloader = Aria2Downloader(
+        process_factory=lambda _: FakeProcess(),
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(FakeDownload(["error"], error_code="8")),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+
+    with pytest.raises(DownloadFilesError, match="without an admitted resumed"):
+        downloader.download(
+            make_item(tmp_path, resume_allowed=True),
+            make_settings(resume_download=False),
+        )
 
 
 def test_aria2_downloader_reports_removed_status(tmp_path: Path) -> None:

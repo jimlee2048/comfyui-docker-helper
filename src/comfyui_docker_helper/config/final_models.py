@@ -88,7 +88,6 @@ class FinalHttpxConfig(FinalConfigModel):
     """HTTPX downloader settings."""
 
     timeout: int | float = Field(default=60, gt=0)
-    retries: int = Field(default=3, ge=0)
 
 
 class FinalDownloaderConfig(FinalConfigModel):

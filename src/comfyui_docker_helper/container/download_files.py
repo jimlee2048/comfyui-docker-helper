@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import secrets
 import subprocess
 import threading
@@ -23,6 +24,13 @@ from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
     require_downloader_name,
 )
+from comfyui_docker_helper.container.attempt_coordinator import (
+    AttemptCancelled,
+    AttemptExhausted,
+    AttemptOrdinaryTerminal,
+    AttemptSucceeded,
+    coordinate_transfer_attempts,
+)
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
     DownloadBackend,
@@ -35,16 +43,15 @@ from comfyui_docker_helper.container.transfer_core import (
     HttpxDownloadSettings,
     Logger,
     StagingDisposition,
-    TransferDownloadFilesError,
     TransportCancelled,
     TransportDiagnostic,
     TransportOrdinaryTerminal,
     TransportOutcome,
     TransportRequest,
+    TransportResumeRejected,
     TransportRetryable,
     TransportSink,
     TransportSuccess,
-    transfer_file,
     verify_required_final,
 )
 
@@ -100,10 +107,12 @@ class HttpxDownloader:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         monotonic: Monotonic = time.monotonic,
+        wall_clock: Monotonic = time.time,
         log: Logger = print,
     ) -> None:
         self._transport = transport
         self._monotonic = monotonic
+        self._wall_clock = wall_clock
         self._log = log
         self._cancel_requested = threading.Event()
         self._active_lock = threading.Lock()
@@ -137,7 +146,13 @@ class HttpxDownloader:
                 return _transport_cancelled("httpx")
             self._active = (loop, task)
         try:
-            outcome = await self._download_attempts(request, settings)
+            try:
+                outcome = await self._download_once(request, settings)
+            except OSError as error:
+                raise DownloadFilesError(
+                    "HTTP download failed while writing supplied staging "
+                    f"{request.sink.display_path}: {error}"
+                ) from error
             # This lock acquisition is the terminal linearization point. A cancel
             # observed first wins; after this point the task does not suspend again.
             with self._active_lock:
@@ -155,33 +170,6 @@ class HttpxDownloader:
                 if self._active == (loop, task):
                     self._active = None
 
-    async def _download_attempts(
-        self,
-        request: TransportRequest,
-        settings: DownloaderSettings,
-    ) -> TransportOutcome:
-        attempts = settings.httpx.retries + 1
-        for attempt in range(attempts):
-            if self._cancel_requested.is_set():
-                return _transport_cancelled("httpx")
-            try:
-                outcome = await self._download_once(request, settings)
-            except OSError as error:
-                raise DownloadFilesError(
-                    "HTTP download failed while writing supplied staging "
-                    f"{request.sink.display_path}: {error}"
-                ) from error
-            if not isinstance(outcome, TransportRetryable):
-                return outcome
-            if attempt + 1 >= attempts:
-                return outcome
-            delay = _backoff_delay(attempt)
-            self._log(
-                f"Retrying HTTP download in {delay}s after failure: {request.url}"
-            )
-            await asyncio.sleep(delay)
-        raise AssertionError("HTTPX attempt loop produced no outcome")
-
     async def _download_once(
         self,
         request: TransportRequest,
@@ -197,7 +185,10 @@ class HttpxDownloader:
                 ) as client,
                 client.stream("GET", request.url) as response,
             ):
-                failure = _http_failure_outcome(response)
+                failure = _http_failure_outcome(
+                    response,
+                    wall_clock=self._wall_clock,
+                )
                 if failure is not None:
                     return failure
                 length = await self._write_response(response, request.sink)
@@ -335,22 +326,38 @@ class Aria2Downloader:
         settings: DownloaderSettings,
     ) -> TransportOutcome:
         if self._cancel_requested.is_set():
+            self._require_cancelled_daemon_quiescence()
             return _transport_cancelled("aria2")
         try:
             api = self._ensure_started(settings)
         except DownloadCancelled:
+            self._require_cancelled_daemon_quiescence()
             return _transport_cancelled("aria2")
         options = _aria2_options(request, settings.aria2)
         try:
             download = api.add_uris([request.url], options=options)
         except Exception as error:
             if self._cancel_requested.is_set():
+                self._require_cancelled_daemon_quiescence()
                 return _transport_cancelled("aria2")
+            self._reap_unquiescent_item(error)
             raise DownloadFilesError(
                 f"aria2 RPC submit failed for {request.url}: {error}"
             ) from error
-        transport = self._wait_for_download(download, request)
+        try:
+            transport = self._wait_for_download(
+                download,
+                request,
+                resumed=(
+                    settings.aria2.resume_download and request.sink.resume_allowed
+                ),
+            )
+        except Exception as error:
+            self._reap_unquiescent_item(error)
+            raise
         if transport is not None:
+            if isinstance(transport, TransportCancelled):
+                self._require_cancelled_daemon_quiescence()
             return transport
         try:
             length = request.sink.current_length()
@@ -562,6 +569,8 @@ class Aria2Downloader:
         self,
         download: Aria2Download,
         request: TransportRequest,
+        *,
+        resumed: bool,
     ) -> TransportOutcome | None:
         while True:
             with self._lifecycle:
@@ -602,7 +611,10 @@ class Aria2Downloader:
                         "aria2 unexpectedly removed an active download"
                     )
                 if status == "error":
-                    return _classify_aria2_error(download)
+                    return _classify_aria2_error(
+                        download,
+                        resumed=resumed,
+                    )
                 if status not in {"active", "waiting"}:
                     raise DownloadFilesError(
                         "aria2 RPC returned an unexpected download status"
@@ -623,6 +635,31 @@ class Aria2Downloader:
             raise DownloadFilesError(
                 f"aria2 daemon exited with code {returncode} {detail}"
             )
+
+    def _require_cancelled_daemon_quiescence(self) -> None:
+        deadline = self._monotonic() + self.shutdown_timeout_seconds
+        with self._lifecycle:
+            while (
+                self._process is not None
+                and self._state is not _Aria2LifecycleState.CLEANUP_FAILED
+            ):
+                self._wait_for_lifecycle_change(deadline)
+            if self._process is not None:
+                raise DownloadFilesError(
+                    "aria2 cancellation returned before the daemon became quiescent"
+                )
+
+    def _reap_unquiescent_item(self, item_error: Exception) -> None:
+        try:
+            self.close()
+        except BaseException as cleanup_error:
+            raise DownloadFilesError(
+                "aria2 failed item could not be made quiescent"
+            ) from cleanup_error
+        if self._process is not None:
+            raise DownloadFilesError(
+                "aria2 failed item retained a live daemon after cleanup"
+            ) from item_error
 
     def _raise_prepare_cancelled(self) -> None:
         if self._cancel_requested.is_set():
@@ -737,7 +774,6 @@ def file_download_plan(
             ),
             httpx=HttpxDownloadSettings(
                 timeout=payload.downloader.httpx.timeout,
-                retries=payload.downloader.httpx.retries,
             ),
         ),
         items=tuple(
@@ -832,18 +868,23 @@ def _download_with_policy(
         expected_checksum=item.checksum,
         staging_disposition=StagingDisposition.CLEAN,
     )
-    for attempt in range(1, plan.download_max_attempts + 1):
-        try:
-            return transfer_file(request, backend=backend, settings=settings)
-        except TransferDownloadFilesError as error:
-            if attempt >= plan.download_max_attempts:
-                raise
-            log(
-                f"Retrying required build file after attempt "
-                f"{attempt}/{plan.download_max_attempts} failed: "
-                f"{item.target}: {error}"
-            )
-    raise AssertionError("build transfer attempt loop produced no outcome")
+    result = coordinate_transfer_attempts(
+        request,
+        backend_name=item.downloader,
+        backend=backend,
+        settings=settings,
+        max_attempts=plan.download_max_attempts,
+        log=log,
+    )
+    if isinstance(result, AttemptSucceeded):
+        return result.outcome
+    if isinstance(result, AttemptOrdinaryTerminal):
+        raise result.error
+    if isinstance(result, AttemptExhausted):
+        raise result.error
+    if isinstance(result, AttemptCancelled):
+        raise DownloadCancelled("required build file download was cancelled")
+    raise AssertionError("attempt coordinator returned an unknown result")
 
 
 def _validate_download_plan(plan: FileDownloadPlan) -> None:
@@ -939,6 +980,8 @@ class Aria2DownloaderFactory(Protocol):
 
 def _http_failure_outcome(
     response: httpx.Response,
+    *,
+    wall_clock: Monotonic = time.time,
 ) -> TransportRetryable | TransportOrdinaryTerminal | None:
     status = response.status_code
     if status in {408, 429} or 500 <= status <= 599:
@@ -950,6 +993,10 @@ def _http_failure_outcome(
                 ),
             ),
             http_status=status,
+            retry_after_seconds=_normalized_retry_after(
+                response,
+                wall_clock=wall_clock,
+            ),
         )
     if 400 <= status <= 599:
         return TransportOrdinaryTerminal(
@@ -964,6 +1011,37 @@ def _http_failure_outcome(
     return None
 
 
+def _normalized_retry_after(
+    response: httpx.Response,
+    *,
+    wall_clock: Monotonic,
+) -> float | None:
+    values = [
+        value.decode("latin-1")
+        for name, value in response.headers.raw
+        if name.lower() == b"retry-after"
+    ]
+    if len(values) != 1:
+        return None
+    value = values[0].strip()
+    if value.isascii() and value.isdecimal():
+        try:
+            return float(int(value))
+        except (ValueError, OverflowError):
+            return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed is None or parsed.tzinfo is None:
+        return None
+    try:
+        delay = parsed.timestamp() - wall_clock()
+    except (OSError, OverflowError, ValueError):
+        return None
+    return delay if delay >= 0 else None
+
+
 def _transport_cancelled(
     namespace: Literal["httpx", "aria2"],
 ) -> TransportCancelled:
@@ -975,7 +1053,11 @@ def _transport_cancelled(
     )
 
 
-def _classify_aria2_error(download: Aria2Download) -> TransportOutcome:
+def _classify_aria2_error(
+    download: Aria2Download,
+    *,
+    resumed: bool,
+) -> TransportOutcome:
     """Map only aria2's deliberately small stable machine-code allowlist."""
     try:
         code = download.error_code
@@ -985,6 +1067,17 @@ def _classify_aria2_error(download: Aria2Download) -> TransportOutcome:
         ) from error
     if not isinstance(code, str):
         raise DownloadFilesError("aria2 RPC returned malformed error metadata")
+    if code == "8":
+        if not resumed:
+            raise DownloadFilesError(
+                "aria2 rejected resume without an admitted resumed request"
+            )
+        return TransportResumeRejected(
+            diagnostic=TransportDiagnostic(
+                namespace="aria2",
+                summary="aria2 reported that the remote server rejected resume",
+            )
+        )
 
     retryable_summaries = {
         "2": "aria2 reported a timeout",
@@ -1056,6 +1149,10 @@ def _aria2_options(
         "continue": _aria2_bool(
             settings.resume_download and request.sink.resume_allowed
         ),
+        "max-tries": "1",
+        "always-resume": "true",
+        "retry-wait": "0",
+        "max-file-not-found": "0",
         "auto-file-renaming": "false",
         "allow-overwrite": "true",
     }
@@ -1070,13 +1167,10 @@ def _aria2_daemon_argv(settings: Aria2DownloadSettings, secret: str) -> list[str
         f"--rpc-listen-port={settings.rpc_port}",
         f"--rpc-secret={secret}",
         "--disable-ipv6=true",
+        "--auto-save-interval=0",
         "--console-log-level=notice",
     ]
 
 
 def _aria2_bool(value: bool) -> str:
     return "true" if value else "false"
-
-
-def _backoff_delay(attempt: int) -> float:
-    return float((1, 2, 4)[min(attempt, 2)])

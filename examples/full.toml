@@ -88,8 +88,6 @@ download_failure_policy = "fail"
 [cdh.downloader.httpx]
 # Default: 60. Seconds for each HTTPX request attempt.
 timeout = 60
-# Default: 3. Number of retry attempts for HTTPX downloads.
-retries = 3
 
 [cdh.downloader.aria2]
 # Default: 6800. Container-local aria2 RPC port used during file downloads.

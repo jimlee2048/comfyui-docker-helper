@@ -24,7 +24,6 @@ class RuntimeAria2Config(ConfigModel):
 
 class RuntimeHttpxConfig(ConfigModel):
     timeout: int | float = 60
-    retries: int = 3
 
 
 class RuntimeDownloaderConfig(ConfigModel):

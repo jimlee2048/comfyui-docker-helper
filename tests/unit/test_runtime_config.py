@@ -71,7 +71,6 @@ download_failure_policy = "fail"
 
 [cdh.downloader.httpx]
 timeout = 15
-retries = 4
 """,
     )
 
@@ -88,7 +87,6 @@ retries = 4
     assert result.config.cdh.download_max_attempts == 5
     assert result.config.cdh.download_failure_policy == "fail"
     assert result.config.cdh.downloader.httpx.timeout == 15
-    assert result.config.cdh.downloader.httpx.retries == 4
 
 
 def test_mounted_config_overrides_baked_config(tmp_path: Path) -> None:
@@ -1050,7 +1048,6 @@ def test_invalid_mounted_httpx_backend_values_fail_runtime_validation(
         """
 [cdh.downloader.httpx]
 timeout = 0
-retries = -1
 """,
     )
 
@@ -1064,10 +1061,6 @@ retries = -1
         (
             ("cdh", "downloader", "httpx", "timeout"),
             "cdh.downloader.httpx_timeout_not_positive",
-        ),
-        (
-            ("cdh", "downloader", "httpx", "retries"),
-            "cdh.downloader.httpx_retries_negative",
         ),
     ]
 

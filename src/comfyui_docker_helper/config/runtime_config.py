@@ -84,7 +84,6 @@ class _RuntimeAria2ConfigPatch(ConfigModel):
 
 class _RuntimeHttpxConfigPatch(ConfigModel):
     timeout: int | float | None = None
-    retries: int | None = None
 
 
 class _RuntimeDownloaderConfigPatch(ConfigModel):
@@ -601,14 +600,6 @@ def _validate_runtime_downloader(config: RuntimeConfig) -> None:
                 path=("cdh", "downloader", "httpx", "timeout"),
                 code="cdh.downloader.httpx_timeout_not_positive",
                 message="must be greater than 0",
-            )
-        )
-    if httpx.retries < 0:
-        diagnostics.append(
-            Diagnostic(
-                path=("cdh", "downloader", "httpx", "retries"),
-                code="cdh.downloader.httpx_retries_negative",
-                message="must be greater than or equal to 0",
             )
         )
     if not 1 <= aria2.rpc_port <= 65535:

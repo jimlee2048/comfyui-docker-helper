@@ -22,7 +22,6 @@ from comfyui_docker_helper.container.download_files import (
     FileDownloadItem,
     FileDownloadPlan,
     HttpxDownloadSettings,
-    TransferDownloadFilesError,
     TransportDiagnostic,
     TransportOutcome,
     TransportRequest,
@@ -31,6 +30,7 @@ from comfyui_docker_helper.container.download_files import (
     file_download_plan,
     process_file_downloads,
 )
+from comfyui_docker_helper.container.transfer_core import TransferDownloadFilesError
 
 
 class RecordingBackend:
@@ -66,7 +66,7 @@ def _settings() -> DownloaderSettings:
             min_split_size="2M",
             resume_download=False,
         ),
-        httpx=HttpxDownloadSettings(timeout=90.5, retries=5),
+        httpx=HttpxDownloadSettings(timeout=90.5),
     )
 
 
@@ -92,7 +92,7 @@ def test_file_download_plan_projects_checksum_without_runtime_failure_policy() -
                 min_split_size="1M",
                 resume_download=True,
             ),
-            httpx=HttpxPlan(timeout=42, retries=4),
+            httpx=HttpxPlan(timeout=42),
         ),
         default_download_mode="sync",
         download_max_attempts=3,
@@ -129,7 +129,7 @@ def test_file_download_plan_rejects_target_outside_admitted_root() -> None:
                 min_split_size="1M",
                 resume_download=True,
             ),
-            httpx=HttpxPlan(timeout=42, retries=0),
+            httpx=HttpxPlan(timeout=42),
         ),
         default_download_mode="sync",
         download_max_attempts=1,

@@ -19,6 +19,13 @@ from comfyui_docker_helper.config.runtime_file_validation import (
 )
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.config.url_validation import DownloaderName
+from comfyui_docker_helper.container.attempt_coordinator import (
+    AttemptCancelled,
+    AttemptExhausted,
+    AttemptOrdinaryTerminal,
+    AttemptSucceeded,
+    coordinate_transfer_attempts,
+)
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloaderFactory,
@@ -39,7 +46,6 @@ from comfyui_docker_helper.container.runtime_state import (
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
     DownloadBackend,
-    DownloadCancelled,
     DownloaderSettings,
     DownloadStatus,
     FileTransferOutcome,
@@ -47,12 +53,10 @@ from comfyui_docker_helper.container.transfer_core import (
     HttpxDownloadSettings,
     Logger,
     StagingDisposition,
-    TerminalTransferDownloadFilesError,
     TransferDownloadFilesError,
     TransferIdentity,
     admitted_regular_final,
     project_transfer_identity,
-    transfer_file,
 )
 
 type RuntimeFilePath = tuple[str | int, ...]
@@ -300,7 +304,6 @@ def process_runtime_file_downloads(
                 state_observer=state_observer,
                 cancel_requested=is_cancelled,
             )
-            _raise_if_runtime_download_cancelled(is_cancelled)
             _notify_runtime_download_state(state_observer, item, "completed")
             log(
                 "Runtime download completed: "
@@ -582,7 +585,6 @@ def runtime_downloader_settings(config: RuntimeConfig) -> DownloaderSettings:
         ),
         httpx=HttpxDownloadSettings(
             timeout=downloader.httpx.timeout,
-            retries=downloader.httpx.retries,
         ),
     )
 
@@ -618,78 +620,55 @@ def _download_runtime_file_with_policy(
         expected_checksum=item.checksum,
         staging_disposition=StagingDisposition.CLEAN,
     )
-    for attempt in range(1, attempts + 1):
-        _raise_if_runtime_download_cancelled(cancel_requested)
-        try:
-            log(
-                "Runtime download attempt: "
-                f"mode={item.download_mode} target={item.relative_target} "
-                f"backend={backend_name} attempt={attempt}/{attempts} "
-                f"status=downloading source_host={source_host} identity={identity}"
-            )
-            _notify_runtime_download_state(state_observer, item, "downloading")
-            _raise_if_runtime_download_cancelled(cancel_requested)
-            outcome = transfer_file(
-                transfer_request,
-                backend=backend,
-                settings=settings,
-            )
-            _raise_if_runtime_download_cancelled(cancel_requested)
-            return attempt, outcome
-        except RuntimeFileDownloadCancelled:
-            raise
-        except DownloadCancelled as error:
-            raise RuntimeFileDownloadCancelled from error
-        except TerminalTransferDownloadFilesError as error:
-            _notify_runtime_download_state(
-                state_observer,
-                item,
-                "exhausted",
-                error=error,
-            )
-            _apply_runtime_item_failure_policy(
-                item,
-                error,
-                attempts=attempt,
-                config=config,
-                path=path,
-                log=log,
-            )
-        except TransferDownloadFilesError as error:
-            _raise_if_runtime_download_cancelled(cancel_requested)
-            if attempt < attempts:
-                _notify_runtime_download_state(
-                    state_observer,
-                    item,
-                    "failed",
-                    error=error,
-                )
-                log(
-                    "Runtime download attempt failed: "
-                    f"mode={item.download_mode} target={item.relative_target} "
-                    f"backend={backend_name} attempt={attempt}/{attempts} "
-                    f"status=failed reason={runtime_error_reason(error)}"
-                )
-                log(
-                    "Retrying runtime file download after attempt "
-                    f"{attempt}/{attempts} failed: target={item.relative_target} "
-                    f"reason={runtime_error_reason(error)}"
-                )
-                continue
-            _notify_runtime_download_state(
-                state_observer,
-                item,
-                "exhausted",
-                error=error,
-            )
-            _apply_runtime_item_failure_policy(
-                item,
-                error,
-                attempts=attempts,
-                config=config,
-                path=path,
-                log=log,
-            )
+
+    def observe_start(attempt: int) -> None:
+        log(
+            "Runtime download attempt: "
+            f"mode={item.download_mode} target={item.relative_target} "
+            f"backend={backend_name} attempt={attempt}/{attempts} "
+            f"status=downloading source_host={source_host} identity={identity}"
+        )
+        _notify_runtime_download_state(state_observer, item, "downloading")
+
+    def observe_retry(
+        attempt: int,
+        error: TransferDownloadFilesError,
+    ) -> None:
+        _notify_runtime_download_state(state_observer, item, "failed", error=error)
+        log(
+            "Runtime download attempt failed: "
+            f"mode={item.download_mode} target={item.relative_target} "
+            f"backend={backend_name} attempt={attempt}/{attempts} "
+            f"status=failed reason={runtime_error_reason(error)}"
+        )
+
+    result = coordinate_transfer_attempts(
+        transfer_request,
+        backend_name=backend_name,
+        backend=backend,
+        settings=settings,
+        max_attempts=attempts,
+        cancel_requested=cancel_requested,
+        attempt_start_observer=observe_start,
+        retry_observer=observe_retry,
+        log=log,
+    )
+    if isinstance(result, AttemptSucceeded):
+        return result.attempts, result.outcome
+    if isinstance(result, AttemptCancelled):
+        raise RuntimeFileDownloadCancelled
+    error = result.error
+    _notify_runtime_download_state(state_observer, item, "exhausted", error=error)
+    if isinstance(result, (AttemptOrdinaryTerminal, AttemptExhausted)):
+        _apply_runtime_item_failure_policy(
+            item,
+            error,
+            attempts=result.attempts,
+            config=config,
+            path=path,
+            log=log,
+        )
+    raise AssertionError("attempt coordinator returned an unknown result")
 
 
 def _apply_runtime_item_failure_policy(
@@ -747,13 +726,6 @@ def _log_async_queue_stopping_after_exhausted_failure(
 
 def _runtime_download_not_cancelled() -> bool:
     return False
-
-
-def _raise_if_runtime_download_cancelled(
-    cancel_requested: RuntimeDownloadCancelRequested,
-) -> None:
-    if cancel_requested():
-        raise RuntimeFileDownloadCancelled
 
 
 def _observe_cancellable_runtime_backend(

@@ -250,15 +250,6 @@ def test_system_extra_package_accepts_lowercase_debian_punctuation() -> None:
     assert _diagnostics(config) == ()
 
 
-def test_httpx_retries_is_active_public_configuration() -> None:
-    document = _document()
-    document["cdh"] = {"downloader": {"httpx": {"retries": 7}}}
-
-    config = validate_final_config_structure(document)
-
-    assert config.cdh.downloader.httpx.retries == 7
-
-
 # Structural and scalar domains reject coercion, ambiguity, and unsupported values.
 def test_strict_structure_forbids_unknown_fields_and_coercion() -> None:
     document = _document()

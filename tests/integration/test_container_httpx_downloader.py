@@ -7,6 +7,8 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 
 import httpx
@@ -54,7 +56,7 @@ class PathSink:
         return self.display_path.open("wb")
 
 
-def _settings(*, retries: int = 0) -> DownloaderSettings:
+def _settings() -> DownloaderSettings:
     return DownloaderSettings(
         default="httpx",
         aria2=Aria2DownloadSettings(
@@ -64,7 +66,7 @@ def _settings(*, retries: int = 0) -> DownloaderSettings:
             min_split_size="2M",
             resume_download=False,
         ),
-        httpx=HttpxDownloadSettings(timeout=30, retries=retries),
+        httpx=HttpxDownloadSettings(timeout=30),
     )
 
 
@@ -81,11 +83,13 @@ def _downloader(
     *,
     logs: list[str] | None = None,
     monotonic: Callable[[], float] | None = None,
+    wall_clock: Callable[[], float] | None = None,
 ) -> HttpxDownloader:
     return HttpxDownloader(
         transport=transport,
         log=(logs if logs is not None else []).append,
         monotonic=monotonic or (lambda: 0.0),
+        wall_clock=wall_clock or time.time,
     )
 
 
@@ -177,36 +181,57 @@ def test_httpx_retryable_response_is_one_adapter_attempt(
     assert result.http_status == status
 
 
-# Public HTTPX retries execute clean attempts against the same safe sink.
-def test_httpx_retries_clean_same_supplied_sink_before_success(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request = _request(tmp_path)
-    sleeps: list[float] = []
-    attempts = 0
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
-        if attempts < 3:
-            return httpx.Response(503, content=b"partial")
-        return httpx.Response(200, content=b"complete")
-
-    async def record_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    monkeypatch.setattr(download_files_module.asyncio, "sleep", record_sleep)
-
-    result = _downloader(httpx.MockTransport(handler)).download(
-        request, _settings(retries=2)
+# Retry-After is normalized only from the exact retryable response boundary.
+def test_httpx_normalizes_delta_and_http_date_retry_after(tmp_path: Path) -> None:
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    responses = iter(
+        [
+            httpx.Response(503, headers={"Retry-After": "10"}),
+            httpx.Response(
+                429,
+                headers={"Retry-After": format_datetime(now + timedelta(seconds=20))},
+            ),
+        ]
+    )
+    downloader = _downloader(
+        httpx.MockTransport(lambda _: next(responses)),
+        wall_clock=now.timestamp,
     )
 
-    assert isinstance(result, TransportSuccess)
-    assert attempts == 3
-    assert sleeps == [1.0, 2.0]
-    assert result.length == len(b"complete")
-    assert request.sink.display_path.read_bytes() == b"complete"
+    delta = downloader.download(_request(tmp_path / "delta"), _settings())
+    dated = downloader.download(_request(tmp_path / "dated"), _settings())
+
+    assert isinstance(delta, TransportRetryable)
+    assert delta.retry_after_seconds == 10
+    assert isinstance(dated, TransportRetryable)
+    assert dated.retry_after_seconds == 20
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"Retry-After", b"-1")],
+        [(b"Retry-After", b"1.5")],
+        [(b"Retry-After", b"not-a-date")],
+        [(b"Retry-After", b"9" * 10_000)],
+        [(b"Retry-After", b"10"), (b"Retry-After", b"20")],
+        [(b"Retry-After", b"Wed, 01 Jan 2020 00:00:00 GMT")],
+    ],
+)
+def test_httpx_ignores_invalid_ambiguous_or_past_retry_after(
+    tmp_path: Path,
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    downloader = _downloader(
+        httpx.MockTransport(lambda _: httpx.Response(503, headers=headers)),
+        wall_clock=now.timestamp,
+    )
+
+    result = downloader.download(_request(tmp_path), _settings())
+
+    assert isinstance(result, TransportRetryable)
+    assert result.retry_after_seconds is None
 
 
 # Ordinary request failures are terminal so an orchestrator will not retry them.
@@ -475,38 +500,6 @@ def test_httpx_decoding_failure_fails_closed(tmp_path: Path) -> None:
         _downloader(httpx.MockTransport(handler)).download(
             _request(tmp_path), _settings()
         )
-
-
-def test_httpx_cancellation_interrupts_inherited_retry_wait(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The configured inner retry delay remains promptly cancellable."""
-    entered_sleep = threading.Event()
-
-    async def stalled_sleep(_: float) -> None:
-        entered_sleep.set()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(download_files_module.asyncio, "sleep", stalled_sleep)
-    downloader = HttpxDownloader(
-        transport=httpx.MockTransport(lambda _: httpx.Response(503)),
-        log=lambda _: None,
-    )
-    results: list[object] = []
-    worker = threading.Thread(
-        target=lambda: results.append(
-            downloader.download(_request(tmp_path), _settings(retries=2))
-        )
-    )
-    worker.start()
-    assert entered_sleep.wait(1.0)
-    downloader.cancel()
-    worker.join(1.0)
-
-    assert not worker.is_alive()
-    assert len(results) == 1
-    assert isinstance(results[0], TransportCancelled)
 
 
 def test_httpx_progress_logs_name_supplied_staging(tmp_path: Path) -> None:

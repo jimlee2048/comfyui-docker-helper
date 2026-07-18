@@ -1074,7 +1074,7 @@ def _run_disposable(
 
 # Every release image must exercise its real entrypoint once in CPU mode; this
 # is deliberately narrower than the lifecycle suite's deep hook and force matrix.
-@pytest.mark.acceptance(probes=(AcceptanceProbe.IMAGE,))
+@pytest.mark.acceptance(probes=(AcceptanceProbe.ENTRYPOINT_TOPOLOGY,))
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
 def test_default_entrypoint_has_tini_cdh_topology_and_completes_sigterm_shutdown(
     scenario: AcceptanceScenario,
@@ -1267,7 +1267,7 @@ def test_default_entrypoint_has_tini_cdh_topology_and_completes_sigterm_shutdown
         )
 
 
-@pytest.mark.acceptance(probes=(AcceptanceProbe.IMAGE,))
+@pytest.mark.acceptance(probes=(AcceptanceProbe.IMAGE_ENVIRONMENT,))
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
 def test_image_has_exact_environment_and_disposition(
     scenario: AcceptanceScenario,

@@ -43,7 +43,8 @@ uv run pytest tests/smoke/test_python_group_resolver_live.py --run-network
 CDH_APPLICATION_ZERO_IMAGE=example/image:tag \
 CDH_APPLICATION_ZERO_CONTEXT=/path/to/rendered-context \
   uv run pytest tests/smoke/test_application_acceptance_live.py \
-  --acceptance-scenario py313-zero --run-network --run-docker --run-slow
+  --acceptance-scenario py313-zero \
+  --run-network --run-docker --run-gpu --run-slow
 ```
 
 The ordinary quality boundary is `scripts/run-quality-gates.sh <python>`. It
@@ -68,9 +69,14 @@ release scenario are failures, not skips. Moving-input scenarios are
 non-blocking canaries and must be reported separately from release acceptance.
 
 Render each selected context once, build its image once, and reuse both across
-all applicable inspection, CPU, startup, CLI, and GPU probes. Clean-cache
-rebuilds and complete GPU matrices are reserved for changes that own those
-risks or for a cumulative release gate.
+all applicable inspection, CPU, startup, CLI, and GPU probes. Every durable
+release image must pass its real GPU functional probe; the complete selected
+release run therefore authorizes network, Docker, GPU, and slow costs. Only the
+functional GPU probe needs GPU device access. Context inspection, image
+metadata, CLI, PID-topology, and other auxiliary containers do not acquire a
+GPU merely because they share the same release run. Clean-cache rebuilds and
+the complete GPU-required matrix are reserved for changes that own those risks
+or for a cumulative release gate.
 
 Lifecycle changes reuse one current image produced by the formal renderer; do
 not create a second handwritten Dockerfile for lifecycle tests. Set

@@ -148,13 +148,17 @@ def test_selected_release_reports_missing_costs_and_runs_when_complete(
         scenario_id,
         "--run-network",
         "--run-docker",
+        "--run-gpu",
         "--run-slow",
         environment=environment,
     )
 
     assert partial.returncode == 4, partial.stdout + partial.stderr
     assert token not in partial.stdout
-    assert f"{scenario_id}: --run-docker, --run-slow" in partial.stdout + partial.stderr
+    assert (
+        f"{scenario_id}: --run-docker, --run-gpu, --run-slow"
+        in partial.stdout + partial.stderr
+    )
     assert complete.returncode == 0, complete.stdout + complete.stderr
     assert token in complete.stdout
     assert "1 passed" in complete.stdout

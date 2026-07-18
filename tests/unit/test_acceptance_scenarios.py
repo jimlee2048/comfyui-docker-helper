@@ -49,7 +49,7 @@ def test_catalog_has_unique_total_fixture_ownership() -> None:
     assert len(documents) == len(set(documents))
 
 
-# The durable matrix is six images with one non-default live CUDA selector.
+# The durable matrix is six GPU-accepted images with one non-default CUDA selector.
 def test_release_matrix_has_exact_dispositions_and_selector_allocation() -> None:
     assert len(RELEASE_SCENARIOS) == 6
     assert Counter(scenario.python_version for scenario in RELEASE_SCENARIOS) == {
@@ -92,6 +92,8 @@ def test_release_matrix_has_exact_dispositions_and_selector_allocation() -> None
         for scenario in RELEASE_SCENARIOS
     ]
     assert len(artifact_inputs) == len(set(artifact_inputs))
+    assert all(Capability.GPU_AUDIO in item.capabilities for item in RELEASE_SCENARIOS)
+    assert all(Cost.GPU in item.costs for item in RELEASE_SCENARIOS)
 
 
 # Live release-profile gates consume each catalog-owned version once in release order.
@@ -111,7 +113,11 @@ def test_release_probe_policy_is_typed_unique_and_capability_derived() -> None:
         probes = required_release_probes(scenario)
         assert len(probes) == len(set(probes))
         assert all(isinstance(probe, AcceptanceProbe) for probe in probes)
-        assert {AcceptanceProbe.CONTEXT, AcceptanceProbe.IMAGE} <= set(probes)
+        assert {
+            AcceptanceProbe.CONTEXT,
+            AcceptanceProbe.ENTRYPOINT_TOPOLOGY,
+            AcceptanceProbe.IMAGE_ENVIRONMENT,
+        } <= set(probes)
         assert (AcceptanceProbe.CLI_BRIDGE in probes) is (
             Capability.CLI in scenario.capabilities
         )
@@ -221,6 +227,7 @@ def test_selected_release_scenario_requires_all_artifact_inputs(
             "-q",
             "--run-network",
             "--run-docker",
+            "--run-gpu",
             "--run-slow",
             "--acceptance-scenario",
             scenario.id,
@@ -248,6 +255,16 @@ def test_selected_release_scenario_requires_all_artifact_inputs(
     [
         ("py313-full", "py313-full", None),
         ("py313-full", "py313-full and not cuda_audio", "missing cuda-audio"),
+        (
+            "py313-full",
+            "py313-full and not default_entrypoint",
+            "missing entrypoint-topology",
+        ),
+        (
+            "py313-full",
+            "py313-full and not image_has_exact_environment",
+            "missing image-environment",
+        ),
         ("py313-zero", "py313-full", "py313-zero: missing"),
     ],
 )

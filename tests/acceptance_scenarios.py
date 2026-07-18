@@ -28,7 +28,8 @@ class Capability(StrEnum):
 
 class AcceptanceProbe(StrEnum):
     CONTEXT = "context"
-    IMAGE = "image"
+    ENTRYPOINT_TOPOLOGY = "entrypoint-topology"
+    IMAGE_ENVIRONMENT = "image-environment"
     CPU_AUDIO_APPLICATION = "cpu-audio-application"
     CLI_BRIDGE = "cli-bridge"
     CUDA_AUDIO = "cuda-audio"
@@ -102,8 +103,14 @@ ACCEPTANCE_SCENARIOS = (
         "application-zero.toml",
         "3.13.14",
         ScenarioClass.RELEASE,
-        frozenset({Capability.APPLICATION, Capability.CPU_AUDIO}),
-        _BASE_COSTS,
+        frozenset(
+            {
+                Capability.APPLICATION,
+                Capability.CPU_AUDIO,
+                Capability.GPU_AUDIO,
+            }
+        ),
+        _BASE_COSTS | {Cost.GPU},
         "CDH_APPLICATION_ZERO_IMAGE",
         "CDH_APPLICATION_ZERO_CONTEXT",
         "cudnn-devel",
@@ -114,8 +121,15 @@ ACCEPTANCE_SCENARIOS = (
         "application-manager-disabled.toml",
         "3.13.14",
         ScenarioClass.RELEASE,
-        frozenset({Capability.APPLICATION, Capability.CLI, Capability.CPU_AUDIO}),
-        _BASE_COSTS,
+        frozenset(
+            {
+                Capability.APPLICATION,
+                Capability.CLI,
+                Capability.CPU_AUDIO,
+                Capability.GPU_AUDIO,
+            }
+        ),
+        _BASE_COSTS | {Cost.GPU},
         "CDH_APPLICATION_MANAGER_DISABLED_IMAGE",
         "CDH_APPLICATION_MANAGER_DISABLED_CONTEXT",
         "cudnn-devel",
@@ -133,9 +147,10 @@ ACCEPTANCE_SCENARIOS = (
                 Capability.CUSTOM_NODES,
                 Capability.HOOKS,
                 Capability.CPU_AUDIO,
+                Capability.GPU_AUDIO,
             }
         ),
-        _BASE_COSTS,
+        _BASE_COSTS | {Cost.GPU},
         "CDH_APPLICATION_CLI_DISABLED_MIXED_IMAGE",
         "CDH_APPLICATION_CLI_DISABLED_MIXED_CONTEXT",
         "cudnn-devel",
@@ -318,15 +333,21 @@ RELEASE_PYTHON_PROFILES = tuple(
     )
 )
 
-_BASE_RELEASE_PROBES = frozenset({AcceptanceProbe.CONTEXT, AcceptanceProbe.IMAGE})
+_BASE_RELEASE_PROBES = frozenset(
+    {
+        AcceptanceProbe.CONTEXT,
+        AcceptanceProbe.ENTRYPOINT_TOPOLOGY,
+        AcceptanceProbe.IMAGE_ENVIRONMENT,
+    }
+)
 _REQUIRED_PROBES_BY_CAPABILITY = {
     Capability.APPLICATION: frozenset({AcceptanceProbe.CPU_AUDIO_APPLICATION}),
     Capability.CLI: frozenset({AcceptanceProbe.CLI_BRIDGE}),
     Capability.MANAGER: frozenset(
-        {AcceptanceProbe.IMAGE, AcceptanceProbe.CPU_AUDIO_APPLICATION}
+        {AcceptanceProbe.IMAGE_ENVIRONMENT, AcceptanceProbe.CPU_AUDIO_APPLICATION}
     ),
-    Capability.CUSTOM_NODES: frozenset({AcceptanceProbe.IMAGE}),
-    Capability.HOOKS: frozenset({AcceptanceProbe.IMAGE}),
+    Capability.CUSTOM_NODES: frozenset({AcceptanceProbe.IMAGE_ENVIRONMENT}),
+    Capability.HOOKS: frozenset({AcceptanceProbe.IMAGE_ENVIRONMENT}),
     Capability.CPU_AUDIO: frozenset({AcceptanceProbe.CPU_AUDIO_APPLICATION}),
     Capability.GPU_AUDIO: frozenset({AcceptanceProbe.CUDA_AUDIO}),
 }

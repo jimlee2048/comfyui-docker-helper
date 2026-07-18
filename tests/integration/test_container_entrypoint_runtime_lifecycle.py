@@ -5,6 +5,7 @@ from __future__ import annotations
 import signal
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -24,6 +25,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     RuntimeHookPlan,
     RuntimeHookResult,
+    discover_runtime_hooks,
 )
 
 
@@ -106,6 +108,19 @@ class SignalOnFirstWaitChild(FakeChild):
     def send_signal(self, sig: signal.Signals) -> None:
         super().send_signal(sig)
         self.returncode = self._final_returncode
+
+
+class ManualClock:
+    """Deterministic monotonic clock for lifecycle timeout characterization."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds if seconds > 0 else 0.1
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -291,6 +306,57 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         "readiness",
         "post-start",
         "wait",
+    ]
+
+
+# Natural child exit preserves the child result, skips signal-only stop hooks,
+# and performs ordinary cleanup for every already-owned auxiliary.
+def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop", "90-stop.sh")
+    hook_plan = discover_runtime_hooks(
+        baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+        mounted_hooks_path=hooks,
+    )
+    events: list[str] = []
+    child = FakeChild(19, events=events, wait_event="child:wait")
+    async_handle = Mock()
+    async_handle.is_alive.side_effect = [True, False]
+    async_handle.request_stop.side_effect = lambda: events.append("async:stop")
+    sshd_handle = Mock(returncode=None)
+
+    def terminate_sshd() -> None:
+        events.append("ssh:terminate")
+        sshd_handle.returncode = 0
+
+    sshd_handle.poll.side_effect = lambda: sshd_handle.returncode
+    sshd_handle.terminate.side_effect = terminate_sshd
+    sshd_handle.wait.side_effect = lambda: events.append("ssh:wait") or 0
+    stop_hook_runner = Mock()
+
+    result = entrypoint_module._wait_with_signal_forwarding(
+        child,
+        hook_plan=hook_plan,
+        runtime=runtime,
+        source_env={"PATH": "/usr/bin"},
+        runtime_stop_hook_runner=stop_hook_runner,
+        async_handle=async_handle,
+        sshd_handle=sshd_handle,
+        sshd_shutdown_requested=entrypoint_module.threading.Event(),
+    )
+
+    assert result == 19
+    stop_hook_runner.assert_not_called()
+    async_handle.terminate_backends.assert_not_called()
+    sshd_handle.kill.assert_not_called()
+    assert events == [
+        "child:wait",
+        "async:stop",
+        "ssh:terminate",
+        "ssh:wait",
     ]
 
 
@@ -1379,41 +1445,32 @@ def test_auxiliary_stop_timeouts_force_owned_cleanup(
         def is_alive(self) -> bool:
             return True
 
-    def clock() -> tuple[Callable[[], float], Callable[[float], None]]:
-        now = 0.0
-
-        def monotonic() -> float:
-            return now
-
-        def sleep(seconds: float) -> None:
-            nonlocal now
-            now += seconds if seconds > 0 else 0.1
-
-        return monotonic, sleep
-
-    ssh_monotonic, ssh_sleep = clock()
+    # The shared clock deliberately exposes the current cumulative boundary:
+    # each serial auxiliary starts a fresh full timeout. The outer-budget
+    # implementation will replace this expectation atomically.
+    clock = ManualClock()
     stopped_ssh = entrypoint_module._stop_sshd_runtime_service(
         StuckSshd(),
         cancel_requested=lambda: False,
         shutdown_requested=entrypoint_module.threading.Event(),
         timeout=0.2,
         poll_interval=0.1,
-        monotonic=ssh_monotonic,
-        sleep=ssh_sleep,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
     )
-    async_monotonic, async_sleep = clock()
     stopped_async = entrypoint_module._stop_runtime_async_download_queue(
         StuckAsyncQueue(),
         cancel_requested=lambda: False,
         timeout=0.2,
         poll_interval=0.1,
-        monotonic=async_monotonic,
-        sleep=async_sleep,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
     )
 
     captured = capsys.readouterr()
     assert stopped_ssh is False
     assert stopped_async is False
+    assert clock.now == pytest.approx(0.5)
     assert events == [
         "ssh:terminate",
         "ssh:kill",

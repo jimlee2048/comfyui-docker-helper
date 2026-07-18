@@ -493,6 +493,48 @@ download_failure_policy = "{mounted_value}"
     assert result.config.cdh.download_failure_policy == value
 
 
+# The planned outer-shutdown inputs remain deliberately inactive until their
+# schema, precedence, and runtime consumer can be enabled as one atomic change.
+def test_shutdown_timeout_toml_is_rejected_before_runtime_activation(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[cdh]
+shutdown_timeout = 8
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+        )
+
+    assert _identities(raised.value) == [
+        (("cdh", "shutdown_timeout"), "schema.extra_forbidden")
+    ]
+
+
+def test_shutdown_timeout_environment_is_inert_before_runtime_activation(
+    tmp_path: Path,
+) -> None:
+    baseline = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={},
+    )
+    candidate = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={"CDH_SHUTDOWN_TIMEOUT": "55.5"},
+    )
+
+    assert candidate == baseline
+
+
 # Host-only build-time settings may appear in mounted files but must not affect
 # container runtime state.
 def test_known_host_only_runtime_config_warns_and_is_ignored(tmp_path: Path) -> None:

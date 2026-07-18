@@ -50,9 +50,7 @@ def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
     assert result.config.system.ssh.password == ""
     assert result.config.system.ssh.pub_keys == []
     assert result.files == ()
-    assert result.file_documents == ()
     assert result.warnings == ()
-    assert result.explicit_paths == frozenset()
 
 
 def test_baked_config_overrides_code_defaults(tmp_path: Path) -> None:
@@ -659,9 +657,6 @@ id = "node"
             DiagnosticSeverity.WARNING,
         ),
     ]
-    assert result.is_explicit(("comfyui", "listen"))
-    assert not result.is_explicit(("comfyui", "version"))
-    assert not result.is_explicit(("system", "workspace"))
 
 
 def test_unknown_runtime_sections_and_fields_fail(tmp_path: Path) -> None:
@@ -692,8 +687,8 @@ unexpected = "value"
     ]
 
 
-# Runtime file config coverage preserves file-layer shape plus authored files.N
-# diagnostics before runtime_files turns entries into executable plans.
+# Runtime file config coverage preserves effective item shape plus authored
+# files.N diagnostics before runtime_files turns entries into executable plans.
 def test_runtime_file_entries_are_accepted_and_recorded(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
@@ -715,17 +710,6 @@ filename = "model.bin"
             "url": "https://example.com/model.bin",
             "dir": "models",
             "filename": "model.bin",
-        },
-    )
-    assert result.file_documents == (
-        {
-            "files": [
-                {
-                    "url": "https://example.com/model.bin",
-                    "dir": "models",
-                    "filename": "model.bin",
-                }
-            ]
         },
     )
 
@@ -1324,39 +1308,3 @@ def test_env_extra_args_reject_cdh_controlled_flags(tmp_path: Path) -> None:
     assert _identities(error.value) == [
         (("comfyui", "extra_args", 1), "comfyui.controlled_extra_arg")
     ]
-
-
-def test_baked_runtime_defaults_do_not_create_user_explicit_provenance(
-    tmp_path: Path,
-) -> None:
-    baked = _write(
-        tmp_path / "baked.toml",
-        """
-[comfyui]
-listen = "0.0.0.0"
-port = 8188
-extra_args = []
-
-[cdh]
-default_downloader = "aria2"
-default_download_mode = "sync"
-
-[cdh.downloader.aria2]
-rpc_port = 6800
-""",
-    )
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[comfyui]
-port = 8188
-""",
-    )
-
-    result = load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
-
-    assert result.config.comfyui.listen == "0.0.0.0"
-    assert result.config.comfyui.port == 8188
-    assert not result.is_explicit(("comfyui", "listen"))
-    assert result.is_explicit(("comfyui", "port"))
-    assert not result.is_explicit(("cdh", "default_downloader"))

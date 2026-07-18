@@ -23,16 +23,6 @@ _ECDSA_CURVES = {
 _AUTHORIZED_KEYS_FORBIDDEN_CHARACTERS = frozenset({"\n", "\r", "\x00"})
 
 
-class SshPublicKeyValidationError(ValueError):
-    """SSH public-key validation failure represented by stable diagnostics."""
-
-    def __init__(self, diagnostics: tuple[Diagnostic, ...]) -> None:
-        if not diagnostics:
-            raise ValueError("SSH public key errors require diagnostics")
-        self.diagnostics = diagnostics
-        super().__init__("SSH public key configuration is invalid")
-
-
 def normalize_ssh_public_keys(
     values: list[str],
     *,

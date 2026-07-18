@@ -152,12 +152,6 @@ class RuntimeFileReconciliation:
     cleanup_pending_digests: frozenset[str]
 
 
-@dataclass(frozen=True, slots=True)
-class _MergedRuntimeFileItem:
-    document: dict[str, Any]
-    source_index: int
-
-
 class RuntimeFilePlanError(ValueError):
     """Runtime file planning failure represented by stable diagnostics."""
 
@@ -182,27 +176,6 @@ class RuntimeFileDownloadCancelled(Exception):
     """Runtime download work stopped after a cooperative cancellation request."""
 
 
-class _RuntimeFilePatch(ConfigModel):
-    dir: str
-    filename: str
-    url: str | None = None
-    overwrite: bool | None = None
-    checksum: str | None = None
-    downloader: DownloaderName | None = None
-    download_mode: Literal["sync", "async"] | None = None
-
-    @field_validator("checksum")
-    @classmethod
-    def _normalize_checksum(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return normalize_file_checksum(value)
-
-
-class _RuntimeFilesDocument(ConfigModel):
-    files: list[_RuntimeFilePatch] | None = None
-
-
 class _RuntimeFileConfig(ConfigModel):
     dir: str
     filename: str
@@ -221,21 +194,20 @@ class _RuntimeFileConfig(ConfigModel):
 
 
 def build_runtime_file_plan(
-    documents: Iterable[Mapping[str, Any]],
+    files: Iterable[Mapping[str, Any]],
     *,
     comfyui_path: str | Path,
     default_download_mode: Literal["sync", "async"] = "sync",
 ) -> RuntimeFilePlan:
-    """Merge runtime file documents and derive safe target paths."""
-    merged_items = _merge_runtime_file_items(documents)
+    """Validate final merged runtime file items and derive safe target paths."""
     diagnostics: list[Diagnostic] = []
     items: list[RuntimeFilePlanItem] = []
     root = Path(comfyui_path)
 
-    for item in merged_items:
-        path: RuntimeFilePath = ("files", item.source_index)
+    for source_index, item in enumerate(files):
+        path: RuntimeFilePath = ("files", source_index)
         try:
-            config = _RuntimeFileConfig.model_validate(item.document)
+            config = _RuntimeFileConfig.model_validate(item)
         except ValidationError as error:
             diagnostics.extend(_diagnostics_from_validation_error(error, path))
             continue
@@ -1088,73 +1060,6 @@ def _notify_runtime_download_state(
     )
 
 
-def merge_runtime_file_items(
-    documents: Iterable[Mapping[str, Any]],
-) -> tuple[dict[str, Any], ...]:
-    """Merge runtime file arrays by normalized relative target path."""
-    return tuple(item.document for item in _merge_runtime_file_items(documents))
-
-
-def _merge_runtime_file_items(
-    documents: Iterable[Mapping[str, Any]],
-) -> tuple[_MergedRuntimeFileItem, ...]:
-    merged: list[_MergedRuntimeFileItem] = []
-    indexes: dict[str, int] = {}
-    diagnostics: list[Diagnostic] = []
-
-    for document in documents:
-        try:
-            parsed = _RuntimeFilesDocument.model_validate(
-                _files_only_document(document)
-            )
-        except ValidationError as error:
-            diagnostics.extend(_diagnostics_from_validation_error(error, ()))
-            continue
-
-        if parsed.files is None:
-            continue
-        if not parsed.files:
-            merged.clear()
-            indexes.clear()
-            continue
-
-        for source_index, item in enumerate(parsed.files):
-            path: RuntimeFilePath = ("files", source_index)
-            item_document = item.model_dump(mode="json", exclude_none=True)
-            has_valid_url = validate_runtime_file_url(
-                item.url,
-                (*path, "url"),
-                diagnostics,
-            )
-            key = _merge_key(item, path, diagnostics)
-            if key is None or not has_valid_url:
-                continue
-            if key in indexes:
-                previous = merged[indexes[key]]
-                merged[indexes[key]] = _MergedRuntimeFileItem(
-                    document={**previous.document, **item_document},
-                    source_index=source_index,
-                )
-            else:
-                indexes[key] = len(merged)
-                merged.append(
-                    _MergedRuntimeFileItem(
-                        document=item_document,
-                        source_index=source_index,
-                    )
-                )
-
-    if diagnostics:
-        raise RuntimeFilePlanError(tuple(diagnostics))
-    return tuple(merged)
-
-
-def _files_only_document(document: Mapping[str, Any]) -> dict[str, Any]:
-    if "files" not in document:
-        return {}
-    return {"files": document["files"]}
-
-
 def _effective_downloader(
     item: RuntimeFilePlanItem,
     config: RuntimeConfig,
@@ -1171,19 +1076,8 @@ def _runtime_item_root(item: RuntimeFilePlanItem) -> Path:
     return item.target.parents[len(relative_parts) - 1]
 
 
-def _merge_key(
-    item: _RuntimeFilePatch,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> str | None:
-    normalized = normalize_runtime_file_path(item.dir, item.filename, path, diagnostics)
-    if normalized is None:
-        return None
-    return normalized[1]
-
-
 def _normalize_runtime_file_path(
-    item: _RuntimeFilePatch | _RuntimeFileConfig,
+    item: _RuntimeFileConfig,
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
 ) -> tuple[PurePosixPath, str] | None:

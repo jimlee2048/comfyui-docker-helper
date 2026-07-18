@@ -246,7 +246,7 @@ class RuntimeDownloads:
     ) -> None:
         """Reconcile files and run the synchronous queue as one owned operation."""
         plan = build_runtime_file_plan(
-            ({"files": list(self._files)},),
+            self._files,
             comfyui_path=self._runtime.comfyui_path,
             default_download_mode=self._config.cdh.default_download_mode,
         )

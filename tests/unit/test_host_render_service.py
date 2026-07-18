@@ -880,7 +880,7 @@ download_mode = "async"
     comfyui = tmp_path / "ComfyUI"
     comfyui.mkdir()
     runtime_plan = build_runtime_file_plan(
-        runtime.file_documents,
+        runtime.files,
         comfyui_path=comfyui,
         default_download_mode=runtime.config.cdh.default_download_mode,
     )

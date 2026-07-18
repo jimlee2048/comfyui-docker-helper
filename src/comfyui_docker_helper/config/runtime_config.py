@@ -57,13 +57,7 @@ class RuntimeConfigurationResult:
 
     config: RuntimeConfig
     files: tuple[dict[str, Any], ...] = ()
-    file_documents: tuple[dict[str, Any], ...] = ()
     warnings: tuple[Diagnostic, ...] = ()
-    explicit_paths: frozenset[RuntimePath] = frozenset()
-
-    def is_explicit(self, path: RuntimePath) -> bool:
-        """Return whether a mounted runtime config authored the path."""
-        return path in self.explicit_paths
 
 
 class RuntimeConfigurationError(ValueError):
@@ -153,11 +147,10 @@ def load_runtime_config(
     warnings: list[Diagnostic] = []
     documents: list[dict[str, Any]] = [_runtime_defaults_document()]
     file_documents: list[dict[str, Any]] = []
-    explicit_paths: set[RuntimePath] = set()
 
-    for source, config_path in (
-        ("baked", Path(baked_config_path)),
-        ("mounted", Path(mounted_config_path)),
+    for config_path in (
+        Path(baked_config_path),
+        Path(mounted_config_path),
     ):
         if not config_path.exists():
             continue
@@ -169,8 +162,6 @@ def load_runtime_config(
         documents.append(_runtime_config_document(document))
         if "files" in document:
             file_documents.append({"files": document["files"]})
-        if source == "mounted":
-            explicit_paths.update(_runtime_explicit_paths(document))
 
     env_document, env_pub_key = _runtime_env_document(
         os.environ if environ is None else environ
@@ -194,9 +185,7 @@ def load_runtime_config(
     return RuntimeConfigurationResult(
         config=config,
         files=files,
-        file_documents=tuple(file_documents),
         warnings=tuple(warnings),
-        explicit_paths=frozenset(explicit_paths),
     )
 
 
@@ -698,25 +687,6 @@ def _validate_runtime_extra_args(config: RuntimeConfig) -> None:
             )
     if diagnostics:
         raise RuntimeConfigurationError(tuple(diagnostics))
-
-
-def _runtime_explicit_paths(document: Mapping[str, Any]) -> frozenset[RuntimePath]:
-    paths: set[RuntimePath] = set()
-    _collect_runtime_paths(document, (), paths)
-    return frozenset(paths)
-
-
-def _collect_runtime_paths(
-    value: Any,
-    path: RuntimePath,
-    paths: set[RuntimePath],
-) -> None:
-    if path:
-        paths.add(path)
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if isinstance(key, str):
-                _collect_runtime_paths(item, (*path, key), paths)
 
 
 def _normalize_pydantic_location(location: tuple[Any, ...]) -> DiagnosticPath:

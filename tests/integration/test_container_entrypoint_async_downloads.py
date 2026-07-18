@@ -1011,13 +1011,9 @@ filename = "b.bin"
             for item in runtime_files_module.build_runtime_file_plan(
                 [
                     {
-                        "files": [
-                            {
-                                "url": "https://example.com/a.bin",
-                                "dir": "models",
-                                "filename": "a.bin",
-                            }
-                        ]
+                        "url": "https://example.com/a.bin",
+                        "dir": "models",
+                        "filename": "a.bin",
                     }
                 ],
                 comfyui_path=runtime.comfyui_path,

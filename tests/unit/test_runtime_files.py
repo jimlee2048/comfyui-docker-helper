@@ -23,7 +23,6 @@ from comfyui_docker_helper.container.runtime_files import (
     build_runtime_file_plan,
     canonical_runtime_file_identity_bytes,
     download_runtime_files,
-    merge_runtime_file_items,
     process_runtime_file_downloads,
     reconcile_runtime_file_plan,
     runtime_file_identity_digest,
@@ -168,7 +167,7 @@ def _config(
 
 def _plan(root: Path, *files: dict) -> RuntimeFilePlan:
     root.mkdir(parents=True, exist_ok=True)
-    return build_runtime_file_plan([{"files": list(files)}], comfyui_path=root)
+    return build_runtime_file_plan(files, comfyui_path=root)
 
 
 def _file(
@@ -329,26 +328,6 @@ def test_runtime_staging_uses_transfer_identity_digest(tmp_path: Path) -> None:
         / ".cdh-staging"
         / f"cdh-{digest.removeprefix('sha256:')}.part"
     )
-
-
-def test_runtime_file_merge_overrides_by_target_and_empty_list_resets() -> None:
-    baked = {"files": [_file("a.bin"), _file("b.bin")]}
-    mounted = {
-        "files": [
-            {
-                **_file("a.bin"),
-                "url": "https://mirror.test/a.bin",
-                "checksum": _checksum(b"a"),
-            }
-        ]
-    }
-
-    merged = merge_runtime_file_items([baked, mounted])
-
-    assert [item["filename"] for item in merged] == ["a.bin", "b.bin"]
-    assert merged[0]["url"] == "https://mirror.test/a.bin"
-    assert merged[0]["checksum"] == _checksum(b"a")
-    assert merge_runtime_file_items([baked, {"files": []}]) == ()
 
 
 @pytest.mark.parametrize(

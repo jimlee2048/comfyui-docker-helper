@@ -10,13 +10,13 @@ import pytest
 from comfyui_docker_helper.container.process_control import (
     ProcessGroupSignalError,
     ProcessStartError,
-    force_reap_direct_process,
     reap_process_if_exited,
+    request_force_direct_process,
     send_direct_process_signal,
     start_direct_process,
     terminate_direct_process,
     terminate_direct_process_until,
-    terminate_process_group,
+    terminate_process_group_until,
     wait_for_process_reap,
 )
 
@@ -152,7 +152,6 @@ def test_direct_process_wait_and_escalation_are_bounded_and_reaped() -> None:
     assert cooperative.kills == 0
     assert cooperative.waits == 1
 
-    clock = FakeClock()
     ignored = FakeProcess()
     assert (
         send_direct_process_signal(
@@ -161,20 +160,11 @@ def test_direct_process_wait_and_escalation_are_bounded_and_reaped() -> None:
         )
         is True
     )
-    assert (
-        force_reap_direct_process(
-            ignored,
-            timeout=0.2,
-            poll_interval=0.1,
-            monotonic=clock.monotonic,
-            sleep=clock.sleep,
-        )
-        is True
-    )
+    assert request_force_direct_process(ignored) is True
+    assert wait_for_process_reap(ignored, timeout=0.2, poll_interval=0.1) is True
     assert ignored.signals == [signal.SIGINT]
     assert ignored.kills == 1
     assert ignored.waits == 1
-    assert clock.now == pytest.approx(0.0)
 
 
 # The absolute-deadline primitive returns strict reap evidence and never opens
@@ -212,15 +202,14 @@ def test_process_group_escalation_and_signal_failure_are_typed() -> None:
             process.returncode = -int(signal.SIGKILL)
 
     assert (
-        terminate_process_group(
+        terminate_process_group_until(
             process,
-            termination_grace=0.2,
-            kill_grace=0.2,
+            deadline=0.2,
             poll_interval=0.1,
             monotonic=clock.monotonic,
             sleep=clock.sleep,
             signaler=signaler,
-        )
+        ).forced
         is True
     )
     assert signals == [(5151, signal.SIGTERM), (5151, signal.SIGKILL)]
@@ -238,16 +227,15 @@ def test_process_group_escalation_and_signal_failure_are_typed() -> None:
         cooperative.returncode = -int(signal.SIGTERM)
 
     assert (
-        terminate_process_group(
+        terminate_process_group_until(
             cooperative,
-            termination_grace=0.2,
-            kill_grace=0.2,
+            deadline=0.2,
             poll_interval=0.1,
             monotonic=cooperative_clock.monotonic,
             sleep=cooperative_sleep,
             signaler=cooperative_signaler,
-        )
-        is True
+        ).forced
+        is False
     )
     assert cooperative_signals == [(5252, signal.SIGTERM)]
     assert cooperative.waits == 1
@@ -259,10 +247,9 @@ def test_process_group_escalation_and_signal_failure_are_typed() -> None:
         raise PermissionError("not permitted")
 
     with pytest.raises(ProcessGroupSignalError) as error:
-        terminate_process_group(
+        terminate_process_group_until(
             failed,
-            termination_grace=0.2,
-            kill_grace=0.2,
+            deadline=0.2,
             poll_interval=0.1,
             signaler=fail_signal,
         )
@@ -289,54 +276,21 @@ def test_process_group_repeated_signal_interrupts_termination_grace() -> None:
         force = True
 
     assert (
-        terminate_process_group(
+        terminate_process_group_until(
             process,
-            termination_grace=30.0,
-            kill_grace=30.0,
+            deadline=30.0,
             poll_interval=0.1,
             monotonic=clock.monotonic,
             sleep=sleep,
             signaler=signaler,
             force_requested=lambda: force,
-        )
+        ).forced
         is True
     )
 
     assert signals == [(5353, signal.SIGTERM), (5353, signal.SIGKILL)]
     assert clock.now == pytest.approx(0.1)
     assert process.waits == 1
-
-    kill_clock = FakeClock()
-    kill_wait_process = FakeProcess(pid=5454)
-    kill_wait_signals: list[tuple[int, signal.Signals]] = []
-    sleep_calls = 0
-
-    def kill_wait_signaler(pid: int, sig: signal.Signals) -> None:
-        kill_wait_signals.append((pid, sig))
-
-    def kill_wait_sleep(seconds: float) -> None:
-        nonlocal sleep_calls
-        kill_clock.sleep(seconds)
-        sleep_calls += 1
-
-    assert (
-        terminate_process_group(
-            kill_wait_process,
-            termination_grace=0.1,
-            kill_grace=30.0,
-            poll_interval=0.1,
-            monotonic=kill_clock.monotonic,
-            sleep=kill_wait_sleep,
-            signaler=kill_wait_signaler,
-            force_requested=lambda: sleep_calls >= 2,
-        )
-        is False
-    )
-    assert kill_wait_signals == [
-        (5454, signal.SIGTERM),
-        (5454, signal.SIGKILL),
-    ]
-    assert kill_clock.now == pytest.approx(0.2)
 
 
 # A terminal child is reaped once; an active child remains owned when its

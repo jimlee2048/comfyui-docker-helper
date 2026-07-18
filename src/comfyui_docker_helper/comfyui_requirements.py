@@ -242,12 +242,6 @@ def merge_requirement_members(
     return tuple(result)
 
 
-def requirement_text(member: DirectPythonRequestMember) -> str:
-    """Render one normalized direct member without changing selector meaning."""
-    extras = f"[{','.join(member.extras)}]" if member.extras else ""
-    return f"{member.package}{extras}{member.selector}"
-
-
 def _member(requirement: Requirement) -> DirectPythonRequestMember:
     try:
         selector = str(SpecifierSet(str(requirement.specifier)))

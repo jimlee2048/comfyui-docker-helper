@@ -193,25 +193,6 @@ def send_direct_process_signal(
     return True
 
 
-def force_reap_direct_process(
-    process: DirectProcess,
-    *,
-    timeout: float,
-    poll_interval: float,
-    monotonic: Monotonic = time.monotonic,
-    sleep: Sleep = time.sleep,
-) -> bool:
-    """Kill a running direct child and wait for its terminal result to be reaped."""
-    request_force_direct_process(process)
-    return wait_for_process_reap(
-        process,
-        timeout=timeout,
-        poll_interval=poll_interval,
-        monotonic=monotonic,
-        sleep=sleep,
-    )
-
-
 def request_force_direct_process(process: DirectProcess) -> bool:
     """Send SIGKILL to one running direct child without waiting."""
     if process.poll() is not None:
@@ -254,26 +235,6 @@ def terminate_direct_process_until(
                 return ProcessTerminationResult(terminal=terminal, forced=True)
         delay = poll_interval if forced else min(poll_interval, deadline - now)
         sleep(max(0.0, delay))
-
-
-def force_reap_process_group(
-    process: SessionLeaderProcess,
-    *,
-    timeout: float,
-    poll_interval: float,
-    monotonic: Monotonic = time.monotonic,
-    sleep: Sleep = time.sleep,
-    signaler: ProcessGroupSignaler | None = None,
-) -> bool:
-    """Kill one owned process group and wait for its direct leader to be reaped."""
-    request_force_process_group(process, signaler=signaler)
-    return wait_for_process_reap(
-        process,
-        timeout=timeout,
-        poll_interval=poll_interval,
-        monotonic=monotonic,
-        sleep=sleep,
-    )
 
 
 def request_force_process_group(
@@ -319,60 +280,6 @@ def terminate_process_group_until(
         sleep(max(0.0, delay))
 
 
-def terminate_process_group(
-    process: SessionLeaderProcess,
-    *,
-    termination_grace: float,
-    kill_grace: float,
-    poll_interval: float,
-    monotonic: Monotonic = time.monotonic,
-    sleep: Sleep = time.sleep,
-    signaler: ProcessGroupSignaler | None = None,
-    force_requested: ForceRequested = lambda: False,
-) -> bool:
-    """Terminate the session leader's group, escalating and reaping its child."""
-    if reap_process_if_exited(process) is not None:
-        return True
-    send = signal_process_group if signaler is None else signaler
-    if force_requested():
-        _send_process_group_signal(process, signal.SIGKILL, send)
-        return wait_for_process_reap(
-            process,
-            timeout=kill_grace,
-            poll_interval=poll_interval,
-            monotonic=monotonic,
-            sleep=sleep,
-        )
-    if not _send_process_group_signal(process, signal.SIGTERM, send):
-        return reap_process_if_exited(process) is not None
-    if _wait_for_process_group_reap(
-        process,
-        timeout=termination_grace,
-        poll_interval=poll_interval,
-        monotonic=monotonic,
-        sleep=sleep,
-        force_requested=force_requested,
-    ):
-        return True
-    _send_process_group_signal(process, signal.SIGKILL, send)
-    if force_requested():
-        return wait_for_process_reap(
-            process,
-            timeout=kill_grace,
-            poll_interval=poll_interval,
-            monotonic=monotonic,
-            sleep=sleep,
-        )
-    return _wait_for_process_group_reap(
-        process,
-        timeout=kill_grace,
-        poll_interval=poll_interval,
-        monotonic=monotonic,
-        sleep=sleep,
-        force_requested=force_requested,
-    )
-
-
 def signal_process_group(group_leader_pid: int, sig: signal.Signals) -> None:
     """Signal the process group owned by one new-session leader."""
     os.killpg(group_leader_pid, sig)
@@ -402,24 +309,3 @@ def _reap_process_if_exited_best_effort(
         return process.wait()
     except OSError:
         return observed
-
-
-def _wait_for_process_group_reap(
-    process: SessionLeaderProcess,
-    *,
-    timeout: float,
-    poll_interval: float,
-    monotonic: Monotonic,
-    sleep: Sleep,
-    force_requested: ForceRequested,
-) -> bool:
-    deadline = monotonic() + timeout
-    while True:
-        if reap_process_if_exited(process) is not None:
-            return True
-        if force_requested():
-            return False
-        now = monotonic()
-        if now >= deadline:
-            return False
-        sleep(min(poll_interval, deadline - now))

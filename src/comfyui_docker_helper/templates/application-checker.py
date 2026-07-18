@@ -370,6 +370,22 @@ def _check_manager_absent() -> None:
     )
 
 
+def _check_audio() -> None:
+    _payload(frozenset())
+    import torch
+    import torchaudio
+
+    waveform = torch.ones((1, 1600), dtype=torch.float32)
+    assert (waveform + 1).sum().item() == 3200
+    resampled = torchaudio.functional.resample(waveform, 16000, 8000)
+    assert resampled.shape == (1, 800)
+    mel = torchaudio.transforms.MelSpectrogram(
+        sample_rate=16000,
+        n_fft=400,
+    )(waveform)
+    assert mel.ndim == 3 and mel.shape[0] == 1 and mel.shape[1] > 0
+
+
 _CHECKS = {
     "inventory": _check_inventory,
     "pip": _check_pip,
@@ -377,6 +393,7 @@ _CHECKS = {
     "comfyui": _check_comfyui,
     "manager": _check_manager,
     "manager-absent": _check_manager_absent,
+    "audio": _check_audio,
 }
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import errno
-import json
 import os
 import re
 import shutil
@@ -32,6 +31,10 @@ from comfyui_docker_helper.config.build_plan import (
     RegistryNodePlan,
 )
 from comfyui_docker_helper.config.canonical_lock import normalized_registry_id
+from comfyui_docker_helper.config.custom_node_inventory import (
+    custom_node_inventory,
+    dump_custom_node_inventory,
+)
 from comfyui_docker_helper.config.final_validation import is_git_source_url
 from comfyui_docker_helper.config.registry_validation import (
     validate_registry_node_authority,
@@ -322,7 +325,7 @@ def install_custom_nodes(
     )
     _write_custom_node_inventory(
         Path(custom_nodes.custom_node_inventory),
-        _custom_node_inventory_bytes(nodes),
+        dump_custom_node_inventory(custom_node_inventory(nodes)),
     )
     observations.application.observe(
         lambda: observe_application_state(
@@ -1162,41 +1165,6 @@ def _managed_python_environment(
         }
     )
     return environment
-
-
-def _custom_node_inventory_bytes(nodes: Sequence[CustomNodePlan]) -> bytes:
-    entries: list[dict[str, str]] = []
-    for node in nodes:
-        if isinstance(node, RegistryNodePlan):
-            entries.append(
-                {
-                    "type": "registry",
-                    "id": node.id,
-                    "version": node.version,
-                    "verification": "registry-version",
-                    "control": "direct-cm-cli",
-                }
-            )
-        else:
-            entries.append(
-                {
-                    "type": "git",
-                    "url": node.url,
-                    "commit": node.commit,
-                    "target": Path(node.target).name,
-                    "verification": "git-commit",
-                    "control": "direct-git",
-                }
-            )
-    return (
-        json.dumps(
-            {"schema_version": 1, "nodes": entries},
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8")
 
 
 def _write_custom_node_inventory(

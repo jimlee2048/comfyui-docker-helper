@@ -21,6 +21,10 @@ from comfyui_docker_helper.config.build_plan import (
     HookPlan,
     RegistryNodePlan,
 )
+from comfyui_docker_helper.config.custom_node_inventory import (
+    custom_node_inventory,
+    dump_custom_node_inventory,
+)
 from comfyui_docker_helper.container import comfyui_installer, custom_node_installer
 from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallError
 from comfyui_docker_helper.container.custom_node_installer import (
@@ -336,10 +340,12 @@ def test_registry_scanner_rejects_normalized_duplicate_metadata(tmp_path: Path) 
 
 # Inventory evidence is canonical, declaration-ordered, exclusive, and exact.
 def test_custom_node_inventory_is_canonical_raw_ordered_and_minimal() -> None:
-    content = custom_node_installer._custom_node_inventory_bytes(
-        (
-            _node("Example_Node", "1.0.0-rc.1+CUDA.1"),
-            _node("second", "2.0.0"),
+    content = dump_custom_node_inventory(
+        custom_node_inventory(
+            (
+                _node("Example_Node", "1.0.0-rc.1+CUDA.1"),
+                _node("second", "2.0.0"),
+            )
         )
     )
 
@@ -366,11 +372,11 @@ def test_mixed_and_empty_inventory_bytes_preserve_typed_declaration_order(
     _application_phase, runtime = _application(tmp_path)
     git = _git_node(runtime, url="https://example.invalid/Raw/Node.git/")
 
-    assert custom_node_installer._custom_node_inventory_bytes(()) == (
+    assert dump_custom_node_inventory(custom_node_inventory(())) == (
         b'{"nodes":[],"schema_version":1}\n'
     )
-    assert custom_node_installer._custom_node_inventory_bytes(
-        (_node("Example_Node", "1.0.0"), git)
+    assert dump_custom_node_inventory(
+        custom_node_inventory((_node("Example_Node", "1.0.0"), git))
     ) == (
         b'{"nodes":[{"control":"direct-cm-cli","id":"Example_Node",'
         b'"type":"registry","verification":"registry-version",'
@@ -385,7 +391,7 @@ def test_custom_node_inventory_creation_is_exclusive_read_only_and_exact(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "custom-node-inventory.json"
-    content = custom_node_installer._custom_node_inventory_bytes((_node("a", "1.0.0"),))
+    content = dump_custom_node_inventory(custom_node_inventory((_node("a", "1.0.0"),)))
 
     custom_node_installer._write_custom_node_inventory(
         path,

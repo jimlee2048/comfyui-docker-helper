@@ -59,6 +59,7 @@ def test_root_command_exposes_current_groups() -> None:
     }
     assert set(command.commands["container"].commands) == {
         "download-files",
+        "emit-final-manifest",
         "entrypoint",
         "install-comfyui",
         "install-custom-nodes",
@@ -79,6 +80,10 @@ def test_root_command_exposes_current_groups() -> None:
         (
             ["container", "install-custom-nodes"],
             "Usage: cdh container install-custom-nodes",
+        ),
+        (
+            ["container", "emit-final-manifest"],
+            "Usage: cdh container emit-final-manifest",
         ),
         (["container", "entrypoint"], "Usage: cdh container entrypoint"),
     ],
@@ -123,7 +128,12 @@ def test_registry_helper_help_exposes_only_owned_inputs(
 
 @pytest.mark.parametrize(
     "command",
-    ["download-files", "install-comfyui", "install-custom-nodes"],
+    [
+        "download-files",
+        "install-comfyui",
+        "install-custom-nodes",
+        "emit-final-manifest",
+    ],
 )
 def test_container_commands_admit_one_canonical_plan_per_invocation(
     command: str,
@@ -172,6 +182,11 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
             (custom_nodes, application)
         ),
     )
+    monkeypatch.setattr(
+        container_cli,
+        "emit_final_manifest",
+        lambda projection, **_kwargs: observed.append((projection,)),
+    )
     monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
     monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
     monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
@@ -195,6 +210,35 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
             ],
             "install-comfyui": [(plan.application, plan.toolchain)],
             "install-custom-nodes": [(plan.custom_nodes, plan.application)],
+            "emit-final-manifest": [
+                (
+                    build_plan_input_module.FinalManifestInput(
+                        binding=build_plan_input_module.manifest_binding(plan),
+                        toolchain=plan.toolchain,
+                        application=plan.application,
+                        custom_nodes=(
+                            build_plan_input_module.FinalManifestCustomNodesInput(
+                                inventory_path=(
+                                    plan.custom_nodes.custom_node_inventory
+                                ),
+                                expected=build_plan_input_module.custom_node_inventory(
+                                    plan.custom_nodes.nodes
+                                ),
+                            )
+                        ),
+                        files=tuple(
+                            build_plan_input_module.FinalManifestFileInput(
+                                url=item.url,
+                                target=item.target,
+                                checksum=item.checksum,
+                            )
+                            for item in plan.files.files
+                        ),
+                        materialized_hooks=(),
+                        shutdown_timeout=plan.runtime.shutdown_timeout,
+                    ),
+                )
+            ],
         }[command]
     )
 

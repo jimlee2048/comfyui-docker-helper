@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 import stat
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from comfyui_docker_helper.config.build_plan import (
     HookPlan,
     build_plan_hook_identities,
     dump_build_plan_json,
+    dump_manifest_binding_json,
     manifest_binding,
 )
 from comfyui_docker_helper.config.runtime_hooks import (
@@ -77,7 +77,7 @@ def materialize_build_plan(
         binding = manifest_binding(plan)
         _write(
             target / "manifest-binding.json",
-            _json_bytes(binding.model_dump(mode="json")),
+            dump_manifest_binding_json(binding),
             root=target,
         )
         for relative_path, hook in expected.items():
@@ -355,10 +355,3 @@ def _require_real_directory_chain(directory: Path) -> None:
             raise FinalMaterializationError(
                 "local source parent must not be a symlink or special file"
             )
-
-
-def _json_bytes(value: object) -> bytes:
-    return (
-        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-        + "\n"
-    ).encode("utf-8")

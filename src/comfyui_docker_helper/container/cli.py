@@ -14,6 +14,7 @@ from comfyui_docker_helper.container.comfyui_installer import install_comfyui
 from comfyui_docker_helper.container.custom_node_installer import install_custom_nodes
 from comfyui_docker_helper.container.download_files import download_files
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
+from comfyui_docker_helper.container.final_manifest import emit_final_manifest
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
@@ -110,6 +111,21 @@ def install_custom_nodes_command(
         constraints_path=constraints,
         hooks_directory=hooks_directory,
     )
+
+
+@app.command("emit-final-manifest", context_settings=HELP_CONTEXT_SETTINGS)
+def emit_final_manifest_command(
+    build_plan_digest: Annotated[
+        str,
+        typer.Option(
+            "--build-plan-digest",
+            help="Expected owning BuildPlan SHA-256 digest.",
+        ),
+    ],
+) -> None:
+    """Verify final image state and emit its observational manifest."""
+    projection = _admission(build_plan_digest).final_manifest()
+    emit_final_manifest(projection, runtime=ContainerRuntime.from_env())
 
 
 @app.command("entrypoint", context_settings=HELP_CONTEXT_SETTINGS)

@@ -1484,6 +1484,11 @@ def manifest_binding(plan: BuildPlan) -> ManifestBinding:
     )
 
 
+def dump_manifest_binding_json(binding: ManifestBinding) -> bytes:
+    """Serialize one final-verification binding to canonical JSON bytes."""
+    return _canonical_json(binding.model_dump(mode="json"))
+
+
 def _take(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],

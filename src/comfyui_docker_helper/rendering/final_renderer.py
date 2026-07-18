@@ -256,6 +256,11 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             "container download-files "
             f"--build-plan-digest {plan_digest}"
         )
+    lines.append(
+        f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+        "container emit-final-manifest "
+        f"--build-plan-digest {plan_digest}"
+    )
     return lines
 
 

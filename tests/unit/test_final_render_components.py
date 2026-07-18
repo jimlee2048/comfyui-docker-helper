@@ -287,6 +287,30 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert "cdh/src/comfyui_docker_helper/cli.py" in tree
     assert "cdh-production-requirements.txt" in tree
     assert "cdh-production-inventory.txt" in tree
+    expected_cdh_inventory = tuple(
+        sorted(
+            (
+                *(
+                    (item.name, item.version)
+                    for item in plan.toolchain.tool_store.cdh_closure
+                ),
+                ("comfyui-docker-helper", plan.toolchain.python.cdh_version),
+            )
+        )
+    )
+    inventory_bytes = tree["cdh-production-inventory.txt"]
+    assert (
+        inventory_bytes
+        == "".join(
+            f"{name}=={version}\n" for name, version in expected_cdh_inventory
+        ).encode()
+    )
+    versions = dict(expected_cdh_inventory)
+    prefix_collision = (
+        f"pydantic=={versions['pydantic']}\n"
+        f"pydantic-core=={versions['pydantic-core']}\n"
+    ).encode()
+    assert prefix_collision in inventory_bytes
     routing = tree["pytorch-resolution.toml"].decode()
     routing_document = tomllib.loads(routing)
     source_map = routing_document["tool"]["uv"]["sources"]

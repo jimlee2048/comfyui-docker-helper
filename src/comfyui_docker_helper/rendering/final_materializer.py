@@ -151,15 +151,20 @@ def _materialize_cdh_release(plan: BuildPlan, target: Path) -> None:
         requirements,
         root=target,
     )
-    inventory = [
-        f"{item.name}=={item.version}" for item in plan.toolchain.tool_store.cdh_closure
-    ]
-    inventory.append(f"comfyui-docker-helper=={plan.toolchain.python.cdh_version}")
+    inventory = _cdh_inventory(plan)
     _write(
         target / "cdh-production-inventory.txt",
-        ("\n".join(sorted(inventory)) + "\n").encode("utf-8"),
+        "".join(f"{name}=={version}\n" for name, version in inventory).encode("utf-8"),
         root=target,
     )
+
+
+def _cdh_inventory(plan: BuildPlan) -> tuple[tuple[str, str], ...]:
+    identities = (
+        *((item.name, item.version) for item in plan.toolchain.tool_store.cdh_closure),
+        ("comfyui-docker-helper", plan.toolchain.python.cdh_version),
+    )
+    return tuple(sorted(identities))
 
 
 def _expected_hooks(

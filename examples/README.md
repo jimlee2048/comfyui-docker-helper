@@ -2,6 +2,8 @@
 
 `minimal.toml` is the smallest canonical CUDA 13 / PyTorch 2.12 configuration.
 `full.toml` documents every field in the current public configuration schema.
+Both select ComfyUI v0.11.0, the minimum supported release; any resolved
+formal, moving, nightly, or full-commit checkout must descend from that floor.
 
 Validate locally without providers or writes:
 
@@ -20,11 +22,14 @@ cdh host render \
   --overwrite
 ```
 
-The output contains canonical `config.lock.toml`, one canonical
+Key output includes canonical `config.lock.toml`, one canonical
 `build-plan.json`, `manifest-binding.json`, a BuildPlan-derived runtime config,
-verified referenced build-hook bytes, content-locked baked runtime hooks, and a
-Dockerfile with literal digest-qualified `FROM` references. It does not copy
-root config into the container-helper authority.
+the projected cdh closure/checker/source-routing inputs, verified referenced
+build-hook bytes, content-locked baked runtime hooks, and a Dockerfile with
+literal digest-qualified `FROM` references. It does not copy root config into
+the container-helper authority. After the image's final build mutation, cdh
+writes `/opt/cdh/build/manifest.json` as digest-bound observational evidence;
+that in-image manifest is not another resolver or replay input.
 
 The optional `--hooks-dir` tree may contain only regular `.sh` or
 `.py` files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`.
@@ -48,6 +53,10 @@ context, `--locked` for zero-provider/zero-write verification, and
 The public PyTorch version is a selector. Its CUDA-derived channel, index, and
 target enter the resolver request identity, while the canonical lock and
 BuildPlan retain complete resolved versions such as `2.12.1+cu130`.
+Configured torch and PyTorch extras are merged with target-active protected
+requirements from the exact ComfyUI checkout. Every direct member uses the
+derived PyTorch source; generic transitives and all ordinary cdh-controlled
+Python installation use `[python].index_url`.
 CUDA `image_flavor` and `image_distro` independently select the exact NVIDIA
 image tag; they do not alter the channel derived from the CUDA version. An
 upstream tag or target-platform miss fails resolution without substitution.
@@ -69,7 +78,10 @@ under `comfyui.extra_args`. Registry and direct-Git nodes run once in their
 declared mixed order, remain independent of optional comfy-cli, and produce
 verified ordered evidence at `/opt/cdh/build/custom-node-inventory.json`.
 Direct-Git URLs pass through unchanged as acquisition locators; locked exact
-commits, not URL normalization or endpoint claims, identify the content.
+commits, not user refs, URL normalization, or endpoint claims, identify the
+content installed in the image. Manager/Registry installers and direct-Git
+`install.py` remain trusted opaque code rather than network-isolated package
+operations.
 Zero-node builds still emit the exact empty custom-node inventory and the final
 application inventory after the dependency check.
 

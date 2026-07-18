@@ -20,8 +20,8 @@ do not reload host configuration or its lock to make build decisions.
 
 - Python 3.12, 3.13, or 3.14;
 - Docker with Buildx for `cdh host build`;
-- NVIDIA Docker support with driver `>=580.65.06` on a Turing-or-newer x86_64
-  GPU.
+- for GPU execution on x86_64, NVIDIA Container Toolkit support, driver
+  `>=580.65.06`, and a Turing-or-newer NVIDIA GPU.
 
 CPython 3.13.14 is the default. CPython 3.12.13 and standard-GIL 3.14.6 are
 explicitly selectable, tested supported profiles; cdh never switches Python
@@ -157,11 +157,13 @@ label such as `2.12.1+cu130`; BuildPlan carries that same exact install version.
 Resolved versions never enter `request_digest`, and the resolved version is not
 split into separate public/local fields.
 
-Every direct member—`torch` plus all `[pytorch].extra_packages`—is mapped
-exclusively to the derived PyTorch index. Generic transitive dependencies use
-only `[python].index_url`; a missing direct member does not fall back to a
-same-named package on the Python index. The complete group is installed
-together into `/opt/venv` and verified with that environment's interpreter.
+Every direct member—configured `torch`, all `[pytorch].extra_packages`, and
+every target-active protected requirement from the exact ComfyUI checkout—is
+mapped exclusively to the derived PyTorch index. Generic transitive
+dependencies use only `[python].index_url`; a missing direct member does not
+fall back to a same-named package on the Python index. The complete group is
+installed together into `/opt/venv` and verified with that environment's
+interpreter.
 Its exact direct distributions and the setuptools compatibility range derived
 from the selected torch wheel metadata are then protected by the root-owned,
 read-only
@@ -194,6 +196,13 @@ links, and verification.
 The cdh-owned host resolver uv, release `uv_build` backend, and container
 uv/uvx image are independently locked and verified identities even when their
 current versions are equal.
+
+All other cdh-controlled Python resolution and installation uses only
+`[python].index_url`, including application extras, ordinary ComfyUI and
+Manager requirements, the frozen cdh closure, optional comfy-cli, generic uv
+tools, and cdh-invoked custom-node requirements. Manager/Registry installers
+and direct-Git `install.py` remain trusted opaque code; cdh does not claim
+network-level source isolation for their arbitrary effects.
 
 Users may mutate the public uv tool store at runtime, but those changes are
 outside the baked-image replay contract. Updating baked cdh or configured tools
@@ -268,6 +277,15 @@ fails the Docker build;
 files, `fail` aborts startup after exhaustion and `continue` tries subsequent
 items. For asynchronous runtime files, `fail` stops the remaining queue without
 stopping ComfyUI, while `continue` tries subsequent queued items.
+
+Only aria2 may resume from exact cdh-owned staging and control state. One
+backend invocation counts as one attempt. If an admitted resumed transfer is
+rejected, cdh safely removes only the exact owned partial state and, when the
+budget remains, spends the next attempt on one clean aria2 transfer without
+backoff. It does not hide a retry or switch backends; HTTPX does not resume.
+Containment, symlink or special-file, identity, permission, persistence, and
+durability failures always fail closed and are never converted by the runtime
+failure policy.
 
 With a checksum, an existing matching regular file is verified and kept
 regardless of `overwrite`. A mismatch is preserved and fails when `overwrite`
@@ -360,12 +378,14 @@ independent, and no cleanup can continue after external `SIGKILL`.
 
 ## Rendered context
 
-A rendered context contains:
+Key rendered-context artifacts include:
 
 - `config.lock.toml`, used only by the host for later reconciliation;
 - one digest-bound canonical `build-plan.json`, used by build-time helpers, and
   `manifest-binding.json`;
-- verified referenced hook bytes under `inputs/`, when configured; and
+- the projected cdh source and frozen production closure, standalone
+  application checker, and PyTorch source-routing input;
+- verified referenced hook bytes under `inputs/`, when configured;
 - a BuildPlan-derived `runtime/config.toml` plus content-locked `runtime/hooks`
   when configured, copied to the paths consumed by the entrypoint; and
 - a Dockerfile whose `FROM` values are literal `tag@sha256` references and
@@ -375,6 +395,22 @@ A rendered context contains:
 The context does not contain a root `config.toml`, and the Dockerfile has no ARG
 that can override lock-authoritative image identities. Host-local source paths
 and resolver `request_digest` values are excluded from the BuildPlan.
+
+## Final image evidence and replay boundary
+
+After every build mutation succeeds, cdh verifies the final image state and
+exclusively writes root-owned, read-only schema-v1 evidence to
+`/opt/cdh/build/manifest.json`. The manifest binds the effective-config,
+canonical-lock, and BuildPlan digests and verifies the materialized cdh and
+ComfyUI requirements inputs. It records intended-versus-observed direct
+toolchain and application identities, source and backend evidence, factual
+package inventories, Manager/comfy-cli state, custom nodes, files, hooks, APT
+observations, and the Tini lifecycle contract.
+
+The manifest is observation, not resolution or replay input. It does not make
+APT results, checksum-free downloads, application transitives, or trusted
+installer and hook effects immutable, and it is not a claim of an offline or
+byte-identical build.
 
 ## Configuration boundaries
 

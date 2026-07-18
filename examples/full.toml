@@ -51,8 +51,9 @@ pub_keys = []
 version = "3.13.14"
 # Default: "0.11.28". Used as the locked ghcr.io/astral-sh/uv image tag.
 uv_version = "0.11.28"
-# Default: "https://pypi.org/simple". Used by cdh-controlled Python package
-# installation steps.
+# Default: "https://pypi.org/simple". Used by ordinary cdh-controlled Python
+# resolution and installation. Direct PyTorch-group members use their derived
+# explicit PyTorch source instead.
 index_url = "https://pypi.org/simple"
 # Extra Python packages installed into the final virtualenv after PyTorch.
 extra_packages = ["numpy"]
@@ -67,9 +68,10 @@ uv_tools = ["ruff==0.15.18"]
 version = "2.12.1"
 # Default: "https://download.pytorch.org/whl". Combined with the CUDA wheel tag.
 index_base_url = "https://download.pytorch.org/whl"
-# Additional PyTorch-family packages installed and constrained with torch as
-# one exact group. Every direct member uses the derived PyTorch source; generic
-# transitive dependencies use [python].index_url. Do not include "torch" here.
+# Additional PyTorch-source packages merged with torch and target-active
+# protected requirements from the exact ComfyUI checkout as one exact group.
+# Every direct member uses the derived PyTorch source; generic transitive
+# dependencies use [python].index_url. Do not include "torch" here.
 extra_packages = ["torchvision==0.27.1"]
 
 [cdh]
@@ -79,9 +81,11 @@ default_downloader = "aria2"
 # Default: "sync". Supported: "sync", "async".
 # Per-file download_mode values override this default.
 default_download_mode = "sync"
-# Default: 3. Total attempts per file for each host build or container start.
+# Default: 3. Total backend invocations per file for each build or runtime start.
 download_max_attempts = 3
-# Host build default: "fail". Runtime default: "continue".
+# Runtime-only. An explicitly configured value is baked into the image; when
+# omitted, the runtime default is "continue". Build downloads are always
+# required and fail the build regardless of this setting.
 # Supported: "continue", "fail".
 download_failure_policy = "fail"
 # Default: 8. One signal-shutdown budget; -1 disables cdh outer/hook deadlines.
@@ -103,7 +107,8 @@ split = 16
 max_connection_per_server = 16
 # Default: "1M". aria2 minimum split size.
 min_split_size = "1M"
-# Default: true. Keep aria2 resume support enabled.
+# Default: true. Allow aria2 to reuse exact cdh-owned partial state. HTTPX does
+# not resume, and any clean fallback still consumes the next available attempt.
 resume_download = true
 
 [build]
@@ -155,7 +160,8 @@ type = "git"
 # Required for git nodes. Passed through unchanged as an acquisition locator;
 # Git URLs must be unique across the effective merged configuration.
 url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
-# Default: unset. Branch, tag, or commit checked out after clone when provided.
+# Default: unset. Host-side branch, tag, or commit resolution selector. The
+# image clones and checks out only the canonical lock's resolved full commit.
 ref = "main"
 # Default: inferred from the URL basename with a trailing .git stripped.
 # Must be a single safe directory name under ComfyUI/custom_nodes.

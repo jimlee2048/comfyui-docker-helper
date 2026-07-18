@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
+import time
 import tomllib
 import uuid
 from pathlib import Path
@@ -67,14 +69,7 @@ for distribution in metadata.distributions():
     observed[name] = version
 items = sorted(observed.items())
 rows = [f"{name}=={version}" for name, version in items]
-order = sys.argv[2]
-if order == "identity-order":
-    expected_rows = rows
-elif order == "serialized-row-order":
-    expected_rows = sorted(rows)
-else:
-    raise AssertionError(f"unknown inventory order: {order}")
-expected = ("\n".join(expected_rows) + "\n").encode()
+expected = ("\n".join(rows) + "\n").encode()
 content = pathlib.Path(sys.argv[1]).read_bytes()
 assert content.endswith(b"\n")
 assert content == expected
@@ -436,7 +431,9 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
 
     dockerfile = context.joinpath("Dockerfile").read_text()
     assert dockerfile.count("container install-custom-nodes") == 1
-    assert dockerfile.count(f"--build-plan-digest {binding.build_plan_digest}") == 2
+    assert dockerfile.count(
+        f"--build-plan-digest {binding.build_plan_digest}"
+    ) == 3 + bool(plan.files.files)
     assert ("COPY inputs /opt/cdh/build/inputs" in dockerfile) is scenario.hooks
     assert "comfy node" not in dockerfile
     assert "comfy install" not in dockerfile
@@ -469,7 +466,7 @@ __REGISTRY_PROOF_SOURCE__
 __MANAGER_FILESYSTEM_PROOF_SOURCE__
 __PYTHON_ROUTING_PROOF_SOURCE__
 
-def require_inventory(path_text, mode, python_prefix, order):
+def require_inventory(path_text, mode, python_prefix):
     path = pathlib.Path(path_text)
     value = path.lstat()
     assert stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode)
@@ -477,7 +474,7 @@ def require_inventory(path_text, mode, python_prefix, order):
     assert (value.st_uid, value.st_gid) == (0, 0)
     source = r'''__INVENTORY_OBSERVER_SOURCE__'''
     completed = subprocess.run(
-        [python_prefix, "-I", "-c", source, path_text, order],
+        [python_prefix, "-I", "-c", source, path_text],
         check=True,
         capture_output=True,
         text=True,
@@ -523,13 +520,11 @@ assert (plan["toolchain"]["tool_store"]["comfy_cli"] is not None) == expected_cl
 
 application = require_inventory(
     "/opt/cdh/build/application-inventory.txt", 0o444, "/opt/venv/bin/python",
-    "identity-order",
 )
 cdh = require_inventory(
     "/opt/cdh/build/cdh-production-inventory.txt",
     0o644,
     "/opt/uv/tools/comfyui-docker-helper/bin/python",
-    "serialized-row-order",
 )
 expected_cdh_items = [
     (item["name"], item["version"])
@@ -688,7 +683,6 @@ tool = plan["toolchain"]["tool_store"]["comfy_cli"]
 if expected_cli:
     tool_inventory = require_inventory(
         tool["inventory_path"], 0o644, "/opt/uv/tools/comfy-cli/bin/python",
-        "identity-order",
     )
     assert tool_inventory["comfy-cli"] == tool["version"]
     for command in ("comfy", "comfy-cli", "comfycli"):
@@ -1068,6 +1062,201 @@ def _run_disposable(
     command.extend(("--entrypoint", "/bin/sh", image, "-ec", script))
     try:
         subprocess.run(command, check=True, timeout=timeout)
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+
+# Every release image must exercise its real entrypoint once in CPU mode; this
+# is deliberately narrower than the lifecycle suite's deep hook and force matrix.
+@pytest.mark.acceptance(probes=(AcceptanceProbe.IMAGE,))
+@pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
+def test_default_entrypoint_has_tini_cdh_topology_and_completes_sigterm_shutdown(
+    scenario: AcceptanceScenario,
+) -> None:
+    image = _environment(scenario.image_variable)
+    context = Path(_environment(scenario.context_variable)).resolve(strict=True)
+    plan = parse_build_plan_json(context.joinpath("build-plan.json").read_bytes())
+    name = f"cdh-application-entrypoint-{uuid.uuid4().hex[:12]}"
+    run = [
+        "docker",
+        "run",
+        "--detach",
+        "--name",
+        name,
+        "--env",
+        "CDH_COMFYUI_EXTRA_ARGS=--cpu",
+        image,
+    ]
+    try:
+        subprocess.run(run, check=True, capture_output=True, text=True, timeout=120)
+        deadline = time.monotonic() + 180
+        readiness = (
+            "import urllib.request; "
+            "response=urllib.request.urlopen("
+            "'http://127.0.0.1:8188/system_stats', timeout=2); "
+            "assert response.status == 200"
+        )
+        while time.monotonic() < deadline:
+            ready = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    name,
+                    "/opt/venv/bin/python",
+                    "-I",
+                    "-c",
+                    readiness,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if ready.returncode == 0:
+                break
+            state = json.loads(
+                subprocess.run(
+                    ["docker", "inspect", name],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                ).stdout
+            )[0]["State"]
+            if not state["Running"]:
+                logs = subprocess.run(
+                    ["docker", "logs", name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                pytest.fail(
+                    "default entrypoint exited before readiness: "
+                    f"state={state!r} logs={logs.stdout + logs.stderr}",
+                    pytrace=False,
+                )
+            time.sleep(1)
+        else:
+            pytest.fail("default entrypoint did not reach CPU readiness", pytrace=False)
+
+        image_config = json.loads(
+            subprocess.run(
+                ["docker", "image", "inspect", image],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout
+        )[0]["Config"]
+        assert image_config["StopSignal"] == "SIGTERM"
+        assert image_config["Entrypoint"] == [
+            "/usr/bin/tini",
+            "--",
+            "/opt/uv/bin/cdh",
+            "container",
+            "entrypoint",
+        ]
+        pid1 = subprocess.run(
+            ["docker", "exec", name, "cat", "/proc/1/comm"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        assert pid1 == "tini"
+        children = subprocess.run(
+            ["docker", "exec", name, "cat", "/proc/1/task/1/children"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.split()
+        expected_argv = [
+            f"{plan.toolchain.tool_store.cdh_environment}/bin/python",
+            "/opt/uv/bin/cdh",
+            "container",
+            "entrypoint",
+        ]
+        expected_cmdline = [item.encode() for item in expected_argv]
+        cdh_children = []
+        for child_pid in children:
+            observed = subprocess.run(
+                ["docker", "exec", name, "cat", f"/proc/{child_pid}/cmdline"],
+                check=False,
+                capture_output=True,
+                timeout=30,
+            )
+            if observed.returncode != 0:
+                continue
+            if observed.stdout.rstrip(b"\0").split(b"\0") == expected_cmdline:
+                cdh_children.append(child_pid)
+        assert len(cdh_children) == 1
+        cdh_pid = cdh_children[0]
+        status = subprocess.run(
+            ["docker", "exec", name, "cat", f"/proc/{cdh_pid}/status"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.splitlines()
+        assert "PPid:\t1" in status
+        cmdline = (
+            subprocess.run(
+                ["docker", "exec", name, "cat", f"/proc/{cdh_pid}/cmdline"],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            .stdout.rstrip(b"\0")
+            .split(b"\0")
+        )
+        assert cmdline == expected_cmdline
+
+        subprocess.run(
+            ["docker", "stop", "--time", "15", name],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        state = json.loads(
+            subprocess.run(
+                ["docker", "inspect", name],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            ).stdout
+        )[0]["State"]
+        assert state["Running"] is False
+        assert state["Pid"] == 0
+        # cdh preserves the real ComfyUI child's SIGTERM-derived exit result.
+        assert state["ExitCode"] == 143
+        assert state["OOMKilled"] is False
+        logs = subprocess.run(
+            ["docker", "logs", name],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        combined_logs = logs.stdout + logs.stderr
+        assert not any(
+            pattern in combined_logs
+            for pattern in (
+                "Traceback",
+                "OutOfMemoryError",
+                "CUDA out of memory",
+                "Killed",
+            )
+        )
     finally:
         subprocess.run(
             ["docker", "rm", "--force", name],

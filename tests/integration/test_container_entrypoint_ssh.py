@@ -443,12 +443,17 @@ download_mode = "async"
         runtime_state_path: Path,
         expected_run_id: str,
         log: Logger,
+        handle_observer: Callable[[FakeAsyncHandle], None],
+        cancel_requested: Callable[[], bool],
     ) -> FakeAsyncHandle:
         del config, runtime, runtime_state_path, expected_run_id, log
+        assert cancel_requested() is False
         assert [item.filename for item in plan.items] == ["async.bin"]
         assert events == ["sync-download", "pre-start", "ssh-start"]
         events.append("async-start")
-        return FakeAsyncHandle(events, alive=False)
+        handle = FakeAsyncHandle(events, alive=False)
+        handle_observer(handle)
+        return handle
 
     def runner(
         argv: Sequence[str],
@@ -971,11 +976,16 @@ filename = "async.bin"
         runtime_state_path: Path,
         expected_run_id: str,
         log: Logger,
+        handle_observer: Callable[[FakeAsyncHandle], None],
+        cancel_requested: Callable[[], bool],
     ) -> FakeAsyncHandle:
         del config, runtime, runtime_state_path, expected_run_id, log
+        assert cancel_requested() is False
         assert [item.filename for item in plan.items] == ["async.bin"]
         events.append("async-start")
-        return FakeAsyncHandle(events)
+        handle = FakeAsyncHandle(events)
+        handle_observer(handle)
+        return handle
 
     def runtime_stop_hook_runner(
         plan: RuntimeHookPlan,

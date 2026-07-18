@@ -52,6 +52,12 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         for item in plan.runtime.environment
     )
     lines.extend(_toolchain_install_lines(plan))
+    lines.extend(
+        (
+            "STOPSIGNAL SIGTERM",
+            'ENTRYPOINT ["/opt/uv/bin/cdh", "container", "entrypoint"]',
+        )
+    )
     return "\n".join(lines) + "\n"
 
 

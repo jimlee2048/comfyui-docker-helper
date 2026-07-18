@@ -323,7 +323,12 @@ this signal path. Its default is eight seconds, with the final two seconds
 reserved for forwarding the original signal to ComfyUI and reaping managed
 children. When the earlier hook portion expires, cdh terminates the active hook
 group and skips later hooks; at the total deadline, it force-stops only managed
-children that remain alive. A second signal cancels the remaining stop hooks.
+children that remain alive. A second `SIGTERM` or `SIGINT` skips any remaining
+grace period and immediately force-stops the active hook, downloader, sshd, and
+ComfyUI. The first signal remains the shutdown identity; a force-killed ComfyUI
+normally makes the container exit with 137. A natural ComfyUI exit keeps its
+own exit code, performs component cleanup, and does not run signal-only stop
+hooks.
 
 Docker or another orchestrator owns a separate external hard limit. Linux
 `docker stop` and Compose normally allow ten seconds before `SIGKILL`; cdh's
@@ -345,7 +350,9 @@ A rendered context contains:
 - verified referenced hook bytes under `inputs/`, when configured; and
 - a BuildPlan-derived `runtime/config.toml` plus content-locked `runtime/hooks`
   when configured, copied to the paths consumed by the entrypoint; and
-- a Dockerfile whose `FROM` values are literal `tag@sha256` references.
+- a Dockerfile whose `FROM` values are literal `tag@sha256` references and
+  whose explicit `STOPSIGNAL SIGTERM` precedes the absolute exec-form
+  `/opt/uv/bin/cdh container entrypoint` launch contract.
 
 The context does not contain a root `config.toml`, and the Dockerfile has no ARG
 that can override lock-authoritative image identities. Host-local source paths

@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from types import FrameType
 from typing import Protocol
@@ -205,12 +205,16 @@ def run_runtime_lifecycle(
             except RuntimeSshServiceError as error:
                 raise EntrypointError(str(error)) from error
             try:
-                downloads.start_async()
+                previous_raise_on_signal = startup_shutdown.raise_on_signal
+                startup_shutdown.raise_on_signal = False
+                downloads.start_async(cancel_requested=startup_shutdown)
             except RuntimeAsyncQueueStartupError as error:
                 stop_startup_auxiliary_services()
                 raise EntrypointError(
                     f"async runtime download queue failed to start: {error}"
                 ) from error
+            finally:
+                startup_shutdown.raise_on_signal = previous_raise_on_signal
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
         except _StartupShutdownRequested as request:
@@ -278,19 +282,22 @@ def run_runtime_lifecycle(
                 return finish_startup_signal_shutdown()
             return finish_startup_signal_shutdown(completed)
 
-    assert completed is not None
-    return _wait_with_signal_forwarding(
-        completed,
-        hook_plan=hook_plan,
-        runtime=runtime,
-        source_env=source_env,
-        runtime_stop_hook_runner=runtime_stop_hook_runner,
-        downloads=downloads,
-        ssh_service=ssh_service,
-        shutdown_timeout=config.cdh.shutdown_timeout,
-        monotonic=monotonic,
-        sleep=sleep,
-    )
+        try:
+            assert completed is not None
+            return _wait_with_existing_signal_state(
+                completed,
+                hook_plan=hook_plan,
+                runtime=runtime,
+                source_env=source_env,
+                runtime_stop_hook_runner=runtime_stop_hook_runner,
+                downloads=downloads,
+                ssh_service=ssh_service,
+                startup_shutdown=startup_shutdown,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
+        except _StartupShutdownRequested:
+            return finish_startup_signal_shutdown(completed)
 
 
 def build_comfyui_argv(
@@ -463,8 +470,11 @@ class _StartupShutdownState:
         self._monotonic = monotonic
         self._cancel_event = threading.Event()
         self._repeated_event = threading.Event()
+        self._signal_admission_enabled = True
 
     def request_shutdown(self, sig: signal.Signals) -> None:
+        if not self._signal_admission_enabled:
+            return
         if self.requested_signal is None:
             self.requested_signal = sig
             self.timeline = _ShutdownTimeline.start(
@@ -487,6 +497,9 @@ class _StartupShutdownState:
     def repeated_signal_requested(self) -> bool:
         return self.repeated_signal
 
+    def force_requested(self) -> bool:
+        return self.repeated_signal_requested()
+
     def shutdown_deadline(self) -> float | None:
         timeline = self.timeline
         return None if timeline is None else timeline.pre_stop_deadline
@@ -497,12 +510,19 @@ class _StartupShutdownState:
     def repeated_cancellation(self) -> _RepeatedStartupCancellation:
         return _RepeatedStartupCancellation(self)
 
+    def disable_signal_admission(self) -> None:
+        """Ignore signals once the managed child has exited naturally."""
+        self._signal_admission_enabled = False
+
 
 @dataclass(frozen=True, slots=True)
 class _RepeatedStartupCancellation:
     state: _StartupShutdownState
 
     def __call__(self) -> bool:
+        return self.state.repeated_signal_requested()
+
+    def force_requested(self) -> bool:
         return self.state.repeated_signal_requested()
 
     def wait(self, timeout: float) -> bool:
@@ -541,6 +561,13 @@ def _finish_startup_signal_shutdown(
     monotonic: Callable[[], float],
     sleep: Callable[[float], object],
 ) -> int:
+    state.raise_on_signal = False
+    if child is not None and child.poll() is not None:
+        state.disable_signal_admission()
+        exit_code = child.wait()
+        downloads.stop(cancel_requested=lambda: False)
+        ssh_service.stop(cancel_requested=lambda: False)
+        return exit_code
     sig = state.requested_signal
     timeline = state.timeline
     assert sig is not None
@@ -554,6 +581,7 @@ def _finish_startup_signal_shutdown(
         source_env=source_env,
         runtime_stop_hook_runner=runtime_stop_hook_runner,
         stop_hooks_cancelled=state.repeated_cancellation(),
+        force_requested=state.repeated_signal_requested,
         hook_processes=(
             () if state.active_hook_process is None else (state.active_hook_process,)
         ),
@@ -562,40 +590,6 @@ def _finish_startup_signal_shutdown(
         monotonic=monotonic,
         sleep=sleep,
     )
-
-
-class _ShutdownRequested(Exception):
-    def __init__(
-        self,
-        sig: signal.Signals,
-        *,
-        timeline: _ShutdownTimeline,
-    ) -> None:
-        self.sig = sig
-        self.timeline = timeline
-        super().__init__(sig.name)
-
-
-class _ShutdownState:
-    """Signal state for one first-signal shutdown timeline."""
-
-    def __init__(self) -> None:
-        self.requested = False
-        self._stop_hooks_cancelled = False
-        self._cancel_event = threading.Event()
-
-    def cancel_stop_hooks(self) -> None:
-        self._stop_hooks_cancelled = True
-        self._cancel_event.set()
-
-    def stop_hooks_cancelled(self) -> bool:
-        return self._stop_hooks_cancelled
-
-    def __call__(self) -> bool:
-        return self.stop_hooks_cancelled()
-
-    def wait(self, timeout: float) -> bool:
-        return self._cancel_event.wait(timeout)
 
 
 def _wait_with_signal_forwarding(
@@ -611,54 +605,67 @@ def _wait_with_signal_forwarding(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
 ) -> int:
-    previous_handlers = {
-        sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
-    }
-    shutdown_state = _ShutdownState()
+    startup_shutdown = _StartupShutdownState(
+        shutdown_timeout=shutdown_timeout,
+        monotonic=monotonic,
+    )
+    with _startup_shutdown_signal_handlers(startup_shutdown):
+        return _wait_with_existing_signal_state(
+            child,
+            hook_plan=hook_plan,
+            runtime=runtime,
+            source_env=source_env,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+            downloads=downloads,
+            ssh_service=ssh_service,
+            startup_shutdown=startup_shutdown,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
 
-    def forward(sig: signal.Signals, frame: object) -> None:
-        del frame
-        if shutdown_state.requested:
-            shutdown_state.cancel_stop_hooks()
-            return
-        requested = signal.Signals(sig)
-        if child.poll() is None:
-            shutdown_state.requested = True
-            raise _ShutdownRequested(
-                requested,
-                timeline=_ShutdownTimeline.start(
-                    shutdown_timeout,
-                    now=monotonic(),
-                ),
-            )
 
+def _wait_with_existing_signal_state(
+    child: DirectProcess,
+    *,
+    hook_plan: RuntimeHookPlan,
+    runtime: ContainerRuntime,
+    source_env: Mapping[str, str],
+    runtime_stop_hook_runner: RuntimeStopHookRunner,
+    downloads: RuntimeDownloads,
+    ssh_service: RuntimeSshService,
+    startup_shutdown: _StartupShutdownState,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], object] = time.sleep,
+) -> int:
+    """Wait for the child under the startup-installed signal authority."""
+    startup_shutdown.raise_on_signal = True
     try:
-        signal.signal(signal.SIGTERM, forward)
-        signal.signal(signal.SIGINT, forward)
         try:
             exit_code = child.wait()
-            downloads.stop(cancel_requested=shutdown_state.stop_hooks_cancelled)
-            ssh_service.stop(cancel_requested=shutdown_state.stop_hooks_cancelled)
-            return exit_code
-        except _ShutdownRequested as request:
-            return _finish_signal_shutdown(
-                request.sig,
-                timeline=request.timeline,
-                child=child,
-                hook_plan=hook_plan,
-                runtime=runtime,
-                source_env=source_env,
-                runtime_stop_hook_runner=runtime_stop_hook_runner,
-                stop_hooks_cancelled=shutdown_state,
-                hook_processes=(),
-                downloads=downloads,
-                ssh_service=ssh_service,
-                monotonic=monotonic,
-                sleep=sleep,
-            )
+        except _StartupShutdownRequested:
+            if child.poll() is None:
+                startup_shutdown.raise_on_signal = False
+                return _finish_startup_signal_shutdown(
+                    startup_shutdown,
+                    child=child,
+                    hook_plan=hook_plan,
+                    runtime=runtime,
+                    source_env=source_env,
+                    runtime_stop_hook_runner=runtime_stop_hook_runner,
+                    downloads=downloads,
+                    ssh_service=ssh_service,
+                    monotonic=monotonic,
+                    sleep=sleep,
+                )
+            exit_code = child.wait()
+
+        startup_shutdown.raise_on_signal = False
+        startup_shutdown.disable_signal_admission()
+        downloads.stop(cancel_requested=startup_shutdown.repeated_signal_requested)
+        ssh_service.stop(cancel_requested=startup_shutdown.repeated_signal_requested)
+        return exit_code
     finally:
-        for sig, previous in previous_handlers.items():
-            signal.signal(sig, previous)
+        startup_shutdown.raise_on_signal = False
 
 
 def _finish_signal_shutdown(
@@ -671,6 +678,7 @@ def _finish_signal_shutdown(
     source_env: Mapping[str, str],
     runtime_stop_hook_runner: RuntimeStopHookRunner,
     stop_hooks_cancelled: Callable[[], bool],
+    force_requested: Callable[[], bool],
     hook_processes: tuple[SessionLeaderProcess, ...],
     downloads: RuntimeDownloads,
     ssh_service: RuntimeSshService,
@@ -680,6 +688,14 @@ def _finish_signal_shutdown(
     """Complete one first-signal shutdown against its sole absolute timeline."""
     downloads.request_stop(deadline=timeline.auxiliary_deadline)
     ssh_service.request_stop()
+    if force_requested():
+        return _force_managed_shutdown(
+            sig,
+            child=child,
+            downloads=downloads,
+            ssh_service=ssh_service,
+            hook_processes=hook_processes,
+        )
     if child is None:
         _wait_for_auxiliary_shutdown(
             downloads=downloads,
@@ -687,6 +703,7 @@ def _finish_signal_shutdown(
             deadline=timeline.deadline,
             auxiliary_deadline=timeline.auxiliary_deadline,
             hook_processes=hook_processes,
+            force_requested=force_requested,
             monotonic=monotonic,
             sleep=sleep,
         )
@@ -705,6 +722,14 @@ def _finish_signal_shutdown(
         )
         if active_hook is not None:
             hook_processes = (*hook_processes, active_hook)
+    if force_requested():
+        return _force_managed_shutdown(
+            sig,
+            child=child,
+            downloads=downloads,
+            ssh_service=ssh_service,
+            hook_processes=hook_processes,
+        )
     if monotonic() >= timeline.auxiliary_deadline:
         if not downloads.is_stopped():
             downloads.force_stop()
@@ -719,6 +744,7 @@ def _finish_signal_shutdown(
         deadline=timeline.deadline,
         auxiliary_deadline=timeline.auxiliary_deadline,
         hook_processes=hook_processes,
+        force_requested=force_requested,
         monotonic=monotonic,
         sleep=sleep,
     )
@@ -765,9 +791,19 @@ def _wait_for_auxiliary_shutdown(
     hook_processes: tuple[SessionLeaderProcess, ...],
     monotonic: Callable[[], float],
     sleep: Callable[[float], object],
+    force_requested: Callable[[], bool] = lambda: False,
 ) -> None:
     """Bound startup-signal auxiliary cleanup without a second outer budget."""
     while True:
+        if force_requested():
+            _force_managed_shutdown(
+                signal.SIGTERM,
+                child=None,
+                downloads=downloads,
+                ssh_service=ssh_service,
+                hook_processes=hook_processes,
+            )
+            return
         downloads_stopped = downloads.is_stopped()
         ssh_stopped = ssh_service.is_stopped()
         hooks_stopped = _reap_hook_processes(hook_processes)
@@ -797,10 +833,19 @@ def _wait_for_managed_shutdown(
     hook_processes: tuple[SessionLeaderProcess, ...],
     monotonic: Callable[[], float],
     sleep: Callable[[float], object],
+    force_requested: Callable[[], bool] = lambda: False,
 ) -> int:
     """Reap all managed work against one caller-owned absolute timeline."""
     auxiliary_bound_reached = False
     while True:
+        if force_requested():
+            return _force_managed_shutdown(
+                signal.SIGTERM,
+                child=child,
+                downloads=downloads,
+                ssh_service=ssh_service,
+                hook_processes=hook_processes,
+            )
         child_result = reap_process_if_exited(child)
         downloads_stopped = downloads.is_stopped()
         ssh_stopped = ssh_service.is_stopped()
@@ -854,6 +899,29 @@ def _wait_for_managed_shutdown(
         if next_boundary is not None and now < next_boundary:
             delay = min(delay, next_boundary - now)
         sleep(delay)
+
+
+def _force_managed_shutdown(
+    sig: signal.Signals,
+    *,
+    child: DirectProcess | None,
+    downloads: RuntimeDownloads,
+    ssh_service: RuntimeSshService,
+    hook_processes: tuple[SessionLeaderProcess, ...],
+) -> int:
+    """Apply one repeated-signal force request without a new wait budget."""
+    downloads.force_stop()
+    ssh_service.force_stop()
+    _force_hook_processes(hook_processes)
+    if child is None:
+        return -int(sig)
+    result = reap_process_if_exited(child)
+    if result is not None:
+        return result
+    with suppress(OSError):
+        child.kill()
+    result = reap_process_if_exited(child)
+    return -int(signal.SIGKILL) if result is None else result
 
 
 def _reap_hook_processes(processes: tuple[SessionLeaderProcess, ...]) -> bool:

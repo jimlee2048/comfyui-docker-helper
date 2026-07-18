@@ -49,6 +49,7 @@ from comfyui_docker_helper.container.runtime_state import (
 )
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
+    CancellableDownloadBackend,
     DownloadBackend,
     DownloaderSettings,
     DownloadFilesError,
@@ -72,7 +73,7 @@ from comfyui_docker_helper.container.transfer_core import (
 type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeDownloadStartupObserver = Callable[[], None]
 type RuntimeDownloadCancelRequested = Callable[[], bool]
-type RuntimeDownloadBackendObserver = Callable[[DownloadBackend], None]
+type RuntimeDownloadBackendObserver = Callable[[CancellableDownloadBackend], None]
 type RuntimeDownloadObservedStatus = Literal[
     "downloading",
     "failed",
@@ -1047,7 +1048,7 @@ def _observe_cancellable_runtime_backend(
     backend: DownloadBackend,
     backend_observer: RuntimeDownloadBackendObserver | None,
 ) -> None:
-    if backend_observer is None or not callable(getattr(backend, "cancel", None)):
+    if backend_observer is None or not isinstance(backend, CancellableDownloadBackend):
         return
     backend_observer(backend)
 
@@ -1059,7 +1060,7 @@ def _runtime_backend_observer_once(
     if backend_observer is None:
         return None
 
-    def observe(backend: DownloadBackend) -> None:
+    def observe(backend: CancellableDownloadBackend) -> None:
         identity = id(backend)
         if identity in observed_backend_ids:
             return

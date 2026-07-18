@@ -257,6 +257,10 @@ class HttpxDownloader:
             with suppress(RuntimeError):
                 loop.call_soon_threadsafe(task.cancel)
 
+    def force_cancel(self) -> None:
+        """Cancel the active request without introducing a new wait budget."""
+        self.cancel()
+
 
 class _Aria2LifecycleState(Enum):
     NEW = auto()
@@ -459,6 +463,17 @@ class Aria2Downloader:
             self.close()
         else:
             self._close_until(deadline)
+
+    def force_cancel(self) -> None:
+        """Kill the exact active daemon while its cancellation owner reaps it."""
+        with self._lifecycle:
+            self._cancel_requested.set()
+            self._close_requested = True
+            process = self._process
+            self._lifecycle.notify_all()
+        if process is not None and process.poll() is None:
+            with suppress(OSError):
+                process.kill()
 
     def _ensure_started(self, settings: DownloaderSettings) -> Aria2Api:
         self._raise_prepare_cancelled()

@@ -15,7 +15,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import BinaryIO, Literal, Protocol
+from typing import BinaryIO, Literal, Protocol, runtime_checkable
 
 from comfyui_docker_helper.config.file_checksum import (
     validate_canonical_file_checksum,
@@ -433,6 +433,15 @@ class DownloadBackend(Protocol):
         request: TransportRequest,
         settings: DownloaderSettings,
     ) -> TransportOutcome: ...
+
+
+@runtime_checkable
+class CancellableDownloadBackend(DownloadBackend, Protocol):
+    """Runtime adapter with cooperative and repeated-signal cancellation."""
+
+    def cancel(self, *, deadline: float | None = None) -> None: ...
+
+    def force_cancel(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

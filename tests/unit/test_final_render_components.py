@@ -54,7 +54,19 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
     )
     assert "COPY --from=uv /uv /uvx /usr/local/bin/" in rendered
     assert "ARG " not in rendered
+    assert "\nCMD " not in rendered
     assert "${PATH}" in rendered
+    instructions = rendered.splitlines()
+    assert [line for line in instructions if line.startswith("STOPSIGNAL ")] == [
+        "STOPSIGNAL SIGTERM"
+    ]
+    assert [line for line in instructions if line.startswith("ENTRYPOINT ")] == [
+        'ENTRYPOINT ["/opt/uv/bin/cdh", "container", "entrypoint"]'
+    ]
+    assert instructions[-2:] == [
+        "STOPSIGNAL SIGTERM",
+        'ENTRYPOINT ["/opt/uv/bin/cdh", "container", "entrypoint"]',
+    ]
     assert rendered == render_build_plan_dockerfile(plan)
 
 

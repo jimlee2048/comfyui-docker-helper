@@ -85,6 +85,7 @@ download_max_attempts = 3
 # Supported: "continue", "fail".
 download_failure_policy = "fail"
 # Default: 8. One signal-shutdown budget; -1 disables cdh outer/hook deadlines.
+# A repeated SIGTERM/SIGINT immediately force-stops all managed runtime work.
 shutdown_timeout = 8
 
 [cdh.downloader.httpx]

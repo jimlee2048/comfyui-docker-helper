@@ -638,6 +638,50 @@ def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
         (4343, signal.SIGTERM),
         (4343, signal.SIGKILL),
     ]
+
+
+# Repeated-signal cancellation bypasses the cooperative TERM grace and sends
+# SIGKILL once before the hook runner can start another hook.
+def test_stop_hook_force_cancellation_skips_termination_grace(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-hang.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    process = FakeHookProcess(pid=4444)
+    signals: list[tuple[int, signal.Signals]] = []
+
+    class ForceCancellation:
+        calls = 0
+
+        def __call__(self) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+        def force_requested(self) -> bool:
+            return True
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+        process.returncode = -int(signal.SIGKILL)
+
+    cancellation = ForceCancellation()
+    with pytest.raises(RuntimeHookError) as error:
+        run_runtime_stop_hooks(
+            plan,
+            runtime=runtime,
+            runner=lambda *_args, **_kwargs: process,
+            cancel_requested=cancellation,
+            process_group_signaler=signaler,
+        )
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.cancelled")
+    ]
+    assert signals == [(4444, signal.SIGKILL)]
     assert process.waits == 1
 
 

@@ -238,6 +238,75 @@ def test_process_group_escalation_and_signal_failure_are_typed() -> None:
     assert isinstance(error.value.error, PermissionError)
 
 
+# A caller-owned force request interrupts the TERM grace and applies SIGKILL
+# without consuming either the remaining grace or a newly created wait budget.
+def test_process_group_repeated_signal_interrupts_termination_grace() -> None:
+    clock = FakeClock()
+    process = FakeProcess(pid=5353)
+    signals: list[tuple[int, signal.Signals]] = []
+    force = False
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            process.returncode = -int(signal.SIGKILL)
+
+    def sleep(seconds: float) -> None:
+        nonlocal force
+        clock.sleep(seconds)
+        force = True
+
+    assert (
+        terminate_process_group(
+            process,
+            termination_grace=30.0,
+            kill_grace=30.0,
+            poll_interval=0.1,
+            monotonic=clock.monotonic,
+            sleep=sleep,
+            signaler=signaler,
+            force_requested=lambda: force,
+        )
+        is True
+    )
+
+    assert signals == [(5353, signal.SIGTERM), (5353, signal.SIGKILL)]
+    assert clock.now == pytest.approx(0.1)
+    assert process.waits == 1
+
+    kill_clock = FakeClock()
+    kill_wait_process = FakeProcess(pid=5454)
+    kill_wait_signals: list[tuple[int, signal.Signals]] = []
+    sleep_calls = 0
+
+    def kill_wait_signaler(pid: int, sig: signal.Signals) -> None:
+        kill_wait_signals.append((pid, sig))
+
+    def kill_wait_sleep(seconds: float) -> None:
+        nonlocal sleep_calls
+        kill_clock.sleep(seconds)
+        sleep_calls += 1
+
+    assert (
+        terminate_process_group(
+            kill_wait_process,
+            termination_grace=0.1,
+            kill_grace=30.0,
+            poll_interval=0.1,
+            monotonic=kill_clock.monotonic,
+            sleep=kill_wait_sleep,
+            signaler=kill_wait_signaler,
+            force_requested=lambda: sleep_calls >= 2,
+        )
+        is False
+    )
+    assert kill_wait_signals == [
+        (5454, signal.SIGTERM),
+        (5454, signal.SIGKILL),
+    ]
+    assert kill_clock.now == pytest.approx(0.2)
+
+
 # A terminal child is reaped once; an active child remains owned when its
 # caller-supplied wait budget expires.
 def test_wait_for_process_reap_distinguishes_exit_from_timeout() -> None:

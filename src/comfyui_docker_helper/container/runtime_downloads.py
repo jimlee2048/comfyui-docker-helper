@@ -38,6 +38,7 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeStateStore,
     prepare_runtime_state_for_start,
 )
+from comfyui_docker_helper.container.transfer_core import CancellableDownloadBackend
 
 ASYNC_QUEUE_STOP_TIMEOUT_SECONDS = 5.0
 ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS = 0.05
@@ -68,6 +69,8 @@ class RuntimeAsyncQueueStarter(Protocol):
         runtime_state_path: Path,
         expected_run_id: str,
         log: Logger,
+        handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
+        cancel_requested: Callable[[], bool],
     ) -> RuntimeAsyncDownloadQueueHandle: ...
 
 
@@ -103,7 +106,7 @@ class _PreparedRuntimeDownloads:
 class _RuntimeAsyncDownloadQueueHandle:
     thread: threading.Thread
     stop_requested: threading.Event
-    backends: list[object]
+    backends: list[CancellableDownloadBackend]
     backends_lock: threading.Lock
     backend_termination_thread: threading.Thread | None = None
 
@@ -114,10 +117,8 @@ class _RuntimeAsyncDownloadQueueHandle:
         with self.backends_lock:
             backends = tuple(self.backends)
         for backend in backends:
-            cancel = getattr(backend, "cancel", None)
-            if callable(cancel):
-                with suppress(Exception):
-                    cancel()
+            with suppress(Exception):
+                backend.force_cancel()
 
     def request_backend_termination(self, *, deadline: float | None) -> None:
         """Start backend cancellation once without blocking the lifecycle owner."""
@@ -128,10 +129,8 @@ class _RuntimeAsyncDownloadQueueHandle:
 
             def terminate() -> None:
                 for backend in backends:
-                    cancel = getattr(backend, "cancel", None)
-                    if callable(cancel):
-                        with suppress(Exception):
-                            cancel(deadline=deadline)
+                    with suppress(Exception):
+                        backend.cancel(deadline=deadline)
 
             thread = threading.Thread(
                 target=terminate,
@@ -199,7 +198,7 @@ class RuntimeDownloads:
             log=self._log,
         )
 
-    def start_async(self) -> None:
+    def start_async(self, *, cancel_requested: Callable[[], bool]) -> None:
         """Start the prepared asynchronous queue after startup admission."""
         plan = self._prepared.async_plan
         if not plan.items:
@@ -213,14 +212,28 @@ class RuntimeDownloads:
             f"items={len(plan.items)} "
             f"policy={self._config.cdh.download_failure_policy}"
         )
-        self._async_handle = self._async_queue_starter(
+
+        def own_handle(handle: RuntimeAsyncDownloadQueueHandle) -> None:
+            if self._async_handle is not None and self._async_handle is not handle:
+                raise RuntimeAsyncQueueStartupError(
+                    "async runtime download queue changed ownership"
+                )
+            self._async_handle = handle
+
+        handle = self._async_queue_starter(
             plan,
             config=self._config,
             runtime=self._runtime,
             runtime_state_path=self._runtime_state_path,
             expected_run_id=self._prepared.run_id,
             log=self._log,
+            handle_observer=own_handle,
+            cancel_requested=cancel_requested,
         )
+        if self._async_handle is not handle:
+            raise RuntimeAsyncQueueStartupError(
+                "async runtime download queue was not published before startup"
+            )
 
     def stop(
         self,
@@ -266,6 +279,7 @@ class RuntimeDownloads:
             return True
         handle.request_stop()
         handle.request_backend_termination(deadline=None)
+        handle.terminate_backends()
         handle.join(timeout=0.0)
         return not handle.is_alive() and not handle.backend_termination_is_alive()
 
@@ -278,6 +292,8 @@ def start_runtime_async_download_queue(
     runtime_state_path: Path,
     expected_run_id: str,
     log: Logger,
+    handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
+    cancel_requested: Callable[[], bool],
 ) -> RuntimeAsyncDownloadQueueHandle:
     """Start one cdh-managed background queue for async runtime files."""
     store: RuntimeStateStore | None = None
@@ -305,13 +321,13 @@ def start_runtime_async_download_queue(
     stop_requested = threading.Event()
     startup_finished = threading.Event()
     startup_error: list[BaseException] = []
-    backends: list[object] = []
+    backends: list[CancellableDownloadBackend] = []
     backends_lock = threading.Lock()
 
     def accept_queue() -> None:
         accepted.set()
 
-    def observe_backend(backend: object) -> None:
+    def observe_backend(backend: CancellableDownloadBackend) -> None:
         with backends_lock:
             if not any(registered is backend for registered in backends):
                 backends.append(backend)
@@ -340,18 +356,31 @@ def start_runtime_async_download_queue(
             store.close()
             startup_finished.set()
 
+    thread: threading.Thread | None = None
     try:
         thread = threading.Thread(
             target=worker,
             name="cdh-runtime-async-downloads",
             daemon=True,
         )
+        handle = _RuntimeAsyncDownloadQueueHandle(
+            thread=thread,
+            stop_requested=stop_requested,
+            backends=backends,
+            backends_lock=backends_lock,
+        )
+        handle_observer(handle)
         thread.start()
-    except Exception as error:
-        store.close()
+    except BaseException as error:
+        if thread is None or thread.ident is None:
+            store.close()
+        if not isinstance(error, Exception):
+            raise
         raise RuntimeAsyncQueueStartupError(str(error)) from error
 
     while not accepted.is_set():
+        if cancel_requested():
+            return handle
         if startup_finished.wait(0.01):
             break
     if not accepted.is_set():
@@ -359,12 +388,7 @@ def start_runtime_async_download_queue(
         raise RuntimeAsyncQueueStartupError(str(error)) from error
 
     log(f"Async runtime download queue accepted: items={len(plan.items)}")
-    return _RuntimeAsyncDownloadQueueHandle(
-        thread=thread,
-        stop_requested=stop_requested,
-        backends=backends,
-        backends_lock=backends_lock,
-    )
+    return handle
 
 
 def _activate_runtime_file_plan(

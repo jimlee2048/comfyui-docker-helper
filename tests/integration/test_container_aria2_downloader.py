@@ -335,6 +335,30 @@ def test_aria2_downloader_context_always_shuts_down_daemon(tmp_path: Path) -> No
     assert process.wait_calls == 1
 
 
+# Repeated-signal escalation kills the exact daemon immediately; the already
+# active cancellation owner remains responsible for publishing and reaping it.
+def test_aria2_force_cancel_kills_exact_active_daemon(tmp_path: Path) -> None:
+    process = FakeProcess()
+    downloader = Aria2Downloader(
+        process_factory=lambda _: process,
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+    assert isinstance(
+        downloader.download(make_item(tmp_path), make_settings()),
+        TransportSuccess,
+    )
+
+    downloader.force_cancel()
+
+    assert process.kill_calls == 1
+    with pytest.raises(DownloadCancelled):
+        downloader.prepare(make_settings())
+
+
 def test_aria2_downloader_context_cleans_up_after_download_failure(
     tmp_path: Path,
 ) -> None:

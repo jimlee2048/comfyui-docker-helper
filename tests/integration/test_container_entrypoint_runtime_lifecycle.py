@@ -360,6 +360,56 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
     ]
 
 
+# A signal observed at the child-return boundary cannot reclassify an already
+# terminal child as signal shutdown or activate signal-only stop hooks.
+def test_terminal_child_signal_race_preserves_natural_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop", "90-stop.sh")
+    hook_plan = discover_runtime_hooks(
+        baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+        mounted_hooks_path=hooks,
+    )
+    handlers, restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class TerminalThenSignalChild(FakeChild):
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.returncode is None:
+                self.returncode = 29
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("signal handler must interrupt the first wait")
+            return self.returncode
+
+    downloads = Mock()
+    downloads.stop.side_effect = lambda **_kwargs: events.append("async:stop")
+    ssh_service = Mock()
+    ssh_service.stop.side_effect = lambda **_kwargs: events.append("ssh:stop")
+    stop_hook_runner = Mock()
+
+    result = lifecycle_module._wait_with_signal_forwarding(
+        TerminalThenSignalChild(),
+        hook_plan=hook_plan,
+        runtime=runtime,
+        source_env={"PATH": "/usr/bin"},
+        runtime_stop_hook_runner=stop_hook_runner,
+        downloads=downloads,
+        ssh_service=ssh_service,
+        shutdown_timeout=8,
+    )
+
+    assert result == 29
+    stop_hook_runner.assert_not_called()
+    assert events == ["async:stop", "ssh:stop"]
+    assert restored == [signal.SIGTERM, signal.SIGINT]
+
+
 # Startup failure coverage ensures failed pre-start, readiness, and post-start
 # phases stop later phases and surface actionable diagnostics.
 def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
@@ -601,11 +651,16 @@ filename = "model.bin"
         plan: RuntimeFilePlan,
         **kwargs: object,
     ) -> OwnedAsyncQueue:
+        handle_observer = kwargs.pop("handle_observer")
+        cancel_requested = kwargs.pop("cancel_requested")
+        assert callable(handle_observer)
+        assert callable(cancel_requested)
         del kwargs
         assert len(plan.items) == 1
         events.append("async:start")
         if failure_point == "async-start":
             raise RuntimeAsyncQueueStartupError("queue unavailable")
+        handle_observer(async_queue)
         return async_queue
 
     def runner(
@@ -777,9 +832,14 @@ filename = "model.bin"
         plan: RuntimeFilePlan,
         **kwargs: object,
     ) -> OwnedAsyncQueue:
+        handle_observer = kwargs.pop("handle_observer")
+        cancel_requested = kwargs.pop("cancel_requested")
+        assert callable(handle_observer)
+        assert callable(cancel_requested)
         del kwargs
         assert len(plan.items) == 1
         events.append("async:start")
+        handle_observer(async_queue)
         return async_queue
 
     with pytest.raises(EntrypointError, match="SSH runtime service exited"):
@@ -1280,8 +1340,8 @@ def test_startup_shutdown_during_post_start_hook_runs_stop_hooks_before_forwardi
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
 
-# A repeated catchable signal immediately cancels pre-stop work while preserving
-# the original signal forwarded to ComfyUI.
+# A repeated catchable signal skips the remaining graceful path and force-kills
+# ComfyUI while retaining the first signal only as shutdown identity.
 def test_repeated_shutdown_signal_forces_stop_hook_cancellation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1306,8 +1366,9 @@ def test_repeated_shutdown_signal_forces_stop_hook_cancellation(
                 handler(signal.SIGTERM, None)
                 raise AssertionError("shutdown handler should interrupt initial wait")
             events.append("wait:final")
-            self.returncode = self._wait_returncode
-            return self._wait_returncode
+            if self.returncode is None:
+                self.returncode = self._wait_returncode
+            return self.returncode
 
     child = RepeatedSignalChild()
 
@@ -1360,17 +1421,105 @@ def test_repeated_shutdown_signal_forces_stop_hook_cancellation(
         environ={"PATH": "/usr/bin"},
         runner=runner,
         runtime_stop_hook_runner=runtime_stop_hook_runner,
-    ) == 128 + int(signal.SIGTERM)
+    ) == 128 + int(signal.SIGKILL)
 
     captured = capsys.readouterr()
     assert events == [
         "stop:10-hang.sh",
         "stop:cancelled",
-        "forward:SIGTERM",
+        "kill",
         "wait:final",
     ]
-    assert child.signals == [signal.SIGTERM]
+    assert child.signals == []
+    assert child.killed is True
     assert "runtime_hook.cancelled" in captured.err
+
+
+# One repeated signal force-stops every managed owner without waiting for the
+# original deadline or forwarding the first signal after force escalation.
+def test_repeated_signal_force_stops_downloads_ssh_and_comfyui(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop", "10-hang.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+        mounted_hooks_path=hooks,
+    )
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class ManagedAuxiliary:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def request_stop(self, *, deadline: float | None = None) -> None:
+            del deadline
+            events.append(f"{self.name}:request")
+
+        def is_stopped(self) -> bool:
+            return False
+
+        def force_stop(self) -> bool:
+            events.append(f"{self.name}:force")
+            return False
+
+    class ForceChild(FakeChild):
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                events.append("wait:initial")
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("shutdown handler should interrupt first wait")
+            events.append("wait:final")
+            assert self.returncode is not None
+            return self.returncode
+
+    child = ForceChild(events=events)
+
+    def stop_hooks(*_args: object, **_kwargs: object) -> tuple[RuntimeHookResult, ...]:
+        events.append("hook:active")
+        handler = handlers[signal.SIGINT]
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "stop", "10-hang.sh"),
+                    code="runtime_hook.cancelled",
+                    message="runtime hook was cancelled by a shutdown signal",
+                ),
+            )
+        )
+
+    downloads = ManagedAuxiliary("downloads")
+    ssh = ManagedAuxiliary("ssh")
+    assert lifecycle_module._wait_with_signal_forwarding(
+        child,
+        hook_plan=plan,
+        runtime=runtime,
+        source_env={"PATH": "/usr/bin"},
+        runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+        downloads=downloads,  # type: ignore[arg-type]
+        ssh_service=ssh,  # type: ignore[arg-type]
+        shutdown_timeout=8,
+    ) == -int(signal.SIGKILL)
+
+    assert events == [
+        "wait:initial",
+        "downloads:request",
+        "ssh:request",
+        "hook:active",
+        "downloads:force",
+        "ssh:force",
+        "kill",
+        "wait:final",
+    ]
+    assert child.signals == []
 
 
 # A child that ignores the forwarded signal receives the reserved graceful
@@ -1646,9 +1795,5 @@ def test_graceful_shutdown_runs_stop_hooks_before_forwarding_and_child_result_wi
     assert child.signals == [signal.SIGTERM]
     assert "Runtime stop hook failed:" in captured.err
     assert "runtime_hook.shutdown_deadline" in captured.err
-    assert restored == [
-        signal.SIGTERM,
-        signal.SIGINT,
-        signal.SIGTERM,
-        signal.SIGINT,
-    ]
+    # One handler authority remains installed from startup through child wait.
+    assert restored == [signal.SIGTERM, signal.SIGINT]

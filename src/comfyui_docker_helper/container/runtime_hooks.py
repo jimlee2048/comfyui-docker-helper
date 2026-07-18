@@ -66,6 +66,13 @@ class WakeableCancellation(Protocol):
     def wait(self, timeout: float) -> object: ...
 
 
+@runtime_checkable
+class ForceEscalationCancellation(Protocol):
+    """Cancellation source that distinguishes a repeated-signal force request."""
+
+    def force_requested(self) -> bool: ...
+
+
 class RuntimeHookError(ValueError):
     """Runtime hook discovery or execution failure with stable diagnostics."""
 
@@ -552,6 +559,12 @@ def _cancellation_deadline(cancel_requested: CancelRequested) -> float | None:
     return None
 
 
+def _force_requested(cancel_requested: CancelRequested) -> bool:
+    if isinstance(cancel_requested, ForceEscalationCancellation):
+        return cancel_requested.force_requested()
+    return False
+
+
 def _wait_for_hook_poll(
     cancel_requested: CancelRequested,
     timeout: float,
@@ -588,6 +601,7 @@ def _wait_for_startup_hook_process(
                 monotonic=monotonic,
                 sleep=sleep,
                 process_group_signaler=process_group_signaler,
+                cancel_requested=cancel_requested,
                 deadline=_cancellation_deadline(cancel_requested),
             )
             _raise_hook_cancelled(hook)
@@ -623,6 +637,7 @@ def _wait_for_stop_hook_process(
                 monotonic=monotonic,
                 sleep=sleep,
                 process_group_signaler=process_group_signaler,
+                cancel_requested=cancel_requested,
                 deadline=deadline,
             )
             _raise_hook_cancelled(hook)
@@ -690,6 +705,7 @@ def _terminate_hook_process_group(
     monotonic: Monotonic,
     sleep: Sleep,
     process_group_signaler: ProcessGroupSignaler,
+    cancel_requested: CancelRequested,
     deadline: float | None = None,
 ) -> None:
     termination_grace = termination_grace_seconds
@@ -725,6 +741,7 @@ def _terminate_hook_process_group(
             monotonic=monotonic,
             sleep=sleep,
             signaler=process_group_signaler,
+            force_requested=lambda: _force_requested(cancel_requested),
         )
     except ProcessGroupSignalError as error:
         raise RuntimeHookError(

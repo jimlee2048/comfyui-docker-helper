@@ -13,6 +13,7 @@ from typing import Protocol
 type Monotonic = Callable[[], float]
 type Sleep = Callable[[float], object]
 type ProcessGroupSignaler = Callable[[int, signal.Signals], object]
+type ForceRequested = Callable[[], bool]
 
 
 class WaitableProcess(Protocol):
@@ -190,11 +191,15 @@ def terminate_process_group(
     monotonic: Monotonic = time.monotonic,
     sleep: Sleep = time.sleep,
     signaler: ProcessGroupSignaler | None = None,
+    force_requested: ForceRequested = lambda: False,
 ) -> bool:
     """Terminate the session leader's group, escalating and reaping its child."""
     if reap_process_if_exited(process) is not None:
         return True
     send = signal_process_group if signaler is None else signaler
+    if force_requested():
+        _send_process_group_signal(process, signal.SIGKILL, send)
+        return reap_process_if_exited(process) is not None
     if not _send_process_group_signal(process, signal.SIGTERM, send):
         return reap_process_if_exited(process) is not None
     if _wait_for_process_group_reap(
@@ -203,15 +208,19 @@ def terminate_process_group(
         poll_interval=poll_interval,
         monotonic=monotonic,
         sleep=sleep,
+        force_requested=force_requested,
     ):
         return True
     _send_process_group_signal(process, signal.SIGKILL, send)
+    if force_requested():
+        return reap_process_if_exited(process) is not None
     return _wait_for_process_group_reap(
         process,
         timeout=kill_grace,
         poll_interval=poll_interval,
         monotonic=monotonic,
         sleep=sleep,
+        force_requested=force_requested,
     )
 
 
@@ -253,11 +262,14 @@ def _wait_for_process_group_reap(
     poll_interval: float,
     monotonic: Monotonic,
     sleep: Sleep,
+    force_requested: ForceRequested,
 ) -> bool:
     deadline = monotonic() + timeout
     while True:
         if reap_process_if_exited(process) is not None:
             return True
+        if force_requested():
+            return False
         now = monotonic()
         if now >= deadline:
             return False

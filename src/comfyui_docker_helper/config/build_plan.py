@@ -828,7 +828,6 @@ class FilesPhase(_PlanModel):
     downloader: DownloaderPlan
     default_download_mode: Literal["sync", "async"]
     download_max_attempts: int = Field(ge=1)
-    download_failure_policy: Literal["continue", "fail"]
     files: tuple[FilePlan, ...]
 
 
@@ -1417,7 +1416,6 @@ def _project_files(
         ),
         default_download_mode=request.default_download_mode,
         download_max_attempts=request.download_max_attempts,
-        download_failure_policy=request.download_failure_policy,
         files=tuple(
             FilePlan(
                 url=item.url,

@@ -206,6 +206,76 @@ def test_existing_checksum_mismatch_without_overwrite_is_terminal_and_untouched(
     assert not transfer_staging_target(request).parent.exists()
 
 
+# A legal final-target skip consumes exact cleanup authority before completion.
+@pytest.mark.parametrize(
+    ("checksum", "overwrite"),
+    [(None, False), (_checksum(b"existing"), True)],
+)
+def test_existing_target_skip_exactly_discards_admitted_resume_artifacts(
+    tmp_path: Path,
+    checksum: str | None,
+    overwrite: bool,
+) -> None:
+    request = _preserved_request(tmp_path / "ComfyUI", checksum=checksum)
+    request = replace(request, overwrite=overwrite)
+    request.target.parent.mkdir(parents=True, exist_ok=True)
+    request.target.write_bytes(b"existing")
+    staging = transfer_staging_target(request)
+    control = Path(f"{staging}.aria2")
+    backend = BytesBackend(b"unused")
+
+    outcome = transfer_file(request, backend=backend, settings=_settings())
+
+    assert outcome.status is DownloadStatus.SKIPPED
+    assert backend.calls == []
+    assert not staging.exists()
+    assert not control.exists()
+    assert request.target.read_bytes() == b"existing"
+
+
+def test_existing_target_skip_durably_accepts_missing_staging_namespace(
+    tmp_path: Path,
+) -> None:
+    request = replace(_preserved_request(tmp_path / "ComfyUI"), overwrite=False)
+    request.target.parent.mkdir(parents=True, exist_ok=True)
+    request.target.write_bytes(b"existing")
+    staging = transfer_staging_target(request)
+    Path(f"{staging}.aria2").unlink()
+    staging.unlink()
+    staging.parent.rmdir()
+    backend = BytesBackend(b"unused")
+
+    outcome = transfer_file(request, backend=backend, settings=_settings())
+
+    assert outcome.status is DownloadStatus.SKIPPED
+    assert backend.calls == []
+    assert not staging.parent.exists()
+    assert request.target.read_bytes() == b"existing"
+
+
+def test_existing_target_skip_fails_closed_when_exact_discard_identity_drifts(
+    tmp_path: Path,
+) -> None:
+    request = _preserved_request(tmp_path / "ComfyUI")
+    request = replace(request, overwrite=False)
+    request.target.parent.mkdir(parents=True, exist_ok=True)
+    request.target.write_bytes(b"existing")
+    staging = transfer_staging_target(request)
+    staging.unlink()
+    staging.write_bytes(b"foreign replacement")
+    control = Path(f"{staging}.aria2")
+    backend = BytesBackend(b"unused")
+
+    with pytest.raises(DownloadFilesError, match="identity does not match authority"):
+        transfer_file(request, backend=backend, settings=_settings())
+
+    assert backend.calls == []
+    assert staging.read_bytes() == b"foreign replacement"
+    assert control.read_bytes() == b"aria2 control"
+    assert request.resume_authority is not None
+    assert request.target.read_bytes() == b"existing"
+
+
 def test_failed_replacement_preserves_old_final_and_cleans_only_owned_staging(
     tmp_path: Path,
 ) -> None:

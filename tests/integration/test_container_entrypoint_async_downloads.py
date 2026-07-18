@@ -33,6 +33,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
 from comfyui_docker_helper.container.runtime_state import (
     RuntimeDownloadsState,
     RuntimeState,
+    RuntimeStateError,
     load_runtime_state,
     write_runtime_state,
 )
@@ -163,6 +164,23 @@ def _state_by_target(state_path: Path):
     return {entry.target: entry for entry in state.downloads.entries.values()}
 
 
+def _expected_state_is_visible(
+    state_path: Path,
+    expected_statuses: Mapping[str, str],
+) -> bool:
+    try:
+        entries = _state_by_target(state_path)
+    except RuntimeStateError as error:
+        if str(error).startswith("runtime state changed during operation:"):
+            return False
+        raise
+    return {
+        target: entry.status
+        for target, entry in entries.items()
+        if target in expected_statuses
+    } == expected_statuses
+
+
 def _eventually(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -199,6 +217,15 @@ def _run_with_real_async_queue(
         runtime_state_path=state_path,
         **kwargs,
     )
+
+
+# State polling retries only the expected atomic-replacement observation.
+def test_state_polling_does_not_hide_persistent_invalid_state(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{}")
+
+    with pytest.raises(RuntimeStateError, match="runtime state is invalid"):
+        _expected_state_is_visible(state_path, {"models/a.bin": "completed"})
 
 
 # Mixed-mode scheduling coverage proves mode partitioning keeps declaration
@@ -777,13 +804,9 @@ filename = "b.bin"
             def wait(self) -> int:
                 assert backend.entered.wait(timeout=1)
                 _eventually(
-                    lambda: (
-                        {
-                            target: entry.status
-                            for target, entry in _state_by_target(state_path).items()
-                            if target in expected_statuses
-                        }
-                        == expected_statuses
+                    lambda: _expected_state_is_visible(
+                        state_path,
+                        expected_statuses,
                     ),
                     timeout=2.5,
                 )

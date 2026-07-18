@@ -102,7 +102,7 @@ def _owned_staging_leaves(root: Path) -> tuple[Path, ...]:
     return tuple(staging.iterdir()) if staging.exists() else ()
 
 
-def test_file_download_plan_projects_checksum_without_runtime_failure_policy() -> None:
+def test_file_download_plan_projects_checksum_and_attempt_budget() -> None:
     checksum = f"sha256:{hashlib.sha256(b'downloaded').hexdigest()}"
     payload = FilesPhase(
         downloader=DownloaderPlan(
@@ -118,7 +118,6 @@ def test_file_download_plan_projects_checksum_without_runtime_failure_policy() -
         ),
         default_download_mode="sync",
         download_max_attempts=3,
-        download_failure_policy="continue",
         files=(
             FilePlan(
                 url="https://example.test/model.bin",
@@ -137,7 +136,6 @@ def test_file_download_plan_projects_checksum_without_runtime_failure_policy() -
 
     assert plan.items[0].checksum == checksum
     assert plan.download_max_attempts == 3
-    assert not hasattr(plan, "download_failure_policy")
 
 
 def test_file_download_plan_rejects_target_outside_admitted_root() -> None:
@@ -155,7 +153,6 @@ def test_file_download_plan_rejects_target_outside_admitted_root() -> None:
         ),
         default_download_mode="sync",
         download_max_attempts=1,
-        download_failure_policy="fail",
         files=(
             FilePlan(
                 url="https://example.test/model.bin",

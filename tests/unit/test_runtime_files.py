@@ -43,6 +43,7 @@ from comfyui_docker_helper.container.transfer_core import (
     DownloadFilesError,
     DownloadStatus,
     Logger,
+    PreservedTransferCleanupError,
     ResumeAuthority,
     TransportCancelled,
     TransportDiagnostic,
@@ -1136,6 +1137,8 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
     backend = FakeBackend(
         failures=[TransportOrdinaryTerminal(TransportDiagnostic("aria2", "not found"))]
     )
+    statuses: list[str] = []
+    logs: list[str] = []
 
     if policy == "fail":
         with pytest.raises(RuntimeFileDownloadError):
@@ -1143,34 +1146,95 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
                 plan,
                 config=_config(policy=policy, attempts=3),
                 backends={"httpx": backend},
-                log=lambda _: None,
+                state_observer=lambda _item, status, **_: statuses.append(status),
+                log=logs.append,
             )
     else:
         results = process_runtime_file_downloads(
             plan,
             config=_config(policy=policy, attempts=3),
             backends={"httpx": backend},
-            log=lambda _: None,
+            state_observer=lambda _item, status, **_: statuses.append(status),
+            log=logs.append,
         )
         assert [result.item.filename for result in results] == ["b.bin"]
 
     assert len(backend.calls) == (1 if policy == "fail" else 2)
+    assert statuses[:2] == ["downloading", "failed"]
+    assert any(
+        "Runtime download failed:" in line and "status=failed" in line for line in logs
+    )
+    assert all("status=exhausted" not in line for line in logs)
+
+
+# Cleanup failure must not overwrite the exact persisted authority it could not use.
+def test_skip_cleanup_failure_preserves_persisted_resume_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    initial = _plan(root, _file("a.bin", downloader="aria2")).items[0]
+    staging = runtime_file_staging_target(initial)
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_bytes(b"partial")
+    control = Path(f"{staging}.aria2")
+    control.write_bytes(b"control")
+    authority = ResumeAuthority(
+        identity_digest=runtime_file_identity_digest(initial),
+        staging_device=staging.stat().st_dev,
+        staging_inode=staging.stat().st_ino,
+        control_device=control.stat().st_dev,
+        control_inode=control.stat().st_ino,
+    )
+    item = replace(initial, resume_authority=authority)
+    item.target.parent.mkdir(parents=True, exist_ok=True)
+    item.target.write_bytes(b"existing")
+    control.unlink()
+    staging.unlink()
+    staging.parent.rmdir()
+
+    def fail_absence_fsync(_fd: int) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(transfer_core.os, "fsync", fail_absence_fsync)
+    backend = FakeBackend()
+    observed: list[str] = []
+
+    with pytest.raises(
+        PreservedTransferCleanupError,
+        match="staging absence could not be made durable",
+    ):
+        process_runtime_file_downloads(
+            RuntimeFilePlan(items=(item,)),
+            config=_config(default="aria2", resume=True),
+            backends={"aria2": backend},
+            state_observer=lambda _item, status, **_: observed.append(status),
+            log=lambda _: None,
+        )
+
+    assert observed == []
+    assert backend.calls == []
+    assert item.resume_authority == authority
+    assert not staging.parent.exists()
 
 
 def test_runtime_continue_cannot_mask_local_target_invariant(tmp_path: Path) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"))
     plan.items[0].target.mkdir(parents=True)
     backend = FakeBackend()
+    statuses: list[str] = []
 
     with pytest.raises(DownloadFilesError, match="not a regular file"):
         process_runtime_file_downloads(
             plan,
             config=_config(policy="continue"),
             backends={"httpx": backend},
+            state_observer=lambda _item, status, **_: statuses.append(status),
             log=lambda _: None,
         )
 
     assert backend.calls == []
+    assert statuses == ["failed"]
 
 
 def test_runtime_cancelled_transfer_stops_without_exhausted_failure(

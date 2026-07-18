@@ -67,6 +67,14 @@ class ResumeRejectedDownloadFilesError(DownloadFilesError):
     """An admitted resumable request was rejected after exact cleanup."""
 
 
+class PreservedTransferCleanupError(DownloadFilesError):
+    """Exact resume cleanup failed before a transfer could finish."""
+
+    def __init__(self, message: str, *, resume_authority: ResumeAuthority) -> None:
+        self.resume_authority = resume_authority
+        super().__init__(message)
+
+
 class _PlacementUncertain(DownloadFilesError):
     """Placement may have mutated final state, so cleanup is forbidden."""
 
@@ -607,6 +615,20 @@ def transfer_file(
                 request.target,
             )
             anchor.verify_visible()
+            if request.resume_authority is not None:
+                try:
+                    discard_preserved_transfer(request)
+                except DownloadFilesError as error:
+                    raise PreservedTransferCleanupError(
+                        str(error), resume_authority=request.resume_authority
+                    ) from error
+            _require_same_safe_final_leaf(
+                anchor.parent.fd,
+                anchor.target_name,
+                initial,
+                request.target,
+            )
+            anchor.verify_visible()
             return existing
 
         staging_anchor = anchor.add_staging_directory()
@@ -761,11 +783,30 @@ def discard_preserved_transfer(request: FileTransferRequest) -> None:
         raise DownloadFilesError(
             "preserved download cleanup lacks same-identity ownership authority"
         )
-    anchor = _TargetAnchor(root=request.root, target=request.target, create=False)
+    try:
+        anchor = _TargetAnchor(root=request.root, target=request.target, create=False)
+    except _MissingDirectory as error:
+        raise DownloadFilesError(
+            "preserved download cleanup target parent changed"
+        ) from error
     staging: _OwnedLeaf | None = None
     control: _OwnedLeaf | None = None
     try:
-        staging_anchor = anchor.add_staging_directory(create=False)
+        try:
+            staging_anchor = anchor.add_staging_directory(create=False)
+        except _MissingDirectory:
+            try:
+                os.fsync(anchor.parent.fd)
+            except OSError as error:
+                raise DownloadFilesError(
+                    f"download staging absence could not be made durable: {error}"
+                ) from error
+            anchor.verify_visible()
+            if _stat_leaf(anchor.parent.fd, ".cdh-staging") is not None:
+                raise DownloadFilesError(
+                    "download staging namespace changed during absence proof"
+                ) from None
+            return
         anchor.verify_visible()
         temp_name = f"{identity.staging_name}.aria2__temp"
         if _stat_leaf(staging_anchor.fd, temp_name) is not None:

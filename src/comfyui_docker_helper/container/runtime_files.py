@@ -57,6 +57,7 @@ from comfyui_docker_helper.container.transfer_core import (
     FileTransferRequest,
     HttpxDownloadSettings,
     Logger,
+    PreservedTransferCleanupError,
     ResumeAuthority,
     StagingDisposition,
     TransferDownloadFilesError,
@@ -326,21 +327,26 @@ def process_runtime_file_downloads(
             continue
         except RuntimeFileDownloadCancelled:
             break
-        except _RuntimeDownloadExhaustedFailure:
-            _log_async_queue_stopping_after_exhausted_failure(
+        except _RuntimeDownloadPolicyFailure as error:
+            _log_async_queue_stopping_after_failure(
                 log,
                 item,
+                status=error.status,
                 config=config,
                 pending=len(plan.items) - index,
             )
             raise
         except RuntimeStateError:
             raise
+        except PreservedTransferCleanupError:
+            # No backend call or state transition occurred, so keep the persisted
+            # exact authority available for a later safe cleanup attempt.
+            raise
         except Exception as error:
             _notify_runtime_download_state(
                 state_observer,
                 item,
-                "exhausted",
+                "failed",
                 error=error,
             )
             raise
@@ -856,11 +862,20 @@ def runtime_downloader_settings(config: RuntimeConfig) -> DownloaderSettings:
 
 
 class _RuntimeDownloadContinued(Exception):
-    """Internal marker for exhausted transfer failures handled by continue."""
+    """Internal marker for policy-eligible failures handled by continue."""
 
 
-class _RuntimeDownloadExhaustedFailure(RuntimeFileDownloadError):
-    """Internal marker for exhausted transfer failures handled by fail policy."""
+class _RuntimeDownloadPolicyFailure(RuntimeFileDownloadError):
+    """Policy-handled terminal or exhausted failure with its truthful state."""
+
+    def __init__(
+        self,
+        diagnostics: tuple[Diagnostic, ...],
+        *,
+        status: Literal["failed", "exhausted"],
+    ) -> None:
+        self.status = status
+        super().__init__(diagnostics)
 
 
 def _download_runtime_file_with_policy(
@@ -943,10 +958,13 @@ def _download_runtime_file_with_policy(
         )
         raise RuntimeFileDownloadCancelled
     error = result.error
+    status: Literal["failed", "exhausted"] = (
+        "failed" if isinstance(result, AttemptOrdinaryTerminal) else "exhausted"
+    )
     _notify_runtime_download_state(
         state_observer,
         item,
-        "exhausted",
+        status,
         error=error,
         resume_authority=(
             result.resume_authority if isinstance(result, AttemptExhausted) else None
@@ -959,6 +977,7 @@ def _download_runtime_file_with_policy(
             attempts=result.attempts,
             config=config,
             path=path,
+            status=status,
             log=log,
         )
     raise AssertionError("attempt coordinator returned an unknown result")
@@ -971,13 +990,14 @@ def _apply_runtime_item_failure_policy(
     attempts: int,
     config: RuntimeConfig,
     path: RuntimeFilePath,
+    status: Literal["failed", "exhausted"],
     log: Logger,
 ) -> None:
     log(
-        "WARNING: Runtime download exhausted: "
+        f"WARNING: Runtime download {status}: "
         f"mode={item.download_mode} target={item.relative_target} "
         f"attempts={attempts}/{config.cdh.download_max_attempts} "
-        f"policy={config.cdh.download_failure_policy} status=exhausted "
+        f"policy={config.cdh.download_failure_policy} status={status} "
         f"reason={runtime_error_reason(error)}"
     )
     if config.cdh.download_failure_policy == "continue":
@@ -987,7 +1007,7 @@ def _apply_runtime_item_failure_policy(
             f"reason={runtime_error_reason(error)}"
         )
         raise _RuntimeDownloadContinued from error
-    raise _RuntimeDownloadExhaustedFailure(
+    raise _RuntimeDownloadPolicyFailure(
         (
             Diagnostic(
                 path=(*path, "target"),
@@ -996,14 +1016,16 @@ def _apply_runtime_item_failure_policy(
                     f"runtime file download failed after {attempts} attempt(s): {error}"
                 ),
             ),
-        )
+        ),
+        status=status,
     ) from error
 
 
-def _log_async_queue_stopping_after_exhausted_failure(
+def _log_async_queue_stopping_after_failure(
     log: Logger,
     item: RuntimeFilePlanItem,
     *,
+    status: Literal["failed", "exhausted"],
     config: RuntimeConfig,
     pending: int,
 ) -> None:
@@ -1011,7 +1033,7 @@ def _log_async_queue_stopping_after_exhausted_failure(
         return
     log(
         "WARNING: Async runtime download queue stopping: "
-        "reason=download_exhausted "
+        f"reason=download_{status} "
         f"policy={config.cdh.download_failure_policy} "
         f"target={item.relative_target} pending={pending}"
     )

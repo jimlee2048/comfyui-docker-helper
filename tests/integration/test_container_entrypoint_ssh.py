@@ -854,6 +854,35 @@ password = "line1\\nline2"
 
 
 # Lifecycle coverage protects sshd monitoring and async/SSH shutdown ordering.
+def test_cooperative_sshd_stop_keeps_wait_errors_best_effort(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class WaitErrorSshd:
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            raise AssertionError("cooperative sshd must not be killed")
+
+        def wait(self) -> int:
+            raise OSError("wait failed")
+
+    assert (
+        entrypoint_module._stop_sshd_runtime_service(
+            WaitErrorSshd(),
+            cancel_requested=lambda: False,
+            shutdown_requested=entrypoint_module.threading.Event(),
+        )
+        is True
+    )
+    assert "SSH runtime service stopped" in capsys.readouterr().out
+
+
 def test_unexpected_post_start_sshd_exit_warns_without_changing_comfyui_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

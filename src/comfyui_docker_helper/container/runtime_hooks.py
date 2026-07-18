@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -16,6 +15,14 @@ from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE,
     RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+)
+from comfyui_docker_helper.container.process_control import (
+    ProcessGroupSignaler,
+    ProcessGroupSignalError,
+    SessionLeaderProcess,
+    reap_process_if_exited,
+    signal_process_group,
+    terminate_process_group,
 )
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
@@ -34,7 +41,6 @@ type RuntimeHookPhase = Literal["pre-start", "post-start", "stop"]
 type RuntimeHookSource = Literal["baked", "mounted"]
 type CancelRequested = Callable[[], bool]
 type Monotonic = Callable[[], float]
-type ProcessGroupSignaler = Callable[[int, signal.Signals], object]
 type Sleep = Callable[[float], object]
 
 
@@ -68,16 +74,6 @@ class RuntimeHookCommandRunner(Protocol):
     ) -> object: ...
 
 
-class RuntimeHookProcess(Protocol):
-    """Running hook process controlled during graceful shutdown."""
-
-    pid: int
-
-    def poll(self) -> int | None: ...
-
-    def wait(self) -> int: ...
-
-
 class RuntimeHookProcessRunner(Protocol):
     """Subprocess-compatible hook process starter."""
 
@@ -89,7 +85,7 @@ class RuntimeHookProcessRunner(Protocol):
         env: Mapping[str, str],
         description: str,
         start_new_session: bool = False,
-    ) -> RuntimeHookProcess: ...
+    ) -> SessionLeaderProcess: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +266,7 @@ def run_runtime_startup_hooks(
                 monotonic=monotonic,
                 sleep=sleep,
                 process_group_signaler=(
-                    _signal_process_group
+                    signal_process_group
                     if process_group_signaler is None
                     else process_group_signaler
                 ),
@@ -359,7 +355,7 @@ def run_runtime_stop_hooks(
                 monotonic=monotonic,
                 sleep=sleep,
                 process_group_signaler=(
-                    _signal_process_group
+                    signal_process_group
                     if process_group_signaler is None
                     else process_group_signaler
                 ),
@@ -542,7 +538,7 @@ def _validate_hook_process_bounds(
 
 
 def _wait_for_startup_hook_process(
-    process: RuntimeHookProcess,
+    process: SessionLeaderProcess,
     *,
     hook: RuntimeHook,
     cancel_requested: CancelRequested,
@@ -553,9 +549,9 @@ def _wait_for_startup_hook_process(
     process_group_signaler: ProcessGroupSignaler,
 ) -> int:
     while True:
-        returncode = process.poll()
+        returncode = reap_process_if_exited(process)
         if returncode is not None:
-            return process.wait()
+            return returncode
         if cancel_requested():
             _terminate_hook_process_group(
                 process,
@@ -571,7 +567,7 @@ def _wait_for_startup_hook_process(
 
 
 def _wait_for_stop_hook_process(
-    process: RuntimeHookProcess,
+    process: SessionLeaderProcess,
     *,
     hook: RuntimeHook,
     cancel_requested: CancelRequested,
@@ -584,9 +580,9 @@ def _wait_for_stop_hook_process(
 ) -> int:
     deadline = monotonic() + timeout_seconds
     while True:
-        returncode = process.poll()
+        returncode = reap_process_if_exited(process)
         if returncode is not None:
-            return process.wait()
+            return returncode
         if cancel_requested():
             _terminate_hook_process_group(
                 process,
@@ -624,7 +620,7 @@ def _wait_for_stop_hook_process(
 
 
 def _terminate_hook_process_group(
-    process: RuntimeHookProcess,
+    process: SessionLeaderProcess,
     *,
     hook: RuntimeHook,
     termination_grace_seconds: float,
@@ -633,77 +629,17 @@ def _terminate_hook_process_group(
     sleep: Sleep,
     process_group_signaler: ProcessGroupSignaler,
 ) -> None:
-    if _reap_hook_process_if_exited(process):
-        return
-
-    if not _send_hook_process_group_signal(
-        process,
-        hook=hook,
-        sig=signal.SIGTERM,
-        process_group_signaler=process_group_signaler,
-    ):
-        _reap_hook_process_if_exited(process)
-        return
-    deadline = monotonic() + termination_grace_seconds
-    while True:
-        if _reap_hook_process_if_exited(process):
-            return
-        now = monotonic()
-        if now >= deadline:
-            _send_hook_process_group_signal(
-                process,
-                hook=hook,
-                sig=signal.SIGKILL,
-                process_group_signaler=process_group_signaler,
-            )
-            _reap_hook_process_until_exited(
-                process,
-                termination_grace_seconds=termination_grace_seconds,
-                poll_interval_seconds=poll_interval_seconds,
-                monotonic=monotonic,
-                sleep=sleep,
-            )
-            return
-        sleep(min(poll_interval_seconds, deadline - now))
-
-
-def _reap_hook_process_until_exited(
-    process: RuntimeHookProcess,
-    *,
-    termination_grace_seconds: float,
-    poll_interval_seconds: float,
-    monotonic: Monotonic,
-    sleep: Sleep,
-) -> None:
-    deadline = monotonic() + termination_grace_seconds
-    while True:
-        if _reap_hook_process_if_exited(process):
-            return
-        now = monotonic()
-        if now >= deadline:
-            return
-        sleep(min(poll_interval_seconds, deadline - now))
-
-
-def _reap_hook_process_if_exited(process: RuntimeHookProcess) -> bool:
-    if process.poll() is None:
-        return False
-    process.wait()
-    return True
-
-
-def _send_hook_process_group_signal(
-    process: RuntimeHookProcess,
-    *,
-    hook: RuntimeHook,
-    sig: signal.Signals,
-    process_group_signaler: ProcessGroupSignaler,
-) -> bool:
     try:
-        process_group_signaler(process.pid, sig)
-    except ProcessLookupError:
-        return False
-    except OSError as error:
+        terminate_process_group(
+            process,
+            termination_grace=termination_grace_seconds,
+            kill_grace=termination_grace_seconds,
+            poll_interval=poll_interval_seconds,
+            monotonic=monotonic,
+            sleep=sleep,
+            signaler=process_group_signaler,
+        )
+    except ProcessGroupSignalError as error:
         raise RuntimeHookError(
             (
                 Diagnostic(
@@ -711,12 +647,11 @@ def _send_hook_process_group_signal(
                     code="runtime_hook.termination_failed",
                     message=(
                         "runtime hook process group could not be signaled with "
-                        f"{sig.name}: {error}"
+                        f"{error.sig.name}: {error.error}"
                     ),
                 ),
             )
         ) from error
-    return True
 
 
 def _raise_if_stop_cancelled(
@@ -744,10 +679,6 @@ def _raise_hook_cancelled(hook: RuntimeHook) -> None:
             ),
         )
     )
-
-
-def _signal_process_group(pid: int, sig: signal.Signals) -> None:
-    os.killpg(os.getpgid(pid), sig)
 
 
 def _hook_argv(

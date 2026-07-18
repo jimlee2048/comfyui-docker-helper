@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +25,15 @@ from comfyui_docker_helper.config import (
     RuntimeConfigurationError,
     RuntimeConfigurationResult,
     load_runtime_config,
+)
+from comfyui_docker_helper.container.process_control import (
+    DirectProcess,
+    DirectProcessStarter,
+    ProcessStartError,
+    signal_direct_process,
+    start_direct_process,
+    terminate_direct_process,
+    wait_for_process_reap,
 )
 from comfyui_docker_helper.container.readiness import (
     ReadinessError,
@@ -90,35 +99,6 @@ SSHD_STOP_POLL_INTERVAL_SECONDS = 0.05
 
 class EntrypointError(ApplicationError):
     """A user-facing container entrypoint failure."""
-
-
-class EntrypointRunner(Protocol):
-    """Subprocess-compatible runner for the ComfyUI child process."""
-
-    def __call__(
-        self,
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> ChildProcess: ...
-
-
-class ChildProcess(Protocol):
-    """Minimal child process interface used by the entrypoint."""
-
-    returncode: int | None
-
-    def wait(self) -> int: ...
-
-    def poll(self) -> int | None: ...
-
-    def send_signal(self, sig: signal.Signals) -> None: ...
-
-    def terminate(self) -> None: ...
-
-    def kill(self) -> None: ...
 
 
 class RuntimeDownloadRunner(Protocol):
@@ -197,7 +177,7 @@ class ReadinessWaiter(Protocol):
         self,
         port: int,
         *,
-        child: ChildProcess,
+        child: DirectProcess,
     ) -> object: ...
 
 
@@ -359,7 +339,7 @@ def run_entrypoint(
     baked_hooks_path: str | Path = BAKED_RUNTIME_HOOKS_PATH,
     mounted_hooks_path: str | Path = MOUNTED_RUNTIME_HOOKS_PATH,
     environ: Mapping[str, str] | None = None,
-    runner: EntrypointRunner = subprocess.Popen,
+    runner: DirectProcessStarter = subprocess.Popen,
     runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
     runtime_async_queue_starter: RuntimeAsyncQueueStarter = (
         start_runtime_async_download_queue
@@ -463,7 +443,7 @@ def run_entrypoint(
             stop_startup_auxiliary_services()
             return _normalize_signal_exit_code(request.sig)
 
-        completed: ChildProcess | None = None
+        completed: DirectProcess | None = None
         try:
             startup_shutdown.raise_on_signal = False
             try:
@@ -484,32 +464,21 @@ def run_entrypoint(
                         startup_shutdown.requested_signal
                     )
                 try:
-                    completed = runner(
+                    completed = start_direct_process(
                         argv,
                         cwd=os.fspath(runtime.comfyui_path),
                         env=runtime.env(source_env),
-                        shell=False,
+                        description="ComfyUI",
+                        starter=runner,
                     )
-                except FileNotFoundError as error:
+                except ProcessStartError as error:
                     if startup_shutdown.requested_signal is not None:
                         stop_startup_auxiliary_services()
                         return _normalize_signal_exit_code(
                             startup_shutdown.requested_signal
                         )
                     stop_startup_auxiliary_services()
-                    raise EntrypointError(
-                        f"ComfyUI executable not found: {argv[0]}"
-                    ) from error
-                except OSError as error:
-                    if startup_shutdown.requested_signal is not None:
-                        stop_startup_auxiliary_services()
-                        return _normalize_signal_exit_code(
-                            startup_shutdown.requested_signal
-                        )
-                    stop_startup_auxiliary_services()
-                    raise EntrypointError(
-                        f"ComfyUI failed to start: {error}"
-                    ) from error
+                    raise EntrypointError(str(error)) from error
                 if startup_shutdown.requested_signal is not None:
                     stop_startup_auxiliary_services()
                     return _forward_startup_shutdown_to_child(
@@ -896,7 +865,7 @@ def _stop_sshd_runtime_service(
             file=sys.stderr,
         )
         _kill_sshd_runtime_service(sshd_handle)
-        _bounded_process_wait(
+        wait_for_process_reap(
             sshd_handle,
             timeout=timeout,
             poll_interval=poll_interval,
@@ -913,7 +882,7 @@ def _stop_sshd_runtime_service(
                 file=sys.stderr,
             )
             _kill_sshd_runtime_service(sshd_handle)
-            _bounded_process_wait(
+            wait_for_process_reap(
                 sshd_handle,
                 timeout=timeout,
                 poll_interval=poll_interval,
@@ -929,7 +898,7 @@ def _stop_sshd_runtime_service(
                 file=sys.stderr,
             )
             _kill_sshd_runtime_service(sshd_handle)
-            _bounded_process_wait(
+            wait_for_process_reap(
                 sshd_handle,
                 timeout=timeout,
                 poll_interval=poll_interval,
@@ -938,7 +907,13 @@ def _stop_sshd_runtime_service(
             )
             return False
         sleep(min(poll_interval, deadline - now))
-    _reap_process_if_exited(sshd_handle)
+    wait_for_process_reap(
+        sshd_handle,
+        timeout=0.0,
+        poll_interval=poll_interval,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
     print("SSH runtime service stopped")
     return True
 
@@ -1193,7 +1168,7 @@ def _wait_for_readiness_if_required(
     hook_plan: RuntimeHookPlan,
     *,
     config: RuntimeConfig,
-    child: ChildProcess,
+    child: DirectProcess,
     readiness_waiter: ReadinessWaiter,
 ) -> None:
     if not hook_plan.for_phase("post-start"):
@@ -1201,7 +1176,12 @@ def _wait_for_readiness_if_required(
     try:
         readiness_waiter(config.comfyui.port, child=child)
     except ReadinessError as error:
-        _terminate_child_if_running(child)
+        terminate_direct_process(
+            child,
+            terminate_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+            kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+            poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+        )
         raise EntrypointError(
             _format_diagnostics("ComfyUI readiness failed", error.diagnostics)
         ) from error
@@ -1212,7 +1192,7 @@ def _run_post_start_hooks_if_required(
     *,
     runtime: ContainerRuntime,
     source_env: Mapping[str, str],
-    child: ChildProcess,
+    child: DirectProcess,
     runtime_hook_runner: RuntimeHookRunner,
     startup_shutdown: _StartupShutdownState,
 ) -> None:
@@ -1233,97 +1213,17 @@ def _run_post_start_hooks_if_required(
             raise _StartupShutdownRequested(
                 startup_shutdown.requested_signal
             ) from error
-        _terminate_child_if_running(child)
+        terminate_direct_process(
+            child,
+            terminate_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+            kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+            poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+        )
         raise EntrypointError(
             _format_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
     finally:
         startup_shutdown.raise_on_signal = True
-
-
-def _terminate_child_if_running(child: ChildProcess) -> None:
-    _terminate_process_with_bounded_kill(
-        child,
-        terminate=lambda: child.terminate(),
-        kill=getattr(child, "kill", None),
-        terminate_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-        kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
-    )
-
-
-def _reap_child_if_exited(child: ChildProcess) -> bool:
-    return _reap_process_if_exited(child)
-
-
-def _reap_child_until_exited(child: ChildProcess) -> None:
-    _bounded_process_wait(
-        child,
-        timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
-    )
-
-
-def _terminate_process_with_bounded_kill(
-    process: ChildProcess,
-    *,
-    terminate: Callable[[], object],
-    kill: Callable[[], object] | None,
-    terminate_timeout: float,
-    kill_timeout: float,
-    poll_interval: float,
-    monotonic: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], object] = time.sleep,
-) -> bool:
-    if _reap_process_if_exited(process):
-        return True
-    with suppress(OSError):
-        terminate()
-    if _bounded_process_wait(
-        process,
-        timeout=terminate_timeout,
-        poll_interval=poll_interval,
-        monotonic=monotonic,
-        sleep=sleep,
-    ):
-        return True
-    if kill is None:
-        return False
-    with suppress(OSError):
-        kill()
-    return _bounded_process_wait(
-        process,
-        timeout=kill_timeout,
-        poll_interval=poll_interval,
-        monotonic=monotonic,
-        sleep=sleep,
-    )
-
-
-def _reap_process_if_exited(process: ChildProcess) -> bool:
-    if process.poll() is None:
-        return False
-    with suppress(OSError):
-        process.wait()
-    return True
-
-
-def _bounded_process_wait(
-    process: ChildProcess,
-    *,
-    timeout: float,
-    poll_interval: float,
-    monotonic: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], object] = time.sleep,
-) -> bool:
-    deadline = monotonic() + timeout
-    while True:
-        if _reap_process_if_exited(process):
-            return True
-        now = monotonic()
-        if now >= deadline:
-            return False
-        sleep(min(poll_interval, deadline - now))
 
 
 class _StartupShutdownRequested(BaseException):
@@ -1383,10 +1283,18 @@ def _normalize_signal_exit_code(sig: signal.Signals) -> int:
 
 
 def _forward_startup_shutdown_to_child(
-    child: ChildProcess,
+    child: DirectProcess,
     sig: signal.Signals,
 ) -> int:
-    return _normalize_child_exit_code(_signal_child_with_bounded_kill(child, sig))
+    return _normalize_child_exit_code(
+        signal_direct_process(
+            child,
+            sig,
+            signal_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+            kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+            poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+        )
+    )
 
 
 class _ShutdownRequested(Exception):
@@ -1412,7 +1320,7 @@ class _ShutdownState:
 
 
 def _wait_with_signal_forwarding(
-    child: ChildProcess,
+    child: DirectProcess,
     *,
     hook_plan: RuntimeHookPlan,
     runtime: ContainerRuntime,
@@ -1478,35 +1386,16 @@ def _wait_with_signal_forwarding(
                     runtime_stop_hook_runner=runtime_stop_hook_runner,
                     cancel_requested=shutdown_state.stop_hooks_cancelled,
                 )
-            return _signal_child_with_bounded_kill(child, request.sig)
+            return signal_direct_process(
+                child,
+                request.sig,
+                signal_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+                kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
+                poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+            )
     finally:
         for sig, previous in previous_handlers.items():
             signal.signal(sig, previous)
-
-
-def _signal_child_with_bounded_kill(
-    child: ChildProcess,
-    sig: signal.Signals,
-) -> int:
-    if child.poll() is None:
-        child.send_signal(sig)
-    if _bounded_process_wait(
-        child,
-        timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
-    ):
-        assert child.returncode is not None
-        return child.returncode
-    with suppress(OSError):
-        child.kill()
-    if _bounded_process_wait(
-        child,
-        timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
-    ):
-        assert child.returncode is not None
-        return child.returncode
-    return -int(signal.SIGKILL)
 
 
 def _run_stop_hooks_before_signal(

@@ -20,6 +20,7 @@ from comfyui_docker_helper.container.download_files import (
     TransportSuccess,
 )
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
+from comfyui_docker_helper.container.process_control import DirectProcessStarter
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
@@ -195,7 +196,7 @@ def _run_with_real_async_queue(
     runtime: ContainerRuntime,
     config: Path,
     state_path: Path,
-    runner: entrypoint_module.EntrypointRunner,
+    runner: DirectProcessStarter,
     runtime_async_queue_starter: entrypoint_module.RuntimeAsyncQueueStarter
     | None = None,
     runtime_hook_runner: entrypoint_module.RuntimeHookRunner | None = None,

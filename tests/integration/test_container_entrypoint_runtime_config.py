@@ -321,6 +321,7 @@ extra_args = ["--preview-method", "auto"]
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
+        **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         del log, state_observer
         events.append("download")

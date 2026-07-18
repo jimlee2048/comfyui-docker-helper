@@ -290,8 +290,9 @@ SSH is disabled by default. Enable it with runtime TOML or `SSH_ENABLE=true`
 and provide at least one public key or password, preferably through
 `SSH_PUB_KEY` or `SSH_PASSWORD` at container startup. If SSH is enabled without
 an effective credential, cdh warns and does not start sshd. The entrypoint
-starts, monitors, and stops the foreground sshd process with the rest of the
-container lifecycle.
+prepares credentials and host keys through bounded cancellable child processes,
+then starts, monitors, and stops foreground sshd with the rest of the container
+lifecycle.
 
 Prefer runtime injection for confidential values. Ordinary TOML values, URLs,
 environment variables, rendered files, image history, and logs can expose
@@ -316,6 +317,15 @@ Startup completes synchronous downloads, runs pre-start hooks, starts sshd when
 enabled, accepts asynchronous downloads, and then starts ComfyUI. If post-start
 hooks exist, cdh waits for ComfyUI readiness before running them.
 
+Each hook runs as an isolated session while its leader is active. cdh owns that
+active execution's timeout, cancellation, process group, result, and leader
+reap. After a hook leader finishes, cdh does not discover, supervise, or signal
+background processes that the trusted script deliberately left running. If a
+startup hook launches a background service, pair it with a stop hook that uses
+the service's control interface, or a carefully validated PID file, to request
+termination and wait for exit. Service control is preferred; stale PID files,
+PID reuse, and process-identity checks remain the hook author's responsibility.
+
 On the first `SIGTERM` or `SIGINT`, cdh promptly starts cancellation of the
 asynchronous download queue and sshd, then runs ordered stop hooks while
 ComfyUI remains alive. `shutdown_timeout` is one total monotonic budget for
@@ -329,6 +339,14 @@ ComfyUI. The first signal remains the shutdown identity; a force-killed ComfyUI
 normally makes the container exit with 137. A natural ComfyUI exit keeps its
 own exit code, performs component cleanup, and does not run signal-only stop
 hooks.
+
+Every rendered image runs Tini as PID 1 with cdh as its direct child. Tini
+forwards Docker's signal to cdh and reaps orphaned zombies adopted by PID 1; it
+is not a service supervisor and does not provide health checks or graceful
+shutdown for hook-started services. Such a service has no graceful-shutdown
+guarantee when its stop hook is missing or fails, ComfyUI exits naturally,
+Docker escalates to `SIGKILL`, or PID 1 exits early. PID-namespace teardown
+terminates remaining processes but is not graceful shutdown.
 
 Docker or another orchestrator owns a separate external hard limit. Linux
 `docker stop` and Compose normally allow ten seconds before `SIGKILL`; cdh's
@@ -352,7 +370,7 @@ A rendered context contains:
   when configured, copied to the paths consumed by the entrypoint; and
 - a Dockerfile whose `FROM` values are literal `tag@sha256` references and
   whose explicit `STOPSIGNAL SIGTERM` precedes the absolute exec-form
-  `/opt/uv/bin/cdh container entrypoint` launch contract.
+  `/usr/bin/tini -- /opt/uv/bin/cdh container entrypoint` launch contract.
 
 The context does not contain a root `config.toml`, and the Dockerfile has no ARG
 that can override lock-authoritative image identities. Host-local source paths

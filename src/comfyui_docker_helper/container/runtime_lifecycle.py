@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from types import FrameType
 from typing import Protocol
@@ -19,7 +19,9 @@ from comfyui_docker_helper.container.process_control import (
     ProcessStartError,
     SessionLeaderProcess,
     reap_process_if_exited,
-    signal_process_group,
+    request_force_direct_process,
+    request_force_process_group,
+    send_direct_process_signal,
     start_direct_process,
     terminate_direct_process,
 )
@@ -160,8 +162,10 @@ def run_runtime_lifecycle(
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
 
         try:
+            previous_raise_on_signal = startup_shutdown.raise_on_signal
+            startup_shutdown.raise_on_signal = False
             try:
-                downloads.activate()
+                downloads.activate(cancel_requested=startup_shutdown)
             except RuntimeFilePlanError as error:
                 raise EntrypointError(
                     format_runtime_diagnostics(
@@ -178,6 +182,10 @@ def run_runtime_lifecycle(
                 ) from error
             except ApplicationError as error:
                 raise EntrypointError(f"runtime download failed: {error}") from error
+            except RuntimeAsyncQueueStartupError as error:
+                raise EntrypointError(f"runtime download failed: {error}") from error
+            finally:
+                startup_shutdown.raise_on_signal = previous_raise_on_signal
 
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
@@ -193,7 +201,7 @@ def run_runtime_lifecycle(
             previous_raise_on_signal = startup_shutdown.raise_on_signal
             startup_shutdown.raise_on_signal = False
             try:
-                ssh_service.start()
+                ssh_service.start(cancel_requested=startup_shutdown)
             except RuntimeSshServiceError as error:
                 raise EntrypointError(str(error)) from error
             finally:
@@ -507,6 +515,9 @@ class _StartupShutdownState:
     def wait(self, timeout: float) -> bool:
         return self._cancel_event.wait(timeout)
 
+    def wait_for_force(self, timeout: float) -> bool:
+        return self._repeated_event.wait(timeout)
+
     def repeated_cancellation(self) -> _RepeatedStartupCancellation:
         return _RepeatedStartupCancellation(self)
 
@@ -695,6 +706,9 @@ def _finish_signal_shutdown(
             downloads=downloads,
             ssh_service=ssh_service,
             hook_processes=hook_processes,
+            deadline=timeline.deadline,
+            monotonic=monotonic,
+            sleep=sleep,
         )
     if child is None:
         _wait_for_auxiliary_shutdown(
@@ -729,14 +743,18 @@ def _finish_signal_shutdown(
             downloads=downloads,
             ssh_service=ssh_service,
             hook_processes=hook_processes,
+            deadline=timeline.deadline,
+            monotonic=monotonic,
+            sleep=sleep,
         )
     if monotonic() >= timeline.auxiliary_deadline:
-        if not downloads.is_stopped():
-            downloads.force_stop()
-        if not ssh_service.is_stopped():
-            ssh_service.force_stop()
-    if child.poll() is None:
-        child.send_signal(sig)
+        _force_auxiliary_shutdown(
+            downloads,
+            ssh_service,
+            downloads_stopped=downloads.is_stopped(),
+            ssh_stopped=ssh_service.is_stopped(),
+        )
+    send_direct_process_signal(child, sig)
     return _wait_for_managed_shutdown(
         child,
         downloads=downloads,
@@ -802,6 +820,9 @@ def _wait_for_auxiliary_shutdown(
                 downloads=downloads,
                 ssh_service=ssh_service,
                 hook_processes=hook_processes,
+                deadline=deadline,
+                monotonic=monotonic,
+                sleep=sleep,
             )
             return
         downloads_stopped = downloads.is_stopped()
@@ -811,12 +832,24 @@ def _wait_for_auxiliary_shutdown(
             return
         now = monotonic()
         if now >= auxiliary_deadline or (deadline is not None and now >= deadline):
-            if not downloads_stopped:
-                downloads.force_stop()
-            if not ssh_stopped:
-                ssh_service.force_stop()
+            _force_auxiliary_shutdown(
+                downloads,
+                ssh_service,
+                downloads_stopped=downloads_stopped,
+                ssh_stopped=ssh_stopped,
+            )
             _force_hook_processes(hook_processes)
-            return
+            return _force_managed_shutdown(
+                signal.SIGTERM,
+                child=None,
+                downloads=downloads,
+                ssh_service=ssh_service,
+                hook_processes=hook_processes,
+                deadline=deadline,
+                monotonic=monotonic,
+                sleep=sleep,
+                force_already_requested=True,
+            )
         boundary = auxiliary_deadline
         if deadline is not None:
             boundary = min(boundary, deadline)
@@ -845,6 +878,9 @@ def _wait_for_managed_shutdown(
                 downloads=downloads,
                 ssh_service=ssh_service,
                 hook_processes=hook_processes,
+                deadline=deadline,
+                monotonic=monotonic,
+                sleep=sleep,
             )
         child_result = reap_process_if_exited(child)
         downloads_stopped = downloads.is_stopped()
@@ -860,10 +896,12 @@ def _wait_for_managed_shutdown(
 
         now = monotonic()
         if not auxiliary_bound_reached and now >= auxiliary_deadline:
-            if not downloads_stopped:
-                downloads.force_stop()
-            if not ssh_stopped:
-                ssh_service.force_stop()
+            _force_auxiliary_shutdown(
+                downloads,
+                ssh_service,
+                downloads_stopped=downloads_stopped,
+                ssh_stopped=ssh_stopped,
+            )
             _force_hook_processes(hook_processes)
             auxiliary_bound_reached = True
             downloads_stopped = downloads.is_stopped()
@@ -875,16 +913,38 @@ def _wait_for_managed_shutdown(
                 and child_result is not None
                 and not (downloads_stopped and ssh_stopped and hooks_stopped)
             ):
-                return child_result
+                return _force_managed_shutdown(
+                    signal.SIGTERM,
+                    child=child,
+                    downloads=downloads,
+                    ssh_service=ssh_service,
+                    hook_processes=hook_processes,
+                    deadline=None,
+                    monotonic=monotonic,
+                    sleep=sleep,
+                    force_already_requested=True,
+                )
 
         if deadline is not None and now >= deadline:
-            downloads.force_stop()
-            ssh_service.force_stop()
+            _force_auxiliary_shutdown(
+                downloads,
+                ssh_service,
+                downloads_stopped=downloads.is_stopped(),
+                ssh_stopped=ssh_service.is_stopped(),
+            )
             _force_hook_processes(hook_processes)
-            if child.poll() is None:
-                child.kill()
-            result = reap_process_if_exited(child)
-            return -int(signal.SIGKILL) if result is None else result
+            request_force_direct_process(child)
+            return _force_managed_shutdown(
+                signal.SIGTERM,
+                child=child,
+                downloads=downloads,
+                ssh_service=ssh_service,
+                hook_processes=hook_processes,
+                deadline=deadline,
+                monotonic=monotonic,
+                sleep=sleep,
+                force_already_requested=True,
+            )
 
         next_boundary = (
             auxiliary_deadline
@@ -908,20 +968,57 @@ def _force_managed_shutdown(
     downloads: RuntimeDownloads,
     ssh_service: RuntimeSshService,
     hook_processes: tuple[SessionLeaderProcess, ...],
+    deadline: float | None,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], object],
+    force_already_requested: bool = False,
 ) -> int:
-    """Apply one repeated-signal force request without a new wait budget."""
-    downloads.force_stop()
-    ssh_service.force_stop()
-    _force_hook_processes(hook_processes)
-    if child is None:
-        return -int(sig)
-    result = reap_process_if_exited(child)
-    if result is not None:
-        return result
-    with suppress(OSError):
-        child.kill()
-    result = reap_process_if_exited(child)
-    return -int(signal.SIGKILL) if result is None else result
+    """Force exact owners concurrently and return only after real quiescence."""
+    if not force_already_requested:
+        downloads.request_force_stop()
+        ssh_service.request_force_stop()
+        _force_hook_processes(hook_processes)
+        if child is not None:
+            request_force_direct_process(child)
+
+    while True:
+        child_result = None if child is None else reap_process_if_exited(child)
+        downloads_stopped = downloads.is_stopped()
+        ssh_stopped = ssh_service.is_stopped()
+        hooks_stopped = _reap_hook_processes(hook_processes)
+        if (
+            (child is None or child_result is not None)
+            and downloads_stopped
+            and ssh_stopped
+            and hooks_stopped
+        ):
+            if child is None:
+                return -int(sig)
+            assert child_result is not None
+            return child_result
+
+        # The caller's deadline controls escalation, not permission to report a
+        # still-owned operation as stopped. Once exhausted, remain fail closed
+        # until exact terminal evidence arrives or the orchestrator hard-kills.
+        now = monotonic()
+        if deadline is not None and now < deadline:
+            sleep(min(CHILD_REAP_POLL_INTERVAL_SECONDS, deadline - now))
+        else:
+            sleep(CHILD_REAP_POLL_INTERVAL_SECONDS)
+
+
+def _force_auxiliary_shutdown(
+    downloads: RuntimeDownloads,
+    ssh_service: RuntimeSshService,
+    *,
+    downloads_stopped: bool,
+    ssh_stopped: bool,
+) -> None:
+    """Force active auxiliaries concurrently without creating a new wait."""
+    if not downloads_stopped:
+        downloads.request_force_stop()
+    if not ssh_stopped:
+        ssh_service.request_force_stop()
 
 
 def _reap_hook_processes(processes: tuple[SessionLeaderProcess, ...]) -> bool:
@@ -933,15 +1030,6 @@ def _reap_hook_processes(processes: tuple[SessionLeaderProcess, ...]) -> bool:
 
 
 def _force_hook_processes(processes: tuple[SessionLeaderProcess, ...]) -> bool:
-    stopped = True
     for process in processes:
-        if reap_process_if_exited(process) is not None:
-            continue
-        try:
-            signal_process_group(process.pid, signal.SIGKILL)
-        except OSError:
-            stopped = False
-            continue
-        if reap_process_if_exited(process) is None:
-            stopped = False
-    return stopped
+        request_force_process_group(process)
+    return _reap_hook_processes(processes)

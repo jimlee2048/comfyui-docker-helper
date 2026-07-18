@@ -2,23 +2,31 @@
 
 from __future__ import annotations
 
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
+from comfyui_docker_helper.container.process_control import send_direct_process_signal
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     discover_runtime_hooks,
     run_runtime_stop_hooks,
 )
+from comfyui_docker_helper.container.runtime_lifecycle import (
+    _wait_for_managed_shutdown,
+)
 
 
-# A real hook group that misses the immediate reap remains lifecycle-owned and
-# is reaped concurrently after the absolute pre-stop deadline expires.
-def test_real_long_stop_hook_is_killed_and_reaped_at_deadline(tmp_path: Path) -> None:
+# A stop-hook cutoff transfers the exact killed-but-unreaped group leader to the
+# lifecycle final window, where it is reaped alongside the signaled main child.
+def test_real_long_stop_hook_is_reaped_in_lifecycle_final_window(
+    tmp_path: Path,
+) -> None:
     runtime = ContainerRuntime(
         workspace=tmp_path / "workspace",
         comfyui_path=tmp_path / "workspace" / "ComfyUI",
@@ -50,42 +58,32 @@ def test_real_long_stop_hook_is_killed_and_reaped_at_deadline(tmp_path: Path) ->
     assert [item.code for item in raised.value.diagnostics] == [
         "runtime_hook.shutdown_deadline"
     ]
-    active_process = raised.value.active_process
-    assert active_process is not None
+    hook_process = raised.value.active_process
+    assert hook_process is not None
 
-    class CompletedChild:
-        returncode: int | None = 0
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        shell=False,
+    )
+    send_direct_process_signal(child, signal.SIGTERM)
 
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def wait(self) -> int:
-            assert self.returncode is not None
-            return self.returncode
-
-        def kill(self) -> None:
-            pytest.fail("completed ComfyUI child must not be killed")
-
-    class StoppedAuxiliary:
+    class StoppedOwner:
         def is_stopped(self) -> bool:
             return True
 
-        def force_stop(self) -> bool:
-            pytest.fail("stopped auxiliary must not be forced")
-
-    now = time.monotonic()
-    auxiliary = StoppedAuxiliary()
-    assert (
-        lifecycle_module._wait_for_managed_shutdown(
-            CompletedChild(),  # type: ignore[arg-type]
-            downloads=auxiliary,  # type: ignore[arg-type]
-            ssh_service=auxiliary,  # type: ignore[arg-type]
-            deadline=now + 1,
-            auxiliary_deadline=now + 1,
-            hook_processes=(active_process,),
-            monotonic=time.monotonic,
-            sleep=time.sleep,
-        )
-        == 0
+    owner = StoppedOwner()
+    final_deadline = time.monotonic() + 1.0
+    result = _wait_for_managed_shutdown(
+        child,
+        downloads=owner,  # type: ignore[arg-type]
+        ssh_service=owner,  # type: ignore[arg-type]
+        deadline=final_deadline,
+        auxiliary_deadline=final_deadline,
+        hook_processes=(hook_process,),
+        monotonic=time.monotonic,
+        sleep=time.sleep,
     )
-    assert active_process.poll() is not None
+
+    assert result == -signal.SIGTERM
+    assert child.returncode == -signal.SIGTERM
+    assert hook_process.returncode == -signal.SIGKILL

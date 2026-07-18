@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container.runners import ContainerRuntime
@@ -45,7 +45,7 @@ ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS = 0.05
 
 
 class RuntimeDownloadRunner(Protocol):
-    """Runtime file downloader used by the synchronous component path."""
+    """Runtime file downloader used by one owned runtime operation."""
 
     def __call__(
         self,
@@ -54,7 +54,30 @@ class RuntimeDownloadRunner(Protocol):
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        backend_observer: Callable[[CancellableDownloadBackend], None] | None = None,
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
+
+
+@runtime_checkable
+class ForceEscalationCancellation(Protocol):
+    """Cancellation source that exposes repeated-signal force escalation."""
+
+    def force_requested(self) -> bool: ...
+
+
+@runtime_checkable
+class DeadlineBoundCancellation(Protocol):
+    """Cancellation source that exposes the owning absolute deadline."""
+
+    def shutdown_deadline(self) -> float | None: ...
+
+
+@runtime_checkable
+class WakeableForceCancellation(Protocol):
+    """Cancellation source that wakes when force escalation is requested."""
+
+    def wait_for_force(self, timeout: float) -> object: ...
 
 
 class RuntimeAsyncQueueStarter(Protocol):
@@ -89,6 +112,14 @@ class RuntimeAsyncDownloadQueueHandle(Protocol):
 
     def is_alive(self) -> bool: ...
 
+    def wait_until_stopped(
+        self,
+        *,
+        timeout: float,
+        poll_interval: float,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> bool: ...
+
 
 class RuntimeAsyncQueueStartupError(RuntimeError):
     """Async queue infrastructure failed before accepting downloads."""
@@ -103,7 +134,7 @@ class _PreparedRuntimeDownloads:
 
 
 @dataclass(slots=True)
-class _RuntimeAsyncDownloadQueueHandle:
+class _RuntimeDownloadOperationHandle:
     thread: threading.Thread
     stop_requested: threading.Event
     backends: list[CancellableDownloadBackend]
@@ -153,6 +184,30 @@ class _RuntimeAsyncDownloadQueueHandle:
     def is_alive(self) -> bool:
         return self.thread.is_alive()
 
+    def wait_until_stopped(
+        self,
+        *,
+        timeout: float,
+        poll_interval: float,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> bool:
+        deadline = monotonic() + timeout
+        while True:
+            self.thread.join(timeout=0.0)
+            worker_alive = self.thread.is_alive()
+            cancellation_alive = self.backend_termination_is_alive()
+            if not worker_alive and not cancellation_alive:
+                return True
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return False
+            if worker_alive:
+                self.thread.join(timeout=min(poll_interval, remaining))
+            else:
+                cancellation = self.backend_termination_thread
+                assert cancellation is not None
+                cancellation.join(timeout=min(poll_interval, remaining))
+
 
 class RuntimeDownloads:
     """Own runtime file activation and the lifetime of its async worker."""
@@ -180,23 +235,85 @@ class RuntimeDownloads:
         )
         self._log = log
         self._prepared = _empty_prepared_runtime_downloads()
+        self._sync_handle: _RuntimeDownloadOperationHandle | None = None
         self._async_handle: RuntimeAsyncDownloadQueueHandle | None = None
 
-    def activate(self) -> None:
-        """Reconcile desired files and complete the synchronous queue."""
+    def activate(
+        self,
+        *,
+        cancel_requested: Callable[[], bool] = lambda: False,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Reconcile files and run the synchronous queue as one owned operation."""
         plan = build_runtime_file_plan(
             ({"files": list(self._files)},),
             comfyui_path=self._runtime.comfyui_path,
             default_download_mode=self._config.cdh.default_download_mode,
         )
-        self._prepared = _activate_runtime_file_plan(
-            plan,
-            config=self._config,
-            runtime=self._runtime,
-            runtime_downloader=self._downloader,
-            runtime_state_path=self._runtime_state_path,
-            log=self._log,
+        stop_requested = threading.Event()
+        backends: list[CancellableDownloadBackend] = []
+        backends_lock = threading.Lock()
+        result: list[_PreparedRuntimeDownloads] = []
+        errors: list[BaseException] = []
+
+        def observe_backend(backend: CancellableDownloadBackend) -> None:
+            with backends_lock:
+                if not any(owned is backend for owned in backends):
+                    backends.append(backend)
+
+        def worker() -> None:
+            try:
+                result.append(
+                    _activate_runtime_file_plan(
+                        plan,
+                        config=self._config,
+                        runtime=self._runtime,
+                        runtime_downloader=self._downloader,
+                        runtime_state_path=self._runtime_state_path,
+                        log=self._log,
+                        cancel_requested=stop_requested.is_set,
+                        backend_observer=observe_backend,
+                    )
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        thread = threading.Thread(
+            target=worker,
+            name="cdh-runtime-sync-downloads",
+            daemon=True,
         )
+        handle = _RuntimeDownloadOperationHandle(
+            thread=thread,
+            stop_requested=stop_requested,
+            backends=backends,
+            backends_lock=backends_lock,
+        )
+        self._sync_handle = handle
+        thread.start()
+        while handle.is_alive():
+            if cancel_requested():
+                _cancel_sync_operation(
+                    handle,
+                    cancel_requested=cancel_requested,
+                    monotonic=monotonic,
+                )
+                return
+            handle.join(timeout=ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS)
+        if cancel_requested():
+            _cancel_sync_operation(
+                handle,
+                cancel_requested=cancel_requested,
+                monotonic=monotonic,
+            )
+            return
+        if errors:
+            raise errors[0]
+        if len(result) != 1:
+            raise RuntimeAsyncQueueStartupError(
+                "synchronous runtime download result is missing"
+            )
+        self._prepared = result[0]
 
     def start_async(self, *, cancel_requested: Callable[[], bool]) -> None:
         """Start the prepared asynchronous queue after startup admission."""
@@ -256,32 +373,37 @@ class RuntimeDownloads:
         )
 
     def request_stop(self, *, deadline: float | None = None) -> None:
-        """Promptly cancel accepted work without waiting for the worker."""
-        handle = self._async_handle
-        if handle is None or not handle.is_alive():
-            return
-        self._log("Async runtime download queue stop requested")
-        handle.request_stop()
-        handle.request_backend_termination(deadline=deadline)
+        """Promptly cancel accepted sync/async work without waiting."""
+        for handle in self._owned_handles():
+            if not handle.is_alive():
+                continue
+            self._log("Runtime download operation stop requested")
+            handle.request_stop()
+            handle.request_backend_termination(deadline=deadline)
 
     def is_stopped(self) -> bool:
-        """Report whether the owned asynchronous worker is quiescent."""
-        handle = self._async_handle
-        if handle is None:
-            return True
-        handle.join(timeout=0.0)
-        return not handle.is_alive() and not handle.backend_termination_is_alive()
+        """Observe nonblocking joins and report complete worker quiescence."""
+        for handle in self._owned_handles():
+            if handle.is_alive():
+                handle.join(timeout=0.0)
+        return all(
+            not handle.is_alive() and not handle.backend_termination_is_alive()
+            for handle in self._owned_handles()
+        )
 
-    def force_stop(self) -> bool:
-        """Force cancellation of any backend still owned by the worker."""
-        handle = self._async_handle
-        if handle is None:
-            return True
-        handle.request_stop()
-        handle.request_backend_termination(deadline=None)
-        handle.terminate_backends()
-        handle.join(timeout=0.0)
-        return not handle.is_alive() and not handle.backend_termination_is_alive()
+    def request_force_stop(self) -> None:
+        """Request immediate force cancellation for every owned operation."""
+        for handle in self._owned_handles():
+            handle.request_stop()
+            handle.request_backend_termination(deadline=None)
+            handle.terminate_backends()
+
+    def _owned_handles(self) -> tuple[RuntimeAsyncDownloadQueueHandle, ...]:
+        return tuple(
+            handle
+            for handle in (self._sync_handle, self._async_handle)
+            if handle is not None
+        )
 
 
 def start_runtime_async_download_queue(
@@ -363,7 +485,7 @@ def start_runtime_async_download_queue(
             name="cdh-runtime-async-downloads",
             daemon=True,
         )
-        handle = _RuntimeAsyncDownloadQueueHandle(
+        handle = _RuntimeDownloadOperationHandle(
             thread=thread,
             stop_requested=stop_requested,
             backends=backends,
@@ -399,6 +521,8 @@ def _activate_runtime_file_plan(
     runtime_downloader: RuntimeDownloadRunner,
     runtime_state_path: Path,
     log: Logger,
+    cancel_requested: Callable[[], bool],
+    backend_observer: Callable[[CancellableDownloadBackend], None],
 ) -> _PreparedRuntimeDownloads:
     now = datetime.now(UTC)
     store = RuntimeStateStore.open(
@@ -447,6 +571,8 @@ def _activate_runtime_file_plan(
             config=config,
             log=log,
             state_observer=state_writer,
+            cancel_requested=cancel_requested,
+            backend_observer=backend_observer,
         )
         return prepared
     finally:
@@ -458,6 +584,46 @@ def _empty_prepared_runtime_downloads() -> _PreparedRuntimeDownloads:
         async_plan=RuntimeFilePlan(items=()),
         run_id=None,
     )
+
+
+def _force_requested(cancel_requested: Callable[[], bool]) -> bool:
+    return (
+        isinstance(cancel_requested, ForceEscalationCancellation)
+        and cancel_requested.force_requested()
+    )
+
+
+def _cancel_sync_operation(
+    handle: _RuntimeDownloadOperationHandle,
+    *,
+    cancel_requested: Callable[[], bool],
+    monotonic: Callable[[], float],
+) -> None:
+    """Cancel one sync operation against one absolute component boundary."""
+    deadline = monotonic() + ASYNC_QUEUE_STOP_TIMEOUT_SECONDS
+    if isinstance(cancel_requested, DeadlineBoundCancellation):
+        outer_deadline = cancel_requested.shutdown_deadline()
+        if outer_deadline is not None:
+            deadline = min(deadline, outer_deadline)
+    handle.request_stop()
+    handle.request_backend_termination(deadline=deadline)
+    forced = False
+    while not handle.wait_until_stopped(
+        timeout=0.0,
+        poll_interval=ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS,
+        monotonic=monotonic,
+    ):
+        now = monotonic()
+        if _force_requested(cancel_requested) or now >= deadline:
+            handle.terminate_backends()
+            forced = True
+        delay = ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS
+        if not forced:
+            delay = min(delay, max(0.0, deadline - now))
+        if isinstance(cancel_requested, WakeableForceCancellation):
+            cancel_requested.wait_for_force(delay)
+        else:
+            time.sleep(delay)
 
 
 def _split_runtime_download_queues(
@@ -531,70 +697,25 @@ def stop_runtime_async_download_queue(
     sleep: Callable[[float], object] = time.sleep,
     log: Logger = print,
 ) -> bool:
-    """Cooperatively stop one owned queue and bound backend termination."""
+    """Stop one owned queue against one absolute component boundary."""
     if handle is None or not handle.is_alive():
         return True
 
     log("Async runtime download queue stop requested")
     handle.request_stop()
     deadline = monotonic() + timeout
-    while handle.is_alive():
-        if cancel_requested():
-            log(
-                "WARNING: Async runtime download queue stop interrupted; "
-                "terminating backends"
-            )
-            handle.terminate_backends()
-            _join_after_backend_termination(
-                handle,
-                timeout=timeout,
-                poll_interval=poll_interval,
-                monotonic=monotonic,
-                sleep=sleep,
-                log=log,
-            )
-            return False
+    forced = False
+    while handle.is_alive() or handle.backend_termination_is_alive():
         now = monotonic()
-        if now >= deadline:
-            log(
-                "WARNING: Async runtime download queue did not stop in "
-                f"{timeout:.1f}s; terminating backends"
-            )
+        if not forced and (cancel_requested() or now >= deadline):
+            reason = "interrupted" if cancel_requested() else f"exceeded {timeout:.1f}s"
+            log(f"WARNING: Async runtime download queue {reason}; forcing backends")
+            handle.request_backend_termination(deadline=deadline)
             handle.terminate_backends()
-            _join_after_backend_termination(
-                handle,
-                timeout=timeout,
-                poll_interval=poll_interval,
-                monotonic=monotonic,
-                sleep=sleep,
-                log=log,
-            )
-            return False
-        handle.join(timeout=min(poll_interval, deadline - now))
-        if handle.is_alive():
+            forced = True
+        delay = poll_interval if forced else min(poll_interval, deadline - now)
+        handle.join(timeout=max(0.0, delay))
+        if handle.is_alive() or handle.backend_termination_is_alive():
             sleep(0)
     log("Async runtime download queue stopped")
-    return True
-
-
-def _join_after_backend_termination(
-    handle: RuntimeAsyncDownloadQueueHandle,
-    *,
-    timeout: float,
-    poll_interval: float,
-    monotonic: Callable[[], float],
-    sleep: Callable[[float], object],
-    log: Logger,
-) -> None:
-    deadline = monotonic() + min(timeout, poll_interval)
-    while handle.is_alive():
-        now = monotonic()
-        if now >= deadline:
-            log(
-                "WARNING: Async runtime download queue remained alive after "
-                "backend termination"
-            )
-            return
-        handle.join(timeout=min(poll_interval, deadline - now))
-        if handle.is_alive():
-            sleep(0)
+    return not forced

@@ -10,10 +10,12 @@ import pytest
 from comfyui_docker_helper.container.process_control import (
     ProcessGroupSignalError,
     ProcessStartError,
+    force_reap_direct_process,
     reap_process_if_exited,
-    signal_direct_process,
+    send_direct_process_signal,
     start_direct_process,
     terminate_direct_process,
+    terminate_direct_process_until,
     terminate_process_group,
     wait_for_process_reap,
 )
@@ -133,8 +135,8 @@ def test_start_direct_process_preserves_inputs_and_maps_expected_errors() -> Non
         )
 
 
-# Direct children are reaped after cooperative termination and escalate exactly
-# once when a forwarded signal is ignored.
+# Direct children preserve separate cooperative-signal and force/reap mechanics
+# so lifecycle policy can signal all owners before waiting on any one child.
 def test_direct_process_wait_and_escalation_are_bounded_and_reaped() -> None:
     cooperative = FakeProcess(terminate_exits=True)
     assert (
@@ -152,19 +154,49 @@ def test_direct_process_wait_and_escalation_are_bounded_and_reaped() -> None:
 
     clock = FakeClock()
     ignored = FakeProcess()
-    assert signal_direct_process(
-        ignored,
-        signal.SIGINT,
-        signal_timeout=0.2,
-        kill_timeout=0.2,
-        poll_interval=0.1,
-        monotonic=clock.monotonic,
-        sleep=clock.sleep,
-    ) == -int(signal.SIGKILL)
+    assert (
+        send_direct_process_signal(
+            ignored,
+            signal.SIGINT,
+        )
+        is True
+    )
+    assert (
+        force_reap_direct_process(
+            ignored,
+            timeout=0.2,
+            poll_interval=0.1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        is True
+    )
     assert ignored.signals == [signal.SIGINT]
     assert ignored.kills == 1
     assert ignored.waits == 1
+    assert clock.now == pytest.approx(0.0)
+
+
+# The absolute-deadline primitive returns strict reap evidence and never opens
+# a second kill interval after the caller-owned cooperative boundary.
+def test_direct_process_absolute_deadline_returns_terminal_evidence() -> None:
+    clock = FakeClock()
+    process = FakeProcess()
+
+    result = terminate_direct_process_until(
+        process,
+        deadline=0.2,
+        poll_interval=0.1,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    assert result.terminal.returncode == -signal.SIGKILL
+    assert result.forced is True
     assert clock.now == pytest.approx(0.2)
+    assert process.terminates == 1
+    assert process.kills == 1
+    assert process.waits == 1
 
 
 # Session-leader ownership targets the recorded group once, then reaps the

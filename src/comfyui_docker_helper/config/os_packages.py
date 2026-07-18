@@ -10,6 +10,7 @@ DEFAULT_OS_PACKAGES = (
     "build-essential",
     "aria2",
     "openssh-server",
+    "tini",
 )
 
 _DEBIAN_PACKAGE_PATTERN = re.compile(r"[a-z0-9][a-z0-9+.-]+\Z")

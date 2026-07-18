@@ -9,16 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.runners import (
-    ContainerCommandError,
-    ContainerRuntime,
-)
+from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_hooks import (
     STOP_HOOK_POLL_INTERVAL_SECONDS,
     STOP_HOOK_TERMINATION_GRACE_SECONDS,
     RuntimeHookError,
     discover_runtime_hooks,
-    run_runtime_hooks,
     run_runtime_startup_hooks,
     run_runtime_stop_hooks,
 )
@@ -217,122 +213,8 @@ def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:
 
 # Startup hook process tests pin interpreter selection, environment shaping,
 # ordering, logging, and failure reporting before ComfyUI starts.
-def test_run_pre_start_hooks_uses_suffix_mapping_env_cwd_and_logs(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime(tmp_path)
-    baked = tmp_path / "baked"
-    _write_hook(baked, "pre-start.d", "10-shell.sh")
-    _write_hook(baked, "pre-start.d", "20-python.py")
-    plan = discover_runtime_hooks(
-        baked_hooks_path=baked,
-        mounted_hooks_path=tmp_path / "missing-mounted",
-    )
-    calls: list[tuple[list[str], Path, dict[str, str], str]] = []
-    logs: list[str] = []
-
-    def runner(
-        argv: Sequence[str | os.PathLike[str]],
-        *,
-        cwd: str | Path,
-        env: Mapping[str, str],
-        description: str,
-    ) -> object:
-        calls.append(
-            (
-                [os.fspath(argument) for argument in argv],
-                Path(cwd),
-                dict(env),
-                description,
-            )
-        )
-        return object()
-
-    results = run_runtime_hooks(
-        plan,
-        "pre-start",
-        runtime=runtime,
-        env={"PATH": "/usr/bin", "EXTRA": "1"},
-        log=logs.append,
-        runner=runner,
-    )
-
-    assert [result.status for result in results] == ["completed", "completed"]
-    assert calls == [
-        (
-            ["bash", str(baked / "pre-start.d" / "10-shell.sh")],
-            runtime.comfyui_path,
-            {
-                "PATH": f"{runtime.virtual_env / 'bin'}:/usr/bin",
-                "EXTRA": "1",
-                "WORKSPACE": str(runtime.workspace),
-                "COMFYUI_PATH": str(runtime.comfyui_path),
-                "VIRTUAL_ENV": str(runtime.virtual_env),
-            },
-            "runtime hook baked/pre-start/10-shell.sh",
-        ),
-        (
-            [str(runtime.python), str(baked / "pre-start.d" / "20-python.py")],
-            runtime.comfyui_path,
-            {
-                "PATH": f"{runtime.virtual_env / 'bin'}:/usr/bin",
-                "EXTRA": "1",
-                "WORKSPACE": str(runtime.workspace),
-                "COMFYUI_PATH": str(runtime.comfyui_path),
-                "VIRTUAL_ENV": str(runtime.virtual_env),
-            },
-            "runtime hook baked/pre-start/20-python.py",
-        ),
-    ]
-    assert logs == [
-        "Running runtime hook source=baked phase=pre-start filename=10-shell.sh",
-        "Running runtime hook source=baked phase=pre-start filename=20-python.py",
-    ]
-
-
-def test_pre_start_hook_failure_stops_phase(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    baked = tmp_path / "baked"
-    _write_hook(baked, "pre-start.d", "10-ok.sh")
-    _write_hook(baked, "pre-start.d", "20-fail.sh")
-    _write_hook(baked, "pre-start.d", "30-skip.sh")
-    plan = discover_runtime_hooks(
-        baked_hooks_path=baked,
-        mounted_hooks_path=tmp_path / "missing-mounted",
-    )
-    calls: list[str] = []
-
-    def runner(
-        argv: Sequence[str | os.PathLike[str]],
-        *,
-        cwd: str | Path,
-        env: Mapping[str, str],
-        description: str,
-    ) -> object:
-        del cwd, env, description
-        filename = Path(argv[-1]).name
-        calls.append(filename)
-        if filename == "20-fail.sh":
-            raise ContainerCommandError("hook failed", exit_code=12)
-        return object()
-
-    with pytest.raises(RuntimeHookError) as error:
-        run_runtime_hooks(
-            plan,
-            "pre-start",
-            runtime=runtime,
-            env={},
-            runner=runner,
-        )
-
-    assert calls == ["10-ok.sh", "20-fail.sh"]
-    assert locations_and_codes(error.value) == [
-        (("hooks", "baked", "pre-start", "20-fail.sh"), "runtime_hook.execution_failed")
-    ]
-
-
-# Stop-hook cleanup uses the lifecycle deadline or cooperative cancellation to
-# terminate the active process group, reap it, and skip later hooks.
+# A successful terminal result releases each hook's original group without a
+# cleanup signal, while cancellation/deadline paths retain exact group authority.
 def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     baked = tmp_path / "baked"
@@ -345,6 +227,7 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
     )
     calls: list[tuple[str, bool]] = []
     logs: list[str] = []
+    group_signals: list[tuple[int, signal.Signals]] = []
 
     def runner(
         argv: Sequence[str | os.PathLike[str]],
@@ -363,6 +246,7 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
         runtime=runtime,
         log=logs.append,
         runner=runner,
+        process_group_signaler=lambda pid, sig: group_signals.append((pid, sig)),
     )
 
     assert calls == [("10-baked.sh", True), ("10-mounted.py", True)]
@@ -370,6 +254,7 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
         "Running runtime hook source=baked phase=stop filename=10-baked.sh",
         "Running runtime hook source=mounted phase=stop filename=10-mounted.py",
     ]
+    assert group_signals == []
 
 
 @pytest.mark.parametrize("phase", ["pre-start", "post-start"])
@@ -638,6 +523,47 @@ def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
         (4343, signal.SIGTERM),
         (4343, signal.SIGKILL),
     ]
+
+
+# Once cancellation wins, the recorded group remains owned even if its leader
+# exits before cleanup signals the group; the leader is then reaped as cancelled.
+def test_stop_hook_cancel_winner_signals_group_after_leader_exit(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-race.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    process = FakeHookProcess(pid=4393)
+    signals: list[tuple[int, signal.Signals]] = []
+
+    class LeaderExitCancellation:
+        calls = 0
+
+        def __call__(self) -> bool:
+            self.calls += 1
+            if self.calls == 1:
+                return False
+            process.returncode = 0
+            return True
+
+    with pytest.raises(RuntimeHookError) as error:
+        run_runtime_stop_hooks(
+            plan,
+            runtime=runtime,
+            runner=lambda *_args, **_kwargs: process,
+            cancel_requested=LeaderExitCancellation(),
+            process_group_signaler=lambda pid, sig: signals.append((pid, sig)),
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted", "stop", "10-race.sh"), "runtime_hook.cancelled")
+    ]
+    assert signals == [(4393, signal.SIGTERM)]
+    assert process.waits == 1
 
 
 # Repeated-signal cancellation bypasses the cooperative TERM grace and sends

@@ -217,9 +217,10 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
 
 # Public OS-package diagnostics cover the effective default-plus-user set and
 # enforce canonical lowercase Debian identities before planning.
-def test_system_extra_package_rejects_default_collision() -> None:
+@pytest.mark.parametrize("package", ["bash", "tini"])
+def test_system_extra_package_rejects_default_collision(package: str) -> None:
     document = _document()
-    document["system"] = {"extra_packages": ["bash"]}
+    document["system"] = {"extra_packages": [package]}
     config = validate_final_config_structure(document)
 
     diagnostics = _diagnostics(config)

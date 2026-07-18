@@ -61,12 +61,16 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
         "STOPSIGNAL SIGTERM"
     ]
     assert [line for line in instructions if line.startswith("ENTRYPOINT ")] == [
-        'ENTRYPOINT ["/opt/uv/bin/cdh", "container", "entrypoint"]'
+        'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/uv/bin/cdh", '
+        '"container", "entrypoint"]'
     ]
     assert instructions[-2:] == [
         "STOPSIGNAL SIGTERM",
-        'ENTRYPOINT ["/opt/uv/bin/cdh", "container", "entrypoint"]',
+        'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/uv/bin/cdh", '
+        '"container", "entrypoint"]',
     ]
+    assert rendered.count("test -x /usr/bin/tini") == 1
+    assert plan.application.os_packages.count("tini") == 1
     assert rendered == render_build_plan_dockerfile(plan)
 
 

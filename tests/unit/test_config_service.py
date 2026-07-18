@@ -93,13 +93,15 @@ def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None
     assert config.pytorch.version == "2.12.1"
 
 
+@pytest.mark.parametrize("package", ["bash", "tini"])
 def test_layered_documents_report_default_os_package_collision(
     tmp_path: Path,
+    package: str,
 ) -> None:
     base = tmp_path / "base.toml"
     override = tmp_path / "override.toml"
     base.write_text(_config())
-    override.write_text('[system]\nextra_packages = ["bash"]\n')
+    override.write_text(f'[system]\nextra_packages = ["{package}"]\n')
 
     with pytest.raises(ConfigurationServiceError) as raised:
         load_validate_config([base, override])

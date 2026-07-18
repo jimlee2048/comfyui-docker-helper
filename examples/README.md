@@ -31,6 +31,16 @@ The optional `--hooks-dir` tree may contain only regular `.sh` or
 Every baked hook is content-locked and copied to `/opt/cdh/runtime/hooks`;
 mounted `/etc/cdh/runtime/hooks` remains external runtime input.
 
+If a startup hook launches a background service, define a matching stop hook
+that requests the service's termination and waits for it to exit. Prefer the
+service's own control command or API. A PID file is also possible, but the hook
+author must validate stale files, PID reuse, and process identity. cdh manages
+the hook only while its leader is active; after a successful return, the
+background service is user-managed. Tini runs as image PID 1 to forward Docker
+signals to cdh and reap adopted zombies, but it is not a service supervisor.
+There is no graceful-stop guarantee when the stop hook is absent or fails,
+ComfyUI exits naturally, Docker sends `SIGKILL`, or PID 1 exits early.
+
 Use `--dry-run` for an exact no-write preview, `--check` to compare an existing
 context, `--locked` for zero-provider/zero-write verification, and
 `--upgrade-lock` to refresh moving selectors.

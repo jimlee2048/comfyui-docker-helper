@@ -13,7 +13,7 @@ import pytest
 
 from comfyui_docker_helper.container.process_control import (
     start_direct_process,
-    terminate_process_group,
+    terminate_process_group_until,
     wait_for_process_reap,
 )
 
@@ -49,7 +49,7 @@ def test_direct_process_normal_exit_is_reaped(tmp_path: Path) -> None:
 
 
 # A new-session child that ignores SIGTERM is killed through its owned process
-# group and then reaped within the bounded escalation path.
+# group and then reaped after one caller-owned absolute cooperative boundary.
 def test_ignored_signal_process_group_is_killed_and_reaped(tmp_path: Path) -> None:
     ready = tmp_path / "ready"
     script = (
@@ -66,15 +66,13 @@ def test_ignored_signal_process_group_is_killed_and_reaped(tmp_path: Path) -> No
     )
     try:
         _wait_for_file(ready)
-        assert (
-            terminate_process_group(
-                process,
-                termination_grace=0.1,
-                kill_grace=2.0,
-                poll_interval=0.01,
-            )
-            is True
+        result = terminate_process_group_until(
+            process,
+            deadline=time.monotonic() + 0.1,
+            poll_interval=0.01,
         )
+        assert result.forced is True
+        assert result.terminal.returncode == -int(signal.SIGKILL)
         assert process.returncode == -int(signal.SIGKILL)
         with pytest.raises(ChildProcessError):
             os.waitpid(process.pid, os.WNOHANG)

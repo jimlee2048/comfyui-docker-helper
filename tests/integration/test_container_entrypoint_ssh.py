@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
+import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,6 +16,7 @@ import pytest
 
 from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container import runtime_ssh_service as ssh_service_module
+from comfyui_docker_helper.container import ssh as ssh_module
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
@@ -26,6 +29,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import (
+    RuntimeSshService,
     stop_runtime_ssh_service,
 )
 from comfyui_docker_helper.container.ssh import SshdStartupError, start_sshd_if_enabled
@@ -341,6 +345,7 @@ def test_default_inactive_ssh_does_not_call_starter_and_spawns(
         *,
         runtime: ContainerRuntime,
         log: Logger,
+        **_kwargs: object,
     ) -> FakeSshdProcess:
         del config, runtime, log
         events.append("ssh-start")
@@ -426,6 +431,7 @@ download_mode = "async"
         *,
         runtime: ContainerRuntime,
         log: Logger,
+        **_kwargs: object,
     ) -> FakeSshdProcess:
         del runtime, log
         assert config.system.ssh.enable is True
@@ -519,6 +525,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
         *,
         runtime: ContainerRuntime,
         log: Logger,
+        **_kwargs: object,
     ) -> FakeSshdProcess | None:
         events.append("ssh-start")
         return start_sshd_if_enabled(
@@ -649,6 +656,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
         *,
         runtime: ContainerRuntime,
         log: Logger,
+        **_kwargs: object,
     ) -> FakeSshdProcess:
         del runtime, log
         seen.append(config)
@@ -719,6 +727,7 @@ def test_disabled_ssh_does_not_start_even_with_credentials(
         *,
         runtime: ContainerRuntime,
         log: Logger,
+        **_kwargs: object,
     ) -> FakeSshdProcess:
         del config, runtime, log
         events.append("ssh-start")
@@ -798,6 +807,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
         *,
         runtime: ContainerRuntime,
         log: Logger,
+        **_kwargs: object,
     ) -> FakeSshdProcess:
         del runtime, log
         assert config.system.ssh.password == secret
@@ -869,8 +879,9 @@ password = "line1\\nline2"
     assert "line2" not in payload
 
 
-# Lifecycle coverage protects sshd monitoring and async/SSH shutdown ordering.
-def test_cooperative_sshd_stop_keeps_wait_errors_best_effort(
+# A failed direct reap is not terminal evidence, so the SSH owner must report
+# incomplete shutdown instead of accepting a successful poll result.
+def test_cooperative_sshd_stop_fails_closed_on_wait_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class WaitErrorSshd:
@@ -894,9 +905,11 @@ def test_cooperative_sshd_stop_keeps_wait_errors_best_effort(
             cancel_requested=lambda: False,
             shutdown_requested=threading.Event(),
         )
-        is True
+        is False
     )
-    assert "SSH runtime service stopped" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "SSH runtime service stopped" not in captured.out
+    assert "SSH runtime service shutdown failed" in captured.err
 
 
 def test_unexpected_post_start_sshd_exit_warns_without_changing_comfyui_exit(
@@ -1049,3 +1062,113 @@ filename = "async.bin"
         "wait",
         "async-join",
     ]
+
+
+# SSH startup publishes each exact preparation child to the service owner, so
+# cancellation terminates and reaps it before startup can return.
+def test_ssh_startup_operation_cancels_and_reaps_published_process(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = RuntimeConfig.model_validate(
+        {"system": {"ssh": {"enable": True, "password": "secret"}}}
+    )
+    published = threading.Event()
+    process: subprocess.Popen[bytes] | None = None
+
+    def starter(
+        config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+        preparation_process_observer: Callable[[object | None], None],
+    ) -> None:
+        nonlocal process
+        del config, runtime, log
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        preparation_process_observer(process)
+        published.set()
+        process.wait()
+        preparation_process_observer(None)
+        return None
+
+    class Cancellation:
+        def __call__(self) -> bool:
+            return published.is_set()
+
+        def force_requested(self) -> bool:
+            return False
+
+    RuntimeSshService(config, runtime=runtime, starter=starter).start(
+        cancel_requested=Cancellation()
+    )
+
+    assert process is not None
+    assert process.returncode is not None
+    with pytest.raises(ChildProcessError):
+        os.waitpid(process.pid, os.WNOHANG)
+
+
+# A monitor wait exception does not manufacture reap evidence; the SSH owner
+# retains the handle and continues to report non-quiescence.
+def test_ssh_monitor_wait_failure_retains_unreaped_owner(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = RuntimeConfig.model_validate(
+        {"system": {"ssh": {"enable": True, "password": "secret"}}}
+    )
+    waited = threading.Event()
+
+    class WaitFailureSshd:
+        returncode = 0
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self) -> int:
+            waited.set()
+            raise OSError("monitor wait failed")
+
+        def terminate(self) -> None:
+            raise AssertionError("terminal-looking owner must not be signaled")
+
+        def kill(self) -> None:
+            raise AssertionError("terminal-looking owner must not be signaled")
+
+    sshd = WaitFailureSshd()
+    service = RuntimeSshService(
+        config,
+        runtime=runtime,
+        starter=lambda *_args, **_kwargs: sshd,
+    )
+    service.start()
+    service.monitor_after_comfyui_start()
+
+    assert waited.wait(timeout=1)
+    assert service.is_stopped() is False
+    assert "SSH runtime service monitor failed" in capsys.readouterr().err
+
+
+# Password bytes stay on stdin and never enter the preparation process argv.
+def test_sensitive_ssh_preparation_keeps_secret_out_of_process_argv() -> None:
+    secret = b"root:super-secret-value\n"
+    observed: list[subprocess.Popen[bytes] | None] = []
+
+    assert (
+        ssh_module._run_sensitive_command(
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            input_data=secret,
+            description="test sensitive input",
+            process_observer=observed.append,
+        )
+        == 0
+    )
+    assert len(observed) == 2
+    process = observed[0]
+    assert process is not None
+    assert secret.decode().strip() not in " ".join(process.args)
+    assert observed[1] is None

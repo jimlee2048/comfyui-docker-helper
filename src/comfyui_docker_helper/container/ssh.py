@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,10 @@ from typing import Protocol
 
 from comfyui_docker_helper.config import RuntimeConfig, RuntimeSystemSshConfig
 from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
+from comfyui_docker_helper.container.process_control import (
+    DirectProcess,
+    terminate_direct_process_until,
+)
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.errors import ApplicationError
 
@@ -25,6 +30,7 @@ type Chown = Callable[
 type Chmod = Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes], int], None]
 type Fchown = Callable[[int, int, int], None]
 type Fchmod = Callable[[int, int], None]
+type PreparationProcessObserver = Callable[[DirectProcess | None], object]
 
 
 class SshCredentialPreparationError(ApplicationError):
@@ -109,6 +115,7 @@ def start_sshd_if_enabled(
     credential_owner_gid: int = _ROOT_GID,
     command_runner: CommandRunner | None = None,
     process_starter: SshdProcessStarter | None = None,
+    preparation_process_observer: PreparationProcessObserver = lambda _process: None,
 ) -> SshdProcess | None:
     """Prepare and start foreground sshd when effective SSH is active."""
     del runtime
@@ -127,6 +134,7 @@ def start_sshd_if_enabled(
             fchmod=credential_fchmod,
             owner_uid=credential_owner_uid,
             owner_gid=credential_owner_gid,
+            process_observer=preparation_process_observer,
         )
     except SshCredentialPreparationError as error:
         raise SshdStartupError(f"SSH credential preparation failed: {error}") from error
@@ -135,7 +143,17 @@ def start_sshd_if_enabled(
         log("WARNING: SSH is enabled but no root SSH credentials are configured")
         return None
 
-    run_command = _run_command if command_runner is None else command_runner
+    run_command = (
+        (
+            lambda argv, *, description: _run_command(
+                argv,
+                description=description,
+                process_observer=preparation_process_observer,
+            )
+        )
+        if command_runner is None
+        else command_runner
+    )
     starter = _start_process if process_starter is None else process_starter
     _ensure_host_keys(run_command)
     _ensure_sshd_runtime_dir(runtime_dir)
@@ -181,10 +199,22 @@ def prepare_root_ssh_credentials(
     fchmod: Fchmod | None = None,
     owner_uid: int = _ROOT_UID,
     owner_gid: int = _ROOT_GID,
+    process_observer: PreparationProcessObserver = lambda _process: None,
 ) -> RootSshCredentialPreparationStatus:
     """Prepare root SSH credentials without starting sshd."""
     ssh = _coerce_ssh_config(config)
-    runner = _run_sensitive_command if command_runner is None else command_runner
+    runner = (
+        (
+            lambda argv, *, input_data, description: _run_sensitive_command(
+                argv,
+                input_data=input_data,
+                description=description,
+                process_observer=process_observer,
+            )
+        )
+        if command_runner is None
+        else command_runner
+    )
     chown_func = os.chown if chown is None else chown
     chmod_func = os.chmod if chmod is None else chmod
     fchown_func = os.fchown if fchown is None else fchown
@@ -289,15 +319,19 @@ def _run_checked_command(
         )
 
 
-def _run_command(argv: Sequence[str], *, description: str) -> int:
+def _run_command(
+    argv: Sequence[str],
+    *,
+    description: str,
+    process_observer: PreparationProcessObserver = lambda _process: None,
+) -> int:
     command = list(argv)
     if not command:
         raise SshdStartupError(f"{description} argv must not be empty")
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
             shell=False,
-            check=False,
         )
     except FileNotFoundError as error:
         raise SshdStartupError(
@@ -305,7 +339,18 @@ def _run_command(argv: Sequence[str], *, description: str) -> int:
         ) from error
     except OSError as error:
         raise SshdStartupError(f"{description} failed to start") from error
-    return result.returncode
+    process_observer(process)
+    try:
+        return process.wait()
+    except BaseException:
+        terminate_direct_process_until(
+            process,
+            deadline=time.monotonic() + 1.0,
+            poll_interval=0.05,
+        )
+        raise
+    finally:
+        process_observer(None)
 
 
 def _start_process(argv: Sequence[str], *, description: str) -> SshdProcess:
@@ -547,16 +592,16 @@ def _run_sensitive_command(
     *,
     input_data: bytes,
     description: str,
+    process_observer: PreparationProcessObserver = lambda _process: None,
 ) -> int:
     command = list(argv)
     if not command:
         raise SshCredentialPreparationError(f"{description} argv must not be empty")
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
-            input=input_data,
+            stdin=subprocess.PIPE,
             shell=False,
-            check=False,
         )
     except FileNotFoundError as error:
         raise SshCredentialPreparationError(
@@ -564,7 +609,20 @@ def _run_sensitive_command(
         ) from error
     except OSError as error:
         raise SshCredentialPreparationError(f"{description} failed to start") from error
-    return result.returncode
+    process_observer(process)
+    try:
+        process.communicate(input_data)
+        assert process.returncode is not None
+        return process.returncode
+    except BaseException:
+        terminate_direct_process_until(
+            process,
+            deadline=time.monotonic() + 1.0,
+            poll_interval=0.05,
+        )
+        raise
+    finally:
+        process_observer(None)
 
 
 def _format_argv(argv: Sequence[str]) -> str:

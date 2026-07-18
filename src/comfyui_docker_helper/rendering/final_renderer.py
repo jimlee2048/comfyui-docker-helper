@@ -55,7 +55,8 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
     lines.extend(
         (
             "STOPSIGNAL SIGTERM",
-            'ENTRYPOINT ["/opt/uv/bin/cdh", "container", "entrypoint"]',
+            'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/uv/bin/cdh", '
+            '"container", "entrypoint"]',
         )
     )
     return "\n".join(lines) + "\n"
@@ -97,6 +98,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         " && DEBIAN_FRONTEND=noninteractive apt-get install -y "
         "--no-install-recommends -- \\",
         f"    {packages} \\",
+        " && test -x /usr/bin/tini \\",
         " && rm -f /usr/sbin/policy-rc.d",
         f"RUN test \"$(uv --version | cut -d ' ' -f 1-2)\" = "
         f"{_shell_word(f'uv {plan.toolchain.uv_image.resolved_version}')} \\",

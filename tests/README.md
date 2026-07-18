@@ -72,6 +72,23 @@ all applicable inspection, CPU, startup, CLI, and GPU probes. Clean-cache
 rebuilds and complete GPU matrices are reserved for changes that own those
 risks or for a cumulative release gate.
 
+Lifecycle changes reuse one current image produced by the formal renderer; do
+not create a second handwritten Dockerfile for lifecycle tests. Set
+`CDH_LIFECYCLE_CONTEXT` to that rendered context and `CDH_LIFECYCLE_IMAGE` to
+the image built from it, then run
+`tests/smoke/test_lifecycle_shutdown_live.py` with `--run-docker --run-slow`.
+The suite bind-mounts deterministic programs, runtime config, and hooks into
+that image to cover Tini/cdh topology, first/repeated signals, finite and
+disabled cdh deadlines, active-hook cancellation, paired background-service
+shutdown, natural exit, and adopted-orphan reap. Separate real process-control
+integration proves cdh-managed child reap inside the ownership window;
+the formal force test also holds cdh during interpreter exit and observes that
+its direct application child is already absent from `/proc`. Container exit
+alone is not that evidence. Graceful service shutdown and Tini orphan-zombie
+reap also require their own observed markers. The six-image release matrix
+repeats only lightweight PID topology, default SIGTERM, and ordinary
+application shutdown checks.
+
 ## Change selection and cleanup
 
 Start with focused tests for the changed owner, then expand to adjacent

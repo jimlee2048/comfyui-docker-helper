@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import signal
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from unittest.mock import Mock
@@ -222,6 +224,7 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
+        **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         del config, log, state_observer
         assert len(plan.items) == 1
@@ -429,6 +432,7 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
+        **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         del plan, config, log, state_observer
         events.append("download")
@@ -525,6 +529,7 @@ filename = "model.bin"
         config: RuntimeConfig,
         log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
+        **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
         del config, log, state_observer
         assert len(plan.items) == 1
@@ -993,64 +998,6 @@ def test_post_start_failure_after_readiness_terminates_child_as_startup_failure(
     assert "[hooks.mounted.post-start.10-fail.sh]" in str(error.value)
 
 
-# Startup shutdown coverage protects cancellation behavior before ComfyUI is
-# fully running, including skipped stop hooks during partial startup.
-def test_startup_shutdown_during_download_prevents_spawn_and_stop_hooks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    config = _runtime_config(tmp_path, include_file=True)
-    hooks = tmp_path / "hooks"
-    _write_hook(hooks, "stop", "90-stop.sh")
-    handlers, restored = _capture_signal_handlers(monkeypatch)
-    events: list[str] = []
-
-    def runtime_downloader(
-        plan: RuntimeFilePlan,
-        *,
-        config: RuntimeConfig,
-        log: Logger,
-        state_observer: RuntimeDownloadStateObserver | None = None,
-    ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log, state_observer
-        events.append("download")
-        handler = handlers[signal.SIGTERM]
-        assert callable(handler)
-        handler(signal.SIGTERM, None)
-        raise AssertionError("shutdown handler should interrupt downloads")
-
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-        events.append("spawn")
-        return FakeChild()
-
-    assert (
-        run_entrypoint(
-            runtime=runtime,
-            runtime_state_path=tmp_path / "state.json",
-            baked_config_path=config,
-            mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
-            baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
-            mounted_hooks_path=hooks,
-            environ={"PATH": "/usr/bin"},
-            runner=runner,
-            runtime_downloader=runtime_downloader,
-            runtime_stop_hook_runner=lambda *_args, **_kwargs: events.append("stop"),
-        )
-        == 143
-    )
-
-    assert events == ["download"]
-    assert restored == [signal.SIGTERM, signal.SIGINT]
-
-
 @pytest.mark.parametrize(
     "sig", [signal.SIGTERM, signal.SIGINT], ids=lambda sig: sig.name
 )
@@ -1454,17 +1401,18 @@ def test_repeated_signal_force_stops_downloads_ssh_and_comfyui(
     class ManagedAuxiliary:
         def __init__(self, name: str) -> None:
             self.name = name
+            self.stopped = False
 
         def request_stop(self, *, deadline: float | None = None) -> None:
             del deadline
             events.append(f"{self.name}:request")
 
         def is_stopped(self) -> bool:
-            return False
+            return self.stopped
 
-        def force_stop(self) -> bool:
+        def request_force_stop(self) -> None:
             events.append(f"{self.name}:force")
-            return False
+            self.stopped = True
 
     class ForceChild(FakeChild):
         def wait(self) -> int:
@@ -1522,6 +1470,51 @@ def test_repeated_signal_force_stops_downloads_ssh_and_comfyui(
     assert child.signals == []
 
 
+# Force completion is fail-closed: an exhausted caller deadline cannot turn an
+# exact owner that still reports live into a successful lifecycle return.
+def test_force_shutdown_waits_for_every_exact_owner_after_deadline() -> None:
+    class ReleasedOwner:
+        def __init__(self) -> None:
+            self.forced = threading.Event()
+            self.stopped = threading.Event()
+
+        def request_force_stop(self) -> None:
+            self.forced.set()
+
+        def is_stopped(self) -> bool:
+            return self.stopped.is_set()
+
+    downloads = ReleasedOwner()
+    ssh = ReleasedOwner()
+    child = FakeChild()
+    result: list[int] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            lifecycle_module._force_managed_shutdown(
+                signal.SIGTERM,
+                child=child,
+                downloads=downloads,  # type: ignore[arg-type]
+                ssh_service=ssh,  # type: ignore[arg-type]
+                hook_processes=(),
+                deadline=0.0,
+                monotonic=time.monotonic,
+                sleep=time.sleep,
+            )
+        )
+    )
+    worker.start()
+
+    assert downloads.forced.wait(timeout=1)
+    assert ssh.forced.wait(timeout=1)
+    assert worker.is_alive()
+    downloads.stopped.set()
+    ssh.stopped.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert result == [-signal.SIGKILL]
+
+
 # A child that ignores the forwarded signal receives the reserved graceful
 # slice, then is killed and reaped at the one absolute outer deadline.
 def test_shutdown_kills_child_at_outer_deadline_after_two_second_reserve(
@@ -1545,25 +1538,27 @@ def test_shutdown_kills_child_at_outer_deadline_after_two_second_reserve(
                 self.returncode = self._wait_returncode
             return self.returncode
 
-    class StuckAuxiliary:
+    class ForceStoppedAuxiliary:
         def __init__(self, name: str) -> None:
             self.name = name
+            self.stopped = False
 
         def request_stop(self, *, deadline: float | None = None) -> None:
             del deadline
             events.append(f"{self.name}:request")
 
         def is_stopped(self) -> bool:
-            return False
+            return self.stopped
 
-        def force_stop(self) -> None:
+        def request_force_stop(self) -> None:
             marker = f"{self.name}:force"
             if marker not in events:
                 events.append(marker)
+            self.stopped = True
 
     child = IgnoringSignalChild(0, events=events)
-    downloads = StuckAuxiliary("downloads")
-    ssh_service = StuckAuxiliary("ssh")
+    downloads = ForceStoppedAuxiliary("downloads")
+    ssh_service = ForceStoppedAuxiliary("ssh")
 
     assert lifecycle_module._wait_with_signal_forwarding(
         child,

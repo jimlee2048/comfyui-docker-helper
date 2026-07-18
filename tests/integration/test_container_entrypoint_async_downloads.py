@@ -623,6 +623,70 @@ filename = "model.bin"
     assert _state_by_target(state_path)["models/model.bin"].status != "completed"
 
 
+# Synchronous activation publishes its exact backend before execution, so a
+# startup signal can cancel and quiesce that operation before any hook or child.
+def test_signal_cancels_published_synchronous_backend_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = _write(
+        tmp_path / "runtime.toml",
+        """[cdh]
+default_download_mode = "sync"
+default_downloader = "httpx"
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    state_path = tmp_path / "state.json"
+    handlers = _capture_signal_handlers(monkeypatch)
+
+    class SignalThenBlockBackend(AsyncBackend):
+        cancel_calls = 0
+
+        def cancel(self, *, deadline: float | None = None) -> None:
+            assert deadline is not None
+            self.cancel_calls += 1
+            super().cancel(deadline=deadline)
+
+        def download(
+            self,
+            item: TransportRequest,
+            settings: DownloaderSettings,
+        ) -> TransportSuccess:
+            self.calls.append((item, settings))
+            self.entered.set()
+            handler = handlers[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+            self.release.wait(timeout=2)
+            if self.cancelled:
+                raise DownloadCancelled("cancelled")
+            raise AssertionError("the synchronous backend was not cancelled")
+
+    backend = SignalThenBlockBackend()
+    _install_async_backend(monkeypatch, backend)
+
+    assert (
+        _run_with_real_async_queue(
+            runtime=runtime,
+            config=config,
+            state_path=state_path,
+            runner=lambda *_args, **_kwargs: pytest.fail(
+                "ComfyUI must not start during synchronous cancellation"
+            ),
+        )
+        == 143
+    )
+    assert backend.cancel_calls == 1
+    assert backend.cancelled is True
+    assert not (runtime.comfyui_path / "models" / "model.bin").exists()
+
+
 # Restart coverage protects staging isolation: interrupted async downloads remain
 # resumable without exposing partial files at their final targets.
 def test_interrupted_async_download_restarts_without_exposing_partial_final(

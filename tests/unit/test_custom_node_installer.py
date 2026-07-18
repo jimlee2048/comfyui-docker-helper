@@ -984,6 +984,28 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         < events.index(("install", "direct"))
         < events.index(("hook", "git-post.py", f"sha256:{'d' * 64}"))
     )
+    git_pre_index = events.index(("hook", "git-pre.py", f"sha256:{'c' * 64}"))
+    git_install_index = events.index(("install", "direct"))
+    git_post_index = events.index(("hook", "git-post.py", f"sha256:{'d' * 64}"))
+    assert [
+        event
+        for event in events[git_pre_index : git_install_index + 1]
+        if event[0] in {"hook", "proof", "install"}
+    ] == [
+        ("hook", "git-pre.py", f"sha256:{'c' * 64}"),
+        ("proof", names(nodes[:1]), names(nodes[1:])),
+        ("proof", names(nodes[:1]), names(nodes[1:])),
+        ("install", "direct"),
+    ]
+    assert [
+        event
+        for event in events[git_install_index : git_post_index + 1]
+        if event[0] in {"install", "proof", "hook"}
+    ] == [
+        ("install", "direct"),
+        ("proof", names(nodes[:2]), names(nodes[2:])),
+        ("hook", "git-post.py", f"sha256:{'d' * 64}"),
+    ]
     assert events[-4:] == [
         ("proof", names(nodes), ()),
         ("manager-check",),

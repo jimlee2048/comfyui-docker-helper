@@ -502,9 +502,11 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     node = planned.model_copy(update={"target": str(custom_nodes / "direct")})
     commands: list[tuple[str, ...]] = []
+    events: list[tuple[str, Path | None]] = []
 
     def run_git(argv, **_kwargs) -> bytes:
         commands.append(tuple(os.fspath(item) for item in argv))
+        events.append(("git", None))
         return b""
 
     monkeypatch.setattr(
@@ -512,11 +514,11 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     )
     monkeypatch.setattr(
         "comfyui_docker_helper.container.custom_node_installer._verify_git_provenance",
-        lambda *_args, **_kwargs: None,
+        lambda _node, path, *_args, **_kwargs: events.append(("proof", Path(path))),
     )
     monkeypatch.setattr(
         "comfyui_docker_helper.container.custom_node_installer._install_git_root_surfaces",
-        lambda *_args: None,
+        lambda *_args: events.append(("root-install", None)),
     )
 
     _install_git_node(
@@ -532,6 +534,18 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     )
 
     assert commands[0][-2] == locator
+    proof_and_install = [
+        event for event in events if event[0] in {"proof", "root-install"}
+    ]
+    assert [event[0] for event in proof_and_install] == [
+        "proof",
+        "proof",
+        "root-install",
+    ]
+    assert proof_and_install[0][1] is not None
+    assert proof_and_install[0][1].parent == custom_nodes
+    assert proof_and_install[0][1].name.startswith(".direct.cdh-stage-")
+    assert proof_and_install[1] == ("proof", custom_nodes / "direct")
     assert f'"url":"{locator}"'.encode() in dump_custom_node_inventory(
         custom_node_inventory((node,))
     )

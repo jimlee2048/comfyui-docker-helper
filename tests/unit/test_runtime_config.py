@@ -44,6 +44,7 @@ def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
     assert result.config.cdh.default_download_mode == "sync"
     assert result.config.cdh.download_max_attempts == 3
     assert result.config.cdh.download_failure_policy == "continue"
+    assert result.config.cdh.shutdown_timeout == 8
     assert result.config.system.ssh.enable is False
     assert result.config.system.ssh.port == 22
     assert result.config.system.ssh.password == ""
@@ -493,17 +494,80 @@ download_failure_policy = "{mounted_value}"
     assert result.config.cdh.download_failure_policy == value
 
 
-# The planned outer-shutdown inputs remain deliberately inactive until their
-# schema, precedence, and runtime consumer can be enabled as one atomic change.
-def test_shutdown_timeout_toml_is_rejected_before_runtime_activation(
+# Shutdown timeout uses the normal runtime precedence chain, with the
+# environment as the final validated override.
+def test_shutdown_timeout_env_overrides_mounted_and_baked_values(
     tmp_path: Path,
 ) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[cdh]
+shutdown_timeout = 20
+""",
+    )
     mounted = _write(
         tmp_path / "mounted.toml",
         """
 [cdh]
-shutdown_timeout = 8
+shutdown_timeout = -1
 """,
+    )
+
+    mounted_result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+        environ={},
+    )
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+        environ={"CDH_SHUTDOWN_TIMEOUT": "55.5"},
+    )
+
+    assert mounted_result.config.cdh.shutdown_timeout == -1
+    assert result.config.cdh.shutdown_timeout == 55.5
+
+
+@pytest.mark.parametrize("value", ["8", "0.25", "-1"])
+def test_shutdown_timeout_env_accepts_finite_positive_or_disabled(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={"CDH_SHUTDOWN_TIMEOUT": value},
+    )
+
+    assert result.config.cdh.shutdown_timeout == float(value)
+
+
+@pytest.mark.parametrize("value", ["", " ", "0", "-0.1", "-2", "nan", "inf", "false"])
+def test_invalid_shutdown_timeout_env_fails_with_stable_identity(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            environ={"CDH_SHUTDOWN_TIMEOUT": value},
+        )
+
+    assert _identities(raised.value) == [
+        (("env", "CDH_SHUTDOWN_TIMEOUT"), "env.invalid_shutdown_timeout")
+    ]
+
+
+@pytest.mark.parametrize("value", ["0", "-0.1", "-2", "nan", "inf", '"8"', "true"])
+def test_invalid_shutdown_timeout_toml_fails_schema_validation(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        f"[cdh]\nshutdown_timeout = {value}\n",
     )
 
     with pytest.raises(RuntimeConfigurationError) as raised:
@@ -513,26 +577,9 @@ shutdown_timeout = 8
             environ={},
         )
 
-    assert _identities(raised.value) == [
-        (("cdh", "shutdown_timeout"), "schema.extra_forbidden")
+    assert [item.path for item in raised.value.diagnostics] == [
+        ("cdh", "shutdown_timeout")
     ]
-
-
-def test_shutdown_timeout_environment_is_inert_before_runtime_activation(
-    tmp_path: Path,
-) -> None:
-    baseline = load_runtime_config(
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=tmp_path / "missing-mounted.toml",
-        environ={},
-    )
-    candidate = load_runtime_config(
-        baked_config_path=tmp_path / "missing-baked.toml",
-        mounted_config_path=tmp_path / "missing-mounted.toml",
-        environ={"CDH_SHUTDOWN_TIMEOUT": "55.5"},
-    )
-
-    assert candidate == baseline
 
 
 # Host-only build-time settings may appear in mounted files but must not affect

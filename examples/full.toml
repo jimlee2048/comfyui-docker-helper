@@ -84,6 +84,8 @@ download_max_attempts = 3
 # Host build default: "fail". Runtime default: "continue".
 # Supported: "continue", "fail".
 download_failure_policy = "fail"
+# Default: 8. One signal-shutdown budget; -1 disables cdh outer/hook deadlines.
+shutdown_timeout = 8
 
 [cdh.downloader.httpx]
 # Default: 60. Seconds for each HTTPX request attempt.

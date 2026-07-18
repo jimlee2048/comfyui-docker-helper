@@ -84,7 +84,8 @@ class AsyncBackend:
         self.block = False
         self.cancelled = False
 
-    def cancel(self) -> None:
+    def cancel(self, *, deadline: float | None = None) -> None:
+        del deadline
         self.cancelled = True
         self.release.set()
 
@@ -559,10 +560,15 @@ filename = "model.bin"
 
         def request_stop(self) -> None:
             self.handle.request_stop()
-            self.handle.terminate_backends()
 
         def terminate_backends(self) -> None:
             self.handle.terminate_backends()
+
+        def request_backend_termination(self, *, deadline: float | None) -> None:
+            self.handle.request_backend_termination(deadline=deadline)
+
+        def backend_termination_is_alive(self) -> bool:
+            return self.handle.backend_termination_is_alive()
 
         def join(self, timeout: float | None = None) -> None:
             self.handle.join(timeout)
@@ -867,6 +873,93 @@ filename = "b.bin"
         assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
     else:
         assert not (runtime.comfyui_path / "models" / "b.bin").exists()
+
+
+# Backend teardown may be slow, but the first signal must still reach stop hooks
+# promptly.
+def test_signal_shutdown_does_not_wait_for_blocking_backend_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingCancellationBackend(AsyncBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = True
+            self.cancel_entered = threading.Event()
+            self.cancel_release = threading.Event()
+            self.deadline: float | None = None
+
+        def cancel(self, *, deadline: float | None = None) -> None:
+            self.deadline = deadline
+            self.cancel_entered.set()
+            self.cancel_release.wait(timeout=1)
+            super().cancel(deadline=deadline)
+
+    runtime = _runtime(tmp_path)
+    config = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_download_mode = "async"
+default_downloader = "httpx"
+shutdown_timeout = 2.3
+
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop", "10-stop.sh")
+    state_path = tmp_path / "state.json"
+    backend = BlockingCancellationBackend()
+    _install_async_backend(monkeypatch, backend)
+    handlers = _capture_signal_handlers(monkeypatch)
+    events: list[str] = []
+
+    class ShutdownChild(FakeChild):
+        def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                assert backend.entered.wait(timeout=1)
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                raise AssertionError("shutdown handler should interrupt wait")
+            assert self.returncode is not None
+            return self.returncode
+
+    def stop_hooks(*_args: object, **_kwargs: object) -> tuple[RuntimeHookResult, ...]:
+        assert backend.cancel_entered.wait(timeout=0.1)
+        assert not backend.cancel_release.is_set()
+        events.append("stop-hook")
+        backend.cancel_release.set()
+        return ()
+
+    started = time.monotonic()
+    try:
+        assert (
+            run_entrypoint(
+                runtime=runtime,
+                baked_config_path=config,
+                mounted_config_path=tmp_path / "missing-mounted.toml",
+                baked_hooks_path=tmp_path / "missing-baked-hooks",
+                mounted_hooks_path=hooks,
+                environ={},
+                runner=lambda *_args, **_kwargs: ShutdownChild(),
+                runtime_state_path=state_path,
+                runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+            )
+            == 143
+        )
+    finally:
+        backend.cancel_release.set()
+
+    assert time.monotonic() - started < 0.8
+    assert events == ["stop-hook"]
+    assert backend.deadline is not None
+    _eventually(lambda: backend.cancelled)
 
 
 # Cross-start accounting coverage proves persisted history does not consume a

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import signal
-import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from unittest.mock import Mock
@@ -17,7 +16,6 @@ from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
-    stop_runtime_async_download_queue,
 )
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
@@ -31,11 +29,9 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
     discover_runtime_hooks,
+    run_runtime_stop_hooks,
 )
-from comfyui_docker_helper.container.runtime_ssh_service import (
-    RuntimeSshService,
-    stop_runtime_ssh_service,
-)
+from comfyui_docker_helper.container.runtime_ssh_service import RuntimeSshService
 
 
 class FakeChild:
@@ -285,8 +281,11 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         env: Mapping[str, str] | None = None,
         log: Logger,
         cancel_requested: Callable[[], bool],
+        deadline: float | None,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], object],
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, cancel_requested
+        del plan, runtime, env, log, cancel_requested, deadline, monotonic, sleep
         events.append("stop")
         return ()
 
@@ -348,6 +347,7 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
         runtime_stop_hook_runner=stop_hook_runner,
         downloads=downloads,
         ssh_service=ssh_service,
+        shutdown_timeout=8,
     )
 
     assert result == 19
@@ -565,6 +565,13 @@ filename = "model.bin"
         def terminate_backends(self) -> None:
             pytest.fail("cooperative async cleanup must not terminate backends")
 
+        def request_backend_termination(self, *, deadline: float | None) -> None:
+            del deadline
+            pytest.fail("cooperative async cleanup must not terminate backends")
+
+        def backend_termination_is_alive(self) -> bool:
+            return False
+
         def join(self, timeout: float | None = None) -> None:
             del timeout
             events.append("async:join")
@@ -740,6 +747,13 @@ filename = "model.bin"
 
         def terminate_backends(self) -> None:
             pytest.fail("cooperative async cleanup must not terminate backends")
+
+        def request_backend_termination(self, *, deadline: float | None) -> None:
+            del deadline
+            pytest.fail("cooperative async cleanup must not terminate backends")
+
+        def backend_termination_is_alive(self) -> bool:
+            return False
 
         def join(self, timeout: float | None = None) -> None:
             del timeout
@@ -1052,7 +1066,7 @@ def test_startup_shutdown_during_pre_start_hook_prevents_spawn_and_stop_hooks(
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
 
-def test_startup_shutdown_during_readiness_forwards_to_child_and_skips_stop_hooks(
+def test_startup_shutdown_during_readiness_runs_stop_hooks_before_forwarding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1113,7 +1127,7 @@ def test_startup_shutdown_during_readiness_forwards_to_child_and_skips_stop_hook
         == 130
     )
 
-    assert events == ["spawn", "readiness", "forward:SIGINT", "wait"]
+    assert events == ["spawn", "readiness", "stop", "forward:SIGINT", "wait"]
     assert child.signals == [signal.SIGINT]
     assert restored == [signal.SIGTERM, signal.SIGINT]
 
@@ -1187,7 +1201,7 @@ def test_startup_shutdown_during_readiness_kills_child_that_ignores_signal(
 @pytest.mark.parametrize(
     "sig", [signal.SIGTERM, signal.SIGINT], ids=lambda sig: sig.name
 )
-def test_startup_shutdown_during_post_start_hook_forwards_to_child_without_stop_hooks(
+def test_startup_shutdown_during_post_start_hook_runs_stop_hooks_before_forwarding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sig: signal.Signals,
@@ -1258,6 +1272,7 @@ def test_startup_shutdown_during_post_start_hook_forwards_to_child_without_stop_
         "readiness",
         "post-start:10-post.sh",
         f"post-start-cancelled:{sig.name}",
+        "stop",
         f"forward:{sig.name}",
         "wait",
     ]
@@ -1313,8 +1328,11 @@ def test_repeated_shutdown_signal_forces_stop_hook_cancellation(
         env: Mapping[str, str] | None = None,
         log: Logger,
         cancel_requested: Callable[[], bool],
+        deadline: float | None,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], object],
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log
+        del runtime, env, log, deadline, monotonic, sleep
         assert _hook_names(plan, "stop") == ["10-hang.sh", "20-skip.sh"]
         assert cancel_requested() is False
         events.append("stop:10-hang.sh")
@@ -1355,19 +1373,16 @@ def test_repeated_shutdown_signal_forces_stop_hook_cancellation(
     assert "runtime_hook.cancelled" in captured.err
 
 
-# A child that ignores the forwarded shutdown signal is killed and reaped within
-# the owned grace period.
-def test_shutdown_kills_child_that_ignores_forwarded_signal(
+# A child that ignores the forwarded signal receives the reserved graceful
+# slice, then is killed and reaped at the one absolute outer deadline.
+def test_shutdown_kills_child_at_outer_deadline_after_two_second_reserve(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     handlers, _restored = _capture_signal_handlers(monkeypatch)
-    monkeypatch.setattr(
-        lifecycle_module,
-        "CHILD_TERMINATION_REAP_GRACE_SECONDS",
-        0.0,
-    )
+    clock = ManualClock()
+    events: list[str] = []
 
     class IgnoringSignalChild(FakeChild):
         def wait(self) -> int:
@@ -1381,109 +1396,174 @@ def test_shutdown_kills_child_that_ignores_forwarded_signal(
                 self.returncode = self._wait_returncode
             return self.returncode
 
-    child = IgnoringSignalChild(0)
+    class StuckAuxiliary:
+        def __init__(self, name: str) -> None:
+            self.name = name
 
-    def runner(
-        argv: Sequence[str],
-        *,
-        cwd: str,
-        env: Mapping[str, str],
-        shell: bool,
-    ) -> FakeChild:
-        del argv, cwd, env, shell
-        return child
+        def request_stop(self, *, deadline: float | None = None) -> None:
+            del deadline
+            events.append(f"{self.name}:request")
 
-    assert run_entrypoint(
+        def is_stopped(self) -> bool:
+            return False
+
+        def force_stop(self) -> None:
+            marker = f"{self.name}:force"
+            if marker not in events:
+                events.append(marker)
+
+    child = IgnoringSignalChild(0, events=events)
+    downloads = StuckAuxiliary("downloads")
+    ssh_service = StuckAuxiliary("ssh")
+
+    assert lifecycle_module._wait_with_signal_forwarding(
+        child,
+        hook_plan=RuntimeHookPlan(hooks=()),
         runtime=runtime,
-        baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
-        mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
-        environ={"PATH": "/usr/bin"},
-        runner=runner,
-    ) == 128 + int(signal.SIGKILL)
+        source_env={"PATH": "/usr/bin"},
+        runtime_stop_hook_runner=run_runtime_stop_hooks,
+        downloads=downloads,  # type: ignore[arg-type]
+        ssh_service=ssh_service,  # type: ignore[arg-type]
+        shutdown_timeout=8,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    ) == -int(signal.SIGKILL)
 
+    assert clock.now == pytest.approx(8.0)
     assert child.signals == [signal.SIGTERM]
     assert child.killed is True
     assert child.returncode == -int(signal.SIGKILL)
+    assert events[:2] == ["downloads:request", "ssh:request"]
+    assert events.index("downloads:force") < events.index("kill")
+    assert events.index("ssh:force") < events.index("kill")
 
 
-# Auxiliary shutdown is time-bounded and escalates both sshd and transfer
-# backends that do not stop cooperatively.
-def test_auxiliary_stop_timeouts_force_owned_cleanup(
-    capsys: pytest.CaptureFixture[str],
+# The enabled budget gives all ordered hooks one shared pre-stop deadline; it
+# does not create one timeout per hook or per auxiliary owner.
+def test_shutdown_hooks_receive_one_pre_stop_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop", "10-stop.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+        mounted_hooks_path=hooks,
+    )
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    clock = ManualClock()
     events: list[str] = []
+    component_deadlines: list[float | None] = []
 
-    class StuckSshd:
-        returncode: int | None = None
+    class CooperativeAuxiliary:
+        def request_stop(self, *, deadline: float | None = None) -> None:
+            component_deadlines.append(deadline)
+            events.append("aux:request")
 
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def terminate(self) -> None:
-            events.append("ssh:terminate")
-
-        def kill(self) -> None:
-            events.append("ssh:kill")
-            self.returncode = -int(signal.SIGKILL)
-
-        def wait(self) -> int:
-            events.append("ssh:wait")
-            assert self.returncode is not None
-            return self.returncode
-
-    class StuckAsyncQueue:
-        def request_stop(self) -> None:
-            events.append("async:stop")
-
-        def terminate_backends(self) -> None:
-            events.append("async:terminate")
-
-        def join(self, timeout: float | None = None) -> None:
-            del timeout
-            events.append("async:join")
-
-        def is_alive(self) -> bool:
+        def is_stopped(self) -> bool:
             return True
 
-    # The shared clock deliberately exposes the current cumulative boundary:
-    # each serial auxiliary starts a fresh full timeout. The outer-budget
-    # implementation will replace this expectation atomically.
-    clock = ManualClock()
-    stopped_ssh = stop_runtime_ssh_service(
-        StuckSshd(),
-        cancel_requested=lambda: False,
-        shutdown_requested=threading.Event(),
-        timeout=0.2,
-        poll_interval=0.1,
-        monotonic=clock.monotonic,
-        sleep=clock.sleep,
+        def force_stop(self) -> None:
+            pytest.fail("cooperative auxiliary must not be forced")
+
+    def stop_hooks(
+        plan: RuntimeHookPlan,
+        *,
+        runtime: ContainerRuntime,
+        env: Mapping[str, str] | None,
+        log: Logger,
+        cancel_requested: Callable[[], bool],
+        deadline: float | None,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], object],
+    ) -> tuple[RuntimeHookResult, ...]:
+        del plan, runtime, env, log, cancel_requested, monotonic
+        assert deadline == pytest.approx(6.0)
+        events.append("hooks")
+        sleep(6.0)
+        return ()
+
+    child = SignalOnFirstWaitChild(
+        handlers=handlers,
+        sig=signal.SIGTERM,
+        final_returncode=23,
+        events=events,
     )
-    stopped_async = stop_runtime_async_download_queue(
-        StuckAsyncQueue(),
-        cancel_requested=lambda: False,
-        timeout=0.2,
-        poll_interval=0.1,
-        monotonic=clock.monotonic,
-        sleep=clock.sleep,
+    auxiliary = CooperativeAuxiliary()
+    assert (
+        lifecycle_module._wait_with_signal_forwarding(
+            child,
+            hook_plan=plan,
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            runtime_stop_hook_runner=stop_hooks,
+            downloads=auxiliary,  # type: ignore[arg-type]
+            ssh_service=auxiliary,  # type: ignore[arg-type]
+            shutdown_timeout=8,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        == 23
     )
 
-    captured = capsys.readouterr()
-    assert stopped_ssh is False
-    assert stopped_async is False
-    assert clock.now == pytest.approx(0.5)
-    assert events == [
-        "ssh:terminate",
-        "ssh:kill",
-        "ssh:wait",
-        "async:stop",
-        "async:join",
-        "async:join",
-        "async:terminate",
-        "async:join",
-    ]
-    assert "SSH runtime service did not stop in 0.2s" in captured.err
-    assert "Async runtime download queue did not stop in 0.2s" in captured.out
-    assert "remained alive after backend termination" in captured.out
+    assert clock.now == pytest.approx(6.0)
+    assert events[:4] == ["wait:initial", "aux:request", "aux:request", "hooks"]
+    assert component_deadlines == [pytest.approx(5.0), None]
+    assert child.signals == [signal.SIGTERM]
+
+
+# Disabled outer timing leaves stop hooks unbounded by cdh while preserving
+# prompt auxiliary cancellation and original-signal forwarding.
+def test_shutdown_timeout_minus_one_disables_outer_and_hook_deadlines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop", "10-stop.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+        mounted_hooks_path=hooks,
+    )
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+    observed_deadlines: list[float | None] = []
+
+    class CooperativeAuxiliary:
+        def request_stop(self, *, deadline: float | None = None) -> None:
+            del deadline
+            pass
+
+        def is_stopped(self) -> bool:
+            return True
+
+        def force_stop(self) -> None:
+            pytest.fail("disabled outer deadline must not force clean auxiliaries")
+
+    def stop_hooks(*_args: object, **kwargs: object) -> tuple[RuntimeHookResult, ...]:
+        observed_deadlines.append(kwargs["deadline"])  # type: ignore[arg-type]
+        return ()
+
+    child = SignalOnFirstWaitChild(
+        handlers=handlers,
+        sig=signal.SIGINT,
+        final_returncode=-int(signal.SIGINT),
+        events=[],
+    )
+    auxiliary = CooperativeAuxiliary()
+    assert lifecycle_module._wait_with_signal_forwarding(
+        child,
+        hook_plan=plan,
+        runtime=runtime,
+        source_env={"PATH": "/usr/bin"},
+        runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+        downloads=auxiliary,  # type: ignore[arg-type]
+        ssh_service=auxiliary,  # type: ignore[arg-type]
+        shutdown_timeout=-1,
+    ) == -int(signal.SIGINT)
+
+    assert observed_deadlines == [None]
+    assert child.signals == [signal.SIGINT]
 
 
 # Graceful shutdown runs stop hooks before signal forwarding while preserving
@@ -1523,8 +1603,11 @@ def test_graceful_shutdown_runs_stop_hooks_before_forwarding_and_child_result_wi
         env: Mapping[str, str] | None = None,
         log: Logger,
         cancel_requested: Callable[[], bool],
+        deadline: float | None,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], object],
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log
+        del runtime, env, log, deadline, monotonic, sleep
         assert cancel_requested() is False
         assert _hook_names(plan, "stop") == ["90-stop.sh"]
         events.append("stop:90-stop.sh")
@@ -1532,8 +1615,8 @@ def test_graceful_shutdown_runs_stop_hooks_before_forwarding_and_child_result_wi
             (
                 Diagnostic(
                     path=("hooks", "mounted", "stop", "90-stop.sh"),
-                    code="runtime_hook.timeout",
-                    message="stop hook timed out in integration test",
+                    code="runtime_hook.shutdown_deadline",
+                    message="stop hook exceeded the shared shutdown deadline",
                 ),
             )
         )
@@ -1562,7 +1645,7 @@ def test_graceful_shutdown_runs_stop_hooks_before_forwarding_and_child_result_wi
     ]
     assert child.signals == [signal.SIGTERM]
     assert "Runtime stop hook failed:" in captured.err
-    assert "runtime_hook.timeout" in captured.err
+    assert "runtime_hook.shutdown_deadline" in captured.err
     assert restored == [
         signal.SIGTERM,
         signal.SIGINT,

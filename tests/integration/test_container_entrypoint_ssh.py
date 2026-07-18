@@ -168,6 +168,13 @@ class FakeAsyncHandle:
     def terminate_backends(self) -> None:
         self._events.append("async-terminate-backends")
 
+    def request_backend_termination(self, *, deadline: float | None) -> None:
+        del deadline
+        self.terminate_backends()
+
+    def backend_termination_is_alive(self) -> bool:
+        return False
+
     def join(self, timeout: float | None = None) -> None:
         del timeout
         self._events.append("async-join")
@@ -977,8 +984,11 @@ filename = "async.bin"
         env: Mapping[str, str] | None = None,
         log: Logger,
         cancel_requested: Callable[[], bool],
+        deadline: float | None,
+        monotonic: Callable[[], float],
+        sleep: Callable[[float], object],
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log
+        del plan, runtime, env, log, deadline, monotonic, sleep
         assert cancel_requested() is False
         events.append("stop-hook")
         return ()
@@ -1022,9 +1032,10 @@ filename = "async.bin"
         "async-start",
         "spawn",
         "async-stop",
-        "async-join",
+        "async-terminate-backends",
         "ssh-stop",
         "stop-hook",
         "signal:SIGTERM",
         "wait",
+        "async-join",
     ]

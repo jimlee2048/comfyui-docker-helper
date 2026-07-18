@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import Field
 
 from comfyui_docker_helper.config.model_base import ConfigModel
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.url_validation import DownloaderName
 
 
@@ -36,6 +37,7 @@ class RuntimeCdhConfig(ConfigModel):
     default_download_mode: Literal["sync", "async"] = "sync"
     download_max_attempts: int = Field(default=3, ge=1)
     download_failure_policy: Literal["continue", "fail"] = "continue"
+    shutdown_timeout: ShutdownTimeout = 8
     downloader: RuntimeDownloaderConfig = Field(default_factory=RuntimeDownloaderConfig)
 
 

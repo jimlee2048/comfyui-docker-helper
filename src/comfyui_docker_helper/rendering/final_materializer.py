@@ -193,6 +193,7 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
         "default_downloader": plan.files.downloader.default,
         "default_download_mode": plan.files.default_download_mode,
         "download_max_attempts": plan.files.download_max_attempts,
+        "shutdown_timeout": plan.runtime.shutdown_timeout,
         "downloader": plan.files.downloader.model_dump(
             mode="json", exclude={"default"}
         ),

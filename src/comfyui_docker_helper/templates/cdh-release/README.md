@@ -228,6 +228,7 @@ default_downloader = "aria2"
 default_download_mode = "sync"
 download_max_attempts = 3
 download_failure_policy = "continue"
+shutdown_timeout = 8
 
 [system.ssh]
 enable = false
@@ -239,7 +240,8 @@ The environment overrides are:
 - `CDH_COMFYUI_LISTEN`, `CDH_COMFYUI_PORT`, and
   `CDH_COMFYUI_EXTRA_ARGS`;
 - `CDH_DEFAULT_DOWNLOADER`, `CDH_DEFAULT_DOWNLOAD_MODE`,
-  `CDH_DOWNLOAD_MAX_ATTEMPTS`, and `CDH_DOWNLOAD_FAILURE_POLICY`; and
+  `CDH_DOWNLOAD_MAX_ATTEMPTS`, `CDH_DOWNLOAD_FAILURE_POLICY`, and
+  `CDH_SHUTDOWN_TIMEOUT`; and
 - `SSH_ENABLE`, `SSH_PORT`, `SSH_PASSWORD`, and `SSH_PUB_KEY`.
 
 `CDH_COMFYUI_EXTRA_ARGS` uses POSIX shell-style word parsing without executing
@@ -314,11 +316,24 @@ Startup completes synchronous downloads, runs pre-start hooks, starts sshd when
 enabled, accepts asynchronous downloads, and then starts ComfyUI. If post-start
 hooks exist, cdh waits for ComfyUI readiness before running them.
 
-On the first `SIGTERM` or `SIGINT`, cdh stops the asynchronous download queue
-and sshd, runs stop hooks while ComfyUI remains alive, then forwards the signal
-to ComfyUI and waits for it for a bounded interval. A second signal cancels the
-remaining stop hooks. The container runtime's stop timeout is independent and
-may still terminate the container if its own deadline expires.
+On the first `SIGTERM` or `SIGINT`, cdh promptly starts cancellation of the
+asynchronous download queue and sshd, then runs ordered stop hooks while
+ComfyUI remains alive. `shutdown_timeout` is one total monotonic budget for
+this signal path. Its default is eight seconds, with the final two seconds
+reserved for forwarding the original signal to ComfyUI and reaping managed
+children. When the earlier hook portion expires, cdh terminates the active hook
+group and skips later hooks; at the total deadline, it force-stops only managed
+children that remain alive. A second signal cancels the remaining stop hooks.
+
+Docker or another orchestrator owns a separate external hard limit. Linux
+`docker stop` and Compose normally allow ten seconds before `SIGKILL`; cdh's
+eight-second default leaves only a best-effort scheduling margin and cannot
+discover or override that external value. For a custom deployment, configure
+Docker `--stop-timeout` or Compose `stop_grace_period` greater than cdh's total.
+For example, long hooks can use `shutdown_timeout = 55` with an external grace
+greater than 55 seconds. Setting cdh to `-1` disables only its outer and hook
+deadlines; cdh-owned component operations remain bounded, Docker's own `-1` is
+independent, and no cleanup can continue after external `SIGKILL`.
 
 ## Rendered context
 

@@ -245,7 +245,8 @@ class HttpxDownloader:
                     last_log = now
         return downloaded
 
-    def cancel(self) -> None:
+    def cancel(self, *, deadline: float | None = None) -> None:
+        del deadline
         with self._active_lock:
             if self._cancel_requested.is_set():
                 return
@@ -450,11 +451,14 @@ class Aria2Downloader:
             self._lifecycle.notify_all()
         return error
 
-    def cancel(self) -> None:
+    def cancel(self, *, deadline: float | None = None) -> None:
         with self._lifecycle:
             self._cancel_requested.set()
             self._lifecycle.notify_all()
-        self.close()
+        if deadline is None:
+            self.close()
+        else:
+            self._close_until(deadline)
 
     def _ensure_started(self, settings: DownloaderSettings) -> Aria2Api:
         self._raise_prepare_cancelled()

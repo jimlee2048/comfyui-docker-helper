@@ -139,6 +139,43 @@ class RuntimeSshService:
             log=self._log,
         )
 
+    def request_stop(self) -> None:
+        """Promptly send the cooperative stop signal without waiting."""
+        handle = self._handle
+        if handle is None or handle.poll() is not None:
+            return
+        self._shutdown_requested.set()
+        self._log("SSH runtime service stop requested")
+        try:
+            handle.terminate()
+        except Exception as error:
+            print(
+                "WARNING: SSH runtime service terminate failed: "
+                f"reason={runtime_error_reason(error)}",
+                file=sys.stderr,
+            )
+
+    def is_stopped(self) -> bool:
+        """Reap and report the owned sshd child when it has exited."""
+        handle = self._handle
+        if handle is None:
+            return True
+        return wait_for_process_reap(
+            handle,
+            timeout=0.0,
+            poll_interval=SSHD_STOP_POLL_INTERVAL_SECONDS,
+        )
+
+    def force_stop(self) -> bool:
+        """Kill and reap an sshd child that outlived the outer budget."""
+        handle = self._handle
+        if handle is None:
+            return True
+        self._shutdown_requested.set()
+        if handle.poll() is None:
+            _kill_runtime_ssh_service(handle)
+        return self.is_stopped()
+
 
 def stop_runtime_ssh_service(
     handle: SshdProcess | None,

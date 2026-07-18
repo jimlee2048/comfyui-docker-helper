@@ -269,6 +269,7 @@ def test_environment_overrides_mounted_and_baked_runtime_config(
 default_downloader = "aria2"
 download_max_attempts = 4
 download_failure_policy = "continue"
+shutdown_timeout = 20
 
 [comfyui]
 listen = "127.0.0.10"
@@ -289,6 +290,7 @@ download_mode = "sync"
 default_downloader = "aria2"
 download_max_attempts = 5
 download_failure_policy = "fail"
+shutdown_timeout = -1
 
 [comfyui]
 listen = "127.0.0.20"
@@ -342,6 +344,7 @@ extra_args = ["--preview-method", "auto"]
             "CDH_DEFAULT_DOWNLOAD_MODE": "async",
             "CDH_DOWNLOAD_MAX_ATTEMPTS": "6",
             "CDH_DOWNLOAD_FAILURE_POLICY": "continue",
+            "CDH_SHUTDOWN_TIMEOUT": "55.5",
         },
         runner=runner,
         runtime_downloader=runtime_downloader,
@@ -361,6 +364,7 @@ extra_args = ["--preview-method", "auto"]
     assert downloader_configs[0].cdh.default_download_mode == "async"
     assert downloader_configs[0].cdh.download_max_attempts == 6
     assert downloader_configs[0].cdh.download_failure_policy == "continue"
+    assert downloader_configs[0].cdh.shutdown_timeout == 55.5
     assert downloader_plans[0].items[0].target == (
         runtime.comfyui_path / "models" / "checkpoints" / "model.bin"
     )

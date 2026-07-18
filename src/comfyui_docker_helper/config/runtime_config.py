@@ -5,6 +5,7 @@ import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +24,7 @@ from comfyui_docker_helper.config.runtime_file_validation import (
     validate_runtime_file_url,
 )
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.ssh_keys import (
     normalize_ssh_public_key,
     normalize_ssh_public_keys,
@@ -96,6 +98,7 @@ class _RuntimeCdhConfigPatch(ConfigModel):
     default_download_mode: Literal["sync", "async"] | None = None
     download_max_attempts: int | None = Field(default=None, ge=1)
     download_failure_policy: Literal["continue", "fail"] | None = None
+    shutdown_timeout: ShutdownTimeout | None = None
     downloader: _RuntimeDownloaderConfigPatch | None = None
 
 
@@ -237,6 +240,10 @@ def _runtime_env_document(
         document.setdefault("cdh", {})["download_failure_policy"] = environ[
             "CDH_DOWNLOAD_FAILURE_POLICY"
         ]
+    if "CDH_SHUTDOWN_TIMEOUT" in environ:
+        document.setdefault("cdh", {})["shutdown_timeout"] = (
+            _parse_env_shutdown_timeout(environ["CDH_SHUTDOWN_TIMEOUT"])
+        )
     if "SSH_ENABLE" in environ:
         document.setdefault("system", {}).setdefault("ssh", {})["enable"] = (
             _parse_env_ssh_enable(environ["SSH_ENABLE"])
@@ -331,6 +338,31 @@ def _parse_env_download_max_attempts(value: str) -> int:
             )
         )
     return max_attempts
+
+
+def _parse_env_shutdown_timeout(value: str) -> int | float:
+    normalized = value.strip()
+    try:
+        timeout = float(normalized)
+    except ValueError as error:
+        raise _invalid_env_shutdown_timeout() from error
+    if not normalized or not isfinite(timeout) or (timeout != -1 and timeout <= 0):
+        raise _invalid_env_shutdown_timeout()
+    if timeout.is_integer():
+        return int(timeout)
+    return timeout
+
+
+def _invalid_env_shutdown_timeout() -> RuntimeConfigurationError:
+    return RuntimeConfigurationError(
+        (
+            Diagnostic(
+                path=("env", "CDH_SHUTDOWN_TIMEOUT"),
+                code="env.invalid_shutdown_timeout",
+                message="must be a finite positive number or -1",
+            ),
+        )
+    )
 
 
 def _parse_env_port(value: str) -> int:

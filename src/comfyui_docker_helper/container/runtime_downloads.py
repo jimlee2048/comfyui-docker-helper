@@ -78,6 +78,10 @@ class RuntimeAsyncDownloadQueueHandle(Protocol):
 
     def terminate_backends(self) -> None: ...
 
+    def request_backend_termination(self, *, deadline: float | None) -> None: ...
+
+    def backend_termination_is_alive(self) -> bool: ...
+
     def join(self, timeout: float | None = None) -> None: ...
 
     def is_alive(self) -> bool: ...
@@ -95,12 +99,13 @@ class _PreparedRuntimeDownloads:
     run_id: str | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _RuntimeAsyncDownloadQueueHandle:
     thread: threading.Thread
     stop_requested: threading.Event
     backends: list[object]
     backends_lock: threading.Lock
+    backend_termination_thread: threading.Thread | None = None
 
     def request_stop(self) -> None:
         self.stop_requested.set()
@@ -113,6 +118,35 @@ class _RuntimeAsyncDownloadQueueHandle:
             if callable(cancel):
                 with suppress(Exception):
                     cancel()
+
+    def request_backend_termination(self, *, deadline: float | None) -> None:
+        """Start backend cancellation once without blocking the lifecycle owner."""
+        with self.backends_lock:
+            if self.backend_termination_thread is not None:
+                return
+            backends = tuple(self.backends)
+
+            def terminate() -> None:
+                for backend in backends:
+                    cancel = getattr(backend, "cancel", None)
+                    if callable(cancel):
+                        with suppress(Exception):
+                            cancel(deadline=deadline)
+
+            thread = threading.Thread(
+                target=terminate,
+                name="cdh-runtime-download-cancellation",
+                daemon=True,
+            )
+            self.backend_termination_thread = thread
+            thread.start()
+
+    def backend_termination_is_alive(self) -> bool:
+        thread = self.backend_termination_thread
+        if thread is None:
+            return False
+        thread.join(timeout=0.0)
+        return thread.is_alive()
 
     def join(self, timeout: float | None = None) -> None:
         self.thread.join(timeout)
@@ -207,6 +241,33 @@ class RuntimeDownloads:
             sleep=sleep,
             log=self._log,
         )
+
+    def request_stop(self, *, deadline: float | None = None) -> None:
+        """Promptly cancel accepted work without waiting for the worker."""
+        handle = self._async_handle
+        if handle is None or not handle.is_alive():
+            return
+        self._log("Async runtime download queue stop requested")
+        handle.request_stop()
+        handle.request_backend_termination(deadline=deadline)
+
+    def is_stopped(self) -> bool:
+        """Report whether the owned asynchronous worker is quiescent."""
+        handle = self._async_handle
+        if handle is None:
+            return True
+        handle.join(timeout=0.0)
+        return not handle.is_alive() and not handle.backend_termination_is_alive()
+
+    def force_stop(self) -> bool:
+        """Force cancellation of any backend still owned by the worker."""
+        handle = self._async_handle
+        if handle is None:
+            return True
+        handle.request_stop()
+        handle.request_backend_termination(deadline=None)
+        handle.join(timeout=0.0)
+        return not handle.is_alive() and not handle.backend_termination_is_alive()
 
 
 def start_runtime_async_download_queue(

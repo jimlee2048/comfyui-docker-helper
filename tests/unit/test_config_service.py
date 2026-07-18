@@ -46,7 +46,38 @@ def test_public_service_returns_validated_config_offline(
 
     assert result.config.python.version == "3.13.14"
     assert result.config.build.platforms == ["linux/amd64"]
+    assert result.config.cdh.shutdown_timeout == 8
     assert result.warnings == ()
+
+
+# The public shutdown budget accepts finite positive values and the exact
+# disable sentinel while rejecting values that cannot drive the runtime owner.
+@pytest.mark.parametrize(("value", "expected"), [("55.5", 55.5), ("-1", -1)])
+def test_public_service_accepts_shutdown_timeout_contract(
+    tmp_path: Path,
+    value: str,
+    expected: float,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + f"\n[cdh]\nshutdown_timeout = {value}\n")
+
+    assert load_validate_config(path).cdh.shutdown_timeout == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-2", "nan", "inf", '"8"', "true"])
+def test_public_service_rejects_invalid_shutdown_timeout(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config() + f"\n[cdh]\nshutdown_timeout = {value}\n")
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config(path)
+
+    assert [item.path for item in raised.value.diagnostics] == [
+        ("cdh", "shutdown_timeout")
+    ]
 
 
 # Layered files merge before validation so diagnostics observe effective input.

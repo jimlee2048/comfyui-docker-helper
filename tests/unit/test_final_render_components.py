@@ -335,6 +335,24 @@ def test_build_plan_admission_rejects_changed_plan_under_literal_digest(
         )
 
 
+# The configured shutdown budget remains exact through planning and baked runtime copy.
+def test_nondefault_shutdown_timeout_projects_to_plan_and_baked_runtime(
+    tmp_path: Path,
+) -> None:
+    plan = build_plan(
+        final_config(shutdown_timeout=55.5),
+        accepted_resolution(),
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+
+    materialize_build_plan(plan, output)
+
+    runtime = tomllib.loads((output / "runtime/config.toml").read_text())
+    assert plan.runtime.shutdown_timeout == 55.5
+    assert runtime["cdh"]["shutdown_timeout"] == 55.5
+
+
 # Descriptor-relative BuildPlan admission rejects substituted inputs.
 def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
     tmp_path: Path,

@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.exact_ledger import (
     DEFAULT_CUDA_IMAGE_DISTRO,
     DEFAULT_CUDA_IMAGE_FLAVOR,
@@ -98,12 +99,13 @@ class FinalDownloaderConfig(FinalConfigModel):
 
 
 class FinalCdhConfig(FinalConfigModel):
-    """cdh-owned transfer settings."""
+    """cdh-owned transfer and lifecycle settings."""
 
     default_downloader: Literal["aria2", "httpx"] = "aria2"
     default_download_mode: Literal["sync", "async"] = "sync"
     download_max_attempts: int = Field(default=3, ge=1)
     download_failure_policy: Literal["continue", "fail"] = "fail"
+    shutdown_timeout: ShutdownTimeout = 8
     downloader: FinalDownloaderConfig = Field(default_factory=FinalDownloaderConfig)
 
 

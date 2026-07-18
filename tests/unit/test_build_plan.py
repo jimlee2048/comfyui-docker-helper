@@ -82,6 +82,7 @@ def final_config(
     with_uv_tool: bool = False,
     install_cli: bool = True,
     python_version: str = "3.13.14",
+    shutdown_timeout: int | float = 8,
 ) -> FinalConfig:
     registry_node: dict[str, object] = {
         "type": "registry",
@@ -114,6 +115,7 @@ def final_config(
                 "output": "load",
                 "platforms": ["linux/amd64"],
             },
+            "cdh": {"shutdown_timeout": shutdown_timeout},
             "comfyui": {
                 "version": "0.11.0",
                 "install_cli": install_cli,
@@ -487,6 +489,7 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
         "/opt/venv/lib/python3.13/site-packages/comfyui-docker-helper-comfyui.pth"
     )
     assert [item.name for item in plan.runtime.environment] == ["ALPHA", "ZED"]
+    assert plan.runtime.shutdown_timeout == 8
     assert plan.runtime.launch_command[-3:] == (
         "--disable-auto-launch",
         "--preview-method",
@@ -1285,6 +1288,7 @@ def test_build_plan_parser_rejects_cross_field_authority_forgery(
         ("git-target", "canonical absolute POSIX path"),
         ("file-url", "canonical HTTP"),
         ("launch-executable", "canonical absolute POSIX path"),
+        ("shutdown-timeout", "must be a finite positive number or -1"),
         ("plan-digest", "digest must be sha256"),
     ],
 )
@@ -1311,6 +1315,8 @@ def test_build_plan_parser_rejects_execution_sensitive_scalar_forgery(
     elif mutation == "launch-executable":
         command = document["runtime"]["launch_command"]
         document["runtime"]["launch_command"] = ("python", *command[1:])
+    elif mutation == "shutdown-timeout":
+        document["runtime"]["shutdown_timeout"] = "8"
     else:
         document["config_digest"] = "bad"
 

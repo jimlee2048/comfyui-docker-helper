@@ -183,6 +183,7 @@ class ApplicationRequest:
 class RuntimeRequest:
     environment: tuple[tuple[str, str], ...]
     ssh: SshRequest
+    shutdown_timeout: int | float
     launch_command: tuple[str, ...]
 
 
@@ -464,6 +465,7 @@ def build_canonical_request_graph(
                 config.system.ssh.password,
                 tuple(config.system.ssh.pub_keys),
             ),
+            shutdown_timeout=config.cdh.shutdown_timeout,
             launch_command=(
                 f"{_VENV_PATH}/bin/python",
                 f"{comfyui_path}/main.py",

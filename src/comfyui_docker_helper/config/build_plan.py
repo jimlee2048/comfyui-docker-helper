@@ -88,6 +88,7 @@ from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
 )
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.url_validation import (
     is_http_url,
@@ -881,6 +882,7 @@ class SshPlan(_PlanModel):
 class RuntimePhase(_PlanModel):
     environment: tuple[EnvironmentPlan, ...]
     ssh: SshPlan
+    shutdown_timeout: ShutdownTimeout
     launch_command: tuple[str, ...]
     hooks: tuple[HookPlan, ...]
     download_failure_policy: Literal["continue", "fail"] | None
@@ -1449,6 +1451,7 @@ def _project_runtime(
             password=graph.runtime.ssh.password,
             pub_keys=graph.runtime.ssh.pub_keys,
         ),
+        shutdown_timeout=graph.runtime.shutdown_timeout,
         launch_command=graph.runtime.launch_command,
         hooks=_runtime_hooks(entries, used),
         download_failure_policy=(

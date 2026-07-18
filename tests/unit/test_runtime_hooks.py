@@ -16,7 +16,6 @@ from comfyui_docker_helper.container.runners import (
 from comfyui_docker_helper.container.runtime_hooks import (
     STOP_HOOK_POLL_INTERVAL_SECONDS,
     STOP_HOOK_TERMINATION_GRACE_SECONDS,
-    STOP_HOOK_TIMEOUT_SECONDS,
     RuntimeHookError,
     discover_runtime_hooks,
     run_runtime_hooks,
@@ -332,8 +331,8 @@ def test_pre_start_hook_failure_stops_phase(tmp_path: Path) -> None:
     ]
 
 
-# Stop-hook cleanup is bounded: cancellation and timeouts must terminate the
-# process group, reap finished hooks, and skip later hooks when shutdown is over.
+# Stop-hook cleanup uses the lifecycle deadline or cooperative cancellation to
+# terminate the active process group, reap it, and skip later hooks.
 def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     baked = tmp_path / "baked"
@@ -373,13 +372,15 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
     ]
 
 
-def test_startup_hook_cancellation_terminates_group_and_skips_remaining(
+@pytest.mark.parametrize("phase", ["pre-start", "post-start"])
+def test_startup_hook_cancellation_uses_outer_deadline_and_skips_remaining(
     tmp_path: Path,
+    phase: str,
 ) -> None:
     runtime = _runtime(tmp_path)
     mounted = tmp_path / "mounted"
-    _write_hook(mounted, "pre-start.d", "10-hang.sh")
-    _write_hook(mounted, "pre-start.d", "20-skip.sh")
+    _write_hook(mounted, f"{phase}.d", "10-hang.sh")
+    _write_hook(mounted, f"{phase}.d", "20-skip.sh")
     plan = discover_runtime_hooks(
         baked_hooks_path=tmp_path / "missing-baked",
         mounted_hooks_path=mounted,
@@ -388,6 +389,21 @@ def test_startup_hook_cancellation_terminates_group_and_skips_remaining(
     process = FakeHookProcess(pid=4141)
     started: list[str] = []
     signals: list[tuple[int, signal.Signals]] = []
+
+    class DeadlineCancellation:
+        cancelled = False
+
+        def __call__(self) -> bool:
+            return self.cancelled
+
+        def shutdown_deadline(self) -> float:
+            return 0.05
+
+        def wait(self, timeout: float) -> bool:
+            del timeout
+            clock.sleep(0.01)
+            self.cancelled = True
+            return True
 
     def runner(
         argv: Sequence[str | os.PathLike[str]],
@@ -410,10 +426,10 @@ def test_startup_hook_cancellation_terminates_group_and_skips_remaining(
     with pytest.raises(RuntimeHookError) as error:
         run_runtime_startup_hooks(
             plan,
-            "pre-start",
+            phase,  # type: ignore[arg-type]
             runtime=runtime,
             runner=runner,
-            cancel_requested=lambda: clock.now >= 0.1,
+            cancel_requested=DeadlineCancellation(),
             termination_grace_seconds=0.2,
             poll_interval_seconds=0.1,
             monotonic=clock.monotonic,
@@ -423,13 +439,14 @@ def test_startup_hook_cancellation_terminates_group_and_skips_remaining(
 
     assert started == ["10-hang.sh"]
     assert locations_and_codes(error.value) == [
-        (("hooks", "mounted", "pre-start", "10-hang.sh"), "runtime_hook.cancelled")
+        (("hooks", "mounted", phase, "10-hang.sh"), "runtime_hook.cancelled")
     ]
     assert signals == [(4141, signal.SIGTERM), (4141, signal.SIGKILL)]
     assert process.waits == 1
+    assert clock.now <= 0.05
 
 
-def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
+def test_stop_hook_deadline_kills_process_group_and_skips_remaining(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
@@ -468,7 +485,7 @@ def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
             plan,
             runtime=runtime,
             runner=runner,
-            timeout_seconds=0.2,
+            deadline=0.2,
             termination_grace_seconds=0.2,
             poll_interval_seconds=0.1,
             monotonic=clock.monotonic,
@@ -478,10 +495,91 @@ def test_stop_hook_timeout_cancels_process_group_and_skips_remaining(
 
     assert started == ["10-hang.sh"]
     assert locations_and_codes(error.value) == [
-        (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.timeout")
+        (
+            ("hooks", "mounted", "stop", "10-hang.sh"),
+            "runtime_hook.shutdown_deadline",
+        )
     ]
-    assert signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    assert signals == [(4242, signal.SIGKILL)]
     assert process.waits == 1
+
+
+# A failed deadline signal reports the owned group without entering an unbounded wait.
+def test_stop_hook_deadline_signal_failure_does_not_wait(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-hang.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    clock = FakeClock()
+    process = FakeHookProcess(pid=4243)
+
+    def signaler(pid: int, sig: signal.Signals) -> None:
+        del pid, sig
+        raise OSError("signal unavailable")
+
+    with pytest.raises(RuntimeHookError) as error:
+        run_runtime_stop_hooks(
+            plan,
+            runtime=runtime,
+            runner=lambda *_args, **_kwargs: process,
+            deadline=0.1,
+            poll_interval_seconds=0.1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+            process_group_signaler=signaler,
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.termination_failed")
+    ]
+    assert process.waits == 0
+
+
+# A hook that finishes at the shared cutoff does not grant a fresh timeout to
+# the next ordered hook; remaining hooks are skipped without being spawned.
+def test_stop_hooks_do_not_start_later_hook_after_shared_deadline(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "stop.d", "10-finish.sh")
+    _write_hook(mounted, "stop.d", "20-skip.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    clock = FakeClock()
+    started: list[str] = []
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        *,
+        cwd: str | Path,
+        env: Mapping[str, str],
+        description: str,
+        start_new_session: bool = False,
+    ) -> FakeHookProcess:
+        del cwd, env, description
+        assert start_new_session is True
+        started.append(Path(argv[-1]).name)
+        clock.sleep(0.2)
+        return FakeHookProcess(pid=4545, returncode=0)
+
+    run_runtime_stop_hooks(
+        plan,
+        runtime=runtime,
+        runner=runner,
+        deadline=0.2,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    assert started == ["10-finish.sh"]
 
 
 def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
@@ -524,7 +622,7 @@ def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
             runtime=runtime,
             runner=runner,
             cancel_requested=lambda: clock.now >= 0.1,
-            timeout_seconds=1.0,
+            deadline=1.0,
             termination_grace_seconds=0.2,
             poll_interval_seconds=0.1,
             monotonic=clock.monotonic,
@@ -536,13 +634,16 @@ def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
     assert locations_and_codes(error.value) == [
         (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.cancelled")
     ]
-    assert signals == [(4343, signal.SIGTERM), (4343, signal.SIGKILL)]
+    assert signals == [
+        (4343, signal.SIGTERM),
+        (4343, signal.SIGKILL),
+    ]
     assert process.waits == 1
 
 
-def test_stop_hook_timeout_constants_are_bounded() -> None:
-    assert 0 < STOP_HOOK_POLL_INTERVAL_SECONDS < STOP_HOOK_TIMEOUT_SECONDS
-    assert 0 < STOP_HOOK_TERMINATION_GRACE_SECONDS < STOP_HOOK_TIMEOUT_SECONDS
+def test_stop_hook_process_cleanup_constants_are_bounded() -> None:
+    assert STOP_HOOK_POLL_INTERVAL_SECONDS > 0
+    assert STOP_HOOK_TERMINATION_GRACE_SECONDS > 0
 
 
 def locations_and_codes(

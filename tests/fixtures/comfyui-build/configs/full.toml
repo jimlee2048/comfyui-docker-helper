@@ -19,6 +19,7 @@ version = "2.12.1"
 [cdh]
 default_downloader = "httpx"
 default_download_mode = "sync"
+shutdown_timeout = 8
 
 [cdh.downloader.aria2]
 rpc_port = 6811

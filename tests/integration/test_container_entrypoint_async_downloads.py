@@ -1,8 +1,9 @@
-"""End-to-end async runtime download coverage for entrypoint orchestration."""
+"""Runtime download owner and lifecycle integration coverage."""
 
 from __future__ import annotations
 
 import signal
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -11,7 +12,6 @@ from urllib.parse import urlsplit
 import pytest
 
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container import entrypoint as entrypoint_module
 from comfyui_docker_helper.container import runtime_files as runtime_files_module
 from comfyui_docker_helper.container.download_files import (
     DownloadCancelled,
@@ -22,6 +22,11 @@ from comfyui_docker_helper.container.download_files import (
 from comfyui_docker_helper.container.entrypoint import run_entrypoint
 from comfyui_docker_helper.container.process_control import DirectProcessStarter
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_downloads import (
+    RuntimeAsyncDownloadQueueHandle,
+    RuntimeAsyncQueueStarter,
+    start_runtime_async_download_queue,
+)
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
     RuntimeFilePlan,
@@ -30,6 +35,11 @@ from comfyui_docker_helper.container.runtime_files import (
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
+)
+from comfyui_docker_helper.container.runtime_lifecycle import (
+    EntrypointError,
+    ReadinessWaiter,
+    RuntimeHookRunner,
 )
 from comfyui_docker_helper.container.runtime_state import (
     RuntimeDownloadsState,
@@ -69,8 +79,8 @@ class AsyncBackend:
         self.calls: list[tuple[TransportRequest, DownloaderSettings]] = []
         self.payloads: dict[str, bytes] = {}
         self.failures: dict[str, int | None] = {}
-        self.entered = entrypoint_module.threading.Event()
-        self.release = entrypoint_module.threading.Event()
+        self.entered = threading.Event()
+        self.release = threading.Event()
         self.block = False
         self.cancelled = False
 
@@ -197,10 +207,9 @@ def _run_with_real_async_queue(
     config: Path,
     state_path: Path,
     runner: DirectProcessStarter,
-    runtime_async_queue_starter: entrypoint_module.RuntimeAsyncQueueStarter
-    | None = None,
-    runtime_hook_runner: entrypoint_module.RuntimeHookRunner | None = None,
-    readiness_waiter: entrypoint_module.ReadinessWaiter | None = None,
+    runtime_async_queue_starter: RuntimeAsyncQueueStarter | None = None,
+    runtime_hook_runner: RuntimeHookRunner | None = None,
+    readiness_waiter: ReadinessWaiter | None = None,
 ) -> int:
     kwargs: dict[str, object] = {}
     if runtime_async_queue_starter is not None:
@@ -473,7 +482,7 @@ filename = "model.bin"
                 downloads=RuntimeDownloadsState(entries=entries),
             ),
         )
-        return entrypoint_module.start_runtime_async_download_queue(
+        return start_runtime_async_download_queue(
             plan,
             config=config,
             runtime=runtime,
@@ -483,7 +492,7 @@ filename = "model.bin"
         )
 
     with pytest.raises(
-        entrypoint_module.EntrypointError,
+        EntrypointError,
         match="async runtime download queue failed to start",
     ):
         _run_with_real_async_queue(
@@ -544,7 +553,7 @@ filename = "model.bin"
     class CancelOnStopHandle:
         def __init__(
             self,
-            handle: entrypoint_module.RuntimeAsyncDownloadQueueHandle,
+            handle: RuntimeAsyncDownloadQueueHandle,
         ) -> None:
             self.handle = handle
 
@@ -571,7 +580,7 @@ filename = "model.bin"
         log: Logger,
     ) -> CancelOnStopHandle:
         return CancelOnStopHandle(
-            entrypoint_module.start_runtime_async_download_queue(
+            start_runtime_async_download_queue(
                 plan,
                 config=config,
                 runtime=runtime,

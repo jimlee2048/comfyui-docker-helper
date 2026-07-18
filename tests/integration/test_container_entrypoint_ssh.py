@@ -1,9 +1,10 @@
-"""End-to-end SSH entrypoint integration coverage."""
+"""Runtime SSH service owner and lifecycle integration coverage."""
 
 from __future__ import annotations
 
 import os
 import signal
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from io import StringIO
@@ -12,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container import entrypoint as entrypoint_module
+from comfyui_docker_helper.container import runtime_ssh_service as ssh_service_module
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
@@ -23,6 +24,9 @@ from comfyui_docker_helper.container.runtime_files import (
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
+)
+from comfyui_docker_helper.container.runtime_ssh_service import (
+    stop_runtime_ssh_service,
 )
 from comfyui_docker_helper.container.ssh import SshdStartupError, start_sshd_if_enabled
 
@@ -98,7 +102,7 @@ class WaitForEventChild(FakeChild):
 
     def __init__(
         self,
-        event: entrypoint_module.threading.Event,
+        event: threading.Event,
         *,
         returncode: int = 0,
     ) -> None:
@@ -123,8 +127,8 @@ class FakeSshdProcess:
         self.returncode = returncode
         self._wait_returncode = wait_returncode
         self._events = events
-        self.waited = entrypoint_module.threading.Event()
-        self.released = entrypoint_module.threading.Event()
+        self.waited = threading.Event()
+        self.released = threading.Event()
 
     def wait(self) -> int:
         if self._wait_returncode is None:
@@ -254,7 +258,7 @@ class EventStderr(StringIO):
     def __init__(self, pattern: str) -> None:
         super().__init__()
         self._pattern = pattern
-        self.observed = entrypoint_module.threading.Event()
+        self.observed = threading.Event()
 
     def write(self, value: str) -> int:
         written = super().write(value)
@@ -873,10 +877,10 @@ def test_cooperative_sshd_stop_keeps_wait_errors_best_effort(
             raise OSError("wait failed")
 
     assert (
-        entrypoint_module._stop_sshd_runtime_service(
+        stop_runtime_ssh_service(
             WaitErrorSshd(),
             cancel_requested=lambda: False,
-            shutdown_requested=entrypoint_module.threading.Event(),
+            shutdown_requested=threading.Event(),
         )
         is True
     )
@@ -900,7 +904,7 @@ password = "secret"
     stderr = EventStderr(
         "WARNING: SSH runtime service exited unexpectedly: returncode=23"
     )
-    monkeypatch.setattr(entrypoint_module.sys, "stderr", stderr)
+    monkeypatch.setattr(ssh_service_module.sys, "stderr", stderr)
 
     assert (
         run_entrypoint(

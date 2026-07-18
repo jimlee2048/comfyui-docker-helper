@@ -1,8 +1,9 @@
-"""Runtime lifecycle integration coverage for entrypoint orchestration."""
+"""Runtime lifecycle owner and composition-boundary integration coverage."""
 
 from __future__ import annotations
 
 import signal
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from unittest.mock import Mock
@@ -10,10 +11,14 @@ from unittest.mock import Mock
 import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
-from comfyui_docker_helper.container import entrypoint as entrypoint_module
+from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
 from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_downloads import (
+    RuntimeAsyncQueueStartupError,
+    stop_runtime_async_download_queue,
+)
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
     RuntimeDownloadStateObserver,
@@ -26,6 +31,10 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
     discover_runtime_hooks,
+)
+from comfyui_docker_helper.container.runtime_ssh_service import (
+    RuntimeSshService,
+    stop_runtime_ssh_service,
 )
 
 
@@ -323,35 +332,26 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
     )
     events: list[str] = []
     child = FakeChild(19, events=events, wait_event="child:wait")
-    async_handle = Mock()
-    async_handle.is_alive.side_effect = [True, False]
-    async_handle.request_stop.side_effect = lambda: events.append("async:stop")
-    sshd_handle = Mock(returncode=None)
-
-    def terminate_sshd() -> None:
-        events.append("ssh:terminate")
-        sshd_handle.returncode = 0
-
-    sshd_handle.poll.side_effect = lambda: sshd_handle.returncode
-    sshd_handle.terminate.side_effect = terminate_sshd
-    sshd_handle.wait.side_effect = lambda: events.append("ssh:wait") or 0
+    downloads = Mock()
+    downloads.stop.side_effect = lambda **_kwargs: events.append("async:stop")
+    ssh_service = Mock()
+    ssh_service.stop.side_effect = lambda **_kwargs: events.extend(
+        ("ssh:terminate", "ssh:wait")
+    )
     stop_hook_runner = Mock()
 
-    result = entrypoint_module._wait_with_signal_forwarding(
+    result = lifecycle_module._wait_with_signal_forwarding(
         child,
         hook_plan=hook_plan,
         runtime=runtime,
         source_env={"PATH": "/usr/bin"},
         runtime_stop_hook_runner=stop_hook_runner,
-        async_handle=async_handle,
-        sshd_handle=sshd_handle,
-        sshd_shutdown_requested=entrypoint_module.threading.Event(),
+        downloads=downloads,
+        ssh_service=ssh_service,
     )
 
     assert result == 19
     stop_hook_runner.assert_not_called()
-    async_handle.terminate_backends.assert_not_called()
-    sshd_handle.kill.assert_not_called()
     assert events == [
         "child:wait",
         "async:stop",
@@ -577,8 +577,8 @@ filename = "model.bin"
     async_queue = OwnedAsyncQueue()
     child: FakeChild | None = None
     monkeypatch.setattr(
-        entrypoint_module,
-        "_monitor_sshd_after_comfyui_start",
+        RuntimeSshService,
+        "monitor_after_comfyui_start",
         lambda *_args, **_kwargs: None,
     )
 
@@ -598,7 +598,7 @@ filename = "model.bin"
         assert len(plan.items) == 1
         events.append("async:start")
         if failure_point == "async-start":
-            raise entrypoint_module.RuntimeAsyncQueueStartupError("queue unavailable")
+            raise RuntimeAsyncQueueStartupError("queue unavailable")
         return async_queue
 
     def runner(
@@ -1127,7 +1127,7 @@ def test_startup_shutdown_during_readiness_kills_child_that_ignores_signal(
     _write_hook(hooks, "post-start", "10-post.sh")
     handlers, restored = _capture_signal_handlers(monkeypatch)
     monkeypatch.setattr(
-        entrypoint_module,
+        lifecycle_module,
         "CHILD_TERMINATION_REAP_GRACE_SECONDS",
         0.0,
     )
@@ -1364,7 +1364,7 @@ def test_shutdown_kills_child_that_ignores_forwarded_signal(
     runtime = _runtime(tmp_path)
     handlers, _restored = _capture_signal_handlers(monkeypatch)
     monkeypatch.setattr(
-        entrypoint_module,
+        lifecycle_module,
         "CHILD_TERMINATION_REAP_GRACE_SECONDS",
         0.0,
     )
@@ -1449,16 +1449,16 @@ def test_auxiliary_stop_timeouts_force_owned_cleanup(
     # each serial auxiliary starts a fresh full timeout. The outer-budget
     # implementation will replace this expectation atomically.
     clock = ManualClock()
-    stopped_ssh = entrypoint_module._stop_sshd_runtime_service(
+    stopped_ssh = stop_runtime_ssh_service(
         StuckSshd(),
         cancel_requested=lambda: False,
-        shutdown_requested=entrypoint_module.threading.Event(),
+        shutdown_requested=threading.Event(),
         timeout=0.2,
         poll_interval=0.1,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
     )
-    stopped_async = entrypoint_module._stop_runtime_async_download_queue(
+    stopped_async = stop_runtime_async_download_queue(
         StuckAsyncQueue(),
         cancel_requested=lambda: False,
         timeout=0.2,

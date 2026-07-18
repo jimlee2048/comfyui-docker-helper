@@ -1,9 +1,11 @@
-"""Bounded, control-safe runtime download diagnostics for container logs."""
+"""Runtime diagnostic formatting for container logs and errors."""
 
 from __future__ import annotations
 
+import sys
 from urllib.parse import urlsplit
 
+from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.container.runtime_state import summarize_runtime_error
 
 _UNKNOWN_SOURCE_HOST = "unknown"
@@ -36,6 +38,43 @@ def runtime_error_reason(error: object) -> str:
     return _quote_log_value(reason)
 
 
+def format_runtime_diagnostics(
+    header: str,
+    diagnostics: tuple[Diagnostic, ...],
+) -> str:
+    """Format ordered diagnostics for one fatal runtime error."""
+    lines = [header]
+    for diagnostic in diagnostics:
+        lines.append(
+            f"[{_format_path(diagnostic.path)}] "
+            f"{diagnostic.message} ({diagnostic.code})"
+        )
+    return "\n".join(lines)
+
+
+def render_runtime_diagnostics(
+    header: str,
+    diagnostics: tuple[Diagnostic, ...],
+) -> None:
+    """Render ordered nonfatal diagnostics to stderr."""
+    if not diagnostics:
+        return
+    print(header, file=sys.stderr)
+    for diagnostic in diagnostics:
+        print(
+            f"[{_format_path(diagnostic.path)}] "
+            f"{diagnostic.message} "
+            f"({diagnostic.code}; severity={diagnostic.severity})",
+            file=sys.stderr,
+        )
+
+
 def _quote_log_value(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _format_path(path: tuple[str | int, ...]) -> str:
+    if not path:
+        return "<root>"
+    return ".".join(str(part) for part in path)

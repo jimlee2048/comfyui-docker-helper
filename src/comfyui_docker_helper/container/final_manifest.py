@@ -14,13 +14,13 @@ from pathlib import Path
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.build_plan import dump_manifest_binding_json
 from comfyui_docker_helper.config.custom_node_inventory import (
     dump_custom_node_inventory,
 )
 from comfyui_docker_helper.config.final_manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
+    CdhToolEnvironmentEvidence,
     ComfyCliEvidence,
     ComfyUISourceEvidence,
     DigestEvidence,
@@ -63,9 +63,6 @@ from comfyui_docker_helper.exact_ledger import UV_VERSION
 
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _MANIFEST_PATH = _BUILD_DIRECTORY / "manifest.json"
-_BINDING_PATH = _BUILD_DIRECTORY / "manifest-binding.json"
-_CDH_REQUIREMENTS_PATH = _BUILD_DIRECTORY / "cdh-production-requirements.txt"
-_CDH_INVENTORY_PATH = _BUILD_DIRECTORY / "cdh-production-inventory.txt"
 _UV_PATH = Path("/usr/local/bin/uv")
 _TINI_PATH = Path("/usr/bin/tini")
 _GIT_PATH = Path("/usr/bin/git")
@@ -102,7 +99,6 @@ def _observe_final_manifest(
     runtime: ContainerRuntime,
 ) -> FinalManifest:
     """Re-prove existing final state without publishing partial evidence."""
-    _verify_binding(projection)
     application_authority = capture_application_requirements(
         projection.application, runtime
     )
@@ -133,28 +129,11 @@ def _observe_final_manifest(
         audio_checks = ()
 
     cdh_inventory = _environment_inventory(Path(sys.executable))
-    expected_cdh_inventory = tuple(
-        (item.name, item.version)
-        for item in projection.toolchain.tool_store.cdh_closure
-    )
-    expected_cdh_inventory = tuple(
-        sorted(
-            (
-                *expected_cdh_inventory,
-                (
-                    "comfyui-docker-helper",
-                    projection.toolchain.python.cdh_version,
-                ),
-            )
-        )
-    )
-    if cdh_inventory != expected_cdh_inventory:
-        raise FinalManifestError("cdh environment inventory does not match BuildPlan")
-    _verify_inventory_file(
-        _CDH_INVENTORY_PATH,
-        cdh_inventory,
-        expected_mode=0o644,
-    )
+    cdh = projection.toolchain.tool_store.cdh
+    if dict(cdh_inventory).get(cdh.name) != cdh.version:
+        raise FinalManifestError("cdh direct identity does not match BuildPlan")
+    if Path(sys.prefix) != Path(cdh.environment):
+        raise FinalManifestError("cdh environment does not match BuildPlan")
     _dependency_check(Path(sys.executable), "cdh dependency verification")
 
     comfy_cli = _comfy_cli_evidence(projection)
@@ -187,11 +166,6 @@ def _observe_final_manifest(
         raise FinalManifestError("Tini is missing from the BuildPlan OS packages")
     _verify_tini()
 
-    cdh_requirements_digest = _sha256(
-        _read_owned_regular(_CDH_REQUIREMENTS_PATH, expected_mode=0o644)
-    )
-    if cdh_requirements_digest != projection.toolchain.tool_store.requirements_digest:
-        raise FinalManifestError("cdh requirements digest does not match BuildPlan")
     requirements_digest = application_authority.digest
 
     observed_commit = _capture(
@@ -243,7 +217,6 @@ def _observe_final_manifest(
         ),
         toolchain=ToolchainEvidence(
             host_uv_resolver_version=UV_VERSION,
-            uv_build_version=projection.toolchain.python.uv_build_version,
             container_uv=VersionEvidence(
                 intended=_required_uv_version(projection),
                 observed=_binary_version((_UV_PATH, "--version"), "uv"),
@@ -262,13 +235,14 @@ def _observe_final_manifest(
             python_catalog_descriptor_digest=(
                 projection.toolchain.python.catalog_descriptor_digest
             ),
-            cdh=ToolEnvironmentEvidence(
-                name="comfyui-docker-helper",
+            cdh=CdhToolEnvironmentEvidence(
+                name=cdh.name,
                 environment="uv-tool:comfyui-docker-helper",
                 direct=VersionEvidence(
-                    intended=projection.toolchain.python.cdh_version,
-                    observed=dict(cdh_inventory)["comfyui-docker-helper"],
+                    intended=cdh.version,
+                    observed=dict(cdh_inventory)[cdh.name],
                 ),
+                wheel_digest=cdh.wheel_digest,
                 inventory=_inventory_models(cdh_inventory),
                 dependency_check="passed",
             ),
@@ -304,11 +278,6 @@ def _observe_final_manifest(
         hooks=hooks,
         apt=apt,
         materialized_inputs=MaterializedInputsEvidence(
-            cdh_source_digest=projection.toolchain.python.cdh_source_digest,
-            cdh_requirements=DigestEvidence(
-                intended=projection.toolchain.tool_store.requirements_digest,
-                observed=cdh_requirements_digest,
-            ),
             comfyui_requirements=DigestEvidence(
                 intended=projection.application.comfyui.requirements.digest,
                 observed=requirements_digest,
@@ -328,12 +297,6 @@ def _observe_final_manifest(
             shutdown_timeout=projection.shutdown_timeout,
         ),
     )
-
-
-def _verify_binding(projection: FinalManifestInput) -> None:
-    expected = dump_manifest_binding_json(projection.binding)
-    if _read_owned_regular(_BINDING_PATH, expected_mode=0o644) != expected:
-        raise FinalManifestError("manifest binding does not match the BuildPlan")
 
 
 def _image_evidence(image) -> ImageEvidence:

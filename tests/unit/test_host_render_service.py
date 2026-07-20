@@ -12,28 +12,31 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config.canonical_lock import (
+    ApplicationExtrasLockEntry,
     CanonicalLock,
     CanonicalLockEntry,
-    ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
+    CudaImageLockEntry,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
-    DirectPythonLockEntry,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
-    OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
-    ProtectedRequirementProjection,
     PythonGroupRequestIdentity,
-    PyTorchCompatibilityLockEntry,
+    PyTorchLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
+    ResolvedPythonPackage,
+    RoutedPyTorchRequirement,
+    UvImageLockEntry,
+    UvToolLockEntry,
+    canonical_entry_key,
     compute_request_digest,
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
@@ -52,7 +55,6 @@ from comfyui_docker_helper.container.runtime_files import (
     runtime_downloader_settings,
 )
 from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
-from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
 )
@@ -61,18 +63,25 @@ from comfyui_docker_helper.host.identity_providers import (
 )
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
-    managed_python_release_inputs,
 )
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,
     PlanningOptions,
     prepare_render_context,
 )
+from comfyui_docker_helper.release_artifacts import CanonicalWheel
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
 DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT = "1" * 40
+WHEEL_CONTENT = b"host render canonical wheel"
+CANONICAL_WHEEL = CanonicalWheel(
+    filename="comfyui_docker_helper-0.5.0-py3-none-any.whl",
+    version="0.5.0",
+    digest=f"sha256:{hashlib.sha256(WHEEL_CONTENT).hexdigest()}",
+    content=WHEEL_CONTENT,
+)
 
 
 def _config(
@@ -116,45 +125,34 @@ class FakeAcquirer:
         self.calls.append(request.type)
         entries: tuple[CanonicalLockEntry, ...]
         if isinstance(request, OciRequestIdentity):
+            common = dict(
+                request_digest=request_digest,
+                repository=request.repository,
+                tag=request.tag,
+                digest=(DIGEST_B if request.role == "uv-tool" else DIGEST_A),
+                kind="index",
+                platform=request.platform,
+            )
             entries = (
-                OciLockEntry(
-                    type="oci",
-                    request_digest=request_digest,
-                    role=request.role,
-                    repository=request.repository,
-                    tag=request.tag,
-                    descriptor_digest=(
-                        DIGEST_B if request.role == "uv-tool" else DIGEST_A
-                    ),
-                    descriptor_kind="index",
-                    platform=request.platform,
-                    resolved_version=("0.11.28" if request.role == "uv-tool" else None),
-                ),
+                UvImageLockEntry(**common, observed_version="0.11.28")
+                if request.role == "uv-tool"
+                else CudaImageLockEntry(**common),
             )
         elif isinstance(request, ManagedPythonRequestIdentity):
-            release = managed_python_release_inputs()
             entries = (
                 ManagedPythonLockEntry(
-                    type="managed-python",
                     request_digest=request_digest,
                     version=request.version,
-                    implementation=request.implementation,
                     platform=request.platform,
                     libc=request.libc,
-                    provider="uv-managed",
-                    catalog_descriptor_digest=request.catalog_descriptor_digest,
-                    catalog_key="cpython-3.13.14-linux-x86_64-gnu",
-                    catalog_url="https://example.test/python.tar.zst",
-                    pip_version=release.pip_version,
-                    cdh_version=release.cdh_version,
-                    cdh_source_digest=release.cdh_source_digest,
-                    uv_build_version=release.uv_build_version,
+                    catalog_digest=request.catalog_descriptor_digest,
+                    artifact_key="cpython-3.13.14-linux-x86_64-gnu",
+                    artifact_url="https://example.test/python.tar.zst",
                 ),
             )
         elif isinstance(request, ComfyUIRequestIdentity):
             entries = (
                 OfficialComfyUILockEntry(
-                    type="comfyui",
                     request_digest=request_digest,
                     repository=request.repository,
                     commit=COMMIT,
@@ -165,41 +163,26 @@ class FakeAcquirer:
             content = b"torch\ntorchvision\ntorchaudio\n"
             entries = (
                 ComfyUIRequirementsLockEntry(
-                    type="comfyui-requirements",
                     request_digest=request_digest,
-                    repository=request.repository,
-                    commit=request.commit,
-                    floor_commit=request.floor_commit,
-                    path=request.path,
-                    python_version=request.python_version,
-                    platform=request.platform,
-                    protected_names=request.protected_names,
-                    protected_policy_digest=request.protected_policy_digest,
-                    requirements_digest=(
-                        f"sha256:{hashlib.sha256(content).hexdigest()}"
-                    ),
-                    protected=[
-                        ProtectedRequirementProjection(
-                            package=name, extras=[], selector=""
-                        )
+                    digest=(f"sha256:{hashlib.sha256(content).hexdigest()}"),
+                    pytorch=tuple(
+                        RoutedPyTorchRequirement(name=name, extras=(), specifier="")
                         for name in ("torch", "torchaudio", "torchvision")
-                    ],
+                    ),
                 ),
             )
         elif isinstance(request, ComfyCliRequestIdentity):
             entries = (
-                ComfyCliLockEntry(
-                    type="comfy-cli",
+                UvToolLockEntry(
                     request_digest=request_digest,
-                    package="comfy-cli",
+                    name="comfy-cli",
+                    extras=(),
                     version="1.8.0",
-                    environment=request.environment,
                 ),
             )
         elif isinstance(request, RegistryRequestIdentity):
             entries = (
                 RegistryNodeLockEntry(
-                    type="registry",
                     request_digest=request_digest,
                     id=request.id,
                     version="1.0.0",
@@ -208,7 +191,6 @@ class FakeAcquirer:
         elif isinstance(request, DirectGitRequestIdentity):
             entries = (
                 DirectGitLockEntry(
-                    type="git",
                     request_digest=request_digest,
                     url=request.url,
                     commit=COMMIT,
@@ -221,25 +203,37 @@ class FakeAcquirer:
                 "torchvision": "0.27.1+cu130",
                 "ruff": "0.15.18",
             }
-            entries = tuple(
-                DirectPythonLockEntry(
-                    type="python-package",
-                    request_digest=request_digest,
-                    package=member.package,
+            packages = tuple(
+                ResolvedPythonPackage(
+                    name=member.package,
                     extras=member.extras,
                     version=versions[member.package],
-                    environment=request.environment,
                 )
                 for member in request.members
             )
             if isinstance(request, PyTorchRequestIdentity):
                 entries = (
-                    *entries,
-                    PyTorchCompatibilityLockEntry(
-                        type="pytorch-compatibility",
+                    PyTorchLockEntry(
                         request_digest=request_digest,
-                        environment="application",
+                        packages=packages,
                         setuptools_specifier="<82",
+                    ),
+                )
+            elif request.group == "application-extra":
+                entries = (
+                    ApplicationExtrasLockEntry(
+                        request_digest=request_digest,
+                        packages=packages,
+                    ),
+                )
+            else:
+                member = packages[0]
+                entries = (
+                    UvToolLockEntry(
+                        request_digest=request_digest,
+                        name=member.name,
+                        extras=member.extras,
+                        version=member.version,
                     ),
                 )
         else:  # pragma: no cover
@@ -262,8 +256,7 @@ def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
     tool_entry = next(
         entry
         for entry in lock.entries
-        if isinstance(entry, DirectPythonLockEntry)
-        and entry.environment == "uv-tool:ruff"
+        if isinstance(entry, UvToolLockEntry) and entry.name == "ruff"
     )
     plan = json.loads((output / "build-plan.json").read_bytes())
     assert tool_entry.version == "0.15.18"
@@ -373,6 +366,7 @@ def _prepare(
         local_acquirer=LocalExecutableEntryAcquirer(
             FilesystemLocalExecutableIdentityProvider()
         ),
+        canonical_wheel=CANONICAL_WHEEL,
         options=options,
         overwrite=overwrite,
         hooks_dir=hooks_dir,
@@ -383,22 +377,21 @@ def _prepare(
 def _write_cross_dependent_incompatible_uv_lock(output: Path) -> None:
     lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     data = lock.model_dump(mode="python")
-    for entry in data["entries"]:
-        if entry["type"] == "oci" and entry["role"] == "uv-tool":
-            entry["repository"] = "registry.example.test/wrong/uv"
-            entry["tag"] = "wrong"
-            entry["descriptor_digest"] = DIGEST_C
-        elif entry["type"] == "managed-python":
-            entry["catalog_descriptor_digest"] = DIGEST_C
-            request = ManagedPythonRequestIdentity(
-                type="managed-python",
-                version=entry["version"],
-                implementation=entry["implementation"],
-                platform=entry["platform"],
-                libc=entry["libc"],
-                catalog_descriptor_digest=DIGEST_C,
-            )
-            entry["request_digest"] = compute_request_digest(request)
+    uv = data["images"]["uv"]
+    uv["repository"] = "registry.example.test/wrong/uv"
+    uv["tag"] = "wrong"
+    uv["digest"] = DIGEST_C
+    interpreter = data["python"]["interpreter"]
+    interpreter["catalog_digest"] = DIGEST_C
+    request = ManagedPythonRequestIdentity(
+        type="managed-python",
+        version=interpreter["version"],
+        implementation="cpython",
+        platform=interpreter["platform"],
+        libc=interpreter["libc"],
+        catalog_descriptor_digest=DIGEST_C,
+    )
+    interpreter["request_digest"] = compute_request_digest(request)
     malformed = CanonicalLock.model_validate(data)
     (output / "config.lock.toml").write_text(dump_canonical_lock_toml(malformed))
 
@@ -545,9 +538,7 @@ def test_cuda_selector_change_reconciles_one_exact_oci_identity(
     _prepare(config, output, FakeAcquirer())
     initial_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     initial_cuda = next(
-        entry
-        for entry in initial_lock.entries
-        if isinstance(entry, OciLockEntry) and entry.role == "cuda-base"
+        entry for entry in initial_lock.entries if isinstance(entry, CudaImageLockEntry)
     )
     config.write_text(_config(**selector_overrides))
 
@@ -568,9 +559,7 @@ def test_cuda_selector_change_reconciles_one_exact_oci_identity(
     assert update_fake.calls == ["oci"]
     updated_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     updated_cuda = next(
-        entry
-        for entry in updated_lock.entries
-        if isinstance(entry, OciLockEntry) and entry.role == "cuda-base"
+        entry for entry in updated_lock.entries if isinstance(entry, CudaImageLockEntry)
     )
     assert updated_cuda.tag == expected_tag
     assert updated_cuda.request_digest != initial_cuda.request_digest
@@ -606,9 +595,9 @@ def test_upgrade_refreshes_only_moving_requests_and_preserves_exact_results(
     _prepare(config, output, FakeAcquirer())
     before_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     before_exact = {
-        (entry.type, getattr(entry, "package", None)): entry
+        canonical_entry_key(entry): entry
         for entry in before_lock.entries
-        if entry.type not in {"oci"}
+        if canonical_entry_key(entry)[0] != "images"
     }
     fake = FakeAcquirer()
 
@@ -623,23 +612,23 @@ def test_upgrade_refreshes_only_moving_requests_and_preserves_exact_results(
     assert fake.calls == [
         "oci",
         "comfyui-requirements",
-        "comfy-cli",
         "oci",
         "pytorch-group",
+        "comfy-cli",
     ]
     assert prepared.lock_result.provider_calls == (
-        ("comfy-cli", "comfy-cli", "uv-tool:comfy-cli"),
-        ("comfyui-requirements", COMFYUI_REPOSITORY),
-        ("oci", "cuda-base"),
-        ("oci", "uv-tool"),
-        ("python-package", "application", "torch"),
+        ("comfyui", "requirements"),
+        ("images", "cuda"),
+        ("images", "uv"),
+        ("python", "package_groups", "pytorch"),
+        ("python", "uv_tools", "comfy-cli"),
     )
     assert prepared.lock_result.write_intent is False
     after_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     assert {
-        (entry.type, getattr(entry, "package", None)): entry
+        canonical_entry_key(entry): entry
         for entry in after_lock.entries
-        if entry.type not in {"oci"}
+        if canonical_entry_key(entry)[0] != "images"
     } == before_exact
 
 
@@ -701,13 +690,11 @@ def test_uv_descriptor_pre_reuse_validates_cross_dependent_lock_in_every_mode(
     assert prepared.plan.toolchain.python.catalog_descriptor_digest == DIGEST_B
     corrected = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     uv_entry = next(
-        entry
-        for entry in corrected.entries
-        if isinstance(entry, OciLockEntry) and entry.role == "uv-tool"
+        entry for entry in corrected.entries if isinstance(entry, UvImageLockEntry)
     )
     assert uv_entry.repository == "ghcr.io/astral-sh/uv"
     assert uv_entry.tag == "0.11.28"
-    assert uv_entry.descriptor_digest == DIGEST_B
+    assert uv_entry.digest == DIGEST_B
 
     _write_cross_dependent_incompatible_uv_lock(output)
     malformed_tree = _tree(output)
@@ -798,9 +785,9 @@ def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
         entry for entry in lock.entries if isinstance(entry, LocalExecutableLockEntry)
     ]
     assert [entry.relative_path for entry in local_entries] == [
-        "runtime-hooks/post-start.d/20-post.py",
-        "runtime-hooks/pre-start.d/10-pre.sh",
-        "runtime-hooks/stop.d/30-stop.sh",
+        "post-start.d/20-post.py",
+        "pre-start.d/10-pre.sh",
+        "stop.d/30-stop.sh",
     ]
     assert (output / "runtime/hooks/pre-start.d/10-pre.sh").read_text() == "pre\n"
     dockerfile = (output / "Dockerfile").read_text()
@@ -989,7 +976,7 @@ def test_uv_pre_reconcile_expected_acquisition_failure_is_diagnostic(
 
     assert raised.value.diagnostics == (
         Diagnostic(
-            ("config.lock.toml", "oci", "uv-tool"),
+            ("config.lock.toml", "images", "uv"),
             "lock.resolve_failed",
             "OCI registry: requested identity was not found",
         ),
@@ -1027,18 +1014,22 @@ pre_install_scripts = ["runtime-hooks/pre-start.d/10-pre.sh"]
     )
 
     lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
-    paths = {
-        entry.relative_path
+    identities = {
+        canonical_entry_key(entry)
         for entry in lock.entries
         if isinstance(entry, LocalExecutableLockEntry)
     }
-    custom_identity = "custom-node-hooks/runtime-hooks/pre-start.d/10-pre.sh"
-    runtime_identity = "runtime-hooks/pre-start.d/10-pre.sh"
-    assert paths == {
+    custom_identity = (
+        "hooks",
+        "custom_node",
+        "runtime-hooks/pre-start.d/10-pre.sh",
+    )
+    runtime_identity = ("hooks", "runtime", "pre-start.d/10-pre.sh")
+    assert identities == {
         custom_identity,
         runtime_identity,
-        "runtime-hooks/post-start.d/20-post.py",
-        "runtime-hooks/stop.d/30-stop.sh",
+        ("hooks", "runtime", "post-start.d/20-post.py"),
+        ("hooks", "runtime", "stop.d/30-stop.sh"),
     }
     assert custom_identity != runtime_identity
     assert (output / "inputs/runtime-hooks/pre-start.d/10-pre.sh").read_text() == (
@@ -1055,7 +1046,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
     output = tmp_path / "context"
     _prepare(config, output, FakeAcquirer(), hooks_dir=hooks)
     before = _tree(output)
-    before_binding = (output / "manifest-binding.json").read_bytes()
+    before_plan = (output / "build-plan.json").read_bytes()
     before_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     before_request_digests = {
         entry.request_digest
@@ -1110,7 +1101,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
         for entry in updated_lock.entries
         if hasattr(entry, "request_digest")
     } == before_request_digests
-    assert (output / "manifest-binding.json").read_bytes() != before_binding
+    assert (output / "build-plan.json").read_bytes() != before_plan
     assert (output / "runtime/hooks/pre-start.d/11-added.py").is_file()
 
     added.unlink()
@@ -1145,7 +1136,7 @@ def test_runtime_hook_tree_rejects_symlinks_and_special_files(tmp_path: Path) ->
     assert special.value.diagnostics[0].code == "runtime_hooks.special_file"
 
 
-def test_default_runtime_hook_tree_is_active_when_present(tmp_path: Path) -> None:
+def test_runtime_hooks_require_an_explicit_source(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
     _runtime_hooks(tmp_path / "hooks")
@@ -1157,7 +1148,8 @@ def test_default_runtime_hook_tree_is_active_when_present(tmp_path: Path) -> Non
         working_directory=tmp_path,
     )
 
-    assert len(prepared.plan.runtime.hooks) == 3
+    assert prepared.plan.runtime.hooks == ()
+    assert not (tmp_path / "context/runtime/hooks").exists()
 
 
 @pytest.mark.parametrize(

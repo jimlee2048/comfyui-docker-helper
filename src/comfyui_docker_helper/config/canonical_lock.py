@@ -7,7 +7,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 from urllib.parse import urlsplit
 
 import tomli_w
@@ -98,21 +98,41 @@ class ProtectedRequirementProjection(_StrictLockModel):
         return _require_direct_package_selector(value)
 
 
-class OciLockEntry(_ResolverEntry):
-    """An immutable descriptor selected from one human-readable OCI tag."""
+class RoutedPyTorchRequirement(_StrictLockModel):
+    """One target-active ComfyUI requirement routed into PyTorch resolution."""
 
-    type: Literal["oci"]
-    role: Literal["cuda-base", "uv-tool"]
+    name: str
+    extras: tuple[str, ...]
+    specifier: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_normalized_package(value)
+
+    @field_validator("extras", mode="before")
+    @classmethod
+    def _validate_extras(cls, value: object) -> tuple[str, ...]:
+        return _require_normalized_extras(_require_tuple(value, "extras"))
+
+    @field_validator("specifier")
+    @classmethod
+    def _validate_specifier(cls, value: str) -> str:
+        return _require_direct_package_selector(value)
+
+
+class OciLockEntry(_ResolverEntry):
+    """Common immutable OCI image result stored in one fixed image domain."""
+
     repository: str = Field(min_length=1)
     tag: str = Field(min_length=1)
-    descriptor_digest: str
-    descriptor_kind: Literal["index", "manifest"]
+    digest: str
+    kind: Literal["index", "manifest"]
     platform: Literal["linux/amd64"]
-    resolved_version: str | None = None
 
-    @field_validator("descriptor_digest")
+    @field_validator("digest")
     @classmethod
-    def _validate_descriptor_digest(cls, value: str) -> str:
+    def _validate_digest(cls, value: str) -> str:
         return _require_sha256(value)
 
     @field_validator("repository")
@@ -125,65 +145,56 @@ class OciLockEntry(_ResolverEntry):
     def _validate_tag(cls, value: str) -> str:
         return _require_oci_tag(value)
 
-    @field_validator("resolved_version")
-    @classmethod
-    def _validate_resolved_version(cls, value: str | None) -> str | None:
-        return None if value is None else _require_exact_stable_version(value)
 
-    @model_validator(mode="after")
-    def _validate_role_version(self) -> OciLockEntry:
-        if (self.role == "uv-tool") != (self.resolved_version is not None):
-            raise ValueError("only uv-tool images require a resolved version")
-        return self
+class CudaImageLockEntry(OciLockEntry):
+    """Exact CUDA base-image descriptor."""
+
+
+class UvImageLockEntry(OciLockEntry):
+    """Exact uv image descriptor plus independently observed uv version."""
+
+    observed_version: str = Field(min_length=1)
+
+    @field_validator("observed_version")
+    @classmethod
+    def _validate_observed_version(cls, value: str) -> str:
+        return _require_exact_stable_version(value)
 
 
 class ManagedPythonLockEntry(_ResolverEntry):
-    """Exact uv-managed CPython plus release-owned bootstrap/cdh inputs."""
+    """Exact uv-managed CPython artifact result."""
 
-    type: Literal["managed-python"]
     version: str = Field(min_length=1)
-    implementation: Literal["cpython"]
     platform: Literal["linux/amd64"]
     libc: Literal["gnu"]
-    provider: Literal["uv-managed"]
-    catalog_descriptor_digest: str
-    catalog_key: str = Field(min_length=1)
-    catalog_url: str = Field(min_length=1)
-    pip_version: str = Field(min_length=1)
-    cdh_version: str = Field(min_length=1)
-    cdh_source_digest: str
-    uv_build_version: str = Field(min_length=1)
+    catalog_digest: str
+    artifact_key: str = Field(min_length=1)
+    artifact_url: str = Field(min_length=1)
 
-    @field_validator("catalog_descriptor_digest", "cdh_source_digest")
+    @field_validator("catalog_digest")
     @classmethod
     def _validate_content_digest(cls, value: str) -> str:
         return _require_sha256(value)
 
-    @field_validator(
-        "version",
-        "pip_version",
-        "cdh_version",
-        "uv_build_version",
-    )
+    @field_validator("version")
     @classmethod
     def _validate_exact_stable_version(cls, value: str) -> str:
         return _require_exact_stable_version(value)
 
-    @field_validator("catalog_key")
+    @field_validator("artifact_key")
     @classmethod
-    def _validate_catalog_key(cls, value: str) -> str:
+    def _validate_artifact_key(cls, value: str) -> str:
         return validate_managed_python_catalog_key(value)
 
-    @field_validator("catalog_url")
+    @field_validator("artifact_url")
     @classmethod
-    def _validate_catalog_url(cls, value: str) -> str:
-        return _require_http_url(value, "catalog_url")
+    def _validate_artifact_url(cls, value: str) -> str:
+        return _require_http_url(value, "artifact_url")
 
 
 class OfficialComfyUILockEntry(_ResolverEntry):
     """Exact official ComfyUI source selection."""
 
-    type: Literal["comfyui"]
     repository: str = Field(min_length=1)
     commit: str
     formal_release: str | None = None
@@ -225,96 +236,35 @@ class OfficialComfyUILockEntry(_ResolverEntry):
 
 
 class ComfyUIRequirementsLockEntry(_ResolverEntry):
-    """Exact root requirements bytes and target-active protected projection."""
+    """Exact requirements bytes and target-active PyTorch routing result."""
 
-    type: Literal["comfyui-requirements"]
-    repository: str = Field(min_length=1)
-    commit: str
-    floor_commit: str
-    path: Literal["requirements.txt"]
-    python_version: str = Field(min_length=1)
-    platform: Literal["linux/amd64"]
-    protected_names: tuple[str, ...] = Field(min_length=1)
-    protected_policy_digest: str
-    requirements_digest: str
-    protected: tuple[ProtectedRequirementProjection, ...]
+    digest: str
+    pytorch: tuple[RoutedPyTorchRequirement, ...]
 
-    @field_validator("repository")
-    @classmethod
-    def _validate_repository(cls, value: str) -> str:
-        return _require_git_url(value)
-
-    @field_validator("commit", "floor_commit")
-    @classmethod
-    def _validate_commit(cls, value: str) -> str:
-        return _require_commit(value)
-
-    @field_validator("python_version")
-    @classmethod
-    def _validate_python_version(cls, value: str) -> str:
-        return _require_exact_stable_version(value)
-
-    @field_validator("protected_policy_digest", "requirements_digest")
+    @field_validator("digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return _require_sha256(value)
 
-    @field_validator("protected_names", mode="before")
+    @field_validator("pytorch", mode="before")
     @classmethod
-    def _validate_protected_names(cls, value: object) -> tuple[str, ...]:
-        value = _require_tuple(value, "protected_names")
-        names = [_require_normalized_package(item) for item in value]
-        if names != sorted(set(names)):
-            raise ValueError("protected_names must be sorted and unique")
-        return tuple(names)
-
-    @field_validator("protected", mode="before")
-    @classmethod
-    def _validate_protected(
-        cls, value: object
-    ) -> tuple[ProtectedRequirementProjection, ...]:
-        value = _require_tuple(value, "protected")
+    def _validate_pytorch(cls, value: object) -> tuple[RoutedPyTorchRequirement, ...]:
+        value = _require_tuple(value, "pytorch")
         projection = tuple(
             item
-            if isinstance(item, ProtectedRequirementProjection)
-            else ProtectedRequirementProjection.model_validate(item)
+            if isinstance(item, RoutedPyTorchRequirement)
+            else RoutedPyTorchRequirement.model_validate(item)
             for item in value
         )
-        packages = [item.package for item in projection]
+        packages = [item.name for item in projection]
         if packages != sorted(set(packages)):
-            raise ValueError("protected projection must be sorted and unique")
+            raise ValueError("pytorch projection must be sorted and unique")
         return projection
-
-    @model_validator(mode="after")
-    def _validate_projection_names(self) -> ComfyUIRequirementsLockEntry:
-        if any(item.package not in self.protected_names for item in self.protected):
-            raise ValueError("protected projection contains an unowned package")
-        return self
-
-
-class ComfyCliLockEntry(_ResolverEntry):
-    """Exact isolated comfy-cli user-tool selection."""
-
-    type: Literal["comfy-cli"]
-    package: Literal["comfy-cli"]
-    version: str = Field(min_length=1)
-    environment: Literal["uv-tool:comfy-cli"]
-
-    @field_validator("version")
-    @classmethod
-    def _validate_version(cls, value: str) -> str:
-        version = _require_exact_stable_public_version(value)
-        if Version(version) < Version(COMFY_CLI_MINIMUM_VERSION):
-            raise ValueError(
-                f"version must be comfy-cli {COMFY_CLI_MINIMUM_VERSION} or newer"
-            )
-        return version
 
 
 class RegistryNodeLockEntry(_ResolverEntry):
     """Minimal exact Registry node identity."""
 
-    type: Literal["registry"]
     id: str = Field(min_length=1)
     version: str = Field(min_length=1)
 
@@ -332,7 +282,6 @@ class RegistryNodeLockEntry(_ResolverEntry):
 class DirectGitLockEntry(_ResolverEntry):
     """Minimal exact direct-Git root identity."""
 
-    type: Literal["git"]
     url: str = Field(min_length=1)
     commit: str
 
@@ -347,18 +296,16 @@ class DirectGitLockEntry(_ResolverEntry):
         return _require_git_url(value)
 
 
-class DirectPythonLockEntry(_ResolverEntry):
-    """Exact direct top-level package identity for one owning environment."""
+class ResolvedPythonPackage(_StrictLockModel):
+    """One exact top-level package result inside its owning atomic group."""
 
-    type: Literal["python-package"]
-    package: str
+    name: str
     extras: tuple[str, ...]
     version: str = Field(min_length=1)
-    environment: str
 
-    @field_validator("package")
+    @field_validator("name")
     @classmethod
-    def _validate_package(cls, value: str) -> str:
+    def _validate_name(cls, value: str) -> str:
         return _require_normalized_package(value)
 
     @field_validator("extras", mode="before")
@@ -366,22 +313,40 @@ class DirectPythonLockEntry(_ResolverEntry):
     def _validate_extras(cls, value: object) -> tuple[str, ...]:
         return _require_normalized_extras(_require_tuple(value, "extras"))
 
-    @field_validator("environment")
-    @classmethod
-    def _validate_environment(cls, value: str) -> str:
-        return _require_environment(value)
-
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
         return _require_exact_stable_distribution_version(value)
 
 
-class PyTorchCompatibilityLockEntry(_ResolverEntry):
-    """Wheel-metadata policy derived with one exact PyTorch group."""
+class PythonPackageGroupLockEntry(_ResolverEntry):
+    """One complete atomic direct-package resolution result."""
 
-    type: Literal["pytorch-compatibility"]
-    environment: Literal["application"]
+    packages: tuple[ResolvedPythonPackage, ...] = Field(min_length=1)
+
+    @field_validator("packages", mode="before")
+    @classmethod
+    def _validate_packages(cls, value: object) -> tuple[ResolvedPythonPackage, ...]:
+        value = _require_tuple(value, "packages")
+        packages = tuple(
+            item
+            if isinstance(item, ResolvedPythonPackage)
+            else ResolvedPythonPackage.model_validate(item)
+            for item in value
+        )
+        names = [item.name for item in packages]
+        if names != sorted(set(names)):
+            raise ValueError("packages must be sorted and unique")
+        return packages
+
+
+class ApplicationExtrasLockEntry(PythonPackageGroupLockEntry):
+    """Atomic application-extra package result."""
+
+
+class PyTorchLockEntry(PythonPackageGroupLockEntry):
+    """Atomic PyTorch package and wheel-metadata compatibility result."""
+
     setuptools_specifier: str | None = None
 
     @field_validator("setuptools_specifier")
@@ -397,11 +362,49 @@ class PyTorchCompatibilityLockEntry(_ResolverEntry):
             raise ValueError("setuptools_specifier must be canonical")
         return value
 
+    @model_validator(mode="after")
+    def _validate_torch(self) -> PyTorchLockEntry:
+        if "torch" not in {package.name for package in self.packages}:
+            raise ValueError("pytorch packages must include torch")
+        return self
+
+
+class UvToolLockEntry(_ResolverEntry):
+    """One independently resolved isolated uv-tool result."""
+
+    name: str
+    extras: tuple[str, ...]
+    version: str = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_normalized_package(value)
+
+    @field_validator("extras", mode="before")
+    @classmethod
+    def _validate_extras(cls, value: object) -> tuple[str, ...]:
+        return _require_normalized_extras(_require_tuple(value, "extras"))
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        return _require_exact_stable_distribution_version(value)
+
+    @model_validator(mode="after")
+    def _validate_comfy_cli_floor(self) -> UvToolLockEntry:
+        if self.name == "comfy-cli":
+            version = _require_exact_stable_public_version(self.version)
+            if Version(version) < Version(COMFY_CLI_MINIMUM_VERSION):
+                raise ValueError(
+                    f"version must be comfy-cli {COMFY_CLI_MINIMUM_VERSION} or newer"
+                )
+        return self
+
 
 class LocalExecutableLockEntry(_StrictLockModel):
     """Content-owned baked executable identity; no resolver request exists."""
 
-    type: Literal["local-executable"]
     relative_path: str
     digest: str
 
@@ -424,38 +427,167 @@ class LocalExecutableLockEntry(_StrictLockModel):
         return _require_sha256(value)
 
 
-CanonicalLockEntry = Annotated[
-    OciLockEntry
+class CustomNodeHookLockEntry(LocalExecutableLockEntry):
+    """One baked custom-node hook identity."""
+
+
+class RuntimeHookLockEntry(LocalExecutableLockEntry):
+    """One baked runtime hook identity."""
+
+
+CanonicalLockEntry = (
+    CudaImageLockEntry
+    | UvImageLockEntry
     | ManagedPythonLockEntry
     | OfficialComfyUILockEntry
     | ComfyUIRequirementsLockEntry
-    | ComfyCliLockEntry
     | RegistryNodeLockEntry
     | DirectGitLockEntry
-    | DirectPythonLockEntry
-    | PyTorchCompatibilityLockEntry
-    | LocalExecutableLockEntry,
-    Field(discriminator="type"),
-]
+    | ApplicationExtrasLockEntry
+    | PyTorchLockEntry
+    | UvToolLockEntry
+    | CustomNodeHookLockEntry
+    | RuntimeHookLockEntry
+)
+
+
+class ImagesLock(_StrictLockModel):
+    cuda: CudaImageLockEntry
+    uv: UvImageLockEntry
+
+
+class PythonPackageGroupsLock(_StrictLockModel):
+    pytorch: PyTorchLockEntry
+    application_extras: ApplicationExtrasLockEntry | None = None
+
+
+class PythonLock(_StrictLockModel):
+    interpreter: ManagedPythonLockEntry
+    package_groups: PythonPackageGroupsLock
+    uv_tools: tuple[UvToolLockEntry, ...] = ()
+
+    @field_validator("uv_tools", mode="before")
+    @classmethod
+    def _validate_uv_tools(cls, value: object) -> tuple[UvToolLockEntry, ...]:
+        value = _require_tuple(value, "uv_tools")
+        tools = tuple(
+            item
+            if isinstance(item, UvToolLockEntry)
+            else UvToolLockEntry.model_validate(item)
+            for item in value
+        )
+        names = [item.name for item in tools]
+        if names != sorted(set(names)):
+            raise ValueError("uv_tools must be sorted and unique")
+        return tools
+
+
+class ComfyUILock(_StrictLockModel):
+    request_digest: str
+    repository: str = Field(min_length=1)
+    commit: str
+    formal_release: str | None = None
+    requirements: ComfyUIRequirementsLockEntry
+
+    @field_validator("request_digest")
+    @classmethod
+    def _validate_request_digest(cls, value: str) -> str:
+        return _require_sha256(value)
+
+    @field_validator("repository")
+    @classmethod
+    def _validate_repository(cls, value: str) -> str:
+        return _require_git_url(value)
+
+    @field_validator("commit")
+    @classmethod
+    def _validate_commit(cls, value: str) -> str:
+        return _require_commit(value)
+
+    @field_validator("formal_release")
+    @classmethod
+    def _validate_formal_release(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return OfficialComfyUILockEntry._validate_formal_release(value)
+
+
+class CustomNodesLock(_StrictLockModel):
+    registry: tuple[RegistryNodeLockEntry, ...] = ()
+    git: tuple[DirectGitLockEntry, ...] = ()
+
+    @field_validator("registry", "git", mode="before")
+    @classmethod
+    def _freeze_nodes(cls, value: object) -> tuple[object, ...]:
+        return _require_tuple(value, "custom_nodes")
+
+    @model_validator(mode="after")
+    def _validate_nodes(self) -> CustomNodesLock:
+        registry_ids = [entry.id for entry in self.registry]
+        git_urls = [entry.url for entry in self.git]
+        if registry_ids != sorted(set(registry_ids)):
+            raise ValueError("registry nodes must be sorted and unique")
+        if git_urls != sorted(set(git_urls)):
+            raise ValueError("git nodes must be sorted and unique")
+        return self
+
+
+class HooksLock(_StrictLockModel):
+    custom_node: tuple[CustomNodeHookLockEntry, ...] = ()
+    runtime: tuple[RuntimeHookLockEntry, ...] = ()
+
+    @field_validator("custom_node", "runtime", mode="before")
+    @classmethod
+    def _freeze_hooks(cls, value: object) -> tuple[object, ...]:
+        return _require_tuple(value, "hooks")
+
+    @model_validator(mode="after")
+    def _validate_hooks(self) -> HooksLock:
+        for tree, entries in (
+            ("custom_node", self.custom_node),
+            ("runtime", self.runtime),
+        ):
+            paths = [entry.relative_path for entry in entries]
+            if paths != sorted(set(paths)):
+                raise ValueError(f"{tree} hooks must be sorted and unique")
+        return self
 
 
 class CanonicalLock(_StrictLockModel):
-    """Complete strict canonical config-lock schema v1."""
+    """Complete strict domain-grouped canonical config-lock schema v1."""
 
     schema_version: Literal[1]
-    entries: tuple[CanonicalLockEntry, ...]
+    images: ImagesLock
+    python: PythonLock
+    comfyui: ComfyUILock
+    custom_nodes: CustomNodesLock = Field(default_factory=CustomNodesLock)
+    hooks: HooksLock = Field(default_factory=HooksLock)
 
-    @field_validator("entries", mode="before")
-    @classmethod
-    def _freeze_entries(cls, value: object) -> tuple[object, ...]:
-        return _require_tuple(value, "entries")
-
-    @model_validator(mode="after")
-    def _validate_entries(self) -> CanonicalLock:
-        keys = [canonical_entry_key(entry) for entry in self.entries]
-        if len(keys) != len(set(keys)):
-            raise ValueError("lock entries must have unique logical identities")
-        return self
+    @property
+    def entries(self) -> tuple[CanonicalLockEntry, ...]:
+        """Expose typed reconciliation units without flattening serialized groups."""
+        comfyui_source = OfficialComfyUILockEntry(
+            request_digest=self.comfyui.request_digest,
+            repository=self.comfyui.repository,
+            commit=self.comfyui.commit,
+            formal_release=self.comfyui.formal_release,
+        )
+        values: list[CanonicalLockEntry] = [
+            self.images.cuda,
+            self.images.uv,
+            self.python.interpreter,
+            comfyui_source,
+            self.comfyui.requirements,
+            self.python.package_groups.pytorch,
+            *self.python.uv_tools,
+            *self.custom_nodes.registry,
+            *self.custom_nodes.git,
+            *self.hooks.custom_node,
+            *self.hooks.runtime,
+        ]
+        if self.python.package_groups.application_extras is not None:
+            values.append(self.python.package_groups.application_extras)
+        return tuple(values)
 
 
 class OciRequestIdentity(_StrictLockModel):
@@ -511,6 +643,29 @@ class ComfyUIRequestIdentity(_StrictLockModel):
         return normalize_comfyui_version(_require_token(value, "selector"))
 
 
+class RequirementsRoutingPolicy(_StrictLockModel):
+    """Complete code-owned requirements parsing and routing policy identity."""
+
+    revision: Literal[1]
+    routed_names: tuple[str, ...] = Field(min_length=1)
+    syntax: Literal["pep508"]
+    markers: Literal["packaging-target-environment"]
+    normalization: Literal["pep503-names-pep508-extras"]
+    merge: Literal["specifier-intersection-extra-union"]
+    sources: Literal["reject-options-and-direct-urls"]
+
+    @field_validator("routed_names", mode="before")
+    @classmethod
+    def _validate_routed_names(cls, value: object) -> tuple[str, ...]:
+        names = tuple(
+            _require_normalized_package(item)
+            for item in _require_tuple(value, "routed_names")
+        )
+        if list(names) != sorted(set(names)):
+            raise ValueError("routed_names must be sorted and unique")
+        return names
+
+
 class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
     """Request for one exact commit's target-specific protected projection."""
 
@@ -521,8 +676,7 @@ class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
     path: Literal["requirements.txt"]
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
-    protected_names: tuple[str, ...] = Field(min_length=1)
-    protected_policy_digest: str
+    routing_policy: RequirementsRoutingPolicy
 
     @field_validator("repository")
     @classmethod
@@ -539,19 +693,9 @@ class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
     def _validate_python_version(cls, value: str) -> str:
         return _require_exact_stable_version(value)
 
-    @field_validator("protected_names", mode="before")
-    @classmethod
-    def _validate_protected_names(cls, value: object) -> tuple[str, ...]:
-        value = _require_tuple(value, "protected_names")
-        names = [_require_normalized_package(item) for item in value]
-        if names != sorted(set(names)):
-            raise ValueError("protected_names must be sorted and unique")
-        return tuple(names)
-
-    @field_validator("protected_policy_digest")
-    @classmethod
-    def _validate_policy_digest(cls, value: str) -> str:
-        return _require_sha256(value)
+    @property
+    def protected_names(self) -> tuple[str, ...]:
+        return self.routing_policy.routed_names
 
 
 class ComfyCliRequestIdentity(_StrictLockModel):
@@ -833,38 +977,137 @@ def load_canonical_lock(path: str | Path) -> CanonicalLock:
 
 
 def dump_canonical_lock_toml(lock: CanonicalLock) -> str:
-    """Serialize canonical fields and entries in deterministic logical order."""
-    entries = sorted(lock.entries, key=canonical_entry_key)
-    data = {
-        "schema_version": lock.schema_version,
-        "entries": [
-            entry.model_dump(mode="json", exclude_none=True) for entry in entries
-        ],
-    }
-    return tomli_w.dumps(data)
+    """Serialize the strict grouped model in deterministic domain order."""
+    return tomli_w.dumps(
+        lock.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    )
 
 
 def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
     """Return the stable logical identity used by lock reconciliation."""
-    if isinstance(entry, OciLockEntry):
-        return (entry.type, entry.role)
+    if isinstance(entry, CudaImageLockEntry):
+        return ("images", "cuda")
+    if isinstance(entry, UvImageLockEntry):
+        return ("images", "uv")
     if isinstance(entry, ManagedPythonLockEntry):
-        return (entry.type, entry.implementation, entry.platform)
+        return ("python", "interpreter")
     if isinstance(entry, OfficialComfyUILockEntry):
-        return (entry.type, entry.repository)
+        return ("comfyui",)
     if isinstance(entry, ComfyUIRequirementsLockEntry):
-        return (entry.type, entry.repository)
-    if isinstance(entry, ComfyCliLockEntry):
-        return (entry.type, entry.package, entry.environment)
+        return ("comfyui", "requirements")
+    if isinstance(entry, PyTorchLockEntry):
+        return ("python", "package_groups", "pytorch")
+    if isinstance(entry, ApplicationExtrasLockEntry):
+        return ("python", "package_groups", "application_extras")
+    if isinstance(entry, UvToolLockEntry):
+        return ("python", "uv_tools", entry.name)
     if isinstance(entry, RegistryNodeLockEntry):
-        return (entry.type, entry.id)
+        return ("custom_nodes", "registry", entry.id)
     if isinstance(entry, DirectGitLockEntry):
-        return (entry.type, entry.url)
-    if isinstance(entry, DirectPythonLockEntry):
-        return (entry.type, entry.environment, entry.package)
-    if isinstance(entry, PyTorchCompatibilityLockEntry):
-        return (entry.type, entry.environment)
-    return (entry.type, entry.relative_path)
+        return ("custom_nodes", "git", entry.url)
+    if isinstance(entry, CustomNodeHookLockEntry):
+        return ("hooks", "custom_node", entry.relative_path)
+    if isinstance(entry, RuntimeHookLockEntry):
+        return ("hooks", "runtime", entry.relative_path)
+    raise TypeError(f"unsupported canonical lock entry: {type(entry).__name__}")
+
+
+def canonical_lock_from_entries(
+    entries: tuple[CanonicalLockEntry, ...] | list[CanonicalLockEntry],
+) -> CanonicalLock:
+    """Assemble one complete grouped lock from atomic reconciliation units."""
+    by_key = {canonical_entry_key(entry): entry for entry in entries}
+    if len(by_key) != len(entries):
+        raise ValueError("canonical lock entries must have unique logical identities")
+
+    def require(key: tuple[str, ...], expected: type):
+        entry = by_key.get(key)
+        if not isinstance(entry, expected):
+            raise ValueError(f"canonical lock is missing required identity {key!r}")
+        return entry
+
+    cuda = require(("images", "cuda"), CudaImageLockEntry)
+    uv = require(("images", "uv"), UvImageLockEntry)
+    interpreter = require(("python", "interpreter"), ManagedPythonLockEntry)
+    pytorch = require(("python", "package_groups", "pytorch"), PyTorchLockEntry)
+    comfyui = require(("comfyui",), OfficialComfyUILockEntry)
+    requirements = require(("comfyui", "requirements"), ComfyUIRequirementsLockEntry)
+    application_extras = by_key.get(("python", "package_groups", "application_extras"))
+    if application_extras is not None and not isinstance(
+        application_extras, ApplicationExtrasLockEntry
+    ):
+        raise ValueError("canonical lock application extras identity is invalid")
+
+    known = {
+        ("images", "cuda"),
+        ("images", "uv"),
+        ("python", "interpreter"),
+        ("python", "package_groups", "pytorch"),
+        ("comfyui",),
+        ("comfyui", "requirements"),
+    }
+    if application_extras is not None:
+        known.add(("python", "package_groups", "application_extras"))
+    known.update(key for key in by_key if key[:2] == ("python", "uv_tools"))
+    known.update(key for key in by_key if key[:2] == ("custom_nodes", "registry"))
+    known.update(key for key in by_key if key[:2] == ("custom_nodes", "git"))
+    known.update(key for key in by_key if key[:2] == ("hooks", "custom_node"))
+    known.update(key for key in by_key if key[:2] == ("hooks", "runtime"))
+    if set(by_key) != known:
+        raise ValueError("canonical lock contains unsupported identities")
+
+    return CanonicalLock(
+        schema_version=1,
+        images=ImagesLock(cuda=cuda, uv=uv),
+        python=PythonLock(
+            interpreter=interpreter,
+            package_groups=PythonPackageGroupsLock(
+                pytorch=pytorch,
+                application_extras=application_extras,
+            ),
+            uv_tools=tuple(
+                entry
+                for key, entry in sorted(by_key.items())
+                if key[:2] == ("python", "uv_tools")
+                and isinstance(entry, UvToolLockEntry)
+            ),
+        ),
+        comfyui=ComfyUILock(
+            request_digest=comfyui.request_digest,
+            repository=comfyui.repository,
+            commit=comfyui.commit,
+            formal_release=comfyui.formal_release,
+            requirements=requirements,
+        ),
+        custom_nodes=CustomNodesLock(
+            registry=tuple(
+                entry
+                for key, entry in sorted(by_key.items())
+                if key[:2] == ("custom_nodes", "registry")
+                and isinstance(entry, RegistryNodeLockEntry)
+            ),
+            git=tuple(
+                entry
+                for key, entry in sorted(by_key.items())
+                if key[:2] == ("custom_nodes", "git")
+                and isinstance(entry, DirectGitLockEntry)
+            ),
+        ),
+        hooks=HooksLock(
+            custom_node=tuple(
+                entry
+                for key, entry in sorted(by_key.items())
+                if key[:2] == ("hooks", "custom_node")
+                and isinstance(entry, CustomNodeHookLockEntry)
+            ),
+            runtime=tuple(
+                entry
+                for key, entry in sorted(by_key.items())
+                if key[:2] == ("hooks", "runtime")
+                and isinstance(entry, RuntimeHookLockEntry)
+            ),
+        ),
+    )
 
 
 def validate_sha256_digest(value: str) -> str:

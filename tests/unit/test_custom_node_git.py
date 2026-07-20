@@ -15,9 +15,9 @@ from comfyui_docker_helper.config.build_plan import (
     HookPlan,
 )
 from comfyui_docker_helper.config.canonical_lock import (
-    CanonicalLock,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
+    canonical_lock_from_entries,
     compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
@@ -480,7 +480,7 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
         for entry in resolution.lock.entries
     ]
     changed_resolution = AcceptedCanonicalLock(
-        lock=CanonicalLock(schema_version=1, entries=entries),
+        lock=canonical_lock_from_entries(entries),
         delta=resolution.delta,
         write_intent=resolution.write_intent,
         provider_calls=resolution.provider_calls,

@@ -20,8 +20,6 @@ from comfyui_docker_helper.host.identity_providers import (
     LocalExecutableIdentityRequest,
 )
 
-_DEFAULT_RUNTIME_HOOKS_DIR = Path("./hooks")
-
 
 @dataclass(frozen=True, slots=True)
 class RuntimeHookInputs:
@@ -39,23 +37,11 @@ def discover_runtime_hook_inputs(
     working_directory: str | Path | None,
 ) -> RuntimeHookInputs:
     """Validate and enumerate every baked runtime hook in canonical order."""
+    if hooks_dir is None:
+        return RuntimeHookInputs(None, ())
     base = Path.cwd() if working_directory is None else Path(working_directory)
-    explicit = hooks_dir is not None
-    selected = Path(hooks_dir) if explicit else _DEFAULT_RUNTIME_HOOKS_DIR
+    selected = Path(hooks_dir)
     candidate = selected if selected.is_absolute() else base / selected
-    if not explicit:
-        try:
-            candidate.lstat()
-        except FileNotFoundError:
-            return RuntimeHookInputs(None, ())
-        except OSError as error:
-            raise _error(
-                ("hooks_dir",),
-                "runtime_hooks.source_inspect_failed",
-                "runtime hook source could not be inspected",
-                error,
-            ) from error
-
     diagnostics: list[Diagnostic] = []
     try:
         mode = candidate.lstat().st_mode

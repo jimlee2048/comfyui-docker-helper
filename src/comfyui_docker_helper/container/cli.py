@@ -62,13 +62,6 @@ def install_comfyui_command(
         Path,
         typer.Option("--constraints", help="Materialized managed constraints file."),
     ] = Path("/opt/cdh/build/python-package-constraints.txt"),
-    resolution_manifest: Annotated[
-        Path,
-        typer.Option(
-            "--resolution-manifest",
-            help="Materialized PyTorch source-routing manifest.",
-        ),
-    ] = Path("/opt/cdh/build/pyproject.toml"),
 ) -> None:
     """Install exact official ComfyUI and its complete requirements."""
     application, toolchain = _admission(build_plan_digest).comfyui_install()
@@ -77,7 +70,6 @@ def install_comfyui_command(
         toolchain,
         runtime=ContainerRuntime.from_env(),
         constraints_path=constraints,
-        resolution_manifest_path=resolution_manifest,
     )
 
 

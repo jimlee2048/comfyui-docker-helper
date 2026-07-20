@@ -20,6 +20,7 @@ from comfyui_docker_helper.host.diagnostics import (
     render_plan_preview,
 )
 from comfyui_docker_helper.host.planning_authority import default_planning_providers
+from comfyui_docker_helper.host.release_wheel import CanonicalWheelError
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,
     PlanningOptions,
@@ -167,11 +168,17 @@ def render(
                 hooks_dir=hooks_dir,
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
+                canonical_wheel=providers.canonical_wheel,
                 options=options,
                 overwrite=overwrite,
                 working_directory=Path.cwd(),
             )
-    except (ConfigurationServiceError, HostRenderServiceError, HostUvError) as error:
+    except (
+        CanonicalWheelError,
+        ConfigurationServiceError,
+        HostRenderServiceError,
+        HostUvError,
+    ) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
@@ -298,12 +305,18 @@ def build(
                 hooks_dir=hooks_dir,
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
+                canonical_wheel=providers.canonical_wheel,
                 options=options,
                 overwrite=True,
                 working_directory=Path.cwd(),
                 configuration_result=validated,
             )
-    except (ConfigurationServiceError, HostRenderServiceError, HostUvError) as error:
+    except (
+        CanonicalWheelError,
+        ConfigurationServiceError,
+        HostRenderServiceError,
+        HostUvError,
+    ) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,

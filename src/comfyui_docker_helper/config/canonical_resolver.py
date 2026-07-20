@@ -4,42 +4,43 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Protocol
 
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
-from pydantic import TypeAdapter
 
 from comfyui_docker_helper.config.canonical_lock import (
+    ApplicationExtrasLockEntry,
     CanonicalLock,
     CanonicalLockEntry,
-    ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
+    CudaImageLockEntry,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
-    DirectPythonLockEntry,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
-    OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
     PythonGroupRequestIdentity,
-    PyTorchCompatibilityLockEntry,
+    PyTorchLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     ResolverRequestIdentity,
+    UvImageLockEntry,
+    UvToolLockEntry,
     canonical_entry_key,
+    canonical_lock_from_entries,
     pytorch_core_version_matches_channel,
     uv_image_version_matches_tag,
 )
 from comfyui_docker_helper.config.canonical_request import (
     DesiredResolution,
-    ManagedPythonReleaseInputs,
     SelectorStability,
     request_keys,
 )
@@ -50,8 +51,6 @@ from comfyui_docker_helper.host.identity_providers import (
 )
 
 type LockEntryKey = tuple[str, ...]
-
-_LOCK_ENTRY_ADAPTER = TypeAdapter(CanonicalLockEntry)
 
 
 class LockPolicy(StrEnum):
@@ -161,7 +160,6 @@ def reconcile_canonical_lock(
             item.request,
             tuple(entry for entry in current if entry is not None),
             item.request_digest,
-            item.managed_python_release,
         )
         refresh = policy is LockPolicy.UPGRADE and (
             item.stability is SelectorStability.MOVING
@@ -193,7 +191,6 @@ def reconcile_canonical_lock(
             item.request,
             resolved,
             item.request_digest,
-            item.managed_python_release,
         ):
             raise ValueError("provider returned an incompatible identity set")
         accepted.update(resolved_by_key)
@@ -202,10 +199,7 @@ def reconcile_canonical_lock(
     if diagnostics:
         raise CanonicalResolutionError(tuple(diagnostics))
 
-    lock = CanonicalLock(
-        schema_version=1,
-        entries=[accepted[key] for key in sorted(accepted)],
-    )
+    lock = canonical_lock_from_entries([accepted[key] for key in sorted(accepted)])
     delta = _lock_delta(existing_by_key, accepted)
     write_intent = (
         purpose is ReconcilePurpose.APPLY
@@ -249,7 +243,6 @@ def _accept_locked(
             item.request,
             entries,
             item.request_digest,
-            item.managed_python_release,
         ):
             diagnostics.extend(
                 _locked_diagnostic(key, "request or result changed")
@@ -264,9 +257,8 @@ def _accept_locked(
         raise CanonicalResolutionError(tuple(diagnostics))
     if existing is None:  # pragma: no cover - guarded by diagnostics above
         raise AssertionError("existing lock must be present")
-    lock = CanonicalLock(
-        schema_version=1,
-        entries=[existing_by_key[key] for key in sorted(existing_by_key)],
+    lock = canonical_lock_from_entries(
+        [existing_by_key[key] for key in sorted(existing_by_key)]
     )
     return AcceptedCanonicalLock(lock, (), False, (), local_reads)
 
@@ -282,7 +274,14 @@ def _acquire_local_entries(
     diagnostics: list[Diagnostic] = []
     reads: list[LockEntryKey] = []
     for request in ordered:
-        key = ("local-executable", request.canonical_path.as_posix())
+        identity = request.canonical_path
+        if identity.parts[0] == "custom-node-hooks":
+            relative = PurePosixPath(*identity.parts[1:]).as_posix()
+            key = ("hooks", "custom_node", relative)
+        elif identity.parts[0] == "runtime-hooks":
+            key = ("hooks", "runtime", PurePosixPath(*identity.parts[1:]).as_posix())
+        else:
+            raise ValueError("local executable request has no supported hook domain")
         reads.append(key)
         try:
             entry = acquirer.acquire(request) if acquirer is not None else None
@@ -307,7 +306,6 @@ def entries_satisfy_request(
     request: ResolverRequestIdentity,
     entries: tuple[CanonicalLockEntry, ...],
     request_digest: str,
-    managed_python_release: ManagedPythonReleaseInputs | None = None,
 ) -> bool:
     """Prove that locally valid resolved entries satisfy one canonical request."""
     expected_keys = set(request_keys(request))
@@ -324,32 +322,30 @@ def entries_satisfy_request(
         return False
     if isinstance(request, OciRequestIdentity):
         entry = entries[0]
-        return isinstance(entry, OciLockEntry) and (
-            entry.role == request.role
-            and entry.repository == request.repository
+        expected_type = (
+            CudaImageLockEntry if request.role == "cuda-base" else UvImageLockEntry
+        )
+        return isinstance(entry, expected_type) and (
+            entry.repository == request.repository
             and entry.tag == request.tag
             and entry.platform == request.platform
             and (
                 request.role != "uv-tool"
-                or uv_image_version_matches_tag(request.tag, entry.resolved_version)
+                or (
+                    isinstance(entry, UvImageLockEntry)
+                    and uv_image_version_matches_tag(
+                        request.tag, entry.observed_version
+                    )
+                )
             )
         )
     if isinstance(request, ManagedPythonRequestIdentity):
         entry = entries[0]
-        return (
-            managed_python_release is not None
-            and isinstance(entry, ManagedPythonLockEntry)
-            and (
-                entry.version == request.version
-                and entry.implementation == request.implementation
-                and entry.platform == request.platform
-                and entry.libc == request.libc
-                and entry.catalog_descriptor_digest == request.catalog_descriptor_digest
-                and entry.pip_version == managed_python_release.pip_version
-                and entry.cdh_version == managed_python_release.cdh_version
-                and entry.cdh_source_digest == managed_python_release.cdh_source_digest
-                and entry.uv_build_version == managed_python_release.uv_build_version
-            )
+        return isinstance(entry, ManagedPythonLockEntry) and (
+            entry.version == request.version
+            and entry.platform == request.platform
+            and entry.libc == request.libc
+            and entry.catalog_digest == request.catalog_descriptor_digest
         )
     if isinstance(request, ComfyUIRequestIdentity):
         entry = entries[0]
@@ -360,20 +356,13 @@ def entries_satisfy_request(
     if isinstance(request, ComfyUIRequirementsRequestIdentity):
         entry = entries[0]
         return isinstance(entry, ComfyUIRequirementsLockEntry) and (
-            entry.repository == request.repository
-            and entry.commit == request.commit
-            and entry.floor_commit == request.floor_commit
-            and entry.path == request.path
-            and entry.python_version == request.python_version
-            and entry.platform == request.platform
-            and entry.protected_names == request.protected_names
-            and entry.protected_policy_digest == request.protected_policy_digest
+            all(item.name in request.protected_names for item in entry.pytorch)
         )
     if isinstance(request, ComfyCliRequestIdentity):
         entry = entries[0]
-        return isinstance(entry, ComfyCliLockEntry) and (
-            entry.package == request.package
-            and entry.environment == request.environment
+        return isinstance(entry, UvToolLockEntry) and (
+            entry.name == request.package
+            and entry.extras == ()
             and Version(entry.version) >= Version(request.minimum_version)
             and _is_stable(Version(entry.version))
         )
@@ -391,30 +380,42 @@ def entries_satisfy_request(
         )
     if not isinstance(request, PythonGroupRequestIdentity):
         return False
+    if not isinstance(request, PyTorchRequestIdentity) and request.group == "uv-tool":
+        entry = entries[0]
+        member = request.members[0]
+        return (
+            isinstance(entry, UvToolLockEntry)
+            and entry.name == member.package
+            and entry.extras == member.extras
+            and _direct_result_matches(member.selector, entry.version)
+        )
+    entry = entries[0]
+    if isinstance(request, PyTorchRequestIdentity):
+        if not isinstance(entry, PyTorchLockEntry):
+            return False
+        packages = entry.packages
+    elif request.group == "application-extra":
+        if not isinstance(entry, ApplicationExtrasLockEntry):
+            return False
+        packages = entry.packages
+    else:  # pragma: no cover - uv-tool groups returned above
+        return False
     members = {member.package: member for member in request.members}
-    compatibility = None
-    for entry in entries:
-        if isinstance(entry, PyTorchCompatibilityLockEntry):
-            if not isinstance(request, PyTorchRequestIdentity):
-                return False
-            compatibility = entry
-            continue
-        if not isinstance(entry, DirectPythonLockEntry):
-            return False
-        member = members.get(entry.package)
-        if member is None or entry.environment != request.environment:
-            return False
-        if entry.extras != member.extras or not _direct_result_matches(
-            member.selector, entry.version
+    if {package.name for package in packages} != set(members):
+        return False
+    for package in packages:
+        member = members[package.name]
+        if package.extras != member.extras or not _direct_result_matches(
+            member.selector, package.version
         ):
             return False
         if isinstance(request, PyTorchRequestIdentity) and not (
             pytorch_core_version_matches_channel(
-                entry.package, entry.version, request.channel
+                package.name, package.version, request.channel
             )
         ):
             return False
-    return not isinstance(request, PyTorchRequestIdentity) or compatibility is not None
+    return True
 
 
 def rebuild_canonical_entries(
@@ -422,9 +423,7 @@ def rebuild_canonical_entries(
 ) -> tuple[CanonicalLockEntry, ...]:
     """Strictly rebuild discriminated entries after crossing an object seam."""
     return tuple(
-        _LOCK_ENTRY_ADAPTER.validate_python(
-            entry.model_dump(mode="python"), strict=True
-        )
+        type(entry).model_validate(entry.model_dump(mode="python"), strict=True)
         for entry in entries
     )
 

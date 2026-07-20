@@ -50,6 +50,7 @@ from comfyui_docker_helper.host.runtime_hook_inputs import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
 )
+from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
     LocalMaterializationSource,
@@ -122,6 +123,7 @@ def prepare_render_context(
     hooks_dir: str | Path | None = None,
     acquirer: CachingCanonicalAcquirer,
     local_acquirer: LocalExecutableEntryAcquirer,
+    canonical_wheel: CanonicalWheel,
     options: PlanningOptions | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
@@ -154,7 +156,7 @@ def prepare_render_context(
         )
         graph = build_canonical_request_graph(
             result.config,
-            release=planning_release_inputs(result.config.python.version),
+            release=planning_release_inputs(canonical_wheel),
             uv_descriptor_digest=uv_digest,
             comfyui_entry=comfyui,
             requirements_entry=requirements,
@@ -192,9 +194,16 @@ def prepare_render_context(
         for request in local_requests
     )
     if selected.check or (selected.locked and not selected.dry_run):
-        _check_context(output, plan, accepted.lock, sources)
+        _check_context(output, plan, accepted.lock, canonical_wheel, sources)
     elif selected.writes:
-        _write_context(output, plan, accepted.lock, sources, overwrite=overwrite)
+        _write_context(
+            output,
+            plan,
+            accepted.lock,
+            canonical_wheel,
+            sources,
+            overwrite=overwrite,
+        )
     return PreparedContext(plan, accepted, result.warnings)
 
 
@@ -216,6 +225,7 @@ def _write_context(
     output: Path,
     plan: BuildPlan,
     lock: CanonicalLock,
+    canonical_wheel: CanonicalWheel,
     sources: tuple[LocalMaterializationSource, ...],
     *,
     overwrite: bool,
@@ -241,7 +251,12 @@ def _write_context(
         raise _render_error("render.context_write_failed", str(error)) from error
     backup_root: Path | None = None
     try:
-        materialize_build_plan(plan, stage, local_sources=sources)
+        materialize_build_plan(
+            plan,
+            stage,
+            canonical_wheel=canonical_wheel,
+            local_sources=sources,
+        )
         (stage / _LOCK_FILE).write_text(
             dump_canonical_lock_toml(lock), encoding="utf-8"
         )
@@ -284,6 +299,7 @@ def _check_context(
     output: Path,
     plan: BuildPlan,
     lock: CanonicalLock,
+    canonical_wheel: CanonicalWheel,
     sources: tuple[LocalMaterializationSource, ...],
 ) -> None:
     if not output.is_dir() or not _valid_marker(output):
@@ -295,7 +311,12 @@ def _check_context(
             prefix=".cdh-check-", dir=output.parent
         ) as raw:
             expected = Path(raw)
-            materialize_build_plan(plan, expected, local_sources=sources)
+            materialize_build_plan(
+                plan,
+                expected,
+                canonical_wheel=canonical_wheel,
+                local_sources=sources,
+            )
             (expected / _LOCK_FILE).write_text(
                 dump_canonical_lock_toml(lock), encoding="utf-8"
             )

@@ -12,7 +12,12 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import ValidationError
-from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
+from tests.unit.test_build_plan import (
+    accepted_resolution,
+    build_plan,
+    canonical_wheel,
+    final_config,
+)
 
 from comfyui_docker_helper.application_checkers import APPLICATION_CHECKER_SOURCE
 from comfyui_docker_helper.config.build_plan import (
@@ -26,6 +31,7 @@ from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.container import file_admission
 from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
+from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering import final_materializer
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
@@ -107,7 +113,7 @@ def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
 
     rendered = render_build_plan_dockerfile(plan)
 
-    cdh_install = rendered.index("/opt/cdh/wheel/*.whl")
+    cdh_install = rendered.index(f"source=bootstrap/{canonical_wheel().filename}")
     cli_install = rendered.index("comfy-cli==1.8.0")
     generic_install = rendered.index("ruff==0.15.18")
     application_install = rendered.index("container install-comfyui")
@@ -264,8 +270,18 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     first.mkdir()
     second.mkdir()
 
-    materialize_build_plan(plan, first, local_sources=(source_input,))
-    materialize_build_plan(plan, second, local_sources=(source_input,))
+    materialize_build_plan(
+        plan,
+        first,
+        canonical_wheel=canonical_wheel(),
+        local_sources=(source_input,),
+    )
+    materialize_build_plan(
+        plan,
+        second,
+        canonical_wheel=canonical_wheel(),
+        local_sources=(source_input,),
+    )
 
     assert (first / "build-plan.json").read_bytes() == dump_build_plan_json(plan)
     assert (first / "inputs/hooks/pre.py").read_bytes() == content
@@ -283,56 +299,19 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert _tree(first) == _tree(second)
     tree = _tree(first)
     assert tree["checkers/application.py"] == APPLICATION_CHECKER_SOURCE.read_bytes()
-    assert "cdh/pyproject.toml" in tree
-    assert "cdh/src/comfyui_docker_helper/cli.py" in tree
-    assert "cdh-production-requirements.txt" in tree
-    assert "cdh-production-inventory.txt" in tree
-    expected_cdh_inventory = tuple(
-        sorted(
-            (
-                *(
-                    (item.name, item.version)
-                    for item in plan.toolchain.tool_store.cdh_closure
-                ),
-                ("comfyui-docker-helper", plan.toolchain.python.cdh_version),
-            )
-        )
-    )
-    inventory_bytes = tree["cdh-production-inventory.txt"]
-    assert (
-        inventory_bytes
-        == "".join(
-            f"{name}=={version}\n" for name, version in expected_cdh_inventory
-        ).encode()
-    )
-    versions = dict(expected_cdh_inventory)
-    prefix_collision = (
-        f"pydantic=={versions['pydantic']}\n"
-        f"pydantic-core=={versions['pydantic-core']}\n"
-    ).encode()
-    assert prefix_collision in inventory_bytes
-    routing = tree["pytorch-resolution.toml"].decode()
-    routing_document = tomllib.loads(routing)
-    source_map = routing_document["tool"]["uv"]["sources"]
-    expected_source_packages = {
-        package.name for package in plan.application.pytorch.packages
-    }
-    assert set(source_map) == expected_source_packages
-    assert "torchaudio" in source_map
-    assert all(source == {"index": "pytorch"} for source in source_map.values())
-    assert 'url = "https://pypi.org/simple"' in routing
-    assert 'url = "https://download.pytorch.org/whl/cu130"' in routing
-    assert '[tool.uv.sources.torch]\nindex = "pytorch"' in routing
-    assert '[tool.uv.sources.torchvision]\nindex = "pytorch"' in routing
+    wheel = canonical_wheel()
+    assert tree[f"bootstrap/{wheel.filename}"] == wheel.content
+    assert tree[".dockerignore"] == b"/.cdh-rendered\n/config.lock.toml\n"
     assert not (first / "config.toml").exists()
     assert not (first / "config.lock.toml").exists()
     assert str(source).encode() not in (first / "build-plan.json").read_bytes()
 
     dockerfile = (first / "Dockerfile").read_text()
     assert (
-        "COPY --chown=0:0 --chmod=0444 pytorch-resolution.toml "
-        "/opt/cdh/build/pyproject.toml" in dockerfile
+        f"--mount=type=bind,source=bootstrap/{wheel.filename},"
+        f"target=/tmp/{wheel.filename},readonly" in dockerfile
     )
+    assert "COPY bootstrap" not in dockerfile
     assert "container install-comfyui" in dockerfile
     assert "COPY --chown=0:0 checkers /opt/cdh/build/checkers" in dockerfile
     assert "/opt/cdh/build/checkers/application.py inventory" in dockerfile
@@ -356,6 +335,25 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     )
 
 
+# Materialization rechecks the retained wheel bytes before admitting them.
+def test_materializer_rejects_canonical_wheel_byte_drift(tmp_path: Path) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    wheel = canonical_wheel()
+    changed = CanonicalWheel(
+        filename=wheel.filename,
+        version=wheel.version,
+        digest=wheel.digest,
+        content=wheel.content + b"changed",
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+
+    with pytest.raises(FinalMaterializationError, match="does not match BuildPlan"):
+        materialize_build_plan(plan, output, canonical_wheel=changed)
+
+    assert tuple(output.iterdir()) == ()
+
+
 # Canonical plan bytes bound to the Dockerfile literal authorize each installer input.
 def test_build_plan_admission_rejects_changed_plan_under_literal_digest(
     tmp_path: Path,
@@ -363,7 +361,7 @@ def test_build_plan_admission_rejects_changed_plan_under_literal_digest(
     plan = build_plan(final_config(), accepted_resolution())
     output = tmp_path / "output"
     output.mkdir()
-    materialize_build_plan(plan, output)
+    materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
     document = json.loads((output / "build-plan.json").read_bytes())
     document["runtime"]["environment"][0]["value"] = "changed"
     (output / "build-plan.json").write_text(json.dumps(document))
@@ -386,7 +384,7 @@ def test_nondefault_shutdown_timeout_projects_to_plan_and_baked_runtime(
     output = tmp_path / "output"
     output.mkdir()
 
-    materialize_build_plan(plan, output)
+    materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
 
     runtime = tomllib.loads((output / "runtime/config.toml").read_text())
     assert plan.runtime.shutdown_timeout == 55.5
@@ -400,7 +398,7 @@ def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
     context.mkdir()
-    materialize_build_plan(plan, context)
+    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
     digest = build_plan_digest(plan)
 
     leaf_link = tmp_path / "build-plan-link.json"
@@ -524,7 +522,7 @@ def test_materializer_direct_call_reuses_shared_runtime_hook_identity(
     output.mkdir()
 
     with pytest.raises(FinalMaterializationError, match="hook identity is invalid"):
-        materialize_build_plan(forged, output)
+        materialize_build_plan(forged, output, canonical_wheel=canonical_wheel())
 
     assert tuple(output.iterdir()) == ()
 
@@ -547,7 +545,7 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
     output.mkdir()
 
     with pytest.raises(FinalMaterializationError, match="exactly match"):
-        materialize_build_plan(plan, output)
+        materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
     assert tuple(output.iterdir()) == ()
 
     source.write_bytes(b"changed")
@@ -555,6 +553,7 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
         materialize_build_plan(
             plan,
             output,
+            canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
                     PurePosixPath("custom-node-hooks/hooks/pre.py"), source
@@ -618,6 +617,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
         materialize_build_plan(
             plan,
             output,
+            canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
                     PurePosixPath("custom-node-hooks/hooks/pre.py"), source
@@ -638,6 +638,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
         materialize_build_plan(
             plan,
             output,
+            canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
                     PurePosixPath("custom-node-hooks/hooks/pre.py"),
@@ -669,6 +670,7 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
         materialize_build_plan(
             plan,
             output,
+            canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
                     PurePosixPath("custom-node-hooks/hooks/pre.py"), source
@@ -727,6 +729,7 @@ def test_materializer_rejects_symlink_or_special_destination_components(
         materialize_build_plan(
             plan,
             output,
+            canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
                     PurePosixPath("custom-node-hooks/hooks/pre.py"), source

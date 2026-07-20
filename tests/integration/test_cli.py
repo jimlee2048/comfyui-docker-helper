@@ -8,7 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 import typer
-from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
+from tests.unit.test_build_plan import (
+    accepted_resolution,
+    build_plan,
+    canonical_wheel,
+    final_config,
+)
 from typer.main import get_command
 from typer.testing import CliRunner
 
@@ -145,7 +150,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
     context.mkdir()
-    materialize_build_plan(plan, context)
+    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
     parse_count = 0
     parse = build_plan_input_module.parse_build_plan_json
 
@@ -259,7 +264,7 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
     custom_root.mkdir(parents=True)
     context = tmp_path / "context"
     context.mkdir()
-    materialize_build_plan(plan, context)
+    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
 
     class WritingBackend:
         def download(self, item, settings):
@@ -306,7 +311,7 @@ def test_container_plan_admission_hides_invalid_plan_secret_values(
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
     context.mkdir()
-    materialize_build_plan(plan, context)
+    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
     plan_path = context / "build-plan.json"
     document = json.loads(plan_path.read_bytes())
     document["runtime"]["ssh"]["password"] = f"{sentinel}\n"
@@ -337,7 +342,7 @@ def test_container_cli_rejects_registry_without_manager(
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
     context.mkdir()
-    materialize_build_plan(plan, context)
+    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
     plan_path = context / "build-plan.json"
     document = json.loads(plan_path.read_bytes())
     document["application"]["comfyui"]["manager"] = None
@@ -497,7 +502,11 @@ platforms = ["linux/amd64"]
 
     @contextmanager
     def providers():
-        yield SimpleNamespace(acquirer=FailingAcquirer(), local_acquirer=object())
+        yield SimpleNamespace(
+            acquirer=FailingAcquirer(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.default_planning_providers", providers
@@ -523,7 +532,11 @@ def test_render_passes_hooks_dir_through_current_planning_boundary(
 
     @contextmanager
     def providers():
-        yield SimpleNamespace(acquirer=object(), local_acquirer=object())
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
 
     def prepare(*args, **kwargs):
         seen["hooks_dir"] = kwargs["hooks_dir"]
@@ -561,7 +574,11 @@ def test_render_materialization_error_is_short_and_has_no_traceback(
 ) -> None:
     @contextmanager
     def providers():
-        yield SimpleNamespace(acquirer=object(), local_acquirer=object())
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
 
     def fail_prepare(*args, **kwargs):
         raise HostRenderServiceError(
@@ -606,7 +623,11 @@ def test_build_overrides_flow_through_plan_and_buildx(
 
     @contextmanager
     def providers():
-        yield SimpleNamespace(acquirer=object(), local_acquirer=object())
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
 
     config = tmp_path / "config.toml"
     config.write_text(
@@ -718,7 +739,11 @@ platforms = ["linux/amd64"]
 
     @contextmanager
     def providers():
-        yield SimpleNamespace(acquirer=object(), local_acquirer=object())
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
 
     def prepare(*args, **kwargs):
         configuration = kwargs["configuration_result"]

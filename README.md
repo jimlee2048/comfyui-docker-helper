@@ -182,8 +182,10 @@ The image installs the exact managed interpreter once, creates the application
 environment at `/opt/venv`, and keeps cdh plus configured standalone CLI tools
 in isolated uv environments. `UV_TOOL_DIR=/opt/uv/tools`,
 `UV_TOOL_BIN_DIR=/opt/uv/bin`, and `/opt/uv/bin` precedes `/opt/venv/bin` on
-`PATH`. cdh is installed first from a projected non-editable wheel using the
-production-only frozen closure derived from this repository's `uv.lock`.
+`PATH`. cdh is installed first from one canonical non-editable wheel rebuilt
+from the installed package's release resources. The host validates that wheel
+once, binds the same bytes into the image build, and lets standard package
+metadata resolve its transitive dependencies from `[python].index_url`.
 Each `[python].uv_tools` entry accepts the same bounded direct-requirement
 grammar, resolves independently, and installs an exact direct result without
 force-replacing an existing executable. When `[comfyui].install_cli=true`, cdh
@@ -199,7 +201,7 @@ current versions are equal.
 
 All other cdh-controlled Python resolution and installation uses only
 `[python].index_url`, including application extras, ordinary ComfyUI and
-Manager requirements, the frozen cdh closure, optional comfy-cli, generic uv
+Manager requirements, cdh dependencies, optional comfy-cli, generic uv
 tools, and cdh-invoked custom-node requirements. Manager/Registry installers
 and direct-Git `install.py` remain trusted opaque code; cdh does not claim
 network-level source isolation for their arbitrary effects.
@@ -321,8 +323,8 @@ does not infer that arbitrary configured values are secrets.
 ## Runtime lifecycle and hooks
 
 Pass `--hooks-dir <dir>` to `cdh host render` or `cdh host build` to bake a
-complete runtime hook tree. When the option is omitted, an existing `./hooks`
-tree is used. The root may contain only `pre-start.d/`, `post-start.d/`, and
+complete runtime hook tree. When the option is omitted, no baked runtime hooks
+are planned. The root may contain only `pre-start.d/`, `post-start.d/`, and
 `stop.d/`; files must be regular `.sh` or `.py` files. Symlinks,
 special files, nested directories, and unknown entries are rejected.
 
@@ -381,10 +383,9 @@ independent, and no cleanup can continue after external `SIGKILL`.
 Key rendered-context artifacts include:
 
 - `config.lock.toml`, used only by the host for later reconciliation;
-- one digest-bound canonical `build-plan.json`, used by build-time helpers, and
-  `manifest-binding.json`;
-- the projected cdh source and frozen production closure, standalone
-  application checker, and PyTorch source-routing input;
+- one digest-bound canonical `build-plan.json`, used by build-time helpers;
+- one host-validated canonical cdh wheel under `bootstrap/` for a read-only
+  BuildKit bind mount, plus the standalone application checker;
 - verified referenced hook bytes under `inputs/`, when configured;
 - a BuildPlan-derived `runtime/config.toml` plus content-locked `runtime/hooks`
   when configured, copied to the paths consumed by the entrypoint; and
@@ -394,7 +395,9 @@ Key rendered-context artifacts include:
 
 The context does not contain a root `config.toml`, and the Dockerfile has no ARG
 that can override lock-authoritative image identities. Host-local source paths
-and resolver `request_digest` values are excluded from the BuildPlan.
+and resolver `request_digest` values are excluded from the BuildPlan. Its
+`.dockerignore` excludes only host reconciliation state: `config.lock.toml` and
+`.cdh-rendered`.
 
 ## Final image evidence and replay boundary
 
@@ -402,7 +405,8 @@ After every build mutation succeeds, cdh verifies the final image state and
 exclusively writes root-owned, read-only schema-v1 evidence to
 `/opt/cdh/build/manifest.json`. The manifest binds the effective-config,
 canonical-lock, and BuildPlan digests and verifies the materialized cdh and
-ComfyUI requirements inputs. It records intended-versus-observed direct
+ComfyUI requirements inputs. The cdh evidence includes the canonical wheel
+digest and observed installed identity. It records intended-versus-observed direct
 toolchain and application identities, source and backend evidence, factual
 package inventories, Manager/comfy-cli state, custom nodes, files, hooks, APT
 observations, and the Tini lifecycle contract.

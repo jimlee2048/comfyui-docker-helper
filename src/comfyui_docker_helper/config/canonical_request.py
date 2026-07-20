@@ -13,7 +13,6 @@ from comfyui_docker_helper.comfyui_requirements import (
     COMFYUI_REQUIREMENTS_PATH,
     ComfyUIRequirementsError,
     merge_pytorch_requirements,
-    protected_policy_digest,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
@@ -29,6 +28,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     ProtectedRequirementProjection,
     PyTorchRequestIdentity,
     RegistryRequestIdentity,
+    RequirementsRoutingPolicy,
     ResolverRequestIdentity,
     compute_request_digest,
 )
@@ -70,22 +70,12 @@ class SelectorStability(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class ManagedPythonReleaseInputs:
-    """Exact release-owned inputs that constrain managed Python reuse."""
+class PlanningReleaseInputs:
+    """Exact release-owned inputs projected into BuildPlan, never the lock."""
 
     pip_version: str
     cdh_version: str
-    cdh_source_digest: str
-    uv_build_version: str
-
-
-@dataclass(frozen=True, slots=True)
-class PlanningReleaseInputs:
-    """Narrow release artifacts needed by request and toolchain projection."""
-
-    managed_python: ManagedPythonReleaseInputs
-    requirements_digest: str
-    cdh_closure: tuple[tuple[str, str], ...]
+    cdh_wheel_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,17 +83,11 @@ class DesiredResolution:
     """One immutable provider acquisition unit."""
 
     request: ResolverRequestIdentity
-    managed_python_release: ManagedPythonReleaseInputs | None = None
     keys: tuple[LockEntryKey, ...] = field(init=False)
     request_digest: str = field(init=False)
     stability: SelectorStability = field(init=False)
 
     def __post_init__(self) -> None:
-        if isinstance(self.request, ManagedPythonRequestIdentity):
-            if self.managed_python_release is None:
-                raise ValueError("managed Python requires current release-owned inputs")
-        elif self.managed_python_release is not None:
-            raise ValueError("release-owned inputs apply only to managed Python")
         object.__setattr__(self, "keys", request_keys(self.request))
         object.__setattr__(self, "request_digest", compute_request_digest(self.request))
         object.__setattr__(self, "stability", request_stability(self.request))
@@ -242,18 +226,11 @@ def build_canonical_request_graph(
     )
     repository, tag = backend.base_image.split(":", 1)
     requirements_request = comfyui_requirements_request(config, comfyui_entry)
-    if (
-        requirements_entry.request_digest
-        != compute_request_digest(requirements_request)
-        or requirements_entry.repository != requirements_request.repository
-        or requirements_entry.commit != requirements_request.commit
-        or requirements_entry.floor_commit != requirements_request.floor_commit
-        or requirements_entry.path != requirements_request.path
-        or requirements_entry.python_version != requirements_request.python_version
-        or requirements_entry.platform != requirements_request.platform
-        or requirements_entry.protected_names != requirements_request.protected_names
-        or requirements_entry.protected_policy_digest
-        != requirements_request.protected_policy_digest
+    if requirements_entry.request_digest != compute_request_digest(
+        requirements_request
+    ) or any(
+        item.name not in requirements_request.protected_names
+        for item in requirements_entry.pytorch
     ):
         raise ValueError("ComfyUI requirements identity does not match final config")
 
@@ -317,11 +294,11 @@ def build_canonical_request_graph(
         )
     upstream = tuple(
         DirectPythonRequestMember(
-            package=item.package,
+            package=item.name,
             extras=item.extras,
-            selector=item.selector,
+            selector=item.specifier,
         )
-        for item in requirements_entry.protected
+        for item in requirements_entry.pytorch
     )
     try:
         pytorch_members = merge_pytorch_requirements(
@@ -402,17 +379,7 @@ def build_canonical_request_graph(
             )
             nodes.append(GitNodeRequest("git", node.url, ref, target, pre, post))
 
-    desired = tuple(
-        DesiredResolution(
-            request,
-            managed_python_release=(
-                release.managed_python
-                if isinstance(request, ManagedPythonRequestIdentity)
-                else None
-            ),
-        )
-        for request in requests
-    )
+    desired = tuple(DesiredResolution(request) for request in requests)
     downloader = DownloaderRequest(
         default=config.cdh.default_downloader,
         default_download_mode=config.cdh.default_download_mode,
@@ -493,38 +460,38 @@ def comfyui_requirements_request(
         path=COMFYUI_REQUIREMENTS_PATH,
         python_version=config.python.version,
         platform=config.build.platforms[0],
-        protected_names=names,
-        protected_policy_digest=protected_policy_digest(names),
+        routing_policy=RequirementsRoutingPolicy(
+            revision=1,
+            routed_names=names,
+            syntax="pep508",
+            markers="packaging-target-environment",
+            normalization="pep503-names-pep508-extras",
+            merge="specifier-intersection-extra-union",
+            sources="reject-options-and-direct-urls",
+        ),
     )
 
 
 def request_keys(request: ResolverRequestIdentity) -> tuple[LockEntryKey, ...]:
     if isinstance(request, OciRequestIdentity):
-        return (("oci", request.role),)
+        return (("images", "cuda" if request.role == "cuda-base" else "uv"),)
     if isinstance(request, ManagedPythonRequestIdentity):
-        return (("managed-python", request.implementation, request.platform),)
+        return (("python", "interpreter"),)
     if isinstance(request, ComfyUIRequestIdentity):
-        return (("comfyui", request.repository),)
+        return (("comfyui",),)
     if isinstance(request, ComfyUIRequirementsRequestIdentity):
-        return (("comfyui-requirements", request.repository),)
+        return (("comfyui", "requirements"),)
     if isinstance(request, ComfyCliRequestIdentity):
-        return (("comfy-cli", request.package, request.environment),)
+        return (("python", "uv_tools", request.package),)
     if isinstance(request, RegistryRequestIdentity):
-        return (("registry", request.id),)
+        return (("custom_nodes", "registry", request.id),)
     if isinstance(request, DirectGitRequestIdentity):
-        return (("git", request.url),)
+        return (("custom_nodes", "git", request.url),)
     if isinstance(request, DirectPythonRequestIdentity):
-        return tuple(
-            ("python-package", request.environment, member.package)
-            for member in request.members
-        )
-    return (
-        *(
-            ("python-package", request.environment, member.package)
-            for member in request.members
-        ),
-        ("pytorch-compatibility", request.environment),
-    )
+        if request.group == "application-extra":
+            return (("python", "package_groups", "application_extras"),)
+        return (("python", "uv_tools", request.members[0].package),)
+    return (("python", "package_groups", "pytorch"),)
 
 
 def request_stability(request: ResolverRequestIdentity) -> SelectorStability:

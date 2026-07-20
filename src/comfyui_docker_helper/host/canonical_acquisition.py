@@ -26,37 +26,40 @@ from comfyui_docker_helper.comfyui_requirements import (
     parse_comfyui_requirements,
 )
 from comfyui_docker_helper.config.canonical_lock import (
+    ApplicationExtrasLockEntry,
     CanonicalLockEntry,
-    ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
+    CudaImageLockEntry,
+    CustomNodeHookLockEntry,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
-    DirectPythonLockEntry,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
-    OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
-    ProtectedRequirementProjection,
     PythonGroupRequestIdentity,
-    PyTorchCompatibilityLockEntry,
+    PyTorchLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
+    ResolvedPythonPackage,
     ResolverRequestIdentity,
+    RoutedPyTorchRequirement,
+    RuntimeHookLockEntry,
+    UvImageLockEntry,
+    UvToolLockEntry,
     pytorch_core_version_matches_channel,
     uv_image_version_matches_tag,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
     CanonicalAcquisitionError,
-    ManagedPythonReleaseInputs,
     entries_satisfy_request,
     rebuild_canonical_entries,
 )
@@ -360,7 +363,6 @@ class ProviderIdentityAcquirer:
     registry: RegistryNodeIdentityProvider
     git: DirectGitIdentityProvider
     python_group: PythonGroupResolver
-    release: ManagedPythonReleaseInputs
     requirements_reader: RequirementsReader = _read_comfyui_requirements
 
     def acquire(
@@ -374,7 +376,6 @@ class ProviderIdentityAcquirer:
             request,
             entries,
             request_digest,
-            self.release if isinstance(request, ManagedPythonRequestIdentity) else None,
         ):
             raise CanonicalAcquisitionError(
                 f"{request.type} provider returned incompatible data"
@@ -406,19 +407,20 @@ class ProviderIdentityAcquirer:
                     ),
                     "OCI uv version",
                 )
-            return (
-                OciLockEntry(
-                    type="oci",
-                    request_digest=request_digest,
-                    role=identity.role,
-                    repository=identity.repository,
-                    tag=identity.tag,
-                    descriptor_digest=identity.descriptor_digest,
-                    descriptor_kind=identity.descriptor_kind,
-                    platform=identity.platform,
-                    resolved_version=identity.resolved_version,
-                ),
+            entry_type = (
+                CudaImageLockEntry if request.role == "cuda-base" else UvImageLockEntry
             )
+            values = {
+                "request_digest": request_digest,
+                "repository": identity.repository,
+                "tag": identity.tag,
+                "digest": identity.descriptor_digest,
+                "kind": identity.descriptor_kind,
+                "platform": identity.platform,
+            }
+            if entry_type is UvImageLockEntry:
+                values["observed_version"] = identity.resolved_version
+            return (entry_type.model_validate(values),)
         if isinstance(request, ManagedPythonRequestIdentity):
             identity = self.managed_python.resolve(
                 ManagedPythonIdentityRequest(
@@ -442,20 +444,13 @@ class ProviderIdentityAcquirer:
             )
             return (
                 ManagedPythonLockEntry(
-                    type="managed-python",
                     request_digest=request_digest,
                     version=identity.version,
-                    implementation=identity.implementation,
                     platform=identity.platform,
                     libc=identity.libc,
-                    provider=identity.provider,
-                    catalog_descriptor_digest=identity.catalog_descriptor_digest,
-                    catalog_key=identity.catalog_key,
-                    catalog_url=identity.catalog_url,
-                    pip_version=self.release.pip_version,
-                    cdh_version=self.release.cdh_version,
-                    cdh_source_digest=self.release.cdh_source_digest,
-                    uv_build_version=self.release.uv_build_version,
+                    catalog_digest=identity.catalog_descriptor_digest,
+                    artifact_key=identity.catalog_key,
+                    artifact_url=identity.catalog_url,
                 ),
             )
         if isinstance(request, ComfyUIRequestIdentity):
@@ -465,7 +460,6 @@ class ProviderIdentityAcquirer:
             )
             return (
                 OfficialComfyUILockEntry(
-                    type="comfyui",
                     request_digest=request_digest,
                     repository=identity.repository,
                     commit=identity.commit,
@@ -497,22 +491,13 @@ class ProviderIdentityAcquirer:
                 raise CanonicalAcquisitionError(str(error)) from error
             return (
                 ComfyUIRequirementsLockEntry(
-                    type="comfyui-requirements",
                     request_digest=request_digest,
-                    repository=request.repository,
-                    commit=request.commit,
-                    floor_commit=request.floor_commit,
-                    path=request.path,
-                    python_version=request.python_version,
-                    platform=request.platform,
-                    protected_names=request.protected_names,
-                    protected_policy_digest=request.protected_policy_digest,
-                    requirements_digest=parsed.digest,
-                    protected=[
-                        ProtectedRequirementProjection(
-                            package=item.package,
+                    digest=parsed.digest,
+                    pytorch=[
+                        RoutedPyTorchRequirement(
+                            name=item.package,
                             extras=item.extras,
-                            selector=item.selector,
+                            specifier=item.selector,
                         )
                         for item in parsed.protected
                     ],
@@ -530,12 +515,11 @@ class ProviderIdentityAcquirer:
                     "Python resolver returned an incompatible comfy-cli result"
                 )
             return (
-                ComfyCliLockEntry(
-                    type="comfy-cli",
+                UvToolLockEntry(
                     request_digest=request_digest,
-                    package="comfy-cli",
+                    name="comfy-cli",
+                    extras=(),
                     version=member.version,
-                    environment=request.environment,
                 ),
             )
         if isinstance(request, RegistryRequestIdentity):
@@ -543,7 +527,6 @@ class ProviderIdentityAcquirer:
             _require_provider_match(identity.node_id == request.id, "Registry")
             return (
                 RegistryNodeLockEntry(
-                    type="registry",
                     request_digest=request_digest,
                     id=identity.node_id,
                     version=identity.version,
@@ -559,7 +542,6 @@ class ProviderIdentityAcquirer:
                 commit = identity.commit
             return (
                 DirectGitLockEntry(
-                    type="git",
                     request_digest=request_digest,
                     url=request.url,
                     commit=commit,
@@ -583,28 +565,38 @@ class ProviderIdentityAcquirer:
             raise CanonicalAcquisitionError(
                 "Python resolver returned an incompatible PyTorch channel"
             )
-        entries: tuple[CanonicalLockEntry, ...] = tuple(
-            DirectPythonLockEntry(
-                type="python-package",
-                request_digest=request_digest,
-                package=member.package,
+        packages = tuple(
+            ResolvedPythonPackage(
+                name=member.package,
                 extras=member.extras,
                 version=by_package[member.package],
-                environment=request.environment,
             )
             for member in request.members
         )
         if isinstance(request, PyTorchRequestIdentity):
-            entries = (
-                *entries,
-                PyTorchCompatibilityLockEntry(
-                    type="pytorch-compatibility",
+            return (
+                PyTorchLockEntry(
                     request_digest=request_digest,
-                    environment="application",
+                    packages=packages,
                     setuptools_specifier=resolution.setuptools_specifier,
                 ),
             )
-        return entries
+        if request.group == "application-extra":
+            return (
+                ApplicationExtrasLockEntry(
+                    request_digest=request_digest,
+                    packages=packages,
+                ),
+            )
+        package = packages[0]
+        return (
+            UvToolLockEntry(
+                request_digest=request_digest,
+                name=package.name,
+                extras=package.extras,
+                version=package.version,
+            ),
+        )
 
     def _resolve_comfyui(
         self, request: ComfyUIRequestIdentity
@@ -650,9 +642,17 @@ class LocalExecutableEntryAcquirer:
             identity = self.provider.resolve(request)
         except IdentityProviderError as error:
             raise CanonicalAcquisitionError(str(error)) from error
-        return LocalExecutableLockEntry(
-            type="local-executable",
-            relative_path=identity.relative_path.as_posix(),
+        path = identity.relative_path
+        if path.parts[0] == "custom-node-hooks":
+            entry_type = CustomNodeHookLockEntry
+        elif path.parts[0] == "runtime-hooks":
+            entry_type = RuntimeHookLockEntry
+        else:
+            raise CanonicalAcquisitionError(
+                "local executable has no supported hook domain"
+            )
+        return entry_type(
+            relative_path=Path(*path.parts[1:]).as_posix(),
             digest=identity.digest,
         )
 

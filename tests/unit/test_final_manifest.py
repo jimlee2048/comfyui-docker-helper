@@ -14,7 +14,6 @@ from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     build_plan_digest,
     dump_build_plan_json,
-    dump_manifest_binding_json,
     manifest_binding,
 )
 from comfyui_docker_helper.config.custom_node_inventory import (
@@ -24,6 +23,7 @@ from comfyui_docker_helper.config.custom_node_inventory import (
 from comfyui_docker_helper.config.final_manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
+    CdhToolEnvironmentEvidence,
     ComfyCliEvidence,
     ComfyUISourceEvidence,
     DigestEvidence,
@@ -38,7 +38,6 @@ from comfyui_docker_helper.config.final_manifest import (
     ProtectedRequirementEvidence,
     SetuptoolsEvidence,
     ToolchainEvidence,
-    ToolEnvironmentEvidence,
     VersionEvidence,
     dump_final_manifest,
     parse_final_manifest,
@@ -61,10 +60,8 @@ def _inventory(
 
 
 def _manifest(plan: BuildPlan) -> FinalManifest:
-    cdh_inventory = (
-        *((item.name, item.version) for item in plan.toolchain.tool_store.cdh_closure),
-        ("comfyui-docker-helper", plan.toolchain.python.cdh_version),
-    )
+    cdh = plan.toolchain.tool_store.cdh
+    cdh_inventory = ((cdh.name, cdh.version),)
     direct = tuple(
         sorted(
             (package.name, package.version)
@@ -82,7 +79,6 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
         *direct,
         ("pip", plan.application.pip_version),
         ("setuptools", "81.0.0"),
-        ("wheel", "0.46.0"),
         *(
             ()
             if plan.application.comfyui.manager is None
@@ -145,7 +141,6 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
         ),
         toolchain=ToolchainEvidence(
             host_uv_resolver_version="0.11.28",
-            uv_build_version=plan.toolchain.python.uv_build_version,
             container_uv=VersionEvidence(intended=expected_uv, observed=expected_uv),
             container_uvx=VersionEvidence(
                 intended=expected_uv,
@@ -159,15 +154,16 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
             python_catalog_descriptor_digest=(
                 plan.toolchain.python.catalog_descriptor_digest
             ),
-            cdh=ToolEnvironmentEvidence(
+            cdh=CdhToolEnvironmentEvidence(
                 name="comfyui-docker-helper",
                 environment="uv-tool:comfyui-docker-helper",
                 direct=VersionEvidence(
-                    intended=plan.toolchain.python.cdh_version,
-                    observed=plan.toolchain.python.cdh_version,
+                    intended=cdh.version,
+                    observed=cdh.version,
                 ),
                 inventory=_inventory(cdh_inventory),
                 dependency_check="passed",
+                wheel_digest=cdh.wheel_digest,
             ),
             comfy_cli=comfy_cli,
             uv_tools=(),
@@ -226,11 +222,6 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
             for name in plan.application.os_packages
         ),
         materialized_inputs=MaterializedInputsEvidence(
-            cdh_source_digest=plan.toolchain.python.cdh_source_digest,
-            cdh_requirements=DigestEvidence(
-                intended=plan.toolchain.tool_store.requirements_digest,
-                observed=plan.toolchain.tool_store.requirements_digest,
-            ),
             comfyui_requirements=DigestEvidence(
                 intended=plan.application.comfyui.requirements.digest,
                 observed=plan.application.comfyui.requirements.digest,
@@ -252,7 +243,7 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
     )
 
 
-# Canonical bytes retain exact local versions and factual wheel without authority.
+# Canonical bytes retain exact local versions without promoting observations.
 def test_manifest_round_trip_is_canonical_observational_and_strict() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     manifest = _manifest(plan)
@@ -263,8 +254,6 @@ def test_manifest_round_trip_is_canonical_observational_and_strict() -> None:
     assert parse_final_manifest(content) == manifest
     assert dump_final_manifest(parse_final_manifest(content)) == content
     assert b'"observed":"2.11.0+cu130"' in content
-    assert b'"name":"wheel","version":"0.46.0"' in content
-    assert b'"name":"wheel","intended"' not in content
     assert b"timestamp" not in content
     assert b"/home/" not in content
 
@@ -394,41 +383,6 @@ def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:
     )
 
 
-def test_final_binding_verification_uses_exact_canonical_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    projection = BuildPlanInputAdmission(plan).final_manifest()
-    expected = dump_manifest_binding_json(projection.binding)
-    calls: list[tuple[Path, int | None]] = []
-
-    def read_exact(path: Path, *, expected_mode: int | None = None) -> bytes:
-        calls.append((path, expected_mode))
-        return expected
-
-    monkeypatch.setattr(final_manifest_service, "_read_owned_regular", read_exact)
-    final_manifest_service._verify_binding(projection)
-    assert calls == [(final_manifest_service._BINDING_PATH, 0o644)]
-
-    monkeypatch.setattr(
-        final_manifest_service,
-        "_read_owned_regular",
-        lambda *_args, **_kwargs: expected + b" ",
-    )
-    with pytest.raises(FinalManifestError, match="does not match"):
-        final_manifest_service._verify_binding(projection)
-
-    monkeypatch.setattr(
-        final_manifest_service,
-        "_read_owned_regular",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            FinalManifestError("required build evidence is unavailable")
-        ),
-    )
-    with pytest.raises(FinalManifestError, match="unavailable"):
-        final_manifest_service._verify_binding(projection)
-
-
 @pytest.mark.parametrize(
     ("metadata", "message"),
     [
@@ -436,12 +390,12 @@ def test_final_binding_verification_uses_exact_canonical_bytes(
         (SimpleNamespace(st_uid=0, st_gid=0, st_mode=0o600), "mode is invalid"),
     ],
 )
-def test_binding_evidence_reader_rejects_owner_or_mode(
+def test_materialized_evidence_reader_rejects_owner_or_mode(
     monkeypatch: pytest.MonkeyPatch,
     metadata: SimpleNamespace,
     message: str,
 ) -> None:
-    path = Path("/opt/cdh/build/manifest-binding.json")
+    path = Path("/opt/cdh/build/comfyui-requirements.txt")
     monkeypatch.setattr(Path, "lstat", lambda _path: metadata)
     monkeypatch.setattr(
         final_manifest_service,

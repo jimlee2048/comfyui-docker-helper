@@ -155,6 +155,17 @@ class ToolEnvironmentEvidence(_ManifestModel):
         return self
 
 
+class CdhToolEnvironmentEvidence(ToolEnvironmentEvidence):
+    name: Literal["comfyui-docker-helper"]
+    environment: Literal["uv-tool:comfyui-docker-helper"]
+    wheel_digest: str
+
+    @field_validator("wheel_digest")
+    @classmethod
+    def _validate_wheel_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
+
+
 class ComfyCliEvidence(ToolEnvironmentEvidence):
     name: Literal["comfy-cli"]
     environment: Literal["uv-tool:comfy-cli"]
@@ -170,17 +181,16 @@ class ComfyCliEvidence(ToolEnvironmentEvidence):
 
 class ToolchainEvidence(_ManifestModel):
     host_uv_resolver_version: str
-    uv_build_version: str
     container_uv: VersionEvidence
     container_uvx: VersionEvidence
     python: VersionEvidence
     python_provider: Literal["uv-managed"]
     python_catalog_descriptor_digest: str
-    cdh: ToolEnvironmentEvidence
+    cdh: CdhToolEnvironmentEvidence
     comfy_cli: ComfyCliEvidence | None = None
     uv_tools: tuple[ToolEnvironmentEvidence, ...]
 
-    @field_validator("host_uv_resolver_version", "uv_build_version")
+    @field_validator("host_uv_resolver_version")
     @classmethod
     def _validate_release_version(cls, value: str) -> str:
         return validate_exact_stable_distribution_version(value)
@@ -444,14 +454,7 @@ class DigestEvidence(_ManifestModel):
 
 
 class MaterializedInputsEvidence(_ManifestModel):
-    cdh_source_digest: str
-    cdh_requirements: DigestEvidence
     comfyui_requirements: DigestEvidence
-
-    @field_validator("cdh_source_digest")
-    @classmethod
-    def _validate_digest(cls, value: str) -> str:
-        return validate_sha256_digest(value)
 
 
 class LifecycleEvidence(_ManifestModel):

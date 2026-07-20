@@ -25,12 +25,11 @@ from tests.smoke.application_probes import (
 )
 
 from comfyui_docker_helper.config.build_plan import (
-    ManifestBinding,
     build_plan_digest,
+    manifest_binding,
     parse_build_plan_json,
 )
 from comfyui_docker_helper.config.canonical_lock import (
-    ComfyCliLockEntry,
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
@@ -320,9 +319,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     assert context.joinpath(".cdh-rendered").is_file()
     plan = parse_build_plan_json(context.joinpath("build-plan.json").read_bytes())
     lock = parse_canonical_lock_toml(context.joinpath("config.lock.toml").read_bytes())
-    binding = ManifestBinding.model_validate_json(
-        context.joinpath("manifest-binding.json").read_bytes()
-    )
+    binding = manifest_binding(plan)
     canonical_lock_bytes = dump_canonical_lock_toml(lock).encode("utf-8")
     assert context.joinpath("config.lock.toml").read_bytes() == canonical_lock_bytes
     lock_digest = f"sha256:{hashlib.sha256(canonical_lock_bytes).hexdigest()}"
@@ -348,28 +345,21 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
         ("torchaudio", "2.11.0+cu130"),
         ("torchvision", "0.27.1+cu130"),
     ]
-    resolution = tomllib.loads(context.joinpath("pytorch-resolution.toml").read_text())
-    assert resolution["project"]["requires-python"] == f"=={scenario.python_version}"
-    assert resolution["project"]["dependencies"] == [
-        "torch==2.12.1+cu130",
-        "torchaudio==2.11.0+cu130",
-        "torchvision==0.27.1+cu130",
-    ]
-    assert resolution["tool"]["uv"]["index"] == [
-        {
-            "name": "python",
-            "url": "https://pypi.org/simple",
-            "default": True,
-        },
-        {
-            "name": "pytorch",
-            "url": "https://download.pytorch.org/whl/cu130",
-            "explicit": True,
-        },
-    ]
-    assert resolution["tool"]["uv"]["sources"] == {
-        name: {"index": "pytorch"} for name in ("torch", "torchaudio", "torchvision")
-    }
+    assert plan.application.pytorch.python_index_url == "https://pypi.org/simple"
+    assert plan.application.pytorch.pytorch_index_url == (
+        "https://download.pytorch.org/whl/cu130"
+    )
+    wheel = context / (
+        "bootstrap/comfyui_docker_helper-"
+        f"{plan.toolchain.tool_store.cdh.version}-py3-none-any.whl"
+    )
+    assert wheel.is_file()
+    assert f"sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}" == (
+        plan.toolchain.tool_store.cdh.wheel_digest
+    )
+    assert context.joinpath(".dockerignore").read_bytes() == (
+        b"/.cdh-rendered\n/config.lock.toml\n"
+    )
 
     expected = _expected_nodes(scenario.mixed)
     fixture_path = (
@@ -405,26 +395,22 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
             observed = f"sha256:{hashlib.sha256(materialized.read_bytes()).hexdigest()}"
             assert observed == hook.digest
 
-    lock_entries = [item.model_dump(mode="json") for item in lock.entries]
-    comfyui = next(item for item in lock_entries if item["type"] == "comfyui")
-    assert comfyui["commit"] == plan.application.comfyui.commit
-    git_entries = [item for item in lock_entries if item["type"] == "git"]
-    assert [(item["url"], item["commit"]) for item in git_entries] == [
+    assert lock.comfyui.commit == plan.application.comfyui.commit
+    assert [(item.url, item.commit) for item in lock.custom_nodes.git] == [
         (node["url"], node["commit"]) for node in expected if node["type"] == "git"
     ]
-    registry_entries = [item for item in lock_entries if item["type"] == "registry"]
-    assert [(item["id"], item["version"]) for item in registry_entries] == [
+    assert [(item.id, item.version) for item in lock.custom_nodes.registry] == [
         (node["id"], node["version"]) for node in expected if node["type"] == "registry"
     ]
-    cli_entries = [item for item in lock.entries if isinstance(item, ComfyCliLockEntry)]
+    cli_entries = [item for item in lock.python.uv_tools if item.name == "comfy-cli"]
     expected_cli_count = 1 if scenario.install_cli else 0
     assert len(cli_entries) == expected_cli_count
     cli_plan = plan.toolchain.tool_store.comfy_cli
     if scenario.install_cli:
         assert cli_plan is not None
         cli_entry = cli_entries[0]
-        assert cli_entry.package == cli_plan.name == "comfy-cli"
-        assert cli_entry.environment == cli_plan.environment == "uv-tool:comfy-cli"
+        assert cli_entry.name == cli_plan.name == "comfy-cli"
+        assert cli_plan.environment == "uv-tool:comfy-cli"
         assert cli_entry.version == cli_plan.version
     else:
         assert cli_plan is None
@@ -521,21 +507,18 @@ assert (plan["toolchain"]["tool_store"]["comfy_cli"] is not None) == expected_cl
 application = require_inventory(
     "/opt/cdh/build/application-inventory.txt", 0o444, "/opt/venv/bin/python",
 )
-cdh = require_inventory(
-    "/opt/cdh/build/cdh-production-inventory.txt",
-    0o644,
-    "/opt/uv/tools/comfyui-docker-helper/bin/python",
-)
-expected_cdh_items = [
-    (item["name"], item["version"])
-    for item in plan["toolchain"]["tool_store"]["cdh_closure"]
-]
-assert len(expected_cdh_items) == len({name for name, _ in expected_cdh_items})
-expected_cdh = dict(expected_cdh_items)
-helper_name = "comfyui-docker-helper"
-assert helper_name not in expected_cdh
-expected_cdh[helper_name] = plan["toolchain"]["python"]["cdh_version"]
-assert cdh == expected_cdh
+cdh_version = subprocess.run(
+    [
+        "/opt/uv/tools/comfyui-docker-helper/bin/python",
+        "-I",
+        "-c",
+        "import importlib.metadata as m; print(m.version('comfyui-docker-helper'))",
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+assert cdh_version == plan["toolchain"]["tool_store"]["cdh"]["version"]
 assert pathlib.Path("/opt/uv/bin/cdh").resolve(strict=True) == pathlib.Path(
     "/opt/uv/tools/comfyui-docker-helper/bin/cdh"
 )
@@ -1179,7 +1162,7 @@ def test_default_entrypoint_has_tini_cdh_topology_and_completes_sigterm_shutdown
             timeout=30,
         ).stdout.split()
         expected_argv = [
-            f"{plan.toolchain.tool_store.cdh_environment}/bin/python",
+            f"{plan.toolchain.tool_store.cdh.environment}/bin/python",
             "/opt/uv/bin/cdh",
             "container",
             "entrypoint",
@@ -1275,9 +1258,7 @@ def test_image_has_exact_environment_and_disposition(
     context = Path(_environment(scenario.context_variable)).resolve(strict=True)
     plan = parse_build_plan_json(context.joinpath("build-plan.json").read_bytes())
     lock = parse_canonical_lock_toml(context.joinpath("config.lock.toml").read_bytes())
-    binding = ManifestBinding.model_validate_json(
-        context.joinpath("manifest-binding.json").read_bytes()
-    )
+    binding = manifest_binding(plan)
     lock_bytes = dump_canonical_lock_toml(lock).encode("utf-8")
     lock_digest = f"sha256:{hashlib.sha256(lock_bytes).hexdigest()}"
     assert context.joinpath("config.lock.toml").read_bytes() == lock_bytes

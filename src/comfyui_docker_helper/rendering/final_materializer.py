@@ -19,21 +19,12 @@ from comfyui_docker_helper.config.build_plan import (
     HookPlan,
     build_plan_hook_identities,
     dump_build_plan_json,
-    dump_manifest_binding_json,
-    manifest_binding,
 )
 from comfyui_docker_helper.config.runtime_hooks import (
     CUSTOM_NODE_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )
-from comfyui_docker_helper.pytorch_resolution import (
-    pytorch_resolution_manifest_bytes,
-)
-from comfyui_docker_helper.release_artifacts import (
-    PRODUCTION_REQUIREMENTS,
-    release_source_digest,
-    release_source_files,
-)
+from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
@@ -55,6 +46,7 @@ def materialize_build_plan(
     plan: BuildPlan,
     directory: str | Path,
     *,
+    canonical_wheel: CanonicalWheel,
     local_sources: tuple[LocalMaterializationSource, ...] = (),
 ) -> None:
     """Populate one existing empty directory without re-reading config or lock."""
@@ -73,13 +65,12 @@ def materialize_build_plan(
             raise FinalMaterializationError(
                 "local materialization sources must exactly match locked inputs"
             )
-        _write(target / "build-plan.json", dump_build_plan_json(plan), root=target)
-        binding = manifest_binding(plan)
         _write(
-            target / "manifest-binding.json",
-            dump_manifest_binding_json(binding),
+            target / ".dockerignore",
+            b"/.cdh-rendered\n/config.lock.toml\n",
             root=target,
         )
+        _write(target / "build-plan.json", dump_build_plan_json(plan), root=target)
         for relative_path, hook in expected.items():
             source = sources[relative_path].source_path
             content = _verified_source(source, hook.digest)
@@ -104,19 +95,7 @@ def materialize_build_plan(
             APPLICATION_CHECKER_SOURCE.read_bytes(),
             root=target,
         )
-        _materialize_cdh_release(plan, target)
-        pytorch = plan.application.pytorch
-        _write(
-            target / "pytorch-resolution.toml",
-            pytorch_resolution_manifest_bytes(
-                requirements=tuple(package.requirement for package in pytorch.packages),
-                direct_packages=tuple(package.name for package in pytorch.packages),
-                python_version=pytorch.python_version,
-                python_index_url=pytorch.python_index_url,
-                pytorch_index_url=pytorch.pytorch_index_url,
-            ),
-            root=target,
-        )
+        _materialize_canonical_wheel(plan, canonical_wheel, target)
         _write(
             target / "Dockerfile",
             render_build_plan_dockerfile(plan).encode("utf-8"),
@@ -131,40 +110,22 @@ def materialize_build_plan(
         raise
 
 
-def _materialize_cdh_release(plan: BuildPlan, target: Path) -> None:
-    if release_source_digest() != plan.toolchain.python.cdh_source_digest:
-        raise FinalMaterializationError("cdh source does not match BuildPlan")
-    for item in release_source_files():
-        _write(
-            target / "cdh" / item.relative_path,
-            item.source_path.read_bytes(),
-            root=target,
-        )
-    requirements = PRODUCTION_REQUIREMENTS.read_bytes()
-    observed = f"sha256:{hashlib.sha256(requirements).hexdigest()}"
-    if observed != plan.toolchain.tool_store.requirements_digest:
-        raise FinalMaterializationError(
-            "cdh production closure does not match BuildPlan"
-        )
-    _write(
-        target / "cdh-production-requirements.txt",
-        requirements,
-        root=target,
-    )
-    inventory = _cdh_inventory(plan)
-    _write(
-        target / "cdh-production-inventory.txt",
-        "".join(f"{name}=={version}\n" for name, version in inventory).encode("utf-8"),
-        root=target,
-    )
-
-
-def _cdh_inventory(plan: BuildPlan) -> tuple[tuple[str, str], ...]:
-    identities = (
-        *((item.name, item.version) for item in plan.toolchain.tool_store.cdh_closure),
-        ("comfyui-docker-helper", plan.toolchain.python.cdh_version),
-    )
-    return tuple(sorted(identities))
+def _materialize_canonical_wheel(
+    plan: BuildPlan,
+    wheel: CanonicalWheel,
+    target: Path,
+) -> None:
+    cdh = plan.toolchain.tool_store.cdh
+    expected_filename = f"comfyui_docker_helper-{cdh.version}-py3-none-any.whl"
+    observed_digest = f"sha256:{hashlib.sha256(wheel.content).hexdigest()}"
+    if (
+        wheel.filename != expected_filename
+        or wheel.version != cdh.version
+        or wheel.digest != cdh.wheel_digest
+        or observed_digest != wheel.digest
+    ):
+        raise FinalMaterializationError("canonical cdh wheel does not match BuildPlan")
+    _write(target / "bootstrap" / wheel.filename, wheel.content, root=target)
 
 
 def _expected_hooks(

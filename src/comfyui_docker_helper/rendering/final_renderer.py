@@ -22,15 +22,8 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         f"{plan.toolchain.cuda_image.reference}",
         "COPY --from=uv /uv /uvx /usr/local/bin/",
         "COPY build-plan.json /opt/cdh/build/build-plan.json",
-        "COPY manifest-binding.json /opt/cdh/build/manifest-binding.json",
         "COPY --chown=0:0 checkers /opt/cdh/build/checkers",
         "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
-        "COPY cdh /opt/cdh/source",
-        "COPY cdh-production-requirements.txt "
-        "/opt/cdh/build/cdh-production-requirements.txt",
-        "COPY cdh-production-inventory.txt /opt/cdh/build/cdh-production-inventory.txt",
-        "COPY --chown=0:0 --chmod=0444 pytorch-resolution.toml "
-        "/opt/cdh/build/pyproject.toml",
     ]
     if any(node.pre_install or node.post_install for node in plan.custom_nodes.nodes):
         lines.append("COPY inputs /opt/cdh/build/inputs")
@@ -64,12 +57,11 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
 
 def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
     python = plan.toolchain.python
+    cdh = plan.toolchain.tool_store.cdh
     interpreter = (
         f"/opt/python/{python.catalog_key}/bin/"
         f"python{'.'.join(python.version.split('.')[:2])}"
     )
-    requirements = "/opt/cdh/build/cdh-production-requirements.txt"
-    inventory = "/opt/cdh/build/cdh-production-inventory.txt"
     package_separator = " \\" + "\n    "
     packages = package_separator.join(
         shlex.quote(item) for item in plan.application.os_packages
@@ -79,17 +71,22 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         sort_keys=True,
         separators=(",", ":"),
     )
-    inventory_check = "; ".join(
+    cdh_check = "; ".join(
         (
-            "import importlib.metadata as m, pathlib, re, sys",
-            "normalize=lambda value: re.sub(r'[-_.]+', '-', value).lower()",
-            "expected=dict(line.split('==', 1) for line in "
-            "pathlib.Path(sys.argv[1]).read_text().splitlines())",
-            "actual={normalize(item.metadata['Name']): item.version "
-            "for item in m.distributions()}",
-            "assert actual == expected, (expected, actual)",
+            "import importlib.metadata as m, pathlib, sys",
+            "distribution=m.distribution('comfyui-docker-helper')",
+            f"assert distribution.version == {cdh.version!r}",
+            "commands={item.name for item in distribution.entry_points "
+            "if item.group == 'console_scripts'}",
+            "assert 'cdh' in commands",
+            f"assert pathlib.Path(sys.prefix) == pathlib.Path({cdh.environment!r})",
+            "assert pathlib.Path(sys._base_executable).resolve() == "
+            f"pathlib.Path({interpreter!r}).resolve()",
         )
     )
+    wheel_filename = f"comfyui_docker_helper-{cdh.version}-py3-none-any.whl"
+    wheel_mount = f"/tmp/{wheel_filename}"
+    wheel_hex_digest = cdh.wheel_digest.removeprefix("sha256:")
     lines = [
         "RUN rm -f /etc/apt/apt.conf.d/docker-clean \\",
         " && printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d \\",
@@ -123,21 +120,30 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f"{_shell_word(bootstrap_check)} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip')} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip3')}",
-        f"RUN uv --no-config build --wheel --python {_shell_word(interpreter)} "
-        "--out-dir /opt/cdh/wheel /opt/cdh/source \\",
-        ' && test "$(find /opt/cdh/wheel -maxdepth 1 -type f '
-        "-name '*.whl' | wc -l)\" = 1 \\",
+        f"RUN --mount=type=bind,source=bootstrap/{wheel_filename},"
+        f"target={wheel_mount},readonly \\",
+        f" test \"$(sha256sum {_shell_word(wheel_mount)} | cut -d ' ' -f 1)\" = "
+        f"{_shell_word(wheel_hex_digest)} \\",
         f" && uv --no-config tool install --python {_shell_word(interpreter)} "
         f"--no-python-downloads --default-index "
         f"{_shell_word(plan.application.python_index_url)} "
-        f"--with-requirements {_shell_word(requirements)} /opt/cdh/wheel/*.whl \\",
-        f" && test -x {_shell_word(plan.toolchain.tool_store.cdh_executable)} \\",
-        f" && {_shell_word(plan.toolchain.tool_store.cdh_environment + '/bin/python')} "
-        f"-c {_shell_word(inventory_check)} {_shell_word(inventory)} \\",
+        f"{_shell_word(wheel_mount)} \\",
+        f" && test -x {_shell_word(cdh.executable)} \\",
+        f" && {_shell_word(cdh.environment + '/bin/python')} "
+        f"-c {_shell_word(cdh_check)} \\",
+        " && "
+        + " && ".join(
+            _command_ownership_checks(
+                plan.toolchain.tool_store.bin_dir,
+                plan.toolchain.tool_store.tool_dir,
+                cdh.name,
+                ("cdh",),
+            )
+        )
+        + " \\",
         f" && uv --no-config pip check --python "
-        f"{_shell_word(plan.toolchain.tool_store.cdh_environment + '/bin/python')} "
-        "--no-python-downloads \\",
-        " && rm -rf /opt/cdh/source /opt/cdh/wheel",
+        f"{_shell_word(cdh.environment + '/bin/python')} "
+        "--no-python-downloads",
     ]
     if plan.toolchain.tool_store.comfy_cli is not None:
         tool = plan.toolchain.tool_store.comfy_cli
@@ -237,14 +243,13 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         )
     plan_digest = _shell_word(build_plan_digest(plan))
     lines.append(
-        f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+        f"RUN {_shell_word(cdh.executable)} "
         "container install-comfyui "
         f"--build-plan-digest {plan_digest} "
-        "--resolution-manifest /opt/cdh/build/pyproject.toml "
         "--constraints /opt/cdh/build/python-package-constraints.txt"
     )
     lines.append(
-        f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+        f"RUN {_shell_word(cdh.executable)} "
         "container install-custom-nodes "
         f"--build-plan-digest {plan_digest} "
         "--constraints /opt/cdh/build/python-package-constraints.txt "
@@ -252,12 +257,12 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
     )
     if plan.files.files:
         lines.append(
-            f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+            f"RUN {_shell_word(cdh.executable)} "
             "container download-files "
             f"--build-plan-digest {plan_digest}"
         )
     lines.append(
-        f"RUN {_shell_word(plan.toolchain.tool_store.cdh_executable)} "
+        f"RUN {_shell_word(cdh.executable)} "
         "container emit-final-manifest "
         f"--build-plan-digest {plan_digest}"
     )

@@ -14,30 +14,31 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from comfyui_docker_helper.comfyui_requirements import protected_policy_digest
 from comfyui_docker_helper.config.canonical_lock import (
+    ApplicationExtrasLockEntry,
     CanonicalLock,
     CanonicalLockEntry,
-    ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
+    CustomNodeHookLockEntry,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
-    DirectPythonLockEntry,
     DirectPythonRequestIdentity,
-    LocalExecutableLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciLockEntry,
     OciRequestIdentity,
     OfficialComfyUILockEntry,
-    PyTorchCompatibilityLockEntry,
+    PyTorchLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     ResolverRequestIdentity,
+    RuntimeHookLockEntry,
+    UvImageLockEntry,
+    UvToolLockEntry,
     canonical_entry_key,
     dump_canonical_lock_toml,
     pytorch_core_version_matches_channel,
@@ -84,7 +85,6 @@ from comfyui_docker_helper.config.registry_validation import (
     validate_registry_node_authority,
 )
 from comfyui_docker_helper.config.runtime_hooks import (
-    RUNTIME_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
 )
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
@@ -109,7 +109,6 @@ from comfyui_docker_helper.exact_ledger import (
     CUDA_IMAGE_REPOSITORY,
     PIP_VERSION,
     UV_IMAGE_REPOSITORY,
-    UV_VERSION,
 )
 
 BUILD_PLAN_SCHEMA_VERSION = 1
@@ -185,9 +184,6 @@ class ManagedPythonPlan(_PlanModel):
     catalog_key: str
     catalog_url: str
     pip_version: str
-    cdh_version: str
-    cdh_source_digest: str
-    uv_build_version: str
 
     @field_validator("version")
     @classmethod
@@ -201,21 +197,7 @@ class ManagedPythonPlan(_PlanModel):
     def _validate_pip_version(cls, value: str) -> str:
         return validate_exact_stable_version(value)
 
-    @field_validator("cdh_version")
-    @classmethod
-    def _validate_cdh_version(cls, value: str) -> str:
-        if validate_exact_stable_version(value) != CDH_VERSION:
-            raise ValueError("cdh version does not match the exact ledger")
-        return value
-
-    @field_validator("uv_build_version")
-    @classmethod
-    def _validate_uv_build_version(cls, value: str) -> str:
-        if validate_exact_stable_version(value) != UV_VERSION:
-            raise ValueError("uv-build version does not match the exact ledger")
-        return value
-
-    @field_validator("catalog_descriptor_digest", "cdh_source_digest")
+    @field_validator("catalog_descriptor_digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return validate_sha256_digest(value)
@@ -231,22 +213,26 @@ class ManagedPythonPlan(_PlanModel):
         return validate_http_url(value, "catalog_url")
 
 
-class ExactDistributionPlan(_PlanModel):
-    name: str
-    version: str
+class CdhToolPlan(_PlanModel):
+    """Exact canonical cdh wheel installed as the image control-plane tool."""
 
-    @field_validator("name")
-    @classmethod
-    def _validate_name(cls, value: str) -> str:
-        try:
-            return validate_normalized_package(value)
-        except ValueError as error:
-            raise ValueError("name must be one normalized distribution name") from error
+    name: Literal["comfyui-docker-helper"]
+    version: str
+    wheel_digest: str
+    environment: Literal["/opt/uv/tools/comfyui-docker-helper"]
+    executable: Literal["/opt/uv/bin/cdh"]
 
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        return validate_exact_stable_distribution_version(value)
+        if validate_exact_stable_version(value) != CDH_VERSION:
+            raise ValueError("cdh version does not match the exact ledger")
+        return value
+
+    @field_validator("wheel_digest")
+    @classmethod
+    def _validate_wheel_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
 
 
 class UvToolPlan(_PlanModel):
@@ -300,10 +286,7 @@ class ComfyCliToolPlan(_PlanModel):
 class ToolStorePlan(_PlanModel):
     tool_dir: Literal["/opt/uv/tools"]
     bin_dir: Literal["/opt/uv/bin"]
-    cdh_environment: Literal["/opt/uv/tools/comfyui-docker-helper"]
-    cdh_executable: Literal["/opt/uv/bin/cdh"]
-    requirements_digest: str
-    cdh_closure: tuple[ExactDistributionPlan, ...]
+    cdh: CdhToolPlan
     comfy_cli: ComfyCliToolPlan | None
     uv_tools: tuple[UvToolPlan, ...]
 
@@ -316,10 +299,6 @@ class ToolStorePlan(_PlanModel):
             names.append(self.comfy_cli.name)
         if len(names) != len(set(names)):
             raise ValueError("uv tools must have unique distribution owners")
-        closure = tuple((item.name, item.version) for item in self.cdh_closure)
-        if not closure or tuple(sorted(set(closure))) != closure:
-            raise ValueError("cdh closure must be non-empty, sorted, and unique")
-        validate_sha256_digest(self.requirements_digest)
         return self
 
 
@@ -513,7 +492,6 @@ class ComfyUIRequirementsPlan(_PlanModel):
     python_version: str
     platform: Literal["linux/amd64"]
     protected_names: tuple[str, ...]
-    protected_policy_digest: str
     digest: str
     protected: tuple[ProtectedRequirementPlan, ...]
 
@@ -527,7 +505,7 @@ class ComfyUIRequirementsPlan(_PlanModel):
     def _validate_python_version(cls, value: str) -> str:
         return validate_exact_stable_version(value)
 
-    @field_validator("protected_policy_digest", "digest")
+    @field_validator("digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return validate_sha256_digest(value)
@@ -670,12 +648,6 @@ class ApplicationPhase(_PlanModel):
         adapter_protected_names = CudaBackendAdapter().protected_requirement_names
         if requirements.protected_names != adapter_protected_names:
             raise ValueError("ComfyUI protected names do not match the backend adapter")
-        if requirements.protected_policy_digest != protected_policy_digest(
-            adapter_protected_names
-        ):
-            raise ValueError(
-                "ComfyUI protected policy digest does not match the backend adapter"
-            )
         resolved_pytorch_names = {package.name for package in self.pytorch.packages}
         unresolved = {item.package for item in requirements.protected}.difference(
             resolved_pytorch_names
@@ -1098,6 +1070,7 @@ class _ResolvedPackageGroup:
     platform: Literal["linux/amd64"]
     index_url: str
     packages: tuple[ExactPackagePlan, ...]
+    setuptools_specifier: str | None = None
 
 
 def construct_build_plan(
@@ -1143,27 +1116,10 @@ def _validate_lock_satisfies_graph(
 ) -> None:
     for desired in graph.desired:
         resolved = tuple(entries[key] for key in desired.keys if key in entries)
-        if isinstance(desired.request, PyTorchRequestIdentity) and any(
-            getattr(entry, "request_digest", None) != desired.request_digest
-            for entry in resolved
-        ):
-            raise ValueError(
-                "canonical PyTorch packages and compatibility policy "
-                "must share one request digest"
-            )
-        if isinstance(desired.request, PyTorchRequestIdentity) and any(
-            isinstance(entry, DirectPythonLockEntry)
-            and not pytorch_core_version_matches_channel(
-                entry.package, entry.version, desired.request.channel
-            )
-            for entry in resolved
-        ):
-            raise ValueError("canonical core package does not match PyTorch channel")
         if len(resolved) != len(desired.keys) or not entries_satisfy_request(
             desired.request,
             resolved,
             desired.request_digest,
-            desired.managed_python_release,
         ):
             raise ValueError(_request_mismatch_message(desired.request))
 
@@ -1193,24 +1149,24 @@ def _project_toolchain(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
 ) -> ToolchainPhase:
-    cuda_entry = _take(entries, used, ("oci", "cuda-base"), OciLockEntry)
-    uv_entry = _take(entries, used, ("oci", "uv-tool"), OciLockEntry)
+    cuda_entry = _take(entries, used, ("images", "cuda"), OciLockEntry)
+    uv_entry = _take(entries, used, ("images", "uv"), OciLockEntry)
     python_entry = _take(
         entries,
         used,
-        ("managed-python", "cpython", graph.target_platform.value),
+        ("python", "interpreter"),
         ManagedPythonLockEntry,
     )
-    if python_entry.catalog_descriptor_digest != uv_entry.descriptor_digest:
+    if python_entry.catalog_digest != uv_entry.digest:
         raise ValueError("managed Python catalog is not bound to the uv image")
     comfy_cli = None
-    cli_key = ("comfy-cli", "comfy-cli", "uv-tool:comfy-cli")
+    cli_key = ("python", "uv_tools", "comfy-cli")
     if any(cli_key in item.keys for item in graph.desired):
-        cli_entry = _take(entries, used, cli_key, ComfyCliLockEntry)
+        cli_entry = _take(entries, used, cli_key, UvToolLockEntry)
         comfy_cli = ComfyCliToolPlan(
-            name=cli_entry.package,
+            name=cli_entry.name,
             version=cli_entry.version,
-            environment=cli_entry.environment,
+            environment="uv-tool:comfy-cli",
             executables=("comfy", "comfy-cli", "comfycli"),
             inventory_path="/opt/cdh/build/comfy-cli-inventory.txt",
         )
@@ -1229,18 +1185,26 @@ def _project_toolchain(
         pytorch_channel=graph.backend.package_channel,
         cuda_image=_image_plan(cuda_entry),
         uv_image=_image_plan(uv_entry),
-        python=ManagedPythonPlan.model_validate(
-            python_entry.model_dump(mode="python", exclude={"type", "request_digest"})
+        python=ManagedPythonPlan(
+            version=python_entry.version,
+            implementation="cpython",
+            platform=python_entry.platform,
+            libc=python_entry.libc,
+            provider="uv-managed",
+            catalog_descriptor_digest=python_entry.catalog_digest,
+            catalog_key=python_entry.artifact_key,
+            catalog_url=python_entry.artifact_url,
+            pip_version=graph.release.pip_version,
         ),
         tool_store=ToolStorePlan(
             tool_dir="/opt/uv/tools",
             bin_dir="/opt/uv/bin",
-            cdh_environment="/opt/uv/tools/comfyui-docker-helper",
-            cdh_executable="/opt/uv/bin/cdh",
-            requirements_digest=graph.release.requirements_digest,
-            cdh_closure=tuple(
-                ExactDistributionPlan(name=name, version=version)
-                for name, version in graph.release.cdh_closure
+            cdh=CdhToolPlan(
+                name="comfyui-docker-helper",
+                version=graph.release.cdh_version,
+                wheel_digest=graph.release.cdh_wheel_digest,
+                environment="/opt/uv/tools/comfyui-docker-helper",
+                executable="/opt/uv/bin/cdh",
             ),
             comfy_cli=comfy_cli,
             uv_tools=uv_tools,
@@ -1298,12 +1262,6 @@ def _project_application(
         used,
         package_channel=pytorch_request.channel,
     )
-    compatibility = _take(
-        entries,
-        used,
-        ("pytorch-compatibility", "application"),
-        PyTorchCompatibilityLockEntry,
-    )
     manager = None
     if graph.application.install_manager:
         python_minor = ".".join(pytorch_request.python_version.split(".")[:2])
@@ -1348,28 +1306,27 @@ def _project_application(
             python_index_url=pytorch_request.python_index_url,
             pytorch_index_url=pytorch_request.pytorch_index_url,
             packages=pytorch_packages.packages,
-            setuptools_specifier=compatibility.setuptools_specifier,
+            setuptools_specifier=pytorch_packages.setuptools_specifier,
         ),
         comfyui=ComfyUIPlan(
             repository=comfyui_entry.repository,
             commit=comfyui_entry.commit,
-            floor_commit=requirements_entry.floor_commit,
+            floor_commit=requirements_request.request.floor_commit,
             formal_release=comfyui_entry.formal_release,
             requirements=ComfyUIRequirementsPlan(
-                path=requirements_entry.path,
-                floor_commit=requirements_entry.floor_commit,
-                python_version=requirements_entry.python_version,
-                platform=requirements_entry.platform,
-                protected_names=requirements_entry.protected_names,
-                protected_policy_digest=requirements_entry.protected_policy_digest,
-                digest=requirements_entry.requirements_digest,
+                path=requirements_request.request.path,
+                floor_commit=requirements_request.request.floor_commit,
+                python_version=requirements_request.request.python_version,
+                platform=requirements_request.request.platform,
+                protected_names=requirements_request.request.protected_names,
+                digest=requirements_entry.digest,
                 protected=tuple(
                     ProtectedRequirementPlan(
-                        package=item.package,
+                        package=item.name,
                         extras=item.extras,
-                        selector=item.selector,
+                        selector=item.specifier,
                     )
-                    for item in requirements_entry.protected
+                    for item in requirements_entry.pytorch
                 ),
             ),
             manager=manager,
@@ -1484,11 +1441,6 @@ def manifest_binding(plan: BuildPlan) -> ManifestBinding:
     )
 
 
-def dump_manifest_binding_json(binding: ManifestBinding) -> bytes:
-    """Serialize one final-verification binding to canonical JSON bytes."""
-    return _canonical_json(binding.model_dump(mode="json"))
-
-
 def _take(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
@@ -1509,25 +1461,30 @@ def _package_group(
     *,
     package_channel: str | None,
 ) -> _ResolvedPackageGroup:
+    key = (
+        ("python", "package_groups", "pytorch")
+        if isinstance(request, PyTorchRequestIdentity)
+        else ("python", "package_groups", "application_extras")
+    )
+    expected_type = (
+        PyTorchLockEntry
+        if isinstance(request, PyTorchRequestIdentity)
+        else ApplicationExtrasLockEntry
+    )
+    entry = _take(entries, used, key, expected_type)
     packages: list[ExactPackagePlan] = []
-    for member in request.members:
-        key = ("python-package", request.environment, member.package)
-        entry = _take(entries, used, key, DirectPythonLockEntry)
-        if entry.extras != member.extras or not _selector_accepts(
-            member.selector, entry.version
-        ):
-            raise ValueError(f"canonical package does not satisfy {member.package}")
+    for package in entry.packages:
         if package_channel is not None and not pytorch_core_version_matches_channel(
-            entry.package, entry.version, package_channel
+            package.name, package.version, package_channel
         ):
             raise ValueError(
-                f"canonical {entry.package} version does not match PyTorch channel"
+                f"canonical {package.name} version does not match PyTorch channel"
             )
         packages.append(
             ExactPackagePlan(
-                name=entry.package,
-                extras=tuple(entry.extras),
-                version=entry.version,
+                name=package.name,
+                extras=package.extras,
+                version=package.version,
                 environment="application",
             )
         )
@@ -1541,6 +1498,9 @@ def _package_group(
             else request.index_url
         ),
         packages=tuple(packages),
+        setuptools_specifier=(
+            entry.setuptools_specifier if isinstance(entry, PyTorchLockEntry) else None
+        ),
     )
 
 
@@ -1553,15 +1513,15 @@ def _uv_tool(
     entry = _take(
         entries,
         used,
-        ("python-package", request.environment, member.package),
-        DirectPythonLockEntry,
+        ("python", "uv_tools", member.package),
+        UvToolLockEntry,
     )
     if entry.extras != member.extras or not _selector_accepts(
         member.selector, entry.version
     ):
         raise ValueError(f"canonical uv tool does not satisfy {member.package}")
     return UvToolPlan(
-        name=entry.package,
+        name=entry.name,
         extras=entry.extras,
         version=entry.version,
         environment=request.environment,
@@ -1623,7 +1583,12 @@ def _custom_node(
     pre = tuple(_hook(value, entries, used) for value in node.pre_install)
     post = tuple(_hook(value, entries, used) for value in node.post_install)
     if isinstance(node, RegistryNodeRequest):
-        entry = _take(entries, used, ("registry", node.id), RegistryNodeLockEntry)
+        entry = _take(
+            entries,
+            used,
+            ("custom_nodes", "registry", node.id),
+            RegistryNodeLockEntry,
+        )
         return RegistryNodePlan(
             type="registry",
             id=entry.id,
@@ -1633,7 +1598,12 @@ def _custom_node(
         )
     if not isinstance(node, GitNodeRequest):  # pragma: no cover - closed union
         raise AssertionError("unsupported canonical custom-node request")
-    entry = _take(entries, used, ("git", node.url), DirectGitLockEntry)
+    entry = _take(
+        entries,
+        used,
+        ("custom_nodes", "git", node.url),
+        DirectGitLockEntry,
+    )
     return GitNodePlan(
         type="git",
         url=entry.url,
@@ -1649,12 +1619,11 @@ def _hook(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
 ) -> HookPlan:
-    identity_path = hook_lock_identity("custom", relative_path)
     entry = _take(
         entries,
         used,
-        ("local-executable", identity_path),
-        LocalExecutableLockEntry,
+        ("hooks", "custom_node", relative_path),
+        CustomNodeHookLockEntry,
     )
     return HookPlan(relative_path=relative_path, digest=entry.digest)
 
@@ -1663,31 +1632,24 @@ def _runtime_hooks(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
 ) -> tuple[HookPlan, ...]:
-    prefix = f"{RUNTIME_HOOK_LOCK_PREFIX}/"
     hooks: list[HookPlan] = []
     phase_order = {
         directory: index
         for index, (_, directory) in enumerate(RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS)
     }
-    runtime_keys = [
-        key
-        for key in entries
-        if key[0] == "local-executable" and key[1].startswith(prefix)
-    ]
+    runtime_keys = [key for key in entries if key[:2] == ("hooks", "runtime")]
     runtime_keys.sort(
         key=lambda key: (
-            phase_order.get(key[1].removeprefix(prefix).split("/", 1)[0], 99),
-            key[1],
+            phase_order.get(key[2].split("/", 1)[0], 99),
+            key[2],
         )
     )
     for key in runtime_keys:
-        entry = _take(entries, used, key, LocalExecutableLockEntry)
-        relative_path = entry.relative_path.removeprefix(prefix)
+        entry = _take(entries, used, key, RuntimeHookLockEntry)
+        relative_path = entry.relative_path
         hooks.append(
             HookPlan(
-                relative_path=hook_lock_identity("runtime", relative_path).removeprefix(
-                    prefix
-                ),
+                relative_path=relative_path,
                 digest=entry.digest,
             )
         )
@@ -1695,8 +1657,16 @@ def _runtime_hooks(
 
 
 def _image_plan(entry: OciLockEntry) -> ImagePlan:
-    return ImagePlan.model_validate(
-        entry.model_dump(mode="python", exclude={"type", "request_digest"})
+    return ImagePlan(
+        role="uv-tool" if isinstance(entry, UvImageLockEntry) else "cuda-base",
+        repository=entry.repository,
+        tag=entry.tag,
+        descriptor_digest=entry.digest,
+        descriptor_kind=entry.kind,
+        platform=entry.platform,
+        resolved_version=(
+            entry.observed_version if isinstance(entry, UvImageLockEntry) else None
+        ),
     )
 
 

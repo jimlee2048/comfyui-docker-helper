@@ -23,8 +23,8 @@ cdh host render \
 ```
 
 Key output includes canonical `config.lock.toml`, one canonical
-`build-plan.json`, `manifest-binding.json`, a BuildPlan-derived runtime config,
-the projected cdh closure/checker/source-routing inputs, verified referenced
+`build-plan.json`, a BuildPlan-derived runtime config, one canonical cdh wheel,
+the standalone application checker, verified referenced
 build-hook bytes, content-locked baked runtime hooks, and a Dockerfile with
 literal digest-qualified `FROM` references. It does not copy root config into
 the container-helper authority. After the image's final build mutation, cdh
@@ -34,7 +34,8 @@ that in-image manifest is not another resolver or replay input.
 The optional `--hooks-dir` tree may contain only regular `.sh` or
 `.py` files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`.
 Every baked hook is content-locked and copied to `/opt/cdh/runtime/hooks`;
-mounted `/etc/cdh/runtime/hooks` remains external runtime input.
+mounted `/etc/cdh/runtime/hooks` remains external runtime input. Omitting
+`--hooks-dir` means that no runtime hook tree is baked.
 
 If a startup hook launches a background service, define a matching stop hook
 that requests the service's termination and waits for it to exit. Prefer the

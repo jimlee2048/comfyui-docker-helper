@@ -9,6 +9,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
 
@@ -42,7 +43,6 @@ from comfyui_docker_helper.pytorch_resolution import (
 _UV_PATH = Path("/usr/local/bin/uv")
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _CONSTRAINTS_PATH = _BUILD_DIRECTORY / "python-package-constraints.txt"
-_RESOLUTION_MANIFEST_PATH = _BUILD_DIRECTORY / "pyproject.toml"
 _PYTORCH_IMPORT_DISTRIBUTIONS = {
     "torch": "torch",
     "torchaudio": "torchaudio",
@@ -71,34 +71,30 @@ def install_inference_group(
     runtime: ContainerRuntime,
     uv_path: Path = _UV_PATH,
     constraints_path: Path = _CONSTRAINTS_PATH,
-    resolution_manifest_path: Path = _RESOLUTION_MANIFEST_PATH,
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Install and verify one BuildPlan-owned exact PyTorch group."""
     _validate_group(application, toolchain, runtime)
-    _verify_resolution_manifest(
-        resolution_manifest_path, application, expected_owner_uid=0
-    )
-
     group = application.pytorch
-    run_argv(
-        [
-            uv_path,
-            "--no-config",
-            "--project",
-            str(resolution_manifest_path.parent),
-            "pip",
-            "install",
-            "--python",
-            runtime.python,
-            "--no-python-downloads",
-            "--requirements",
-            str(resolution_manifest_path),
-        ],
-        cwd=_BUILD_DIRECTORY,
-        env=application_install_environment(environ),
-        description="inference package install",
-    )
+    with _pytorch_resolution_project(application) as resolution_manifest_path:
+        run_argv(
+            [
+                uv_path,
+                "--no-config",
+                "--project",
+                str(resolution_manifest_path.parent),
+                "pip",
+                "install",
+                "--python",
+                runtime.python,
+                "--no-python-downloads",
+                "--requirements",
+                str(resolution_manifest_path),
+            ],
+            cwd=_BUILD_DIRECTORY,
+            env=application_install_environment(environ),
+            description="inference package install",
+        )
     expected = {package.name: package.version for package in group.packages}
     run_application_checker(
         runtime,
@@ -128,7 +124,6 @@ def install_inference_group(
         owner_uid=0,
         owner_gid=0,
     )
-    resolution_manifest_path.unlink()
 
 
 def install_python_extras(
@@ -304,40 +299,29 @@ def _validate_application_package_owners(application: ApplicationPhase) -> None:
         )
 
 
-def _verify_resolution_manifest(
-    path: Path,
-    application: ApplicationPhase,
-    *,
-    expected_owner_uid: int,
-    expected_owner_gid: int = 0,
-) -> None:
-    try:
-        metadata = path.lstat()
-        content = path.read_bytes()
-    except OSError as error:
-        raise ApplicationInstallError(
-            "PyTorch resolution manifest could not be read"
-        ) from error
-    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
-        raise ApplicationInstallError(
-            "PyTorch resolution manifest must be a regular file"
-        )
-    if metadata.st_uid != expected_owner_uid or metadata.st_gid != expected_owner_gid:
-        raise ApplicationInstallError("PyTorch resolution manifest must be root-owned")
-    if stat.S_IMODE(metadata.st_mode) != 0o444:
-        raise ApplicationInstallError("PyTorch resolution manifest must be read-only")
+@contextmanager
+def _pytorch_resolution_project(application: ApplicationPhase):
+    """Materialize routing from the admitted plan only for its uv invocation."""
     group = application.pytorch
-    expected = pytorch_resolution_manifest_bytes(
+    content = pytorch_resolution_manifest_bytes(
         requirements=tuple(package.requirement for package in group.packages),
         direct_packages=tuple(package.name for package in group.packages),
         python_version=group.python_version,
         python_index_url=group.python_index_url,
         pytorch_index_url=group.pytorch_index_url,
     )
-    if content != expected:
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".pytorch-resolution-", dir=_BUILD_DIRECTORY
+        ) as raw:
+            path = Path(raw) / "pyproject.toml"
+            path.write_bytes(content)
+            path.chmod(0o444)
+            yield path
+    except OSError as error:
         raise ApplicationInstallError(
-            "PyTorch resolution manifest does not match BuildPlan"
-        )
+            "PyTorch resolution project could not be materialized"
+        ) from error
 
 
 def _write_constraints(

@@ -14,7 +14,7 @@ This project uses a src/ layout.
     - `rendering/`: materializes Docker build contexts.
     - `host/`: commands executed on the host machine.
     - `container/`: helpers executed inside Docker build containers.
-    - `templates/`: stores template files used by the internal implementation.
+    - `resources/`: stores package-owned files used by the internal implementation.
 - `tests/`: Test suites and fixtures.
     - `tests/unit/`: unit tests .
     - `tests/integration/`: integration tests.

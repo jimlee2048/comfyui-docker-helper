@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from tests.unit.test_build_plan import (
     accepted_resolution,
     build_plan,
+    canonical_wheel,
     final_config,
     request_graph,
 )
@@ -95,7 +96,7 @@ def test_materialization_projects_checksum_to_runtime_and_real_build_consumer(
     output = tmp_path / "context"
     output.mkdir()
 
-    materialize_build_plan(plan, output)
+    materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
 
     runtime = tomllib.loads((output / "runtime/config.toml").read_text())
     assert runtime["files"][0]["checksum"] == CANONICAL_CHECKSUM
@@ -114,13 +115,9 @@ def test_renderer_omits_build_download_command_when_no_files() -> None:
     assert "container download-files" not in render_build_plan_dockerfile(plan)
 
 
-def test_readme_template_documents_trusted_digest_and_matches_root() -> None:
+def test_readme_documents_trusted_digest() -> None:
     root = Path("README.md").read_text()
-    template = Path(
-        "src/comfyui_docker_helper/templates/cdh-release/README.md"
-    ).read_text()
 
-    assert root == template
     assert 'checksum = "sha256:<64 hexadecimal digits>"' in root
     assert "does not fetch or infer a digest" in root
     assert "download_failure_policy` applies only at runtime" in root

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import tomllib
 from pathlib import Path
 
@@ -13,14 +12,11 @@ from comfyui_docker_helper.exact_ledger import (
     UV_BUILD_REQUIREMENT,
     UV_RUNTIME_REQUIREMENT,
 )
-from comfyui_docker_helper.host.uv_runner import locate_host_uv
 from comfyui_docker_helper.release_artifacts import (
     PACKAGE_ROOT,
-    PRODUCTION_REQUIREMENTS,
     PROJECTED_LICENSE,
     PROJECTED_PYPROJECT,
-    PROJECTED_README,
-    release_source_files,
+    release_projection_files,
 )
 
 PROJECT_ROOT = Path(__file__).parents[2]
@@ -66,32 +62,6 @@ def test_project_release_identity_matches_toolchain_metadata() -> None:
     assert pyproject["build-system"]["requires"] == [UV_BUILD_REQUIREMENT]
 
 
-def test_frozen_production_closure_matches_repository_lock() -> None:
-    runner = locate_host_uv()
-    completed = subprocess.run(
-        runner.argv(
-            (
-                "export",
-                "--locked",
-                "--no-dev",
-                "--no-emit-project",
-                "--format",
-                "requirements.txt",
-                "--no-header",
-                "--no-annotate",
-            )
-        ),
-        cwd=PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout == PRODUCTION_REQUIREMENTS.read_text(encoding="utf-8")
-
-
 def test_projected_release_metadata_matches_repository_metadata() -> None:
     repository = _project_metadata()
     projected = tomllib.loads(PROJECTED_PYPROJECT.read_text(encoding="utf-8"))
@@ -102,12 +72,12 @@ def test_projected_release_metadata_matches_repository_metadata() -> None:
         projected["tool"]["uv"]["build-backend"]
         == repository["tool"]["uv"]["build-backend"]
     )
-    assert PROJECTED_README.read_bytes() == (PROJECT_ROOT / "README.md").read_bytes()
     assert PROJECTED_LICENSE.read_bytes() == (PROJECT_ROOT / "LICENSE").read_bytes()
+    assert "readme" not in repository["project"]
 
 
 def test_projected_release_source_is_entirely_wheel_owned() -> None:
-    projected = release_source_files()
+    projected = release_projection_files()
     relative_paths = tuple(item.relative_path for item in projected)
 
     assert len(relative_paths) == len(set(relative_paths))

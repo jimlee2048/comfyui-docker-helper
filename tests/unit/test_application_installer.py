@@ -24,7 +24,6 @@ from comfyui_docker_helper.container.application_installer import (
     _verify_application_imports,
     _verify_application_pip_commands,
     _verify_ordinary_requirements,
-    _verify_resolution_manifest,
     _write_application_inventory,
     _write_constraints,
     application_install_environment,
@@ -60,23 +59,16 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
 ) -> None:
     plan, _digest, application, toolchain = _write_phases(tmp_path)
     constraints = tmp_path / "constraints.txt"
-    manifest = tmp_path / "pyproject.toml"
     group = plan.application.pytorch
-    manifest.write_bytes(
-        pytorch_resolution_manifest_bytes(
-            requirements=tuple(package.requirement for package in group.packages),
-            direct_packages=tuple(package.name for package in group.packages),
-            python_version=group.python_version,
-            python_index_url=group.python_index_url,
-            pytorch_index_url=group.pytorch_index_url,
-        )
-    )
-    manifest.chmod(0o444)
     calls = []
+    observed_manifest: list[bytes] = []
 
-    monkeypatch.setattr(
-        application_installer, "_verify_resolution_manifest", lambda *_a, **_k: None
-    )
+    def record_call(argv, **kwargs) -> None:
+        calls.append((tuple(map(str, argv)), kwargs))
+        if "--requirements" in argv:
+            observed_manifest.append(Path(argv[-1]).read_bytes())
+
+    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
     monkeypatch.setattr(
         application_installer,
         "_verify_setuptools_compatibility",
@@ -90,7 +82,7 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     monkeypatch.setattr(
         application_installer,
         "run_argv",
-        lambda argv, **kwargs: calls.append((tuple(map(str, argv)), kwargs)),
+        record_call,
     )
     runtime = ContainerRuntime(virtual_env=Path("/opt/venv"))
 
@@ -99,7 +91,6 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         toolchain,
         runtime=runtime,
         constraints_path=constraints,
-        resolution_manifest_path=manifest,
         environ={
             "UV_INDEX_URL": "https://poison.example",
             "PIP_CONSTRAINT": "/tmp/poison",
@@ -113,15 +104,28 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "/usr/local/bin/uv",
         "--no-config",
         "--project",
-        str(tmp_path),
+        str(Path(install_argv[3])),
         "pip",
         "install",
         "--python",
         "/opt/venv/bin/python",
         "--no-python-downloads",
         "--requirements",
-        str(manifest),
+        install_argv[-1],
     )
+    resolution_root = Path(install_argv[3])
+    assert resolution_root.name.startswith(".pytorch-resolution-")
+    assert Path(install_argv[-1]).parent == resolution_root
+    assert observed_manifest == [
+        pytorch_resolution_manifest_bytes(
+            requirements=tuple(package.requirement for package in group.packages),
+            direct_packages=tuple(package.name for package in group.packages),
+            python_version=group.python_version,
+            python_index_url=group.python_index_url,
+            pytorch_index_url=group.pytorch_index_url,
+        )
+    ]
+    assert not resolution_root.exists()
     assert install_kwargs["env"] == {
         "HTTPS_PROXY": "https://proxy.example",
         "HOME": "/root",
@@ -149,7 +153,6 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "check",
     )
     assert constraints.read_bytes() == managed_constraints_bytes(group)
-    assert not manifest.exists()
 
 
 def test_constraints_are_complete_deterministic_and_read_only(tmp_path: Path) -> None:
@@ -633,21 +636,6 @@ def test_application_inventory_creation_is_exclusive_read_only_and_exact(
         )
 
 
-def test_resolution_manifest_rejects_changed_identity(tmp_path: Path) -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    manifest = tmp_path / "pyproject.toml"
-    manifest.write_text("[project]\nname='changed'\n")
-    manifest.chmod(0o444)
-
-    with pytest.raises(ApplicationInstallError, match="does not match BuildPlan"):
-        _verify_resolution_manifest(
-            manifest,
-            plan.application,
-            expected_owner_uid=os.getuid(),
-            expected_owner_gid=os.getgid(),
-        )
-
-
 def test_install_rejects_cross_channel_phase_before_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -665,7 +653,6 @@ def test_install_rejects_cross_channel_phase_before_running(
             toolchain,
             runtime=ContainerRuntime(virtual_env=Path("/opt/venv")),
             constraints_path=tmp_path / "unused",
-            resolution_manifest_path=tmp_path / "unused-manifest",
         )
 
 

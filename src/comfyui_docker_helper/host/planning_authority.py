@@ -12,15 +12,14 @@ import httpx
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     ComfyUIRequirementsLockEntry,
-    OciLockEntry,
     OfficialComfyUILockEntry,
     ResolverRequestIdentity,
+    UvImageLockEntry,
     canonical_entry_key,
     compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_request import (
     CanonicalRequestGraph,
-    ManagedPythonReleaseInputs,
     PlanningReleaseInputs,
     SelectorStability,
     comfyui_request,
@@ -41,9 +40,7 @@ from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.hook_validation import hook_lock_identity
 from comfyui_docker_helper.exact_ledger import (
     CDH_VERSION,
-    COMFYUI_REPOSITORY,
     PIP_VERSION,
-    UV_VERSION,
 )
 from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
@@ -59,12 +56,9 @@ from comfyui_docker_helper.host.identity_providers import (
     LocalExecutableIdentityRequest,
     UvManagedPythonIdentityProvider,
 )
+from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
 from comfyui_docker_helper.host.uv_runner import locate_host_uv
-from comfyui_docker_helper.release_artifacts import (
-    production_inventory,
-    production_requirements_digest,
-    release_source_digest,
-)
+from comfyui_docker_helper.release_artifacts import CanonicalWheel
 
 
 @dataclass(slots=True)
@@ -87,13 +81,14 @@ class CachingCanonicalAcquirer:
 class DefaultPlanningProviders:
     acquirer: CachingCanonicalAcquirer
     local_acquirer: LocalExecutableEntryAcquirer
+    canonical_wheel: CanonicalWheel
 
 
 @contextmanager
 def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
     """Create concrete final providers only for render/build, never validate."""
     uv = locate_host_uv()
-    release = managed_python_release_inputs()
+    canonical_wheel = build_canonical_wheel(uv)
     with httpx.Client(follow_redirects=True, timeout=30.0) as client:
         provider = ProviderIdentityAcquirer(
             oci=HttpOciIdentityProvider(client),
@@ -102,11 +97,11 @@ def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
             registry=HttpRegistryNodeIdentityProvider(client),
             git=GitDirectIdentityProvider(),
             python_group=UvPythonGroupResolver(uv),
-            release=release,
         )
         yield DefaultPlanningProviders(
             CachingCanonicalAcquirer(provider),
             LocalExecutableEntryAcquirer(FilesystemLocalExecutableIdentityProvider()),
+            canonical_wheel,
         )
 
 
@@ -122,11 +117,11 @@ def uv_catalog_descriptor_digest(
     if policy is not LockPolicy.UPGRADE and existing is not None:
         for entry in existing.entries:
             if (
-                isinstance(entry, OciLockEntry)
-                and canonical_entry_key(entry) == ("oci", "uv-tool")
+                isinstance(entry, UvImageLockEntry)
+                and canonical_entry_key(entry) == ("images", "uv")
                 and entries_satisfy_request(request, (entry,), digest)
             ):
-                return entry.descriptor_digest
+                return entry.digest
     if policy is LockPolicy.LOCKED:
         return f"sha256:{'0' * 64}"
     try:
@@ -135,7 +130,7 @@ def uv_catalog_descriptor_digest(
         raise CanonicalResolutionError(
             (
                 Diagnostic(
-                    path=("config.lock.toml", "oci", "uv-tool"),
+                    path=("config.lock.toml", "images", "uv"),
                     code="lock.resolve_failed",
                     message=str(error),
                 ),
@@ -144,9 +139,9 @@ def uv_catalog_descriptor_digest(
     if not entries_satisfy_request(request, acquired.entries, digest):
         raise ValueError("uv provider returned an incompatible descriptor")
     entry = acquired.entries[0]
-    if not isinstance(entry, OciLockEntry):  # pragma: no cover - proven above
+    if not isinstance(entry, UvImageLockEntry):  # pragma: no cover - proven above
         raise AssertionError("compatible uv OCI result must be an OCI entry")
-    return entry.descriptor_digest
+    return entry.digest
 
 
 def build_local_executable_requests(
@@ -185,7 +180,7 @@ def stable_comfyui_entry(
     """Stabilize the exact source identity needed by downstream requests."""
     request = comfyui_request(config)
     digest = compute_request_digest(request)
-    current = _existing_entry(existing, ("comfyui", COMFYUI_REPOSITORY))
+    current = _existing_entry(existing, ("comfyui",))
     if (
         (
             policy is not LockPolicy.UPGRADE
@@ -201,7 +196,7 @@ def stable_comfyui_entry(
         policy,
         acquirer,
         OfficialComfyUILockEntry,
-        ("comfyui", COMFYUI_REPOSITORY),
+        ("comfyui",),
     )
 
 
@@ -215,7 +210,7 @@ def stable_comfyui_requirements_entry(
     """Stabilize the exact protected projection needed by the PyTorch request."""
     request = comfyui_requirements_request(config, comfyui)
     digest = compute_request_digest(request)
-    key = ("comfyui-requirements", COMFYUI_REPOSITORY)
+    key = ("comfyui", "requirements")
     current = _existing_entry(existing, key)
     if (
         policy is not LockPolicy.UPGRADE
@@ -281,20 +276,10 @@ def _acquire_stable_entry(
     return acquired.entries[0]
 
 
-def managed_python_release_inputs() -> ManagedPythonReleaseInputs:
-    return ManagedPythonReleaseInputs(
+def planning_release_inputs(canonical_wheel: CanonicalWheel) -> PlanningReleaseInputs:
+    """Collect exact release-owned request and toolchain artifacts once."""
+    return PlanningReleaseInputs(
         pip_version=PIP_VERSION,
         cdh_version=CDH_VERSION,
-        cdh_source_digest=release_source_digest(),
-        uv_build_version=UV_VERSION,
-    )
-
-
-def planning_release_inputs(python_version: str) -> PlanningReleaseInputs:
-    """Collect exact release-owned request and toolchain artifacts once."""
-    managed = managed_python_release_inputs()
-    return PlanningReleaseInputs(
-        managed_python=managed,
-        requirements_digest=production_requirements_digest(),
-        cdh_closure=production_inventory(python_version),
+        cdh_wheel_digest=canonical_wheel.digest,
     )

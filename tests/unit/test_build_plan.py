@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,9 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from comfyui_docker_helper.comfyui_requirements import (
-    CUDA_PROTECTED_REQUIREMENTS,
     merge_pytorch_requirements,
-    protected_policy_digest,
 )
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
@@ -28,28 +27,32 @@ from comfyui_docker_helper.config.build_plan import (
     construct_build_plan as _construct_build_plan,
 )
 from comfyui_docker_helper.config.canonical_lock import (
+    ApplicationExtrasLockEntry,
     CanonicalLock,
-    ComfyCliLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequirementsLockEntry,
-    ComfyUIRequirementsRequestIdentity,
+    CudaImageLockEntry,
+    CustomNodeHookLockEntry,
     DirectGitLockEntry,
-    DirectPythonLockEntry,
     DirectPythonRequestMember,
-    LocalExecutableLockEntry,
     ManagedPythonLockEntry,
-    OciLockEntry,
     OfficialComfyUILockEntry,
     ProtectedRequirementProjection,
-    PyTorchCompatibilityLockEntry,
+    PyTorchLockEntry,
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
+    ResolvedPythonPackage,
+    RoutedPyTorchRequirement,
+    UvImageLockEntry,
+    UvToolLockEntry,
     canonical_entry_key,
+    canonical_lock_from_entries,
     compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_request import (
     CanonicalRequestGraph,
     build_canonical_request_graph,
+    comfyui_requirements_request,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -61,18 +64,27 @@ from comfyui_docker_helper.config.final_validation import (
 )
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
-    COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
 )
 from comfyui_docker_helper.host.planning_authority import planning_release_inputs
-from comfyui_docker_helper.release_artifacts import release_source_digest
+from comfyui_docker_helper.release_artifacts import CanonicalWheel
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
 DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT_A = "1" * 40
 COMMIT_B = "2" * 40
+CANONICAL_WHEEL_CONTENT = b"canonical cdh wheel test artifact"
+
+
+def canonical_wheel() -> CanonicalWheel:
+    return CanonicalWheel(
+        filename="comfyui_docker_helper-0.5.0-py3-none-any.whl",
+        version="0.5.0",
+        digest=(f"sha256:{hashlib.sha256(CANONICAL_WHEEL_CONTENT).hexdigest()}"),
+        content=CANONICAL_WHEEL_CONTENT,
+    )
 
 
 def final_config(
@@ -212,133 +224,81 @@ def accepted_resolution(
             members=pytorch_members,
         )
     )
-    names = tuple(sorted(CUDA_PROTECTED_REQUIREMENTS))
-    requirements_request = ComfyUIRequirementsRequestIdentity(
-        type="comfyui-requirements",
+    comfyui_entry = OfficialComfyUILockEntry(
+        request_digest=DIGEST_A,
         repository=COMFYUI_REPOSITORY,
         commit=COMMIT_A,
-        floor_commit=COMFYUI_FLOOR_COMMIT,
-        path="requirements.txt",
-        python_version=config.python.version,
-        platform="linux/amd64",
-        protected_names=list(names),
-        protected_policy_digest=protected_policy_digest(names),
+        formal_release="0.11.0",
     )
+    requirements_request = comfyui_requirements_request(config, comfyui_entry)
     entries = [
-        OciLockEntry(
-            type="oci",
+        CudaImageLockEntry(
             request_digest=DIGEST_A,
-            role="cuda-base",
             repository="nvidia/cuda",
             tag="13.0.3-cudnn-devel-ubuntu24.04",
-            descriptor_digest=DIGEST_A,
-            descriptor_kind="index",
+            digest=DIGEST_A,
+            kind="index",
             platform="linux/amd64",
         ),
-        OciLockEntry(
-            type="oci",
+        UvImageLockEntry(
             request_digest=DIGEST_B,
-            role="uv-tool",
             repository=UV_IMAGE_REPOSITORY,
             tag="0.11.28",
-            descriptor_digest=DIGEST_B,
-            descriptor_kind="index",
+            digest=DIGEST_B,
+            kind="index",
             platform="linux/amd64",
-            resolved_version="0.11.28",
+            observed_version="0.11.28",
         ),
         ManagedPythonLockEntry(
-            type="managed-python",
             request_digest=DIGEST_A,
             version=python_version,
-            implementation="cpython",
             platform="linux/amd64",
             libc="gnu",
-            provider="uv-managed",
-            catalog_descriptor_digest=DIGEST_B,
-            catalog_key=f"cpython-{python_version}-linux-x86_64-gnu",
-            catalog_url="https://example.test/python.tar.zst",
-            pip_version="26.1.2",
-            cdh_version="0.5.0",
-            cdh_source_digest=release_source_digest(),
-            uv_build_version="0.11.28",
+            catalog_digest=DIGEST_B,
+            artifact_key=f"cpython-{python_version}-linux-x86_64-gnu",
+            artifact_url="https://example.test/python.tar.zst",
         ),
-        OfficialComfyUILockEntry(
-            type="comfyui",
+        comfyui_entry,
+        ApplicationExtrasLockEntry(
             request_digest=DIGEST_A,
-            repository=COMFYUI_REPOSITORY,
-            commit=COMMIT_A,
-            formal_release="0.11.0",
+            packages=(ResolvedPythonPackage(name="numpy", extras=(), version="2.3.1"),),
         ),
-        DirectPythonLockEntry(
-            type="python-package",
-            request_digest=DIGEST_A,
-            package="numpy",
-            extras=[],
-            version="2.3.1",
-            environment="application",
-        ),
-        DirectPythonLockEntry(
-            type="python-package",
+        PyTorchLockEntry(
             request_digest=pytorch_digest,
-            package="torch",
-            extras=[],
-            version="2.12.1+cu130",
-            environment="application",
-        ),
-        DirectPythonLockEntry(
-            type="python-package",
-            request_digest=pytorch_digest,
-            package="torchvision",
-            extras=["image"],
-            version="0.27.1+cu130",
-            environment="application",
+            setuptools_specifier="<82",
+            packages=(
+                ResolvedPythonPackage(name="torch", extras=(), version="2.12.1+cu130"),
+                ResolvedPythonPackage(
+                    name="torchaudio", extras=(), version="2.11.0+cu130"
+                ),
+                ResolvedPythonPackage(
+                    name="torchvision",
+                    extras=("image",),
+                    version="0.27.1+cu130",
+                ),
+            ),
         ),
         RegistryNodeLockEntry(
-            type="registry",
             request_digest=DIGEST_A,
             id="registry-node",
             version="1.2.3",
         ),
         DirectGitLockEntry(
-            type="git",
             request_digest=DIGEST_A,
             url="https://example.test/direct.git",
             commit=COMMIT_B,
         ),
-        PyTorchCompatibilityLockEntry(
-            type="pytorch-compatibility",
-            request_digest=pytorch_digest,
-            environment="application",
-            setuptools_specifier="<82",
-        ),
-        DirectPythonLockEntry(
-            type="python-package",
-            request_digest=pytorch_digest,
-            package="torchaudio",
-            extras=[],
-            version="2.11.0+cu130",
-            environment="application",
-        ),
         ComfyUIRequirementsLockEntry(
-            type="comfyui-requirements",
             request_digest=compute_request_digest(requirements_request),
-            repository=COMFYUI_REPOSITORY,
-            commit=COMMIT_A,
-            floor_commit=COMFYUI_FLOOR_COMMIT,
-            path="requirements.txt",
-            python_version=config.python.version,
-            platform="linux/amd64",
-            protected_names=list(names),
-            protected_policy_digest=protected_policy_digest(names),
-            requirements_digest=DIGEST_C,
-            protected=[
-                ProtectedRequirementProjection(
-                    package=item.package,
+            digest=DIGEST_C,
+            pytorch=tuple(
+                RoutedPyTorchRequirement(
+                    name=item.package,
                     extras=item.extras,
-                    selector=item.selector,
+                    specifier=item.selector,
                 )
                 for item in upstream
-            ],
+            ),
         ),
     ]
     if install_cli:
@@ -354,40 +314,36 @@ def accepted_resolution(
         )
         entries.insert(
             4,
-            ComfyCliLockEntry(
-                type="comfy-cli",
+            UvToolLockEntry(
                 request_digest=compute_request_digest(cli_request),
-                package="comfy-cli",
+                name="comfy-cli",
+                extras=(),
                 version="1.8.0",
-                environment="uv-tool:comfy-cli",
             ),
         )
     if hook_digest is not None:
         entries.append(
-            LocalExecutableLockEntry(
-                type="local-executable",
-                relative_path="custom-node-hooks/hooks/pre.py",
+            CustomNodeHookLockEntry(
+                relative_path="hooks/pre.py",
                 digest=hook_digest,
             )
         )
     if with_uv_tool:
         entries.append(
-            DirectPythonLockEntry(
-                type="python-package",
+            UvToolLockEntry(
                 request_digest=DIGEST_C,
-                package="ruff",
-                extras=[],
+                name="ruff",
+                extras=(),
                 version="0.15.18",
-                environment="uv-tool:ruff",
             )
         )
     staged = {canonical_entry_key(entry): entry for entry in entries}
     graph = build_canonical_request_graph(
         config,
-        release=planning_release_inputs(config.python.version),
+        release=planning_release_inputs(canonical_wheel()),
         uv_descriptor_digest=DIGEST_B,
-        comfyui_entry=staged[("comfyui", COMFYUI_REPOSITORY)],
-        requirements_entry=staged[("comfyui-requirements", COMFYUI_REPOSITORY)],
+        comfyui_entry=staged[("comfyui",)],
+        requirements_entry=staged[("comfyui", "requirements")],
     )
     digest_by_key = {
         key: desired.request_digest for desired in graph.desired for key in desired.keys
@@ -407,7 +363,7 @@ def accepted_resolution(
     ]
     if reverse:
         entries.reverse()
-    lock = CanonicalLock(schema_version=1, entries=entries)
+    lock = canonical_lock_from_entries(entries)
     return AcceptedCanonicalLock(
         lock=lock,
         delta=(),
@@ -423,10 +379,10 @@ def request_graph(
     entries = {canonical_entry_key(entry): entry for entry in resolution.lock.entries}
     return build_canonical_request_graph(
         config,
-        release=planning_release_inputs(config.python.version),
-        uv_descriptor_digest=entries[("oci", "uv-tool")].descriptor_digest,
-        comfyui_entry=entries[("comfyui", COMFYUI_REPOSITORY)],
-        requirements_entry=entries[("comfyui-requirements", COMFYUI_REPOSITORY)],
+        release=planning_release_inputs(canonical_wheel()),
+        uv_descriptor_digest=entries[("images", "uv")].digest,
+        comfyui_entry=entries[("comfyui",)],
+        requirements_entry=entries[("comfyui", "requirements")],
     )
 
 
@@ -655,7 +611,7 @@ def test_constructor_projects_isolated_uv_tool_exact_result() -> None:
     tool = plan.toolchain.tool_store.uv_tools[0]
     assert tool.environment == "uv-tool:ruff"
     assert tool.requirement == "ruff==0.15.18"
-    assert plan.toolchain.tool_store.cdh_closure
+    assert plan.toolchain.tool_store.cdh.wheel_digest == canonical_wheel().digest
 
 
 def test_constructor_projects_optional_comfy_cli_only_to_the_tool_store() -> None:
@@ -833,28 +789,11 @@ def test_execution_only_config_change_updates_binding_deterministically() -> Non
     assert build_plan_digest(first) != build_plan_digest(second)
 
 
-@pytest.mark.parametrize(
-    ("entry_index", "field", "value", "message"),
-    [
-        (0, "tag", "12.9.2-cudnn-devel-ubuntu24.04", "CUDA image"),
-        (1, "tag", "latest", "uv image"),
-        (2, "version", "3.12.13", "managed Python"),
-        (3, "formal_release", "0.12.0", "ComfyUI identity"),
-        (4, "request_digest", DIGEST_B, "comfy-cli identity"),
-        (6, "version", "2.11.0+cu130", "satisfy torch"),
-        (8, "version", "1.2.4", "Registry identity"),
-        (9, "commit", "3" * 40, "Git identity"),
-    ],
-)
-def test_config_lock_identity_mismatches_fail_construction(
-    entry_index: int,
-    field: str,
-    value: str,
-    message: str,
-) -> None:
+# BuildPlan construction admits only a grouped lock that satisfies the request graph.
+def test_config_lock_identity_mismatch_fails_construction() -> None:
     resolution = accepted_resolution()
     data = resolution.lock.model_dump(mode="python")
-    data["entries"][entry_index][field] = value
+    data["images"]["cuda"]["tag"] = "12.9.2-cudnn-devel-ubuntu24.04"
     changed = AcceptedCanonicalLock(
         lock=CanonicalLock.model_validate(data),
         delta=(),
@@ -863,20 +802,16 @@ def test_config_lock_identity_mismatches_fail_construction(
         local_reads=(),
     )
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="CUDA image"):
         build_plan(final_config(), changed)
 
 
-# Construction rejects mismatched cohesive group and source-routing authorities.
-@pytest.mark.parametrize("entry_index", [6, 7])
-@pytest.mark.parametrize("version", ["2.12.1", "2.12.1+cpu", "2.12.1+cu129"])
-def test_build_plan_constructor_rejects_core_channel_mismatch(
-    entry_index: int, version: str
-) -> None:
+# An admitted PyTorch group must still preserve its requested backend channel.
+def test_build_plan_constructor_rejects_core_channel_mismatch() -> None:
     resolution = accepted_resolution()
     data = resolution.lock.model_dump(mode="python")
-    data["entries"][entry_index]["version"] = (
-        version if entry_index == 6 else version.replace("2.12.1", "0.27.1")
+    data["python"]["package_groups"]["pytorch"]["packages"][0]["version"] = (
+        "2.12.1+cu129"
     )
     changed = AcceptedCanonicalLock(
         lock=CanonicalLock.model_validate(data),
@@ -886,45 +821,7 @@ def test_build_plan_constructor_rejects_core_channel_mismatch(
         local_reads=(),
     )
 
-    with pytest.raises(ValueError, match="does not match PyTorch channel"):
-        build_plan(final_config(), changed)
-
-
-@pytest.mark.parametrize("entry_index", [6, 7, 10])
-def test_build_plan_constructor_rejects_split_pytorch_request_digest(
-    entry_index: int,
-) -> None:
-    resolution = accepted_resolution()
-    data = resolution.lock.model_dump(mode="python")
-    data["entries"][entry_index]["request_digest"] = DIGEST_C
-    changed = AcceptedCanonicalLock(
-        lock=CanonicalLock.model_validate(data),
-        delta=(),
-        write_intent=False,
-        provider_calls=(),
-        local_reads=(),
-    )
-
-    with pytest.raises(ValueError, match="must share one request digest"):
-        build_plan(final_config(), changed)
-
-
-def test_build_plan_constructor_rejects_cohesive_forged_pytorch_request_digest() -> (
-    None
-):
-    resolution = accepted_resolution()
-    data = resolution.lock.model_dump(mode="python")
-    for entry_index in (6, 7, 10):
-        data["entries"][entry_index]["request_digest"] = DIGEST_C
-    changed = AcceptedCanonicalLock(
-        lock=CanonicalLock.model_validate(data),
-        delta=(),
-        write_intent=False,
-        provider_calls=(),
-        local_reads=(),
-    )
-
-    with pytest.raises(ValueError, match="must share one request digest"):
+    with pytest.raises(ValueError, match="canonical package does not satisfy"):
         build_plan(final_config(), changed)
 
 
@@ -1109,19 +1006,19 @@ def test_build_plan_parser_accepts_unlisted_python_patch_inside_support() -> Non
 
 
 @pytest.mark.parametrize(
-    ("field", "message"),
+    ("field", "value", "message"),
     [
-        ("cdh_version", "cdh version does not match"),
-        ("uv_build_version", "uv-build version does not match"),
+        ("version", "99.0.0", "cdh version does not match"),
+        ("wheel_digest", "invalid", "digest must be sha256"),
     ],
 )
-def test_build_plan_parser_rejects_forged_release_owned_python_input(
-    field: str, message: str
+def test_build_plan_parser_rejects_forged_cdh_wheel_identity(
+    field: str, value: str, message: str
 ) -> None:
     document = json.loads(
         dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
     )
-    document["toolchain"]["python"][field] = "99.0.0"
+    document["toolchain"]["tool_store"]["cdh"][field] = value
 
     with pytest.raises(ValidationError, match=message):
         parse_build_plan_json(json.dumps(document))
@@ -1162,7 +1059,6 @@ def test_build_plan_parser_rejects_cohesively_shrunk_protected_policy() -> None:
     )
     requirements = document["application"]["comfyui"]["requirements"]
     requirements["protected_names"] = ["torch"]
-    requirements["protected_policy_digest"] = protected_policy_digest(("torch",))
     requirements["protected"] = [
         item for item in requirements["protected"] if item["package"] == "torch"
     ]
@@ -1173,18 +1069,6 @@ def test_build_plan_parser_rejects_cohesively_shrunk_protected_policy() -> None:
     ]
 
     with pytest.raises(ValidationError, match="do not match the backend adapter"):
-        parse_build_plan_json(json.dumps(document))
-
-
-def test_build_plan_parser_rejects_wrong_protected_policy_digest() -> None:
-    document = json.loads(
-        dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
-    )
-    document["application"]["comfyui"]["requirements"]["protected_policy_digest"] = (
-        DIGEST_C
-    )
-
-    with pytest.raises(ValidationError, match="digest does not match"):
         parse_build_plan_json(json.dumps(document))
 
 
@@ -1448,11 +1332,12 @@ def test_build_plan_requires_exact_runtime_planning_provenance() -> None:
 def test_unused_lock_identity_is_rejected() -> None:
     resolution = accepted_resolution()
     data = resolution.lock.model_dump(mode="python")
-    data["entries"] += (
-        LocalExecutableLockEntry(
-            type="local-executable",
-            relative_path="unused.sh",
-            digest=DIGEST_A,
+    data["python"]["uv_tools"] += (
+        UvToolLockEntry(
+            request_digest=DIGEST_A,
+            name="unused-tool",
+            extras=(),
+            version="1.0.0",
         ).model_dump(mode="python"),
     )
     changed = AcceptedCanonicalLock(

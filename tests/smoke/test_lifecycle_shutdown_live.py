@@ -45,7 +45,6 @@ def _formal_context(value: str | Path | None = None) -> Path:
         context / ".cdh-rendered",
         context / "Dockerfile",
         context / "build-plan.json",
-        context / "manifest-binding.json",
     )
     missing = [
         os.fspath(path) for path in required if path.is_symlink() or not path.is_file()
@@ -60,7 +59,7 @@ def _assert_image_context_binding(context: Path | None = None) -> None:
     binding = (context, _image())
     if binding in _VERIFIED_BINDINGS:
         return
-    for filename in ("build-plan.json", "manifest-binding.json"):
+    for filename in ("build-plan.json",):
         expected = subprocess.run(
             ["sha256sum", os.fspath(context / filename)],
             check=True,
@@ -90,7 +89,7 @@ def _launch_script_path() -> str:
 
 def _expected_cdh_argv() -> list[str]:
     document = json.loads((_formal_context() / "build-plan.json").read_text())
-    environment = document["toolchain"]["tool_store"]["cdh_environment"]
+    environment = document["toolchain"]["tool_store"]["cdh"]["environment"]
     return [
         f"{environment}/bin/python",
         "/opt/uv/bin/cdh",

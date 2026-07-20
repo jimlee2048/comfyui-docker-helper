@@ -1,168 +1,192 @@
-"""Canonical request graph derivation and immutability contracts."""
+"""Grouped request-key and release-binding contracts."""
 
-from dataclasses import FrozenInstanceError
+from __future__ import annotations
 
-import pytest
-from tests.unit.test_build_plan import accepted_resolution, final_config, request_graph
-
-from comfyui_docker_helper.comfyui_requirements import ComfyUIRequirementsError
 from comfyui_docker_helper.config.canonical_lock import (
+    ComfyCliRequestIdentity,
+    ComfyUIRequirementsRequestIdentity,
+    DirectGitRequestIdentity,
+    DirectPythonRequestIdentity,
+    DirectPythonRequestMember,
+    ManagedPythonRequestIdentity,
     OciRequestIdentity,
     PyTorchRequestIdentity,
-    ResolverRequestIdentity,
+    RegistryRequestIdentity,
+    RequirementsRoutingPolicy,
+    compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_request import (
-    CanonicalRequestError,
-    CanonicalRequestGraph,
-)
-from comfyui_docker_helper.config.final_models import (
-    CudaImageDistro,
-    CudaImageFlavor,
-    FinalConfig,
+    DesiredResolution,
+    PlanningReleaseInputs,
+    SelectorStability,
+    request_keys,
+    request_stability,
 )
 
-
-def _request(
-    graph: CanonicalRequestGraph, key: tuple[str, ...]
-) -> ResolverRequestIdentity:
-    matches = tuple(item.request for item in graph.desired if key in item.keys)
-    assert len(matches) == 1
-    return matches[0]
+DIGEST = f"sha256:{'a' * 64}"
+COMMIT = "1" * 40
 
 
-# One immutable request graph owns normalized acquisition intent and diagnostics.
-def test_graph_owns_backend_and_complete_pytorch_request_once() -> None:
-    graph = request_graph(final_config(), accepted_resolution())
-    cuda = _request(graph, ("oci", "cuda-base"))
-    pytorch = _request(graph, ("pytorch-compatibility", "application"))
-
-    assert isinstance(cuda, OciRequestIdentity)
-    assert cuda.tag == "13.0.3-cudnn-devel-ubuntu24.04"
-    assert graph.backend.package_channel == "cu130"
-    assert isinstance(pytorch, PyTorchRequestIdentity)
-    assert pytorch.pytorch_index_url == "https://download.pytorch.org/whl/cu130"
-    assert tuple(member.package for member in pytorch.members) == (
-        "torch",
-        "torchaudio",
-        "torchvision",
-    )
-    assert pytorch.members[2].extras == ("image",)
-    assert graph.application.os_packages == (
-        "bash",
-        "ca-certificates",
-        "curl",
-        "git",
-        "build-essential",
-        "aria2",
-        "openssh-server",
-        "tini",
-        "ffmpeg",
-    )
-    assert graph.application.os_packages.count("tini") == 1
-
-
-@pytest.mark.parametrize("python_version", ["3.12.13", "3.13.14", "3.14.6"])
-def test_graph_propagates_each_supported_python_target(python_version: str) -> None:
-    config = final_config(python_version=python_version)
-    graph = request_graph(
-        config,
-        accepted_resolution(python_version=python_version),
-    )
-    pytorch = _request(graph, ("pytorch-compatibility", "application"))
-
-    assert isinstance(pytorch, PyTorchRequestIdentity)
-    assert pytorch.python_version == python_version
-    assert (
-        _request(graph, ("managed-python", "cpython", "linux/amd64")).version
-        == python_version
+def _routing_policy(*, revision: int = 1) -> RequirementsRoutingPolicy:
+    return RequirementsRoutingPolicy(
+        revision=revision,
+        routed_names=("torch", "torchaudio", "torchvision"),
+        syntax="pep508",
+        markers="packaging-target-environment",
+        normalization="pep503-names-pep508-extras",
+        merge="specifier-intersection-extra-union",
+        sources="reject-options-and-direct-urls",
     )
 
 
-# Every supported CUDA image selector pair projects into one exact typed OCI
-# request, while the package channel remains a function of CUDA version alone.
-@pytest.mark.parametrize("image_distro", ["ubuntu22.04", "ubuntu24.04"])
-@pytest.mark.parametrize(
-    "image_flavor",
-    ["base", "runtime", "devel", "cudnn-runtime", "cudnn-devel"],
-)
-def test_graph_projects_each_cuda_image_selector_pair(
-    image_flavor: CudaImageFlavor,
-    image_distro: CudaImageDistro,
-) -> None:
-    document = final_config().model_dump(mode="python")
-    document["compute_platform"]["cuda"]["image_flavor"] = image_flavor
-    document["compute_platform"]["cuda"]["image_distro"] = image_distro
-    graph = request_graph(
-        FinalConfig.model_validate(document),
-        accepted_resolution(),
+def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
+    requests = (
+        OciRequestIdentity(
+            type="oci",
+            role="cuda-base",
+            repository="nvidia/cuda",
+            tag="13.0.3-cudnn-devel-ubuntu24.04",
+            platform="linux/amd64",
+        ),
+        ManagedPythonRequestIdentity(
+            type="managed-python",
+            version="3.13.14",
+            implementation="cpython",
+            platform="linux/amd64",
+            libc="gnu",
+            catalog_descriptor_digest=DIGEST,
+        ),
+        PyTorchRequestIdentity(
+            type="pytorch-group",
+            environment="application",
+            group="pytorch",
+            backend="cuda",
+            channel="cu130",
+            python_version="3.13.14",
+            platform="linux/amd64",
+            python_index_url="https://pypi.org/simple",
+            pytorch_index_url="https://download.pytorch.org/whl/cu130",
+            members=(
+                DirectPythonRequestMember(
+                    package="torch", extras=(), selector="==2.12.1"
+                ),
+                DirectPythonRequestMember(
+                    package="torchvision", extras=(), selector="==0.27.1"
+                ),
+            ),
+        ),
+        DirectPythonRequestIdentity(
+            type="python-group",
+            environment="application",
+            group="application-extra",
+            python_version="3.13.14",
+            platform="linux/amd64",
+            index_url="https://pypi.org/simple",
+            members=(
+                DirectPythonRequestMember(
+                    package="numpy", extras=(), selector="<3,>=2"
+                ),
+                DirectPythonRequestMember(
+                    package="pillow", extras=(), selector="<12,>=11"
+                ),
+            ),
+        ),
+        DirectPythonRequestIdentity(
+            type="python-group",
+            environment="uv-tool:ruff",
+            group="uv-tool",
+            python_version="3.13.14",
+            platform="linux/amd64",
+            index_url="https://pypi.org/simple",
+            members=(
+                DirectPythonRequestMember(
+                    package="ruff", extras=(), selector="<0.16,>=0.15"
+                ),
+            ),
+        ),
     )
-    cuda = _request(graph, ("oci", "cuda-base"))
-    pytorch = _request(graph, ("pytorch-compatibility", "application"))
-    expected_tag = f"13.0.3-{image_flavor}-{image_distro}"
 
-    assert cuda == OciRequestIdentity(
-        type="oci",
-        role="cuda-base",
-        repository="nvidia/cuda",
-        tag=expected_tag,
+    assert tuple(request_keys(request)[0] for request in requests) == (
+        ("images", "cuda"),
+        ("python", "interpreter"),
+        ("python", "package_groups", "pytorch"),
+        ("python", "package_groups", "application_extras"),
+        ("python", "uv_tools", "ruff"),
+    )
+    assert all(len(DesiredResolution(request).keys) == 1 for request in requests)
+
+
+def test_non_python_domains_use_semantic_grouped_keys() -> None:
+    cli = ComfyCliRequestIdentity(
+        type="comfy-cli",
+        package="comfy-cli",
+        policy="highest-target-compatible-stable",
+        minimum_version="1.7.0",
+        environment="uv-tool:comfy-cli",
+        index_url="https://pypi.org/simple",
+        python_version="3.13.14",
         platform="linux/amd64",
     )
-    assert graph.backend.base_image == f"nvidia/cuda:{expected_tag}"
-    assert graph.backend.package_channel == "cu130"
-    assert isinstance(pytorch, PyTorchRequestIdentity)
-    assert pytorch.channel == "cu130"
-    assert pytorch.pytorch_index_url == "https://download.pytorch.org/whl/cu130"
-
-
-def test_graph_derives_nondefault_cuda_tag_channel_and_index_once() -> None:
-    document = final_config().model_dump(mode="python")
-    document["compute_platform"]["cuda"] = {
-        "version": "12.9.2",
-        "image_flavor": "runtime",
-        "image_distro": "ubuntu22.04",
-    }
-    document["pytorch"]["index_base_url"] = "https://mirror.example.test/pytorch/"
-    config = FinalConfig.model_validate(document)
-    graph = request_graph(config, accepted_resolution())
-    cuda = _request(graph, ("oci", "cuda-base"))
-    pytorch = _request(graph, ("pytorch-compatibility", "application"))
-
-    assert isinstance(cuda, OciRequestIdentity)
-    assert cuda.tag == "12.9.2-runtime-ubuntu22.04"
-    assert graph.backend.package_channel == "cu129"
-    assert isinstance(pytorch, PyTorchRequestIdentity)
-    assert pytorch.channel == "cu129"
-    assert pytorch.pytorch_index_url == "https://mirror.example.test/pytorch/cu129"
-
-
-def test_graph_and_derived_sequences_are_immutable() -> None:
-    graph = request_graph(final_config(), accepted_resolution())
-    pytorch = _request(graph, ("pytorch-compatibility", "application"))
-
-    assert isinstance(graph.desired, tuple)
-    assert isinstance(pytorch, PyTorchRequestIdentity)
-    assert isinstance(pytorch.members, tuple)
-    with pytest.raises(FrozenInstanceError):
-        graph.config_digest = "sha256:forged"
-
-
-def test_protected_requirement_conflict_has_stable_canonical_diagnostic(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def reject_merge(*_args, **_kwargs):
-        raise ComfyUIRequirementsError("incompatible selectors")
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.config.canonical_request.merge_pytorch_requirements",
-        reject_merge,
+    registry = RegistryRequestIdentity(
+        type="registry", id="example-node", selector="latest"
+    )
+    git = DirectGitRequestIdentity(
+        type="git", url="https://example.test/node.git", ref="main"
     )
 
-    with pytest.raises(CanonicalRequestError) as raised:
-        request_graph(final_config(), accepted_resolution())
+    assert request_keys(cli) == (("python", "uv_tools", "comfy-cli"),)
+    assert request_keys(registry) == (("custom_nodes", "registry", "example-node"),)
+    assert request_keys(git) == (
+        ("custom_nodes", "git", "https://example.test/node.git"),
+    )
 
-    assert len(raised.value.diagnostics) == 1
-    diagnostic = raised.value.diagnostics[0]
-    assert diagnostic.path == ("pytorch", "extra_packages")
-    assert diagnostic.code == "pytorch.protected_requirement_conflict"
-    assert diagnostic.message == "protected PyTorch requirements conflict"
-    assert isinstance(raised.value.__cause__, ComfyUIRequirementsError)
+
+def test_complete_routing_policy_is_bound_only_through_request_digest() -> None:
+    values = dict(
+        type="comfyui-requirements",
+        repository="https://github.com/Comfy-Org/ComfyUI.git",
+        commit=COMMIT,
+        floor_commit=COMMIT,
+        path="requirements.txt",
+        python_version="3.13.14",
+        platform="linux/amd64",
+    )
+    current = ComfyUIRequirementsRequestIdentity(
+        **values, routing_policy=_routing_policy()
+    )
+    changed = ComfyUIRequirementsRequestIdentity(
+        **values,
+        routing_policy=RequirementsRoutingPolicy(
+            **{
+                **_routing_policy().model_dump(),
+                "sources": "reject-options-and-direct-urls",
+                "routed_names": ("torch", "torchvision"),
+            }
+        ),
+    )
+
+    assert current.protected_names == ("torch", "torchaudio", "torchvision")
+    assert compute_request_digest(current) != compute_request_digest(changed)
+    assert request_keys(current) == (("comfyui", "requirements"),)
+
+
+def test_release_inputs_bind_wheel_without_affecting_resolution_keys() -> None:
+    release = PlanningReleaseInputs(
+        pip_version="26.1.2",
+        cdh_version="0.5.0",
+        cdh_wheel_digest=DIGEST,
+    )
+
+    assert release == PlanningReleaseInputs("26.1.2", "0.5.0", DIGEST)
+
+
+def test_moving_and_exact_stability_remain_group_scoped() -> None:
+    exact = DirectGitRequestIdentity(
+        type="git", url="https://example.test/node.git", ref=COMMIT
+    )
+    moving = DirectGitRequestIdentity(
+        type="git", url="https://example.test/node.git", ref="main"
+    )
+
+    assert request_stability(exact) is SelectorStability.EXACT
+    assert request_stability(moving) is SelectorStability.MOVING

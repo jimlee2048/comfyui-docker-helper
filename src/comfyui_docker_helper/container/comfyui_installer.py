@@ -43,7 +43,6 @@ _GIT_PATH = Path("/usr/bin/git")
 _UV_PATH = Path("/usr/local/bin/uv")
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _CONSTRAINTS_PATH = _BUILD_DIRECTORY / "python-package-constraints.txt"
-_RESOLUTION_MANIFEST_PATH = _BUILD_DIRECTORY / "pyproject.toml"
 _REQUIRED_ROOT_FILES = ("main.py", "requirements.txt", "comfy_extras/nodes_audio.py")
 
 
@@ -59,7 +58,6 @@ def install_comfyui(
     git_path: Path = _GIT_PATH,
     uv_path: Path = _UV_PATH,
     constraints_path: Path = _CONSTRAINTS_PATH,
-    resolution_manifest_path: Path = _RESOLUTION_MANIFEST_PATH,
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Verify exact source before installing protected and ordinary requirements."""
@@ -73,7 +71,6 @@ def install_comfyui(
         runtime=runtime,
         uv_path=uv_path,
         constraints_path=constraints_path,
-        resolution_manifest_path=resolution_manifest_path,
         environ=environ,
     )
     install_python_extras(

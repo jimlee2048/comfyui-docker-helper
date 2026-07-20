@@ -663,21 +663,6 @@ def _verify_tini() -> None:
         raise FinalManifestError("Tini executable identity is invalid")
 
 
-def _read_owned_regular(path: Path, *, expected_mode: int | None = None) -> bytes:
-    try:
-        metadata = path.lstat()
-        content = read_regular_absolute_file(path)
-    except (OSError, ValueError) as error:
-        raise FinalManifestError(
-            f"required build evidence is unavailable: {path}"
-        ) from error
-    if metadata.st_uid != 0 or metadata.st_gid != 0:
-        raise FinalManifestError(f"required build evidence is not root-owned: {path}")
-    if expected_mode is not None and stat.S_IMODE(metadata.st_mode) != expected_mode:
-        raise FinalManifestError(f"required build evidence mode is invalid: {path}")
-    return content
-
-
 def _capture(
     argv: tuple[Path | str, ...],
     *,

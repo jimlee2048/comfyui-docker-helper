@@ -467,7 +467,6 @@ def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) 
         manager_enabled=plan.application.comfyui.manager is not None,
     )
     assert projection.shutdown_timeout == plan.runtime.shutdown_timeout
-    assert not hasattr(projection, "build")
 
 
 def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:
@@ -495,30 +494,6 @@ def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:
         "a-tool",
         "z-tool",
     )
-
-
-@pytest.mark.parametrize(
-    ("metadata", "message"),
-    [
-        (SimpleNamespace(st_uid=1, st_gid=0, st_mode=0o644), "not root-owned"),
-        (SimpleNamespace(st_uid=0, st_gid=0, st_mode=0o600), "mode is invalid"),
-    ],
-)
-def test_materialized_evidence_reader_rejects_owner_or_mode(
-    monkeypatch: pytest.MonkeyPatch,
-    metadata: SimpleNamespace,
-    message: str,
-) -> None:
-    path = Path("/opt/cdh/build/comfyui-requirements.txt")
-    monkeypatch.setattr(Path, "lstat", lambda _path: metadata)
-    monkeypatch.setattr(
-        final_manifest_service,
-        "read_regular_absolute_file",
-        lambda _path: b"{}\n",
-    )
-
-    with pytest.raises(FinalManifestError, match=message):
-        final_manifest_service._read_owned_regular(path, expected_mode=0o644)
 
 
 def test_manifest_service_publishes_only_after_successful_observation(

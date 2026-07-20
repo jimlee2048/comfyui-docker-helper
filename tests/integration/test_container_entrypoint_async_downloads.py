@@ -42,7 +42,6 @@ from comfyui_docker_helper.container.runtime_lifecycle import (
     RuntimeHookRunner,
 )
 from comfyui_docker_helper.container.runtime_state import (
-    RuntimeDownloadsState,
     RuntimeState,
     RuntimeStateError,
     load_runtime_state,
@@ -176,7 +175,7 @@ def _capture_signal_handlers(
 
 def _state_by_target(state_path: Path):
     state = load_runtime_state(state_path)
-    return {entry.target: entry for entry in state.downloads.entries.values()}
+    return {entry.target: entry for entry in state.downloads.values()}
 
 
 def _expected_state_is_visible(
@@ -482,16 +481,12 @@ filename = "model.bin"
         nonlocal starter_calls
         starter_calls += 1
         state = load_runtime_state(runtime_state_path)
-        entries = dict(state.downloads.entries)
-        digest, entry = next(iter(entries.items()))
-        entries[digest] = entry.model_copy(update={"attempts": 1})
         write_runtime_state(
             runtime_state_path,
             RuntimeState(
                 schema_version=state.schema_version,
-                updated_at=state.updated_at,
-                run_id=state.run_id,
-                downloads=RuntimeDownloadsState(entries=entries),
+                run_id="replaced-generation",
+                downloads=state.downloads,
             ),
         )
         return start_runtime_async_download_queue(
@@ -761,7 +756,7 @@ filename = "model.bin"
                 return self.returncode
             assert backend.entered.wait(timeout=1)
             interrupted_entries = _state_by_target(state_path)
-            assert interrupted_entries["models/model.bin"].status == "downloading"
+            assert interrupted_entries["models/model.bin"].status == "pending"
             handler = handlers[signal.SIGTERM]
             assert callable(handler)
             handler(signal.SIGTERM, None)
@@ -795,7 +790,7 @@ filename = "model.bin"
     assert backend.cancelled is True
     assert not (runtime.comfyui_path / "models" / "model.bin").exists()
     interrupted_entries = _state_by_target(state_path)
-    assert interrupted_entries["models/model.bin"].status == "failed"
+    assert interrupted_entries["models/model.bin"].status == "pending"
 
     resumed = AsyncBackend()
     resumed.payloads["model.bin"] = b"resumed"
@@ -912,20 +907,20 @@ overwrite = true
     assert _state_by_target(state_path)["models/model.bin"].status == "completed"
 
 
-# Exhausted-policy coverage pins async failure semantics: ComfyUI keeps running,
-# state records exhaustion, and continue/fail controls later queued files.
+# Exhausted-policy coverage pins current-run behavior while persisted recovery
+# state remains pending for the next start.
 @pytest.mark.parametrize(
     ("policy", "expected_calls", "expected_statuses"),
     [
         (
             "continue",
             ["a.bin", "a.bin", "b.bin"],
-            {"models/a.bin": "exhausted", "models/b.bin": "completed"},
+            {"models/a.bin": "pending", "models/b.bin": "completed"},
         ),
         (
             "fail",
             ["a.bin", "a.bin"],
-            {"models/a.bin": "exhausted", "models/b.bin": "pending"},
+            {"models/a.bin": "pending", "models/b.bin": "pending"},
         ),
     ],
 )
@@ -977,12 +972,13 @@ filename = "b.bin"
             def wait(self) -> int:
                 assert backend.entered.wait(timeout=1)
                 _eventually(
-                    lambda: _expected_state_is_visible(
-                        state_path,
-                        expected_statuses,
-                    ),
+                    lambda: len(backend.calls) == len(expected_calls),
                     timeout=2.5,
                 )
+                if policy == "continue":
+                    _eventually(
+                        lambda: (runtime.comfyui_path / "models" / "b.bin").is_file()
+                    )
                 return super().wait()
 
         return Child(0)
@@ -1115,9 +1111,9 @@ filename = "model.bin"
     _eventually(lambda: backend.cancelled)
 
 
-# Cross-start accounting coverage proves persisted history does not consume a
-# later container start's per-file attempt budget.
-def test_sync_attempt_budget_resets_for_each_container_start(
+# Cross-start accounting coverage proves each start owns its complete in-memory
+# attempt budget while persisted recovery state remains actionable.
+def test_sync_attempt_budget_is_owned_by_each_container_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1162,10 +1158,9 @@ filename = "model.bin"
         == 0
     )
     first = load_runtime_state(state_path)
-    first_entry = next(iter(first.downloads.entries.values()))
+    first_entry = next(iter(first.downloads.values()))
     assert len(backend.calls) == 2
-    assert first_entry.status == "exhausted"
-    assert first_entry.attempts == 2
+    assert first_entry.status == "pending"
 
     assert (
         _run_with_real_async_queue(
@@ -1177,8 +1172,7 @@ filename = "model.bin"
         == 0
     )
     second = load_runtime_state(state_path)
-    second_entry = next(iter(second.downloads.entries.values()))
+    second_entry = next(iter(second.downloads.values()))
     assert len(backend.calls) == 4
     assert second.run_id != first.run_id
-    assert second_entry.status == "exhausted"
-    assert second_entry.attempts == 2
+    assert second_entry.status == "pending"

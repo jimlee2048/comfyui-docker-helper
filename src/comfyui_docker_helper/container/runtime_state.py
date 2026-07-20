@@ -13,7 +13,6 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
 
@@ -38,20 +37,14 @@ RUNTIME_STATE_PATH = Path("/var/lib/cdh/runtime/state.json")
 RUNTIME_STATE_SCHEMA_VERSION = 1
 
 _DIGEST_KEY_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
-_ERROR_DOWNLOAD_STATUSES = frozenset({"failed", "exhausted", "cleanup_pending"})
-_RESUMABLE_DOWNLOAD_STATUSES = frozenset(
-    {"pending", "downloading", "failed", "exhausted", "cleanup_pending"}
-)
+_RESUMABLE_DOWNLOAD_STATUSES = frozenset({"pending", "cleanup_pending"})
 
 type RuntimeDownloadDigestKey = Annotated[
     str, Field(pattern=_DIGEST_KEY_PATTERN.pattern)
 ]
 type RuntimeDownloadStatus = Literal[
     "pending",
-    "downloading",
     "completed",
-    "failed",
-    "exhausted",
     "cleanup_pending",
 ]
 
@@ -125,11 +118,7 @@ class RuntimeDownloadEntry(ConfigModel):
     downloader: DownloaderName
     download_mode: Literal["sync", "async"]
     status: RuntimeDownloadStatus
-    attempts: int = Field(ge=0)
-    attempt_run_id: str = Field(min_length=1)
     resume: RuntimeResumeState | None = None
-    last_error: str | None = None
-    updated_at: datetime
 
     @field_validator("source")
     @classmethod
@@ -166,18 +155,6 @@ class RuntimeDownloadEntry(ConfigModel):
             validate_canonical_file_checksum(value)
         return value
 
-    @field_validator("attempt_run_id")
-    @classmethod
-    def _validate_attempt_run_id(cls, value: str) -> str:
-        if not value:
-            raise ValueError("attempt_run_id must be non-empty")
-        return value
-
-    @field_validator("updated_at")
-    @classmethod
-    def _validate_updated_at(cls, value: datetime) -> datetime:
-        return _validate_aware_datetime(value, "updated_at")
-
     @model_validator(mode="after")
     def _validate_lifecycle(self) -> Self:
         if self.resume is not None:
@@ -187,28 +164,17 @@ class RuntimeDownloadEntry(ConfigModel):
                 raise ValueError(
                     "runtime resume authority is invalid for this download status"
                 )
-        if self.status not in _ERROR_DOWNLOAD_STATUSES:
-            self.last_error = None
-        elif self.last_error is not None:
-            self.last_error = summarize_runtime_error(self.last_error)
         return self
-
-
-class RuntimeDownloadsState(ConfigModel):
-    """Persisted runtime file entries keyed by canonical desired identity."""
-
-    entries: dict[RuntimeDownloadDigestKey, RuntimeDownloadEntry] = Field(
-        default_factory=dict
-    )
 
 
 class RuntimeState(ConfigModel):
     """Sole canonical runtime-state schema v1."""
 
     schema_version: Literal[1]
-    updated_at: datetime
     run_id: str = Field(min_length=1)
-    downloads: RuntimeDownloadsState = Field(default_factory=RuntimeDownloadsState)
+    downloads: dict[RuntimeDownloadDigestKey, RuntimeDownloadEntry] = Field(
+        default_factory=dict
+    )
 
     @field_validator("run_id")
     @classmethod
@@ -216,11 +182,6 @@ class RuntimeState(ConfigModel):
         if not value:
             raise ValueError("run_id must be non-empty")
         return value
-
-    @field_validator("updated_at")
-    @classmethod
-    def _validate_updated_at(cls, value: datetime) -> datetime:
-        return _validate_aware_datetime(value, "updated_at")
 
 
 @dataclass(slots=True)
@@ -534,10 +495,8 @@ def prepare_runtime_state_for_start(
     *,
     desired_downloads: bool,
     run_id: str,
-    now: datetime,
 ) -> RuntimeState | None:
-    """Load state and reset per-start attempt accounting without writing it."""
-    _validate_aware_datetime(now, "now")
+    """Load state and bind the next startup generation without writing it."""
     if not run_id:
         raise RuntimeStateError("run_id must be non-empty")
 
@@ -553,20 +512,14 @@ def prepare_runtime_state_for_start(
             return None
         return RuntimeState(
             schema_version=RUNTIME_STATE_SCHEMA_VERSION,
-            updated_at=now,
             run_id=run_id,
-            downloads=RuntimeDownloadsState(),
+            downloads={},
         )
 
-    entries = {
-        digest_key: _entry_for_run(entry, run_id=run_id, now=now)
-        for digest_key, entry in state.downloads.entries.items()
-    }
     return RuntimeState(
         schema_version=RUNTIME_STATE_SCHEMA_VERSION,
-        updated_at=now,
         run_id=run_id,
-        downloads=RuntimeDownloadsState(entries=entries),
+        downloads=state.downloads,
     )
 
 
@@ -583,31 +536,6 @@ def summarize_runtime_error(value: object, *, max_length: int = 512) -> str:
     return text
 
 
-def failed_runtime_download_entry(
-    entry: RuntimeDownloadEntry,
-    *,
-    status: Literal["failed", "exhausted", "cleanup_pending"],
-    last_error: object,
-    updated_at: datetime,
-    resume_authority: ResumeAuthority | None = None,
-) -> RuntimeDownloadEntry:
-    """Return an error entry with bounded diagnostics and exact resume state."""
-    resume = (
-        RuntimeResumeState.from_authority(resume_authority)
-        if resume_authority is not None
-        else None
-    )
-    return RuntimeDownloadEntry.model_validate(
-        {
-            **entry.model_dump(),
-            "status": status,
-            "resume": resume,
-            "last_error": summarize_runtime_error(last_error),
-            "updated_at": updated_at,
-        }
-    )
-
-
 def _runtime_state_json(state: RuntimeState) -> str:
     normalized = RuntimeState.model_validate(state.model_dump())
     data = normalized.model_dump(mode="json")
@@ -615,22 +543,6 @@ def _runtime_state_json(state: RuntimeState) -> str:
         json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         + "\n"
     )
-
-
-def _entry_for_run(
-    entry: RuntimeDownloadEntry, *, run_id: str, now: datetime
-) -> RuntimeDownloadEntry:
-    if entry.attempt_run_id == run_id:
-        return entry
-    return entry.model_copy(
-        update={"attempts": 0, "attempt_run_id": run_id, "updated_at": now}
-    )
-
-
-def _validate_aware_datetime(value: datetime, field_name: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{field_name} must be timezone-aware")
-    return value
 
 
 def _parse_runtime_state(payload: bytes, path: Path) -> RuntimeState:

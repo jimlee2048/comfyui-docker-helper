@@ -6,7 +6,6 @@ import hashlib
 import os
 import stat
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -15,6 +14,9 @@ import pytest
 
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.container import transfer_core
+from comfyui_docker_helper.container.runtime_download_state import (
+    RuntimeDownloadStateWriter,
+)
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
     RuntimeFilePlan,
@@ -32,7 +34,6 @@ from comfyui_docker_helper.container.runtime_files import (
 )
 from comfyui_docker_helper.container.runtime_state import (
     RuntimeDownloadEntry,
-    RuntimeDownloadsState,
     RuntimeResumeState,
     RuntimeState,
     RuntimeStateError,
@@ -54,9 +55,6 @@ from comfyui_docker_helper.container.transfer_core import (
     VerificationStatus,
 )
 
-NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
-LATER = datetime(2026, 1, 2, 4, 5, 6, tzinfo=UTC)
-
 
 def _checksum(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
@@ -73,9 +71,8 @@ def _state(
 ) -> RuntimeState:
     return RuntimeState(
         schema_version=1,
-        updated_at=NOW,
         run_id=run_id,
-        downloads=RuntimeDownloadsState(entries=entries or {}),
+        downloads=entries or {},
     )
 
 
@@ -96,10 +93,6 @@ def _entry(
         downloader=downloader,
         download_mode="sync",
         status=status,
-        attempts=1,
-        attempt_run_id="run-1",
-        last_error=None,
-        updated_at=NOW,
     )
 
 
@@ -133,7 +126,7 @@ def _state_digest(
 def _resume_entry_for_item(
     item: RuntimeFilePlanItem,
     *,
-    status: str = "failed",
+    status: str = "pending",
 ) -> tuple[RuntimeDownloadEntry, Path, Path]:
     staging = runtime_file_staging_target(item)
     control = Path(f"{staging}.aria2")
@@ -368,7 +361,6 @@ def test_reconciliation_schedules_unproven_existing_target_for_core(
     result = reconcile_runtime_file_plan(
         plan,
         _state(),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
@@ -392,7 +384,6 @@ def test_reconciliation_reschedules_completed_checksum_for_live_verification(
     result = reconcile_runtime_file_plan(
         plan,
         _state({digest: _entry_for_item(item)}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
@@ -415,7 +406,6 @@ def test_reconciliation_reuses_completed_checksum_free_regular_final(
     result = reconcile_runtime_file_plan(
         plan,
         _state({digest: _entry_for_item(item)}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
@@ -442,7 +432,6 @@ def test_reconciliation_rejects_completed_final_through_symlinked_parent(
         reconcile_runtime_file_plan(
             plan,
             _state({digest: _entry_for_item(plan.items[0])}),
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
@@ -459,14 +448,13 @@ def test_reconciliation_reschedules_completed_entry_when_final_is_missing(
     result = reconcile_runtime_file_plan(
         plan,
         _state({digest: _entry_for_item(plan.items[0])}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
     )
 
     assert result.download_plan.items == (replace(plan.items[0], downloader="httpx"),)
-    assert result.state.downloads.entries[digest].status == "pending"
+    assert result.state.downloads[digest].status == "pending"
 
 
 def test_reconciliation_retains_unowned_stale_artifact_as_cleanup_pending(
@@ -482,16 +470,18 @@ def test_reconciliation_retains_unowned_stale_artifact_as_cleanup_pending(
 
     result = reconcile_runtime_file_plan(
         RuntimeFilePlan(items=()),
-        _state({stale_digest: _entry_for_item(stale_item, status="downloading")}),
-        now=LATER,
+        _state({stale_digest: _entry_for_item(stale_item, status="pending")}),
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
     )
 
     assert result.stale_entry_digests == frozenset({stale_digest})
-    assert result.cleanup_pending_digests == frozenset({stale_digest})
-    assert result.state.downloads.entries[stale_digest].status == "cleanup_pending"
+    assert [pending.digest for pending in result.cleanup_pending] == [stale_digest]
+    assert result.cleanup_pending[0].reason == (
+        "interrupted transfer lacks exact artifact authority"
+    )
+    assert result.state.downloads[stale_digest].status == "cleanup_pending"
     assert stale.read_bytes() == b"partial"
 
 
@@ -515,7 +505,6 @@ def test_invalid_state_identity_fails_before_stale_artifact_mutation(
         reconcile_runtime_file_plan(
             RuntimeFilePlan(items=()),
             _state({mismatched_digest: _entry_for_item(stale_item)}),
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
@@ -539,7 +528,7 @@ def test_reconciliation_exactly_cleans_authorized_stale_resume_artifacts(
     control.write_bytes(b"control")
     staging_stat = staging.stat()
     control_stat = control.stat()
-    entry = _entry_for_item(stale_item, status="failed", downloader="aria2")
+    entry = _entry_for_item(stale_item, status="pending", downloader="aria2")
     entry.resume = RuntimeResumeState(
         staging_device=staging_stat.st_dev,
         staging_inode=staging_stat.st_ino,
@@ -550,14 +539,13 @@ def test_reconciliation_exactly_cleans_authorized_stale_resume_artifacts(
     result = reconcile_runtime_file_plan(
         RuntimeFilePlan(items=()),
         _state({stale_digest: entry}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
     )
 
-    assert result.state.downloads.entries == {}
-    assert result.cleanup_pending_digests == frozenset()
+    assert result.state.downloads == {}
+    assert result.cleanup_pending == ()
     assert not staging.exists()
     assert not control.exists()
 
@@ -577,13 +565,12 @@ def test_changed_identity_preserves_final_and_drops_clean_old_bookkeeping(
     result = reconcile_runtime_file_plan(
         new_plan,
         _state({old_digest: _entry_for_item(old_item)}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
     )
 
-    assert old_digest not in result.state.downloads.entries
+    assert old_digest not in result.state.downloads
     assert result.download_plan.items == (replace(new_item, downloader="httpx"),)
     assert new_item.target.read_bytes() == b"old final"
 
@@ -604,13 +591,12 @@ def test_changed_overwrite_cleans_old_resume_and_preserves_final(
     result = reconcile_runtime_file_plan(
         new_plan,
         _state({old_digest: entry}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=True,
     )
 
-    assert old_digest not in result.state.downloads.entries
+    assert old_digest not in result.state.downloads
     assert not staging.exists()
     assert not control.exists()
     assert old_item.target.read_bytes() == b"old final"
@@ -631,7 +617,6 @@ def test_duplicate_serialized_transfer_namespace_is_invalid(tmp_path: Path) -> N
         reconcile_runtime_file_plan(
             RuntimeFilePlan(items=()),
             _state(entries),
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
@@ -661,20 +646,16 @@ def test_async_secondary_admission_rejects_non_digest_identity_mismatch(
 
 
 @pytest.mark.parametrize(
-    ("status", "attempt_run_id", "attempts", "state_run_id"),
+    ("status", "state_run_id"),
     [
-        ("completed", "run-1", 0, "run-1"),
-        ("cleanup_pending", "run-1", 0, "run-1"),
-        ("pending", "old-run", 0, "run-1"),
-        ("pending", "run-1", 1, "run-1"),
-        ("pending", "run-1", 0, "other-run"),
+        ("completed", "run-1"),
+        ("cleanup_pending", "run-1"),
+        ("pending", "other-run"),
     ],
 )
 def test_async_secondary_admission_binds_current_pending_generation(
     tmp_path: Path,
     status: str,
-    attempt_run_id: str,
-    attempts: int,
     state_run_id: str,
 ) -> None:
     root = tmp_path / "ComfyUI"
@@ -689,8 +670,6 @@ def test_async_secondary_admission_binds_current_pending_generation(
             **base.model_dump(),
             "download_mode": "async",
             "status": status,
-            "attempt_run_id": attempt_run_id,
-            "attempts": attempts,
         }
     )
 
@@ -715,14 +694,13 @@ def test_disabling_resume_cleans_exact_current_authority(tmp_path: Path) -> None
     result = reconcile_runtime_file_plan(
         plan,
         _state({digest: entry}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
     )
 
     assert result.download_plan.items[0].resume_authority is None
-    assert result.state.downloads.entries[digest].resume is None
+    assert result.state.downloads[digest].resume is None
     assert not staging.exists()
     assert not control.exists()
 
@@ -752,13 +730,12 @@ def test_disabling_resume_cleanup_failure_retains_old_authority(
         reconcile_runtime_file_plan(
             plan,
             state,
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
         )
 
-    assert state.downloads.entries[digest].resume == entry.resume
+    assert state.downloads[digest].resume == entry.resume
 
 
 def test_current_partial_resume_authority_converges_to_clean_schedule(
@@ -774,14 +751,13 @@ def test_current_partial_resume_authority_converges_to_clean_schedule(
     result = reconcile_runtime_file_plan(
         plan,
         _state({digest: entry}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=True,
     )
 
     assert result.download_plan.items[0].resume_authority is None
-    assert result.state.downloads.entries[digest].resume is None
+    assert result.state.downloads[digest].resume is None
     assert not staging.exists()
 
 
@@ -801,20 +777,19 @@ def test_current_resume_inode_mismatch_is_fatal_without_state_change(
         reconcile_runtime_file_plan(
             plan,
             state,
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=True,
         )
 
-    assert state.downloads.entries[digest].resume == entry.resume
+    assert state.downloads[digest].resume == entry.resume
     assert staging.read_bytes() == b"partial"
     assert control.read_bytes() == b"foreign"
 
 
 @pytest.mark.parametrize(
     ("status", "with_authority", "resume_download"),
-    [("cleanup_pending", True, True), ("downloading", False, False)],
+    [("cleanup_pending", True, True), ("pending", False, False)],
 )
 def test_current_interrupted_state_reconciles_before_clean_schedule(
     tmp_path: Path,
@@ -835,14 +810,13 @@ def test_current_interrupted_state_reconciles_before_clean_schedule(
     result = reconcile_runtime_file_plan(
         plan,
         _state({digest: entry}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=resume_download,
     )
 
     assert result.download_plan.items[0].resume_authority is None
-    assert result.state.downloads.entries[digest].status == "pending"
+    assert result.state.downloads[digest].status == "pending"
     if staging is not None and control is not None:
         assert not staging.exists()
         assert not control.exists()
@@ -860,7 +834,6 @@ def test_current_unowned_artifact_fails_before_schedule(tmp_path: Path) -> None:
         reconcile_runtime_file_plan(
             plan,
             _state(),
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
@@ -891,26 +864,25 @@ def test_stale_cleanup_fsync_failure_retries_from_durable_absence(
         first = reconcile_runtime_file_plan(
             RuntimeFilePlan(items=()),
             _state({digest: entry}),
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
         )
 
-    assert first.cleanup_pending_digests == frozenset({digest})
-    assert first.state.downloads.entries[digest].resume == entry.resume
+    assert [pending.digest for pending in first.cleanup_pending] == [digest]
+    assert "directory fsync failed" in first.cleanup_pending[0].reason
+    assert first.state.downloads[digest].resume == entry.resume
     assert not staging.exists()
     assert not control.exists()
 
     second = reconcile_runtime_file_plan(
         RuntimeFilePlan(items=()),
         first.state,
-        now=LATER,
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
     )
-    assert second.state.downloads.entries == {}
+    assert second.state.downloads == {}
 
 
 def test_partial_stale_authority_and_unsafe_leaf_remain_cleanup_pending(
@@ -930,7 +902,7 @@ def test_partial_stale_authority_and_unsafe_leaf_remain_cleanup_pending(
         _state_digest(partial_item): partial_entry,
         _state_digest(unsafe_item): _entry_for_item(
             unsafe_item,
-            status="downloading",
+            status="pending",
         ),
     }
 
@@ -952,13 +924,15 @@ def test_partial_stale_authority_and_unsafe_leaf_remain_cleanup_pending(
         result = reconcile_runtime_file_plan(
             RuntimeFilePlan(items=()),
             _state(entries),
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
         )
 
-    assert result.cleanup_pending_digests == frozenset(entries)
+    assert {pending.digest for pending in result.cleanup_pending} == set(entries)
+    assert any(
+        pending.reason == "staging cleanup failed" for pending in result.cleanup_pending
+    )
     assert staging.read_bytes() == b"partial"
     assert not control.exists()
     assert unsafe_staging.is_symlink()
@@ -967,13 +941,12 @@ def test_partial_stale_authority_and_unsafe_leaf_remain_cleanup_pending(
     partial_digest = _state_digest(partial_item)
     retry = reconcile_runtime_file_plan(
         RuntimeFilePlan(items=()),
-        _state({partial_digest: result.state.downloads.entries[partial_digest]}),
-        now=LATER,
+        _state({partial_digest: result.state.downloads[partial_digest]}),
         comfyui_path=root,
         default_downloader="httpx",
         resume_download=False,
     )
-    assert retry.state.downloads.entries == {}
+    assert retry.state.downloads == {}
     assert not staging.exists()
 
 
@@ -994,11 +967,10 @@ def test_unresolved_stale_owner_cannot_share_current_transfer_namespace(
                 {
                     _state_digest(stale_item): _entry_for_item(
                         stale_item,
-                        status="downloading",
+                        status="pending",
                     )
                 }
             ),
-            now=LATER,
             comfyui_path=root,
             default_downloader="httpx",
             resume_download=False,
@@ -1139,7 +1111,9 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
         assert [result.item.filename for result in results] == ["b.bin"]
 
     assert len(backend.calls) == (1 if policy == "fail" else 2)
-    assert statuses[:2] == ["downloading", "failed"]
+    assert statuses[0] == "failed"
+    if policy == "continue":
+        assert statuses[-1] == "completed"
     assert any(
         "Runtime download failed:" in line and "status=failed" in line for line in logs
     )
@@ -1234,11 +1208,11 @@ def test_runtime_cancelled_transfer_stops_without_exhausted_failure(
     )
 
     assert results == ()
-    assert statuses == ["downloading", "failed"]
+    assert statuses == ["failed"]
     assert len(backend.calls) == 1
 
 
-def test_state_persistence_failure_stops_before_backend_and_is_not_reobserved(
+def test_required_completion_state_persistence_failure_is_fatal(
     tmp_path: Path,
 ) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"))
@@ -1265,9 +1239,61 @@ def test_state_persistence_failure_stops_before_backend_and_is_not_reobserved(
             log=lambda _: None,
         )
 
-    assert observations == ["downloading"]
-    assert backend.calls == []
-    assert not runtime_file_staging_target(plan.items[0]).exists()
+    assert observations == ["completed"]
+    assert len(backend.calls) == 1
+    assert plan.items[0].target.read_bytes() == b"downloaded"
+
+
+# The state writer persists only next-start recovery changes, not repeated
+# current-run failure telemetry.
+def test_runtime_state_writer_persists_only_recovery_changes(tmp_path: Path) -> None:
+    class RecordingStore:
+        def __init__(self) -> None:
+            self.writes: list[RuntimeState] = []
+
+        def write(self, state: RuntimeState) -> None:
+            self.writes.append(state)
+
+    item = replace(
+        _plan(tmp_path / "ComfyUI", _file("a.bin", downloader="aria2")).items[0],
+        downloader="aria2",
+    )
+    digest = _state_digest(item, default_downloader="aria2")
+    store = RecordingStore()
+    writer = RuntimeDownloadStateWriter(
+        store,
+        _state({digest: _entry_for_item(item, status="pending", downloader="aria2")}),
+    )
+    authority = ResumeAuthority(
+        identity_digest=runtime_file_identity_digest(item),
+        staging_device=1,
+        staging_inode=2,
+        control_device=3,
+        control_inode=4,
+    )
+
+    writer(item, "failed")
+    assert store.writes == []
+
+    writer(item, "failed", resume_authority=authority)
+    assert len(store.writes) == 1
+    assert store.writes[-1].downloads[digest].status == "pending"
+    assert store.writes[-1].downloads[digest].resume == (
+        RuntimeResumeState.from_authority(authority)
+    )
+
+    writer(item, "failed", resume_authority=authority)
+    assert len(store.writes) == 1
+
+    writer(item, "failed")
+    assert len(store.writes) == 2
+    assert store.writes[-1].downloads[digest].status == "pending"
+    assert store.writes[-1].downloads[digest].resume is None
+
+    writer(item, "completed")
+    assert len(store.writes) == 3
+    assert store.writes[-1].downloads[digest].status == "completed"
+    assert store.writes[-1].downloads[digest].resume is None
 
 
 def test_quiescent_aria_resume_authority_round_trips_through_reconciliation(
@@ -1321,13 +1347,12 @@ def test_quiescent_aria_resume_authority_round_trips_through_reconciliation(
     assert authority is not None
     item = plan.items[0]
     digest = _state_digest(item, default_downloader="aria2")
-    entry = _entry_for_item(item, status="exhausted", downloader="aria2")
+    entry = _entry_for_item(item, status="pending", downloader="aria2")
     entry.resume = RuntimeResumeState.from_authority(authority)
 
     reconciled = reconcile_runtime_file_plan(
         plan,
         _state({digest: entry}),
-        now=LATER,
         comfyui_path=root,
         default_downloader="aria2",
         resume_download=True,

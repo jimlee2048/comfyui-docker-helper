@@ -8,7 +8,6 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -524,7 +523,6 @@ def _activate_runtime_file_plan(
     cancel_requested: Callable[[], bool],
     backend_observer: Callable[[CancellableDownloadBackend], None],
 ) -> _PreparedRuntimeDownloads:
-    now = datetime.now(UTC)
     store = RuntimeStateStore.open(
         runtime_state_path,
         create_parent=bool(plan.items),
@@ -537,7 +535,6 @@ def _activate_runtime_file_plan(
             store,
             desired_downloads=bool(plan.items),
             run_id=run_id,
-            now=now,
         )
         if state is None:
             return _empty_prepared_runtime_downloads()
@@ -545,7 +542,6 @@ def _activate_runtime_file_plan(
         reconciliation = reconcile_runtime_file_plan(
             plan,
             state,
-            now=now,
             comfyui_path=runtime.comfyui_path,
             default_downloader=config.cdh.default_downloader,
             resume_download=config.cdh.downloader.aria2.resume_download,
@@ -659,12 +655,13 @@ def _log_runtime_download_reconciliation(
             f"source_host={runtime_source_host(item.item.url)} "
             f"identity={short_runtime_identity(item.digest)}"
         )
-    for digest in sorted(reconciliation.cleanup_pending_digests):
-        entry = reconciliation.state.downloads.entries[digest]
+    for pending in reconciliation.cleanup_pending:
+        entry = reconciliation.state.downloads[pending.digest]
         log(
             "WARNING: Runtime stale download cleanup remains pending: "
-            f"target={entry.target} identity={short_runtime_identity(digest)} "
-            f"reason={runtime_error_reason(entry.last_error)}"
+            f"target={entry.target} "
+            f"identity={short_runtime_identity(pending.digest)} "
+            f"reason={runtime_error_reason(pending.reason)}"
         )
 
 
@@ -680,10 +677,10 @@ def _log_runtime_download_reconciliation_persisted(
     async_skipped = len(async_items) - async_scheduled
     log(
         "Runtime download reconciliation persisted: "
-        f"entries={len(reconciliation.state.downloads.entries)} "
+        f"entries={len(reconciliation.state.downloads)} "
         f"async_scheduled={async_scheduled} async_skipped={async_skipped} "
         f"stale_entries={len(reconciliation.stale_entry_digests)} "
-        f"cleanup_pending={len(reconciliation.cleanup_pending_digests)}"
+        f"cleanup_pending={len(reconciliation.cleanup_pending)}"
     )
 
 

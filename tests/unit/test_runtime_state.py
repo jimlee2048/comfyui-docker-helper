@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import stat
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,7 +19,6 @@ from comfyui_docker_helper.container.runtime_diagnostics import (
 from comfyui_docker_helper.container.runtime_state import (
     RUNTIME_STATE_SCHEMA_VERSION,
     RuntimeDownloadEntry,
-    RuntimeDownloadsState,
     RuntimeResumeState,
     RuntimeState,
     RuntimeStateError,
@@ -32,18 +30,12 @@ from comfyui_docker_helper.container.runtime_state import (
 )
 
 DIGEST_KEY = "sha256:" + ("a" * 64)
-OTHER_DIGEST_KEY = "sha256:" + ("b" * 64)
-NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 def _entry(
     *,
     target: str = "models/checkpoints/model.safetensors",
     status: str = "pending",
-    attempts: int = 0,
-    attempt_run_id: str = "run-1",
-    updated_at: datetime = NOW,
-    last_error: str | None = None,
     source: str = "https://example.com/model.safetensors",
     checksum: str | None = None,
     overwrite: bool = False,
@@ -58,11 +50,7 @@ def _entry(
         downloader=downloader,
         download_mode="sync",
         status=status,
-        attempts=attempts,
-        attempt_run_id=attempt_run_id,
         resume=resume,
-        last_error=last_error,
-        updated_at=updated_at,
     )
 
 
@@ -70,13 +58,11 @@ def _state(
     *,
     run_id: str = "run-1",
     entries: dict[str, RuntimeDownloadEntry] | None = None,
-    updated_at: datetime = NOW,
 ) -> RuntimeState:
     return RuntimeState(
         schema_version=RUNTIME_STATE_SCHEMA_VERSION,
-        updated_at=updated_at,
         run_id=run_id,
-        downloads=RuntimeDownloadsState(entries=entries or {}),
+        downloads=entries or {},
     )
 
 
@@ -91,15 +77,13 @@ def test_write_runtime_state_serializes_deterministic_json_shape(
     write_runtime_state(path, state)
 
     assert path.read_text(encoding="utf-8") == (
-        '{"downloads":{"entries":{"'
+        '{"downloads":{"'
         f"{DIGEST_KEY}"
-        '":{"attempt_run_id":"run-1","attempts":0,"checksum":null,'
-        '"download_mode":"sync","downloader":"httpx","last_error":null,'
+        '":{"checksum":null,"download_mode":"sync","downloader":"httpx",'
         '"overwrite":false,"resume":null,"source":'
         '"https://example.com/model.safetensors","status":"pending","target":'
-        '"models/checkpoints/model.safetensors",'
-        '"updated_at":"2026-01-02T03:04:05Z"}}},"run_id":"run-1",'
-        '"schema_version":1,"updated_at":"2026-01-02T03:04:05Z"}\n'
+        '"models/checkpoints/model.safetensors"}},"run_id":"run-1",'
+        '"schema_version":1}\n'
     )
     assert load_runtime_state(path) == state
 
@@ -110,9 +94,8 @@ def test_load_runtime_state_rejects_unsupported_schema_version(tmp_path: Path) -
         json.dumps(
             {
                 "schema_version": 2,
-                "updated_at": "2026-01-02T03:04:05Z",
                 "run_id": "run-1",
-                "downloads": {"entries": {}},
+                "downloads": {},
             }
         ),
         encoding="utf-8",
@@ -127,9 +110,8 @@ def test_load_runtime_state_requires_serialized_schema_version(tmp_path: Path) -
     path.write_text(
         json.dumps(
             {
-                "updated_at": "2026-01-02T03:04:05Z",
                 "run_id": "run-1",
-                "downloads": {"entries": {}},
+                "downloads": {},
             }
         ),
         encoding="utf-8",
@@ -151,15 +133,14 @@ def test_runtime_state_rejects_extra_fields_and_invalid_digest_key() -> None:
         RuntimeState.model_validate(
             {
                 "schema_version": 1,
-                "updated_at": "2026-01-02T03:04:05Z",
                 "run_id": "run-1",
-                "downloads": {"entries": {}},
+                "downloads": {},
                 "extra": True,
             }
         )
 
     with pytest.raises(ValidationError):
-        RuntimeDownloadsState(entries={"sha256:" + ("A" * 64): _entry()})
+        _state(entries={"sha256:" + ("A" * 64): _entry()})
 
 
 @pytest.mark.parametrize(
@@ -183,68 +164,7 @@ def test_runtime_download_entry_rejects_invalid_target_paths(target: str) -> Non
         _entry(target=target)
 
 
-# Runtime state retains bounded, control-safe failure details only for
-# failed/exhausted downloads; all non-error statuses clear stale messages.
-@pytest.mark.parametrize("status", ["pending", "downloading", "completed"])
-def test_runtime_download_entry_clears_last_error_for_non_error_statuses(
-    status: str,
-) -> None:
-    entry = _entry(
-        status=status,
-        last_error=(
-            "https://example.com/model.safetensors?token=secret "
-            "password=hunter2 /workspace/ComfyUI/model.safetensors"
-        ),
-    )
-
-    assert entry.last_error is None
-
-
-@pytest.mark.parametrize("status", ["failed", "exhausted", "cleanup_pending"])
-def test_runtime_download_entry_summarizes_last_error_for_error_statuses(
-    status: str,
-) -> None:
-    raw_error = (
-        "failed\n"
-        "https://example.com/model.safetensors?token=secret "
-        "password=hunter2 Authorization: Bearer auth-secret bearer bearer-secret "
-        "/workspace/ComfyUI/models/model.safetensors "
-        f"{'x' * 600}"
-    )
-
-    entry = _entry(status=status, last_error=raw_error)
-
-    assert entry.last_error is not None
-    assert "\n" not in entry.last_error
-    assert "https://example.com/model.safetensors?token=secret" in entry.last_error
-    assert "password=hunter2" in entry.last_error
-    assert "Authorization: Bearer auth-secret" in entry.last_error
-    assert "/workspace/ComfyUI/models/model.safetensors" in entry.last_error
-    assert len(entry.last_error) == 512
-    assert entry.last_error.endswith("...")
-
-
-def test_failed_runtime_download_entry_accepts_exception_last_error() -> None:
-    entry = runtime_state.failed_runtime_download_entry(
-        _entry(),
-        status="failed",
-        last_error=RuntimeError(
-            "https://example.com/model.safetensors?token=secret "
-            "password=hunter2 /absolute/path/model.safetensors"
-        ),
-        updated_at=NOW,
-    )
-
-    assert isinstance(entry, RuntimeDownloadEntry)
-    assert entry.status == "failed"
-    assert entry.last_error is not None
-    assert "https://example.com/model.safetensors?token=secret" in entry.last_error
-    assert "password=hunter2" in entry.last_error
-    assert "/absolute/path/model.safetensors" in entry.last_error
-
-
-# Atomic writes protect the state file from partial updates and re-normalize any
-# mutated entries before persistence.
+# Atomic writes protect the state file from partial updates and foreign races.
 def test_atomic_write_replaces_file(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     write_runtime_state(path, _state(run_id="old-run"))
@@ -263,22 +183,6 @@ def test_crash_leftover_temp_does_not_block_next_atomic_write(tmp_path: Path) ->
 
     assert load_runtime_state(path) == _state()
     assert leftover.read_text(encoding="utf-8") == "partial"
-
-
-def test_write_runtime_state_resummarizes_mutated_last_error(tmp_path: Path) -> None:
-    path = tmp_path / "state.json"
-    state = _state(entries={DIGEST_KEY: _entry(status="failed")})
-    state.downloads.entries[DIGEST_KEY].last_error = (
-        "https://example.com/model.safetensors?token=secret "
-        "password=hunter2 /workspace/ComfyUI/model.safetensors"
-    )
-
-    write_runtime_state(path, state)
-
-    payload = path.read_text(encoding="utf-8")
-    assert "https://example.com/model.safetensors?token=secret" in payload
-    assert "password=hunter2" in payload
-    assert "/workspace/ComfyUI/model.safetensors" in payload
 
 
 def test_atomic_write_preserves_old_file_on_replace_failure(
@@ -553,8 +457,8 @@ def test_precommit_temp_cleanup_name_replacement_preserves_both_files(
     assert not path.exists()
 
 
-# Startup preparation validates existing state and resets the in-memory
-# per-start budget; reconciliation owns the first durable write.
+# Startup preparation validates existing state and binds one top-level generation;
+# reconciliation owns the first durable write.
 def test_prepare_runtime_state_creates_missing_desired_state_without_writing(
     tmp_path: Path,
 ) -> None:
@@ -564,7 +468,6 @@ def test_prepare_runtime_state_creates_missing_desired_state_without_writing(
         path,
         desired_downloads=True,
         run_id="run-1",
-        now=NOW,
     )
 
     assert state == _state()
@@ -580,7 +483,6 @@ def test_prepare_runtime_state_fails_corrupt_active_state(tmp_path: Path) -> Non
             path,
             desired_downloads=True,
             run_id="run-1",
-            now=NOW,
         )
 
 
@@ -598,7 +500,6 @@ def test_prepare_runtime_state_rejects_invalid_existing_empty_plan_state(
             path,
             desired_downloads=False,
             run_id="run-1",
-            now=NOW,
         )
 
     assert path.read_text(encoding="utf-8") == "{not-json"
@@ -609,32 +510,19 @@ def test_prepare_runtime_state_rejects_invalid_existing_empty_plan_state(
             missing_path,
             desired_downloads=False,
             run_id="run-1",
-            now=NOW,
         )
         is None
     )
     assert not missing_path.parent.exists()
 
 
-def test_prepare_runtime_state_resets_attempts_for_new_run_and_preserves_same_run(
+def test_prepare_runtime_state_rebinds_generation_without_rewriting_entries(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "state.json"
-    old_updated_at = datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC)
     state = _state(
         run_id="old-run",
-        entries={
-            DIGEST_KEY: _entry(
-                attempts=3,
-                attempt_run_id="old-run",
-                updated_at=old_updated_at,
-            ),
-            OTHER_DIGEST_KEY: _entry(
-                attempts=2,
-                attempt_run_id="run-2",
-                updated_at=old_updated_at,
-            ),
-        },
+        entries={DIGEST_KEY: _entry()},
     )
     write_runtime_state(path, state)
 
@@ -642,21 +530,14 @@ def test_prepare_runtime_state_resets_attempts_for_new_run_and_preserves_same_ru
         path,
         desired_downloads=True,
         run_id="run-2",
-        now=NOW,
     )
 
     assert prepared is not None
     assert prepared.run_id == "run-2"
-    assert prepared.downloads.entries[DIGEST_KEY].attempts == 0
-    assert prepared.downloads.entries[DIGEST_KEY].attempt_run_id == "run-2"
-    assert prepared.downloads.entries[DIGEST_KEY].updated_at == NOW
-    assert prepared.downloads.entries[OTHER_DIGEST_KEY].attempts == 2
-    assert prepared.downloads.entries[OTHER_DIGEST_KEY].attempt_run_id == "run-2"
-    assert prepared.downloads.entries[OTHER_DIGEST_KEY].updated_at == old_updated_at
+    assert prepared.downloads == state.downloads
 
 
-# Runtime error summaries preserve authored text while making it structurally
-# safe for one-line state and log records.
+# Runtime error summaries preserve authored text while making logs structurally safe.
 def test_summarize_runtime_error_preserves_text_and_truncates() -> None:
     raw = (
         "failed\n"
@@ -713,38 +594,3 @@ def test_runtime_error_reason_preserves_authored_text_and_quotes_it() -> None:
     assert "password=plain" in reason
     assert "token:abc123" in reason
     assert "Bearer bearer-secret" in reason
-
-
-def test_state_json_preserves_bounded_authored_failure_details(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "state.json"
-    state = _state(
-        entries={
-            DIGEST_KEY: _entry(
-                status="failed",
-                target="models/checkpoints/model.safetensors",
-                last_error=(
-                    "https://example.com/model.safetensors?token=secret "
-                    "password=hunter2 Authorization: Bearer auth-secret "
-                    "bearer bearer-secret /workspace/ComfyUI/models/model.safetensors "
-                    "/var/lib/cdh/runtime/staging/model.tmp backend=httpx "
-                    "failure_policy=continue"
-                ),
-            )
-        }
-    )
-
-    write_runtime_state(path, state)
-
-    payload = path.read_text(encoding="utf-8")
-    assert "https://example.com/model.safetensors?token=secret" in payload
-    assert "password=hunter2" in payload
-    assert "Authorization: Bearer auth-secret" in payload
-    assert "bearer bearer-secret" in payload
-    assert "backend=httpx" in payload
-    assert "failure_policy=continue" in payload
-    assert "/workspace/ComfyUI/models/model.safetensors" in payload
-    assert "/var/lib/cdh/runtime/staging/model.tmp" in payload
-    assert "models/checkpoints/model.safetensors" in payload
-    assert os.linesep

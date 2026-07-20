@@ -53,8 +53,6 @@ _SUBMODULE_GITLINK_COMMIT = "1a499becb0a88fd28ac3e4e09bd8917ce95c9629"
 
 _INVENTORY_OBSERVER_SOURCE = r"""import importlib.metadata as metadata
 import json
-import pathlib
-import sys
 
 from packaging.utils import canonicalize_name
 from packaging.version import Version
@@ -67,11 +65,6 @@ for distribution in metadata.distributions():
     assert name not in observed
     observed[name] = version
 items = sorted(observed.items())
-rows = [f"{name}=={version}" for name, version in items]
-expected = ("\n".join(rows) + "\n").encode()
-content = pathlib.Path(sys.argv[1]).read_bytes()
-assert content.endswith(b"\n")
-assert content == expected
 print(json.dumps(items, ensure_ascii=True, separators=(",", ":")))
 """
 

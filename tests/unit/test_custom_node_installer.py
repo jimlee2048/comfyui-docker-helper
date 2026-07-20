@@ -640,6 +640,9 @@ def test_enabled_git_only_plan_rejects_anchor_drift_at_next_observation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     application, runtime, anchor = _local_manager_application(tmp_path)
+    manager = application.comfyui.manager
+    assert manager is not None
+    (anchor.parent / manager.import_name).mkdir()
     custom_nodes = _phase(runtime, (_git_node(runtime),))
     _patch_phases(monkeypatch, application, custom_nodes)
     runtime.comfyui_path.joinpath("manager_requirements.txt").write_text(
@@ -669,11 +672,6 @@ def test_enabled_git_only_plan_rejects_anchor_drift_at_next_observation(
         lambda *_args: None,
     )
     monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
-    monkeypatch.setattr(
-        comfyui_installer,
-        "run_application_checker",
-        lambda *_args, **_kwargs: None,
-    )
     monkeypatch.setattr(
         custom_node_installer,
         "capture_manager_authority",
@@ -1742,15 +1740,17 @@ def test_hook_cannot_retarget_requirements_and_installed_manager_together(
     )
     monkeypatch.setattr(
         comfyui_installer,
+        "_verify_manager_import_root",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        comfyui_installer,
         "_verify_manager_import_anchor",
         lambda _application, observed_manager, _runtime: (
             Path(observed_manager.import_anchor).parent
         ),
     )
     monkeypatch.setattr(comfyui_installer, "_verify_cm_cli", lambda *_args: None)
-    monkeypatch.setattr(
-        comfyui_installer, "run_application_checker", lambda *_args, **_kwargs: None
-    )
     monkeypatch.setattr(custom_node_installer, "run_hook", retarget)
     monkeypatch.setattr(
         custom_node_installer,

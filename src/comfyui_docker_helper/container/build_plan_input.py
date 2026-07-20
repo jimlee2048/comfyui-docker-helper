@@ -24,6 +24,10 @@ from comfyui_docker_helper.config.custom_node_inventory import (
     CustomNodeInventory,
     custom_node_inventory,
 )
+from comfyui_docker_helper.config.final_manifest import (
+    FinalBuildCheckId,
+    final_build_check_ids,
+)
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.container.file_admission import read_regular_absolute_file
 
@@ -40,6 +44,7 @@ class FinalManifestInput:
     custom_nodes: FinalManifestCustomNodesInput
     files: tuple[FinalManifestFileInput, ...]
     materialized_hooks: tuple[FinalManifestHookInput, ...]
+    final_probe: FinalCoreProbeInput
     shutdown_timeout: ShutdownTimeout
 
 
@@ -67,6 +72,14 @@ class FinalManifestFileInput:
     url: str
     target: str
     checksum: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FinalCoreProbeInput:
+    """Narrow final-probe intent derived from one admitted BuildPlan."""
+
+    workspace: str
+    checks: tuple[FinalBuildCheckId, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,5 +160,15 @@ class BuildPlanInputAdmission:
                 for item in self._plan.files.files
             ),
             materialized_hooks=hooks,
+            final_probe=FinalCoreProbeInput(
+                workspace=self._plan.application.paths.comfyui,
+                checks=final_build_check_ids(
+                    tuple(
+                        package.name
+                        for package in self._plan.application.pytorch.packages
+                    ),
+                    manager_enabled=self._plan.application.comfyui.manager is not None,
+                ),
+            ),
             shutdown_timeout=self._plan.runtime.shutdown_timeout,
         )

@@ -24,12 +24,15 @@ cdh host render \
 
 Key output includes canonical `config.lock.toml`, one canonical
 `build-plan.json`, a BuildPlan-derived runtime config, one canonical cdh wheel,
-the standalone application checker, verified referenced
-build-hook bytes, content-locked baked runtime hooks, and a Dockerfile with
+verified referenced build-hook bytes, content-locked baked runtime hooks, and a
+Dockerfile with
 literal digest-qualified `FROM` references. It does not copy root config into
 the container-helper authority. After the image's final build mutation, cdh
-writes `/opt/cdh/build/manifest.json` as digest-bound observational evidence;
-that in-image manifest is not another resolver or replay input.
+runs one limited core application smoke through the exact isolated application
+interpreter, then writes `/opt/cdh/build/manifest.json` as digest-bound
+observational evidence. The smoke does not certify arbitrary custom nodes,
+workflows, GPU behavior, codecs, models, or service health, and the in-image
+manifest is not another resolver or replay input.
 
 The optional `--hooks-dir` tree may contain only regular `.sh` or
 `.py` files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`.

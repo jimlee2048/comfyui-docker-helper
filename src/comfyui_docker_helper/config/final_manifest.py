@@ -38,6 +38,17 @@ from comfyui_docker_helper.config.value_validation import has_control_characters
 
 FINAL_MANIFEST_SCHEMA_VERSION = 1
 
+type FinalBuildCheckId = Literal[
+    "torch-import",
+    "torch-cpu-tensor",
+    "torchvision-import",
+    "torchaudio-import",
+    "torchaudio-cpu-resample",
+    "comfyui-folder-paths-import",
+    "comfyui-comfy-import",
+    "comfyui-manager-import",
+]
+
 
 class _ManifestModel(BaseModel):
     model_config = ConfigDict(
@@ -309,6 +320,30 @@ class DisabledManagerEvidence(_ManifestModel):
     observed: Literal["absent"]
 
 
+class FinalBuildProbeEvidence(_ManifestModel):
+    stage: Literal["final-build"]
+    result: Literal["passed"]
+    checks: tuple[FinalBuildCheckId, ...]
+
+
+def final_build_check_ids(
+    direct_packages: tuple[str, ...],
+    *,
+    manager_enabled: bool,
+) -> tuple[FinalBuildCheckId, ...]:
+    """Return the exact ordered probe checks selected by admitted intent."""
+    members = set(direct_packages)
+    checks: list[FinalBuildCheckId] = ["torch-import", "torch-cpu-tensor"]
+    if "torchvision" in members:
+        checks.append("torchvision-import")
+    if "torchaudio" in members:
+        checks.extend(("torchaudio-import", "torchaudio-cpu-resample"))
+    checks.extend(("comfyui-folder-paths-import", "comfyui-comfy-import"))
+    if manager_enabled:
+        checks.append("comfyui-manager-import")
+    return tuple(checks)
+
+
 class ApplicationEvidence(_ManifestModel):
     pip: VersionEvidence
     direct_packages: tuple[tuple[str, VersionEvidence], ...]
@@ -317,9 +352,7 @@ class ApplicationEvidence(_ManifestModel):
     dependency_check: Literal["passed"]
     source: ComfyUISourceEvidence
     manager: EnabledManagerEvidence | DisabledManagerEvidence
-    audio_checks: tuple[
-        Literal["import", "cpu-tensor", "resample", "mel-spectrogram"], ...
-    ]
+    final_probe: FinalBuildProbeEvidence
 
     @model_validator(mode="after")
     def _validate_application(self) -> ApplicationEvidence:
@@ -348,13 +381,12 @@ class ApplicationEvidence(_ManifestModel):
                 raise ValueError("application inventory does not match Manager")
         elif "comfyui-manager" in inventory:
             raise ValueError("disabled Manager must be absent from inventory")
-        expected_audio = (
-            ("import", "cpu-tensor", "resample", "mel-spectrogram")
-            if "torchaudio" in direct_names
-            else ()
+        expected_checks = final_build_check_ids(
+            direct_names,
+            manager_enabled=isinstance(self.manager, EnabledManagerEvidence),
         )
-        if self.audio_checks != expected_audio:
-            raise ValueError("audio checks do not match the direct package set")
+        if self.final_probe.checks != expected_checks:
+            raise ValueError("final probe checks do not match the application intent")
         return self
 
 

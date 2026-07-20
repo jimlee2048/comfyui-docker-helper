@@ -29,6 +29,7 @@ from comfyui_docker_helper.config.final_manifest import (
     DigestEvidence,
     DisabledManagerEvidence,
     EnabledManagerEvidence,
+    FinalBuildProbeEvidence,
     FinalManifest,
     ImageEvidence,
     InventoryDistribution,
@@ -40,6 +41,7 @@ from comfyui_docker_helper.config.final_manifest import (
     ToolchainEvidence,
     VersionEvidence,
     dump_final_manifest,
+    final_build_check_ids,
     parse_final_manifest,
 )
 from comfyui_docker_helper.container import final_manifest as final_manifest_service
@@ -208,7 +210,14 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
                 ),
             ),
             manager=manager_evidence,
-            audio_checks=("import", "cpu-tensor", "resample", "mel-spectrogram"),
+            final_probe=FinalBuildProbeEvidence(
+                stage="final-build",
+                result="passed",
+                checks=final_build_check_ids(
+                    tuple(name for name, _version in direct),
+                    manager_enabled=manager is not None,
+                ),
+            ),
         ),
         custom_nodes=custom_node_inventory(plan.custom_nodes.nodes),
         files=(),
@@ -321,6 +330,20 @@ def test_application_evidence_rejects_inventory_contradictions(
         FinalManifest.model_validate(document)
 
 
+def test_application_evidence_requires_the_exact_conditional_probe_checks() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    document = _manifest(plan).model_dump(mode="python")
+    document["application"]["final_probe"]["checks"] = (
+        "torch-import",
+        "torch-cpu-tensor",
+        "comfyui-folder-paths-import",
+        "comfyui-comfy-import",
+    )
+
+    with pytest.raises(ValidationError, match="do not match the application intent"):
+        FinalManifest.model_validate(document)
+
+
 # Final admission authenticates the plan once and exposes only the final projection.
 def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) -> None:
     plan = build_plan(final_config(), accepted_resolution())
@@ -351,6 +374,11 @@ def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) 
             for item in projection.materialized_hooks
         )
         == ()
+    )
+    assert projection.final_probe.workspace == plan.application.paths.comfyui
+    assert projection.final_probe.checks == final_build_check_ids(
+        tuple(package.name for package in plan.application.pytorch.packages),
+        manager_enabled=plan.application.comfyui.manager is not None,
     )
     assert projection.shutdown_timeout == plan.runtime.shutdown_timeout
     assert not hasattr(projection, "build")
@@ -447,6 +475,63 @@ def test_manifest_service_publishes_only_after_successful_observation(
     with pytest.raises(FinalManifestError, match="observation failed"):
         final_manifest_service.emit_final_manifest(projection, runtime=object())
     assert published == []
+
+
+def test_final_probe_runner_uses_the_exact_application_python_and_typed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    probe = BuildPlanInputAdmission(plan).final_manifest().final_probe
+    runtime = SimpleNamespace(python=Path("/opt/venv/bin/python"))
+    calls: list[tuple[tuple[Path | str, ...], Path, str]] = []
+
+    def capture(argv, *, cwd, description):
+        calls.append((argv, cwd, description))
+        return json.dumps(
+            {"checks": probe.checks, "result": "passed", "stage": "final-build"}
+        )
+
+    monkeypatch.setattr(final_manifest_service, "_capture", capture)
+
+    evidence = final_manifest_service._run_final_core_probe(probe, runtime)
+
+    assert evidence.checks == probe.checks
+    argv, cwd, description = calls[0]
+    assert argv[:3] == (
+        Path("/opt/venv/bin/python"),
+        "-I",
+        final_manifest_service._FINAL_CORE_PROBE_PATH,
+    )
+    assert json.loads(argv[3]) == {
+        "checks": list(probe.checks),
+        "workspace": plan.application.paths.comfyui,
+    }
+    assert cwd == Path("/opt/cdh/build")
+    assert description == "final core application probe"
+
+
+def test_final_probe_runner_rejects_untruthful_success_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    probe = BuildPlanInputAdmission(plan).final_manifest().final_probe
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "checks": probe.checks[:-1],
+                "result": "passed",
+                "stage": "final-build",
+            }
+        ),
+    )
+
+    with pytest.raises(FinalManifestError, match="do not match BuildPlan"):
+        final_manifest_service._run_final_core_probe(
+            probe,
+            SimpleNamespace(python=Path("/opt/venv/bin/python")),
+        )
 
 
 # The manifest command is the last filesystem mutation in every rendered build.

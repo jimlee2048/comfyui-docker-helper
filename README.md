@@ -385,7 +385,7 @@ Key rendered-context artifacts include:
 - `config.lock.toml`, used only by the host for later reconciliation;
 - one digest-bound canonical `build-plan.json`, used by build-time helpers;
 - one host-validated canonical cdh wheel under `bootstrap/` for a read-only
-  BuildKit bind mount, plus the standalone application checker;
+  BuildKit bind mount;
 - verified referenced hook bytes under `inputs/`, when configured;
 - a BuildPlan-derived `runtime/config.toml` plus content-locked `runtime/hooks`
   when configured, copied to the paths consumed by the entrypoint; and
@@ -410,6 +410,14 @@ digest and observed installed identity. It records intended-versus-observed dire
 toolchain and application identities, source and backend evidence, factual
 package inventories, Manager/comfy-cli state, custom nodes, files, hooks, APT
 observations, and the Tini lifecycle contract.
+
+Immediately before publishing that evidence, the exact application interpreter
+runs one mandatory isolated core probe from the installed canonical cdh wheel.
+It checks torch CPU tensor execution, selected torchvision and torchaudio
+imports and CPU resampling, workspace-first ComfyUI imports, and the Manager
+import when enabled. This is a limited build-time smoke check, not certification
+of custom nodes, workflows, GPU execution, codecs, models, service readiness,
+or production health; release acceptance owns those wider runtime checks.
 
 The manifest is observation, not resolution or replay input. It does not make
 APT results, checksum-free downloads, application transitives, or trusted

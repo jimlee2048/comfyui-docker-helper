@@ -10,10 +10,6 @@ from pathlib import Path, PurePosixPath
 
 import tomli_w
 
-from comfyui_docker_helper.application_checkers import (
-    APPLICATION_CHECKER_CONTEXT_PATH,
-    APPLICATION_CHECKER_SOURCE,
-)
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
@@ -88,11 +84,6 @@ def materialize_build_plan(
         _write(
             target / "runtime" / "config.toml",
             _runtime_config_bytes(plan),
-            root=target,
-        )
-        _write(
-            target.joinpath(*APPLICATION_CHECKER_CONTEXT_PATH.parts),
-            APPLICATION_CHECKER_SOURCE.read_bytes(),
             root=target,
         )
         _materialize_canonical_wheel(plan, canonical_wheel, target)

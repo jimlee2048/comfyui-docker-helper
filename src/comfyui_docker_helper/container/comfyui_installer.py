@@ -32,7 +32,6 @@ from comfyui_docker_helper.container.application_installer import (
     application_install_environment,
     install_inference_group,
     install_python_extras,
-    run_application_checker,
     verify_application_environment,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
@@ -44,6 +43,7 @@ _UV_PATH = Path("/usr/local/bin/uv")
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _CONSTRAINTS_PATH = _BUILD_DIRECTORY / "python-package-constraints.txt"
 _REQUIRED_ROOT_FILES = ("main.py", "requirements.txt", "comfy_extras/nodes_audio.py")
+_MANAGER_IMPORT_NAME = "comfyui_manager"
 
 
 class ComfyUIInstallError(ApplicationError):
@@ -86,7 +86,6 @@ def install_comfyui(
         uv_path=uv_path,
         constraints_path=constraints_path,
         environ=environ,
-        verify_capabilities=False,
     )
     _install_ordinary_requirements(
         application,
@@ -106,7 +105,7 @@ def install_comfyui(
     )
     manager = application.comfyui.manager
     if manager is None:
-        _verify_manager_absent(application, runtime, environ)
+        _verify_manager_absent(application, runtime)
     else:
         _install_manager_capability(
             application,
@@ -480,7 +479,6 @@ def _install_manager_capability(
         manager,
         parsed,
         runtime,
-        environ,
     )
 
 
@@ -489,24 +487,39 @@ def _verify_manager_capability(
     manager: ManagerCapabilityPlan,
     parsed: ParsedManagerRequirements,
     runtime: ContainerRuntime,
-    environ: Mapping[str, str] | None,
 ) -> None:
-    site_packages = _verify_manager_import_anchor(application, manager, runtime)
+    _verify_manager_import_root(application, manager, runtime)
+    _verify_manager_import_anchor(application, manager, runtime)
     _verify_declared_manager_distributions(application, parsed, runtime)
-    run_application_checker(
-        runtime,
-        "manager",
-        {
-            "version": parsed.manager_version,
-            "workspace": os.fspath(runtime.comfyui_path),
-            "site_packages": os.fspath(site_packages),
-            "import_name": manager.import_name,
-        },
-        environ=environ,
-        runtime_environment=True,
-        description="Manager application capability verification",
-    )
     _verify_cm_cli(Path(manager.executable), runtime)
+
+
+def _verify_manager_import_root(
+    application: ApplicationPhase,
+    manager: ManagerCapabilityPlan,
+    runtime: ContainerRuntime,
+) -> None:
+    path = _manager_site_packages(application, runtime) / manager.import_name
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ComfyUIInstallError("Manager import root is unavailable") from error
+    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode) or resolved != path:
+        raise ComfyUIInstallError(
+            "Manager import root must be one real non-symlink directory"
+        )
+
+
+def _manager_site_packages(
+    application: ApplicationPhase,
+    runtime: ContainerRuntime,
+) -> Path:
+    application_venv = Path(application.paths.venv)
+    if runtime.virtual_env != application_venv:
+        raise ComfyUIInstallError("Manager runtime does not match the application venv")
+    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
+    return application_venv / "lib" / f"python{python_minor}" / "site-packages"
 
 
 def _verify_manager_import_anchor(
@@ -517,15 +530,7 @@ def _verify_manager_import_anchor(
     owner_uid: int = 0,
     owner_gid: int = 0,
 ) -> Path:
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    application_venv = Path(application.paths.venv)
-    if runtime.virtual_env != application_venv:
-        raise ComfyUIInstallError(
-            "Manager import anchor runtime does not match the application venv"
-        )
-    expected_parent = (
-        application_venv / "lib" / f"python{python_minor}" / "site-packages"
-    )
+    expected_parent = _manager_site_packages(application, runtime)
     path = Path(manager.import_anchor)
     if path.parent != expected_parent:
         raise ComfyUIInstallError(
@@ -558,10 +563,7 @@ def _verify_declared_manager_distributions(
     parsed: ParsedManagerRequirements,
     runtime: ContainerRuntime,
 ) -> None:
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    site_packages = (
-        runtime.virtual_env / "lib" / f"python{python_minor}" / "site-packages"
-    )
+    site_packages = _manager_site_packages(application, runtime)
     manager = application.comfyui.manager
     if manager is None:  # pragma: no cover - caller owns the enabled capability.
         raise ComfyUIInstallError("Manager capability is unavailable")
@@ -627,7 +629,7 @@ def capture_manager_authority(
     if manager is None:
         raise ComfyUIInstallError("Manager capability is unavailable")
     parsed = _read_manager_requirements(application, manager, runtime.comfyui_path)
-    _verify_manager_capability(application, manager, parsed, runtime, None)
+    _verify_manager_capability(application, manager, parsed, runtime)
     return parsed
 
 
@@ -654,16 +656,15 @@ def observe_manager_capability(
     manager = application.comfyui.manager
     if manager is None:
         raise ComfyUIInstallError("Manager capability is unavailable")
-    _verify_manager_capability(application, manager, authority, runtime, None)
+    _verify_manager_capability(application, manager, authority, runtime)
 
 
 def observe_manager_absence(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
-    environ: Mapping[str, str] | None = None,
 ) -> None:
     """Observe the complete disabled Manager desired-state contract."""
-    _verify_manager_absent(application, runtime, environ)
+    _verify_manager_absent(application, runtime)
 
 
 def _read_manager_requirements(
@@ -770,19 +771,13 @@ def _verify_cm_cli(
 def _verify_manager_absent(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
-    environ: Mapping[str, str] | None,
 ) -> None:
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    anchor = (
-        runtime.virtual_env
-        / "lib"
-        / f"python{python_minor}"
-        / "site-packages"
-        / "comfyui-docker-helper-comfyui.pth"
-    )
+    site_packages = _manager_site_packages(application, runtime)
+    anchor = site_packages / "comfyui-docker-helper-comfyui.pth"
     for path, subject in (
         (runtime.virtual_env / "bin/cm-cli", "Manager cm-cli"),
         (anchor, "Manager import anchor"),
+        (site_packages / _MANAGER_IMPORT_NAME, "Manager import root"),
     ):
         try:
             path.lstat()
@@ -791,13 +786,18 @@ def _verify_manager_absent(
         except OSError as error:
             raise ComfyUIInstallError(f"{subject} could not be inspected") from error
         raise ComfyUIInstallError(f"{subject} exists while Manager is disabled")
-    run_application_checker(
-        runtime,
-        "manager-absent",
-        {},
-        environ=environ,
-        description="disabled Manager verification",
-    )
+    for distribution in importlib_metadata.distributions(path=[str(anchor.parent)]):
+        raw_name = distribution.metadata.get("Name")
+        if raw_name is None:
+            continue
+        try:
+            name = canonicalize_name(raw_name, validate=True)
+        except InvalidName:
+            continue
+        if name == "comfyui-manager":
+            raise ComfyUIInstallError(
+                "Manager distribution exists while Manager is disabled"
+            )
 
 
 def _require_existing_real_directory(path: Path) -> None:

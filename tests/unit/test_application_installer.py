@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
 
-from comfyui_docker_helper.application_checkers import APPLICATION_CHECKER_SOURCE
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     ExactPackagePlan,
@@ -21,7 +19,6 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.container import application_installer
 from comfyui_docker_helper.container.application_installer import (
     ApplicationInstallError,
-    _verify_application_imports,
     _verify_application_pip_commands,
     _verify_ordinary_requirements,
     _write_application_inventory,
@@ -41,15 +38,6 @@ def _write_phases(tmp_path: Path):
     plan = build_plan(final_config(), accepted_resolution())
     digest = build_plan_digest(plan)
     return plan, digest, plan.application, plan.toolchain
-
-
-@pytest.fixture(autouse=True)
-def _materialized_checker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        application_installer,
-        "APPLICATION_CHECKER_CONTAINER_PATH",
-        APPLICATION_CHECKER_SOURCE,
-    )
 
 
 # Application installation consumes one exact source-routed plan and emits exact
@@ -78,6 +66,13 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         application_installer,
         "_write_constraints",
         lambda path, content, **_kwargs: path.write_bytes(content),
+    )
+    monkeypatch.setattr(
+        application_installer,
+        "_application_inventory",
+        lambda *_args: tuple(
+            (package.name, package.version) for package in group.packages
+        ),
     )
     monkeypatch.setattr(
         application_installer,
@@ -132,21 +127,7 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
     }
-    verify_argv, _ = calls[1]
-    assert verify_argv[:4] == (
-        "/opt/venv/bin/python",
-        "-I",
-        str(APPLICATION_CHECKER_SOURCE),
-        "inventory",
-    )
-    assert json.loads(verify_argv[4]) == {
-        "distributions": {
-            "torch": "2.12.1+cu130",
-            "torchaudio": "2.11.0+cu130",
-            "torchvision": "0.27.1+cu130",
-        }
-    }
-    assert calls[2][0][:4] == (
+    assert calls[1][0][:4] == (
         "/usr/local/bin/uv",
         "--no-config",
         "pip",
@@ -320,11 +301,6 @@ def test_final_application_verification_checks_direct_identities_and_inventory(
     )
     monkeypatch.setattr(
         application_installer,
-        "_verify_application_imports",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        application_installer,
         "run_argv",
         lambda argv, **_kwargs: calls.append(tuple(map(str, argv))),
     )
@@ -412,11 +388,6 @@ def test_final_application_inventory_rejects_observation_drift(
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        application_installer,
-        "_verify_application_imports",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         application_installer, "run_argv", lambda *_args, **_kwargs: None
     )
 
@@ -485,10 +456,10 @@ def test_ordinary_requirement_verification_uses_the_exact_target_markers() -> No
         )
 
 
-def test_pip_verification_constructs_checker_payload_and_command_sequence(
+def test_pip_verification_proves_command_ownership_and_routing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Keep installer coverage at the checker payload and command boundary."""
+    """Bind each pip command to the exact application environment."""
     application = build_plan(final_config(), accepted_resolution()).application
     virtual_env = tmp_path / "venv"
     bin_dir = virtual_env / "bin"
@@ -506,13 +477,7 @@ def test_pip_verification_constructs_checker_payload_and_command_sequence(
         command = bin_dir / name
         command.write_text(f"#!{runtime.python}\n")
         command.chmod(0o755)
-    checker_calls: list[tuple[object, ...]] = []
     command_calls: list[tuple[tuple[Path | str, ...], dict[str, str], str]] = []
-    monkeypatch.setattr(
-        application_installer,
-        "run_application_checker",
-        lambda *args, **kwargs: checker_calls.append((*args, kwargs)),
-    )
 
     def capture(argv, environment, description):
         command_calls.append((argv, environment, description))
@@ -531,16 +496,6 @@ def test_pip_verification_constructs_checker_payload_and_command_sequence(
         owner_gid=os.getgid(),
     )
 
-    observed_runtime, capability, expected, kwargs = checker_calls[0]
-    assert observed_runtime is runtime
-    assert capability == "pip"
-    assert expected == {
-        "site_packages": os.fspath(site_packages),
-        "workspace": os.fspath(runtime.comfyui_path),
-        "version": application.pip_version,
-        "commands": [os.fspath(bin_dir / "pip"), os.fspath(bin_dir / "pip3")],
-    }
-    assert kwargs["environ"] == {"HTTPS_PROXY": "https://proxy.example"}
     assert [call[0] for call in command_calls] == [
         (bin_dir / "pip", "--version"),
         (bin_dir / "pip3", "--version"),
@@ -549,66 +504,6 @@ def test_pip_verification_constructs_checker_payload_and_command_sequence(
     assert all(
         call[1]["HTTPS_PROXY"] == "https://proxy.example" for call in command_calls
     )
-
-
-def test_import_verification_constructs_exact_checker_payloads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Project versions and runtime paths without repeating checker semantics."""
-    application = build_plan(final_config(), accepted_resolution()).application
-    xformers = ExactPackagePlan.model_construct(
-        name="xformers",
-        extras=(),
-        version="0.0.35+cu130",
-        environment="application",
-    )
-    pytorch = PyTorchGroupPlan.model_construct(
-        **{
-            **application.pytorch.__dict__,
-            "packages": (*application.pytorch.packages, xformers),
-        }
-    )
-    application = ApplicationPhase.model_construct(
-        **{**application.__dict__, "pytorch": pytorch}
-    )
-    runtime = ContainerRuntime(
-        comfyui_path=tmp_path / "ComfyUI",
-        virtual_env=tmp_path / "venv",
-    )
-    calls: list[tuple[object, ...]] = []
-    monkeypatch.setattr(
-        application_installer,
-        "run_application_checker",
-        lambda *args, **kwargs: calls.append((*args, kwargs)),
-    )
-
-    _verify_application_imports(application, runtime, {})
-
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    site_packages = runtime.virtual_env / "lib" / f"python{python_minor}/site-packages"
-    assert calls[0][1:3] == (
-        "pytorch",
-        {
-            "site_packages": os.fspath(site_packages),
-            "workspace": os.fspath(runtime.comfyui_path),
-            "distributions": {
-                "torch": "2.12.1+cu130",
-                "torchaudio": "2.11.0+cu130",
-                "torchvision": "0.27.1+cu130",
-                "xformers": "0.0.35+cu130",
-            },
-            "modules": {
-                "torch": "torch",
-                "torchaudio": "torchaudio",
-                "torchvision": "torchvision",
-            },
-        },
-    )
-    assert calls[1][1:3] == (
-        "comfyui",
-        {"workspace": os.fspath(runtime.comfyui_path)},
-    )
-    assert calls[1][3]["runtime_environment"] is True
 
 
 # Evidence and manifest checks bind installed state before accepting the application.

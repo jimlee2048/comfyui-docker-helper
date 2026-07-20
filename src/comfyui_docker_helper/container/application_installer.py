@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import stat
@@ -18,9 +17,6 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.application_checkers import (
-    APPLICATION_CHECKER_CONTAINER_PATH,
-)
 from comfyui_docker_helper.comfyui_requirements import target_marker_environment
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
@@ -43,11 +39,6 @@ from comfyui_docker_helper.pytorch_resolution import (
 _UV_PATH = Path("/usr/local/bin/uv")
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _CONSTRAINTS_PATH = _BUILD_DIRECTORY / "python-package-constraints.txt"
-_PYTORCH_IMPORT_DISTRIBUTIONS = {
-    "torch": "torch",
-    "torchaudio": "torchaudio",
-    "torchvision": "torchvision",
-}
 _NETWORK_ENVIRONMENT = frozenset(
     {
         "HTTP_PROXY",
@@ -96,13 +87,16 @@ def install_inference_group(
             description="inference package install",
         )
     expected = {package.name: package.version for package in group.packages}
-    run_application_checker(
-        runtime,
-        "inventory",
-        {"distributions": expected},
-        environ=environ,
-        description="inference package verification",
-    )
+    observed = dict(_application_inventory(application, runtime))
+    mismatches = {
+        name: (version, observed.get(name))
+        for name, version in expected.items()
+        if observed.get(name) != version
+    }
+    if mismatches:
+        raise ApplicationInstallError(
+            f"inference package identity changed: {mismatches!r}"
+        )
     _verify_setuptools_compatibility(application, runtime)
     run_argv(
         [
@@ -173,7 +167,6 @@ def verify_application_environment(
     constraints_path: Path = _CONSTRAINTS_PATH,
     environ: Mapping[str, str] | None = None,
     ordinary_requirements: tuple[str, ...] = (),
-    verify_capabilities: bool = True,
     write_inventory: bool = False,
 ) -> None:
     """Re-prove exact application packages, constraints, and dependency health."""
@@ -225,9 +218,7 @@ def verify_application_environment(
         env=application_install_environment(environ),
         description="application dependency verification",
     )
-    if verify_capabilities:
-        _verify_application_pip_commands(application, runtime, environ)
-        _verify_application_imports(application, runtime, environ)
+    _verify_application_pip_commands(application, runtime, environ)
     if write_inventory:
         final_inventory = _application_inventory(application, runtime)
         if final_inventory != inventory:
@@ -502,21 +493,6 @@ def _verify_application_pip_commands(
                 f"application {name} does not target the application interpreter"
             )
         commands.append((path, f"application {name} command verification"))
-    run_application_checker(
-        runtime,
-        "pip",
-        {
-            "site_packages": os.fspath(site_packages),
-            "workspace": os.fspath(runtime.comfyui_path),
-            "version": application.pip_version,
-            "commands": [
-                os.fspath(runtime.virtual_env / "bin/pip"),
-                os.fspath(runtime.virtual_env / "bin/pip3"),
-            ],
-        },
-        environ=environ,
-        description="application pip module verification",
-    )
     commands.append((runtime.python, "application python -m pip verification"))
     for executable, description in commands:
         argv = (
@@ -575,45 +551,6 @@ _PIP_VERSION_PATTERN = re.compile(
 )
 
 
-def _verify_application_imports(
-    application: ApplicationPhase,
-    runtime: ContainerRuntime,
-    environ: Mapping[str, str] | None,
-) -> None:
-    python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
-    site_packages = (
-        runtime.virtual_env / "lib" / f"python{python_minor}" / "site-packages"
-    )
-    distributions = {
-        package.name: package.version for package in application.pytorch.packages
-    }
-    modules = {
-        module: distribution
-        for module, distribution in _PYTORCH_IMPORT_DISTRIBUTIONS.items()
-        if distribution in distributions
-    }
-    run_application_checker(
-        runtime,
-        "pytorch",
-        {
-            "site_packages": os.fspath(site_packages),
-            "workspace": os.fspath(runtime.comfyui_path),
-            "distributions": distributions,
-            "modules": modules,
-        },
-        environ=environ,
-        description="PyTorch import capability verification",
-    )
-    run_application_checker(
-        runtime,
-        "comfyui",
-        {"workspace": os.fspath(runtime.comfyui_path)},
-        environ=environ,
-        runtime_environment=True,
-        description="ComfyUI import capability verification",
-    )
-
-
 def _write_application_inventory(
     path: Path,
     content: bytes,
@@ -659,33 +596,3 @@ def application_install_environment(
     if virtual_env is not None:
         result["VIRTUAL_ENV"] = os.fspath(virtual_env)
     return result
-
-
-def run_application_checker(
-    runtime: ContainerRuntime,
-    capability: str,
-    expected: Mapping[str, object],
-    *,
-    environ: Mapping[str, str] | None,
-    description: str,
-    checker_path: Path | None = None,
-    runtime_environment: bool = False,
-) -> None:
-    """Execute one materialized checker with the exact application Python."""
-    path = APPLICATION_CHECKER_CONTAINER_PATH if checker_path is None else checker_path
-    run_argv(
-        (
-            runtime.python,
-            "-I",
-            path,
-            capability,
-            json.dumps(expected, sort_keys=True, separators=(",", ":")),
-        ),
-        cwd=_BUILD_DIRECTORY,
-        env=application_install_environment(
-            environ,
-            comfyui_path=runtime.comfyui_path if runtime_environment else None,
-            virtual_env=runtime.virtual_env if runtime_environment else None,
-        ),
-        description=description,
-    )

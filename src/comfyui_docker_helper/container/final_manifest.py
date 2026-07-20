@@ -13,6 +13,7 @@ from pathlib import Path
 
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
+from pydantic import ValidationError
 
 from comfyui_docker_helper.config.custom_node_inventory import (
     dump_custom_node_inventory,
@@ -27,6 +28,7 @@ from comfyui_docker_helper.config.final_manifest import (
     DisabledManagerEvidence,
     EnabledManagerEvidence,
     FileEvidence,
+    FinalBuildProbeEvidence,
     FinalManifest,
     HookEvidence,
     ImageEvidence,
@@ -41,10 +43,10 @@ from comfyui_docker_helper.config.final_manifest import (
     VersionEvidence,
     dump_final_manifest,
 )
-from comfyui_docker_helper.container.application_installer import (
-    run_application_checker,
+from comfyui_docker_helper.container.build_plan_input import (
+    FinalCoreProbeInput,
+    FinalManifestInput,
 )
-from comfyui_docker_helper.container.build_plan_input import FinalManifestInput
 from comfyui_docker_helper.container.comfyui_installer import (
     capture_application_requirements,
     capture_manager_authority,
@@ -67,6 +69,7 @@ _UV_PATH = Path("/usr/local/bin/uv")
 _TINI_PATH = Path("/usr/bin/tini")
 _GIT_PATH = Path("/usr/bin/git")
 _DPKG_QUERY_PATH = Path("/usr/bin/dpkg-query")
+_FINAL_CORE_PROBE_PATH = Path(__file__).parents[1] / "resources" / "final-core-probe.py"
 _VERSION_PATTERN = re.compile(r"^(?:uv|uvx) (?P<version>\S+)(?: \([^\n]+\))?$")
 _OBSERVATION_ENVIRONMENT = {
     "HOME": "/root",
@@ -116,17 +119,6 @@ def _observe_final_manifest(
     )
     manager = _manager_evidence(projection, runtime, application_inventory)
     direct_packages = _direct_application_packages(projection, application_inventory)
-    if any(name == "torchaudio" for name, _identity in direct_packages):
-        run_application_checker(
-            runtime,
-            "audio",
-            {},
-            environ=None,
-            description="application audio capability verification",
-        )
-        audio_checks = ("import", "cpu-tensor", "resample", "mel-spectrogram")
-    else:
-        audio_checks = ()
 
     cdh_inventory = _environment_inventory(Path(sys.executable))
     cdh = projection.toolchain.tool_store.cdh
@@ -204,6 +196,13 @@ def _observe_final_manifest(
             observed=actual,
         )
 
+    container_uv_version = _binary_version((_UV_PATH, "--version"), "uv")
+    container_uvx_version = _binary_version(
+        (Path("/usr/local/bin/uvx"), "--version"), "uvx"
+    )
+    application_python_version = _python_version(runtime.python)
+    final_probe = _run_final_core_probe(projection.final_probe, runtime)
+
     return FinalManifest(
         schema_version=1,
         binding=projection.binding,
@@ -219,17 +218,15 @@ def _observe_final_manifest(
             host_uv_resolver_version=UV_VERSION,
             container_uv=VersionEvidence(
                 intended=_required_uv_version(projection),
-                observed=_binary_version((_UV_PATH, "--version"), "uv"),
+                observed=container_uv_version,
             ),
             container_uvx=VersionEvidence(
                 intended=_required_uv_version(projection),
-                observed=_binary_version(
-                    (Path("/usr/local/bin/uvx"), "--version"), "uvx"
-                ),
+                observed=container_uvx_version,
             ),
             python=VersionEvidence(
                 intended=projection.toolchain.python.version,
-                observed=_python_version(runtime.python),
+                observed=application_python_version,
             ),
             python_provider="uv-managed",
             python_catalog_descriptor_digest=(
@@ -271,7 +268,7 @@ def _observe_final_manifest(
                 protected=protected,
             ),
             manager=manager,
-            audio_checks=audio_checks,
+            final_probe=final_probe,
         ),
         custom_nodes=custom_inventory,
         files=files,
@@ -297,6 +294,43 @@ def _observe_final_manifest(
             shutdown_timeout=projection.shutdown_timeout,
         ),
     )
+
+
+def _run_final_core_probe(
+    probe: FinalCoreProbeInput,
+    runtime: ContainerRuntime,
+) -> FinalBuildProbeEvidence:
+    try:
+        metadata = _FINAL_CORE_PROBE_PATH.lstat()
+        resolved = _FINAL_CORE_PROBE_PATH.resolve(strict=True)
+    except OSError as error:
+        raise FinalManifestError("final core probe resource is unavailable") from error
+    if (
+        _FINAL_CORE_PROBE_PATH.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or resolved != _FINAL_CORE_PROBE_PATH
+    ):
+        raise FinalManifestError("final core probe resource identity is invalid")
+    payload = json.dumps(
+        {"checks": probe.checks, "workspace": probe.workspace},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    output = _capture(
+        (runtime.python, "-I", _FINAL_CORE_PROBE_PATH, payload),
+        cwd=_BUILD_DIRECTORY,
+        description="final core application probe",
+    )
+    try:
+        evidence = FinalBuildProbeEvidence.model_validate_json(output)
+    except ValidationError as error:
+        raise FinalManifestError(
+            "final core probe returned invalid evidence"
+        ) from error
+    if evidence.checks != probe.checks:
+        raise FinalManifestError("final core probe checks do not match BuildPlan")
+    return evidence
 
 
 def _image_evidence(image) -> ImageEvidence:

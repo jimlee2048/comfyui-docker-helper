@@ -22,7 +22,6 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         f"{plan.toolchain.cuda_image.reference}",
         "COPY --from=uv /uv /uvx /usr/local/bin/",
         "COPY build-plan.json /opt/cdh/build/build-plan.json",
-        "COPY --chown=0:0 checkers /opt/cdh/build/checkers",
         "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
     ]
     if any(node.pre_install or node.post_install for node in plan.custom_nodes.nodes):
@@ -66,10 +65,9 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
     packages = package_separator.join(
         shlex.quote(item) for item in plan.application.os_packages
     )
-    bootstrap_check = json.dumps(
-        {"distributions": {"pip": python.pip_version}},
-        sort_keys=True,
-        separators=(",", ":"),
+    bootstrap_check = (
+        "import importlib.metadata as m; "
+        f"assert m.version('pip') == {python.pip_version!r}"
     )
     cdh_check = "; ".join(
         (
@@ -116,8 +114,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f" && {_shell_word(plan.application.paths.venv + '/bin/python')} "
         "-m pip --version \\",
         f" && {_shell_word(plan.application.paths.venv + '/bin/python')} "
-        "-I /opt/cdh/build/checkers/application.py inventory "
-        f"{_shell_word(bootstrap_check)} \\",
+        f"-I -c {_shell_word(bootstrap_check)} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip')} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip3')}",
         f"RUN --mount=type=bind,source=bootstrap/{wheel_filename},"

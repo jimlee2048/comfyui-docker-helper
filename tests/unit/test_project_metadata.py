@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from packaging.specifiers import SpecifierSet
 
@@ -83,3 +83,18 @@ def test_projected_release_source_is_entirely_wheel_owned() -> None:
     assert len(relative_paths) == len(set(relative_paths))
     for item in projected:
         assert item.source_path.is_relative_to(PACKAGE_ROOT)
+
+
+def test_package_resources_contain_the_final_probe_and_release_projection() -> None:
+    resource_root = PurePosixPath("src/comfyui_docker_helper/resources")
+    resource_paths = {
+        item.relative_path.relative_to(resource_root)
+        for item in release_projection_files()
+        if item.relative_path.is_relative_to(resource_root)
+    }
+
+    assert resource_paths == {
+        PurePosixPath("final-core-probe.py"),
+        PurePosixPath("release-projection/LICENSE"),
+        PurePosixPath("release-projection/pyproject.toml"),
+    }

@@ -240,6 +240,18 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
                             for item in plan.files.files
                         ),
                         materialized_hooks=(),
+                        final_probe=build_plan_input_module.FinalCoreProbeInput(
+                            workspace=plan.application.paths.comfyui,
+                            checks=build_plan_input_module.final_build_check_ids(
+                                tuple(
+                                    package.name
+                                    for package in plan.application.pytorch.packages
+                                ),
+                                manager_enabled=(
+                                    plan.application.comfyui.manager is not None
+                                ),
+                            ),
+                        ),
                         shutdown_timeout=plan.runtime.shutdown_timeout,
                     ),
                 )

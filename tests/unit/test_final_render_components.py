@@ -19,7 +19,6 @@ from tests.unit.test_build_plan import (
     final_config,
 )
 
-from comfyui_docker_helper.application_checkers import APPLICATION_CHECKER_SOURCE
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
@@ -298,7 +297,6 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert runtime.config.comfyui.port == 8188
     assert _tree(first) == _tree(second)
     tree = _tree(first)
-    assert tree["checkers/application.py"] == APPLICATION_CHECKER_SOURCE.read_bytes()
     wheel = canonical_wheel()
     assert tree[f"bootstrap/{wheel.filename}"] == wheel.content
     assert tree[".dockerignore"] == b"/.cdh-rendered\n/config.lock.toml\n"
@@ -313,8 +311,8 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     )
     assert "COPY bootstrap" not in dockerfile
     assert "container install-comfyui" in dockerfile
-    assert "COPY --chown=0:0 checkers /opt/cdh/build/checkers" in dockerfile
-    assert "/opt/cdh/build/checkers/application.py inventory" in dockerfile
+    assert "importlib.metadata as m" in dockerfile
+    assert plan.application.pip_version in dockerfile
     assert "torch==2.12.1+cu130" not in dockerfile
     assert "UV_CONSTRAINT" not in dockerfile
     assert "PIP_CONSTRAINT" not in dockerfile

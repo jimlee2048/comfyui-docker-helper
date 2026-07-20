@@ -141,7 +141,7 @@ def install_custom_nodes(
     manager_authority: ParsedManagerRequirements | None = None
     if nodes:
         if application.comfyui.manager is None:
-            observe_manager_absence(application, runtime, environ)
+            observe_manager_absence(application, runtime)
         else:
             manager_authority = capture_manager_authority(application, runtime)
     custom_nodes_root = _require_real_directory(
@@ -605,7 +605,7 @@ def _verify_boundary(
     if manager_epoch is not None:
         manager_epoch.observe(
             lambda: (
-                observe_manager_absence(application, runtime, environ)
+                observe_manager_absence(application, runtime)
                 if manager_authority is None
                 else observe_manager_capability(application, runtime, manager_authority)
             ),

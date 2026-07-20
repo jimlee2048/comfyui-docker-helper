@@ -451,6 +451,43 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
     ]
 
 
+def test_disabled_manager_state_rejects_installed_distribution_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    document = plan.application.model_dump(mode="python")
+    document["comfyui"]["manager"] = None
+    application = ApplicationPhase.model_validate(document)
+    runtime = ContainerRuntime()
+    monkeypatch.setattr(
+        comfyui_installer.importlib_metadata,
+        "distributions",
+        lambda **_kwargs: (SimpleNamespace(metadata={"Name": "ComfyUI_Manager"}),),
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="distribution exists"):
+        comfyui_installer._verify_manager_absent(application, runtime)
+
+
+def test_disabled_manager_state_rejects_import_root_without_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime, anchor = _local_manager_application(tmp_path)
+    application = application.model_copy(
+        update={"comfyui": application.comfyui.model_copy(update={"manager": None})}
+    )
+    (anchor.parent / "comfyui_manager").mkdir()
+    monkeypatch.setattr(
+        comfyui_installer.importlib_metadata,
+        "distributions",
+        lambda **_kwargs: (),
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="import root exists"):
+        comfyui_installer._verify_manager_absent(application, runtime)
+
+
 def test_application_observation_rechecks_source_input_and_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -515,9 +552,6 @@ def test_ordinary_requirements_use_only_python_index_constraints_and_cleanup(
 
     monkeypatch.setattr(comfyui_installer, "_BUILD_DIRECTORY", tmp_path)
     monkeypatch.setattr(comfyui_installer, "run_argv", fake_run_argv)
-    monkeypatch.setattr(
-        comfyui_installer, "run_application_checker", lambda *_args, **_kwargs: None
-    )
 
     comfyui_installer._install_ordinary_requirements(
         application,
@@ -559,7 +593,6 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     constraints = tmp_path / "python-package-constraints.txt"
     constraints.write_text("torch==2.12.1+cu130\n")
     commands: list[tuple[tuple[str, ...], dict]] = []
-    checker_calls: list[tuple[object, ...]] = []
     requirements_paths: list[Path] = []
     events: list[str] = []
 
@@ -576,13 +609,13 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     monkeypatch.setattr(comfyui_installer, "run_argv", fake_run_argv)
     monkeypatch.setattr(
         comfyui_installer,
-        "run_application_checker",
-        lambda *args, **kwargs: checker_calls.append((*args, kwargs)),
+        "_write_import_anchor",
+        lambda path, workspace: events.append(f"anchor:{path}:{workspace}"),
     )
     monkeypatch.setattr(
         comfyui_installer,
-        "_write_import_anchor",
-        lambda path, workspace: events.append(f"anchor:{path}:{workspace}"),
+        "_verify_manager_import_root",
+        lambda *_args: events.append("import root"),
     )
     monkeypatch.setattr(
         comfyui_installer,
@@ -623,19 +656,9 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     assert "download.pytorch.org" not in " ".join(install)
     assert install_kwargs["env"]["UV_CONSTRAINT"] == os.fspath(constraints)
     assert install_kwargs["env"]["PIP_CONSTRAINT"] == os.fspath(constraints)
-    observed_runtime, capability, expected, checker_kwargs = checker_calls[0]
-    assert observed_runtime is runtime
-    assert capability == "manager"
-    assert expected == {
-        "version": "4.0.5",
-        "workspace": os.fspath(runtime.comfyui_path),
-        "site_packages": os.fspath(Path(manager.import_anchor).parent),
-        "import_name": manager.import_name,
-    }
-    assert checker_kwargs["environ"] == {}
-    assert checker_kwargs["runtime_environment"] is True
     assert events == [
         f"anchor:{manager.import_anchor}:{runtime.comfyui_path}",
+        "import root",
         "anchor proof",
         "declared distributions",
         f"cm-cli:{manager.executable}:{runtime.python}",
@@ -672,7 +695,32 @@ def test_manager_requirements_fail_closed_before_package_mutation(
         _verify_checkout(application, runtime)
 
 
-# Manager capability binds its anchor, distributions, import, and unique cm-cli owner.
+# Manager capability binds package structure, distributions, and cm-cli ownership.
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "unavailable"),
+        ("symlink", "real non-symlink directory"),
+    ],
+)
+def test_manager_import_root_must_be_one_real_application_site_directory(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    application, runtime, anchor = _local_manager_application(tmp_path)
+    manager = application.comfyui.manager
+    assert manager is not None
+    root = anchor.parent / manager.import_name
+    if mutation == "symlink":
+        target = tmp_path / "manager-root"
+        target.mkdir()
+        root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(ComfyUIInstallError, match=message):
+        comfyui_installer._verify_manager_import_root(application, manager, runtime)
+
+
 def test_manager_import_anchor_is_exclusive_read_only_and_exact(
     tmp_path: Path,
 ) -> None:
@@ -954,7 +1002,6 @@ def test_manager_capability_captures_and_reuses_immutable_authority(
         observed_manager,
         observed_parsed,
         observed_runtime,
-        observed_environ,
     ) -> None:
         events.append(
             (
@@ -963,7 +1010,6 @@ def test_manager_capability_captures_and_reuses_immutable_authority(
                 observed_manager,
                 observed_parsed,
                 observed_runtime,
-                observed_environ,
             )
         )
 
@@ -982,9 +1028,9 @@ def test_manager_capability_captures_and_reuses_immutable_authority(
 
     assert events == [
         ("requirements", application, manager, runtime.comfyui_path),
-        ("complete capability", application, manager, parsed, runtime, None),
+        ("complete capability", application, manager, parsed, runtime),
         ("requirements", application, manager, runtime.comfyui_path),
-        ("complete capability", application, manager, parsed, runtime, None),
+        ("complete capability", application, manager, parsed, runtime),
     ]
 
 

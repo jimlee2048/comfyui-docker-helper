@@ -1,8 +1,7 @@
-"""Canonical custom-node inventory shared by emission and final observation."""
+"""Typed custom-node evidence recorded in the final image manifest."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from typing import Annotated, Literal
 
@@ -79,7 +78,7 @@ class CustomNodeInventory(_InventoryModel):
 
 
 def custom_node_inventory(nodes: Sequence[CustomNodePlan]) -> CustomNodeInventory:
-    """Project the exact typed declaration-order evidence."""
+    """Project verified declarations into final typed evidence."""
     entries: list[RegistryInventoryEntry | GitInventoryEntry] = []
     for node in nodes:
         if isinstance(node, RegistryNodePlan):
@@ -104,16 +103,3 @@ def custom_node_inventory(nodes: Sequence[CustomNodePlan]) -> CustomNodeInventor
                 )
             )
     return CustomNodeInventory(schema_version=1, nodes=tuple(entries))
-
-
-def dump_custom_node_inventory(inventory: CustomNodeInventory) -> bytes:
-    """Serialize the schema-1 inventory to its sole canonical byte form."""
-    return (
-        json.dumps(
-            inventory.model_dump(mode="json"),
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8")

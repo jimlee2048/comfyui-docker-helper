@@ -20,8 +20,15 @@ tool = plan["toolchain"]["tool_store"]["comfy_cli"]
 assert tool is not None
 assert metadata.version("comfy-cli") == tool["version"]
 assert pathlib.Path(sys.prefix) == pathlib.Path("/opt/uv/tools/comfy-cli")
-inventory = pathlib.Path(tool["inventory_path"]).read_text().splitlines()
-assert "comfy-cli==" + tool["version"] in inventory
+manifest = json.loads(pathlib.Path("/opt/cdh/build/manifest.json").read_text())
+evidence = manifest["toolchain"]["comfy_cli"]
+assert evidence["direct"] == {
+    "intended": tool["version"],
+    "observed": tool["version"],
+}
+assert {item["name"]: item["version"] for item in evidence["inventory"]}[
+    "comfy-cli"
+] == tool["version"]
 '
 uv --no-config pip check \
   --python /opt/uv/tools/comfy-cli/bin/python \

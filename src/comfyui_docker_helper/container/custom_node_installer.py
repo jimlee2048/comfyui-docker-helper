@@ -32,8 +32,8 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.canonical_lock import normalized_registry_id
 from comfyui_docker_helper.config.custom_node_inventory import (
+    CustomNodeInventory,
     custom_node_inventory,
-    dump_custom_node_inventory,
 )
 from comfyui_docker_helper.config.final_validation import is_git_source_url
 from comfyui_docker_helper.config.registry_validation import (
@@ -50,10 +50,6 @@ from comfyui_docker_helper.container.comfyui_installer import (
     observe_manager_absence,
     observe_manager_capability,
     verify_manager_authority,
-)
-from comfyui_docker_helper.container.evidence_writer import (
-    ApplicationEvidenceError,
-    write_application_evidence,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
 from comfyui_docker_helper.errors import ApplicationError
@@ -323,10 +319,6 @@ def install_custom_nodes(
         force_manager=True,
         observe_application=False,
     )
-    _write_custom_node_inventory(
-        Path(custom_nodes.custom_node_inventory),
-        dump_custom_node_inventory(custom_node_inventory(nodes)),
-    )
     observations.application.observe(
         lambda: observe_application_state(
             application,
@@ -336,10 +328,44 @@ def install_custom_nodes(
             uv_path=uv_path,
             constraints_path=constraints_path,
             environ=environ,
-            write_inventory=True,
         ),
         force=True,
     )
+
+
+def observe_custom_node_state(
+    custom_nodes: CustomNodesPhase,
+    *,
+    runtime: ContainerRuntime,
+    git_path: Path = _GIT_PATH,
+    environ: Mapping[str, str] | None = None,
+) -> CustomNodeInventory:
+    """Prove final local Git and Registry identities without executing node code."""
+    custom_nodes_root = _require_real_directory(
+        runtime.comfyui_path / "custom_nodes", "custom-nodes root"
+    )
+    git_environment = runtime.env(environ)
+    git_targets: list[Path] = []
+    for node in custom_nodes.nodes:
+        if not isinstance(node, GitNodePlan):
+            continue
+        target = _planned_git_target(node, custom_nodes_root)
+        _verify_git_provenance(
+            node,
+            target,
+            custom_nodes_root,
+            git_path,
+            git_environment,
+        )
+        git_targets.append(target)
+    _verify_registry_set(
+        custom_nodes_root,
+        tuple(
+            node for node in custom_nodes.nodes if isinstance(node, RegistryNodePlan)
+        ),
+        excluded_git_targets=git_targets,
+    )
+    return custom_node_inventory(custom_nodes.nodes)
 
 
 def _validate_inputs(
@@ -363,13 +389,6 @@ def _validate_inputs(
         raise CustomNodeInstallError("custom-node venv does not match BuildPlan")
     if Path(custom_nodes.user_directory) != runtime.comfyui_path / "user":
         raise CustomNodeInstallError("Registry user directory does not match BuildPlan")
-    if custom_nodes.custom_node_inventory != os.fspath(
-        _BUILD_DIRECTORY / "custom-node-inventory.json"
-    ):
-        raise CustomNodeInstallError(
-            "custom-node inventory path does not match BuildPlan"
-        )
-
     git_targets: set[Path] = set()
     custom_root = runtime.comfyui_path / "custom_nodes"
     registry_nodes = tuple(
@@ -1165,24 +1184,6 @@ def _managed_python_environment(
         }
     )
     return environment
-
-
-def _write_custom_node_inventory(
-    path: Path,
-    content: bytes,
-    *,
-    owner_uid: int = 0,
-    owner_gid: int = 0,
-) -> None:
-    try:
-        write_application_evidence(
-            path,
-            content,
-            owner_uid=owner_uid,
-            owner_gid=owner_gid,
-        )
-    except ApplicationEvidenceError as error:
-        raise CustomNodeInstallError(f"custom-node inventory {error}") from error
 
 
 def _parse_project_identity(content: bytes) -> _ObservedRegistryIdentity:

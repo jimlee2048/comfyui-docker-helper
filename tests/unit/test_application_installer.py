@@ -21,7 +21,6 @@ from comfyui_docker_helper.container.application_installer import (
     ApplicationInstallError,
     _verify_application_pip_commands,
     _verify_ordinary_requirements,
-    _write_application_inventory,
     _write_constraints,
     application_install_environment,
     install_inference_group,
@@ -272,14 +271,11 @@ def test_runtime_rejects_python_extra_overlap_with_arbitrary_pytorch_member(
         install_python_extras(forged, ContainerRuntime())
 
 
-# Final verification observes exact distributions, imports, requirements, and inventory.
-def test_final_application_verification_checks_direct_identities_and_inventory(
+# Final verification observes exact distributions, requirements, and dependency health.
+def test_final_application_verification_checks_direct_identities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    document = plan.application.model_dump(mode="python")
-    document["inventory_path"] = "/opt/cdh/build/application-inventory.txt"
-    application = type(plan.application).model_validate(document)
+    application = build_plan(final_config(), accepted_resolution()).application
     inventory = (
         ("numpy", "2.3.1"),
         ("pip", "26.1.2"),
@@ -289,7 +285,6 @@ def test_final_application_verification_checks_direct_identities_and_inventory(
         ("torchvision", "0.27.1+cu130"),
     )
     calls: list[tuple[str, ...]] = []
-    written: list[tuple[Path, bytes]] = []
     monkeypatch.setattr(application_installer, "_verify_constraints", lambda *_: None)
     monkeypatch.setattr(
         application_installer, "_application_inventory", lambda *_: inventory
@@ -304,17 +299,10 @@ def test_final_application_verification_checks_direct_identities_and_inventory(
         "run_argv",
         lambda argv, **_kwargs: calls.append(tuple(map(str, argv))),
     )
-    monkeypatch.setattr(
-        application_installer,
-        "_write_application_inventory",
-        lambda path, content: written.append((path, content)),
-    )
-
     verify_application_environment(
         application,
         ContainerRuntime(virtual_env=Path("/opt/venv")),
         constraints_path=tmp_path / "constraints.txt",
-        write_inventory=True,
     )
 
     assert calls == [
@@ -326,14 +314,6 @@ def test_final_application_verification_checks_direct_identities_and_inventory(
             "--python",
             "/opt/venv/bin/python",
             "--no-python-downloads",
-        )
-    ]
-    assert written == [
-        (
-            Path("/opt/cdh/build/application-inventory.txt"),
-            b"numpy==2.3.1\npip==26.1.2\nsetuptools==81.0.0\n"
-            b"torch==2.12.1+cu130\ntorchaudio==2.11.0+cu130\n"
-            b"torchvision==0.27.1+cu130\n",
         )
     ]
 
@@ -362,44 +342,6 @@ def test_final_application_verification_reports_missing_setuptools(
             application,
             ContainerRuntime(virtual_env=Path("/opt/venv")),
             constraints_path=tmp_path / "constraints.txt",
-        )
-
-
-def test_final_application_inventory_rejects_observation_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    application = build_plan(final_config(), accepted_resolution()).application
-    inventory = (
-        ("numpy", "2.3.1"),
-        ("pip", "26.1.2"),
-        ("setuptools", "81.0.0"),
-        ("torch", "2.12.1+cu130"),
-        ("torchaudio", "2.11.0+cu130"),
-        ("torchvision", "0.27.1+cu130"),
-    )
-    observations = iter((inventory, (*inventory, ("unexpected", "1.0"))))
-    monkeypatch.setattr(application_installer, "_verify_constraints", lambda *_: None)
-    monkeypatch.setattr(
-        application_installer, "_application_inventory", lambda *_: next(observations)
-    )
-    monkeypatch.setattr(
-        application_installer,
-        "_verify_application_pip_commands",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        application_installer, "run_argv", lambda *_args, **_kwargs: None
-    )
-
-    with pytest.raises(
-        ApplicationInstallError,
-        match="application inventory changed during final verification",
-    ):
-        verify_application_environment(
-            application,
-            ContainerRuntime(virtual_env=Path("/opt/venv")),
-            constraints_path=tmp_path / "constraints.txt",
-            write_inventory=True,
         )
 
 
@@ -504,31 +446,6 @@ def test_pip_verification_proves_command_ownership_and_routing(
     assert all(
         call[1]["HTTPS_PROXY"] == "https://proxy.example" for call in command_calls
     )
-
-
-# Evidence and manifest checks bind installed state before accepting the application.
-def test_application_inventory_creation_is_exclusive_read_only_and_exact(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "application-inventory.txt"
-    content = b"pip==26.1.2\ntorch==2.12.1+cu130\n"
-
-    _write_application_inventory(
-        path,
-        content,
-        owner_uid=os.getuid(),
-        owner_gid=os.getgid(),
-    )
-
-    assert path.read_bytes() == content
-    assert path.stat().st_mode & 0o777 == 0o444
-    with pytest.raises(ApplicationInstallError, match="already exists"):
-        _write_application_inventory(
-            path,
-            content,
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-        )
 
 
 def test_install_rejects_cross_channel_phase_before_running(

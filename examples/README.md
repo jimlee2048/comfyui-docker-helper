@@ -80,14 +80,17 @@ Manager package and `/opt/venv/bin/cm-cli` application capability. Enabling the
 capability does not append `--enable-manager`; runtime arguments remain explicit
 under `comfyui.extra_args`. Registry and direct-Git nodes run once in their
 declared mixed order, remain independent of optional comfy-cli, and produce
-verified ordered evidence at `/opt/cdh/build/custom-node-inventory.json`.
+verified ordered evidence in `/opt/cdh/build/manifest.json` after the final
+filesystem is observed.
 Direct-Git URLs pass through unchanged as acquisition locators; locked exact
 commits, not user refs, URL normalization, or endpoint claims, identify the
 content installed in the image. Manager/Registry installers and direct-Git
 `install.py` remain trusted opaque code rather than network-isolated package
 operations.
-Zero-node builds still emit the exact empty custom-node inventory and the final
-application inventory after the dependency check.
+Zero-node builds still record exact empty custom-node evidence and the factual
+final application inventory after the dependency check. Custom-node build-hook
+source is retained under `/opt/cdh/build/inputs` and in image layers as verified
+audit evidence; do not put secrets in these scripts.
 
 The image contains a baked runtime configuration at
 `/opt/cdh/runtime/config.toml`. A mounted `/etc/cdh/runtime/config.toml` can

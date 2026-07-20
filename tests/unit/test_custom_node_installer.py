@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,10 +20,7 @@ from comfyui_docker_helper.config.build_plan import (
     HookPlan,
     RegistryNodePlan,
 )
-from comfyui_docker_helper.config.custom_node_inventory import (
-    custom_node_inventory,
-    dump_custom_node_inventory,
-)
+from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.container import comfyui_installer, custom_node_installer
 from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallError
 from comfyui_docker_helper.container.custom_node_installer import (
@@ -153,7 +149,6 @@ def _phase(
     return CustomNodesPhase(
         install_manager=install_manager,
         user_directory=str(runtime.comfyui_path / "user"),
-        custom_node_inventory="/opt/cdh/build/custom-node-inventory.json",
         nodes=nodes,
     )
 
@@ -338,84 +333,100 @@ def test_registry_scanner_rejects_normalized_duplicate_metadata(tmp_path: Path) 
         custom_node_installer._scan_registry_identities(root)
 
 
-# Inventory evidence is canonical, declaration-ordered, exclusive, and exact.
-def test_custom_node_inventory_is_canonical_raw_ordered_and_minimal() -> None:
-    content = dump_custom_node_inventory(
-        custom_node_inventory(
-            (
-                _node("Example_Node", "1.0.0-rc.1+CUDA.1"),
-                _node("second", "2.0.0"),
-            )
-        )
-    )
-
-    assert content == (
-        b'{"nodes":[{"control":"direct-cm-cli","id":"Example_Node",'
-        b'"type":"registry","verification":"registry-version",'
-        b'"version":"1.0.0-rc.1+CUDA.1"},{"control":"direct-cm-cli",'
-        b'"id":"second","type":"registry",'
-        b'"verification":"registry-version","version":"2.0.0"}],'
-        b'"schema_version":1}\n'
-    )
-    assert list(json.loads(content)["nodes"][0]) == [
-        "control",
-        "id",
-        "type",
-        "verification",
-        "version",
-    ]
-
-
-def test_mixed_and_empty_inventory_bytes_preserve_typed_declaration_order(
+# Final observation returns typed evidence only after exact local state is proved.
+def test_final_observer_rejects_post_install_registry_identity_drift(
     tmp_path: Path,
 ) -> None:
     _application_phase, runtime = _application(tmp_path)
-    git = _git_node(runtime, url="https://example.invalid/Raw/Node.git/")
-
-    assert dump_custom_node_inventory(custom_node_inventory(())) == (
-        b'{"nodes":[],"schema_version":1}\n'
-    )
-    assert dump_custom_node_inventory(
-        custom_node_inventory((_node("Example_Node", "1.0.0"), git))
-    ) == (
-        b'{"nodes":[{"control":"direct-cm-cli","id":"Example_Node",'
-        b'"type":"registry","verification":"registry-version",'
-        b'"version":"1.0.0"},{"commit":"cccccccccccccccccccccccccccccccccccccccc",'
-        b'"control":"direct-git","target":"direct","type":"git",'
-        b'"url":"https://example.invalid/Raw/Node.git/",'
-        b'"verification":"git-commit"}],"schema_version":1}\n'
+    node = _node("Example_Node", "1.0.0")
+    custom_nodes = _phase(runtime, (node,))
+    project = _write_project(
+        runtime.comfyui_path / "custom_nodes",
+        "installed-example",
+        "example.node",
+        "1.0.0",
     )
 
+    assert custom_node_installer.observe_custom_node_state(
+        custom_nodes,
+        runtime=runtime,
+    ) == custom_node_inventory((node,))
 
-def test_custom_node_inventory_creation_is_exclusive_read_only_and_exact(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "custom-node-inventory.json"
-    content = dump_custom_node_inventory(custom_node_inventory((_node("a", "1.0.0"),)))
-
-    custom_node_installer._write_custom_node_inventory(
-        path,
-        content,
-        owner_uid=os.getuid(),
-        owner_gid=os.getgid(),
+    project.joinpath("pyproject.toml").write_text(
+        '[project]\nname = "example.node"\nversion = "2.0.0"\n'
     )
-
-    assert path.read_bytes() == content
-    assert stat_mode(path) == 0o444
-    with pytest.raises(CustomNodeInstallError, match="already exists"):
-        custom_node_installer._write_custom_node_inventory(
-            path,
-            content,
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
+    with pytest.raises(CustomNodeInstallError, match="version does not match"):
+        custom_node_installer.observe_custom_node_state(
+            custom_nodes,
+            runtime=runtime,
         )
 
 
-def stat_mode(path: Path) -> int:
-    return path.stat().st_mode & 0o777
+# Git targets become Registry exclusions only after the existing proof succeeds.
+def test_final_observer_proves_git_before_exact_registry_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _application_phase, runtime = _application(tmp_path)
+    git = _git_node(runtime)
+    registry = _node("registry-node", "1.0.0")
+    custom_nodes = _phase(runtime, (git, registry))
+    target = Path(git.target)
+    events: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_git_provenance",
+        lambda node, observed, *_args, **_kwargs: events.append(
+            ("git", node, observed)
+        ),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_registry_set",
+        lambda _root, expected, **kwargs: events.append(
+            ("registry", tuple(expected), tuple(kwargs["excluded_git_targets"]))
+        ),
+    )
+
+    evidence = custom_node_installer.observe_custom_node_state(
+        custom_nodes,
+        runtime=runtime,
+    )
+
+    assert events == [
+        ("git", git, target),
+        ("registry", (registry,), (target,)),
+    ]
+    assert evidence == custom_node_inventory((git, registry))
 
 
-def test_empty_plan_writes_exact_inventory_then_checks_application(
+# An empty declaration still proves that no unexpected Registry project exists.
+def test_final_observer_scans_exact_empty_registry_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _application_phase, runtime = _application(tmp_path)
+    custom_nodes = _phase(runtime, ())
+    calls: list[tuple[Path, tuple[RegistryNodePlan, ...], tuple[Path, ...]]] = []
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_verify_registry_set",
+        lambda root, expected, **kwargs: calls.append(
+            (root, tuple(expected), tuple(kwargs["excluded_git_targets"]))
+        ),
+    )
+
+    evidence = custom_node_installer.observe_custom_node_state(
+        custom_nodes,
+        runtime=runtime,
+    )
+
+    assert calls == [(runtime.comfyui_path / "custom_nodes", (), ())]
+    assert evidence == custom_node_inventory(())
+
+
+# Empty installation still closes its application verification boundary.
+def test_empty_plan_checks_application_without_node_processes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -465,15 +476,8 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda path, content: events.append(("inventory", path, content)),
-    )
-    monkeypatch.setattr(
-        custom_node_installer,
         "observe_application_state",
-        lambda *_args, **kwargs: events.append(
-            ("application", bool(kwargs.get("write_inventory")))
-        ),
+        lambda *_args, **_kwargs: events.append(("application",)),
     )
 
     custom_node_installer.install_custom_nodes(
@@ -484,12 +488,7 @@ def test_empty_plan_writes_exact_inventory_then_checks_application(
 
     assert events == [
         ("final-typed-boundary",),
-        (
-            "inventory",
-            Path("/opt/cdh/build/custom-node-inventory.json"),
-            b'{"nodes":[],"schema_version":1}\n',
-        ),
-        ("application", True),
+        ("application",),
     ]
 
 
@@ -574,12 +573,6 @@ def test_enabled_git_only_plan_observes_manager_without_registry_scanning(
             "Git-only plans must not enter Registry scanning"
         ),
     )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda *_args: events.append("inventory"),
-    )
-
     custom_node_installer.install_custom_nodes(
         custom_nodes,
         application,
@@ -590,7 +583,7 @@ def test_enabled_git_only_plan_observes_manager_without_registry_scanning(
     assert events.count("install-git") == 1
     assert events.count("verify-manager-authority") == 5
     assert events.count("observe-manager") == 2
-    assert events[-2:] == ["observe-manager", "inventory"]
+    assert events[-1] == "observe-manager"
 
 
 def test_enabled_git_only_plan_rejects_manager_mutation_at_next_boundary(
@@ -621,12 +614,6 @@ def test_enabled_git_only_plan_rejects_manager_mutation_at_next_boundary(
         "_verify_mixed_state",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda *_args: pytest.fail("invalid Manager state must prevent evidence"),
-    )
-
     with pytest.raises(ComfyUIInstallError, match="was mutated"):
         custom_node_installer.install_custom_nodes(
             custom_nodes,
@@ -699,12 +686,6 @@ def test_enabled_git_only_plan_rejects_anchor_drift_at_next_observation(
         "_verify_git_provenance",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda *_args: pytest.fail("anchor drift must prevent evidence"),
-    )
-
     with pytest.raises(ComfyUIInstallError, match="content does not match"):
         custom_node_installer.install_custom_nodes(
             custom_nodes,
@@ -751,12 +732,6 @@ def test_disabled_git_only_plan_rejects_manager_introduction_at_next_boundary(
         "_verify_mixed_state",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda *_args: pytest.fail("invalid Manager state must prevent evidence"),
-    )
-
     with pytest.raises(ComfyUIInstallError, match="exists while disabled"):
         custom_node_installer.install_custom_nodes(
             custom_nodes,
@@ -943,23 +918,13 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     monkeypatch.setattr(
         custom_node_installer,
         "observe_application_state",
-        lambda *_args, **kwargs: events.append(
-            ("application", True)
-            if kwargs.get("write_inventory")
-            else ("application-check",)
-        ),
+        lambda *_args, **_kwargs: events.append(("application-check",)),
     )
     monkeypatch.setattr(
         custom_node_installer,
         "observe_manager_capability",
         lambda *_args: events.append(("manager-check",)),
     )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda *_args: events.append(("inventory",)),
-    )
-
     custom_node_installer.install_custom_nodes(
         custom_nodes,
         application,
@@ -1004,14 +969,13 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         ("proof", names(nodes[:2]), names(nodes[2:])),
         ("hook", "git-post.py", f"sha256:{'d' * 64}"),
     ]
-    assert events[-4:] == [
+    assert events[-3:] == [
         ("proof", names(nodes), ()),
         ("manager-check",),
-        ("inventory",),
-        ("application", True),
+        ("application-check",),
     ]
     assert len([event for event in events if event[0] == "proof"]) == 16
-    assert events.count(("application-check",)) == 7
+    assert events.count(("application-check",)) == 8
     assert events.count(("manager-check",)) == 7
     assert events.index(("application-check",)) < events.index(("install", "first"))
     assert observed_git_environment["GIT_SSH_COMMAND"] == ("ssh -F /tmp/user-config")
@@ -1057,17 +1021,8 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
     )
     monkeypatch.setattr(
         custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda path, content: events.append(("inventory", path, content)),
-    )
-    monkeypatch.setattr(
-        custom_node_installer,
         "observe_application_state",
-        lambda *_args, **kwargs: events.append(
-            ("application", True)
-            if kwargs.get("write_inventory")
-            else ("application-check",)
-        ),
+        lambda *_args, **_kwargs: events.append(("application-check",)),
     )
 
     custom_node_installer.install_custom_nodes(
@@ -1139,8 +1094,7 @@ def test_registry_orchestration_uses_one_process_and_admitted_prefix(
     assert "UV_INDEX" not in first_kwargs["env"]
     assert "https://packages.example/simple" not in first_argv
     assert "USER_VALUE" not in first_kwargs["env"]
-    assert events[-2][0] == "inventory"
-    assert events[-1] == ("application", True)
+    assert events[-1] == ("application-check",)
 
 
 def test_empty_hook_phases_reuse_observations_and_force_fresh_final_evidence(
@@ -1179,19 +1133,13 @@ def test_empty_hook_phases_reuse_observations_and_force_fresh_final_evidence(
 
     def observe_application(*_args, **kwargs) -> None:
         application_git_paths.append(kwargs["git_path"])
-        events.append(("application-observation", bool(kwargs.get("write_inventory"))))
+        events.append(("application-observation", None))
 
     monkeypatch.setattr(
         custom_node_installer,
         "observe_application_state",
         observe_application,
     )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "_write_custom_node_inventory",
-        lambda *_args: events.append(("custom-node-inventory", None)),
-    )
-
     custom_node_installer.install_custom_nodes(
         custom_nodes,
         application,
@@ -1205,16 +1153,15 @@ def test_empty_hook_phases_reuse_observations_and_force_fresh_final_evidence(
         ("manager-observation", 2),
     ]
     assert [event for event in events if event[0] == "application-observation"] == [
-        ("application-observation", False),
-        ("application-observation", False),
-        ("application-observation", True),
+        ("application-observation", None),
+        ("application-observation", None),
+        ("application-observation", None),
     ]
     assert application_git_paths == [application_git_path] * 3
-    assert events[-4:] == [
+    assert events[-3:] == [
         ("typed-boundary", None),
         ("manager-observation", 2),
-        ("custom-node-inventory", None),
-        ("application-observation", True),
+        ("application-observation", None),
     ]
 
 
@@ -1629,10 +1576,6 @@ def test_real_hook_is_reproved_before_the_next_cm_cli_process(
 
     monkeypatch.setattr(custom_node_installer, "observe_manager_capability", prove)
     monkeypatch.setattr(custom_node_installer, "run_argv", install)
-    monkeypatch.setattr(
-        custom_node_installer, "_write_custom_node_inventory", lambda *_args: None
-    )
-
     custom_node_installer.install_custom_nodes(
         custom_nodes,
         application,

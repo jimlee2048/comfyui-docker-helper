@@ -20,10 +20,6 @@ from comfyui_docker_helper.config.build_plan import (
     manifest_binding,
     parse_build_plan_json,
 )
-from comfyui_docker_helper.config.custom_node_inventory import (
-    CustomNodeInventory,
-    custom_node_inventory,
-)
 from comfyui_docker_helper.config.final_manifest import (
     FinalBuildCheckId,
     final_build_check_ids,
@@ -41,7 +37,7 @@ class FinalManifestInput:
     binding: ManifestBinding
     toolchain: ToolchainPhase
     application: ApplicationPhase
-    custom_nodes: FinalManifestCustomNodesInput
+    custom_nodes: CustomNodesPhase
     files: tuple[FinalManifestFileInput, ...]
     materialized_hooks: tuple[FinalManifestHookInput, ...]
     final_probe: FinalCoreProbeInput
@@ -55,14 +51,6 @@ class FinalManifestHookInput:
     owner: Literal["custom-node", "runtime"]
     relative_path: str
     digest: str
-
-
-@dataclass(frozen=True, slots=True)
-class FinalManifestCustomNodesInput:
-    """Final custom-node inventory location and exact expected identities."""
-
-    inventory_path: str
-    expected: CustomNodeInventory
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,10 +135,7 @@ class BuildPlanInputAdmission:
             binding=manifest_binding(self._plan),
             toolchain=toolchain.model_copy(update={"tool_store": tool_store}),
             application=self._plan.application,
-            custom_nodes=FinalManifestCustomNodesInput(
-                inventory_path=self._plan.custom_nodes.custom_node_inventory,
-                expected=custom_node_inventory(self._plan.custom_nodes.nodes),
-            ),
+            custom_nodes=self._plan.custom_nodes,
             files=tuple(
                 FinalManifestFileInput(
                     url=item.url,

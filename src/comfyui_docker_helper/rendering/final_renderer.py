@@ -85,8 +85,12 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
     wheel_filename = f"comfyui_docker_helper-{cdh.version}-py3-none-any.whl"
     wheel_mount = f"/tmp/{wheel_filename}"
     wheel_hex_digest = cdh.wheel_digest.removeprefix("sha256:")
+    uv_cache_mount = "--mount=type=cache,target=/root/.cache/uv,sharing=locked"
+    uv_cache_export = "export UV_CACHE_DIR=/root/.cache/uv &&"
     lines = [
-        "RUN rm -f /etc/apt/apt.conf.d/docker-clean \\",
+        "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\",
+        "    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\",
+        " rm -f /etc/apt/apt.conf.d/docker-clean \\",
         " && printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d \\",
         " && chmod +x /usr/sbin/policy-rc.d \\",
         " && apt-get update \\",
@@ -94,8 +98,10 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         "--no-install-recommends -- \\",
         f"    {packages} \\",
         " && test -x /usr/bin/tini \\",
+        " && rm -f /etc/ssh/ssh_host_* \\",
         " && rm -f /usr/sbin/policy-rc.d",
-        f"RUN test \"$(uv --version | cut -d ' ' -f 1-2)\" = "
+        f"RUN {uv_cache_mount} {uv_cache_export} "
+        f"test \"$(uv --version | cut -d ' ' -f 1-2)\" = "
         f"{_shell_word(f'uv {plan.toolchain.uv_image.resolved_version}')} \\",
         f" && test \"$(uvx --version | cut -d ' ' -f 1-2)\" = "
         f"{_shell_word(f'uvx {plan.toolchain.uv_image.resolved_version}')} \\",
@@ -117,9 +123,11 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f"-I -c {_shell_word(bootstrap_check)} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip')} \\",
         f" && test -x {_shell_word(plan.application.paths.venv + '/bin/pip3')}",
-        f"RUN --mount=type=bind,source=bootstrap/{wheel_filename},"
+        f"RUN {uv_cache_mount} \\",
+        f"    --mount=type=bind,source=bootstrap/{wheel_filename},"
         f"target={wheel_mount},readonly \\",
-        f" test \"$(sha256sum {_shell_word(wheel_mount)} | cut -d ' ' -f 1)\" = "
+        f" {uv_cache_export} "
+        f"test \"$(sha256sum {_shell_word(wheel_mount)} | cut -d ' ' -f 1)\" = "
         f"{_shell_word(wheel_hex_digest)} \\",
         f" && uv --no-config tool install --python {_shell_word(interpreter)} "
         f"--no-python-downloads --default-index "
@@ -146,7 +154,6 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         tool = plan.toolchain.tool_store.comfy_cli
         tool_python = f"{plan.toolchain.tool_store.tool_dir}/{tool.name}/bin/python"
         tool_environment = f"{plan.toolchain.tool_store.tool_dir}/{tool.name}"
-        inventory = tool.inventory_path
         direct_check = "; ".join(
             (
                 "import importlib.metadata as m, pathlib, sys",
@@ -159,16 +166,6 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
                 f"pathlib.Path({tool_environment!r})",
                 "assert pathlib.Path(sys._base_executable).resolve() == "
                 f"pathlib.Path({interpreter!r}).resolve()",
-            )
-        )
-        inventory_script = "; ".join(
-            (
-                "import importlib.metadata as m, re",
-                "normalize=lambda value: re.sub(r'[-_.]+', '-', value).lower()",
-                "items=sorted((normalize(d.metadata['Name']), d.version) "
-                "for d in m.distributions())",
-                "assert len(items) == len({name for name, _ in items})",
-                "print('\\n'.join(f'{name}=={version}' for name, version in items))",
             )
         )
         commands = tool.executables
@@ -185,7 +182,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             )
         )
         lines.append(
-            f"RUN {preflight} \\\n"
+            f"RUN {uv_cache_mount} {uv_cache_export} {preflight} \\\n"
             f" && uv --no-config tool install --python {_shell_word(interpreter)} "
             f"--no-python-downloads --default-index "
             f"{_shell_word(plan.application.python_index_url)} "
@@ -194,11 +191,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             f" && {_shell_word(tool_python)} -c {_shell_word(direct_check)} \\\n"
             f" && uv --no-config pip check --python {_shell_word(tool_python)} "
             f"--no-python-downloads \\\n"
-            f" && {_shell_word(tool_python)} -c {_shell_word(inventory_script)} "
-            f"> {_shell_word(inventory)} \\\n"
-            f"{links} \\\n"
-            f" && grep -Fqx {_shell_word(f'comfy-cli=={tool.version}')} "
-            f"{_shell_word(inventory)}"
+            f"{links}"
         )
     for tool in plan.toolchain.tool_store.uv_tools:
         tool_python = f"{plan.toolchain.tool_store.tool_dir}/{tool.name}/bin/python"
@@ -207,7 +200,9 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             f"assert m.version({tool.name!r}) == {tool.version!r}"
         )
         lines.append(
-            f"RUN uv --no-config tool install --python {_shell_word(interpreter)} "
+            f"RUN {uv_cache_mount} {uv_cache_export} "
+            "uv --no-config tool install --python "
+            f"{_shell_word(interpreter)} "
             f"--no-python-downloads --default-index "
             f"{_shell_word(plan.application.python_index_url)} "
             f"{_shell_word(tool.requirement)} \\"
@@ -240,13 +235,13 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         )
     plan_digest = _shell_word(build_plan_digest(plan))
     lines.append(
-        f"RUN {_shell_word(cdh.executable)} "
+        f"RUN {uv_cache_mount} {uv_cache_export} {_shell_word(cdh.executable)} "
         "container install-comfyui "
         f"--build-plan-digest {plan_digest} "
         "--constraints /opt/cdh/build/python-package-constraints.txt"
     )
     lines.append(
-        f"RUN {_shell_word(cdh.executable)} "
+        f"RUN {uv_cache_mount} {uv_cache_export} {_shell_word(cdh.executable)} "
         "container install-custom-nodes "
         f"--build-plan-digest {plan_digest} "
         "--constraints /opt/cdh/build/python-package-constraints.txt "
@@ -259,7 +254,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             f"--build-plan-digest {plan_digest}"
         )
     lines.append(
-        f"RUN {_shell_word(cdh.executable)} "
+        f"RUN {uv_cache_mount} {uv_cache_export} {_shell_word(cdh.executable)} "
         "container emit-final-manifest "
         f"--build-plan-digest {plan_digest}"
     )

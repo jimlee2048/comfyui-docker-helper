@@ -452,15 +452,10 @@ __REGISTRY_PROOF_SOURCE__
 __MANAGER_FILESYSTEM_PROOF_SOURCE__
 __PYTHON_ROUTING_PROOF_SOURCE__
 
-def require_inventory(path_text, mode, python_prefix):
-    path = pathlib.Path(path_text)
-    value = path.lstat()
-    assert stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode)
-    assert stat.S_IMODE(value.st_mode) == mode
-    assert (value.st_uid, value.st_gid) == (0, 0)
+def observe_inventory(python_prefix):
     source = r'''__INVENTORY_OBSERVER_SOURCE__'''
     completed = subprocess.run(
-        [python_prefix, "-I", "-c", source, path_text],
+        [python_prefix, "-I", "-c", source],
         check=True,
         capture_output=True,
         text=True,
@@ -472,6 +467,14 @@ def require_inventory(path_text, mode, python_prefix):
 
 build = pathlib.Path("/opt/cdh/build")
 plan = json.loads(build.joinpath("build-plan.json").read_text())
+manifest_path = build.joinpath("manifest.json")
+manifest_metadata = manifest_path.lstat()
+assert stat.S_ISREG(manifest_metadata.st_mode)
+assert not stat.S_ISLNK(manifest_metadata.st_mode)
+assert stat.S_IMODE(manifest_metadata.st_mode) == 0o444
+assert (manifest_metadata.st_uid, manifest_metadata.st_gid) == (0, 0)
+manifest = json.loads(manifest_path.read_text())
+assert manifest["schema_version"] == 1
 expected_cli = os.environ["EXPECTED_CLI"] == "1"
 expected_manager = os.environ["EXPECTED_MANAGER"] == "1"
 expected_mixed = os.environ["EXPECTED_MIXED"] == "1"
@@ -504,9 +507,11 @@ assert comfyui["formal_release"] == "0.11.0"
 assert (plan["application"]["comfyui"]["manager"] is not None) == expected_manager
 assert (plan["toolchain"]["tool_store"]["comfy_cli"] is not None) == expected_cli
 
-application = require_inventory(
-    "/opt/cdh/build/application-inventory.txt", 0o444, "/opt/venv/bin/python",
-)
+application = observe_inventory("/opt/venv/bin/python")
+assert application == {
+    item["name"]: item["version"]
+    for item in manifest["application"]["inventory"]
+}
 cdh_version = subprocess.run(
     [
         "/opt/uv/tools/comfyui-docker-helper/bin/python",
@@ -664,9 +669,11 @@ else:
 
 tool = plan["toolchain"]["tool_store"]["comfy_cli"]
 if expected_cli:
-    tool_inventory = require_inventory(
-        tool["inventory_path"], 0o644, "/opt/uv/tools/comfy-cli/bin/python",
-    )
+    tool_inventory = observe_inventory("/opt/uv/tools/comfy-cli/bin/python")
+    cli_evidence = manifest["toolchain"]["comfy_cli"]
+    assert tool_inventory == {
+        item["name"]: item["version"] for item in cli_evidence["inventory"]
+    }
     assert tool_inventory["comfy-cli"] == tool["version"]
     for command in ("comfy", "comfy-cli", "comfycli"):
         public = pathlib.Path("/opt/uv/bin") / command
@@ -674,8 +681,8 @@ if expected_cli:
         assert public.resolve(strict=True) == owned
 else:
     assert tool is None
+    assert "comfy_cli" not in manifest["toolchain"]
     assert not os.path.lexists("/opt/uv/tools/comfy-cli")
-    assert not os.path.lexists(build / "comfy-cli-inventory.txt")
     commands = ("comfy", "comfy-cli", "comfycli")
     assert all(
         not os.path.lexists(pathlib.Path("/opt/uv/bin", item))
@@ -686,11 +693,6 @@ assert not os.path.lexists(build / "registry-inventory.json")
 
 nodes = plan["custom_nodes"]["nodes"]
 assert bool(nodes) == expected_mixed
-inventory = build.joinpath("custom-node-inventory.json")
-value = inventory.lstat()
-assert stat.S_ISREG(value.st_mode) and not stat.S_ISLNK(value.st_mode)
-assert stat.S_IMODE(value.st_mode) == 0o444
-assert (value.st_uid, value.st_gid) == (0, 0)
 def inventory_entry(node):
     if node["type"] == "registry":
         return {
@@ -706,13 +708,7 @@ def inventory_entry(node):
 expected_inventory = {
     "nodes": [inventory_entry(node) for node in nodes], "schema_version": 1,
 }
-expected_bytes = (
-    json.dumps(
-        expected_inventory, ensure_ascii=True, separators=(",", ":"),
-        sort_keys=True,
-    ) + "\n"
-).encode()
-assert inventory.read_bytes() == expected_bytes
+assert manifest["custom_nodes"] == expected_inventory
 custom_nodes = workspace / "custom_nodes"
 scan_registry_projects_after_git_proof(custom_nodes, nodes)
 if expected_mixed:
@@ -761,7 +757,7 @@ if expected_mixed:
         )
     assert lines == expected_hook_lines
 else:
-    assert inventory.read_bytes() == b'{"nodes":[],"schema_version":1}\n'
+    assert manifest["custom_nodes"] == {"nodes": [], "schema_version": 1}
     assert not hook_log.exists()
 PY
 

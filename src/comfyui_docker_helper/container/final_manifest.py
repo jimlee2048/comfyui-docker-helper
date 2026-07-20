@@ -15,9 +15,6 @@ from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.custom_node_inventory import (
-    dump_custom_node_inventory,
-)
 from comfyui_docker_helper.config.final_manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
@@ -52,6 +49,10 @@ from comfyui_docker_helper.container.comfyui_installer import (
     capture_manager_authority,
     observe_application_state,
     observe_manager_absence,
+)
+from comfyui_docker_helper.container.custom_node_installer import (
+    CustomNodeInstallError,
+    observe_custom_node_state,
 )
 from comfyui_docker_helper.container.evidence_writer import (
     ApplicationEvidenceError,
@@ -112,11 +113,6 @@ def _observe_final_manifest(
     )
 
     application_inventory = _environment_inventory(runtime.python)
-    _verify_inventory_file(
-        Path(projection.application.inventory_path),
-        application_inventory,
-        expected_mode=0o444,
-    )
     manager = _manager_evidence(projection, runtime, application_inventory)
     direct_packages = _direct_application_packages(projection, application_inventory)
 
@@ -139,8 +135,8 @@ def _observe_final_manifest(
         for tool in projection.toolchain.tool_store.uv_tools
     )
 
-    custom_inventory = _custom_node_inventory(projection)
     files = _file_evidence(projection)
+    custom_inventory = _custom_node_evidence(projection, runtime)
     hooks = _hook_evidence(projection)
     apt = tuple(
         AptPackageEvidence(
@@ -407,8 +403,42 @@ def _comfy_cli_evidence(
     if tool is None:
         return None
     python = Path(projection.toolchain.tool_store.tool_dir) / tool.name / "bin/python"
+    managed_python = projection.toolchain.python
+    managed_interpreter = (
+        Path("/opt/python")
+        / managed_python.catalog_key
+        / "bin"
+        / f"python{'.'.join(managed_python.version.split('.')[:2])}"
+    )
+    identity_script = (
+        "import json,sys;"
+        "print(json.dumps({'base_executable':sys._base_executable,"
+        "'prefix':sys.prefix},sort_keys=True,separators=(',',':')))"
+    )
+    identity_output = _capture(
+        (python, "-I", "-c", identity_script),
+        cwd=_BUILD_DIRECTORY,
+        description="comfy-cli interpreter identity observation",
+    )
+    try:
+        identity = json.loads(identity_output)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise FinalManifestError("comfy-cli interpreter identity is invalid") from error
+    if not isinstance(identity, dict) or set(identity) != {
+        "base_executable",
+        "prefix",
+    }:
+        raise FinalManifestError("comfy-cli interpreter identity is invalid")
+    prefix = identity["prefix"]
+    base_executable = identity["base_executable"]
+    if not isinstance(prefix, str) or Path(prefix) != python.parent.parent:
+        raise FinalManifestError("comfy-cli environment does not match BuildPlan")
+    if (
+        not isinstance(base_executable, str)
+        or Path(base_executable) != managed_interpreter
+    ):
+        raise FinalManifestError("comfy-cli base interpreter does not match BuildPlan")
     inventory = _environment_inventory(python)
-    _verify_inventory_file(Path(tool.inventory_path), inventory, expected_mode=0o644)
     _dependency_check(python, "comfy-cli dependency verification")
     for command in tool.executables:
         link = Path(projection.toolchain.tool_store.bin_dir) / command
@@ -466,14 +496,14 @@ def _tool_evidence(
     )
 
 
-def _custom_node_inventory(projection: FinalManifestInput):
-    path = Path(projection.custom_nodes.inventory_path)
-    content = _read_owned_regular(path, expected_mode=0o444)
-    expected = projection.custom_nodes.expected
-    expected_bytes = dump_custom_node_inventory(expected)
-    if content != expected_bytes:
-        raise FinalManifestError("custom-node inventory does not match BuildPlan")
-    return expected
+def _custom_node_evidence(
+    projection: FinalManifestInput,
+    runtime: ContainerRuntime,
+):
+    try:
+        return observe_custom_node_state(projection.custom_nodes, runtime=runtime)
+    except CustomNodeInstallError as error:
+        raise FinalManifestError("final custom-node observation failed") from error
 
 
 def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
@@ -564,17 +594,6 @@ def _inventory_models(
     return tuple(
         InventoryDistribution(name=name, version=version) for name, version in inventory
     )
-
-
-def _verify_inventory_file(
-    path: Path,
-    inventory: tuple[tuple[str, str], ...],
-    *,
-    expected_mode: int,
-) -> None:
-    expected = "".join(f"{name}=={version}\n" for name, version in inventory).encode()
-    if _read_owned_regular(path, expected_mode=expected_mode) != expected:
-        raise FinalManifestError(f"factual inventory does not match: {path}")
 
 
 def _dependency_check(python: Path, description: str) -> None:

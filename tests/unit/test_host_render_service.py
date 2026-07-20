@@ -271,7 +271,6 @@ def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
     assert plan["toolchain"]["tool_store"]["comfy_cli"] == {
         "environment": "uv-tool:comfy-cli",
         "executables": ["comfy", "comfy-cli", "comfycli"],
-        "inventory_path": "/opt/cdh/build/comfy-cli-inventory.txt",
         "name": "comfy-cli",
         "version": "1.8.0",
     }
@@ -304,9 +303,6 @@ def test_checkout_owned_manager_capability_flows_to_application_plan(
     }
     assert plan["toolchain"]["tool_store"]["comfy_cli"] is None
     assert plan["custom_nodes"]["user_directory"] == "/workspace/ComfyUI/user"
-    assert plan["custom_nodes"]["custom_node_inventory"] == (
-        "/opt/cdh/build/custom-node-inventory.json"
-    )
     assert "--enable-manager" not in plan["runtime"]["launch_command"]
 
 

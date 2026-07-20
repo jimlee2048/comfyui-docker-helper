@@ -85,13 +85,14 @@ nodes use the verified absolute `cm-cli`, one exact request per process, while
 direct-Git nodes pass the declared URL through unchanged as an acquisition
 locator and use the locked exact commit as content authority; cdh does not
 canonicalize the URL or claim it identifies the actual network endpoint. cdh
-verifies the ordered node set around hooks and writes declaration-ordered
-evidence to `/opt/cdh/build/custom-node-inventory.json`. Registry installs do
+verifies the ordered node set around hooks. After every build mutation, final
+manifest emission re-proves each direct-Git checkout and the exact Registry
+identity set from the final filesystem, then records declaration-ordered typed
+evidence in `/opt/cdh/build/manifest.json`. Registry installs do
 not invoke the optional `comfy`, `comfy-cli`, or `comfycli` commands.
-Even with no custom nodes, the same layer validates the custom-node root, writes
-the exact empty inventory, and performs the final application dependency check.
-The final factual application distribution inventory is written separately to
-`/opt/cdh/build/application-inventory.txt`.
+Even with no custom nodes, final observation validates the custom-node root and
+records exact empty evidence. The same manifest records the factual final
+application and optional isolated comfy-cli distribution inventories.
 
 See [`examples/full.toml`](examples/full.toml) for the complete current schema.
 
@@ -313,12 +314,19 @@ an effective credential, cdh warns and does not start sshd. The entrypoint
 prepares credentials and host keys through bounded cancellable child processes,
 then starts, monitors, and stops foreground sshd with the rest of the container
 lifecycle.
+Package-generated SSH host keys are removed during the image build. When SSH is
+enabled, the container generates its own host keys during startup instead of
+shipping a shared baked identity.
 
 Prefer runtime injection for confidential values. Ordinary TOML values, URLs,
 environment variables, rendered files, image history, and logs can expose
 their contents when their contract requires it. cdh keeps its own ephemeral
 credentials internal and avoids printing the explicit SSH password, but it
 does not infer that arbitrary configured values are secrets.
+
+Custom-node build-hook source is copied to `/opt/cdh/build/inputs` as durable
+verified evidence and remains in the final image and its committed layers. Do
+not place secrets in these scripts.
 
 ## Runtime lifecycle and hooks
 

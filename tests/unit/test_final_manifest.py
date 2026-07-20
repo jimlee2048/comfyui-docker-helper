@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,10 +17,7 @@ from comfyui_docker_helper.config.build_plan import (
     dump_build_plan_json,
     manifest_binding,
 )
-from comfyui_docker_helper.config.custom_node_inventory import (
-    custom_node_inventory,
-    dump_custom_node_inventory,
-)
+from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.config.final_manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
@@ -285,6 +283,100 @@ def test_manifest_omits_disabled_comfy_cli_capability() -> None:
     assert json.loads(content)["application"]["manager"]["enabled"] is True
 
 
+# Final comfy-cli evidence executes the tool interpreter and proves its isolation.
+def test_comfy_cli_evidence_observes_exact_interpreter_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    tool = projection.toolchain.tool_store.comfy_cli
+    assert tool is not None
+    python = Path("/opt/uv/tools/comfy-cli/bin/python")
+    managed = projection.toolchain.python
+    expected_base = (
+        Path("/opt/python")
+        / managed.catalog_key
+        / "bin"
+        / f"python{'.'.join(managed.version.split('.')[:2])}"
+    )
+    calls: list[tuple[tuple[Path | str, ...], Path, str]] = []
+
+    def capture(argv, *, cwd, description):
+        calls.append((argv, cwd, description))
+        return json.dumps(
+            {
+                "base_executable": str(expected_base),
+                "prefix": "/opt/uv/tools/comfy-cli",
+            }
+        )
+
+    monkeypatch.setattr(final_manifest_service, "_capture", capture)
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_environment_inventory",
+        lambda _python: (("comfy-cli", tool.version),),
+    )
+    monkeypatch.setattr(
+        final_manifest_service, "_dependency_check", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _path: SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0),
+    )
+    monkeypatch.setattr(
+        Path,
+        "resolve",
+        lambda path, *, strict: Path("/opt/uv/tools/comfy-cli/bin") / path.name,
+    )
+
+    evidence = final_manifest_service._comfy_cli_evidence(projection)
+
+    assert evidence is not None
+    assert evidence.direct.observed == tool.version
+    assert calls[0][0][:3] == (python, "-I", "-c")
+    assert calls[0][1:] == (
+        Path("/opt/cdh/build"),
+        "comfy-cli interpreter identity observation",
+    )
+
+
+@pytest.mark.parametrize(
+    ("identity", "message"),
+    [
+        (
+            {
+                "base_executable": "/opt/python/expected/bin/python3.12",
+                "prefix": "/tmp/forged-comfy-cli",
+            },
+            "environment does not match BuildPlan",
+        ),
+        (
+            {
+                "base_executable": "/tmp/forged-python",
+                "prefix": "/opt/uv/tools/comfy-cli",
+            },
+            "base interpreter does not match BuildPlan",
+        ),
+    ],
+)
+def test_comfy_cli_evidence_rejects_pyvenv_or_base_interpreter_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    identity: dict[str, str],
+    message: str,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(identity),
+    )
+
+    with pytest.raises(FinalManifestError, match=message):
+        final_manifest_service._comfy_cli_evidence(projection)
+
+
 # Schema validators reject identity drift and a false setuptools compatibility claim.
 def test_manifest_rejects_intended_observed_identity_mismatch() -> None:
     with pytest.raises(ValidationError, match="intended and observed versions"):
@@ -358,13 +450,7 @@ def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) 
     assert projection.binding == manifest_binding(plan)
     assert projection.toolchain == plan.toolchain
     assert projection.application == plan.application
-    assert (
-        projection.custom_nodes.inventory_path
-        == plan.custom_nodes.custom_node_inventory
-    )
-    assert projection.custom_nodes.expected == custom_node_inventory(
-        plan.custom_nodes.nodes
-    )
+    assert projection.custom_nodes == plan.custom_nodes
     assert tuple(
         (item.url, item.target, item.checksum) for item in projection.files
     ) == tuple((item.url, item.target, item.checksum) for item in plan.files.files)
@@ -565,60 +651,40 @@ def test_renderer_places_manifest_emission_after_every_build_mutation(
     ]
 
 
-# Final observation unconditionally consumes exact typed inventory, including zero.
-def test_final_observation_requires_exact_custom_node_inventory(
+# Final observation delegates to the existing local custom-node identity authority.
+def test_final_observation_uses_live_custom_node_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     projection = BuildPlanInputAdmission(plan).final_manifest()
     expected = custom_node_inventory(plan.custom_nodes.nodes)
-    content = dump_custom_node_inventory(expected)
+    runtime = SimpleNamespace(comfyui_path=Path("/workspace/ComfyUI"))
+    calls = []
     monkeypatch.setattr(
         final_manifest_service,
-        "_read_owned_regular",
-        lambda *_args, **_kwargs: content,
+        "observe_custom_node_state",
+        lambda custom_nodes, **kwargs: calls.append((custom_nodes, kwargs)) or expected,
     )
 
-    assert final_manifest_service._custom_node_inventory(projection) == expected
-
-    reordered = expected.model_copy(update={"nodes": tuple(reversed(expected.nodes))})
-    monkeypatch.setattr(
-        final_manifest_service,
-        "_read_owned_regular",
-        lambda *_args, **_kwargs: dump_custom_node_inventory(reordered),
-    )
-    with pytest.raises(FinalManifestError, match="does not match BuildPlan"):
-        final_manifest_service._custom_node_inventory(projection)
+    assert final_manifest_service._custom_node_evidence(projection, runtime) == expected
+    assert calls == [(plan.custom_nodes, {"runtime": runtime})]
 
 
-def test_final_observation_accepts_only_exact_empty_inventory_bytes(
+def test_final_observation_reports_custom_node_proof_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
-    document = plan.model_dump(mode="python")
-    document["custom_nodes"]["nodes"] = ()
-    plan = BuildPlan.model_validate(document)
     projection = BuildPlanInputAdmission(plan).final_manifest()
-    exact = b'{"nodes":[],"schema_version":1}\n'
     monkeypatch.setattr(
         final_manifest_service,
-        "_read_owned_regular",
-        lambda *_args, **_kwargs: exact,
-    )
-
-    assert (
-        dump_custom_node_inventory(
-            final_manifest_service._custom_node_inventory(projection)
-        )
-        == exact
-    )
-
-    monkeypatch.setattr(
-        final_manifest_service,
-        "_read_owned_regular",
+        "observe_custom_node_state",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            FinalManifestError("required build evidence is unavailable")
+            final_manifest_service.CustomNodeInstallError("identity drift")
         ),
     )
-    with pytest.raises(FinalManifestError, match="unavailable"):
-        final_manifest_service._custom_node_inventory(projection)
+
+    with pytest.raises(FinalManifestError, match="final custom-node observation"):
+        final_manifest_service._custom_node_evidence(
+            projection,
+            SimpleNamespace(comfyui_path=Path("/workspace/ComfyUI")),
+        )

@@ -221,16 +221,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
                         binding=build_plan_input_module.manifest_binding(plan),
                         toolchain=plan.toolchain,
                         application=plan.application,
-                        custom_nodes=(
-                            build_plan_input_module.FinalManifestCustomNodesInput(
-                                inventory_path=(
-                                    plan.custom_nodes.custom_node_inventory
-                                ),
-                                expected=build_plan_input_module.custom_node_inventory(
-                                    plan.custom_nodes.nodes
-                                ),
-                            )
-                        ),
+                        custom_nodes=plan.custom_nodes,
                         files=tuple(
                             build_plan_input_module.FinalManifestFileInput(
                                 url=item.url,

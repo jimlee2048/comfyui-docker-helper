@@ -26,10 +26,6 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
 )
-from comfyui_docker_helper.container.evidence_writer import (
-    ApplicationEvidenceError,
-    write_application_evidence,
-)
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.errors import ApplicationError
 from comfyui_docker_helper.pytorch_resolution import (
@@ -167,7 +163,6 @@ def verify_application_environment(
     constraints_path: Path = _CONSTRAINTS_PATH,
     environ: Mapping[str, str] | None = None,
     ordinary_requirements: tuple[str, ...] = (),
-    write_inventory: bool = False,
 ) -> None:
     """Re-prove exact application packages, constraints, and dependency health."""
     _validate_application_package_owners(application)
@@ -219,18 +214,6 @@ def verify_application_environment(
         description="application dependency verification",
     )
     _verify_application_pip_commands(application, runtime, environ)
-    if write_inventory:
-        final_inventory = _application_inventory(application, runtime)
-        if final_inventory != inventory:
-            raise ApplicationInstallError(
-                "application inventory changed during final verification"
-            )
-        _write_application_inventory(
-            Path(application.inventory_path),
-            b"".join(
-                f"{name}=={version}\n".encode() for name, version in final_inventory
-            ),
-        )
 
 
 def _validate_group(
@@ -549,24 +532,6 @@ _PIP_VERSION_PATTERN = re.compile(
     r"pip (?P<version>\S+) from (?P<root>.+) "
     r"\(python (?P<python>[0-9]+\.[0-9]+)\)"
 )
-
-
-def _write_application_inventory(
-    path: Path,
-    content: bytes,
-    *,
-    owner_uid: int = 0,
-    owner_gid: int = 0,
-) -> None:
-    try:
-        write_application_evidence(
-            path,
-            content,
-            owner_uid=owner_uid,
-            owner_gid=owner_gid,
-        )
-    except ApplicationEvidenceError as error:
-        raise ApplicationInstallError(f"application inventory {error}") from error
 
 
 def application_install_environment(

@@ -268,7 +268,6 @@ class ComfyCliToolPlan(_PlanModel):
     version: str
     environment: Literal["uv-tool:comfy-cli"]
     executables: tuple[Literal["comfy"], Literal["comfy-cli"], Literal["comfycli"]]
-    inventory_path: Literal["/opt/cdh/build/comfy-cli-inventory.txt"]
 
     @field_validator("version")
     @classmethod
@@ -600,7 +599,6 @@ class ApplicationPhase(_PlanModel):
     os_packages: tuple[str, ...]
     python_index_url: str
     pip_version: str
-    inventory_path: Literal["/opt/cdh/build/application-inventory.txt"]
     python_extras: PackageGroupPlan | None
     pytorch: PyTorchGroupPlan
     comfyui: ComfyUIPlan
@@ -732,7 +730,6 @@ CustomNodePlan = Annotated[RegistryNodePlan | GitNodePlan, Field(discriminator="
 class CustomNodesPhase(_PlanModel):
     install_manager: bool
     user_directory: str
-    custom_node_inventory: Literal["/opt/cdh/build/custom-node-inventory.json"]
     nodes: tuple[CustomNodePlan, ...]
 
     @field_validator("user_directory")
@@ -1168,7 +1165,6 @@ def _project_toolchain(
             version=cli_entry.version,
             environment="uv-tool:comfy-cli",
             executables=("comfy", "comfy-cli", "comfycli"),
-            inventory_path="/opt/cdh/build/comfy-cli-inventory.txt",
         )
     uv_tools = tuple(
         _uv_tool(request, entries, used)
@@ -1285,7 +1281,6 @@ def _project_application(
         os_packages=graph.application.os_packages,
         python_index_url=graph.application.python_index_url,
         pip_version=toolchain.python.pip_version,
-        inventory_path="/opt/cdh/build/application-inventory.txt",
         python_extras=(
             PackageGroupPlan(
                 group="application-extra",
@@ -1343,7 +1338,6 @@ def _project_custom_nodes(
     return CustomNodesPhase(
         install_manager=graph.application.install_manager,
         user_directory=str(PurePosixPath(graph.application.comfyui_path) / "user"),
-        custom_node_inventory="/opt/cdh/build/custom-node-inventory.json",
         nodes=nodes,
     )
 

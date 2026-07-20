@@ -516,17 +516,16 @@ def test_application_observation_rechecks_source_input_and_environment(
             (
                 "application",
                 kwargs["ordinary_requirements"],
-                kwargs["write_inventory"],
             )
         ),
     )
 
-    observe_application_state(application, runtime, parsed, write_inventory=True)
+    observe_application_state(application, runtime, parsed)
 
     assert events == [
         "source",
         "requirements",
-        ("application", parsed.ordinary, True),
+        ("application", parsed.ordinary),
     ]
 
 

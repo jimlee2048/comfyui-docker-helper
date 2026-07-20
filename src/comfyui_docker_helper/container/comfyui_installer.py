@@ -135,7 +135,6 @@ def observe_application_state(
     uv_path: Path = _UV_PATH,
     constraints_path: Path = _CONSTRAINTS_PATH,
     environ: Mapping[str, str] | None = None,
-    write_inventory: bool = False,
 ) -> None:
     """Observe complete application health against immutable requirements input."""
     _validate_paths(application, runtime)
@@ -154,7 +153,6 @@ def observe_application_state(
         constraints_path=constraints_path,
         environ=environ,
         ordinary_requirements=authority.ordinary,
-        write_inventory=write_inventory,
     )
 
 

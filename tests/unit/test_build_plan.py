@@ -431,9 +431,6 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     assert plan.application.python_extras is not None
     assert plan.application.python_extras.packages[0].requirement == "numpy==2.3.1"
     assert plan.application.pip_version == "26.1.2"
-    assert plan.application.inventory_path == (
-        "/opt/cdh/build/application-inventory.txt"
-    )
     manager = plan.application.comfyui.manager
     assert manager is not None
     assert manager.requirements_path == "manager_requirements.txt"
@@ -453,9 +450,6 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
     )
     assert not hasattr(plan.custom_nodes.nodes[0], "target")
     assert plan.custom_nodes.user_directory == "/workspace/ComfyUI/user"
-    assert plan.custom_nodes.custom_node_inventory == (
-        "/opt/cdh/build/custom-node-inventory.json"
-    )
     assert plan.custom_nodes.nodes[1].url == "https://example.test/direct.git"
     assert plan.custom_nodes.nodes[1].commit == COMMIT_B
     assert plan.custom_nodes.nodes[1].target.endswith("/custom_nodes/direct-node")

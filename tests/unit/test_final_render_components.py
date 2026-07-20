@@ -79,6 +79,73 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
     assert rendered == render_build_plan_dockerfile(plan)
 
 
+# Build caches stay outside image layers, and package-generated SSH identity is removed.
+def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    rendered = render_build_plan_dockerfile(plan)
+    run_blocks = tuple(f"RUN {block}" for block in rendered.split("\nRUN ")[1:])
+    apt_block = next(block for block in run_blocks if "apt-get update" in block)
+
+    assert apt_block.startswith(
+        "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\\n"
+        "    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked"
+    )
+    assert apt_block.index("apt-get install") < apt_block.index(
+        "rm -f /etc/ssh/ssh_host_*"
+    )
+    uv_cache_prefix = (
+        "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked "
+        "export UV_CACHE_DIR=/root/.cache/uv && "
+    )
+    for marker in (
+        "uv --no-config python install",
+        "comfy-cli==",
+        "container install-comfyui",
+        "container install-custom-nodes",
+        "container emit-final-manifest",
+    ):
+        block = next(item for item in run_blocks if marker in item)
+        assert block.startswith(uv_cache_prefix)
+
+    wheel_block = next(item for item in run_blocks if "source=bootstrap/" in item)
+    assert wheel_block.startswith(
+        "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \\\n"
+        "    --mount=type=bind,source=bootstrap/"
+    )
+    assert wheel_block.index("--mount=type=bind") < wheel_block.index(
+        "export UV_CACHE_DIR=/root/.cache/uv &&"
+    )
+
+
+def test_renderer_keeps_build_uv_cache_outside_user_runtime_cache_paths() -> None:
+    config = final_config()
+    document = config.model_dump(mode="python")
+    document["system"]["env"].update(
+        {"HOME": "/workspace/home", "XDG_CACHE_HOME": "/workspace/cache"}
+    )
+    plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+
+    rendered = render_build_plan_dockerfile(plan)
+
+    assert 'ENV HOME="/workspace/home"' in rendered
+    assert 'ENV XDG_CACHE_HOME="/workspace/cache"' in rendered
+    uv_run_blocks = tuple(
+        f"RUN {block}"
+        for block in rendered.split("\nRUN ")[1:]
+        if "--mount=type=cache,target=/root/.cache/uv" in block
+    )
+    assert uv_run_blocks
+    for block in uv_run_blocks:
+        export_index = block.index("export UV_CACHE_DIR=/root/.cache/uv &&")
+        command_indexes = tuple(
+            index
+            for marker in ("uv --no-config", "/opt/uv/bin/cdh")
+            if (index := block.find(marker)) >= 0
+        )
+        assert command_indexes
+        assert export_index < min(command_indexes)
+
+
 def test_renderer_quotes_container_paths_without_host_projection() -> None:
     config = final_config()
     document = config.model_dump(mode="python")
@@ -133,7 +200,6 @@ def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
         "uv --no-config pip check --python /opt/uv/tools/comfy-cli/bin/python"
         in cli_block
     )
-    assert "/opt/cdh/build/comfy-cli-inventory.txt" in cli_block
     assert "sys._base_executable" in cli_block
     assert "console_scripts" in cli_block
     for command in ("comfy", "comfy-cli", "comfycli"):
@@ -159,7 +225,6 @@ def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
 
     assert "uv --no-config tool install" in rendered  # cdh remains a uv tool.
     assert "comfy-cli==" not in rendered
-    assert "comfy-cli-inventory.txt" not in rendered
     for command in ("comfy", "comfy-cli", "comfycli"):
         assert f"test ! -e /opt/uv/bin/{command}" in rendered
         assert f"test ! -L /opt/uv/bin/{command}" in rendered
@@ -180,7 +245,10 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
     custom_node_line = next(
         line for line in rendered.splitlines() if "install-custom-nodes" in line
     )
-    assert custom_node_line.startswith("RUN /opt/uv/bin/cdh container")
+    assert custom_node_line.startswith(
+        "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked "
+        "export UV_CACHE_DIR=/root/.cache/uv && /opt/uv/bin/cdh container"
+    )
     assert f"--build-plan-digest {build_plan_digest(plan)}" in custom_node_line
     assert "--constraints /opt/cdh/build/python-package-constraints.txt" in (
         custom_node_line
@@ -239,9 +307,6 @@ def test_final_application_mode_matrix_keeps_one_observed_execution_boundary(
 
     assert rendered.count("container install-custom-nodes") == 1
     assert tuple(node.type for node in changed.custom_nodes.nodes) == node_types
-    assert changed.application.inventory_path == (
-        "/opt/cdh/build/application-inventory.txt"
-    )
     assert (changed.toolchain.tool_store.comfy_cli is not None) is install_cli
     assert (changed.application.comfyui.manager is not None) is install_manager
 

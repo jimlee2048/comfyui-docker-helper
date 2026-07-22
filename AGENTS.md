@@ -16,10 +16,10 @@ This project uses a src/ layout.
     - `container/`: helpers executed inside Docker build containers.
     - `resources/`: stores package-owned files used by the internal implementation.
 - `tests/`: Test suites and fixtures.
-    - `tests/unit/`: unit tests .
+    - `tests/unit/`: unit tests.
     - `tests/integration/`: integration tests.
     - `tests/smoke/`: smoke tests.
-    - `tests/fixture/<set>`: test fixture sets.
+    - `tests/fixtures/<set>/`: test fixture sets.
 - `examples/`: User-facing config examples.
 
 
@@ -81,9 +81,10 @@ Use `pytest` for testing:
 ### ComfyUI
 - [ComfyUI App](https://github.com/Comfy-Org/ComfyUI)
 - [comfy-cli](https://github.com/Comfy-Org/comfy-cli)
-- [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager/tree/manager-v4): 
-    - Branch `manager-v4` is the correct and latest branch.
-    - Includes `cm-cli`; some features of `comfy-cli` depend on `cm-cli`.
+- [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager/tree/manager-v4):
+    - Provides `cm-cli`, which cdh uses for Registry node operations.
+    - cdh installs the exact Manager requirement declared by the selected
+      ComfyUI checkout.
 - [Comfy Registry](https://registry.comfy.org/): the official registry of ComfyUI custom_nodes.
 
 

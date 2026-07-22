@@ -25,7 +25,9 @@ def render_configuration_diagnostics(
         item for item in diagnostics if item.severity == DiagnosticSeverity.WARNING
     )
     if errors:
-        output.print(Text(f"Configuration is invalid: {config_path}", style="bold red"))
+        output.print(
+            Text(f"Unable to process configuration: {config_path}", style="bold red")
+        )
         _render_items(errors, output)
     if warnings:
         output.print(

@@ -337,14 +337,17 @@ not place secrets in these hook files.
 
 Pass `--runtime-hooks-dir <dir>` to `cdh host render` or `cdh host build` to
 bake a complete runtime hook tree. When the option is omitted, no baked runtime
-hooks are planned. The root may contain only `pre-start.d/`, `post-start.d/`,
-and `stop.d/`; files must be regular `.sh` or `.py` files. Symlinks, special
-files, nested directories, and unknown entries are rejected.
+hooks are planned. The selected source root may contain only `pre-start.d/`,
+`post-start.d/`, and `stop.d/`; files must be regular `.sh` or `.py` files.
+Symlinks, special files, nested directories, and unknown top-level entries are
+rejected before the build context is materialized.
 
 Every baked hook is verified while materializing and copied to
 `/opt/cdh/runtime/hooks`. Mounted `/etc/cdh/runtime/hooks` remains an external
-runtime input. Baked hooks run before mounted hooks and filenames run in lexical
-order within each phase.
+runtime input. Unrelated top-level entries in that mounted tree are ignored,
+while entries inside recognized phase directories are strictly validated as
+regular `.sh` or `.py` files. Baked hooks run before mounted hooks and
+filenames run in lexical order within each phase.
 
 Startup completes synchronous downloads, runs pre-start hooks, starts sshd when
 enabled, accepts asynchronous downloads, and then starts ComfyUI. If post-start

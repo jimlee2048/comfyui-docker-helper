@@ -31,7 +31,6 @@ extra_packages = ["ffmpeg", "libgl1"]
 # Values become Dockerfile ENV entries and may appear in image history/logs.
 # Do not put secrets here unless that exposure is acceptable.
 # UV_* and PIP_* names are reserved to cdh package and tool authority.
-COMFYUI_PORT = "8188"
 EXAMPLE_PROFILE = "full"
 
 [system.ssh]

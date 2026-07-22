@@ -34,11 +34,14 @@ observational evidence. The smoke does not certify arbitrary custom nodes,
 workflows, GPU behavior, codecs, models, or service health, and the in-image
 manifest is not another resolver or replay input.
 
-The optional `--runtime-hooks-dir` tree may contain only regular `.sh` or
-`.py` files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`.
-Every baked hook is content-locked and copied to `/opt/cdh/runtime/hooks`;
-mounted `/etc/cdh/runtime/hooks` remains external runtime input. Omitting
-`--runtime-hooks-dir` means that no runtime hook tree is baked.
+The optional `--runtime-hooks-dir` source may contain only regular `.sh` or
+`.py` files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`;
+unknown top-level entries are rejected before rendering. Every baked hook is
+content-locked and copied to `/opt/cdh/runtime/hooks`. Mounted
+`/etc/cdh/runtime/hooks` remains external runtime input: unrelated top-level
+entries are ignored, but contents of recognized phase directories are strictly
+validated. Omitting `--runtime-hooks-dir` means that no runtime hook tree is
+baked.
 
 `--build-hooks-dir` has no default and is required only when configuration
 references `pre_install_hooks` or `post_install_hooks`. Paths are resolved

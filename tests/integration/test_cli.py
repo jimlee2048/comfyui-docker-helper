@@ -531,6 +531,7 @@ def test_invalid_build_hook_root_fails_before_planning_providers(
     )
 
     assert result.exit_code == 1
+    assert "Unable to process configuration" in result.output
     assert "hook.build_hooks_dir_not_directory" in result.output
     assert not context.exists()
 
@@ -846,6 +847,7 @@ def test_render_materialization_error_is_short_and_has_no_traceback(
     )
 
     assert result.exit_code == 1
+    assert "Unable to process configuration" in result.output
     assert "render.context_write_failed" in result.output
     assert "Traceback" not in result.output
 

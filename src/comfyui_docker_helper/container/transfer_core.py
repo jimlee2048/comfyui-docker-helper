@@ -2220,7 +2220,8 @@ def _link_fd_noreplace(source_fd: int, target_fd: int, target_name: str) -> None
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         linkat = libc.linkat
-    except (OSError, AttributeError) as error:  # pragma: no cover - Ubuntu owns it.
+    except (OSError, AttributeError) as error:  # pragma: no cover
+        # Supported Ubuntu/glibc images provide this required symbol.
         raise DownloadFilesError("exact staging inode claim is unavailable") from error
     linkat.argtypes = [
         ctypes.c_int,
@@ -2256,7 +2257,8 @@ def _renameat2(
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = libc.renameat2
-    except (OSError, AttributeError) as error:  # pragma: no cover - Ubuntu owns it.
+    except (OSError, AttributeError) as error:  # pragma: no cover
+        # Supported Ubuntu/glibc images provide this required symbol.
         raise DownloadFilesError("atomic file placement is unavailable") from error
     renameat2.argtypes = [
         ctypes.c_int,

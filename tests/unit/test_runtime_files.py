@@ -23,7 +23,6 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFilePlanError,
     RuntimeFilePlanItem,
     build_runtime_file_plan,
-    canonical_runtime_file_identity_bytes,
     download_runtime_files,
     process_runtime_file_downloads,
     reconcile_runtime_file_plan,
@@ -266,19 +265,30 @@ def test_runtime_plan_projects_order_targets_modes_and_checksum(tmp_path: Path) 
     assert plan.items[0].target == root / "models" / "a.bin"
 
 
-def test_runtime_identity_includes_checksum_but_not_execution_policy(
+# Transfer identity follows the requested bytes and destination, while execution
+# policies remain outside the resumable staging identity.
+def test_runtime_transfer_identity_tracks_source_target_and_checksum_only(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "ComfyUI"
     item = _plan(root, _file("a.bin", checksum=_checksum(b"one"))).items[0]
-    identity = canonical_runtime_file_identity_bytes(item)
-
-    assert b'"checksum":"sha256:' in identity
-    assert b'"target":"models/a.bin"' in identity
     baseline = runtime_file_identity_digest(item)
+
     assert runtime_file_identity_digest(replace(item, overwrite=True)) == baseline
     assert (
         runtime_file_identity_digest(replace(item, download_mode="async")) == baseline
+    )
+    assert (
+        runtime_file_identity_digest(
+            replace(item, url="https://example.test/other.bin")
+        )
+        != baseline
+    )
+    assert (
+        runtime_file_identity_digest(
+            replace(item, target=root / "models" / "other.bin")
+        )
+        != baseline
     )
     assert (
         runtime_file_identity_digest(replace(item, checksum=_checksum(b"two")))

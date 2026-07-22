@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from types import TracebackType
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 import aria2p
 import httpx
@@ -90,6 +90,7 @@ class DownloadResult:
         return self.outcome.status
 
 
+@runtime_checkable
 class DownloadBackendPreparer(Protocol):
     """Optional backend hook for startup work before downloads begin."""
 

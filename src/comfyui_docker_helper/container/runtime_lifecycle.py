@@ -603,38 +603,6 @@ def _finish_startup_signal_shutdown(
     )
 
 
-def _wait_with_signal_forwarding(
-    child: DirectProcess,
-    *,
-    hook_plan: RuntimeHookPlan,
-    runtime: ContainerRuntime,
-    source_env: Mapping[str, str],
-    runtime_stop_hook_runner: RuntimeStopHookRunner,
-    downloads: RuntimeDownloads,
-    ssh_service: RuntimeSshService,
-    shutdown_timeout: int | float,
-    monotonic: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], object] = time.sleep,
-) -> int:
-    startup_shutdown = _StartupShutdownState(
-        shutdown_timeout=shutdown_timeout,
-        monotonic=monotonic,
-    )
-    with _startup_shutdown_signal_handlers(startup_shutdown):
-        return _wait_with_existing_signal_state(
-            child,
-            hook_plan=hook_plan,
-            runtime=runtime,
-            source_env=source_env,
-            runtime_stop_hook_runner=runtime_stop_hook_runner,
-            downloads=downloads,
-            ssh_service=ssh_service,
-            startup_shutdown=startup_shutdown,
-            monotonic=monotonic,
-            sleep=sleep,
-        )
-
-
 def _wait_with_existing_signal_state(
     child: DirectProcess,
     *,

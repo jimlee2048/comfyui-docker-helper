@@ -341,11 +341,6 @@ def process_runtime_file_downloads(
     return tuple(results)
 
 
-def canonical_runtime_file_identity_bytes(item: RuntimeFilePlanItem) -> bytes:
-    """Return canonical runtime file identity bytes for digesting."""
-    return _runtime_transfer_identity(item).canonical_bytes
-
-
 def runtime_file_identity_digest(
     item: RuntimeFilePlanItem,
 ) -> RuntimeDownloadDigestKey:
@@ -790,10 +785,8 @@ def _prepare_runtime_download_backends(
         if backend_name in prepared:
             continue
         backend = backends[backend_name]
-        prepare = getattr(backend, "prepare", None)
-        if prepare is not None:
-            preparer: DownloadBackendPreparer = backend
-            preparer.prepare(settings)
+        if isinstance(backend, DownloadBackendPreparer):
+            backend.prepare(settings)
         prepared.add(backend_name)
 
 

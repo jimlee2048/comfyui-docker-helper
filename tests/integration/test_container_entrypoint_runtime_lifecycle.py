@@ -342,16 +342,21 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
     )
     stop_hook_runner = Mock()
 
-    result = lifecycle_module._wait_with_signal_forwarding(
-        child,
-        hook_plan=hook_plan,
-        runtime=runtime,
-        source_env={"PATH": "/usr/bin"},
-        runtime_stop_hook_runner=stop_hook_runner,
-        downloads=downloads,
-        ssh_service=ssh_service,
+    startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
+        monotonic=time.monotonic,
     )
+    with lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown):
+        result = lifecycle_module._wait_with_existing_signal_state(
+            child,
+            hook_plan=hook_plan,
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            runtime_stop_hook_runner=stop_hook_runner,
+            downloads=downloads,
+            ssh_service=ssh_service,
+            startup_shutdown=startup_shutdown,
+        )
 
     assert result == 19
     stop_hook_runner.assert_not_called()
@@ -396,16 +401,21 @@ def test_terminal_child_signal_race_preserves_natural_exit(
     ssh_service.stop.side_effect = lambda **_kwargs: events.append("ssh:stop")
     stop_hook_runner = Mock()
 
-    result = lifecycle_module._wait_with_signal_forwarding(
-        TerminalThenSignalChild(),
-        hook_plan=hook_plan,
-        runtime=runtime,
-        source_env={"PATH": "/usr/bin"},
-        runtime_stop_hook_runner=stop_hook_runner,
-        downloads=downloads,
-        ssh_service=ssh_service,
+    startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
+        monotonic=time.monotonic,
     )
+    with lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown):
+        result = lifecycle_module._wait_with_existing_signal_state(
+            TerminalThenSignalChild(),
+            hook_plan=hook_plan,
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            runtime_stop_hook_runner=stop_hook_runner,
+            downloads=downloads,
+            ssh_service=ssh_service,
+            startup_shutdown=startup_shutdown,
+        )
 
     assert result == 29
     stop_hook_runner.assert_not_called()
@@ -1446,16 +1456,23 @@ def test_repeated_signal_force_stops_downloads_ssh_and_comfyui(
 
     downloads = ManagedAuxiliary("downloads")
     ssh = ManagedAuxiliary("ssh")
-    assert lifecycle_module._wait_with_signal_forwarding(
-        child,
-        hook_plan=plan,
-        runtime=runtime,
-        source_env={"PATH": "/usr/bin"},
-        runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
-        downloads=downloads,  # type: ignore[arg-type]
-        ssh_service=ssh,  # type: ignore[arg-type]
+    startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
-    ) == -int(signal.SIGKILL)
+        monotonic=time.monotonic,
+    )
+    with lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown):
+        result = lifecycle_module._wait_with_existing_signal_state(
+            child,
+            hook_plan=plan,
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+            downloads=downloads,  # type: ignore[arg-type]
+            ssh_service=ssh,  # type: ignore[arg-type]
+            startup_shutdown=startup_shutdown,
+        )
+
+    assert result == -int(signal.SIGKILL)
 
     assert events == [
         "wait:initial",
@@ -1560,18 +1577,25 @@ def test_shutdown_kills_child_at_outer_deadline_after_two_second_reserve(
     downloads = ForceStoppedAuxiliary("downloads")
     ssh_service = ForceStoppedAuxiliary("ssh")
 
-    assert lifecycle_module._wait_with_signal_forwarding(
-        child,
-        hook_plan=RuntimeHookPlan(hooks=()),
-        runtime=runtime,
-        source_env={"PATH": "/usr/bin"},
-        runtime_stop_hook_runner=run_runtime_stop_hooks,
-        downloads=downloads,  # type: ignore[arg-type]
-        ssh_service=ssh_service,  # type: ignore[arg-type]
+    startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
         monotonic=clock.monotonic,
-        sleep=clock.sleep,
-    ) == -int(signal.SIGKILL)
+    )
+    with lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown):
+        result = lifecycle_module._wait_with_existing_signal_state(
+            child,
+            hook_plan=RuntimeHookPlan(hooks=()),
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            runtime_stop_hook_runner=run_runtime_stop_hooks,
+            downloads=downloads,  # type: ignore[arg-type]
+            ssh_service=ssh_service,  # type: ignore[arg-type]
+            startup_shutdown=startup_shutdown,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+    assert result == -int(signal.SIGKILL)
 
     assert clock.now == pytest.approx(8.0)
     assert child.signals == [signal.SIGTERM]
@@ -1635,8 +1659,12 @@ def test_shutdown_hooks_receive_one_pre_stop_deadline(
         events=events,
     )
     auxiliary = CooperativeAuxiliary()
-    assert (
-        lifecycle_module._wait_with_signal_forwarding(
+    startup_shutdown = lifecycle_module._StartupShutdownState(
+        shutdown_timeout=8,
+        monotonic=clock.monotonic,
+    )
+    with lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown):
+        result = lifecycle_module._wait_with_existing_signal_state(
             child,
             hook_plan=plan,
             runtime=runtime,
@@ -1644,12 +1672,12 @@ def test_shutdown_hooks_receive_one_pre_stop_deadline(
             runtime_stop_hook_runner=stop_hooks,
             downloads=auxiliary,  # type: ignore[arg-type]
             ssh_service=auxiliary,  # type: ignore[arg-type]
-            shutdown_timeout=8,
+            startup_shutdown=startup_shutdown,
             monotonic=clock.monotonic,
             sleep=clock.sleep,
         )
-        == 23
-    )
+
+    assert result == 23
 
     assert clock.now == pytest.approx(6.0)
     assert events[:4] == ["wait:initial", "aux:request", "aux:request", "hooks"]
@@ -1695,16 +1723,23 @@ def test_shutdown_timeout_minus_one_disables_outer_and_hook_deadlines(
         events=[],
     )
     auxiliary = CooperativeAuxiliary()
-    assert lifecycle_module._wait_with_signal_forwarding(
-        child,
-        hook_plan=plan,
-        runtime=runtime,
-        source_env={"PATH": "/usr/bin"},
-        runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
-        downloads=auxiliary,  # type: ignore[arg-type]
-        ssh_service=auxiliary,  # type: ignore[arg-type]
+    startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=-1,
-    ) == -int(signal.SIGINT)
+        monotonic=time.monotonic,
+    )
+    with lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown):
+        result = lifecycle_module._wait_with_existing_signal_state(
+            child,
+            hook_plan=plan,
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+            downloads=auxiliary,  # type: ignore[arg-type]
+            ssh_service=auxiliary,  # type: ignore[arg-type]
+            startup_shutdown=startup_shutdown,
+        )
+
+    assert result == -int(signal.SIGINT)
 
     assert observed_deadlines == [None]
     assert child.signals == [signal.SIGINT]

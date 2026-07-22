@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
+from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.identity_providers import (
     DirectGitIdentityRequest,
@@ -988,4 +990,47 @@ def test_local_executable_rejects_symlinked_parent(tmp_path: Path) -> None:
             LocalExecutableIdentityRequest(root, PurePosixPath("nested/hook.sh"))
         )
 
+    assert raised.value.kind is ProviderFailureKind.LOCAL_INPUT
+
+
+@pytest.mark.parametrize("substitution", ["leaf", "ancestor"])
+def test_local_executable_rejects_substitution_during_descriptor_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substitution: str,
+) -> None:
+    root = tmp_path / "scripts"
+    source = root / "nested/hook.sh"
+    source.parent.mkdir(parents=True)
+    source.write_text("echo trusted\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "hook.sh").write_text("echo substituted\n")
+    real_open = os.open
+    substituted = False
+
+    def substitute_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal substituted
+        if not substituted and (
+            (substitution == "leaf" and path == "hook.sh")
+            or (substitution == "ancestor" and path == "nested")
+        ):
+            substituted = True
+            if substitution == "leaf":
+                source.unlink()
+                source.symlink_to(outside / "hook.sh")
+            else:
+                real_parent = root / "real-nested"
+                source.parent.rename(real_parent)
+                source.parent.symlink_to(real_parent, target_is_directory=True)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(file_admission.os, "open", substitute_then_open)
+
+    with pytest.raises(IdentityProviderError) as raised:
+        FilesystemLocalExecutableIdentityProvider().resolve(
+            LocalExecutableIdentityRequest(root, PurePosixPath("nested/hook.sh"))
+        )
+
+    assert substituted
     assert raised.value.kind is ProviderFailureKind.LOCAL_INPUT

@@ -42,7 +42,6 @@ from comfyui_docker_helper.config.final_planning import (
 )
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigDomainResult,
-    validate_final_config_domains,
 )
 from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
@@ -211,13 +210,13 @@ def comfyui_request(config: FinalConfig) -> ComfyUIRequestIdentity:
 def build_canonical_request_graph(
     config: FinalConfig,
     *,
+    domains: FinalConfigDomainResult,
     release: PlanningReleaseInputs,
     uv_descriptor_digest: str,
     comfyui_entry: OfficialComfyUILockEntry,
     requirements_entry: ComfyUIRequirementsLockEntry,
 ) -> CanonicalRequestGraph:
     """Project validated config and accepted staged identities exactly once."""
-    domains = validate_final_config_domains(config)
     platform = TargetPlatform(config.build.platforms[0])
     backend = CudaBackendAdapter().derive(
         CudaVersion.from_validated(config.compute_platform.cuda.version),

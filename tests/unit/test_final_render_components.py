@@ -19,6 +19,7 @@ from tests.unit.test_build_plan import (
     final_config,
 )
 
+from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
@@ -28,7 +29,6 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
-from comfyui_docker_helper.container import file_admission
 from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering import final_materializer
@@ -471,6 +471,18 @@ else:
     assert result.returncode == 0, result.stderr.decode()
 
 
+def test_file_admission_fails_closed_without_descriptor_relative_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "input.json"
+    source.write_bytes(b"{}")
+    monkeypatch.setattr(file_admission, "_descriptor_relative_open_available", False)
+
+    with pytest.raises(OSError, match=r"descriptor-safe.*unavailable"):
+        file_admission.read_regular_absolute_file(source)
+
+
 def test_file_admission_attempts_every_close_and_preserves_primary_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -490,7 +502,7 @@ def test_file_admission_attempts_every_close_and_preserves_primary_error(
         file_admission, "_close_descriptor", close_then_report_first_error
     )
 
-    with pytest.raises(OSError, match="materialized input must be a regular file"):
+    with pytest.raises(OSError, match="admitted input must be a regular file"):
         file_admission.read_regular_absolute_file(fifo)
 
     assert len(closed) >= 3
@@ -660,7 +672,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
     build_hooks.symlink_to(real_build_hooks, target_is_directory=True)
     output = tmp_path / "parent-symlink-output"
     output.mkdir()
-    with pytest.raises(FinalMaterializationError, match="source parent"):
+    with pytest.raises(FinalMaterializationError, match="regular file"):
         materialize_build_plan(
             plan,
             output,
@@ -704,6 +716,64 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
             ),
         )
 
+    assert tuple(output.iterdir()) == ()
+
+
+@pytest.mark.parametrize("substitution", ["leaf", "ancestor"])
+def test_materializer_rejects_source_substitution_during_descriptor_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substitution: str,
+) -> None:
+    content = b"hook"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(content)
+    plan = build_plan(
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "pre.py").write_bytes(content)
+    real_open = os.open
+    substituted = False
+
+    def substitute_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal substituted
+        if not substituted and (
+            (substitution == "leaf" and path == "pre.py")
+            or (substitution == "ancestor" and path == "hooks")
+        ):
+            substituted = True
+            if substitution == "leaf":
+                source.unlink()
+                source.symlink_to(outside / "pre.py")
+            else:
+                real_parent = build_hooks / "real-hooks"
+                source.parent.rename(real_parent)
+                source.parent.symlink_to(real_parent, target_is_directory=True)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(file_admission.os, "open", substitute_then_open)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    with pytest.raises(FinalMaterializationError, match="regular file"):
+        materialize_build_plan(
+            plan,
+            output,
+            canonical_wheel=canonical_wheel(),
+            local_sources=(
+                LocalMaterializationSource(
+                    PurePosixPath("build-hooks/hooks/pre.py"), source
+                ),
+            ),
+        )
+
+    assert substituted
     assert tuple(output.iterdir()) == ()
 
 

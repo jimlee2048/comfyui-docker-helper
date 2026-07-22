@@ -24,6 +24,7 @@ from packaging.version import InvalidVersion, Version
 from comfyui_docker_helper.comfyui_requirements import (
     ComfyUIRequirementsError,
     parse_comfyui_requirements,
+    target_marker_environment,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
@@ -348,6 +349,8 @@ class UvPythonGroupResolver:
         specifier = _setuptools_specifier_from_metadata(
             metadata,
             python_version=request.python_version,
+            platform=request.platform,
+            machine="x86_64",
             expected_torch_version=resolved_by_name["torch"]["version"],
         )
         return ResolvedPythonGroup(resolved, specifier)
@@ -477,7 +480,8 @@ class ProviderIdentityAcquirer:
                 raise CanonicalAcquisitionError(str(error)) from error
             if request.floor_commit != COMFYUI_FLOOR_COMMIT or not supported:
                 raise CanonicalAcquisitionError(
-                    "official ComfyUI checkout is below the supported v0.11.0 floor"
+                    "official ComfyUI checkout is below the supported "
+                    f"v{COMFYUI_MINIMUM_VERSION} floor"
                 )
             content = self.requirements_reader(request)
             try:
@@ -485,6 +489,7 @@ class ProviderIdentityAcquirer:
                     content,
                     python_version=request.python_version,
                     platform=request.platform,
+                    machine="x86_64",
                     protected_names=tuple(request.protected_names),
                 )
             except ComfyUIRequirementsError as error:
@@ -725,6 +730,8 @@ def _setuptools_specifier_from_metadata(
     metadata: str,
     *,
     python_version: str,
+    platform: str,
+    machine: str,
     expected_torch_version: str,
 ) -> str | None:
     try:
@@ -742,7 +749,7 @@ def _setuptools_specifier_from_metadata(
             raise ValueError
         if versions[0] != expected_torch_version:
             raise ValueError
-        environment = _target_marker_environment(python_version)
+        environment = target_marker_environment(python_version, platform, machine)
         specifiers = []
         for value in message.get_all("Requires-Dist", []):
             requirement = Requirement(value)
@@ -760,23 +767,6 @@ def _setuptools_specifier_from_metadata(
         return str(SpecifierSet(",".join(specifiers)))
     except (InvalidRequirement, KeyError, TypeError, ValueError) as error:
         raise CanonicalAcquisitionError("PyTorch wheel metadata is invalid") from error
-
-
-def _target_marker_environment(python_version: str) -> dict[str, str]:
-    return {
-        "implementation_name": "cpython",
-        "implementation_version": python_version,
-        "os_name": "posix",
-        "platform_machine": "x86_64",
-        "platform_python_implementation": "CPython",
-        "platform_release": "",
-        "platform_system": "Linux",
-        "platform_version": "",
-        "python_full_version": python_version,
-        "python_version": ".".join(python_version.split(".")[:2]),
-        "sys_platform": "linux",
-        "extra": "",
-    }
 
 
 def _metadata_sidecar_url(wheel_url: str) -> str:

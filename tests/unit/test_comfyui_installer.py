@@ -66,6 +66,7 @@ def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
         _REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
     document["paths"]["workspace"] = str(workspace)
@@ -314,12 +315,14 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
         _REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
     parsed_manager = parse_manager_requirements(
         _MANAGER_REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
     monkeypatch.setattr(
         comfyui_installer, "_checkout_exact", lambda *_args: events.append("checkout")
@@ -390,6 +393,7 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
         _REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
     events: list[str] = []
@@ -496,6 +500,7 @@ def test_application_observation_rechecks_source_input_and_environment(
         _REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
     events: list[object] = []
@@ -588,6 +593,7 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
         _MANAGER_REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
     constraints = tmp_path / "python-package-constraints.txt"
     constraints.write_text("torch==2.12.1+cu130\n")
@@ -809,6 +815,7 @@ def test_declared_manager_distributions_are_verified_from_application_site(
         b"comfyui_manager==4.1b8\npackaging>=26\n",
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
     observed_paths: list[list[str]] = []
 
@@ -850,6 +857,7 @@ def test_declared_manager_distribution_mismatch_fails_capability(
         _MANAGER_REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
     monkeypatch.setattr(
         comfyui_installer.importlib_metadata,
@@ -880,6 +888,7 @@ def test_manager_cm_cli_requires_one_unique_distribution_owner(
         _MANAGER_REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
     manager_entries = ()
     if case != "missing":
@@ -934,6 +943,7 @@ def test_manager_cm_cli_rejects_unidentifiable_distribution_owner(
         _MANAGER_REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
     distributions = (
         SimpleNamespace(
@@ -983,6 +993,7 @@ def test_manager_capability_captures_and_reuses_immutable_authority(
         _MANAGER_REQUIREMENTS,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
     events: list[tuple[object, ...]] = []
     monkeypatch.setattr(

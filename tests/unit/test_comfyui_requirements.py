@@ -10,7 +10,7 @@ from comfyui_docker_helper.comfyui_requirements import (
     merge_pytorch_requirements,
     parse_comfyui_requirements,
     parse_manager_requirements,
-    protected_policy_digest,
+    target_marker_environment,
 )
 from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
 
@@ -20,6 +20,7 @@ def _parse(content: bytes, *, python_version: str = "3.13.14"):
         content,
         python_version=python_version,
         platform="linux/amd64",
+        machine="x86_64",
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
 
@@ -131,10 +132,21 @@ def test_merge_rejects_exact_conflicts(selectors: tuple[str, str]) -> None:
         )
 
 
-def test_policy_digest_binds_sorted_names_and_policy_version() -> None:
-    assert protected_policy_digest(
-        ("torchvision", "torch", "torchaudio")
-    ) == protected_policy_digest(CUDA_PROTECTED_REQUIREMENTS)
+def test_target_marker_environment_is_complete_and_host_independent() -> None:
+    assert target_marker_environment("3.13.14", "linux/amd64", "x86_64") == {
+        "implementation_name": "cpython",
+        "implementation_version": "3.13.14",
+        "os_name": "posix",
+        "platform_machine": "x86_64",
+        "platform_python_implementation": "CPython",
+        "platform_release": "",
+        "platform_system": "Linux",
+        "platform_version": "",
+        "python_full_version": "3.13.14",
+        "python_version": "3.13",
+        "sys_platform": "linux",
+        "extra": "",
+    }
 
 
 def test_manager_parser_projects_exact_checkout_owned_distribution() -> None:
@@ -147,6 +159,7 @@ ignored==1; python_version < "3.13"
 """,
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
 
     assert parsed.rows == (
@@ -184,6 +197,7 @@ def test_manager_parser_rejects_unowned_or_ambiguous_requirements(
             content,
             python_version="3.13.14",
             platform="linux/amd64",
+            machine="x86_64",
         )
 
 
@@ -192,6 +206,7 @@ def test_manager_parser_accepts_checkout_owned_prerelease_pin() -> None:
         b"comfyui_manager==4.1b8\n",
         python_version="3.13.14",
         platform="linux/amd64",
+        machine="x86_64",
     )
 
     assert parsed.manager_version == "4.1b8"

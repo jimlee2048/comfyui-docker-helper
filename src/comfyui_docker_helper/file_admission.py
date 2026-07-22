@@ -1,4 +1,4 @@
-"""Descriptor-relative admission for materialized container inputs."""
+"""Descriptor-relative admission for trusted regular-file inputs."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import stat
 from pathlib import PurePosixPath
 
 _close_descriptor = os.close
+_descriptor_relative_open_available = os.open in os.supports_dir_fd
 
 
 def read_regular_absolute_file(path: str | os.PathLike[str]) -> bytes:
@@ -26,6 +27,15 @@ def read_regular_absolute_file(path: str | os.PathLike[str]) -> bytes:
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise ValueError("path must be one canonical absolute POSIX path")
+    if (
+        os.name != "posix"
+        or not _descriptor_relative_open_available
+        or any(
+            not hasattr(os, name)
+            for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK")
+        )
+    ):
+        raise OSError("descriptor-safe regular-file admission is unavailable")
 
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     leaf_flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -40,7 +50,7 @@ def read_regular_absolute_file(path: str | os.PathLike[str]) -> bytes:
             )
         leaf_fd = os.open(parsed.name, leaf_flags, dir_fd=directory_fds[-1])
         if not stat.S_ISREG(os.fstat(leaf_fd).st_mode):
-            raise OSError("materialized input must be a regular file")
+            raise OSError("admitted input must be a regular file")
         chunks: list[bytes] = []
         while chunk := os.read(leaf_fd, 1024 * 1024):
             chunks.append(chunk)

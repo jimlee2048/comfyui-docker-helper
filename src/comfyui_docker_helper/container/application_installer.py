@@ -404,6 +404,7 @@ def _verify_ordinary_requirements(
     environment = target_marker_environment(
         application.pytorch.python_version,
         application.pytorch.platform,
+        "x86_64",
     )
     for row in requirements:
         try:

@@ -20,6 +20,7 @@ from comfyui_docker_helper.config.runtime_hooks import (
     BUILD_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )
+from comfyui_docker_helper.file_admission import read_regular_absolute_file
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
@@ -196,13 +197,11 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
 
 def _verified_source(path: Path, expected_digest: str) -> bytes:
     try:
-        _require_real_directory_chain(path.parent)
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise FinalMaterializationError("local source must be a regular file")
-        content = path.read_bytes()
-    except OSError as error:
-        raise FinalMaterializationError("local source could not be read") from error
+        content = read_regular_absolute_file(path)
+    except (OSError, ValueError) as error:
+        raise FinalMaterializationError(
+            "local source must be a readable regular file without symlinks"
+        ) from error
     observed = f"sha256:{hashlib.sha256(content).hexdigest()}"
     if observed != expected_digest:
         raise FinalMaterializationError("local source digest does not match BuildPlan")

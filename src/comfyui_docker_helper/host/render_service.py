@@ -150,6 +150,7 @@ def prepare_render_context(
         )
         graph = build_canonical_request_graph(
             result.config,
+            domains=result.domains,
             release=planning_release_inputs(canonical_wheel),
             uv_descriptor_digest=uv_digest,
             comfyui_entry=comfyui,

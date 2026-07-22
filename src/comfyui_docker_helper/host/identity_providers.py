@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
@@ -30,6 +29,7 @@ from comfyui_docker_helper.config.value_validation import (
     validate_managed_python_catalog_key,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
+from comfyui_docker_helper.file_admission import read_regular_absolute_file
 from comfyui_docker_helper.host.uv_runner import HostUvRunner
 
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -621,20 +621,9 @@ class FilesystemLocalExecutableIdentityProvider:
         ):
             raise IdentityProviderError(source, ProviderFailureKind.INVALID_REQUEST)
         try:
-            root = request.root.resolve(strict=True)
-            parent = root
-            for component in relative.parts[:-1]:
-                parent /= component
-                if not stat.S_ISDIR(parent.lstat().st_mode):
-                    raise IdentityProviderError(source, ProviderFailureKind.LOCAL_INPUT)
-            path = parent / relative.name
-            metadata = path.lstat()
-            if not stat.S_ISREG(metadata.st_mode):
-                raise IdentityProviderError(source, ProviderFailureKind.LOCAL_INPUT)
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except IdentityProviderError:
-            raise
-        except OSError as error:
+            content = read_regular_absolute_file(request.root.joinpath(*relative.parts))
+            digest = hashlib.sha256(content).hexdigest()
+        except (OSError, ValueError) as error:
             raise IdentityProviderError(
                 source, ProviderFailureKind.LOCAL_INPUT
             ) from error

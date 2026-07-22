@@ -25,7 +25,7 @@ from comfyui_docker_helper.config.final_manifest import (
     final_build_check_ids,
 )
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
-from comfyui_docker_helper.container.file_admission import read_regular_absolute_file
+from comfyui_docker_helper.file_admission import read_regular_absolute_file
 
 MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
 

@@ -63,6 +63,7 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
             requirements_response.content,
             python_version=python_version,
             platform="linux/amd64",
+            machine="x86_64",
             protected_names=CUDA_PROTECTED_REQUIREMENTS,
         )
         assert [item.package for item in parsed.protected] == [
@@ -79,6 +80,7 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
         manager_response.content,
         python_version=DEFAULT_MANAGED_PYTHON_VERSION,
         platform="linux/amd64",
+        machine="x86_64",
     )
     assert manager.rows == ("comfyui_manager==4.0.5",)
     assert manager.manager_version == "4.0.5"

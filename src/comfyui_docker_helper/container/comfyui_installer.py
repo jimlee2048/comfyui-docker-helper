@@ -359,6 +359,7 @@ def _verify_requirements(application: ApplicationPhase, path: Path):
             content,
             python_version=expected.python_version,
             platform=expected.platform,
+            machine="x86_64",
             protected_names=expected.protected_names,
         )
     except ComfyUIRequirementsError as error:
@@ -686,6 +687,7 @@ def _read_manager_requirements(
             content,
             python_version=application.pytorch.python_version,
             platform=application.pytorch.platform,
+            machine="x86_64",
         )
     except ComfyUIRequirementsError as error:
         raise ComfyUIInstallError(str(error)) from error

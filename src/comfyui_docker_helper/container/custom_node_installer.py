@@ -552,6 +552,7 @@ def _install_git_root_surfaces(
                 requirements.read_bytes(),
                 python_version=application.pytorch.python_version,
                 platform=application.pytorch.platform,
+                machine="x86_64",
             )
         except (OSError, ComfyUIRequirementsError) as error:
             raise CustomNodeInstallError(

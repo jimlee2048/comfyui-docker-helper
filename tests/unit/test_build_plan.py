@@ -340,6 +340,7 @@ def accepted_resolution(
     staged = {canonical_entry_key(entry): entry for entry in entries}
     graph = build_canonical_request_graph(
         config,
+        domains=validate_final_config_domains(config),
         release=planning_release_inputs(canonical_wheel()),
         uv_descriptor_digest=DIGEST_B,
         comfyui_entry=staged[("comfyui",)],
@@ -379,6 +380,7 @@ def request_graph(
     entries = {canonical_entry_key(entry): entry for entry in resolution.lock.entries}
     return build_canonical_request_graph(
         config,
+        domains=validate_final_config_domains(config),
         release=planning_release_inputs(canonical_wheel()),
         uv_descriptor_digest=entries[("images", "uv")].digest,
         comfyui_entry=entries[("comfyui",)],

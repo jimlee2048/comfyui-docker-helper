@@ -5,7 +5,7 @@ from __future__ import annotations
 import venv
 from pathlib import Path
 
-from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app

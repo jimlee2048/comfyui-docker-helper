@@ -102,6 +102,8 @@ def _owned_staging_leaves(root: Path) -> tuple[Path, ...]:
     return tuple(staging.iterdir()) if staging.exists() else ()
 
 
+# Build-file planning preserves declared checksum, attempt budget, order, and
+# target containment before transport begins.
 def test_file_download_plan_projects_checksum_and_attempt_budget() -> None:
     checksum = f"sha256:{hashlib.sha256(b'downloaded').hexdigest()}"
     payload = FilesPhase(
@@ -170,6 +172,8 @@ def test_file_download_plan_rejects_target_outside_admitted_root() -> None:
         file_download_plan(payload, "/workspace/ComfyUI")
 
 
+# The build orchestrator delegates each item in declaration order with a fresh
+# per-file attempt budget.
 def test_build_orchestrator_preserves_order_and_places_via_shared_core(
     tmp_path: Path,
 ) -> None:
@@ -245,6 +249,8 @@ def test_build_grants_each_declared_file_a_fresh_attempt_budget(
     assert all(result.status is DownloadStatus.DOWNLOADED for result in results)
 
 
+# Required build downloads expose stable success evidence and stop immediately
+# on exhausted or terminal outcomes.
 def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -344,6 +350,8 @@ def test_build_terminal_outcomes_are_fatal_and_stop_declaration_order(
     assert _owned_staging_leaves(root) == ()
 
 
+# Preflight skips valid existing finals and rejects unavailable backends before
+# mutating the destination.
 def test_build_existing_regular_skip_does_not_call_backend(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     item = _item(root, "model.bin")

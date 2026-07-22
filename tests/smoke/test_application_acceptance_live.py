@@ -1240,6 +1240,8 @@ def test_default_entrypoint_has_tini_cdh_topology_and_completes_sigterm_shutdown
 
 
 @pytest.mark.acceptance(probes=(AcceptanceProbe.IMAGE_ENVIRONMENT,))
+# Final image probes observe exact environment contents and enabled CPU, CLI,
+# audio, and CUDA capabilities for their admitted scenario sets.
 @pytest.mark.parametrize("scenario", _SCENARIOS, ids=lambda item: item.id)
 def test_image_has_exact_environment_and_disposition(
     scenario: AcceptanceScenario,

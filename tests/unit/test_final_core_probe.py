@@ -123,6 +123,8 @@ def test_final_core_probe_reports_only_successfully_executed_full_checks(
     }
 
 
+# Check selection excludes optional imports, rejects malformed sets, and
+# propagates real capability failures.
 def test_final_core_probe_omits_unselected_optional_imports(tmp_path: Path) -> None:
     python, workspace = _environment(tmp_path, full=False)
 

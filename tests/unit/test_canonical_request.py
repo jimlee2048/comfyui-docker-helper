@@ -39,6 +39,7 @@ def _routing_policy(*, revision: int = 1) -> RequirementsRoutingPolicy:
     )
 
 
+# Every request domain maps to its semantic atomic reconciliation key.
 def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
     requests = (
         OciRequestIdentity(
@@ -141,6 +142,8 @@ def test_non_python_domains_use_semantic_grouped_keys() -> None:
     )
 
 
+# Complete routing and release inputs bind request identity without changing
+# group keys or selector-stability classification.
 def test_complete_routing_policy_is_bound_only_through_request_digest() -> None:
     values = dict(
         type="comfyui-requirements",

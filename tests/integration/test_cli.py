@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import typer
-from tests.unit.test_build_plan import (
+from tests.build_plan_support import (
     accepted_resolution,
     build_plan,
     canonical_wheel,

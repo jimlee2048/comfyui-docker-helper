@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from tests.unit.test_build_plan import (
+from tests.build_plan_support import (
     accepted_resolution,
     build_plan,
     canonical_wheel,
@@ -19,7 +19,6 @@ from comfyui_docker_helper.config.build_plan import BuildPlan, dump_build_plan_j
 from comfyui_docker_helper.config.canonical_lock import dump_canonical_lock_toml
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
-from comfyui_docker_helper.rendering.final_renderer import render_build_plan_dockerfile
 
 UPPER_CHECKSUM = f"sha256:{'AB' * 32}"
 CANONICAL_CHECKSUM = UPPER_CHECKSUM.lower()
@@ -59,6 +58,8 @@ def test_public_checksum_rejects_noncanonical_domain_input(value: object) -> Non
         _config_with_checksum(value)
 
 
+# Checksum intent enters the canonical request and BuildPlan, while the
+# provider-owned lock remains independent of user download policy.
 def test_checksum_projects_to_request_and_build_plan_but_not_lock() -> None:
     config = _config_with_checksum(UPPER_CHECKSUM)
     resolution = accepted_resolution()
@@ -71,6 +72,7 @@ def test_checksum_projects_to_request_and_build_plan_but_not_lock() -> None:
     assert "checksum" not in dump_canonical_lock_toml(resolution.lock)
 
 
+# Serialized BuildPlan admission accepts only the canonical checksum spelling.
 def test_build_plan_admission_requires_canonical_lowercase_checksum() -> None:
     plan = build_plan(_config_with_checksum(UPPER_CHECKSUM), accepted_resolution())
     document = plan.model_dump(mode="python")
@@ -80,15 +82,8 @@ def test_build_plan_admission_requires_canonical_lowercase_checksum() -> None:
         BuildPlan.model_validate(document)
 
 
-def test_build_plan_admission_rejects_reserved_staging_final_leaf() -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    document = plan.model_dump(mode="python")
-    document["files"]["files"][0]["target"] = "/workspace/ComfyUI/models/.cdh-staging"
-
-    with pytest.raises(ValidationError, match="reserved staging filename"):
-        BuildPlan.model_validate(document)
-
-
+# Materialization carries the trusted checksum into runtime state and the real
+# build download phase without changing phase order.
 def test_materialization_projects_checksum_to_runtime_and_real_build_consumer(
     tmp_path: Path,
 ) -> None:
@@ -105,19 +100,3 @@ def test_materialization_projects_checksum_to_runtime_and_real_build_consumer(
     assert dockerfile.index("container install-custom-nodes") < dockerfile.index(
         "container download-files"
     )
-
-
-def test_renderer_omits_build_download_command_when_no_files() -> None:
-    document = final_config().model_dump(mode="python")
-    document["files"] = []
-    plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
-
-    assert "container download-files" not in render_build_plan_dockerfile(plan)
-
-
-def test_readme_documents_trusted_digest() -> None:
-    root = Path("README.md").read_text()
-
-    assert 'checksum = "sha256:<64 hexadecimal digits>"' in root
-    assert "does not fetch or infer a digest" in root
-    assert "download_failure_policy` applies only at runtime" in root

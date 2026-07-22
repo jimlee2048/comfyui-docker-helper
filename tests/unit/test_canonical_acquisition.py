@@ -113,6 +113,8 @@ def _routing_policy() -> RequirementsRoutingPolicy:
     )
 
 
+# Fixed image and managed-Python providers return only their owned external
+# artifact identities.
 def test_uv_provider_returns_one_fixed_image_domain_result() -> None:
     request = OciRequestIdentity(
         type="oci",
@@ -150,6 +152,8 @@ def test_managed_python_result_has_only_provider_owned_artifact_identity() -> No
     assert entry.artifact_key == "cpython-3.13.14-linux-x86_64-gnu"
 
 
+# Requirements and PyTorch acquisition preserve routed metadata and one atomic
+# package-group result.
 def test_requirements_provider_returns_nested_digest_and_pytorch_projection() -> None:
     request = ComfyUIRequirementsRequestIdentity(
         type="comfyui-requirements",
@@ -205,6 +209,8 @@ def test_pytorch_provider_returns_one_complete_atomic_group() -> None:
     assert entry.setuptools_specifier == "<82"
 
 
+# Local hook acquisition removes the host-only prefix and retains typed content
+# identity for canonical locking.
 class _Local:
     def resolve(self, request):
         return LocalExecutableIdentity(request.canonical_path, DIGEST_A)

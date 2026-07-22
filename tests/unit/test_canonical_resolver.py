@@ -257,6 +257,8 @@ def _initial_lock(*, application_extras: bool = False, local: bool = False):
     return accepted.lock
 
 
+# Default and upgrade reconciliation operate once per compatible atomic group
+# and accurately report provider calls and deltas.
 def test_default_reuses_every_compatible_atomic_group_without_provider_calls() -> None:
     existing = _initial_lock(application_extras=True)
     acquirer = FakeAcquirer()
@@ -293,6 +295,8 @@ def test_upgrade_refreshes_complete_application_extras_as_one_delta() -> None:
     assert tuple(package.version for package in group.packages) == ("2.5.0", "11.3.0")
 
 
+# Locked and non-apply modes never silently refresh identities or request a
+# write; local drift fails before external provider work.
 def test_locked_matching_lock_has_zero_provider_calls_and_no_write() -> None:
     existing = _initial_lock(local=True)
     acquirer = FakeAcquirer()

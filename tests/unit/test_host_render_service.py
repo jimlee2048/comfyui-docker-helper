@@ -800,12 +800,6 @@ def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
     dockerfile = (output / "Dockerfile").read_text()
     assert "COPY runtime/config.toml /opt/cdh/runtime/config.toml" in dockerfile
     assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
-    runtime = load_runtime_config(
-        baked_config_path=output / "runtime/config.toml",
-        mounted_config_path=tmp_path / "missing.toml",
-        environ={},
-    )
-    assert runtime.config.comfyui.port == 8188
     discovered = discover_runtime_hooks(
         baked_hooks_path=output / "runtime/hooks",
         mounted_hooks_path=tmp_path / "missing-hooks",

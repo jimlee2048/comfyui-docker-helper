@@ -405,7 +405,7 @@ def test_run_hook_executes_sealed_bytes_after_original_path_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prove the inherited script is sealed and independent of its old path."""
+    """Execute only the sealed inherited bytes after source replacement."""
     _require_linux_memfd()
     import fcntl
 

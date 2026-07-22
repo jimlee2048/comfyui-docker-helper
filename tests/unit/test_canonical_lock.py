@@ -113,6 +113,8 @@ def _lock():
     return canonical_lock_from_entries(_entries())
 
 
+# Canonical lock bytes and reconciliation keys remain deterministic across
+# complete grouped identities.
 def test_complete_grouped_lock_round_trips_with_deterministic_bytes() -> None:
     first = dump_canonical_lock_toml(_lock())
     second = dump_canonical_lock_toml(
@@ -141,6 +143,8 @@ def test_atomic_groups_expose_one_logical_reconciliation_key() -> None:
     assert ("hooks", "build", "common/setup.sh") in keys
 
 
+# Parsed domains retain only their owning external identity and canonical
+# sorted, unique package projections.
 def test_interpreter_result_contains_only_external_artifact_identity() -> None:
     document = dump_canonical_lock_toml(_lock())
     parsed = parse_canonical_lock_toml(document)
@@ -172,6 +176,8 @@ def test_python_group_requires_sorted_unique_packages() -> None:
         )
 
 
+# Strict parsing rejects schema drift with stable public diagnostics, and parsed
+# lock models remain immutable.
 def test_grouped_parser_rejects_unknown_current_fields_with_stable_error() -> None:
     document = dump_canonical_lock_toml(_lock()).replace(
         "[images.cuda]\n", "[images.cuda]\nunknown = true\n"

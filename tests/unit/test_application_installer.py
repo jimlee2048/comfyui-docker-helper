@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
-from tests.unit.test_build_plan import accepted_resolution, build_plan, final_config
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,

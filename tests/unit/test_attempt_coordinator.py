@@ -125,6 +125,8 @@ def _success() -> TransportSuccess:
     return TransportSuccess(length=0, namespace="httpx", http_status=200)
 
 
+# Attempt budgets count transport dispatches, stop on terminal outcomes, and
+# bound retry delays without retrying local failures or completed targets.
 def test_total_budget_counts_only_backend_calls_and_uses_one_two_backoff(
     tmp_path: Path,
 ) -> None:
@@ -281,6 +283,8 @@ def test_existing_target_skip_consumes_zero_transport_attempts(tmp_path: Path) -
     assert result.attempts == backend.calls == 0
 
 
+# Resumable retries may reuse only the exact staging artifact whose identity
+# remains under the coordinator's authority.
 def test_aria2_resume_reuses_only_authority_proven_partial(tmp_path: Path) -> None:
     request = _request(tmp_path / "ComfyUI")
 
@@ -370,6 +374,8 @@ def test_aria2_resume_authority_drift_fails_closed_without_touching_foreign_leaf
     assert staging.read_bytes() == b"foreign"
 
 
+# A rejected resume permits one counted clean fallback while cancellation,
+# ownership drift, durability failure, and exhausted budgets remain fail-closed.
 def test_resume_rejection_counts_and_uses_one_immediate_clean_fallback(
     tmp_path: Path,
 ) -> None:
@@ -595,6 +601,8 @@ def test_rejected_resume_allows_only_one_clean_fallback_call(tmp_path: Path) -> 
     assert not transfer_staging_target(request).exists()
 
 
+# Observer, logging, or wait failures cannot invent attempts or strand resumable
+# data without a continuation owner.
 def test_start_observer_failure_does_not_count_or_call_adapter(tmp_path: Path) -> None:
     """An observer failure before dispatch cannot manufacture a transport attempt."""
     request = _request(tmp_path / "ComfyUI")

@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import ValidationError
-from tests.unit.test_build_plan import (
+from tests.build_plan_support import (
     accepted_resolution,
     build_plan,
     canonical_wheel,
@@ -117,6 +117,8 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
     )
 
 
+# Renderer-owned caches, quoted container paths, runtime environment, and
+# isolated tools remain independent of user runtime paths and modes.
 def test_renderer_keeps_build_uv_cache_outside_user_runtime_cache_paths() -> None:
     config = final_config()
     document = config.model_dump(mode="python")
@@ -228,6 +230,14 @@ def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
     for command in ("comfy", "comfy-cli", "comfycli"):
         assert f"test ! -e /opt/uv/bin/{command}" in rendered
         assert f"test ! -L /opt/uv/bin/{command}" in rendered
+
+
+def test_renderer_omits_build_download_command_when_no_files() -> None:
+    document = final_config().model_dump(mode="python")
+    document["files"] = []
+    plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+
+    assert "container download-files" not in render_build_plan_dockerfile(plan)
 
 
 # Custom-node and application modes render one ordered observed execution boundary.

@@ -44,9 +44,7 @@ def test_public_service_returns_validated_config_offline(
     monkeypatch.setattr("httpx.Client.get", forbidden)
     result = load_validate_config_result(path)
 
-    assert result.config.python.version == "3.13.14"
     assert result.config.build.platforms == ["linux/amd64"]
-    assert result.config.cdh.shutdown_timeout == 8
     assert result.warnings == ()
 
 

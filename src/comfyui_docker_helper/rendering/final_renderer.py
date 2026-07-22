@@ -24,8 +24,11 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         "COPY build-plan.json /opt/cdh/build/build-plan.json",
         "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
     ]
-    if any(node.pre_install or node.post_install for node in plan.custom_nodes.nodes):
-        lines.append("COPY inputs /opt/cdh/build/inputs")
+    if any(
+        node.pre_install_hooks or node.post_install_hooks
+        for node in plan.custom_nodes.nodes
+    ):
+        lines.append("COPY build/hooks /opt/cdh/build/hooks")
     if plan.runtime.hooks:
         lines.append("COPY runtime/hooks /opt/cdh/runtime/hooks")
     lines.extend(
@@ -245,7 +248,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         "container install-custom-nodes "
         f"--build-plan-digest {plan_digest} "
         "--constraints /opt/cdh/build/python-package-constraints.txt "
-        "--hooks-directory /opt/cdh/build/inputs"
+        "--build-hooks-directory /opt/cdh/build/hooks"
     )
     if plan.files.files:
         lines.append(

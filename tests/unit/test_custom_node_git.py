@@ -117,8 +117,8 @@ def _materialized_nested_checkout(tmp_path: Path) -> tuple[Path, GitNodePlan, st
         url="https://example.invalid/Raw/Node.git",
         commit=root_commit,
         target=str(target),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
     return custom_nodes, node, leaf_second
 
@@ -184,8 +184,8 @@ def test_linked_worktree_root_is_rejected(tmp_path: Path) -> None:
         url="https://example.invalid/node.git",
         commit=commit,
         target=str(target),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
 
     assert target.joinpath(".git").is_file()
@@ -263,8 +263,8 @@ def test_repository_root_proof_rejects_parent_repository_discovery(
         url="ssh://git@example.invalid/node.git",
         commit=commit,
         target=str(target),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
 
     with pytest.raises(CustomNodeInstallError, match="repository root"):
@@ -283,8 +283,8 @@ def test_final_proof_rejects_a_different_valid_sibling_repository(
         url="https://example.invalid/node.git",
         commit=commit,
         target=str(custom_nodes / "expected"),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
 
     with pytest.raises(CustomNodeInstallError, match="does not match BuildPlan"):
@@ -329,8 +329,8 @@ def test_direct_git_install_stages_places_and_retains_repository_metadata(
         url=str(source),
         commit=commit,
         target=str(target),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
     monkeypatch.setattr(
         "comfyui_docker_helper.container.custom_node_installer._install_git_root_surfaces",
@@ -375,8 +375,8 @@ def test_failed_direct_git_clone_cleans_only_owned_stage(
         url=str(tmp_path / "missing-source"),
         commit="a" * 40,
         target=str(custom_nodes / "direct"),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
     monkeypatch.setattr(
         "comfyui_docker_helper.container.custom_node_installer._install_git_root_surfaces",
@@ -412,8 +412,8 @@ def test_stage_replacement_race_fails_without_removing_replacement(
         url="https://example.invalid/node.git",
         commit="a" * 40,
         target=str(custom_nodes / "direct"),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
     replacement: Path | None = None
 
@@ -568,8 +568,8 @@ def test_post_hook_head_drift_stops_before_next_node(
         url="https://example.invalid/first.git",
         commit=prepared_node.commit,
         target=str(first_target),
-        pre_install=(),
-        post_install=(
+        pre_install_hooks=(),
+        post_install_hooks=(
             HookPlan(relative_path="mutate.py", digest=f"sha256:{'a' * 64}"),
         ),
     )
@@ -578,8 +578,8 @@ def test_post_hook_head_drift_stops_before_next_node(
         url="https://example.invalid/second.git",
         commit=prepared_node.commit,
         target=str(custom_nodes / "second"),
-        pre_install=(),
-        post_install=(),
+        pre_install_hooks=(),
+        post_install_hooks=(),
     )
     phase = _phase(runtime, (first, second))
     _patch_phases(monkeypatch, application, phase)

@@ -41,15 +41,17 @@ class ConfigurationServiceError(ValueError):
 def load_validate_config(
     config_path: ConfigPath | Sequence[ConfigPath],
     *,
-    scripts_dir: str | Path = "./scripts",
+    build_hooks_dir: str | Path | None = None,
 ) -> FinalConfig:
-    return load_validate_config_result(config_path, scripts_dir=scripts_dir).config
+    return load_validate_config_result(
+        config_path, build_hooks_dir=build_hooks_dir
+    ).config
 
 
 def load_validate_config_result(
     config_path: ConfigPath | Sequence[ConfigPath],
     *,
-    scripts_dir: str | Path = "./scripts",
+    build_hooks_dir: str | Path | None = None,
 ) -> ConfigurationResult:
     """Load and validate locally without providers, Docker, lock I/O, or planning."""
     paths = _coerce_config_paths(config_path)
@@ -61,7 +63,7 @@ def load_validate_config_result(
         config = validate_final_config_structure(document)
     except FinalConfigError as error:
         raise ConfigurationServiceError(error.diagnostics) from error
-    domains = validate_final_config_domains(config, scripts_dir=scripts_dir)
+    domains = validate_final_config_domains(config, build_hooks_dir=build_hooks_dir)
     diagnostics = (
         *domains.diagnostics,
         *validate_final_config_semantics(config, domains),

@@ -173,7 +173,7 @@ def run_hook(
     hook: str,
     *,
     expected_digest: str,
-    scripts_dir: str | Path,
+    build_hooks_dir: str | Path,
     runtime: ContainerRuntime = _DEFAULT_RUNTIME,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
@@ -181,7 +181,7 @@ def run_hook(
 
     hook_path = _validate_hook_path(hook)
     _validate_hook_digest(expected_digest)
-    source_fd = _open_hook(hook_path, scripts_dir=scripts_dir)
+    source_fd = _open_hook(hook_path, build_hooks_dir=build_hooks_dir)
     try:
         sealed_fd = _seal_hook(source_fd, expected_digest=expected_digest, hook=hook)
     finally:
@@ -221,8 +221,8 @@ def _validate_hook_digest(digest: str) -> None:
         raise ContainerCommandError("hook expected digest is invalid") from error
 
 
-def _open_hook(path: PurePosixPath, *, scripts_dir: str | Path) -> int:
-    scripts_parts = _validate_scripts_root(scripts_dir)
+def _open_hook(path: PurePosixPath, *, build_hooks_dir: str | Path) -> int:
+    build_hooks_parts = _validate_build_hooks_root(build_hooks_dir)
     directory_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -239,7 +239,7 @@ def _open_hook(path: PurePosixPath, *, scripts_dir: str | Path) -> int:
     source_fd: int | None = None
     try:
         directory_fd = os.open("/", directory_flags)
-        for part in (*scripts_parts, *path.parts[:-1]):
+        for part in (*build_hooks_parts, *path.parts[:-1]):
             next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
             previous_fd = directory_fd
             directory_fd = None
@@ -274,11 +274,11 @@ def _open_hook(path: PurePosixPath, *, scripts_dir: str | Path) -> int:
             os.close(directory_fd)
 
 
-def _validate_scripts_root(scripts_dir: str | Path) -> tuple[str, ...]:
-    value = os.fspath(scripts_dir)
+def _validate_build_hooks_root(build_hooks_dir: str | Path) -> tuple[str, ...]:
+    value = os.fspath(build_hooks_dir)
     if not isinstance(value, str):
         raise ContainerCommandError(
-            "hook scripts root must be one canonical absolute path"
+            "build hooks root must be one canonical absolute path"
         )
     path = PurePosixPath(value)
     if (
@@ -291,7 +291,7 @@ def _validate_scripts_root(scripts_dir: str | Path) -> tuple[str, ...]:
         or any(part in {"", ".", ".."} for part in path.parts[1:])
     ):
         raise ContainerCommandError(
-            "hook scripts root must be one canonical absolute path"
+            "build hooks root must be one canonical absolute path"
         )
     return path.parts[1:]
 

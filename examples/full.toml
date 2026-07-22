@@ -149,10 +149,11 @@ id = "comfyui-custom-scripts"
 # Default: unset. Use "latest", a registry-supported version selector, or
 # PEP 440-style constraints such as ">=1.0.0,<2.0.0" where applicable.
 version = "latest"
-# Hook paths are relative to --scripts-dir, must not contain "..", and must end
-# in .sh or .py. Shell hooks run with bash; Python hooks run with the venv Python.
-pre_install_scripts = ["pre.sh"]
-post_install_scripts = []
+# Hook paths are relative to the explicit --build-hooks-dir, preserve any safe
+# user-defined subdirectory structure, must not contain "..", and must end in
+# .sh or .py. Shell hooks run with bash; Python hooks run with the venv Python.
+pre_install_hooks = ["pre.sh"]
+post_install_hooks = []
 
 [[comfyui.custom_nodes]]
 # Git custom node cloned directly into ComfyUI/custom_nodes.
@@ -166,8 +167,8 @@ ref = "main"
 # Default: inferred from the URL basename with a trailing .git stripped.
 # Must be a single safe directory name under ComfyUI/custom_nodes.
 target_dir = "ComfyUI-Custom-Scripts"
-pre_install_scripts = []
-post_install_scripts = ["post.sh"]
+pre_install_hooks = []
+post_install_hooks = ["post.sh"]
 
 [[files]]
 # Required. Must be an HTTP(S) URL with a host.

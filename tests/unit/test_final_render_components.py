@@ -253,7 +253,7 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
     assert "--constraints /opt/cdh/build/python-package-constraints.txt" in (
         custom_node_line
     )
-    assert "--hooks-directory /opt/cdh/build/inputs" in custom_node_line
+    assert "--build-hooks-directory /opt/cdh/build/hooks" in custom_node_line
     assert "comfy node" not in rendered
     assert "comfy install" not in rendered
 
@@ -280,17 +280,17 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
 ) -> None:
     content = b"#!/usr/bin/env python3\n"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    scripts = tmp_path / "scripts"
-    source = scripts / "hooks/pre.py"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
     plan = build_plan(
-        final_config(scripts_dir=scripts, with_hook=True),
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
     source_input = LocalMaterializationSource(
-        PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+        PurePosixPath("build-hooks/hooks/pre.py"), source
     )
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -311,7 +311,7 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     )
 
     assert (first / "build-plan.json").read_bytes() == dump_build_plan_json(plan)
-    assert (first / "inputs/hooks/pre.py").read_bytes() == content
+    assert (first / "build/hooks/hooks/pre.py").read_bytes() == content
     assert (first / "Dockerfile").read_text() == render_build_plan_dockerfile(plan)
     assert (
         "COPY runtime/config.toml /opt/cdh/runtime/config.toml"
@@ -558,13 +558,13 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
 ) -> None:
     content = b"hook"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    scripts = tmp_path / "scripts"
-    source = scripts / "hooks/pre.py"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
     plan = build_plan(
-        final_config(scripts_dir=scripts, with_hook=True),
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
     output = tmp_path / "output"
@@ -582,7 +582,7 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                    PurePosixPath("build-hooks/hooks/pre.py"), source
                 ),
             ),
         )
@@ -599,17 +599,17 @@ def test_parsed_build_plan_rejects_unsafe_hook_paths(
 ) -> None:
     content = b"hook"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    scripts = tmp_path / "scripts"
-    source = scripts / "hooks/pre.py"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
     plan = build_plan(
-        final_config(scripts_dir=scripts, with_hook=True),
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
     document = json.loads(dump_build_plan_json(plan))
-    document["custom_nodes"]["nodes"][0]["pre_install"][0]["relative_path"] = (
+    document["custom_nodes"]["nodes"][0]["pre_install_hooks"][0]["relative_path"] = (
         relative_path
     )
 
@@ -623,13 +623,13 @@ def test_parsed_build_plan_rejects_unsafe_hook_paths(
 def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) -> None:
     content = b"hook"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    scripts = tmp_path / "scripts"
-    source = scripts / "hooks/pre.py"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
     plan = build_plan(
-        final_config(scripts_dir=scripts, with_hook=True),
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
 
@@ -646,7 +646,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                    PurePosixPath("build-hooks/hooks/pre.py"), source
                 ),
             ),
         )
@@ -655,9 +655,9 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
     source.unlink()
     source.write_bytes(content)
     source.chmod(0o755)
-    real_scripts = tmp_path / "real-scripts"
-    scripts.rename(real_scripts)
-    scripts.symlink_to(real_scripts, target_is_directory=True)
+    real_build_hooks = tmp_path / "real-build-hooks"
+    build_hooks.rename(real_build_hooks)
+    build_hooks.symlink_to(real_build_hooks, target_is_directory=True)
     output = tmp_path / "parent-symlink-output"
     output.mkdir()
     with pytest.raises(FinalMaterializationError, match="source parent"):
@@ -667,8 +667,8 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("custom-node-hooks/hooks/pre.py"),
-                    scripts / "hooks/pre.py",
+                    PurePosixPath("build-hooks/hooks/pre.py"),
+                    build_hooks / "hooks/pre.py",
                 ),
             ),
         )
@@ -678,13 +678,13 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
 def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
     content = b"hook"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    scripts = tmp_path / "scripts"
-    source = scripts / "hooks/pre.py"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
     plan = build_plan(
-        final_config(scripts_dir=scripts, with_hook=True),
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
     source.unlink()
@@ -699,7 +699,7 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                    PurePosixPath("build-hooks/hooks/pre.py"), source
                 ),
             ),
         )
@@ -718,13 +718,13 @@ def test_materializer_rejects_symlink_or_special_destination_components(
 ) -> None:
     content = b"hook"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    scripts = tmp_path / "scripts"
-    source = scripts / "hooks/pre.py"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
     source.parent.mkdir(parents=True)
     source.write_bytes(content)
     source.chmod(0o755)
     plan = build_plan(
-        final_config(scripts_dir=scripts, with_hook=True),
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
         accepted_resolution(hook_digest=digest),
     )
     output = tmp_path / "output"
@@ -736,11 +736,11 @@ def test_materializer_rejects_symlink_or_special_destination_components(
 
     def inject_destination(_path: Path, _digest: str) -> bytes:
         if injected_type == "parent-symlink":
-            (output / "inputs").symlink_to(outside, target_is_directory=True)
+            (output / "build").symlink_to(outside, target_is_directory=True)
         elif injected_type == "parent-special":
-            os.mkfifo(output / "inputs")
+            os.mkfifo(output / "build")
         else:
-            parent = output / "inputs/hooks"
+            parent = output / "build/hooks/hooks"
             parent.mkdir(parents=True)
             final = parent / "pre.py"
             if injected_type == "final-symlink":
@@ -758,7 +758,7 @@ def test_materializer_rejects_symlink_or_special_destination_components(
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("custom-node-hooks/hooks/pre.py"), source
+                    PurePosixPath("build-hooks/hooks/pre.py"), source
                 ),
             ),
         )

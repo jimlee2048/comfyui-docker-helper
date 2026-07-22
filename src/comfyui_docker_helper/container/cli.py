@@ -86,13 +86,13 @@ def install_custom_nodes_command(
         Path,
         typer.Option("--constraints", help="Materialized managed constraints file."),
     ] = Path("/opt/cdh/build/python-package-constraints.txt"),
-    hooks_directory: Annotated[
+    build_hooks_directory: Annotated[
         Path,
         typer.Option(
-            "--hooks-directory",
-            help="Materialized custom-node hook directory.",
+            "--build-hooks-directory",
+            help="Materialized build hook directory.",
         ),
-    ] = Path("/opt/cdh/build/inputs"),
+    ] = Path("/opt/cdh/build/hooks"),
 ) -> None:
     """Install the exact ordered Registry and direct-Git custom nodes."""
     custom_nodes, application = _admission(build_plan_digest).custom_node_install()
@@ -101,7 +101,7 @@ def install_custom_nodes_command(
         application,
         runtime=ContainerRuntime.from_env(),
         constraints_path=constraints,
-        hooks_directory=hooks_directory,
+        build_hooks_directory=build_hooks_directory,
     )
 
 

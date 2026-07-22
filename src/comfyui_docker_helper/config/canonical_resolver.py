@@ -275,9 +275,9 @@ def _acquire_local_entries(
     reads: list[LockEntryKey] = []
     for request in ordered:
         identity = request.canonical_path
-        if identity.parts[0] == "custom-node-hooks":
+        if identity.parts[0] == "build-hooks":
             relative = PurePosixPath(*identity.parts[1:]).as_posix()
-            key = ("hooks", "custom_node", relative)
+            key = ("hooks", "build", relative)
         elif identity.parts[0] == "runtime-hooks":
             key = ("hooks", "runtime", PurePosixPath(*identity.parts[1:]).as_posix())
         else:

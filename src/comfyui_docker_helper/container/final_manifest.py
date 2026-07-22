@@ -541,16 +541,16 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
 def _hook_evidence(projection: FinalManifestInput) -> tuple[HookEvidence, ...]:
     result: list[HookEvidence] = []
     roots = {
-        "custom-node": Path("/opt/cdh/build/inputs"),
+        "build": Path("/opt/cdh/build/hooks"),
         "runtime": Path("/opt/cdh/runtime/hooks"),
     }
     for hook in projection.materialized_hooks:
         observed = _sha256(
-            read_regular_absolute_file(roots[hook.owner] / hook.relative_path)
+            read_regular_absolute_file(roots[hook.domain] / hook.relative_path)
         )
         result.append(
             HookEvidence(
-                owner=hook.owner,
+                domain=hook.domain,
                 relative_path=hook.relative_path,
                 intended_digest=hook.digest,
                 observed_digest=observed,

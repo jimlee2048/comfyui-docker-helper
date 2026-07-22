@@ -8,10 +8,10 @@ from pydantic import ValidationError
 from comfyui_docker_helper.config.canonical_lock import (
     INVALID_CANONICAL_LOCK_MESSAGE,
     ApplicationExtrasLockEntry,
+    BuildHookLockEntry,
     CanonicalLockError,
     ComfyUIRequirementsLockEntry,
     CudaImageLockEntry,
-    CustomNodeHookLockEntry,
     DirectGitLockEntry,
     ManagedPythonLockEntry,
     OfficialComfyUILockEntry,
@@ -104,7 +104,7 @@ def _entries():
             url="https://example.test/node.git",
             commit=COMMIT_B,
         ),
-        CustomNodeHookLockEntry(relative_path="common/setup.sh", digest=DIGEST_B),
+        BuildHookLockEntry(relative_path="common/setup.sh", digest=DIGEST_B),
         RuntimeHookLockEntry(relative_path="pre-start.d/service.sh", digest=DIGEST_C),
     ]
 
@@ -127,6 +127,7 @@ def test_complete_grouped_lock_round_trips_with_deterministic_bytes() -> None:
     assert "[[python.uv_tools]]" in first
     assert "[comfyui.requirements]" in first
     assert "[[custom_nodes.registry]]" in first
+    assert "[[hooks.build]]" in first
     assert "[[hooks.runtime]]" in first
 
 
@@ -137,7 +138,7 @@ def test_atomic_groups_expose_one_logical_reconciliation_key() -> None:
     assert ("python", "package_groups", "application_extras") in keys
     assert ("python", "uv_tools", "comfy-cli") in keys
     assert ("comfyui", "requirements") in keys
-    assert ("hooks", "custom_node", "common/setup.sh") in keys
+    assert ("hooks", "build", "common/setup.sh") in keys
 
 
 def test_interpreter_result_contains_only_external_artifact_identity() -> None:

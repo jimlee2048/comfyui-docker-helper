@@ -28,11 +28,11 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
+    BuildHookLockEntry,
     CanonicalLock,
     ComfyCliRequestIdentity,
     ComfyUIRequirementsLockEntry,
     CudaImageLockEntry,
-    CustomNodeHookLockEntry,
     DirectGitLockEntry,
     DirectPythonRequestMember,
     ManagedPythonLockEntry,
@@ -89,7 +89,7 @@ def canonical_wheel() -> CanonicalWheel:
 
 def final_config(
     *,
-    scripts_dir: Path | None = None,
+    build_hooks_dir: Path | None = None,
     with_hook: bool = False,
     with_uv_tool: bool = False,
     install_cli: bool = True,
@@ -102,7 +102,7 @@ def final_config(
         "version": "1.2.3",
     }
     if with_hook:
-        registry_node["pre_install_scripts"] = ["hooks/pre.py"]
+        registry_node["pre_install_hooks"] = ["hooks/pre.py"]
     config = validate_final_config_structure(
         {
             "compute_platform": {"type": "cuda", "cuda": {"version": "13.0.3"}},
@@ -153,7 +153,7 @@ def final_config(
             ],
         }
     )
-    domains = validate_final_config_domains(config, scripts_dir=scripts_dir)
+    domains = validate_final_config_domains(config, build_hooks_dir=build_hooks_dir)
     assert (
         *domains.diagnostics,
         *validate_final_config_semantics(config, domains),
@@ -323,7 +323,7 @@ def accepted_resolution(
         )
     if hook_digest is not None:
         entries.append(
-            CustomNodeHookLockEntry(
+            BuildHookLockEntry(
                 relative_path="hooks/pre.py",
                 digest=hook_digest,
             )
@@ -524,7 +524,7 @@ def test_build_plan_parser_enforces_complete_hook_tree_identity() -> None:
     document = build_plan(final_config(), accepted_resolution()).model_dump(
         mode="python"
     )
-    document["custom_nodes"]["nodes"][0]["pre_install"] = (
+    document["custom_nodes"]["nodes"][0]["pre_install_hooks"] = (
         {"relative_path": "hooks/install.txt", "digest": DIGEST_A},
     )
     with pytest.raises(ValidationError, match=r"must end in \.sh or \.py"):
@@ -533,28 +533,28 @@ def test_build_plan_parser_enforces_complete_hook_tree_identity() -> None:
     document = build_plan(final_config(), accepted_resolution()).model_dump(
         mode="python"
     )
-    document["custom_nodes"]["nodes"][0]["pre_install"] = (
+    document["custom_nodes"]["nodes"][0]["pre_install_hooks"] = (
         {"relative_path": "hooks/install.py", "digest": DIGEST_A},
     )
-    document["custom_nodes"]["nodes"][1]["post_install"] = (
+    document["custom_nodes"]["nodes"][1]["post_install_hooks"] = (
         {"relative_path": "hooks/install.py", "digest": DIGEST_B},
     )
     with pytest.raises(ValidationError, match="conflicting digests"):
         parse_build_plan_json(json.dumps(document))
 
 
-def test_build_plan_parser_accepts_reused_custom_hook_and_separate_tree_path() -> None:
+def test_build_plan_parser_accepts_reused_build_hook_and_separate_tree_path() -> None:
     document = build_plan(final_config(), accepted_resolution()).model_dump(
         mode="python"
     )
     hook = {"relative_path": "pre-start.d/shared.py", "digest": DIGEST_A}
-    document["custom_nodes"]["nodes"][0]["pre_install"] = (hook,)
-    document["custom_nodes"]["nodes"][1]["post_install"] = (hook,)
+    document["custom_nodes"]["nodes"][0]["pre_install_hooks"] = (hook,)
+    document["custom_nodes"]["nodes"][1]["post_install_hooks"] = (hook,)
     document["runtime"]["hooks"] = (hook,)
 
     parsed = parse_build_plan_json(json.dumps(document))
 
-    assert parsed.custom_nodes.nodes[0].pre_install[0].digest == DIGEST_A
+    assert parsed.custom_nodes.nodes[0].pre_install_hooks[0].digest == DIGEST_A
     assert parsed.runtime.hooks[0].relative_path == "pre-start.d/shared.py"
 
 

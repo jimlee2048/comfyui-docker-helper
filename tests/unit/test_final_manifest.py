@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from pathlib import Path
@@ -456,7 +457,7 @@ def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) 
     ) == tuple((item.url, item.target, item.checksum) for item in plan.files.files)
     assert (
         tuple(
-            (item.owner, item.relative_path, item.digest)
+            (item.domain, item.relative_path, item.digest)
             for item in projection.materialized_hooks
         )
         == ()
@@ -467,6 +468,41 @@ def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) 
         manager_enabled=plan.application.comfyui.manager is not None,
     )
     assert projection.shutdown_timeout == plan.runtime.shutdown_timeout
+
+
+def test_final_manifest_observes_build_hook_domain_and_retained_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"echo retained build hook\n"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    build_hooks = tmp_path / "build-hooks"
+    hook_path = build_hooks / "hooks/pre.py"
+    hook_path.parent.mkdir(parents=True)
+    hook_path.write_bytes(content)
+    plan = build_plan(
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    path = tmp_path / "build-plan.json"
+    path.write_bytes(dump_build_plan_json(plan))
+    projection = BuildPlanInputAdmission.from_path(
+        path,
+        expected_build_plan_digest=build_plan_digest(plan),
+    ).final_manifest()
+    observed: list[Path] = []
+
+    def read(path: Path) -> bytes:
+        observed.append(path)
+        return content
+
+    monkeypatch.setattr(final_manifest_service, "read_regular_absolute_file", read)
+
+    evidence = final_manifest_service._hook_evidence(projection)
+
+    assert tuple(item.domain for item in projection.materialized_hooks) == ("build",)
+    assert tuple(item.domain for item in evidence) == ("build",)
+    assert observed == [Path("/opt/cdh/build/hooks/hooks/pre.py")]
 
 
 def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:

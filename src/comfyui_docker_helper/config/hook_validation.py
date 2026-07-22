@@ -7,14 +7,14 @@ from pathlib import PurePosixPath
 from typing import Literal
 
 from comfyui_docker_helper.config.runtime_hooks import (
-    CUSTOM_NODE_HOOK_LOCK_PREFIX,
+    BUILD_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
     RUNTIME_HOOK_SUPPORTED_SUFFIXES,
 )
 from comfyui_docker_helper.config.value_validation import has_control_characters
 
-type HookTree = Literal["custom", "runtime"]
+type HookTree = Literal["build", "runtime"]
 _SHA256_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
@@ -56,7 +56,7 @@ def hook_lock_identity(tree: HookTree, relative_path: str) -> str:
             )
         prefix = RUNTIME_HOOK_LOCK_PREFIX
     else:
-        prefix = CUSTOM_NODE_HOOK_LOCK_PREFIX
+        prefix = BUILD_HOOK_LOCK_PREFIX
     return f"{prefix}/{relative_path}"
 
 
@@ -64,5 +64,5 @@ def materialized_hook_identity(tree: HookTree, relative_path: str) -> PurePosixP
     """Return the canonical destination identity for one materialized hook."""
     identity = hook_lock_identity(tree, relative_path)
     relative = identity.split("/", 1)[1]
-    root = PurePosixPath("runtime/hooks" if tree == "runtime" else "inputs")
+    root = PurePosixPath("runtime/hooks" if tree == "runtime" else "build/hooks")
     return root / relative

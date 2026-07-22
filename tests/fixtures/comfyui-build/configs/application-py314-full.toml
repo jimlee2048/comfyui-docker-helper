@@ -26,8 +26,8 @@ type = "git"
 url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
 ref = "609f3afaa74b2f88ef9ce8d939626065e3247469"
 target_dir = "git-custom-scripts"
-pre_install_scripts = ["pre.sh", "pre.py"]
-post_install_scripts = ["post.sh", "post.py"]
+pre_install_hooks = ["pre.sh", "pre.py"]
+post_install_hooks = ["post.sh", "post.py"]
 
 [[comfyui.custom_nodes]]
 type = "registry"

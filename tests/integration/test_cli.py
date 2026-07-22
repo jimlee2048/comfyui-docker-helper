@@ -1,5 +1,6 @@
 """Smoke tests for the CLI skeleton and shared error boundary."""
 
+import inspect
 import json
 from contextlib import contextmanager
 from importlib.metadata import entry_points, version
@@ -26,9 +27,40 @@ from comfyui_docker_helper.container import build_plan_input as build_plan_input
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
+from comfyui_docker_helper.host import cli as host_cli
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.uv_runner import HostUvError
 from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
+
+
+def _write_minimal_config(path: Path) -> None:
+    path.write_text(
+        """
+[compute_platform]
+type = "cuda"
+[compute_platform.cuda]
+version = "13.0.3"
+[pytorch]
+version = "2.12.1"
+[comfyui]
+version = "0.11.0"
+install_manager = false
+"""
+    )
+
+
+def _write_build_hook_config(path: Path) -> None:
+    _write_minimal_config(path)
+    with path.open("a") as config:
+        config.write(
+            """
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://example.test/node.git"
+ref = "1111111111111111111111111111111111111111"
+pre_install_hooks = ["nested/pre.sh"]
+"""
+        )
 
 
 # The public command surface, adapters, and error boundary stay executable and concise.
@@ -128,7 +160,7 @@ def test_registry_helper_help_exposes_only_owned_inputs(
     assert result.exit_code == 0
     assert "--build-plan-digest" in result.output
     assert "--constraints" in result.output
-    assert "--hooks-directory" in result.output
+    assert "--build-hooks-directory" in result.output
 
 
 @pytest.mark.parametrize(
@@ -375,9 +407,187 @@ def test_host_hook_option_is_preserved_only_on_render_and_build(
     build_help = cli_runner.invoke(app, ["host", "build", "--help"])
     validate_help = cli_runner.invoke(app, ["host", "validate", "--help"])
 
-    assert "--hooks-dir" in render_help.output
-    assert "--hooks-dir" in build_help.output
-    assert "--hooks-dir" not in validate_help.output
+    assert "--runtime-hooks-dir" in render_help.output
+    assert "--runtime-hooks-dir" in build_help.output
+    assert "--runtime-hooks-dir" not in validate_help.output
+    assert "--build-hooks-dir" in render_help.output
+    assert "--build-hooks-dir" in build_help.output
+    assert "--build-hooks-dir" in validate_help.output
+
+
+def test_host_hook_roots_have_no_implicit_defaults() -> None:
+    for command in (host_cli.validate, host_cli.render, host_cli.build):
+        assert inspect.signature(command).parameters["build_hooks_dir"].default is None
+    for command in (host_cli.render, host_cli.build):
+        assert (
+            inspect.signature(command).parameters["runtime_hooks_dir"].default is None
+        )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("validate",),
+        ("render", "-o", "context"),
+        ("render", "-o", "context", "--locked"),
+        ("render", "-o", "context", "--check"),
+        ("build", "--context-dir", "context", "--locked"),
+    ],
+)
+def test_required_build_hook_root_fails_before_planning_providers(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_build_hook_config(config)
+
+    def fail_providers():
+        pytest.fail("build-hook admission must precede planning providers")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers",
+        fail_providers,
+    )
+    result = cli_runner.invoke(
+        app,
+        ["host", *command, "-f", str(config)],
+    )
+
+    assert result.exit_code == 1
+    assert "hook.build_hooks_dir_required" in result.output
+    assert not (tmp_path / "context").exists()
+
+
+def test_overlapping_build_hook_root_fails_before_planning_providers(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "build-hooks"
+    hook = source / "nested/pre.sh"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("sentinel\n")
+    config = tmp_path / "config.toml"
+    _write_build_hook_config(config)
+
+    def fail_providers():
+        pytest.fail("source/output admission must precede planning providers")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers",
+        fail_providers,
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(source),
+            "--build-hooks-dir",
+            str(source),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "render.input_output_overlap" in result.output
+    assert "build hook source" in result.output
+    assert hook.read_text() == "sentinel\n"
+
+
+def test_invalid_build_hook_root_fails_before_planning_providers(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an explicit invalid required root before any planning work."""
+    config = tmp_path / "config.toml"
+    _write_build_hook_config(config)
+    context = tmp_path / "context"
+
+    def fail_providers():
+        pytest.fail("build-hook admission must precede planning providers")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers",
+        fail_providers,
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(context),
+            "--build-hooks-dir",
+            str(tmp_path / "missing-build-hooks"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "hook.build_hooks_dir_not_directory" in result.output
+    assert not context.exists()
+
+
+def test_relative_build_hook_root_is_resolved_from_invocation_directory(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve a relative build-hook root from cwd, not the config directory."""
+    invocation = tmp_path / "invocation"
+    hook = invocation / "build-hooks/nested/pre.sh"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("#!/bin/sh\n")
+    config_dir = tmp_path / "configuration"
+    config_dir.mkdir()
+    config = config_dir / "config.toml"
+    _write_build_hook_config(config)
+    observed: list[Path | None] = []
+
+    @contextmanager
+    def providers():
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=object(),
+        )
+
+    def prepare(_output_dir, *, build_hook_source_root, **_kwargs):
+        observed.append(build_hook_source_root)
+        return SimpleNamespace(warnings=())
+
+    monkeypatch.chdir(invocation)
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers",
+        providers,
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.prepare_render_context",
+        prepare,
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            "context",
+            "--build-hooks-dir",
+            "build-hooks",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert observed == [(invocation / "build-hooks").resolve()]
 
 
 def test_host_validate_remains_offline_and_does_not_construct_providers(
@@ -526,12 +736,14 @@ platforms = ["linux/amd64"]
     assert "Traceback" not in result.output
 
 
-def test_render_passes_hooks_dir_through_current_planning_boundary(
+def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, object] = {}
+    loaded = []
+    original_load = host_cli.load_validate_config_result
 
     @contextmanager
     def providers():
@@ -542,8 +754,15 @@ def test_render_passes_hooks_dir_through_current_planning_boundary(
         )
 
     def prepare(*args, **kwargs):
-        seen["hooks_dir"] = kwargs["hooks_dir"]
+        seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
+        seen["configuration_result"] = kwargs["configuration_result"]
+        seen["build_hook_source_root"] = kwargs["build_hook_source_root"]
         return SimpleNamespace(warnings=())
+
+    def load(*args, **kwargs):
+        result = original_load(*args, **kwargs)
+        loaded.append(result)
+        return result
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.default_planning_providers", providers
@@ -551,23 +770,35 @@ def test_render_passes_hooks_dir_through_current_planning_boundary(
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.prepare_render_context", prepare
     )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.load_validate_config_result", load
+    )
     hooks = tmp_path / "hooks"
+    unused_build_hooks = tmp_path / "unused-build-hooks"
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
     result = cli_runner.invoke(
         app,
         [
             "host",
             "render",
             "-f",
-            str(tmp_path / "config.toml"),
+            str(config),
             "-o",
             str(tmp_path / "context"),
-            "--hooks-dir",
+            "--runtime-hooks-dir",
             str(hooks),
+            "--build-hooks-dir",
+            str(unused_build_hooks),
         ],
     )
 
     assert result.exit_code == 0
-    assert seen["hooks_dir"] == hooks
+    assert seen["runtime_hooks_dir"] == hooks
+    assert len(loaded) == 1
+    assert seen["configuration_result"] is loaded[0]
+    assert seen["build_hook_source_root"] is None
+    assert not unused_build_hooks.exists()
 
 
 def test_render_materialization_error_is_short_and_has_no_traceback(
@@ -600,13 +831,15 @@ def test_render_materialization_error_is_short_and_has_no_traceback(
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.prepare_render_context", fail_prepare
     )
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
     result = cli_runner.invoke(
         app,
         [
             "host",
             "render",
             "-f",
-            str(tmp_path / "config.toml"),
+            str(config),
             "-o",
             str(tmp_path / "context"),
         ],
@@ -657,7 +890,7 @@ platforms = ["linux/amd64"]
     )
 
     def prepare(*args, **kwargs):
-        seen["hooks_dir"] = kwargs["hooks_dir"]
+        seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         configuration = kwargs["configuration_result"]
         seen["configuration_build"] = configuration.config.build
         return SimpleNamespace(
@@ -693,7 +926,7 @@ platforms = ["linux/amd64"]
             str(config),
             "--context-dir",
             str(context),
-            "--hooks-dir",
+            "--runtime-hooks-dir",
             str(hooks),
             "--tag",
             "cli:first",
@@ -704,7 +937,7 @@ platforms = ["linux/amd64"]
     )
 
     assert result.exit_code == 0
-    assert seen["hooks_dir"] == hooks
+    assert seen["runtime_hooks_dir"] == hooks
     configuration_build = seen["configuration_build"]
     assert configuration_build.tags == list(plan_build.tags)
     assert configuration_build.output == plan_build.output

@@ -122,8 +122,8 @@ class FinalBuildConfig(FinalConfigModel):
 class _FinalCustomNodeConfig(FinalConfigModel):
     """Ordered executable hooks shared by custom-node variants."""
 
-    pre_install_scripts: list[str] = Field(default_factory=list)
-    post_install_scripts: list[str] = Field(default_factory=list)
+    pre_install_hooks: list[str] = Field(default_factory=list)
+    post_install_hooks: list[str] = Field(default_factory=list)
 
 
 class FinalRegistryCustomNodeConfig(_FinalCustomNodeConfig):

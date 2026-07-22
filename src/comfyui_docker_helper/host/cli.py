@@ -24,11 +24,11 @@ from comfyui_docker_helper.host.release_wheel import CanonicalWheelError
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,
     PlanningOptions,
+    admit_build_hook_source,
     prepare_render_context,
 )
 from comfyui_docker_helper.host.uv_runner import HostUvError
 
-_DEFAULT_SCRIPTS_DIR = Path("./scripts")
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
 
 app = typer.Typer(
@@ -56,19 +56,21 @@ def validate(
             metavar="CONFIG.TOML",
         ),
     ],
-    scripts_dir: Annotated[
-        Path,
+    build_hooks_dir: Annotated[
+        Path | None,
         typer.Option(
-            "--scripts-dir",
-            help="Directory containing referenced custom-node hook scripts.",
+            "--build-hooks-dir",
+            help="Directory containing referenced build hook files.",
             metavar="DIR",
         ),
-    ] = _DEFAULT_SCRIPTS_DIR,
+    ] = None,
 ) -> None:
     """Validate configuration locally without network access, Docker, or writes."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     try:
-        result = load_validate_config_result(config_files, scripts_dir=scripts_dir)
+        result = load_validate_config_result(
+            config_files, build_hooks_dir=build_hooks_dir
+        )
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
@@ -98,18 +100,18 @@ def render(
             metavar="DIR",
         ),
     ],
-    scripts_dir: Annotated[
-        Path,
-        typer.Option(
-            "--scripts-dir",
-            help="Directory containing referenced custom-node hook scripts.",
-            metavar="DIR",
-        ),
-    ] = _DEFAULT_SCRIPTS_DIR,
-    hooks_dir: Annotated[
+    build_hooks_dir: Annotated[
         Path | None,
         typer.Option(
-            "--hooks-dir",
+            "--build-hooks-dir",
+            help="Directory containing referenced build hook files.",
+            metavar="DIR",
+        ),
+    ] = None,
+    runtime_hooks_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-hooks-dir",
             help="Directory containing baked runtime lifecycle hook files.",
             metavar="DIR",
         ),
@@ -160,12 +162,21 @@ def render(
             upgrade_lock=upgrade_lock,
             dry_run=dry_run,
         )
+        validated = load_validate_config_result(
+            config_files, build_hooks_dir=build_hooks_dir
+        )
+        build_hook_source_root = admit_build_hook_source(
+            validated,
+            build_hooks_dir,
+            output_dir,
+            working_directory=Path.cwd(),
+        )
         with default_planning_providers() as providers:
             prepared = prepare_render_context(
-                config_files,
                 output_dir,
-                scripts_dir=scripts_dir,
-                hooks_dir=hooks_dir,
+                configuration_result=validated,
+                build_hook_source_root=build_hook_source_root,
+                runtime_hooks_dir=runtime_hooks_dir,
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
                 canonical_wheel=providers.canonical_wheel,
@@ -232,18 +243,18 @@ def build(
             help="Push the built image tags to their registry.",
         ),
     ] = False,
-    scripts_dir: Annotated[
-        Path,
-        typer.Option(
-            "--scripts-dir",
-            help="Directory containing referenced custom-node hook scripts.",
-            metavar="DIR",
-        ),
-    ] = _DEFAULT_SCRIPTS_DIR,
-    hooks_dir: Annotated[
+    build_hooks_dir: Annotated[
         Path | None,
         typer.Option(
-            "--hooks-dir",
+            "--build-hooks-dir",
+            help="Directory containing referenced build hook files.",
+            metavar="DIR",
+        ),
+    ] = None,
+    runtime_hooks_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--runtime-hooks-dir",
             help="Directory containing baked runtime lifecycle hook files.",
             metavar="DIR",
         ),
@@ -277,7 +288,9 @@ def build(
     cli_output = _resolve_cli_build_output(load=load, push=push)
 
     try:
-        validated = load_validate_config_result(config_files, scripts_dir=scripts_dir)
+        validated = load_validate_config_result(
+            config_files, build_hooks_dir=build_hooks_dir
+        )
     except ConfigurationServiceError as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
@@ -297,19 +310,24 @@ def build(
 
     try:
         options = PlanningOptions(locked=locked, upgrade_lock=upgrade_lock)
+        build_hook_source_root = admit_build_hook_source(
+            validated,
+            build_hooks_dir,
+            context_dir,
+            working_directory=Path.cwd(),
+        )
         with default_planning_providers() as providers:
             prepared = prepare_render_context(
-                config_files,
                 context_dir,
-                scripts_dir=scripts_dir,
-                hooks_dir=hooks_dir,
+                configuration_result=validated,
+                build_hook_source_root=build_hook_source_root,
+                runtime_hooks_dir=runtime_hooks_dir,
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
                 canonical_wheel=providers.canonical_wheel,
                 options=options,
                 overwrite=True,
                 working_directory=Path.cwd(),
-                configuration_result=validated,
             )
     except (
         CanonicalWheelError,

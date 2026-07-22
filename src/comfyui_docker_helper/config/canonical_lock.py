@@ -427,8 +427,8 @@ class LocalExecutableLockEntry(_StrictLockModel):
         return _require_sha256(value)
 
 
-class CustomNodeHookLockEntry(LocalExecutableLockEntry):
-    """One baked custom-node hook identity."""
+class BuildHookLockEntry(LocalExecutableLockEntry):
+    """One baked build-hook identity."""
 
 
 class RuntimeHookLockEntry(LocalExecutableLockEntry):
@@ -446,7 +446,7 @@ CanonicalLockEntry = (
     | ApplicationExtrasLockEntry
     | PyTorchLockEntry
     | UvToolLockEntry
-    | CustomNodeHookLockEntry
+    | BuildHookLockEntry
     | RuntimeHookLockEntry
 )
 
@@ -533,10 +533,10 @@ class CustomNodesLock(_StrictLockModel):
 
 
 class HooksLock(_StrictLockModel):
-    custom_node: tuple[CustomNodeHookLockEntry, ...] = ()
+    build: tuple[BuildHookLockEntry, ...] = ()
     runtime: tuple[RuntimeHookLockEntry, ...] = ()
 
-    @field_validator("custom_node", "runtime", mode="before")
+    @field_validator("build", "runtime", mode="before")
     @classmethod
     def _freeze_hooks(cls, value: object) -> tuple[object, ...]:
         return _require_tuple(value, "hooks")
@@ -544,7 +544,7 @@ class HooksLock(_StrictLockModel):
     @model_validator(mode="after")
     def _validate_hooks(self) -> HooksLock:
         for tree, entries in (
-            ("custom_node", self.custom_node),
+            ("build", self.build),
             ("runtime", self.runtime),
         ):
             paths = [entry.relative_path for entry in entries]
@@ -582,7 +582,7 @@ class CanonicalLock(_StrictLockModel):
             *self.python.uv_tools,
             *self.custom_nodes.registry,
             *self.custom_nodes.git,
-            *self.hooks.custom_node,
+            *self.hooks.build,
             *self.hooks.runtime,
         ]
         if self.python.package_groups.application_extras is not None:
@@ -1005,8 +1005,8 @@ def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
         return ("custom_nodes", "registry", entry.id)
     if isinstance(entry, DirectGitLockEntry):
         return ("custom_nodes", "git", entry.url)
-    if isinstance(entry, CustomNodeHookLockEntry):
-        return ("hooks", "custom_node", entry.relative_path)
+    if isinstance(entry, BuildHookLockEntry):
+        return ("hooks", "build", entry.relative_path)
     if isinstance(entry, RuntimeHookLockEntry):
         return ("hooks", "runtime", entry.relative_path)
     raise TypeError(f"unsupported canonical lock entry: {type(entry).__name__}")
@@ -1051,7 +1051,7 @@ def canonical_lock_from_entries(
     known.update(key for key in by_key if key[:2] == ("python", "uv_tools"))
     known.update(key for key in by_key if key[:2] == ("custom_nodes", "registry"))
     known.update(key for key in by_key if key[:2] == ("custom_nodes", "git"))
-    known.update(key for key in by_key if key[:2] == ("hooks", "custom_node"))
+    known.update(key for key in by_key if key[:2] == ("hooks", "build"))
     known.update(key for key in by_key if key[:2] == ("hooks", "runtime"))
     if set(by_key) != known:
         raise ValueError("canonical lock contains unsupported identities")
@@ -1094,11 +1094,11 @@ def canonical_lock_from_entries(
             ),
         ),
         hooks=HooksLock(
-            custom_node=tuple(
+            build=tuple(
                 entry
                 for key, entry in sorted(by_key.items())
-                if key[:2] == ("hooks", "custom_node")
-                and isinstance(entry, CustomNodeHookLockEntry)
+                if key[:2] == ("hooks", "build")
+                and isinstance(entry, BuildHookLockEntry)
             ),
             runtime=tuple(
                 entry

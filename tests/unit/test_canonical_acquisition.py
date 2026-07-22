@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from comfyui_docker_helper.config.canonical_lock import (
+    BuildHookLockEntry,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
-    CustomNodeHookLockEntry,
     DirectPythonRequestMember,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
@@ -214,11 +214,11 @@ def test_local_hook_acquisition_returns_typed_tree_row_without_prefix() -> None:
     request = LocalExecutableIdentityRequest(
         Path("/tmp/hooks"),
         PurePosixPath("common/setup.sh"),
-        PurePosixPath("custom-node-hooks/common/setup.sh"),
+        PurePosixPath("build-hooks/common/setup.sh"),
     )
 
     entry = LocalExecutableEntryAcquirer(_Local()).acquire(request)
 
-    assert isinstance(entry, CustomNodeHookLockEntry)
+    assert isinstance(entry, BuildHookLockEntry)
     assert entry.relative_path == "common/setup.sh"
     assert entry.digest == DIGEST_A

@@ -32,15 +32,15 @@ class RuntimeHookInputError(DiagnosticError):
 
 
 def discover_runtime_hook_inputs(
-    hooks_dir: str | Path | None,
+    runtime_hooks_dir: str | Path | None,
     *,
     working_directory: str | Path | None,
 ) -> RuntimeHookInputs:
     """Validate and enumerate every baked runtime hook in canonical order."""
-    if hooks_dir is None:
+    if runtime_hooks_dir is None:
         return RuntimeHookInputs(None, ())
     base = Path.cwd() if working_directory is None else Path(working_directory)
-    selected = Path(hooks_dir)
+    selected = Path(runtime_hooks_dir)
     candidate = selected if selected.is_absolute() else base / selected
     diagnostics: list[Diagnostic] = []
     try:
@@ -49,7 +49,7 @@ def discover_runtime_hook_inputs(
         raise RuntimeHookInputError(
             (
                 Diagnostic(
-                    ("hooks_dir",),
+                    ("runtime_hooks_dir",),
                     "runtime_hooks.source_not_directory",
                     "runtime hook source must be an existing real directory",
                 ),
@@ -57,7 +57,7 @@ def discover_runtime_hook_inputs(
         ) from error
     except OSError as error:
         raise _error(
-            ("hooks_dir",),
+            ("runtime_hooks_dir",),
             "runtime_hooks.source_inspect_failed",
             "runtime hook source could not be inspected",
             error,
@@ -66,7 +66,7 @@ def discover_runtime_hook_inputs(
         raise RuntimeHookInputError(
             (
                 Diagnostic(
-                    ("hooks_dir",),
+                    ("runtime_hooks_dir",),
                     "runtime_hooks.source_not_directory",
                     "runtime hook source must be an existing real directory",
                 ),
@@ -77,7 +77,7 @@ def discover_runtime_hook_inputs(
         children = tuple(sorted(root.iterdir(), key=lambda item: item.name))
     except OSError as error:
         raise _error(
-            ("hooks_dir",),
+            ("runtime_hooks_dir",),
             "runtime_hooks.source_read_failed",
             "runtime hook source could not be read",
             error,
@@ -85,7 +85,7 @@ def discover_runtime_hook_inputs(
 
     relative_files: list[PurePosixPath] = []
     for child in children:
-        child_path = ("hooks_dir", child.name)
+        child_path = ("runtime_hooks_dir", child.name)
         child_mode = _mode(child, child_path, diagnostics)
         if child_mode is None:
             continue

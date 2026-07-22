@@ -22,7 +22,7 @@ from comfyui_docker_helper.container.runners import (
 
 # Process runners preserve exact argv/environment ownership and actionable failures.
 def test_runtime_env_sets_required_container_variables() -> None:
-    """Build the helper env expected by scripts and subprocesses."""
+    """Build the helper env expected by build_hooks and subprocesses."""
     runtime = ContainerRuntime(
         workspace=Path("/w"),
         comfyui_path=Path("/w/c"),
@@ -224,8 +224,8 @@ def test_run_hook_executes_exact_shell_and_python_bytes(
 ) -> None:
     """Execute exact locked bytes with the suffix-selected interpreter."""
     _require_linux_memfd()
-    scripts = tmp_path / "scripts"
-    nested = scripts / "nested"
+    build_hooks = tmp_path / "build_hooks"
+    nested = build_hooks / "nested"
     nested.mkdir(parents=True)
     marker = tmp_path / f"ran{suffix}"
     content = (
@@ -243,7 +243,7 @@ def test_run_hook_executes_exact_shell_and_python_bytes(
     run_hook(
         f"nested/exact{suffix}",
         expected_digest=_digest(content),
-        scripts_dir=scripts,
+        build_hooks_dir=build_hooks,
         runtime=runtime,
         env={**os.environ, "HOOK_MARKER": str(marker)},
     )
@@ -257,10 +257,10 @@ def test_run_hook_rejects_digest_mismatch_before_subprocess(
 ) -> None:
     """Do not start mismatched hook bytes."""
     _require_linux_memfd()
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
+    build_hooks = tmp_path / "build_hooks"
+    build_hooks.mkdir()
     marker = tmp_path / "must-not-run"
-    hook = scripts / "mismatch.sh"
+    hook = build_hooks / "mismatch.sh"
     hook.write_text(f"touch {marker}\n")
     monkeypatch.setattr(
         subprocess,
@@ -272,7 +272,7 @@ def test_run_hook_rejects_digest_mismatch_before_subprocess(
         run_hook(
             "mismatch.sh",
             expected_digest=_digest(b"different\n"),
-            scripts_dir=scripts,
+            build_hooks_dir=build_hooks,
             runtime=_runtime(tmp_path),
             env=os.environ,
         )
@@ -300,7 +300,7 @@ def test_run_hook_rejects_invalid_paths(
         run_hook(
             hook,
             expected_digest=_digest(b"unused"),
-            scripts_dir=tmp_path,
+            build_hooks_dir=tmp_path,
             runtime=_runtime(tmp_path),
         )
 
@@ -310,35 +310,35 @@ def test_run_hook_rejects_symlinked_component(
     tmp_path: Path, symlink_location: str
 ) -> None:
     """Reject symlinks in either the directory walk or leaf admission."""
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
+    build_hooks = tmp_path / "build_hooks"
+    build_hooks.mkdir()
     target = tmp_path / "target"
     target.mkdir()
     target.joinpath("hook.sh").write_bytes(b"true\n")
     if symlink_location == "parent":
-        scripts.joinpath("linked").symlink_to(target, target_is_directory=True)
+        build_hooks.joinpath("linked").symlink_to(target, target_is_directory=True)
         hook = "linked/hook.sh"
     else:
-        scripts.joinpath("linked.sh").symlink_to(target / "hook.sh")
+        build_hooks.joinpath("linked.sh").symlink_to(target / "hook.sh")
         hook = "linked.sh"
 
     with pytest.raises(ContainerCommandError, match="regular non-symlink"):
         run_hook(
             hook,
             expected_digest=_digest(target.joinpath("hook.sh").read_bytes()),
-            scripts_dir=scripts,
+            build_hooks_dir=build_hooks,
             runtime=_runtime(tmp_path),
         )
 
 
-def test_run_hook_rejects_symlinked_scripts_root_ancestor(tmp_path: Path) -> None:
-    """Reject an exact hook when an ancestor of its scripts root is a symlink."""
+def test_run_hook_rejects_symlinked_build_hooks_root_ancestor(tmp_path: Path) -> None:
+    """Reject an exact hook when an ancestor of its build_hooks root is a symlink."""
     real_parent = tmp_path / "real-parent"
-    scripts = real_parent / "scripts"
-    scripts.mkdir(parents=True)
+    build_hooks = real_parent / "build_hooks"
+    build_hooks.mkdir(parents=True)
     marker = tmp_path / "must-not-run"
     content = f"touch {marker}\n".encode()
-    scripts.joinpath("exact.sh").write_bytes(content)
+    build_hooks.joinpath("exact.sh").write_bytes(content)
     alias = tmp_path / "alias"
     alias.symlink_to(real_parent, target_is_directory=True)
 
@@ -346,7 +346,7 @@ def test_run_hook_rejects_symlinked_scripts_root_ancestor(tmp_path: Path) -> Non
         run_hook(
             "exact.sh",
             expected_digest=_digest(content),
-            scripts_dir=alias / "scripts",
+            build_hooks_dir=alias / "build_hooks",
             runtime=_runtime(tmp_path),
             env=os.environ,
         )
@@ -360,9 +360,9 @@ def test_run_hook_rejects_unwritten_later_fifo_without_blocking(
     """Fail promptly before subprocess start when a later hook leaf is a FIFO."""
     if not hasattr(os, "mkfifo"):
         pytest.skip("FIFO special files are not supported on this platform")
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    fifo = scripts / "later.sh"
+    build_hooks = tmp_path / "build_hooks"
+    build_hooks.mkdir()
+    fifo = build_hooks / "later.sh"
     os.mkfifo(fifo)
     marker = tmp_path / "subprocess-started"
     script = """
@@ -381,7 +381,7 @@ try:
     runners.run_hook(
         "later.sh",
         expected_digest="sha256:" + "a" * 64,
-        scripts_dir=sys.argv[1],
+        build_hooks_dir=sys.argv[1],
     )
 except runners.ContainerCommandError as error:
     assert str(error) == "hook must reference one regular non-symlink file"
@@ -391,7 +391,7 @@ assert not marker.exists()
 """
 
     result = subprocess.run(
-        [sys.executable, "-c", script, str(scripts), str(marker)],
+        [sys.executable, "-c", script, str(build_hooks), str(marker)],
         check=False,
         capture_output=True,
         timeout=3,
@@ -409,13 +409,13 @@ def test_run_hook_executes_sealed_bytes_after_original_path_swap(
     _require_linux_memfd()
     import fcntl
 
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
+    build_hooks = tmp_path / "build_hooks"
+    build_hooks.mkdir()
     trusted_marker = tmp_path / "trusted"
     malicious_marker = tmp_path / "malicious"
     trusted = f'touch "{trusted_marker}"\n'.encode()
     malicious = f'touch "{malicious_marker}"\n'.encode()
-    source = scripts / "swap.sh"
+    source = build_hooks / "swap.sh"
     source.write_bytes(trusted)
     real_run = subprocess.run
     observed_seals = 0
@@ -437,7 +437,7 @@ def test_run_hook_executes_sealed_bytes_after_original_path_swap(
     run_hook(
         "swap.sh",
         expected_digest=_digest(trusted),
-        scripts_dir=scripts,
+        build_hooks_dir=build_hooks,
         runtime=_runtime(tmp_path),
         env=os.environ,
     )

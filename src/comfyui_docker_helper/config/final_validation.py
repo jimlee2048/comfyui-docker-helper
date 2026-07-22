@@ -133,7 +133,7 @@ def validate_final_config_structure(document: Mapping[str, Any]) -> FinalConfig:
 def validate_final_config_domains(
     config: FinalConfig,
     *,
-    scripts_dir: str | Path | None = None,
+    build_hooks_dir: str | Path | None = None,
 ) -> FinalConfigDomainResult:
     """Validate individual consumer domains without enforcing relationships."""
     diagnostics: list[Diagnostic] = []
@@ -154,7 +154,7 @@ def validate_final_config_domains(
     )
     _validate_comfyui_domains(
         config,
-        scripts_dir,
+        build_hooks_dir,
         registry_ids,
         registry_nodes,
         git_urls,
@@ -588,7 +588,7 @@ def _absolute_container_path(
 
 def _validate_comfyui_domains(
     config: FinalConfig,
-    scripts_dir: str | Path | None,
+    build_hooks_dir: str | Path | None,
     registry_ids: list[LocatedValue],
     registry_nodes: list[DiagnosticPath],
     git_urls: list[LocatedValue],
@@ -620,7 +620,7 @@ def _validate_comfyui_domains(
             controlled_extra_args.append(LocatedValue(path, argument))
 
     hooks = tuple(_iter_hooks(config))
-    root = _validate_scripts_root(hooks, scripts_dir, diagnostics)
+    root = _validate_build_hooks_root(hooks, build_hooks_dir, diagnostics)
     for index, node in enumerate(comfyui.custom_nodes):
         path: DiagnosticPath = ("comfyui", "custom_nodes", index)
         if isinstance(node, FinalRegistryCustomNodeConfig):
@@ -914,35 +914,35 @@ def _iter_node_hooks(
     node: FinalRegistryCustomNodeConfig | FinalGitCustomNodeConfig,
 ) -> Iterable[tuple[str, DiagnosticPath]]:
     base: DiagnosticPath = ("comfyui", "custom_nodes", index)
-    for field in ("pre_install_scripts", "post_install_scripts"):
+    for field in ("pre_install_hooks", "post_install_hooks"):
         for hook_index, hook in enumerate(getattr(node, field)):
             yield hook, (*base, field, hook_index)
 
 
-def _validate_scripts_root(
+def _validate_build_hooks_root(
     hooks: tuple[tuple[str, DiagnosticPath], ...],
-    scripts_dir: str | Path | None,
+    build_hooks_dir: str | Path | None,
     diagnostics: list[Diagnostic],
 ) -> Path | None:
     if not hooks:
         return None
-    if scripts_dir is None:
+    if build_hooks_dir is None:
         diagnostics.append(
             Diagnostic(
-                ("scripts_dir",),
-                "hook.scripts_dir_required",
-                "is required when hooks are configured",
+                ("build_hooks_dir",),
+                "hook.build_hooks_dir_required",
+                "--build-hooks-dir is required when build hooks are configured",
             )
         )
         return None
-    root = Path(scripts_dir)
+    root = Path(build_hooks_dir)
     try:
         mode = root.lstat().st_mode
     except OSError:
         diagnostics.append(
             Diagnostic(
-                ("scripts_dir",),
-                "hook.scripts_dir_not_directory",
+                ("build_hooks_dir",),
+                "hook.build_hooks_dir_not_directory",
                 "must be an existing regular directory",
             )
         )
@@ -950,8 +950,8 @@ def _validate_scripts_root(
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
         diagnostics.append(
             Diagnostic(
-                ("scripts_dir",),
-                "hook.scripts_dir_not_directory",
+                ("build_hooks_dir",),
+                "hook.build_hooks_dir_not_directory",
                 "must be a non-symlink directory",
             )
         )

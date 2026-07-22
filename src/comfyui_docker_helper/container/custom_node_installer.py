@@ -58,7 +58,7 @@ _GIT_PATH = Path("/usr/bin/git")
 _UV_PATH = Path("/usr/local/bin/uv")
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _CONSTRAINTS_PATH = _BUILD_DIRECTORY / "python-package-constraints.txt"
-_HOOKS_DIRECTORY = _BUILD_DIRECTORY / "inputs"
+_BUILD_HOOKS_DIRECTORY = _BUILD_DIRECTORY / "hooks"
 _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 _GITLINK_MODE = b"160000"
 
@@ -126,7 +126,7 @@ def install_custom_nodes(
     git_path: Path = _GIT_PATH,
     uv_path: Path = _UV_PATH,
     constraints_path: Path = _CONSTRAINTS_PATH,
-    hooks_directory: Path = _HOOKS_DIRECTORY,
+    build_hooks_directory: Path = _BUILD_HOOKS_DIRECTORY,
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Install all custom nodes in one original-order admitted-prefix sequence."""
@@ -174,12 +174,12 @@ def install_custom_nodes(
             environ=environ,
             application_authority=application_authority,
         )
-        for hook in node.pre_install:
+        for hook in node.pre_install_hooks:
             observations.invalidate_mutation()
             run_hook(
                 hook.relative_path,
                 expected_digest=hook.digest,
-                scripts_dir=hooks_directory,
+                build_hooks_dir=build_hooks_directory,
                 runtime=runtime,
                 env=environ,
             )
@@ -258,12 +258,12 @@ def install_custom_nodes(
             environ=environ,
             application_authority=application_authority,
         )
-        for hook in node.post_install:
+        for hook in node.post_install_hooks:
             observations.invalidate_mutation()
             run_hook(
                 hook.relative_path,
                 expected_digest=hook.digest,
-                scripts_dir=hooks_directory,
+                build_hooks_dir=build_hooks_directory,
                 runtime=runtime,
                 env=environ,
             )

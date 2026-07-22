@@ -50,6 +50,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
+from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.container.runtime_files import (
     build_runtime_file_plan,
     runtime_downloader_settings,
@@ -67,6 +68,7 @@ from comfyui_docker_helper.host.planning_authority import (
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,
     PlanningOptions,
+    admit_build_hook_source,
     prepare_render_context,
 )
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
@@ -350,14 +352,23 @@ def _prepare(
     *,
     options: PlanningOptions | None = None,
     overwrite: bool = False,
-    hooks_dir: Path | None = None,
+    runtime_hooks_dir: Path | None = None,
     working_directory: Path | None = None,
-    scripts_dir: Path | str = "./scripts",
+    build_hooks_dir: Path | str | None = None,
 ):
-    return prepare_render_context(
-        config,
+    configuration_result = load_validate_config_result(
+        config, build_hooks_dir=build_hooks_dir
+    )
+    build_hook_source_root = admit_build_hook_source(
+        configuration_result,
+        build_hooks_dir,
         output,
-        scripts_dir=scripts_dir,
+        working_directory=working_directory,
+    )
+    return prepare_render_context(
+        output,
+        configuration_result=configuration_result,
+        build_hook_source_root=build_hook_source_root,
         acquirer=CachingCanonicalAcquirer(fake),
         local_acquirer=LocalExecutableEntryAcquirer(
             FilesystemLocalExecutableIdentityProvider()
@@ -365,7 +376,7 @@ def _prepare(
         canonical_wheel=CANONICAL_WHEEL,
         options=options,
         overwrite=overwrite,
-        hooks_dir=hooks_dir,
+        runtime_hooks_dir=runtime_hooks_dir,
         working_directory=working_directory,
     )
 
@@ -769,7 +780,7 @@ def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
     hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
 
-    prepared = _prepare(config, output, FakeAcquirer(), hooks_dir=hooks)
+    prepared = _prepare(config, output, FakeAcquirer(), runtime_hooks_dir=hooks)
 
     assert [hook.relative_path for hook in prepared.plan.runtime.hooks] == [
         "pre-start.d/10-pre.sh",
@@ -875,7 +886,7 @@ download_mode = "async"
     assert runtime_plan.items[1].download_mode == "async"
 
 
-@pytest.mark.parametrize("source_kind", ["custom", "runtime"])
+@pytest.mark.parametrize("source_kind", ["build", "runtime"])
 @pytest.mark.parametrize("relation", ["equal", "output-descendant", "output-ancestor"])
 def test_render_rejects_every_source_output_overlap_before_overwrite(
     tmp_path: Path,
@@ -883,9 +894,9 @@ def test_render_rejects_every_source_output_overlap_before_overwrite(
     relation: str,
 ) -> None:
     workspace = tmp_path / "workspace"
-    source = workspace / ("scripts" if source_kind == "custom" else "hooks")
+    source = workspace / ("build-hooks" if source_kind == "build" else "runtime-hooks")
     workspace.mkdir()
-    if source_kind == "custom":
+    if source_kind == "build":
         hook = source / "hook.sh"
         hook.parent.mkdir()
         hook.write_text("sentinel\n")
@@ -896,18 +907,18 @@ def test_render_rejects_every_source_output_overlap_before_overwrite(
 type = "git"
 url = "https://example.test/node.git"
 ref = "1111111111111111111111111111111111111111"
-pre_install_scripts = ["hook.sh"]
+pre_install_hooks = ["hook.sh"]
 """
         )
-        scripts_dir = source
-        hooks_dir = None
+        build_hooks_dir = source
+        runtime_hooks_dir = None
     else:
         hook = source / "pre-start.d/10-hook.sh"
         hook.parent.mkdir(parents=True)
         hook.write_text("sentinel\n")
         config_text = _config()
-        scripts_dir = tmp_path / "unused-scripts"
-        hooks_dir = source
+        build_hooks_dir = tmp_path / "unused-build-hooks"
+        runtime_hooks_dir = source
     hook.chmod(0o644)
     config = tmp_path / f"{source_kind}.toml"
     config.write_text(config_text)
@@ -923,8 +934,8 @@ pre_install_scripts = ["hook.sh"]
             output,
             FakeAcquirer(),
             overwrite=True,
-            scripts_dir=scripts_dir,
-            hooks_dir=hooks_dir,
+            build_hooks_dir=build_hooks_dir,
+            runtime_hooks_dir=runtime_hooks_dir,
         )
 
     assert raised.value.diagnostics[0].code == "render.input_output_overlap"
@@ -979,7 +990,7 @@ def test_uv_pre_reconcile_expected_acquisition_failure_is_diagnostic(
     )
 
 
-def test_custom_node_and_runtime_hook_lock_namespaces_cannot_collide(
+def test_build_and_runtime_hook_lock_namespaces_are_disjoint(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "config.toml"
@@ -990,14 +1001,14 @@ def test_custom_node_and_runtime_hook_lock_namespaces_cannot_collide(
 type = "git"
 url = "https://example.test/node.git"
 ref = "1111111111111111111111111111111111111111"
-pre_install_scripts = ["runtime-hooks/pre-start.d/10-pre.sh"]
+pre_install_hooks = ["runtime-hooks/pre-start.d/10-pre.sh"]
 """
     )
-    scripts = tmp_path / "scripts"
-    custom_hook = scripts / "runtime-hooks/pre-start.d/10-pre.sh"
-    custom_hook.parent.mkdir(parents=True)
-    custom_hook.write_text("custom\n")
-    custom_hook.chmod(0o755)
+    build_hooks = tmp_path / "build_hooks"
+    build_hook = build_hooks / "runtime-hooks/pre-start.d/10-pre.sh"
+    build_hook.parent.mkdir(parents=True)
+    build_hook.write_text("build\n")
+    build_hook.chmod(0o755)
     hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
 
@@ -1005,8 +1016,8 @@ pre_install_scripts = ["runtime-hooks/pre-start.d/10-pre.sh"]
         config,
         output,
         FakeAcquirer(),
-        hooks_dir=hooks,
-        scripts_dir=scripts,
+        runtime_hooks_dir=hooks,
+        build_hooks_dir=build_hooks,
     )
 
     lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
@@ -1015,21 +1026,21 @@ pre_install_scripts = ["runtime-hooks/pre-start.d/10-pre.sh"]
         for entry in lock.entries
         if isinstance(entry, LocalExecutableLockEntry)
     }
-    custom_identity = (
+    build_identity = (
         "hooks",
-        "custom_node",
+        "build",
         "runtime-hooks/pre-start.d/10-pre.sh",
     )
     runtime_identity = ("hooks", "runtime", "pre-start.d/10-pre.sh")
     assert identities == {
-        custom_identity,
+        build_identity,
         runtime_identity,
         ("hooks", "runtime", "post-start.d/20-post.py"),
         ("hooks", "runtime", "stop.d/30-stop.sh"),
     }
-    assert custom_identity != runtime_identity
-    assert (output / "inputs/runtime-hooks/pre-start.d/10-pre.sh").read_text() == (
-        "custom\n"
+    assert build_identity != runtime_identity
+    assert (output / "build/hooks/runtime-hooks/pre-start.d/10-pre.sh").read_text() == (
+        "build\n"
     )
     assert (output / "runtime/hooks/pre-start.d/10-pre.sh").read_text() == "pre\n"
 
@@ -1040,7 +1051,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
     config.write_text(_config())
     hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
-    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks)
+    _prepare(config, output, FakeAcquirer(), runtime_hooks_dir=hooks)
     before = _tree(output)
     before_plan = (output / "build-plan.json").read_bytes()
     before_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
@@ -1059,7 +1070,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
             config,
             output,
             locked_fake,
-            hooks_dir=hooks,
+            runtime_hooks_dir=hooks,
             options=PlanningOptions(locked=True),
         )
     assert locked.value.diagnostics[0].code == "lock.locked_mismatch"
@@ -1070,7 +1081,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
             config,
             output,
             check_fake,
-            hooks_dir=hooks,
+            runtime_hooks_dir=hooks,
             options=PlanningOptions(check=True),
         )
     assert checked.value.diagnostics[0].code == "render.context_changed"
@@ -1080,7 +1091,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
         config,
         output,
         dry_fake,
-        hooks_dir=hooks,
+        runtime_hooks_dir=hooks,
         options=PlanningOptions(dry_run=True),
     )
     assert dry.lock_result.changed
@@ -1090,7 +1101,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
     added = hooks / "pre-start.d/11-added.py"
     added.write_text("print('added')\n")
     added.chmod(0o755)
-    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks, overwrite=True)
+    _prepare(config, output, FakeAcquirer(), runtime_hooks_dir=hooks, overwrite=True)
     updated_lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     assert {
         entry.request_digest
@@ -1106,11 +1117,11 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
             config,
             output,
             FakeAcquirer(),
-            hooks_dir=hooks,
+            runtime_hooks_dir=hooks,
             options=PlanningOptions(check=True),
         )
     assert deleted_check.value.diagnostics[0].code == "render.context_changed"
-    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks, overwrite=True)
+    _prepare(config, output, FakeAcquirer(), runtime_hooks_dir=hooks, overwrite=True)
     assert not (output / "runtime/hooks/pre-start.d/11-added.py").exists()
 
 
@@ -1122,13 +1133,13 @@ def test_runtime_hook_tree_rejects_symlinks_and_special_files(tmp_path: Path) ->
     target.unlink()
     target.symlink_to(tmp_path / "outside")
     with pytest.raises(HostRenderServiceError) as symlinked:
-        _prepare(config, tmp_path / "context", FakeAcquirer(), hooks_dir=hooks)
+        _prepare(config, tmp_path / "context", FakeAcquirer(), runtime_hooks_dir=hooks)
     assert symlinked.value.diagnostics[0].code == "runtime_hooks.symlink"
 
     target.unlink()
     os.mkfifo(target)
     with pytest.raises(HostRenderServiceError) as special:
-        _prepare(config, tmp_path / "context", FakeAcquirer(), hooks_dir=hooks)
+        _prepare(config, tmp_path / "context", FakeAcquirer(), runtime_hooks_dir=hooks)
     assert special.value.diagnostics[0].code == "runtime_hooks.special_file"
 
 
@@ -1177,7 +1188,7 @@ def test_runtime_hook_tree_reports_closed_validation_contract(
     fake = FakeAcquirer()
 
     with pytest.raises(HostRenderServiceError) as raised:
-        _prepare(config, tmp_path / "context", fake, hooks_dir=hooks)
+        _prepare(config, tmp_path / "context", fake, runtime_hooks_dir=hooks)
 
     assert raised.value.diagnostics[0].code == code
     assert fake.calls == []
@@ -1193,7 +1204,7 @@ def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
     hook.chmod(0o644)
 
     prepared = _prepare(
-        config, tmp_path / "context", FakeAcquirer(), hooks_dir=hooks.parent
+        config, tmp_path / "context", FakeAcquirer(), runtime_hooks_dir=hooks.parent
     )
 
     assert prepared.plan.runtime.hooks[0].relative_path == "pre-start.d/10-hook.sh"
@@ -1364,7 +1375,7 @@ def test_check_detects_materialized_hook_permission_drift(tmp_path: Path) -> Non
     config.write_text(_config())
     hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
-    _prepare(config, output, FakeAcquirer(), hooks_dir=hooks)
+    _prepare(config, output, FakeAcquirer(), runtime_hooks_dir=hooks)
     rendered = output / "runtime/hooks/pre-start.d/10-pre.sh"
     assert rendered.stat().st_mode & 0o777 == 0o755
     rendered.chmod(0o644)
@@ -1374,7 +1385,7 @@ def test_check_detects_materialized_hook_permission_drift(tmp_path: Path) -> Non
             config,
             output,
             FakeAcquirer(),
-            hooks_dir=hooks,
+            runtime_hooks_dir=hooks,
             options=PlanningOptions(check=True),
         )
 

@@ -23,18 +23,19 @@ def _document() -> dict[str, Any]:
     }
 
 
-def _codes(config: FinalConfig, *, scripts_dir: Path | None = None) -> set[str]:
+def _codes(config: FinalConfig, *, build_hooks_dir: Path | None = None) -> set[str]:
     return {
-        diagnostic.code for diagnostic in _diagnostics(config, scripts_dir=scripts_dir)
+        diagnostic.code
+        for diagnostic in _diagnostics(config, build_hooks_dir=build_hooks_dir)
     }
 
 
 def _diagnostics(
     config: FinalConfig,
     *,
-    scripts_dir: Path | None = None,
+    build_hooks_dir: Path | None = None,
 ) -> tuple[Diagnostic, ...]:
-    domains = validate_final_config_domains(config, scripts_dir=scripts_dir)
+    domains = validate_final_config_domains(config, build_hooks_dir=build_hooks_dir)
     return (*domains.diagnostics, *validate_final_config_semantics(config, domains))
 
 
@@ -753,17 +754,17 @@ def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(
         {
             "type": "git",
             "url": "https://github.com/example/direct.git",
-            "pre_install_scripts": ["first.sh", "linked.py"],
+            "pre_install_hooks": ["first.sh", "linked.py"],
         }
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config, scripts_dir=tmp_path)
+    diagnostics = _diagnostics(config, build_hooks_dir=tmp_path)
 
     assert [
         item.path for item in diagnostics if item.code == "hook.source_not_regular"
-    ] == [("comfyui", "custom_nodes", 0, "pre_install_scripts", 1)]
-    assert config.comfyui.custom_nodes[0].pre_install_scripts == [
+    ] == [("comfyui", "custom_nodes", 0, "pre_install_hooks", 1)]
+    assert config.comfyui.custom_nodes[0].pre_install_hooks == [
         "first.sh",
         "linked.py",
     ]

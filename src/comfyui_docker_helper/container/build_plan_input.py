@@ -48,7 +48,7 @@ class FinalManifestInput:
 class FinalManifestHookInput:
     """One already-validated baked hook identity for final observation."""
 
-    owner: Literal["custom-node", "runtime"]
+    domain: Literal["build", "runtime"]
     relative_path: str
     digest: str
 
@@ -107,19 +107,19 @@ class BuildPlanInputAdmission:
 
     def final_manifest(self) -> FinalManifestInput:
         """Project only the complete cross-domain final observation inputs."""
-        custom, runtime = build_plan_hook_identities(
+        build_hooks, runtime_hooks = build_plan_hook_identities(
             self._plan.custom_nodes,
             self._plan.runtime,
         )
         hooks = tuple(
             FinalManifestHookInput(
-                owner=owner,
+                domain=domain,
                 relative_path=identity.removeprefix(prefix),
                 digest=hook.digest,
             )
-            for owner, prefix, items in (
-                ("custom-node", "custom-node-hooks/", custom),
-                ("runtime", "runtime-hooks/", runtime),
+            for domain, prefix, items in (
+                ("build", "build-hooks/", build_hooks),
+                ("runtime", "runtime-hooks/", runtime_hooks),
             )
             for identity, hook in sorted(items.items())
         )

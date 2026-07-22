@@ -27,7 +27,7 @@ from comfyui_docker_helper.config import load_validate_config_result
 
 _FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "comfyui-build"
 _CONFIG_ROOT = _FIXTURE_ROOT / "configs"
-_SCRIPT_ROOT = _FIXTURE_ROOT / "scripts"
+_BUILD_HOOK_ROOT = _FIXTURE_ROOT / "build-hooks"
 _PROJECT_ROOT = Path(__file__).parents[2]
 
 
@@ -315,7 +315,7 @@ def test_fixture_is_formally_valid_with_existing_references(
 ) -> None:
     result = load_validate_config_result(
         _CONFIG_ROOT / scenario.fixture,
-        scripts_dir=_SCRIPT_ROOT,
+        build_hooks_dir=_BUILD_HOOK_ROOT,
     )
     config = result.config
     capabilities = scenario.capabilities
@@ -331,11 +331,11 @@ def test_fixture_is_formally_valid_with_existing_references(
     hooks = [
         name
         for node in config.comfyui.custom_nodes
-        for name in (*node.pre_install_scripts, *node.post_install_scripts)
+        for name in (*node.pre_install_hooks, *node.post_install_hooks)
     ]
     assert (Capability.HOOKS in capabilities) is bool(hooks)
     assert (Capability.FILES in capabilities) is bool(config.files)
-    assert all((_SCRIPT_ROOT / name).is_file() for name in hooks)
+    assert all((_BUILD_HOOK_ROOT / name).is_file() for name in hooks)
     has_gpu_acceptance = Capability.GPU_AUDIO in capabilities
     assert has_gpu_acceptance is (Cost.GPU in scenario.costs)
     assert not has_gpu_acceptance or Capability.CPU_AUDIO in capabilities

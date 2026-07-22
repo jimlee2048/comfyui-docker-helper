@@ -324,17 +324,22 @@ their contents when their contract requires it. cdh keeps its own ephemeral
 credentials internal and avoids printing the explicit SSH password, but it
 does not infer that arbitrary configured values are secrets.
 
-Custom-node build-hook source is copied to `/opt/cdh/build/inputs` as durable
+When custom-node configuration references `pre_install_hooks` or
+`post_install_hooks`, pass `--build-hooks-dir <dir>` to validate, render, and
+build. The option has no default and is ignored when no build hook is
+referenced. Paths are relative to the explicit root; cdh preserves any safe
+user-defined subdirectory structure and admits only referenced regular files.
+Referenced build-hook source is copied to `/opt/cdh/build/hooks` as durable
 verified evidence and remains in the final image and its committed layers. Do
-not place secrets in these scripts.
+not place secrets in these hook files.
 
 ## Runtime lifecycle and hooks
 
-Pass `--hooks-dir <dir>` to `cdh host render` or `cdh host build` to bake a
-complete runtime hook tree. When the option is omitted, no baked runtime hooks
-are planned. The root may contain only `pre-start.d/`, `post-start.d/`, and
-`stop.d/`; files must be regular `.sh` or `.py` files. Symlinks,
-special files, nested directories, and unknown entries are rejected.
+Pass `--runtime-hooks-dir <dir>` to `cdh host render` or `cdh host build` to
+bake a complete runtime hook tree. When the option is omitted, no baked runtime
+hooks are planned. The root may contain only `pre-start.d/`, `post-start.d/`,
+and `stop.d/`; files must be regular `.sh` or `.py` files. Symlinks, special
+files, nested directories, and unknown entries are rejected.
 
 Every baked hook is verified while materializing and copied to
 `/opt/cdh/runtime/hooks`. Mounted `/etc/cdh/runtime/hooks` remains an external
@@ -394,7 +399,7 @@ Key rendered-context artifacts include:
 - one digest-bound canonical `build-plan.json`, used by build-time helpers;
 - one host-validated canonical cdh wheel under `bootstrap/` for a read-only
   BuildKit bind mount;
-- verified referenced hook bytes under `inputs/`, when configured;
+- verified referenced build-hook bytes under `build/hooks/`, when configured;
 - a BuildPlan-derived `runtime/config.toml` plus content-locked `runtime/hooks`
   when configured, copied to the paths consumed by the entrypoint; and
 - a Dockerfile whose `FROM` values are literal `tag@sha256` references and

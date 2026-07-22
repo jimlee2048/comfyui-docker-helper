@@ -39,8 +39,8 @@ extra_args = []
 type = "registry"
 id = "comfyui-custom-scripts"
 version = "latest"
-pre_install_scripts = ["pre.sh", "pre.py"]
-post_install_scripts = ["post.sh", "post.py"]
+pre_install_hooks = ["pre.sh", "pre.py"]
+post_install_hooks = ["post.sh", "post.py"]
 
 [[comfyui.custom_nodes]]
 type = "git"

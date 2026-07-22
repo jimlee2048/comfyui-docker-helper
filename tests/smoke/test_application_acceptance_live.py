@@ -373,18 +373,18 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     assert actual == expected
     if scenario.hooks:
         first = plan.custom_nodes.nodes[0]
-        assert [item.relative_path for item in first.pre_install] == [
+        assert [item.relative_path for item in first.pre_install_hooks] == [
             "pre.sh",
             "pre.py",
         ]
-        assert [item.relative_path for item in first.post_install] == [
+        assert [item.relative_path for item in first.post_install_hooks] == [
             "post.sh",
             "post.py",
         ]
-        assert not plan.custom_nodes.nodes[1].pre_install
-        assert not plan.custom_nodes.nodes[1].post_install
-        for hook in (*first.pre_install, *first.post_install):
-            materialized = context / "inputs" / hook.relative_path
+        assert not plan.custom_nodes.nodes[1].pre_install_hooks
+        assert not plan.custom_nodes.nodes[1].post_install_hooks
+        for hook in (*first.pre_install_hooks, *first.post_install_hooks):
+            materialized = context / "build" / "hooks" / hook.relative_path
             observed = f"sha256:{hashlib.sha256(materialized.read_bytes()).hexdigest()}"
             assert observed == hook.digest
 
@@ -413,7 +413,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     assert dockerfile.count(
         f"--build-plan-digest {binding.build_plan_digest}"
     ) == 3 + bool(plan.files.files)
-    assert ("COPY inputs /opt/cdh/build/inputs" in dockerfile) is scenario.hooks
+    assert ("COPY build/hooks /opt/cdh/build/hooks" in dockerfile) is scenario.hooks
     assert "comfy node" not in dockerfile
     assert "comfy install" not in dockerfile
 

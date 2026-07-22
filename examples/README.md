@@ -9,7 +9,7 @@ Validate locally without providers or writes:
 
 ```bash
 cdh host validate -f examples/minimal.toml
-cdh host validate -f examples/full.toml --scripts-dir examples/scripts
+cdh host validate -f examples/full.toml --build-hooks-dir examples/build-hooks
 ```
 
 Render with canonical reconciliation:
@@ -18,7 +18,7 @@ Render with canonical reconciliation:
 cdh host render \
   -f examples/minimal.toml \
   -o .cdh/build/minimal \
-  --hooks-dir examples/hooks \
+  --runtime-hooks-dir examples/runtime-hooks \
   --overwrite
 ```
 
@@ -34,11 +34,16 @@ observational evidence. The smoke does not certify arbitrary custom nodes,
 workflows, GPU behavior, codecs, models, or service health, and the in-image
 manifest is not another resolver or replay input.
 
-The optional `--hooks-dir` tree may contain only regular `.sh` or
+The optional `--runtime-hooks-dir` tree may contain only regular `.sh` or
 `.py` files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`.
 Every baked hook is content-locked and copied to `/opt/cdh/runtime/hooks`;
 mounted `/etc/cdh/runtime/hooks` remains external runtime input. Omitting
-`--hooks-dir` means that no runtime hook tree is baked.
+`--runtime-hooks-dir` means that no runtime hook tree is baked.
+
+`--build-hooks-dir` has no default and is required only when configuration
+references `pre_install_hooks` or `post_install_hooks`. Paths are resolved
+relative to that explicit root. cdh preserves the user's safe relative layout,
+admits only referenced files, and does not require owner or phase subfolders.
 
 If a startup hook launches a background service, define a matching stop hook
 that requests the service's termination and waits for it to exit. Prefer the
@@ -88,9 +93,9 @@ content installed in the image. Manager/Registry installers and direct-Git
 `install.py` remain trusted opaque code rather than network-isolated package
 operations.
 Zero-node builds still record exact empty custom-node evidence and the factual
-final application inventory after the dependency check. Custom-node build-hook
-source is retained under `/opt/cdh/build/inputs` and in image layers as verified
-audit evidence; do not put secrets in these scripts.
+final application inventory after the dependency check. Referenced build-hook
+source is retained under `/opt/cdh/build/hooks` and in image layers as verified
+audit evidence; do not put secrets in these hook files.
 
 The image contains a baked runtime configuration at
 `/opt/cdh/runtime/config.toml`. A mounted `/etc/cdh/runtime/config.toml` can

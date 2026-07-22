@@ -27,13 +27,13 @@ from comfyui_docker_helper.comfyui_requirements import (
 )
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
+    BuildHookLockEntry,
     CanonicalLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
     CudaImageLockEntry,
-    CustomNodeHookLockEntry,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonRequestIdentity,
@@ -643,8 +643,8 @@ class LocalExecutableEntryAcquirer:
         except IdentityProviderError as error:
             raise CanonicalAcquisitionError(str(error)) from error
         path = identity.relative_path
-        if path.parts[0] == "custom-node-hooks":
-            entry_type = CustomNodeHookLockEntry
+        if path.parts[0] == "build-hooks":
+            entry_type = BuildHookLockEntry
         elif path.parts[0] == "runtime-hooks":
             entry_type = RuntimeHookLockEntry
         else:

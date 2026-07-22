@@ -36,7 +36,6 @@ from comfyui_docker_helper.config.canonical_resolver import (
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
-    load_validate_config_result,
 )
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
@@ -116,32 +115,27 @@ class HostRenderServiceError(ValueError):
 
 
 def prepare_render_context(
-    config_files,
     output_dir: str | Path,
     *,
-    scripts_dir: str | Path = "./scripts",
-    hooks_dir: str | Path | None = None,
+    configuration_result: ConfigurationResult,
+    build_hook_source_root: Path | None,
+    runtime_hooks_dir: str | Path | None = None,
     acquirer: CachingCanonicalAcquirer,
     local_acquirer: LocalExecutableEntryAcquirer,
     canonical_wheel: CanonicalWheel,
     options: PlanningOptions | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
-    configuration_result: ConfigurationResult | None = None,
 ) -> PreparedContext:
     """Resolve one canonical lock, construct once, then render or compare."""
     selected = options or PlanningOptions()
-    result = configuration_result or load_validate_config_result(
-        config_files, scripts_dir=scripts_dir
-    )
+    result = configuration_result
     output = _output_path(output_dir, working_directory)
     existing = _load_existing_lock(output)
     try:
         runtime_hooks = discover_runtime_hook_inputs(
-            hooks_dir, working_directory=working_directory
+            runtime_hooks_dir, working_directory=working_directory
         )
-        custom_hook_root = _custom_hook_source_root(result, scripts_dir)
-        _validate_input_output_separation(output, custom_hook_root, "custom hook")
         _validate_input_output_separation(
             output, runtime_hooks.source_root, "runtime hook"
         )
@@ -163,7 +157,7 @@ def prepare_render_context(
         )
         local_requests = build_local_executable_requests(
             graph,
-            scripts_dir=scripts_dir,
+            build_hooks_dir=build_hook_source_root,
             runtime_hook_requests=runtime_hooks.requests,
         )
         accepted = reconcile_canonical_lock(
@@ -205,6 +199,23 @@ def prepare_render_context(
             overwrite=overwrite,
         )
     return PreparedContext(plan, accepted, result.warnings)
+
+
+def admit_build_hook_source(
+    result: ConfigurationResult,
+    build_hooks_dir: str | Path | None,
+    output_dir: str | Path,
+    *,
+    working_directory: str | Path | None = None,
+) -> Path | None:
+    """Admit the referenced build-hook root before provider initialization."""
+    root = _build_hook_source_root(
+        result, build_hooks_dir, working_directory=working_directory
+    )
+    _validate_input_output_separation(
+        _output_path(output_dir, working_directory), root, "build hook"
+    )
+    return root
 
 
 def _load_existing_lock(output: Path) -> CanonicalLock | None:
@@ -411,21 +422,32 @@ def _validate_input_output_separation(
         )
 
 
-def _custom_hook_source_root(
-    result: ConfigurationResult, scripts_dir: str | Path
+def _build_hook_source_root(
+    result: ConfigurationResult,
+    build_hooks_dir: str | Path | None,
+    *,
+    working_directory: str | Path | None,
 ) -> Path | None:
     has_hooks = any(
-        node.pre_install_scripts or node.post_install_scripts
+        node.pre_install_hooks or node.post_install_hooks
         for node in result.config.comfyui.custom_nodes
     )
     if not has_hooks:
         return None
+    if build_hooks_dir is None:
+        raise _render_error(
+            "hook.build_hooks_dir_required",
+            "--build-hooks-dir is required when build hooks are configured",
+        )
+    base = Path.cwd() if working_directory is None else Path(working_directory)
+    selected = Path(build_hooks_dir)
+    candidate = selected if selected.is_absolute() else base / selected
     try:
-        return Path(scripts_dir).resolve(strict=True)
+        return candidate.resolve(strict=True)
     except OSError as error:
         raise _render_error(
-            "render.custom_hook_source_unavailable",
-            "custom hook source could not be resolved",
+            "render.build_hook_source_unavailable",
+            "build hook source could not be resolved",
         ) from error
 
 

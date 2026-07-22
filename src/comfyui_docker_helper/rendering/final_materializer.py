@@ -17,7 +17,7 @@ from comfyui_docker_helper.config.build_plan import (
     dump_build_plan_json,
 )
 from comfyui_docker_helper.config.runtime_hooks import (
-    CUSTOM_NODE_HOOK_LOCK_PREFIX,
+    BUILD_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
@@ -54,8 +54,8 @@ def materialize_build_plan(
     if next(target.iterdir(), None) is not None:
         raise FinalMaterializationError("materialization target must be empty")
     try:
-        custom_hooks, runtime_hooks = _expected_hooks(plan)
-        expected = {**custom_hooks, **runtime_hooks}
+        build_hooks, runtime_hooks = _expected_hooks(plan)
+        expected = {**build_hooks, **runtime_hooks}
         sources = {item.relative_path.as_posix(): item for item in local_sources}
         if len(sources) != len(local_sources) or set(sources) != set(expected):
             raise FinalMaterializationError(
@@ -76,10 +76,10 @@ def materialize_build_plan(
                 )
                 output = target / "runtime" / "hooks" / runtime_relative
             else:
-                custom_relative = relative_path.removeprefix(
-                    f"{CUSTOM_NODE_HOOK_LOCK_PREFIX}/"
+                build_relative = relative_path.removeprefix(
+                    f"{BUILD_HOOK_LOCK_PREFIX}/"
                 )
-                output = target / "inputs" / custom_relative
+                output = target / "build" / "hooks" / build_relative
             _write(output, content, root=target, executable=True)
         _write(
             target / "runtime" / "config.toml",

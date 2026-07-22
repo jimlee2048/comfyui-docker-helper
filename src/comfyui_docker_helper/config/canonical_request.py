@@ -137,8 +137,8 @@ class RegistryNodeRequest:
     type: Literal["registry"]
     id: str
     selector: str
-    pre_install: tuple[str, ...]
-    post_install: tuple[str, ...]
+    pre_install_hooks: tuple[str, ...]
+    post_install_hooks: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,8 +147,8 @@ class GitNodeRequest:
     url: str
     ref: str
     target: str
-    pre_install: tuple[str, ...]
-    post_install: tuple[str, ...]
+    pre_install_hooks: tuple[str, ...]
+    post_install_hooks: tuple[str, ...]
 
 
 type CustomNodeRequest = RegistryNodeRequest | GitNodeRequest
@@ -361,14 +361,22 @@ def build_canonical_request_graph(
     )
     nodes: list[CustomNodeRequest] = []
     for node in config.comfyui.custom_nodes:
-        pre = tuple(node.pre_install_scripts)
-        post = tuple(node.post_install_scripts)
+        pre_install_hooks = tuple(node.pre_install_hooks)
+        post_install_hooks = tuple(node.post_install_hooks)
         if node.type == "registry":
             selector = node.version or "latest"
             requests.append(
                 RegistryRequestIdentity(type="registry", id=node.id, selector=selector)
             )
-            nodes.append(RegistryNodeRequest("registry", node.id, selector, pre, post))
+            nodes.append(
+                RegistryNodeRequest(
+                    "registry",
+                    node.id,
+                    selector,
+                    pre_install_hooks,
+                    post_install_hooks,
+                )
+            )
         else:
             ref = node.ref or "HEAD"
             requests.append(DirectGitRequestIdentity(type="git", url=node.url, ref=ref))
@@ -377,7 +385,16 @@ def build_canonical_request_graph(
                 / "custom_nodes"
                 / resolve_git_target_dir(node.url, node.target_dir)
             )
-            nodes.append(GitNodeRequest("git", node.url, ref, target, pre, post))
+            nodes.append(
+                GitNodeRequest(
+                    "git",
+                    node.url,
+                    ref,
+                    target,
+                    pre_install_hooks,
+                    post_install_hooks,
+                )
+            )
 
     desired = tuple(DesiredResolution(request) for request in requests)
     downloader = DownloaderRequest(

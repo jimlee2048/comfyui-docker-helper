@@ -44,10 +44,10 @@ def _node(
         type="registry",
         id=node_id,
         version=version,
-        pre_install=tuple(
+        pre_install_hooks=tuple(
             HookPlan(relative_path=value, digest=f"sha256:{'a' * 64}") for value in pre
         ),
-        post_install=tuple(
+        post_install_hooks=tuple(
             HookPlan(relative_path=value, digest=f"sha256:{'b' * 64}") for value in post
         ),
     )
@@ -67,10 +67,10 @@ def _git_node(
         url=url,
         commit="c" * 40,
         target=str(runtime.comfyui_path / "custom_nodes" / name),
-        pre_install=tuple(
+        pre_install_hooks=tuple(
             HookPlan(relative_path=value, digest=f"sha256:{'c' * 64}") for value in pre
         ),
-        post_install=tuple(
+        post_install_hooks=tuple(
             HookPlan(relative_path=value, digest=f"sha256:{'d' * 64}") for value in post
         ),
     )
@@ -1549,7 +1549,7 @@ def test_real_hook_is_reproved_before_the_next_cm_cli_process(
     hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
     node = _node("first", "1.0.0", pre=("mutate.sh",)).model_copy(
         update={
-            "pre_install": (
+            "pre_install_hooks": (
                 HookPlan(
                     relative_path="mutate.sh",
                     digest=_hook_digest(hook.read_bytes()),
@@ -1580,7 +1580,7 @@ def test_real_hook_is_reproved_before_the_next_cm_cli_process(
         custom_nodes,
         application,
         runtime=runtime,
-        hooks_directory=tmp_path,
+        build_hooks_directory=tmp_path,
     )
 
     assert marker.exists()
@@ -1610,11 +1610,11 @@ def test_first_hook_replacement_of_later_regular_hook_fails_before_execution(
         type="registry",
         id="first",
         version="1.0.0",
-        pre_install=(
+        pre_install_hooks=(
             HookPlan(relative_path="first.sh", digest=_hook_digest(first_content)),
             HookPlan(relative_path="later.sh", digest=_hook_digest(later_content)),
         ),
-        post_install=(),
+        post_install_hooks=(),
     )
     custom_nodes = _phase(runtime, (node,))
     _patch_phases(monkeypatch, application, custom_nodes)
@@ -1629,7 +1629,7 @@ def test_first_hook_replacement_of_later_regular_hook_fails_before_execution(
             custom_nodes,
             application,
             runtime=runtime,
-            hooks_directory=tmp_path,
+            build_hooks_directory=tmp_path,
         )
 
     assert later_path.read_text() == f"{malicious}\n"

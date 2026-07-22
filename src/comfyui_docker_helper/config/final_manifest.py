@@ -428,7 +428,7 @@ class FileEvidence(_ManifestModel):
 
 
 class HookEvidence(_ManifestModel):
-    owner: Literal["custom-node", "runtime"]
+    domain: Literal["build", "runtime"]
     relative_path: str
     intended_digest: str
     observed_digest: str

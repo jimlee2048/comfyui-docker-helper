@@ -9,12 +9,12 @@ import pytest
 
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
+    BuildHookLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
     CudaImageLockEntry,
-    CustomNodeHookLockEntry,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     ManagedPythonLockEntry,
@@ -228,7 +228,7 @@ class FakeLocalAcquirer:
     digest: str = DIGEST_A
 
     def acquire(self, request):
-        return CustomNodeHookLockEntry(
+        return BuildHookLockEntry(
             relative_path=PurePosixPath(*request.canonical_path.parts[1:]).as_posix(),
             digest=self.digest,
         )
@@ -243,7 +243,7 @@ def _initial_lock(*, application_extras: bool = False, local: bool = False):
                 LocalExecutableIdentityRequest(
                     Path("/tmp/hooks"),
                     PurePosixPath("setup.sh"),
-                    PurePosixPath("custom-node-hooks/setup.sh"),
+                    PurePosixPath("build-hooks/setup.sh"),
                 ),
             ),
             "local_acquirer": FakeLocalAcquirer(),
@@ -303,7 +303,7 @@ def test_locked_matching_lock_has_zero_provider_calls_and_no_write() -> None:
             LocalExecutableIdentityRequest(
                 Path("/tmp/hooks"),
                 PurePosixPath("setup.sh"),
-                PurePosixPath("custom-node-hooks/setup.sh"),
+                PurePosixPath("build-hooks/setup.sh"),
             ),
         ),
         local_acquirer=FakeLocalAcquirer(),
@@ -316,7 +316,7 @@ def test_locked_matching_lock_has_zero_provider_calls_and_no_write() -> None:
     assert accepted.provider_calls == ()
     assert acquirer.calls == []
     assert accepted.write_intent is False
-    assert accepted.local_reads == (("hooks", "custom_node", "setup.sh"),)
+    assert accepted.local_reads == (("hooks", "build", "setup.sh"),)
 
 
 def test_locked_hook_drift_fails_without_external_provider_calls() -> None:
@@ -330,7 +330,7 @@ def test_locked_hook_drift_fails_without_external_provider_calls() -> None:
                 LocalExecutableIdentityRequest(
                     Path("/tmp/hooks"),
                     PurePosixPath("setup.sh"),
-                    PurePosixPath("custom-node-hooks/setup.sh"),
+                    PurePosixPath("build-hooks/setup.sh"),
                 ),
             ),
             local_acquirer=FakeLocalAcquirer(DIGEST_B),

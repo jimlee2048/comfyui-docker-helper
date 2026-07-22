@@ -147,25 +147,28 @@ def uv_catalog_descriptor_digest(
 def build_local_executable_requests(
     graph: CanonicalRequestGraph,
     *,
-    scripts_dir: str | Path,
+    build_hooks_dir: str | Path | None,
     runtime_hook_requests: tuple[LocalExecutableIdentityRequest, ...] = (),
 ) -> tuple[LocalExecutableIdentityRequest, ...]:
-    root = Path(scripts_dir).resolve()
     relative_hooks = sorted(
         {
             hook
             for node in graph.custom_nodes
-            for hook in (*node.pre_install, *node.post_install)
+            for hook in (*node.pre_install_hooks, *node.post_install_hooks)
         }
     )
+    if relative_hooks and build_hooks_dir is None:
+        raise ValueError("build-hook requests require an admitted source root")
+    root = Path(build_hooks_dir).resolve() if build_hooks_dir is not None else None
     return (
         tuple(
             LocalExecutableIdentityRequest(
                 root,
                 PurePosixPath(path),
-                PurePosixPath(hook_lock_identity("custom", path)),
+                PurePosixPath(hook_lock_identity("build", path)),
             )
             for path in relative_hooks
+            if root is not None
         )
         + runtime_hook_requests
     )

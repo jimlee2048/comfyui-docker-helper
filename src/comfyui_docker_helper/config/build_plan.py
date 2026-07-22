@@ -16,13 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
+    BuildHookLockEntry,
     CanonicalLock,
     CanonicalLockEntry,
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
-    CustomNodeHookLockEntry,
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonRequestIdentity,
@@ -686,8 +686,8 @@ class RegistryNodePlan(_PlanModel):
     type: Literal["registry"]
     id: str
     version: str
-    pre_install: tuple[HookPlan, ...]
-    post_install: tuple[HookPlan, ...]
+    pre_install_hooks: tuple[HookPlan, ...]
+    post_install_hooks: tuple[HookPlan, ...]
 
     @field_validator("id")
     @classmethod
@@ -705,8 +705,8 @@ class GitNodePlan(_PlanModel):
     url: str
     commit: str
     target: str
-    pre_install: tuple[HookPlan, ...]
-    post_install: tuple[HookPlan, ...]
+    pre_install_hooks: tuple[HookPlan, ...]
+    post_install_hooks: tuple[HookPlan, ...]
 
     @field_validator("url")
     @classmethod
@@ -999,16 +999,16 @@ def build_plan_hook_identities(
     runtime: RuntimePhase,
 ) -> tuple[dict[str, HookPlan], dict[str, HookPlan]]:
     """Validate and group the complete materialized hook-tree authority."""
-    custom: dict[str, HookPlan] = {}
+    build_hooks: dict[str, HookPlan] = {}
     destinations: set[PurePosixPath] = set()
     for node in custom_nodes.nodes:
-        for hook in (*node.pre_install, *node.post_install):
-            identity = hook_lock_identity("custom", hook.relative_path)
-            existing = custom.get(identity)
+        for hook in (*node.pre_install_hooks, *node.post_install_hooks):
+            identity = hook_lock_identity("build", hook.relative_path)
+            existing = build_hooks.get(identity)
             if existing is not None and existing.digest != hook.digest:
-                raise ValueError("custom hook identity has conflicting digests")
-            custom[identity] = hook
-            destinations.add(materialized_hook_identity("custom", hook.relative_path))
+                raise ValueError("build hook identity has conflicting digests")
+            build_hooks[identity] = hook
+            destinations.add(materialized_hook_identity("build", hook.relative_path))
 
     runtime_hooks: dict[str, HookPlan] = {}
     for hook in runtime.hooks:
@@ -1020,7 +1020,7 @@ def build_plan_hook_identities(
             raise ValueError("materialized hook identities must be unique")
         runtime_hooks[identity] = hook
         destinations.add(destination)
-    return custom, runtime_hooks
+    return build_hooks, runtime_hooks
 
 
 class ManifestBinding(_PlanModel):
@@ -1574,8 +1574,12 @@ def _custom_node(
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
 ) -> CustomNodePlan:
-    pre = tuple(_hook(value, entries, used) for value in node.pre_install)
-    post = tuple(_hook(value, entries, used) for value in node.post_install)
+    pre_install_hooks = tuple(
+        _hook(value, entries, used) for value in node.pre_install_hooks
+    )
+    post_install_hooks = tuple(
+        _hook(value, entries, used) for value in node.post_install_hooks
+    )
     if isinstance(node, RegistryNodeRequest):
         entry = _take(
             entries,
@@ -1587,8 +1591,8 @@ def _custom_node(
             type="registry",
             id=entry.id,
             version=entry.version,
-            pre_install=pre,
-            post_install=post,
+            pre_install_hooks=pre_install_hooks,
+            post_install_hooks=post_install_hooks,
         )
     if not isinstance(node, GitNodeRequest):  # pragma: no cover - closed union
         raise AssertionError("unsupported canonical custom-node request")
@@ -1603,8 +1607,8 @@ def _custom_node(
         url=entry.url,
         commit=entry.commit,
         target=node.target,
-        pre_install=pre,
-        post_install=post,
+        pre_install_hooks=pre_install_hooks,
+        post_install_hooks=post_install_hooks,
     )
 
 
@@ -1616,8 +1620,8 @@ def _hook(
     entry = _take(
         entries,
         used,
-        ("hooks", "custom_node", relative_path),
-        CustomNodeHookLockEntry,
+        ("hooks", "build", relative_path),
+        BuildHookLockEntry,
     )
     return HookPlan(relative_path=relative_path, digest=entry.digest)
 

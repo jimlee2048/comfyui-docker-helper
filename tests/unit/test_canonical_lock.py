@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from pydantic import ValidationError
 
 from comfyui_docker_helper.config.canonical_lock import (
     INVALID_CANONICAL_LOCK_MESSAGE,
+    MAX_COMFYUI_REQUIREMENTS_BYTES,
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
     CanonicalLockError,
@@ -18,7 +21,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     PyTorchLockEntry,
     RegistryNodeLockEntry,
     ResolvedPythonPackage,
-    RoutedPyTorchRequirement,
     RuntimeHookLockEntry,
     UvImageLockEntry,
     UvToolLockEntry,
@@ -33,6 +35,10 @@ DIGEST_B = f"sha256:{'b' * 64}"
 DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT_A = "1" * 40
 COMMIT_B = "2" * 40
+REQUIREMENTS_CONTENT = "torch\r\ntorchaudio  \r\n"
+REQUIREMENTS_DIGEST = (
+    f"sha256:{hashlib.sha256(REQUIREMENTS_CONTENT.encode('utf-8')).hexdigest()}"
+)
 
 
 def _entries():
@@ -71,10 +77,8 @@ def _entries():
         ),
         ComfyUIRequirementsLockEntry(
             request_digest=DIGEST_B,
-            digest=DIGEST_C,
-            pytorch=(
-                RoutedPyTorchRequirement(name="torchaudio", extras=(), specifier=""),
-            ),
+            digest=REQUIREMENTS_DIGEST,
+            content=REQUIREMENTS_CONTENT,
         ),
         PyTorchLockEntry(
             request_digest=DIGEST_C,
@@ -133,6 +137,39 @@ def test_complete_grouped_lock_round_trips_with_deterministic_bytes() -> None:
     assert "[[hooks.runtime]]" in first
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "torch\n",
+        "torch\r\n",
+        "torch  \n\t# note\n",
+        "torch",
+        "\ufefftorch\n",
+        "torch\t>=2\n",
+    ],
+)
+def test_requirements_source_bytes_survive_canonical_toml_round_trip(
+    content: str,
+) -> None:
+    encoded = content.encode("utf-8")
+    entry = ComfyUIRequirementsLockEntry(
+        request_digest=DIGEST_B,
+        digest=f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+        content=content,
+    )
+    entries = [
+        entry if isinstance(item, ComfyUIRequirementsLockEntry) else item
+        for item in _entries()
+    ]
+
+    document = dump_canonical_lock_toml(canonical_lock_from_entries(entries))
+    parsed = parse_canonical_lock_toml(document)
+
+    assert parsed.comfyui.requirements.content.encode("utf-8") == encoded
+    assert dump_canonical_lock_toml(parsed) == document
+
+
 def test_atomic_groups_expose_one_logical_reconciliation_key() -> None:
     keys = {canonical_entry_key(entry) for entry in _lock().entries}
 
@@ -153,16 +190,62 @@ def test_interpreter_result_contains_only_external_artifact_identity() -> None:
     assert parsed.python.interpreter.catalog_digest == DIGEST_C
 
 
-def test_comfyui_requirements_projection_is_sorted_and_unique() -> None:
-    with pytest.raises(ValidationError, match="sorted and unique"):
+def test_comfyui_requirements_content_digest_must_match_exact_utf8_bytes() -> None:
+    with pytest.raises(ValidationError, match="digest does not match"):
         ComfyUIRequirementsLockEntry(
             request_digest=DIGEST_A,
             digest=DIGEST_B,
-            pytorch=(
-                RoutedPyTorchRequirement(name="torchvision", extras=(), specifier=""),
-                RoutedPyTorchRequirement(name="torch", extras=(), specifier=""),
-            ),
+            content="torch\n",
         )
+
+
+def test_comfyui_requirements_content_has_one_encoded_byte_bound() -> None:
+    oversized = "x" * (MAX_COMFYUI_REQUIREMENTS_BYTES + 1)
+
+    with pytest.raises(ValidationError, match="exceeds the supported size"):
+        ComfyUIRequirementsLockEntry(
+            request_digest=DIGEST_A,
+            digest=f"sha256:{hashlib.sha256(oversized.encode()).hexdigest()}",
+            content=oversized,
+        )
+
+
+def test_requirements_source_at_encoded_byte_bound_round_trips() -> None:
+    content = "x" * MAX_COMFYUI_REQUIREMENTS_BYTES
+    encoded = content.encode("utf-8")
+    entry = ComfyUIRequirementsLockEntry(
+        request_digest=DIGEST_B,
+        digest=f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+        content=content,
+    )
+    entries = [
+        entry if isinstance(item, ComfyUIRequirementsLockEntry) else item
+        for item in _entries()
+    ]
+
+    parsed = parse_canonical_lock_toml(
+        dump_canonical_lock_toml(canonical_lock_from_entries(entries))
+    )
+
+    assert parsed.comfyui.requirements.content.encode("utf-8") == encoded
+
+
+def test_requirements_source_rejects_non_utf8_scalar_content() -> None:
+    with pytest.raises(ValidationError, match="strict UTF-8"):
+        ComfyUIRequirementsLockEntry(
+            request_digest=DIGEST_A,
+            digest=DIGEST_B,
+            content="\ud800",
+        )
+
+
+def test_existing_lock_rejects_invalid_requirements_content_digest() -> None:
+    document = dump_canonical_lock_toml(_lock()).replace(
+        f'digest = "{REQUIREMENTS_DIGEST}"', f'digest = "{DIGEST_A}"'
+    )
+
+    with pytest.raises(CanonicalLockError, match=INVALID_CANONICAL_LOCK_MESSAGE):
+        parse_canonical_lock_toml(document)
 
 
 def test_python_group_requires_sorted_unique_packages() -> None:

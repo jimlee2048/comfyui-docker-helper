@@ -36,6 +36,7 @@ from comfyui_docker_helper.exact_ledger import (
 )
 
 CANONICAL_LOCK_SCHEMA_VERSION = 1
+MAX_COMFYUI_REQUIREMENTS_BYTES = 1024 * 1024
 INVALID_CANONICAL_LOCK_MESSAGE = (
     "config.lock.toml is invalid; remove it and regenerate the build context"
 )
@@ -95,29 +96,6 @@ class ProtectedRequirementProjection(_StrictLockModel):
     @field_validator("selector")
     @classmethod
     def _validate_selector(cls, value: str) -> str:
-        return _require_direct_package_selector(value)
-
-
-class RoutedPyTorchRequirement(_StrictLockModel):
-    """One target-active ComfyUI requirement routed into PyTorch resolution."""
-
-    name: str
-    extras: tuple[str, ...]
-    specifier: str
-
-    @field_validator("name")
-    @classmethod
-    def _validate_name(cls, value: str) -> str:
-        return _require_normalized_package(value)
-
-    @field_validator("extras", mode="before")
-    @classmethod
-    def _validate_extras(cls, value: object) -> tuple[str, ...]:
-        return _require_normalized_extras(_require_tuple(value, "extras"))
-
-    @field_validator("specifier")
-    @classmethod
-    def _validate_specifier(cls, value: str) -> str:
         return _require_direct_package_selector(value)
 
 
@@ -236,30 +214,23 @@ class OfficialComfyUILockEntry(_ResolverEntry):
 
 
 class ComfyUIRequirementsLockEntry(_ResolverEntry):
-    """Exact requirements bytes and target-active PyTorch routing result."""
+    """Exact bounded UTF-8 requirements source snapshot."""
 
     digest: str
-    pytorch: tuple[RoutedPyTorchRequirement, ...]
+    content: str
 
-    @field_validator("digest")
-    @classmethod
-    def _validate_digest(cls, value: str) -> str:
-        return _require_sha256(value)
-
-    @field_validator("pytorch", mode="before")
-    @classmethod
-    def _validate_pytorch(cls, value: object) -> tuple[RoutedPyTorchRequirement, ...]:
-        value = _require_tuple(value, "pytorch")
-        projection = tuple(
-            item
-            if isinstance(item, RoutedPyTorchRequirement)
-            else RoutedPyTorchRequirement.model_validate(item)
-            for item in value
-        )
-        packages = [item.name for item in projection]
-        if packages != sorted(set(packages)):
-            raise ValueError("pytorch projection must be sorted and unique")
-        return projection
+    @model_validator(mode="after")
+    def _validate_source(self) -> ComfyUIRequirementsLockEntry:
+        try:
+            content = self.content.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("requirements content must be strict UTF-8") from error
+        if len(content) > MAX_COMFYUI_REQUIREMENTS_BYTES:
+            raise ValueError("requirements content exceeds the supported size")
+        expected = f"sha256:{hashlib.sha256(content).hexdigest()}"
+        if self.digest != expected:
+            raise ValueError("requirements content digest does not match content")
+        return self
 
 
 class RegistryNodeLockEntry(_ResolverEntry):
@@ -643,40 +614,14 @@ class ComfyUIRequestIdentity(_StrictLockModel):
         return normalize_comfyui_version(_require_token(value, "selector"))
 
 
-class RequirementsRoutingPolicy(_StrictLockModel):
-    """Complete code-owned requirements parsing and routing policy identity."""
-
-    revision: Literal[1]
-    routed_names: tuple[str, ...] = Field(min_length=1)
-    syntax: Literal["pep508"]
-    markers: Literal["packaging-target-environment"]
-    normalization: Literal["pep503-names-pep508-extras"]
-    merge: Literal["specifier-intersection-extra-union"]
-    sources: Literal["reject-options-and-direct-urls"]
-
-    @field_validator("routed_names", mode="before")
-    @classmethod
-    def _validate_routed_names(cls, value: object) -> tuple[str, ...]:
-        names = tuple(
-            _require_normalized_package(item)
-            for item in _require_tuple(value, "routed_names")
-        )
-        if list(names) != sorted(set(names)):
-            raise ValueError("routed_names must be sorted and unique")
-        return names
-
-
 class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
-    """Request for one exact commit's target-specific protected projection."""
+    """Request for one exact commit's root requirements source."""
 
     type: Literal["comfyui-requirements"]
     repository: str = Field(min_length=1)
     commit: str
     floor_commit: str
     path: Literal["requirements.txt"]
-    python_version: str = Field(min_length=1)
-    platform: Literal["linux/amd64"]
-    routing_policy: RequirementsRoutingPolicy
 
     @field_validator("repository")
     @classmethod
@@ -687,15 +632,6 @@ class ComfyUIRequirementsRequestIdentity(_StrictLockModel):
     @classmethod
     def _validate_commit(cls, value: str) -> str:
         return _require_commit(value)
-
-    @field_validator("python_version")
-    @classmethod
-    def _validate_python_version(cls, value: str) -> str:
-        return _require_exact_stable_version(value)
-
-    @property
-    def protected_names(self) -> tuple[str, ...]:
-        return self.routing_policy.routed_names
 
 
 class ComfyCliRequestIdentity(_StrictLockModel):

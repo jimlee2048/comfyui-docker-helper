@@ -1247,6 +1247,8 @@ def _project_application(
         requirements_request.keys[0],
         ComfyUIRequirementsLockEntry,
     )
+    if requirements_entry.digest != graph.comfyui_requirements.digest:
+        raise ValueError("ComfyUI requirements lock does not match request graph")
     python_packages = (
         _package_group(python_request, entries, used, package_channel=None)
         if python_request is not None
@@ -1311,17 +1313,17 @@ def _project_application(
             requirements=ComfyUIRequirementsPlan(
                 path=requirements_request.request.path,
                 floor_commit=requirements_request.request.floor_commit,
-                python_version=requirements_request.request.python_version,
-                platform=requirements_request.request.platform,
-                protected_names=requirements_request.request.protected_names,
+                python_version=pytorch_request.python_version,
+                platform=pytorch_request.platform,
+                protected_names=graph.protected_requirement_names,
                 digest=requirements_entry.digest,
                 protected=tuple(
                     ProtectedRequirementPlan(
-                        package=item.name,
+                        package=item.package,
                         extras=item.extras,
-                        selector=item.specifier,
+                        selector=item.selector,
                     )
-                    for item in requirements_entry.pytorch
+                    for item in graph.comfyui_requirements.protected
                 ),
             ),
             manager=manager,

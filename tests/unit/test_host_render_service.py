@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.config import canonical_request as canonical_request_module
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
     CanonicalLock,
@@ -33,7 +34,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     RegistryNodeLockEntry,
     RegistryRequestIdentity,
     ResolvedPythonPackage,
-    RoutedPyTorchRequirement,
     UvImageLockEntry,
     UvToolLockEntry,
     canonical_entry_key,
@@ -91,6 +91,7 @@ def _config(
     with_uv_tool: bool = False,
     install_cli: bool = True,
     install_manager: bool = False,
+    python_version: str = "3.13.14",
     image_flavor: str = "cudnn-devel",
     image_distro: str = "ubuntu24.04",
 ) -> str:
@@ -103,7 +104,7 @@ version = "13.0.3"
 image_flavor = "{image_flavor}"
 image_distro = "{image_distro}"
 [python]
-version = "3.13.14"
+version = "{python_version}"
 uv_version = "0.11.28"
 {uv_tools}
 [pytorch]
@@ -122,6 +123,7 @@ platforms = ["linux/amd64"]
 @dataclass
 class FakeAcquirer:
     calls: list[str] = field(default_factory=list)
+    requirements_content: bytes = b"torch\ntorchvision\ntorchaudio\n"
 
     def acquire(self, request, request_digest: str) -> AcquiredCanonicalEntries:
         self.calls.append(request.type)
@@ -162,15 +164,12 @@ class FakeAcquirer:
                 ),
             )
         elif isinstance(request, ComfyUIRequirementsRequestIdentity):
-            content = b"torch\ntorchvision\ntorchaudio\n"
+            content = self.requirements_content
             entries = (
                 ComfyUIRequirementsLockEntry(
                     request_digest=request_digest,
                     digest=(f"sha256:{hashlib.sha256(content).hexdigest()}"),
-                    pytorch=tuple(
-                        RoutedPyTorchRequirement(name=name, extras=(), specifier="")
-                        for name in ("torch", "torchaudio", "torchvision")
-                    ),
+                    content=content.decode("utf-8"),
                 ),
             )
         elif isinstance(request, ComfyCliRequestIdentity):
@@ -527,6 +526,105 @@ def test_default_writes_canonical_context_and_second_default_reuses_lock(
     assert _tree(output) == before
 
 
+def test_request_graph_parses_one_source_snapshot_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    original = canonical_request_module.parse_comfyui_requirements
+    calls = 0
+
+    def counted_parse(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        canonical_request_module, "parse_comfyui_requirements", counted_parse
+    )
+
+    _prepare(config, tmp_path / "context", FakeAcquirer())
+
+    assert calls == 1
+
+
+def test_target_change_reuses_source_and_refreshes_only_target_owned_groups(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    output = tmp_path / "context"
+    config.write_text(_config(python_version="3.13.14"))
+    _prepare(config, output, FakeAcquirer())
+    before = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+
+    config.write_text(_config(python_version="3.14.6"))
+    fake = FakeAcquirer()
+    prepared = _prepare(config, output, fake, overwrite=True)
+    after = prepared.lock_result.lock
+
+    assert fake.calls == ["managed-python", "pytorch-group", "comfy-cli"]
+    assert after.comfyui.requirements == before.comfyui.requirements
+    assert prepared.plan.application.comfyui.requirements.python_version == "3.14.6"
+
+
+def test_changed_local_projection_reuses_source_and_obeys_lock_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    output = tmp_path / "context"
+    config.write_text(_config())
+    _prepare(config, output, FakeAcquirer())
+    before = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    monkeypatch.setattr(
+        canonical_request_module.CudaBackendAdapter,
+        "protected_requirement_names",
+        property(lambda _self: ("torch", "torchvision")),
+    )
+
+    locked_fake = FakeAcquirer()
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            locked_fake,
+            options=PlanningOptions(locked=True),
+            overwrite=True,
+        )
+
+    assert locked_fake.calls == []
+    assert [item.code for item in raised.value.diagnostics] == ["lock.locked_mismatch"]
+
+    default_fake = FakeAcquirer()
+    prepared = _prepare(config, output, default_fake, overwrite=True)
+
+    assert default_fake.calls == ["pytorch-group"]
+    assert prepared.lock_result.lock.comfyui.requirements == before.comfyui.requirements
+    assert tuple(
+        item.package
+        for item in prepared.plan.application.comfyui.requirements.protected
+    ) == ("torch", "torchvision")
+
+
+def test_local_requirements_parser_failure_leaves_no_partial_context(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    output = tmp_path / "context"
+    config.write_text(_config())
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(requirements_content=b"--index-url https://example.test"),
+        )
+
+    assert raised.value.diagnostics[0].code == "comfyui.requirements_invalid"
+    assert not output.exists()
+
+
 @pytest.mark.parametrize(
     ("selector_overrides", "expected_tag"),
     [
@@ -618,13 +716,11 @@ def test_upgrade_refreshes_only_moving_requests_and_preserves_exact_results(
 
     assert fake.calls == [
         "oci",
-        "comfyui-requirements",
         "oci",
         "pytorch-group",
         "comfy-cli",
     ]
     assert prepared.lock_result.provider_calls == (
-        ("comfyui", "requirements"),
         ("images", "cuda"),
         ("images", "uv"),
         ("python", "package_groups", "pytorch"),
@@ -769,6 +865,26 @@ def test_malformed_lock_fails_generically(tmp_path: Path) -> None:
 
     assert raised.value.diagnostics[0].code == "lock.invalid"
     assert "remove" in raised.value.diagnostics[0].message
+
+
+def test_invalid_locked_requirements_content_uses_lock_invalid_diagnostic(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    path = output / "config.lock.toml"
+    lock = parse_canonical_lock_toml(path.read_bytes())
+    source_digest = lock.comfyui.requirements.digest
+    path.write_text(path.read_text().replace(source_digest, DIGEST_C))
+    fake = FakeAcquirer()
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, fake, overwrite=True)
+
+    assert raised.value.diagnostics[0].code == "lock.invalid"
+    assert fake.calls == []
 
 
 # Runtime hooks/files preserve locked projection, precedence, and source containment.

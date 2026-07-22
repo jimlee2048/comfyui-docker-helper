@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -23,9 +24,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     OfficialComfyUILockEntry,
     PyTorchLockEntry,
     PyTorchRequestIdentity,
-    RequirementsRoutingPolicy,
     ResolvedPythonPackage,
-    RoutedPyTorchRequirement,
     UvImageLockEntry,
     UvToolLockEntry,
 )
@@ -46,18 +45,6 @@ from comfyui_docker_helper.host.identity_providers import (
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
 COMMIT = "1" * 40
-
-
-def _routing_policy() -> RequirementsRoutingPolicy:
-    return RequirementsRoutingPolicy(
-        revision=1,
-        routed_names=("torch", "torchaudio", "torchvision"),
-        syntax="pep508",
-        markers="packaging-target-environment",
-        normalization="pep503-names-pep508-extras",
-        merge="specifier-intersection-extra-union",
-        sources="reject-options-and-direct-urls",
-    )
 
 
 def _requests(*, application_extras: bool = False):
@@ -95,9 +82,6 @@ def _requests(*, application_extras: bool = False):
             commit=COMMIT,
             floor_commit=COMFYUI_FLOOR_COMMIT,
             path="requirements.txt",
-            python_version="3.13.14",
-            platform="linux/amd64",
-            routing_policy=_routing_policy(),
         ),
         PyTorchRequestIdentity(
             type="pytorch-group",
@@ -185,12 +169,11 @@ class FakeAcquirer:
                 formal_release="0.11.0",
             )
         elif isinstance(request, ComfyUIRequirementsRequestIdentity):
+            content = "torch\n"
             entry = ComfyUIRequirementsLockEntry(
                 request_digest=request_digest,
-                digest=DIGEST_B,
-                pytorch=(
-                    RoutedPyTorchRequirement(name="torch", extras=(), specifier=""),
-                ),
+                digest=(f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"),
+                content=content,
             )
         elif isinstance(request, PyTorchRequestIdentity):
             entry = PyTorchLockEntry(

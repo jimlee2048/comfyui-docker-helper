@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -21,11 +22,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.comfyui_requirements import (
-    ComfyUIRequirementsError,
-    parse_comfyui_requirements,
-    target_marker_environment,
-)
+from comfyui_docker_helper.comfyui_requirements import target_marker_environment
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -51,7 +48,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     RegistryRequestIdentity,
     ResolvedPythonPackage,
     ResolverRequestIdentity,
-    RoutedPyTorchRequirement,
     RuntimeHookLockEntry,
     UvImageLockEntry,
     UvToolLockEntry,
@@ -484,30 +480,20 @@ class ProviderIdentityAcquirer:
                     f"v{COMFYUI_MINIMUM_VERSION} floor"
                 )
             content = self.requirements_reader(request)
-            try:
-                parsed = parse_comfyui_requirements(
-                    content,
-                    python_version=request.python_version,
-                    platform=request.platform,
-                    machine="x86_64",
-                    protected_names=tuple(request.protected_names),
+            if not isinstance(content, bytes):
+                raise CanonicalAcquisitionError(
+                    "exact ComfyUI requirements provider returned invalid content"
                 )
-            except ComfyUIRequirementsError as error:
-                raise CanonicalAcquisitionError(str(error)) from error
-            return (
-                ComfyUIRequirementsLockEntry(
+            try:
+                document = content.decode("utf-8")
+                entry = ComfyUIRequirementsLockEntry(
                     request_digest=request_digest,
-                    digest=parsed.digest,
-                    pytorch=[
-                        RoutedPyTorchRequirement(
-                            name=item.package,
-                            extras=item.extras,
-                            specifier=item.selector,
-                        )
-                        for item in parsed.protected
-                    ],
-                ),
-            )
+                    digest=f"sha256:{hashlib.sha256(content).hexdigest()}",
+                    content=document,
+                )
+            except (UnicodeDecodeError, ValueError) as error:
+                raise CanonicalAcquisitionError(str(error)) from error
+            return (entry,)
         if isinstance(request, ComfyCliRequestIdentity):
             resolution = self.python_group.resolve(request)
             if len(resolution.members) != 1:

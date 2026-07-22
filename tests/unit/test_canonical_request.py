@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequirementsRequestIdentity,
@@ -12,7 +15,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciRequestIdentity,
     PyTorchRequestIdentity,
     RegistryRequestIdentity,
-    RequirementsRoutingPolicy,
     compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_request import (
@@ -25,18 +27,6 @@ from comfyui_docker_helper.config.canonical_request import (
 
 DIGEST = f"sha256:{'a' * 64}"
 COMMIT = "1" * 40
-
-
-def _routing_policy(*, revision: int = 1) -> RequirementsRoutingPolicy:
-    return RequirementsRoutingPolicy(
-        revision=revision,
-        routed_names=("torch", "torchaudio", "torchvision"),
-        syntax="pep508",
-        markers="packaging-target-environment",
-        normalization="pep503-names-pep508-extras",
-        merge="specifier-intersection-extra-union",
-        sources="reject-options-and-direct-urls",
-    )
 
 
 # Every request domain maps to its semantic atomic reconciliation key.
@@ -142,35 +132,43 @@ def test_non_python_domains_use_semantic_grouped_keys() -> None:
     )
 
 
-# Complete routing and release inputs bind request identity without changing
-# group keys or selector-stability classification.
-def test_complete_routing_policy_is_bound_only_through_request_digest() -> None:
+# Exact source identity changes only with an upstream source coordinate.
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "https://github.com/Comfy-Org/ComfyUI-fork.git"),
+        ("commit", "2" * 40),
+        ("floor_commit", "3" * 40),
+    ],
+)
+def test_requirements_source_coordinates_bind_request_digest(
+    field: str,
+    value: str,
+) -> None:
     values = dict(
         type="comfyui-requirements",
         repository="https://github.com/Comfy-Org/ComfyUI.git",
         commit=COMMIT,
         floor_commit=COMMIT,
         path="requirements.txt",
-        python_version="3.13.14",
-        platform="linux/amd64",
     )
-    current = ComfyUIRequirementsRequestIdentity(
-        **values, routing_policy=_routing_policy()
-    )
-    changed = ComfyUIRequirementsRequestIdentity(
-        **values,
-        routing_policy=RequirementsRoutingPolicy(
-            **{
-                **_routing_policy().model_dump(),
-                "sources": "reject-options-and-direct-urls",
-                "routed_names": ("torch", "torchvision"),
-            }
-        ),
-    )
+    current = ComfyUIRequirementsRequestIdentity(**values)
+    changed = ComfyUIRequirementsRequestIdentity(**{**values, field: value})
 
-    assert current.protected_names == ("torch", "torchaudio", "torchvision")
     assert compute_request_digest(current) != compute_request_digest(changed)
     assert request_keys(current) == (("comfyui", "requirements"),)
+    assert request_stability(current) is SelectorStability.EXACT
+
+
+def test_requirements_source_path_is_the_literal_root_requirements_file() -> None:
+    with pytest.raises(ValidationError):
+        ComfyUIRequirementsRequestIdentity(
+            type="comfyui-requirements",
+            repository="https://github.com/Comfy-Org/ComfyUI.git",
+            commit=COMMIT,
+            floor_commit=COMMIT,
+            path="nested/requirements.txt",
+        )
 
 
 def test_release_inputs_bind_wheel_without_affecting_resolution_keys() -> None:

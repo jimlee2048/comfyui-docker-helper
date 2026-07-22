@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path, PurePosixPath
 
+import pytest
+
 from comfyui_docker_helper.config.canonical_lock import (
+    MAX_COMFYUI_REQUIREMENTS_BYTES,
     BuildHookLockEntry,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
@@ -14,9 +18,14 @@ from comfyui_docker_helper.config.canonical_lock import (
     OciRequestIdentity,
     PyTorchLockEntry,
     PyTorchRequestIdentity,
-    RequirementsRoutingPolicy,
     UvImageLockEntry,
     compute_request_digest,
+)
+from comfyui_docker_helper.config.canonical_request import DesiredResolution
+from comfyui_docker_helper.config.canonical_resolver import (
+    CanonicalAcquisitionError,
+    CanonicalResolutionError,
+    reconcile_canonical_lock,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.canonical_acquisition import (
@@ -101,18 +110,6 @@ def _acquirer(**changes):
     return ProviderIdentityAcquirer(**values)
 
 
-def _routing_policy() -> RequirementsRoutingPolicy:
-    return RequirementsRoutingPolicy(
-        revision=1,
-        routed_names=("torch", "torchaudio", "torchvision"),
-        syntax="pep508",
-        markers="packaging-target-environment",
-        normalization="pep503-names-pep508-extras",
-        merge="specifier-intersection-extra-union",
-        sources="reject-options-and-direct-urls",
-    )
-
-
 # Fixed image and managed-Python providers return only their owned external
 # artifact identities.
 def test_uv_provider_returns_one_fixed_image_domain_result() -> None:
@@ -152,30 +149,83 @@ def test_managed_python_result_has_only_provider_owned_artifact_identity() -> No
     assert entry.artifact_key == "cpython-3.13.14-linux-x86_64-gnu"
 
 
-# Requirements and PyTorch acquisition preserve routed metadata and one atomic
-# package-group result.
-def test_requirements_provider_returns_nested_digest_and_pytorch_projection() -> None:
+# Requirements acquisition preserves the exact upstream source bytes; local
+# planning owns target projection separately.
+def test_requirements_provider_returns_exact_source_snapshot() -> None:
     request = ComfyUIRequirementsRequestIdentity(
         type="comfyui-requirements",
         repository="https://github.com/Comfy-Org/ComfyUI.git",
         commit=COMMIT,
         floor_commit=COMFYUI_FLOOR_COMMIT,
         path="requirements.txt",
-        python_version="3.13.14",
-        platform="linux/amd64",
-        routing_policy=_routing_policy(),
     )
-    acquirer = _acquirer(
-        requirements_reader=lambda _request: b"torch\ntorchaudio>=2\nnumpy>=2\n"
-    )
+    content = b"torch\r\ntorchaudio>=2  \r\nnumpy>=2"
+    acquirer = _acquirer(requirements_reader=lambda _request: content)
 
     acquired = acquirer.acquire(request, compute_request_digest(request))
 
     entry = acquired.entries[0]
     assert isinstance(entry, ComfyUIRequirementsLockEntry)
-    assert entry.digest.startswith("sha256:")
-    assert tuple(item.name for item in entry.pytorch) == ("torch", "torchaudio")
-    assert entry.pytorch[1].specifier == ">=2"
+    assert entry.digest == f"sha256:{hashlib.sha256(content).hexdigest()}"
+    assert entry.content.encode("utf-8") == content
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"\xff", b"x" * (MAX_COMFYUI_REQUIREMENTS_BYTES + 1)],
+)
+def test_requirements_provider_rejects_invalid_source_as_acquisition_failure(
+    content: bytes,
+) -> None:
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository="https://github.com/Comfy-Org/ComfyUI.git",
+        commit=COMMIT,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+    )
+
+    with pytest.raises(CanonicalAcquisitionError):
+        _acquirer(requirements_reader=lambda _request: content).acquire(
+            request, compute_request_digest(request)
+        )
+
+
+def test_invalid_provider_source_surfaces_as_lock_resolution_failure() -> None:
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository="https://github.com/Comfy-Org/ComfyUI.git",
+        commit=COMMIT,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+    )
+
+    with pytest.raises(CanonicalResolutionError) as raised:
+        reconcile_canonical_lock(
+            (DesiredResolution(request),),
+            existing=None,
+            acquirer=_acquirer(requirements_reader=lambda _request: b"\xff"),
+        )
+
+    assert raised.value.diagnostics[0].code == "lock.resolve_failed"
+
+
+def test_requirements_provider_rejects_non_bytes_without_leaking_type_errors() -> None:
+    request = ComfyUIRequirementsRequestIdentity(
+        type="comfyui-requirements",
+        repository="https://github.com/Comfy-Org/ComfyUI.git",
+        commit=COMMIT,
+        floor_commit=COMFYUI_FLOOR_COMMIT,
+        path="requirements.txt",
+    )
+
+    with pytest.raises(
+        CanonicalAcquisitionError,
+        match="provider returned invalid content",
+    ):
+        _acquirer(requirements_reader=lambda _request: "torch\n").acquire(
+            request, compute_request_digest(request)
+        )
 
 
 def test_pytorch_provider_returns_one_complete_atomic_group() -> None:

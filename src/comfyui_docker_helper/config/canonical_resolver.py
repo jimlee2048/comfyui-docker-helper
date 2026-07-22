@@ -355,9 +355,7 @@ def entries_satisfy_request(
         )
     if isinstance(request, ComfyUIRequirementsRequestIdentity):
         entry = entries[0]
-        return isinstance(entry, ComfyUIRequirementsLockEntry) and (
-            all(item.name in request.protected_names for item in entry.pytorch)
-        )
+        return isinstance(entry, ComfyUIRequirementsLockEntry)
     if isinstance(request, ComfyCliRequestIdentity):
         entry = entries[0]
         return isinstance(entry, UvToolLockEntry) and (

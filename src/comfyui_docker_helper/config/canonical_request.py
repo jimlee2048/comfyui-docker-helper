@@ -12,7 +12,9 @@ from typing import Literal
 from comfyui_docker_helper.comfyui_requirements import (
     COMFYUI_REQUIREMENTS_PATH,
     ComfyUIRequirementsError,
+    ParsedComfyUIRequirements,
     merge_pytorch_requirements,
+    parse_comfyui_requirements,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
@@ -28,7 +30,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     ProtectedRequirementProjection,
     PyTorchRequestIdentity,
     RegistryRequestIdentity,
-    RequirementsRoutingPolicy,
     ResolverRequestIdentity,
     compute_request_digest,
 )
@@ -178,6 +179,8 @@ class CanonicalRequestGraph:
     target_platform: TargetPlatform
     backend: BackendPlan
     release: PlanningReleaseInputs
+    protected_requirement_names: tuple[str, ...]
+    comfyui_requirements: ParsedComfyUIRequirements
     desired: tuple[DesiredResolution, ...]
     build: BuildRequest
     application: ApplicationRequest
@@ -224,14 +227,30 @@ def build_canonical_request_graph(
         image_distro=config.compute_platform.cuda.image_distro,
     )
     repository, tag = backend.base_image.split(":", 1)
-    requirements_request = comfyui_requirements_request(config, comfyui_entry)
+    requirements_request = comfyui_requirements_request(comfyui_entry)
     if requirements_entry.request_digest != compute_request_digest(
         requirements_request
-    ) or any(
-        item.name not in requirements_request.protected_names
-        for item in requirements_entry.pytorch
     ):
         raise ValueError("ComfyUI requirements identity does not match final config")
+    protected_requirement_names = CudaBackendAdapter().protected_requirement_names
+    try:
+        requirements_projection = parse_comfyui_requirements(
+            requirements_entry.content.encode("utf-8"),
+            python_version=config.python.version,
+            platform=platform.value,
+            machine="x86_64",
+            protected_names=protected_requirement_names,
+        )
+    except ComfyUIRequirementsError as error:
+        raise CanonicalRequestError(
+            (
+                Diagnostic(
+                    path=("comfyui", "requirements"),
+                    code="comfyui.requirements_invalid",
+                    message=str(error),
+                ),
+            )
+        ) from error
 
     requests: list[ResolverRequestIdentity] = [
         OciRequestIdentity(
@@ -293,11 +312,11 @@ def build_canonical_request_graph(
         )
     upstream = tuple(
         DirectPythonRequestMember(
-            package=item.name,
+            package=item.package,
             extras=item.extras,
-            selector=item.specifier,
+            selector=item.selector,
         )
-        for item in requirements_entry.pytorch
+        for item in requirements_projection.protected
     )
     try:
         pytorch_members = merge_pytorch_requirements(
@@ -426,6 +445,8 @@ def build_canonical_request_graph(
         target_platform=platform,
         backend=backend,
         release=release,
+        protected_requirement_names=protected_requirement_names,
+        comfyui_requirements=requirements_projection,
         desired=desired,
         build=BuildRequest(
             tuple(config.build.tags), config.build.output, tuple(config.build.platforms)
@@ -464,27 +485,14 @@ def build_canonical_request_graph(
 
 
 def comfyui_requirements_request(
-    config: FinalConfig,
     comfyui: OfficialComfyUILockEntry,
 ) -> ComfyUIRequirementsRequestIdentity:
-    names = CudaBackendAdapter().protected_requirement_names
     return ComfyUIRequirementsRequestIdentity(
         type="comfyui-requirements",
         repository=comfyui.repository,
         commit=comfyui.commit,
         floor_commit=COMFYUI_FLOOR_COMMIT,
         path=COMFYUI_REQUIREMENTS_PATH,
-        python_version=config.python.version,
-        platform=config.build.platforms[0],
-        routing_policy=RequirementsRoutingPolicy(
-            revision=1,
-            routed_names=names,
-            syntax="pep508",
-            markers="packaging-target-environment",
-            normalization="pep503-names-pep508-extras",
-            merge="specifier-intersection-extra-union",
-            sources="reject-options-and-direct-urls",
-        ),
     )
 
 
@@ -522,7 +530,7 @@ def request_stability(request: ResolverRequestIdentity) -> SelectorStability:
             else SelectorStability.MOVING
         )
     if isinstance(request, ComfyUIRequirementsRequestIdentity):
-        return SelectorStability.MOVING
+        return SelectorStability.EXACT
     if isinstance(request, ComfyCliRequestIdentity):
         return SelectorStability.MOVING
     if isinstance(request, RegistryRequestIdentity):

@@ -146,7 +146,7 @@ def prepare_render_context(
             result.config, existing, selected.policy, acquirer
         )
         requirements = stable_comfyui_requirements_entry(
-            result.config, comfyui, existing, selected.policy, acquirer
+            comfyui, existing, selected.policy, acquirer
         )
         graph = build_canonical_request_graph(
             result.config,

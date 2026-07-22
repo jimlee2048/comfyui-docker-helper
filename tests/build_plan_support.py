@@ -26,7 +26,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     PyTorchRequestIdentity,
     RegistryNodeLockEntry,
     ResolvedPythonPackage,
-    RoutedPyTorchRequirement,
     UvImageLockEntry,
     UvToolLockEntry,
     canonical_entry_key,
@@ -214,7 +213,8 @@ def accepted_resolution(
         commit=COMMIT_A,
         formal_release="0.11.0",
     )
-    requirements_request = comfyui_requirements_request(config, comfyui_entry)
+    requirements_request = comfyui_requirements_request(comfyui_entry)
+    requirements_content = b"torch\ntorchaudio\ntorchvision\n"
     entries = [
         CudaImageLockEntry(
             request_digest=DIGEST_A,
@@ -274,15 +274,8 @@ def accepted_resolution(
         ),
         ComfyUIRequirementsLockEntry(
             request_digest=compute_request_digest(requirements_request),
-            digest=DIGEST_C,
-            pytorch=tuple(
-                RoutedPyTorchRequirement(
-                    name=item.package,
-                    extras=item.extras,
-                    specifier=item.selector,
-                )
-                for item in upstream
-            ),
+            digest=(f"sha256:{hashlib.sha256(requirements_content).hexdigest()}"),
+            content=requirements_content.decode("utf-8"),
         ),
     ]
     if install_cli:

@@ -204,19 +204,21 @@ def stable_comfyui_entry(
 
 
 def stable_comfyui_requirements_entry(
-    config: FinalConfig,
     comfyui: OfficialComfyUILockEntry,
     existing: CanonicalLock | None,
     policy: LockPolicy,
     acquirer: CachingCanonicalAcquirer,
 ) -> ComfyUIRequirementsLockEntry:
-    """Stabilize the exact protected projection needed by the PyTorch request."""
-    request = comfyui_requirements_request(config, comfyui)
+    """Stabilize the exact source snapshot needed by current local planning."""
+    request = comfyui_requirements_request(comfyui)
     digest = compute_request_digest(request)
     key = ("comfyui", "requirements")
     current = _existing_entry(existing, key)
     if (
-        policy is not LockPolicy.UPGRADE
+        (
+            policy is not LockPolicy.UPGRADE
+            or request_stability(request) is SelectorStability.EXACT
+        )
         and isinstance(current, ComfyUIRequirementsLockEntry)
         and entries_satisfy_request(request, (current,), digest)
     ):

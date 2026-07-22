@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -18,6 +19,7 @@ from tests.build_plan_support import (
     request_graph,
 )
 
+from comfyui_docker_helper.config import canonical_request as canonical_request_module
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
@@ -115,6 +117,31 @@ def test_constructor_carries_python_314_exact_identity_through_build_plan() -> N
         "/opt/venv/lib/python3.14/site-packages/comfyui-docker-helper-comfyui.pth"
     )
     assert plan.toolchain.tool_store.comfy_cli is not None
+
+
+def test_request_graph_freezes_one_protected_name_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = final_config()
+    resolution = accepted_resolution()
+    expected = canonical_request_module.CudaBackendAdapter().protected_requirement_names
+    reads = 0
+
+    def read_protected_names(_self):
+        nonlocal reads
+        reads += 1
+        return expected
+
+    monkeypatch.setattr(
+        canonical_request_module.CudaBackendAdapter,
+        "protected_requirement_names",
+        property(read_protected_names),
+    )
+
+    graph = request_graph(config, resolution)
+
+    assert reads == 1
+    assert graph.protected_requirement_names == expected
 
 
 # Serialized node and hook authorities reject unsafe execution combinations.
@@ -969,6 +996,30 @@ def test_build_plan_requires_exact_runtime_planning_provenance() -> None:
                 failure_policy_explicit=False,
                 file_downloader_explicit=(False,),
                 file_download_mode_explicit=(),
+            ),
+        )
+
+
+def test_build_plan_rejects_requirements_source_that_differs_from_graph() -> None:
+    config = final_config()
+    resolution = accepted_resolution()
+    graph = request_graph(config, resolution)
+    data = resolution.lock.model_dump(mode="python")
+    content = "torch\ntorchvision\n"
+    data["comfyui"]["requirements"].update(
+        content=content,
+        digest=f"sha256:{hashlib.sha256(content.encode()).hexdigest()}",
+    )
+    mismatched_lock = CanonicalLock.model_validate(data)
+
+    with pytest.raises(ValueError, match="lock does not match request graph"):
+        _construct_build_plan(
+            graph,
+            mismatched_lock,
+            runtime_provenance=RuntimePlanningProvenance(
+                failure_policy_explicit=False,
+                file_downloader_explicit=(False,),
+                file_download_mode_explicit=(False,),
             ),
         )
 

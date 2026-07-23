@@ -1,9 +1,20 @@
-# Configuration examples
+# Configuration guide
 
-`minimal.toml` is the smallest canonical CUDA 13 / PyTorch 2.12 configuration.
-`full.toml` documents every field in the current public configuration schema.
-Both select ComfyUI v0.11.0, the minimum supported release; any resolved
-formal, moving, nightly, or full-commit checkout must descend from that floor.
+cdh's strict Pydantic models are the machine authority for the public
+configuration schema. This guide and the annotated examples explain how to use
+that schema:
+
+- [`minimal.toml`](minimal.toml) is the smallest runnable supported
+  configuration example.
+- [`full.toml`](full.toml) is the complete annotated field reference.
+
+Values selected by these examples are explicit supported choices, not implied
+defaults. `full.toml` labels fields as required or identifies their actual
+defaults. Both examples select ComfyUI v0.11.0, the minimum supported release;
+any resolved formal, moving, nightly, or full-commit checkout must descend from
+that floor.
+
+## Quick start
 
 Validate locally without providers or writes:
 
@@ -70,9 +81,17 @@ Buildx.
 `X.Y.Z`. cdh derives the official Debian-slim uv image tag, then locks its exact
 digest and observed uv version; it does not execute a host uv. Configure an
 exact release when the request itself must stay fixed before lock resolution.
-Ordinary package resolution uses the explicitly configured
-`[python].index_url` rather than ambient host pip/uv configuration. See the root
-README for Docker connection, proxy, and private-CA boundaries.
+Ordinary target-Python package resolution uses the explicitly configured
+`[python].index_url` rather than ambient host pip/uv configuration. That setting
+does not configure canonical-wheel backend provisioning: PyPA isolated backend
+acquisition follows the host Python packaging environment. See the
+[root README](../README.md) for Docker connection, proxy, and private-CA
+boundaries.
+
+Direct declarations in `[python].extra_packages`, `[python].uv_tools`, and
+`[pytorch].extra_packages` accept a bare package name, an exact stable version,
+or a bounded comparison selector. URL, VCS, local, editable, raw-option, and
+environment-marker forms are rejected.
 
 The public PyTorch version is a selector. Its CUDA-derived channel, index, and
 target enter the resolver request identity, while the canonical lock and
@@ -95,6 +114,10 @@ executables linked under `/opt/uv/bin`. The application interpreter and its
 executable collisions are fatal. `[comfyui].install_cli` independently controls
 the isolated user-facing comfy-cli tool; enabled mode installs its exact locked
 release before generic tools and disabled mode omits it completely.
+The `comfy-cli` distribution remains reserved to `[comfyui].install_cli` in
+both modes and must not be declared in Python extras, PyTorch extras, or uv
+tools.
+
 `[comfyui].install_manager` separately controls the exact checkout-declared
 Manager package and `/opt/venv/bin/cm-cli` application capability. Enabling the
 capability does not append `--enable-manager`; runtime arguments remain explicit
@@ -102,6 +125,9 @@ under `comfyui.extra_args`. Registry and direct-Git nodes run once in their
 declared mixed order, remain independent of optional comfy-cli, and produce
 verified ordered evidence in `/opt/cdh/build/manifest.json` after the final
 filesystem is observed.
+Registry custom-node IDs must be valid Python project names and remain unique
+after normalized project-name comparison.
+
 Direct-Git URLs pass through unchanged as acquisition locators; locked exact
 commits, not user refs, URL normalization, or endpoint claims, identify the
 content installed in the image. Manager/Registry installers and direct-Git

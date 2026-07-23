@@ -24,13 +24,10 @@ do not reload host configuration or its lock to make build decisions.
 - for GPU execution on x86_64, NVIDIA Container Toolkit support, driver
   `>=580.65.06`, and a Turing-or-newer NVIDIA GPU.
 
-CPython 3.13.14 is the default. CPython 3.12.13 and standard-GIL 3.14.6 are
-explicitly selectable, tested supported profiles; cdh never switches Python
-versions automatically. CUDA 13.0.3, PyTorch 2.12.1, torchvision 0.27.1,
-Ubuntu 24.04, and `linux/amd64` complete the default configuration.
-The default formal-baseline inference group resolves to the complete exact
-distributions `torch==2.12.1+cu130`, `torchvision==0.27.1+cu130`, and
-`torchaudio==2.11.0+cu130` from the derived cu130 index.
+CPython 3.13.14 is the managed-Python default. CPython 3.12.13 and standard-GIL
+3.14.6 are additional tested profiles; cdh never switches Python versions
+automatically. CUDA, PyTorch, and ComfyUI versions remain explicit required
+configuration selections.
 
 ## Install
 
@@ -43,71 +40,18 @@ Plain `pip install comfyui-docker-helper` is also supported. The cdh package
 does not install uv or require a host uv executable; uv-backed canonical
 resolution runs through the configuration-selected Docker image.
 
-## Minimal configuration
+## Configuration and quick start
 
-```toml
-[compute_platform]
-type = "cuda"
-
-[compute_platform.cuda]
-version = "13.0.3"
-image_flavor = "cudnn-devel"
-image_distro = "ubuntu24.04"
-
-[python]
-version = "3.13.14"
-uv_version = "latest"
-uv_tools = []
-
-[pytorch]
-version = "2.12.1"
-extra_packages = ["torchvision==0.27.1"]
-
-[comfyui]
-version = "0.11.0"
-install_cli = true
-install_manager = false
-
-[build]
-platforms = ["linux/amd64"]
-tags = ["my-comfy:dev"]
-output = "load"
-```
+The strict Pydantic configuration models are the machine schema authority. Use
+the [`examples` configuration guide](examples/README.md) as the user-facing
+entry point: [`minimal.toml`](examples/minimal.toml) is the smallest runnable
+supported example, while [`full.toml`](examples/full.toml) is the complete
+annotated field reference. Values selected by either example are explicit
+choices, not implied defaults.
 
 ComfyUI v0.11.0 is the minimum supported release. Every resolved formal,
 moving, nightly, or full-commit checkout must descend from the immutable
 v0.11.0 floor commit before dependency installation begins.
-
-`install_manager = true` installs the exact checkout's declared Manager package
-into `/opt/venv` and verifies its absolute `/opt/venv/bin/cm-cli` capability.
-It does not add `--enable-manager` to ComfyUI startup; add that runtime argument
-explicitly through `comfyui.extra_args` when the selected checkout supports it.
-This application capability is independent of the optional isolated comfy-cli
-user tool.
-
-`[python].uv_version` is a release selector, not a raw image tag. An exact
-stable `X.Y.Z` selects cdh's official `X.Y.Z-debian-slim` uv image, while
-the default `latest` selects the rolling `debian-slim` image. Other values are
-rejected. The canonical lock records the selected image's exact digest and
-observed uv version, and the same exact uv authority resolves Python inputs and
-supplies uv/uvx to the image. Configure an exact release when the request itself
-must remain fixed before lock resolution.
-
-Custom nodes run once in their declared Registry/direct-Git order. Registry
-nodes use the verified absolute `cm-cli`, one exact request per process, while
-direct-Git nodes pass the declared URL through unchanged as an acquisition
-locator and use the locked exact commit as content authority; cdh does not
-canonicalize the URL or claim it identifies the actual network endpoint. cdh
-verifies the ordered node set around hooks. After every build mutation, final
-manifest emission re-proves each direct-Git checkout and the exact Registry
-identity set from the final filesystem, then records declaration-ordered typed
-evidence in `/opt/cdh/build/manifest.json`. Registry installs do
-not invoke the optional `comfy`, `comfy-cli`, or `comfycli` commands.
-Even with no custom nodes, final observation validates the custom-node root and
-records exact empty evidence. The same manifest records the factual final
-application and optional isolated comfy-cli distribution inventories.
-
-See [`examples/full.toml`](examples/full.toml) for the complete current schema.
 
 ## Layered host configuration
 
@@ -221,22 +165,27 @@ Set `install_cli=false` to omit the request, lock identity, tool environment,
 links, and verification.
 The release `uv_build` backend and the configuration-selected uv/uvx image are
 independently locked and verified identities even when their current versions
-are equal. cdh itself has no host uv runtime dependency.
+are equal. cdh itself has no host uv runtime dependency. Canonical-wheel
+construction uses a PyPA isolated build environment; provisioning its declared
+backend follows the host Python packaging environment.
+`[python].index_url` does not configure that host-side step.
 
-All other cdh-controlled Python resolution and installation uses only
-`[python].index_url`, including application extras, ordinary ComfyUI and
-Manager requirements, cdh dependencies, optional comfy-cli, generic uv
-tools, and cdh-invoked custom-node requirements. Manager/Registry installers
-and direct-Git `install.py` remain trusted opaque code; cdh does not claim
+After that host-side wheel boundary, cdh-controlled Python resolution and
+installation other than the explicitly routed PyTorch group use only
+`[python].index_url`. This includes application extras, ordinary ComfyUI and
+Manager requirements, cdh dependencies, optional comfy-cli, generic uv tools,
+and cdh-invoked custom-node requirements. Manager/Registry installers and
+direct-Git `install.py` remain trusted opaque code; cdh does not claim
 network-level source isolation for their arbitrary effects.
 
 Resolver containers receive the configured Python and PyTorch indexes
-explicitly and disable ambient uv configuration. cdh does not import host
-pip/uv configuration or inject enterprise private certificate authorities.
-Image pulls and resolver traffic use ordinary Docker daemon, container-network,
-registry, and proxy configuration. If an index requires a private CA that the
-selected Docker environment does not already trust, resolution fails; cdh does
-not bypass certificate verification or provide an implicit fallback.
+explicitly and disable ambient uv configuration. They do not import host
+pip/uv configuration, and cdh does not inject enterprise private certificate
+authorities into them. Image pulls and resolver traffic use ordinary Docker
+daemon, container-network, registry, and proxy configuration. If an index
+requires a private CA that the selected Docker environment does not already
+trust, resolution fails; cdh does not bypass certificate verification or
+provide an implicit fallback.
 
 The verified host baseline is Linux x86_64 using the local/default Docker
 connection. Docker Desktop, TLS, SSH, remote daemons, and non-default builders
@@ -360,6 +309,9 @@ environment variables, rendered files, image history, and logs can expose
 their contents when their contract requires it. cdh keeps its own ephemeral
 credentials internal and avoids printing the explicit SSH password, but it
 does not infer that arbitrary configured values are secrets.
+Names beginning with `UV_` or `PIP_` are reserved from `[system].env` so image
+configuration cannot replace cdh's package and tool authority. Runtime
+`docker run -e` overrides remain outside baked-image replay guarantees.
 
 When custom-node configuration references `pre_install_hooks` or
 `post_install_hooks`, pass `--build-hooks-dir <dir>` to validate, render, and
@@ -476,44 +428,6 @@ The manifest is observation, not resolution or replay input. It does not make
 APT results, checksum-free downloads, application transitives, or trusted
 installer and hook effects immutable, and it is not a claim of an offline or
 byte-identical build.
-
-## Configuration boundaries
-
-- Duplicate, uniqueness, and cross-field checks apply after all host layers
-  have merged. This includes platforms, Python and PyTorch package
-  declarations, uv tools, Registry IDs, direct-Git URLs and targets, and file
-  targets.
-- `[build].platforms` is ordered, non-empty, duplicate-free, and currently
-  accepts exactly `["linux/amd64"]`.
-- CUDA version is the sole inference-backend version authority and solely
-  derives the PyTorch channel. `image_flavor` accepts `base`, `runtime`,
-  `devel`, `cudnn-runtime`, or `cudnn-devel` (default), while `image_distro`
-  accepts `ubuntu22.04` or `ubuntu24.04` (default). These selectors construct
-  the exact NVIDIA image tag without changing the PyTorch channel. Validation
-  is structural and offline; a missing upstream tag or `linux/amd64`
-  descriptor fails during provider resolution without fallback.
-  Resolving a `base` or `runtime` image does not promise development headers or
-  cuDNN capabilities; dependent install, build, or runtime gates may still fail
-  without fallback.
-- Direct Python declarations accept bare names, exact stable versions, or
-  supported bounded selectors. URL/VCS/local/editable/raw-option forms and
-  environment markers are rejected.
-- `[python].uv_tools` installs standalone CLI distributions into isolated tool
-  environments. Duplicate normalized owners and executable collisions,
-  including `cdh` and the optional comfy-cli commands, fail the image build.
-  `comfy-cli` itself is reserved to `[comfyui].install_cli` across Python
-  extras, PyTorch extras, and uv tools in both modes.
-- `[system].env` defines non-managed runtime image values. Names beginning with
-  `UV_` or `PIP_` are reserved so config cannot alter build-time package
-  sources, constraints, configuration, Python selection, or tool ownership.
-  Runtime `docker run -e` overrides are outside baked-image replay guarantees.
-- Registry custom-node IDs must be valid Python project names. They require
-  Manager, preserve their raw locked ID/version,
-  and reject duplicate normalized IDs. Direct-Git nodes are independently
-  locked to full commits and preserve their declared acquisition URLs.
-- Ordinary configured values may appear in rendered artifacts or logs when the
-  contract requires them. Keep confidential values out of ordinary config
-  fields unless that exposure is acceptable.
 
 ## Development
 

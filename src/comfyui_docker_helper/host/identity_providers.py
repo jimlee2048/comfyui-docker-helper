@@ -84,10 +84,19 @@ _FAILURE_MESSAGES: Mapping[ProviderFailureKind, str] = {
 class IdentityProviderError(Exception):
     """A short stable provider error that never contains request credentials."""
 
-    def __init__(self, source: str, kind: ProviderFailureKind) -> None:
+    def __init__(
+        self,
+        source: str,
+        kind: ProviderFailureKind,
+        *,
+        controlled_detail: str | None = None,
+    ) -> None:
         self.source = source
         self.kind = kind
-        super().__init__(f"{source}: {_FAILURE_MESSAGES[kind]}")
+        message = f"{source}: {_FAILURE_MESSAGES[kind]}"
+        if controlled_detail is not None:
+            message = f"{message}: {controlled_detail}"
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,7 +383,11 @@ class DockerManagedPythonIdentityProvider:
                 ManagedPythonCatalogOperation(request.version),
             )
         except UvDockerExecutorError as error:
-            raise IdentityProviderError(source, ProviderFailureKind.NETWORK) from error
+            raise IdentityProviderError(
+                source,
+                ProviderFailureKind.NETWORK,
+                controlled_detail=str(error),
+            ) from error
         try:
             rows = json.loads(result.stdout)
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as error:

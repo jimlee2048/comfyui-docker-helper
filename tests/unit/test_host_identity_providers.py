@@ -32,7 +32,10 @@ from comfyui_docker_helper.host.identity_providers import (
     RegistryNodeIdentityRequest,
     SelectorStability,
 )
-from comfyui_docker_helper.host.uv_docker_executor import UvResolverResult
+from comfyui_docker_helper.host.uv_docker_executor import (
+    UvDockerExecutorError,
+    UvResolverResult,
+)
 
 INDEX_DIGEST_A = f"sha256:{'a' * 64}"
 INDEX_DIGEST_B = f"sha256:{'b' * 64}"
@@ -455,6 +458,16 @@ class _UvExecutor:
         return UvResolverResult(self.stdout, b"")
 
 
+class _FailingUvExecutor:
+    def execute(self, descriptor, operation):
+        del descriptor, operation
+        raise UvDockerExecutorError(
+            "uv resolver cancelled; cleanup_incomplete: "
+            "name=cdh-uv-resolver-test, "
+            "label=comfyui-docker-helper.uv-operation=test"
+        )
+
+
 @pytest.mark.parametrize("version", ["3.12.13", "3.13.14", "3.14.6"])
 def test_managed_python_selects_exact_uv_catalog_identity(version: str) -> None:
     rows = [
@@ -499,6 +512,21 @@ def test_managed_python_selects_exact_uv_catalog_identity(version: str) -> None:
     assert descriptor.digest == INDEX_DIGEST_A
     assert descriptor.platform == "linux/amd64"
     assert operation.python_version == version
+
+
+def test_managed_python_preserves_controlled_executor_cleanup_identity() -> None:
+    provider = DockerManagedPythonIdentityProvider(_FailingUvExecutor())
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(ManagedPythonIdentityRequest("3.13.14", INDEX_DIGEST_A))
+
+    assert raised.value.kind is ProviderFailureKind.NETWORK
+    assert str(raised.value) == (
+        "managed Python catalog: identity provider request failed: "
+        "uv resolver cancelled; cleanup_incomplete: "
+        "name=cdh-uv-resolver-test, "
+        "label=comfyui-docker-helper.uv-operation=test"
+    )
 
 
 def test_managed_python_rejects_missing_and_duplicate_catalog_rows() -> None:

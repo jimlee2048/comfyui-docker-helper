@@ -39,7 +39,8 @@ Useful commands include:
 ```bash
 uv run pytest
 uv run pytest tests/unit tests/integration
-uv run pytest tests/smoke/test_python_group_resolver_live.py --run-network
+uv run pytest tests/smoke/test_python_group_resolver_live.py \
+  --run-network --run-docker
 CDH_APPLICATION_ZERO_IMAGE=example/image:tag \
 CDH_APPLICATION_ZERO_CONTEXT=/path/to/rendered-context \
   uv run pytest tests/smoke/test_application_acceptance_live.py \

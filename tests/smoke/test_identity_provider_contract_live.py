@@ -38,6 +38,22 @@ CUSTOM_SCRIPTS_REGISTRY_ID = "comfyui-custom-scripts"
 CUSTOM_SCRIPTS_URL = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
 
 
+@pytest.fixture(scope="module")
+def uv_descriptor_digest() -> str:
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        return (
+            HttpOciIdentityProvider(client)
+            .resolve(
+                OciIdentityRequest(
+                    "uv-tool",
+                    "ghcr.io/astral-sh/uv",
+                    f"{UV_VERSION}-debian-slim",
+                )
+            )
+            .descriptor_digest
+        )
+
+
 # Live providers must return exact upstream identities for every canonical source kind.
 @pytest.mark.parametrize(
     "role,repository,tag",
@@ -67,22 +83,17 @@ def test_live_oci_descriptor_and_linux_amd64_binding(
     RELEASE_PYTHON_PROFILES,
 )
 @pytest.mark.docker
-def test_live_exact_uv_managed_python_catalog(version: str) -> None:
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        uv_identity = HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest(
-                "uv-tool",
-                "ghcr.io/astral-sh/uv",
-                f"{UV_VERSION}-debian-slim",
-            )
-        )
+def test_live_exact_uv_managed_python_catalog(
+    version: str,
+    uv_descriptor_digest: str,
+) -> None:
     identity = DockerManagedPythonIdentityProvider().resolve(
-        ManagedPythonIdentityRequest(version, uv_identity.descriptor_digest)
+        ManagedPythonIdentityRequest(version, uv_descriptor_digest)
     )
 
     assert identity.version == version
     assert identity.catalog_url.startswith("https://")
-    assert identity.catalog_descriptor_digest == uv_identity.descriptor_digest
+    assert identity.catalog_descriptor_digest == uv_descriptor_digest
 
 
 def test_live_official_comfyui_release_and_head_identities() -> None:

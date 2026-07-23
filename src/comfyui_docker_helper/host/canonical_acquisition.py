@@ -185,7 +185,11 @@ class DockerPythonGroupResolver:
                 ),
             )
             output = result.stdout.decode("utf-8")
-        except (UvDockerExecutorError, UnicodeDecodeError) as error:
+        except UvDockerExecutorError as error:
+            raise CanonicalAcquisitionError(
+                f"Python group resolution failed: {error}"
+            ) from error
+        except UnicodeDecodeError as error:
             raise CanonicalAcquisitionError("Python group resolution failed") from error
         resolved = _parse_direct_members(output, request)
         if isinstance(request, PyTorchRequestIdentity) and any(
@@ -220,7 +224,9 @@ class DockerPythonGroupResolver:
             document = tomllib.loads(result.stdout.decode("utf-8"))
             packages = document["packages"]
         except UvDockerExecutorError as error:
-            raise _pytorch_resolution_error(request, "resolution failed") from error
+            raise _pytorch_resolution_error(
+                request, f"resolution failed: {error}"
+            ) from error
         except (
             KeyError,
             TypeError,

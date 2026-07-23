@@ -383,6 +383,48 @@ def test_keyboard_interrupt_restores_handlers_and_cleans(
     assert len(client.container.remove_calls) == 1
 
 
+def test_cancellation_with_cleanup_failure_reports_controlled_owned_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeDockerClient()
+    _install_client(monkeypatch, client)
+    original_create = client.container.create
+
+    def create(
+        image: object, command: tuple[str, ...], **kwargs: object
+    ) -> _FakeContainer:
+        container = original_create(image, command, **kwargs)
+
+        def execute(argv: tuple[str, ...], **call_kwargs: object):
+            del argv, call_kwargs
+            raise KeyboardInterrupt("upstream cancellation detail")
+            yield  # pragma: no cover
+
+        container.execute = execute  # type: ignore[method-assign]
+        return container
+
+    def remove(container: object, *, force: bool) -> None:
+        del container, force
+        raise DockerException(["docker", "container", "rm", "secret"], 1)
+
+    client.container.create = create  # type: ignore[method-assign]
+    client.container.remove = remove  # type: ignore[method-assign]
+
+    with pytest.raises(UvDockerExecutorError) as raised:
+        UvDockerExecutor().execute(
+            UvResolverDescriptor(_DIGEST),
+            ManagedPythonCatalogOperation("3.13.14"),
+        )
+
+    message = str(raised.value)
+    assert message.startswith(
+        "uv resolver cancelled; cleanup_incomplete: name=cdh-uv-resolver-"
+    )
+    assert "label=comfyui-docker-helper.uv-operation=" in message
+    assert "upstream cancellation detail" not in message
+    assert "secret" not in message
+
+
 def test_cleanup_failure_reports_exact_owned_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

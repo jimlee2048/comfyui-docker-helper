@@ -43,11 +43,19 @@ from comfyui_docker_helper.host.identity_providers import (
     ManagedPythonIdentity,
     OciIdentity,
 )
-from comfyui_docker_helper.host.uv_docker_executor import UvResolverResult
+from comfyui_docker_helper.host.uv_docker_executor import (
+    UvDockerExecutorError,
+    UvResolverResult,
+)
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
 COMMIT = "1" * 40
+CONTROLLED_CLEANUP_ERROR = (
+    "uv resolver cancelled; cleanup_incomplete: "
+    "name=cdh-uv-resolver-test, "
+    "label=comfyui-docker-helper.uv-operation=test"
+)
 
 
 class _Unused:
@@ -109,6 +117,12 @@ class _UvExecutor:
     def execute(self, descriptor, operation):
         self.calls.append((descriptor, operation))
         return UvResolverResult(self.stdout, b"")
+
+
+class _FailingUvExecutor:
+    def execute(self, descriptor, operation):
+        del descriptor, operation
+        raise UvDockerExecutorError(CONTROLLED_CLEANUP_ERROR)
 
 
 def _acquirer(**changes):
@@ -323,6 +337,61 @@ def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests()
     assert cli_executor.calls[0][0].digest == DIGEST_B
 
 
+@pytest.mark.parametrize(
+    ("environment", "group", "package", "selector"),
+    [
+        ("application", "application-extra", "packaging", "==26.2"),
+        ("uv-tool:ruff", "uv-tool", "ruff", "==0.15.18"),
+    ],
+)
+def test_direct_python_groups_preserve_controlled_executor_cleanup_identity(
+    environment: str,
+    group: str,
+    package: str,
+    selector: str,
+) -> None:
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment=environment,
+        group=group,
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(package=package, extras=(), selector=selector),
+        ),
+    )
+
+    with pytest.raises(CanonicalAcquisitionError) as raised:
+        DockerPythonGroupResolver(_FailingUvExecutor()).resolve(request)
+
+    assert str(raised.value) == (
+        f"Python group resolution failed: {CONTROLLED_CLEANUP_ERROR}"
+    )
+
+
+def test_comfy_cli_preserves_controlled_executor_cleanup_identity() -> None:
+    request = ComfyCliRequestIdentity(
+        type="comfy-cli",
+        package="comfy-cli",
+        policy="highest-target-compatible-stable",
+        minimum_version="1.7.0",
+        environment="uv-tool:comfy-cli",
+        index_url="https://pypi.org/simple",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        resolver_descriptor_digest=DIGEST_A,
+    )
+
+    with pytest.raises(CanonicalAcquisitionError) as raised:
+        DockerPythonGroupResolver(_FailingUvExecutor()).resolve(request)
+
+    assert str(raised.value) == (
+        f"Python group resolution failed: {CONTROLLED_CLEANUP_ERROR}"
+    )
+
+
 def test_docker_python_group_resolver_preserves_pytorch_routing_and_metadata() -> None:
     executor = _UvExecutor(
         b"""
@@ -373,6 +442,63 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
     assert resolved.setuptools_specifier == "<82"
     assert executor.calls[0][0].digest == DIGEST_A
     assert b'name = "pytorch"' in executor.calls[0][1].pyproject
+
+
+def test_pytorch_preserves_controlled_executor_cleanup_identity() -> None:
+    request = PyTorchRequestIdentity(
+        type="pytorch-group",
+        environment="application",
+        group="pytorch",
+        backend="cuda",
+        channel="cu130",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        python_index_url="https://pypi.org/simple",
+        pytorch_index_url="https://download.pytorch.org/whl/cu130",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+        ),
+    )
+
+    with pytest.raises(CanonicalAcquisitionError) as raised:
+        DockerPythonGroupResolver(_FailingUvExecutor()).resolve(request)
+
+    message = str(raised.value)
+    assert f"PyTorch resolution failed: {CONTROLLED_CLEANUP_ERROR}" in message
+    assert "packages [torch]" in message
+    assert "channel cu130" in message
+
+
+def test_controlled_cleanup_identity_reaches_final_reconciliation_diagnostic() -> None:
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(
+                package="packaging", extras=(), selector="==26.2"
+            ),
+        ),
+    )
+    acquirer = _acquirer(python_group=DockerPythonGroupResolver(_FailingUvExecutor()))
+
+    with pytest.raises(CanonicalResolutionError) as raised:
+        reconcile_canonical_lock(
+            (DesiredResolution(request),),
+            existing=None,
+            acquirer=acquirer,
+        )
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "lock.resolve_failed"
+    assert diagnostic.message == (
+        f"Python group resolution failed: {CONTROLLED_CLEANUP_ERROR}"
+    )
 
 
 # Local hook acquisition removes the host-only prefix and retains typed content

@@ -190,8 +190,9 @@ class UvDockerExecutor:
             if cleanup_identity is not None:
                 message = f"cleanup_incomplete: {cleanup_identity}"
                 if isinstance(primary, (KeyboardInterrupt, SystemExit)):
-                    primary.add_note(message)
-                    raise primary.with_traceback(primary.__traceback__)
+                    raise UvDockerExecutorError(
+                        f"uv resolver cancelled; {message}"
+                    ) from primary
                 stdout = (
                     primary.stdout
                     if isinstance(primary, UvDockerExecutorError)

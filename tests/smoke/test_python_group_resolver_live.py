@@ -36,7 +36,8 @@ from comfyui_docker_helper.host.identity_providers import (
 )
 
 
-def _uv_descriptor_digest() -> str:
+@pytest.fixture(scope="module")
+def uv_descriptor_digest() -> str:
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
         return (
             HttpOciIdentityProvider(client)
@@ -111,7 +112,9 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
 @pytest.mark.network
 @pytest.mark.docker
 @pytest.mark.smoke
-def test_exact_oci_uv_resolves_one_real_complete_group() -> None:
+def test_exact_oci_uv_resolves_one_real_complete_group(
+    uv_descriptor_digest: str,
+) -> None:
     request = DirectPythonRequestIdentity(
         type="python-group",
         environment="application",
@@ -119,7 +122,7 @@ def test_exact_oci_uv_resolves_one_real_complete_group() -> None:
         python_version=DEFAULT_MANAGED_PYTHON_VERSION,
         platform="linux/amd64",
         index_url="https://pypi.org/simple",
-        resolver_descriptor_digest=_uv_descriptor_digest(),
+        resolver_descriptor_digest=uv_descriptor_digest,
         members=[
             DirectPythonRequestMember(package="packaging", extras=[], selector="==26.2")
         ],
@@ -135,7 +138,9 @@ def test_exact_oci_uv_resolves_one_real_complete_group() -> None:
 @pytest.mark.network
 @pytest.mark.docker
 @pytest.mark.smoke
-def test_exact_oci_uv_resolves_one_isolated_uv_tool() -> None:
+def test_exact_oci_uv_resolves_one_isolated_uv_tool(
+    uv_descriptor_digest: str,
+) -> None:
     request = DirectPythonRequestIdentity(
         type="python-group",
         environment="uv-tool:ruff",
@@ -143,7 +148,7 @@ def test_exact_oci_uv_resolves_one_isolated_uv_tool() -> None:
         python_version=DEFAULT_MANAGED_PYTHON_VERSION,
         platform="linux/amd64",
         index_url="https://pypi.org/simple",
-        resolver_descriptor_digest=_uv_descriptor_digest(),
+        resolver_descriptor_digest=uv_descriptor_digest,
         members=[
             DirectPythonRequestMember(package="ruff", extras=[], selector="==0.15.18")
         ],
@@ -165,6 +170,7 @@ def test_exact_oci_uv_resolves_one_isolated_uv_tool() -> None:
 )
 def test_exact_oci_uv_resolves_optional_comfy_cli_for_every_target_profile(
     python_version: str,
+    uv_descriptor_digest: str,
 ) -> None:
     request = ComfyCliRequestIdentity(
         type="comfy-cli",
@@ -175,7 +181,7 @@ def test_exact_oci_uv_resolves_optional_comfy_cli_for_every_target_profile(
         python_version=python_version,
         platform="linux/amd64",
         index_url="https://pypi.org/simple",
-        resolver_descriptor_digest=_uv_descriptor_digest(),
+        resolver_descriptor_digest=uv_descriptor_digest,
     )
 
     resolved = DockerPythonGroupResolver().resolve(request)
@@ -199,6 +205,7 @@ def test_exact_oci_uv_resolves_optional_comfy_cli_for_every_target_profile(
 )
 def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
     python_version: str,
+    uv_descriptor_digest: str,
 ) -> None:
     request = PyTorchRequestIdentity(
         type="pytorch-group",
@@ -210,7 +217,7 @@ def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
         platform="linux/amd64",
         python_index_url="https://pypi.org/simple",
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
-        resolver_descriptor_digest=_uv_descriptor_digest(),
+        resolver_descriptor_digest=uv_descriptor_digest,
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
             DirectPythonRequestMember(
@@ -233,7 +240,9 @@ def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
 @pytest.mark.network
 @pytest.mark.docker
 @pytest.mark.smoke
-def test_pytorch_direct_extra_does_not_fall_back_to_python_index() -> None:
+def test_pytorch_direct_extra_does_not_fall_back_to_python_index(
+    uv_descriptor_digest: str,
+) -> None:
     request = PyTorchRequestIdentity(
         type="pytorch-group",
         environment="application",
@@ -244,7 +253,7 @@ def test_pytorch_direct_extra_does_not_fall_back_to_python_index() -> None:
         platform="linux/amd64",
         python_index_url="https://pypi.org/simple",
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
-        resolver_descriptor_digest=_uv_descriptor_digest(),
+        resolver_descriptor_digest=uv_descriptor_digest,
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
             DirectPythonRequestMember(

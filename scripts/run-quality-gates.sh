@@ -19,7 +19,8 @@ uv sync --locked --python "$python_version"
 uv run --locked --python "$python_version" ruff format --check .
 uv run --locked --python "$python_version" ruff check .
 uv run --locked --python "$python_version" pytest tests/unit tests/integration
-uv build --python "$python_version" --out-dir "$artifact_dir/dist"
+uv run --locked --python "$python_version" \
+    python -m build --wheel --outdir "$artifact_dir/dist" .
 
 wheel_path="$(find "$artifact_dir/dist" -maxdepth 1 -type f -name '*.whl' -print -quit)"
 if [[ -z "$wheel_path" ]]; then
@@ -76,9 +77,8 @@ from pathlib import Path
 import sys
 
 from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
-from comfyui_docker_helper.host.uv_runner import locate_host_uv
 
-wheel = build_canonical_wheel(locate_host_uv())
+wheel = build_canonical_wheel()
 Path(sys.argv[1]).write_bytes(wheel.content)
 Path(sys.argv[2]).write_text(wheel.digest, encoding="utf-8")
 PY

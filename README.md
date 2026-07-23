@@ -485,5 +485,5 @@ uv sync --locked
 uv run ruff format --check .
 uv run ruff check .
 uv run pytest tests/unit tests/integration
-uv build
+uv run --locked python -m build
 ```

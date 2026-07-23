@@ -88,7 +88,7 @@ class DefaultPlanningProviders:
 def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
     """Create concrete final providers only for render/build, never validate."""
     uv = locate_host_uv()
-    canonical_wheel = build_canonical_wheel(uv)
+    canonical_wheel = build_canonical_wheel()
     with httpx.Client(follow_redirects=True, timeout=30.0) as client:
         provider = ProviderIdentityAcquirer(
             oci=HttpOciIdentityProvider(client),

@@ -27,7 +27,7 @@ This project uses a src/ layout.
 
 Use `uv` for Python execution, dependency management, and packaging:
 - `uv sync --locked`: install the locked development environment.
-- `uv build`: build wheel and source distribution artifacts.
+- `uv run --locked python -m build`: build wheel and source distribution artifacts.
 - `uv run cdh --help`: verify the local CLI entry point.
 - `uv run cdh host validate -f examples/minimal.toml`: validate a sample config.
 

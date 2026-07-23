@@ -36,6 +36,7 @@ classifiers = [
 ]
 dependencies = [
     "aria2p",
+    "build>=1,<2",
     "httpx",
     "packaging>=26.2",
     "pydantic>=2,<3",

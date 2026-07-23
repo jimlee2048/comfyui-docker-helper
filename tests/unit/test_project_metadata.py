@@ -59,6 +59,7 @@ def test_project_release_identity_matches_toolchain_metadata() -> None:
 
     assert pyproject["project"]["version"] == CDH_VERSION
     assert "build>=1,<2" in pyproject["project"]["dependencies"]
+    assert "python-on-whales>=0.81.0" in pyproject["project"]["dependencies"]
     assert UV_RUNTIME_REQUIREMENT in pyproject["project"]["dependencies"]
     assert pyproject["build-system"]["requires"] == [UV_BUILD_REQUIREMENT]
 

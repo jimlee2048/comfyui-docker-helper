@@ -40,6 +40,7 @@ dependencies = [
     "httpx",
     "packaging>=26.2",
     "pydantic>=2,<3",
+    "python-on-whales>=0.81.0",
     "rich",
     "tomli-w",
     "typer",

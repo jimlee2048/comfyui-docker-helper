@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import shlex
-import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal
+
+from python_on_whales import DockerClient
+from python_on_whales.exceptions import DockerException
 
 from comfyui_docker_helper.errors import ApplicationError
 
@@ -16,28 +16,6 @@ type BuildxOutput = Literal["load", "push"]
 
 class BuildxBuildError(ApplicationError):
     """A user-facing Docker Buildx invocation failure."""
-
-
-@dataclass(frozen=True, slots=True)
-class BuildxBuildResult:
-    """Successful Buildx invocation details."""
-
-    argv: tuple[str, ...]
-    context_dir: Path
-    image_tags: tuple[str, ...]
-    output: BuildxOutput
-
-
-class BuildxRunner(Protocol):
-    """Injectable subprocess-compatible runner."""
-
-    def __call__(
-        self,
-        args: Sequence[str],
-        *,
-        cwd: str | Path | None = None,
-        check: bool = False,
-    ) -> subprocess.CompletedProcess[object]: ...
 
 
 BuildxLogger = Callable[[str], None]
@@ -50,37 +28,39 @@ def build_image_with_buildx(
     context_dir: str | Path,
     platforms: Sequence[str] = ("linux/amd64",),
     cwd: str | Path | None = None,
-    docker_executable: str = "docker",
-    runner: BuildxRunner = subprocess.run,
     log: BuildxLogger = print,
-) -> BuildxBuildResult:
-    """Run the supported Docker Buildx command and stream output.
-
-    The subprocess inherits stdout/stderr from the current process because no
-    capture arguments are passed. This intentionally does not use the Docker
-    SDK, retry, or fall back to ``docker build``.
-    """
+) -> None:
+    """Build one image through the public python-on-whales Buildx API."""
+    base_directory = Path(cwd) if cwd is not None else Path.cwd()
     resolved_context = Path(context_dir)
+    if not resolved_context.is_absolute():
+        resolved_context = base_directory / resolved_context
+    resolved_context = resolved_context.resolve()
     tags = tuple(image_tags)
-    tag_args = tuple(arg for tag in tags for arg in ("-t", tag))
-    argv = (
-        docker_executable,
-        "buildx",
-        "build",
-        f"--{output}",
-        "--platform",
-        ",".join(platforms),
-        *tag_args,
-        str(resolved_context),
+    target_platforms = tuple(platforms)
+    tag_summary = ", ".join(tags)
+    log(
+        "Running Docker Buildx "
+        f"({output}) for {tag_summary} on {', '.join(target_platforms)}"
     )
-    log(f"Running Docker Buildx: {shlex.join(argv)}")
 
     try:
-        completed = runner(argv, cwd=cwd, check=False)
+        stream = DockerClient().buildx.build(
+            resolved_context,
+            tags=list(tags),
+            load=output == "load",
+            push=output == "push",
+            platforms=list(target_platforms),
+            progress="plain",
+            stream_logs=True,
+        )
+        if stream is None:  # pragma: no cover - public API contract
+            raise BuildxBuildError("Docker Buildx did not provide its live log stream")
+        for message in stream:
+            log(message.rstrip("\n"))
     except FileNotFoundError as error:
         raise BuildxBuildError(
-            f"{docker_executable!r} executable was not found; install Docker "
-            "with Buildx and ensure it is on PATH"
+            "Docker was not found; install Docker with Buildx and ensure it is on PATH"
         ) from error
     except KeyboardInterrupt:
         raise
@@ -88,22 +68,12 @@ def build_image_with_buildx(
         raise BuildxBuildError(
             f"Docker Buildx could not be started: {error}"
         ) from error
-    except subprocess.SubprocessError as error:
-        raise BuildxBuildError(f"Docker Buildx failed to start: {error}") from error
-
-    if completed.returncode != 0:
+    except DockerException as error:
         raise BuildxBuildError(
-            f"Docker Buildx failed with exit code {completed.returncode}"
-        )
+            f"Docker Buildx failed with exit code {error.return_code}"
+        ) from error
 
-    tag_summary = ", ".join(tags)
     if output == "push":
         log(f"Docker Buildx pushed image tags: {tag_summary}")
     else:
         log(f"Docker Buildx loaded image tags: {tag_summary}")
-    return BuildxBuildResult(
-        argv=argv,
-        context_dir=resolved_context,
-        image_tags=tags,
-        output=output,
-    )

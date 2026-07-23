@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from build import BuildBackendException
 
-from comfyui_docker_helper.exact_ledger import CDH_VERSION, UV_BUILD_REQUIREMENT
+from comfyui_docker_helper.exact_ledger import CDH_VERSION
 from comfyui_docker_helper.host import release_wheel
 from comfyui_docker_helper.host.release_wheel import (
     CanonicalWheelError,
@@ -17,6 +17,7 @@ from comfyui_docker_helper.host.release_wheel import (
 )
 
 WHEEL_NAME = f"comfyui_docker_helper-{CDH_VERSION}-py3-none-any.whl"
+TEST_BUILD_REQUIREMENT = "test-build-backend==1.2.3"
 
 
 def _write_wheel(path: Path, *, name: str = "comfyui-docker-helper") -> bytes:
@@ -54,7 +55,7 @@ def _install_builder_fakes(
             installed.append(frozenset(requirements))
 
     class FakeBuilder:
-        build_system_requires = frozenset({UV_BUILD_REQUIREMENT})
+        build_system_requires = frozenset({TEST_BUILD_REQUIREMENT})
 
         @classmethod
         def from_isolated_env(cls, environment, source):
@@ -91,7 +92,7 @@ def test_build_canonical_wheel_returns_the_single_validated_artifact(
     wheel = build_canonical_wheel()
 
     assert installed == [
-        frozenset({UV_BUILD_REQUIREMENT}),
+        frozenset({TEST_BUILD_REQUIREMENT}),
         frozenset({"backend-wheel-requirement>=1"}),
     ]
     assert len(builds) == 1

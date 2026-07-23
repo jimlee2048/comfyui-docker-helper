@@ -44,7 +44,7 @@ def test_final_structure_uses_exact_baseline_defaults() -> None:
     config = validate_final_config_structure(_document())
 
     assert config.python.version == "3.13.14"
-    assert config.python.uv_version == "0.11.28"
+    assert config.python.uv_version == "latest"
     assert config.build.platforms == ["linux/amd64"]
     assert config.compute_platform.cuda.image_flavor == "cudnn-devel"
     assert config.compute_platform.cuda.image_distro == "ubuntu24.04"

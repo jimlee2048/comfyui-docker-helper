@@ -1,7 +1,5 @@
-"""Single code authority for exact release-owned toolchain identities."""
+"""Single code authority for exact project-owned identities."""
 
-UV_VERSION = "0.11.28"
-UV_BUILD_REQUIREMENT = f"uv_build=={UV_VERSION}"
 UV_IMAGE_REPOSITORY = "ghcr.io/astral-sh/uv"
 COMFYUI_REPOSITORY = "https://github.com/comfyanonymous/ComfyUI.git"
 # v0.11.0 is the first formal release to declare its runtime requests dependency.

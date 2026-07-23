@@ -56,7 +56,7 @@ image_distro = "ubuntu24.04"
 
 [python]
 version = "3.13.14"
-uv_version = "0.11.28"
+uv_version = "latest"
 uv_tools = []
 
 [pytorch]
@@ -87,9 +87,11 @@ user tool.
 
 `[python].uv_version` is a release selector, not a raw image tag. An exact
 stable `X.Y.Z` selects cdh's official `X.Y.Z-debian-slim` uv image, while
-`latest` selects the rolling `debian-slim` image. Other values are rejected.
-The canonical lock records the selected image's exact digest, and the same
-exact uv authority resolves Python inputs and supplies uv/uvx to the image.
+the default `latest` selects the rolling `debian-slim` image. Other values are
+rejected. The canonical lock records the selected image's exact digest and
+observed uv version, and the same exact uv authority resolves Python inputs and
+supplies uv/uvx to the image. Configure an exact release when the request itself
+must remain fixed before lock resolution.
 
 Custom nodes run once in their declared Registry/direct-Git order. Registry
 nodes use the verified absolute `cm-cli`, one exact request per process, while

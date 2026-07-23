@@ -25,7 +25,6 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_REPOSITORY,
     DEFAULT_MANAGED_PYTHON_VERSION,
     UV_IMAGE_REPOSITORY,
-    UV_VERSION,
 )
 from comfyui_docker_helper.host.canonical_acquisition import DockerPythonGroupResolver
 from comfyui_docker_helper.host.identity_providers import (
@@ -34,6 +33,8 @@ from comfyui_docker_helper.host.identity_providers import (
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
 )
+
+QUALIFIED_TEST_UV_VERSION = "0.11.28"
 
 
 @pytest.fixture(scope="module")
@@ -45,7 +46,7 @@ def uv_descriptor_digest() -> str:
                 OciIdentityRequest(
                     "uv-tool",
                     UV_IMAGE_REPOSITORY,
-                    f"{UV_VERSION}-debian-slim",
+                    f"{QUALIFIED_TEST_UV_VERSION}-debian-slim",
                 )
             )
             .descriptor_digest

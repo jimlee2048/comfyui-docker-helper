@@ -5,12 +5,12 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path, PurePosixPath
 
+from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
-from comfyui_docker_helper.exact_ledger import (
-    CDH_VERSION,
-    UV_BUILD_REQUIREMENT,
-)
+from comfyui_docker_helper.exact_ledger import CDH_VERSION
 from comfyui_docker_helper.release_artifacts import (
     PACKAGE_ROOT,
     PROJECTED_LICENSE,
@@ -51,29 +51,49 @@ def test_supported_python_minors_match_project_metadata() -> None:
     }
 
 
-def test_project_release_identity_matches_toolchain_metadata() -> None:
-    """Package metadata matches the current release and host toolchain ledger."""
+def test_project_release_identity_matches_package_metadata() -> None:
+    """Package metadata matches the current release and runtime dependencies."""
 
     pyproject = _project_metadata()
 
     assert pyproject["project"]["version"] == CDH_VERSION
     assert "build>=1,<2" in pyproject["project"]["dependencies"]
     assert "python-on-whales>=0.81.0" in pyproject["project"]["dependencies"]
-    assert pyproject["build-system"]["requires"] == [UV_BUILD_REQUIREMENT]
 
 
 def test_projected_release_metadata_matches_repository_metadata() -> None:
+    """The packaged release projection retains one exact stable uv_build backend."""
+
     repository = _project_metadata()
     projected = tomllib.loads(PROJECTED_PYPROJECT.read_text(encoding="utf-8"))
+    build_system = repository["build-system"]
+    build_requirements = build_system["requires"]
 
     assert projected["project"] == repository["project"]
-    assert projected["build-system"] == repository["build-system"]
+    assert projected["build-system"] == build_system
     assert (
         projected["tool"]["uv"]["build-backend"]
         == repository["tool"]["uv"]["build-backend"]
     )
     assert PROJECTED_LICENSE.read_bytes() == (PROJECT_ROOT / "LICENSE").read_bytes()
     assert "readme" not in repository["project"]
+    assert build_system["build-backend"] == "uv_build"
+    assert len(build_requirements) == 1
+
+    requirement = Requirement(build_requirements[0])
+    specifiers = tuple(requirement.specifier)
+    assert canonicalize_name(requirement.name) == "uv-build"
+    assert requirement.extras == set()
+    assert requirement.marker is None
+    assert requirement.url is None
+    assert len(specifiers) == 1
+    assert specifiers[0].operator == "=="
+    version = Version(specifiers[0].version)
+    assert len(version.release) == 3
+    assert not any(
+        (version.is_prerelease, version.is_devrelease, version.is_postrelease)
+    )
+    assert version.local is None
 
 
 def test_projected_release_source_is_entirely_wheel_owned() -> None:

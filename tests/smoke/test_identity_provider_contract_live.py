@@ -14,7 +14,7 @@ from comfyui_docker_helper.exact_ledger import (
     CUDA_VERSION,
     DEFAULT_CUDA_IMAGE_DISTRO,
     DEFAULT_CUDA_IMAGE_FLAVOR,
-    UV_VERSION,
+    UV_IMAGE_REPOSITORY,
 )
 from comfyui_docker_helper.host.identity_providers import (
     DirectGitIdentityRequest,
@@ -36,6 +36,7 @@ pytestmark = [
 
 CUSTOM_SCRIPTS_REGISTRY_ID = "comfyui-custom-scripts"
 CUSTOM_SCRIPTS_URL = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
+QUALIFIED_TEST_UV_VERSION = "0.11.28"
 
 
 @pytest.fixture(scope="module")
@@ -46,8 +47,8 @@ def uv_descriptor_digest() -> str:
             .resolve(
                 OciIdentityRequest(
                     "uv-tool",
-                    "ghcr.io/astral-sh/uv",
-                    f"{UV_VERSION}-debian-slim",
+                    UV_IMAGE_REPOSITORY,
+                    f"{QUALIFIED_TEST_UV_VERSION}-debian-slim",
                 )
             )
             .descriptor_digest
@@ -63,7 +64,11 @@ def uv_descriptor_digest() -> str:
             CUDA_IMAGE_REPOSITORY,
             f"{CUDA_VERSION}-{DEFAULT_CUDA_IMAGE_FLAVOR}-{DEFAULT_CUDA_IMAGE_DISTRO}",
         ),
-        ("uv-tool", "ghcr.io/astral-sh/uv", f"{UV_VERSION}-debian-slim"),
+        (
+            "uv-tool",
+            UV_IMAGE_REPOSITORY,
+            f"{QUALIFIED_TEST_UV_VERSION}-debian-slim",
+        ),
     ],
 )
 def test_live_oci_descriptor_and_linux_amd64_binding(

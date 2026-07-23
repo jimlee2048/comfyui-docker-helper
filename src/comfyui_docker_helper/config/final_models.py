@@ -10,7 +10,6 @@ from comfyui_docker_helper.exact_ledger import (
     DEFAULT_CUDA_IMAGE_DISTRO,
     DEFAULT_CUDA_IMAGE_FLAVOR,
     DEFAULT_MANAGED_PYTHON_VERSION,
-    UV_VERSION,
 )
 
 CudaImageFlavor = Literal["base", "runtime", "devel", "cudnn-runtime", "cudnn-devel"]
@@ -61,7 +60,7 @@ class FinalPythonConfig(FinalConfigModel):
     """Managed Python, application packages, and isolated CLI-tool requests."""
 
     version: str = DEFAULT_MANAGED_PYTHON_VERSION
-    uv_version: str = UV_VERSION
+    uv_version: str = "latest"
     index_url: str = "https://pypi.org/simple"
     extra_packages: list[str] = Field(default_factory=list)
     uv_tools: list[str] = Field(default_factory=list)

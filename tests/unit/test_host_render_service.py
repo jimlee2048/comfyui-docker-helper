@@ -97,8 +97,10 @@ def _config(
     python_version: str = "3.13.14",
     image_flavor: str = "cudnn-devel",
     image_distro: str = "ubuntu24.04",
+    uv_version: str | None = "0.11.28",
 ) -> str:
     uv_tools = 'uv_tools = ["ruff>=0.15,<0.16"]' if with_uv_tool else ""
+    uv_selector = f'uv_version = "{uv_version}"' if uv_version is not None else ""
     return f"""
 [compute_platform]
 type = "cuda"
@@ -108,7 +110,7 @@ image_flavor = "{image_flavor}"
 image_distro = "{image_distro}"
 [python]
 version = "{python_version}"
-uv_version = "0.11.28"
+{uv_selector}
 {uv_tools}
 [pytorch]
 version = "2.12.1"
@@ -527,6 +529,28 @@ def test_default_writes_canonical_context_and_second_default_reuses_lock(
     _prepare(config, output, second_fake, overwrite=True)
     assert second_fake.calls == []
     assert _tree(output) == before
+
+
+def test_omitted_uv_selector_reconciles_the_rolling_provider_request(
+    tmp_path: Path,
+) -> None:
+    """The public default enters the lock as the rolling provider tag."""
+
+    config = tmp_path / "config.toml"
+    config.write_text(_config(uv_version=None))
+    output = tmp_path / "context"
+
+    prepared = _prepare(config, output, FakeAcquirer())
+
+    uv_entry = next(
+        entry
+        for entry in prepared.lock_result.lock.entries
+        if isinstance(entry, UvImageLockEntry)
+    )
+    assert uv_entry.repository == "ghcr.io/astral-sh/uv"
+    assert uv_entry.tag == "debian-slim"
+    assert uv_entry.digest == DIGEST_B
+    assert uv_entry.observed_version == "0.11.28"
 
 
 def test_request_graph_parses_one_source_snapshot_once(

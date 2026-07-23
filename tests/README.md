@@ -52,6 +52,13 @@ runs Ruff, offline unit and integration tests, package construction, isolated
 wheel/CLI verification, and release-source projection. It does not authorize
 network, Docker, GPU, or slow tests.
 
+Canonical-lock tests should use the Docker-free matching-lock path unless they
+specifically own provider acquisition or resolution behavior. Live resolver
+tests require both `docker` and `network`, use the local/default Linux x86_64
+Docker baseline, and must clean only their uniquely owned containers or images.
+Do not assume Docker Desktop, TLS, SSH, or remote-daemon compatibility from the
+local baseline.
+
 ## Acceptance scenarios
 
 `tests/acceptance_scenarios.py` is the machine-consumed authority for scenario

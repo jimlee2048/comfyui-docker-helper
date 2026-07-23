@@ -133,7 +133,7 @@ def render(
         bool,
         typer.Option(
             "--locked",
-            help="Require the existing context lock without updating it.",
+            help="Require a matching lock without resolving or updating the context.",
         ),
     ] = False,
     check: Annotated[
@@ -151,7 +151,7 @@ def render(
         ),
     ] = False,
 ) -> None:
-    """Render a Docker build context from configuration file(s)."""
+    """Render a context; Docker may be used when new uv resolution is needed."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
     try:
@@ -269,7 +269,7 @@ def build(
         bool,
         typer.Option(
             "--locked",
-            help="Require the existing context lock without updating it.",
+            help="Require a matching lock without resolving or updating the context.",
         ),
     ] = False,
     upgrade_lock: Annotated[

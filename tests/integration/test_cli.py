@@ -414,6 +414,23 @@ def test_host_hook_option_is_preserved_only_on_render_and_build(
     assert "--build-hooks-dir" in validate_help.output
 
 
+# Host help distinguishes Docker-backed resolution from later Buildx
+# materialization.
+def test_host_render_and_build_help_explain_locked_docker_boundaries(
+    cli_runner: CliRunner,
+) -> None:
+    render_help = cli_runner.invoke(app, ["host", "render", "--help"])
+    build_help = cli_runner.invoke(app, ["host", "build", "--help"])
+
+    assert "Docker may be used when new uv resolution is needed" in render_help.output
+    for output in (render_help.output, build_help.output):
+        normalized = " ".join(output.replace("│", " ").split())
+        assert "matching lock" in normalized
+        assert "without resolving" in normalized
+        assert "updating the context" in normalized
+    assert "build it with Docker Buildx" in build_help.output
+
+
 def test_host_hook_roots_have_no_implicit_defaults() -> None:
     for command in (host_cli.validate, host_cli.render, host_cli.build):
         assert inspect.signature(command).parameters["build_hooks_dir"].default is None

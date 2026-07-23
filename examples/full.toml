@@ -48,7 +48,8 @@ pub_keys = []
 [python]
 # Default: "3.13.14". Must be an exact stable CPython patch.
 version = "3.13.14"
-# Default: "0.11.28". Used as the locked ghcr.io/astral-sh/uv image tag.
+# Default: "0.11.28". Accepts an exact stable X.Y.Z or "latest"; cdh derives
+# the official Debian-slim uv image tag and locks its exact descriptor.
 uv_version = "0.11.28"
 # Default: "https://pypi.org/simple". Used by ordinary cdh-controlled Python
 # resolution and installation. Direct PyTorch-group members use their derived

@@ -19,7 +19,8 @@ do not reload host configuration or its lock to make build decisions.
 ## Requirements
 
 - Python 3.12, 3.13, or 3.14;
-- Docker with Buildx for `cdh host build`;
+- Docker for uv-backed canonical resolution when the lock needs a new result,
+  and Docker with Buildx for `cdh host build`;
 - for GPU execution on x86_64, NVIDIA Container Toolkit support, driver
   `>=580.65.06`, and a Turing-or-newer NVIDIA GPU.
 
@@ -37,6 +38,10 @@ distributions `torch==2.12.1+cu130`, `torchvision==0.27.1+cu130`, and
 uv tool install comfyui-docker-helper
 cdh --help
 ```
+
+Plain `pip install comfyui-docker-helper` is also supported. The cdh package
+does not install uv or require a host uv executable; uv-backed canonical
+resolution runs through the configuration-selected Docker image.
 
 ## Minimal configuration
 
@@ -80,6 +85,12 @@ explicitly through `comfyui.extra_args` when the selected checkout supports it.
 This application capability is independent of the optional isolated comfy-cli
 user tool.
 
+`[python].uv_version` is a release selector, not a raw image tag. An exact
+stable `X.Y.Z` selects cdh's official `X.Y.Z-debian-slim` uv image, while
+`latest` selects the rolling `debian-slim` image. Other values are rejected.
+The canonical lock records the selected image's exact digest, and the same
+exact uv authority resolves Python inputs and supplies uv/uvx to the image.
+
 Custom nodes run once in their declared Registry/direct-Git order. Registry
 nodes use the verified absolute `cm-cli`, one exact request per process, while
 direct-Git nodes pass the declared URL through unchanged as an acquisition
@@ -114,7 +125,9 @@ or writes.
 cdh host validate -f examples/minimal.toml
 ```
 
-Render a context and its canonical lock:
+Render a context and its canonical lock. Docker may be used when canonical
+reconciliation needs a new uv-backed result; a complete matching lock is
+reused without Docker:
 
 ```bash
 cdh host render \
@@ -137,14 +150,22 @@ cdh host build \
 
 - Default reconciliation reuses unchanged entries, resolves only missing or
   changed requests, removes deleted identities, and writes atomically.
-- `--locked` performs zero provider calls and zero writes while requiring an
-  exact compatible canonical lock and local input set.
+- `--locked` performs zero provider or Docker calls and zero context writes
+  during reconciliation while requiring an exact compatible canonical lock and
+  local input set. A mismatch fails before resolution starts. After successful
+  locked reconciliation, `host build` still invokes Buildx to materialize or
+  push the configured image.
 - `--upgrade-lock` refreshes moving selectors while retaining unchanged exact
   selections.
 - `--check` computes default reconciliation and compares the expected context
   without writing.
 - `--dry-run` applies the selected resolution policy, prints the exact
   BuildPlan preview, and performs no writes or build.
+
+Default, `--check`, and `--dry-run` also remain Docker-free when the complete
+lock already matches. When one of those modes genuinely needs a new uv-backed
+result, resolution requires Docker even though the no-write modes still do not
+materialize changes.
 
 Malformed or unsupported lock schemas fail with an actionable
 remove-and-regenerate diagnostic.
@@ -196,9 +217,9 @@ before generic tools. The `comfy`, `comfy-cli`, and `comfycli` commands are
 linked under `/opt/uv/bin`; cdh does not invoke them during an image build.
 Set `install_cli=false` to omit the request, lock identity, tool environment,
 links, and verification.
-The cdh-owned host resolver uv, release `uv_build` backend, and container
-uv/uvx image are independently locked and verified identities even when their
-current versions are equal.
+The release `uv_build` backend and the configuration-selected uv/uvx image are
+independently locked and verified identities even when their current versions
+are equal. cdh itself has no host uv runtime dependency.
 
 All other cdh-controlled Python resolution and installation uses only
 `[python].index_url`, including application extras, ordinary ComfyUI and
@@ -206,6 +227,20 @@ Manager requirements, cdh dependencies, optional comfy-cli, generic uv
 tools, and cdh-invoked custom-node requirements. Manager/Registry installers
 and direct-Git `install.py` remain trusted opaque code; cdh does not claim
 network-level source isolation for their arbitrary effects.
+
+Resolver containers receive the configured Python and PyTorch indexes
+explicitly and disable ambient uv configuration. cdh does not import host
+pip/uv configuration or inject enterprise private certificate authorities.
+Image pulls and resolver traffic use ordinary Docker daemon, container-network,
+registry, and proxy configuration. If an index requires a private CA that the
+selected Docker environment does not already trust, resolution fails; cdh does
+not bypass certificate verification or provide an implicit fallback.
+
+The verified host baseline is Linux x86_64 using the local/default Docker
+connection. Docker Desktop, TLS, SSH, remote daemons, and non-default builders
+may work through Docker's own environment and configuration, but are not
+currently compatibility guarantees. cdh does not define its own
+`DOCKER_CONTEXT`/`DOCKER_HOST` precedence or expose a separate daemon endpoint.
 
 Users may mutate the public uv tool store at runtime, but those changes are
 outside the baked-image replay contract. Updating baked cdh or configured tools

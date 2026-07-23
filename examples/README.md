@@ -61,6 +61,16 @@ ComfyUI exits naturally, Docker sends `SIGKILL`, or PID 1 exits early.
 Use `--dry-run` for an exact no-write preview, `--check` to compare an existing
 context, `--locked` for zero-provider/zero-write verification, and
 `--upgrade-lock` to refresh moving selectors.
+A complete matching lock keeps default, check, dry-run, and locked
+reconciliation Docker-free. Missing or changed uv-backed canonical results
+require Docker-backed resolution; `host build` additionally requires Docker
+Buildx.
+
+`[python].uv_version` accepts an exact stable `X.Y.Z` or `latest`. cdh derives
+the official Debian-slim uv image tag and locks its exact digest; it does not
+execute a host uv. Ordinary package resolution uses the explicitly configured
+`[python].index_url` rather than ambient host pip/uv configuration. See the
+root README for Docker connection, proxy, and private-CA boundaries.
 
 The public PyTorch version is a selector. Its CUDA-derived channel, index, and
 target enter the resolver request identity, while the canonical lock and

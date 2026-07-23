@@ -194,16 +194,22 @@ def test_cache_miss_pulls_and_reinspects_exact_descriptor(
     assert resolver_argv[-1] == "3.12.13"
 
 
-def test_image_verification_rejects_digest_from_another_repository(
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("os", "windows"),
+        ("architecture", "arm64"),
+        ("repo_digests", (f"registry.example.test/unrelated/image@{_DIGEST}",)),
+    ],
+)
+def test_image_verification_rejects_wrong_descriptor_or_platform(
     monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    value: object,
 ) -> None:
     client = _FakeDockerClient()
     _install_client(monkeypatch, client)
-    monkeypatch.setattr(
-        _FakeImage,
-        "repo_digests",
-        (f"registry.example.test/unrelated/image@{_DIGEST}",),
-    )
+    monkeypatch.setattr(_FakeImage, attribute, value)
 
     with pytest.raises(UvDockerExecutorError, match="exact descriptor"):
         UvDockerExecutor().execute(
@@ -262,6 +268,34 @@ def test_ambiguous_create_recovers_exact_owned_container(
 
     assert result.stdout == b'{"result":"exact"}\n'
     assert len(client.container.remove_calls) == 1
+
+
+def test_ambiguous_create_rejects_foreign_owner_without_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeDockerClient()
+    _install_client(monkeypatch, client)
+    original_create = client.container.create
+
+    def create(
+        image: object, command: tuple[str, ...], **kwargs: object
+    ) -> _FakeContainer:
+        container = original_create(image, command, **kwargs)
+        owner_label = next(iter(container.config.labels))
+        container.config.labels = {owner_label: "foreign-owner"}
+        raise DockerException(["docker", "container", "create"], 125)
+
+    client.container.create = create  # type: ignore[method-assign]
+
+    with pytest.raises(UvDockerExecutorError) as raised:
+        UvDockerExecutor().execute(
+            UvResolverDescriptor(_DIGEST),
+            ManagedPythonCatalogOperation("3.13.14"),
+        )
+
+    assert "ownership mismatch" in str(raised.value)
+    assert "cleanup_incomplete" in str(raised.value)
+    assert client.container.remove_calls == []
 
 
 def test_ambiguous_remove_accepts_verified_absence(
@@ -551,8 +585,16 @@ def test_operations_require_exact_stable_python(
         operation("3.13")  # type: ignore[operator]
 
 
-def test_descriptor_and_controlled_input_are_bounded() -> None:
+def test_descriptor_index_and_controlled_input_are_bounded() -> None:
     with pytest.raises(ValueError, match="sha256"):
         UvResolverDescriptor("sha256:bad")
+    with pytest.raises(ValueError, match="HTTP or HTTPS"):
+        RequirementsCompileOperation("3.13.14", "file:///tmp/index", b"requests\n")
     with pytest.raises(ValueError, match="size limit"):
         RequirementsCompileOperation("3.13.14", "https://pypi.org/simple", b"")
+    with pytest.raises(ValueError, match="size limit"):
+        RequirementsCompileOperation(
+            "3.13.14",
+            "https://pypi.org/simple",
+            b"x" * (1024 * 1024 + 1),
+        )

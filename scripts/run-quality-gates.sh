@@ -18,9 +18,9 @@ project_root="$(pwd -P)"
 uv sync --locked --python "$python_version"
 uv run --locked --python "$python_version" ruff format --check .
 uv run --locked --python "$python_version" ruff check .
-uv run --locked --python "$python_version" pytest tests/unit tests/integration
+uv run --locked --python "$python_version" pytest
 uv run --locked --python "$python_version" \
-    python -m build --wheel --outdir "$artifact_dir/dist" .
+    python -m build --outdir "$artifact_dir/dist" .
 
 wheel_path="$(find "$artifact_dir/dist" -maxdepth 1 -type f -name '*.whl' -print -quit)"
 if [[ -z "$wheel_path" ]]; then

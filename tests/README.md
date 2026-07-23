@@ -49,9 +49,10 @@ CDH_APPLICATION_ZERO_CONTEXT=/path/to/rendered-context \
 ```
 
 The ordinary quality boundary is `scripts/run-quality-gates.sh <python>`. It
-runs Ruff, offline unit and integration tests, package construction, isolated
-wheel/CLI verification, and release-source projection. It does not authorize
-network, Docker, GPU, or slow tests.
+runs Ruff, the complete offline suite with cost tests collected and skipped,
+standard sdist-then-wheel package construction, isolated wheel/CLI
+verification, and release-source projection. It does not authorize network,
+Docker, GPU, or slow tests.
 
 Canonical-lock tests should use the Docker-free matching-lock path unless they
 specifically own provider acquisition or resolution behavior. Live resolver

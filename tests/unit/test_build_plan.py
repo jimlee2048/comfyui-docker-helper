@@ -59,7 +59,7 @@ def test_constructor_consumes_exact_authorities_and_orders_values() -> None:
         f"nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04@{DIGEST_A}"
     )
     assert plan.toolchain.uv_image.reference == (
-        f"{UV_IMAGE_REPOSITORY}:0.11.28@{DIGEST_B}"
+        f"{UV_IMAGE_REPOSITORY}:0.11.28-debian-slim@{DIGEST_B}"
     )
     assert plan.toolchain.python.version == "3.13.14"
     assert plan.toolchain.pytorch_channel == "cu130"
@@ -613,10 +613,10 @@ def test_build_plan_parser_preserves_safe_opaque_python_catalog_key() -> None:
 
 
 # Container uv selection remains independent from release-owned uv-build, while
-# an exact image tag must still agree with its observed resolved version.
+# cdh's exact Debian provider tag must agree with its observed uv release.
 @pytest.mark.parametrize(
     ("tag", "resolved_version"),
-    [("latest", "0.11.29"), ("0.11.29", "0.11.29")],
+    [("debian-slim", "0.11.29"), ("0.11.29-debian-slim", "0.11.29")],
 )
 def test_build_plan_parser_accepts_locked_uv_image_selector(
     tag: str, resolved_version: str
@@ -639,7 +639,7 @@ def test_build_plan_parser_rejects_exact_uv_image_version_mismatch() -> None:
         dump_build_plan_json(build_plan(final_config(), accepted_resolution()))
     )
     uv_image = document["toolchain"]["uv_image"]
-    uv_image["tag"] = "0.11.29"
+    uv_image["tag"] = "0.11.29-debian-slim"
     uv_image["resolved_version"] = "0.11.30"
 
     with pytest.raises(ValidationError, match="does not match its exact tag"):

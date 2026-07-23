@@ -29,7 +29,6 @@ from comfyui_docker_helper.container import download_files as download_files_mod
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
-from comfyui_docker_helper.host.uv_runner import HostUvError
 from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
 
 
@@ -635,48 +634,6 @@ def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
     assert "Traceback" not in result.output
 
 
-def test_render_host_uv_error_is_one_short_diagnostic_without_traceback(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = tmp_path / "config.toml"
-    config.write_text(
-        """
-[compute_platform]
-type = "cuda"
-[compute_platform.cuda]
-version = "13.0.3"
-[pytorch]
-version = "2.12.1"
-[comfyui]
-version = "0.11.0"
-install_manager = false
-[build]
-tags = ["example:test"]
-platforms = ["linux/amd64"]
-"""
-    )
-
-    def fail_providers():
-        raise HostUvError(
-            (Diagnostic(("host", "uv"), "host.uv.not-found", "reinstall cdh"),)
-        )
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.default_planning_providers",
-        fail_providers,
-    )
-    result = cli_runner.invoke(
-        app,
-        ["host", "render", "-f", str(config), "-o", str(tmp_path / "context")],
-    )
-
-    assert result.exit_code == 1
-    assert "host.uv.not-found" in result.output
-    assert "Traceback" not in result.output
-
-
 @pytest.mark.parametrize(
     "command_args",
     [
@@ -684,7 +641,7 @@ platforms = ["linux/amd64"]
         ["host", "build", "--context-dir", "context"],
     ],
 )
-def test_host_uv_catalog_acquisition_error_is_short_without_traceback(
+def test_provider_acquisition_error_is_short_without_traceback(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

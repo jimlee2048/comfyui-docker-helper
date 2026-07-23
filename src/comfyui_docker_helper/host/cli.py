@@ -27,7 +27,6 @@ from comfyui_docker_helper.host.render_service import (
     admit_build_hook_source,
     prepare_render_context,
 )
-from comfyui_docker_helper.host.uv_runner import HostUvError
 
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
 
@@ -188,7 +187,6 @@ def render(
         CanonicalWheelError,
         ConfigurationServiceError,
         HostRenderServiceError,
-        HostUvError,
     ) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),
@@ -333,7 +331,6 @@ def build(
         CanonicalWheelError,
         ConfigurationServiceError,
         HostRenderServiceError,
-        HostUvError,
     ) as error:
         render_configuration_diagnostics(
             _format_config_files(config_files),

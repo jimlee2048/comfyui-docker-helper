@@ -141,7 +141,6 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
             ),
         ),
         toolchain=ToolchainEvidence(
-            host_uv_resolver_version="0.11.28",
             container_uv=VersionEvidence(intended=expected_uv, observed=expected_uv),
             container_uvx=VersionEvidence(
                 intended=expected_uv,

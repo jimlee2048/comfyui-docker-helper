@@ -44,7 +44,6 @@ dependencies = [
     "rich",
     "tomli-w",
     "typer",
-    "uv==0.11.28",
 ]
 
 [project.scripts]

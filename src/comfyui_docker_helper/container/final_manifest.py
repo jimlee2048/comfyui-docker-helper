@@ -61,7 +61,6 @@ from comfyui_docker_helper.container.evidence_writer import (
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.container.transfer_core import verify_required_final
 from comfyui_docker_helper.errors import ApplicationError
-from comfyui_docker_helper.exact_ledger import UV_VERSION
 from comfyui_docker_helper.file_admission import read_regular_absolute_file
 
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
@@ -211,7 +210,6 @@ def _observe_final_manifest(
             uv_image=_image_evidence(projection.toolchain.uv_image),
         ),
         toolchain=ToolchainEvidence(
-            host_uv_resolver_version=UV_VERSION,
             container_uv=VersionEvidence(
                 intended=_required_uv_version(projection),
                 observed=container_uv_version,

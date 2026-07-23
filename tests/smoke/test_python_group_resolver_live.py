@@ -24,13 +24,31 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_REPOSITORY,
     DEFAULT_MANAGED_PYTHON_VERSION,
+    UV_IMAGE_REPOSITORY,
+    UV_VERSION,
 )
-from comfyui_docker_helper.host.canonical_acquisition import UvPythonGroupResolver
+from comfyui_docker_helper.host.canonical_acquisition import DockerPythonGroupResolver
 from comfyui_docker_helper.host.identity_providers import (
     GitOfficialComfyUIIdentityProvider,
+    HttpOciIdentityProvider,
+    OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
 )
-from comfyui_docker_helper.host.uv_runner import locate_host_uv
+
+
+def _uv_descriptor_digest() -> str:
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        return (
+            HttpOciIdentityProvider(client)
+            .resolve(
+                OciIdentityRequest(
+                    "uv-tool",
+                    UV_IMAGE_REPOSITORY,
+                    f"{UV_VERSION}-debian-slim",
+                )
+            )
+            .descriptor_digest
+        )
 
 
 # Live resolution proves supported profiles and strict Python/PyTorch source routing.
@@ -91,8 +109,9 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
 
 
 @pytest.mark.network
+@pytest.mark.docker
 @pytest.mark.smoke
-def test_exact_host_uv_resolves_one_real_complete_group() -> None:
+def test_exact_oci_uv_resolves_one_real_complete_group() -> None:
     request = DirectPythonRequestIdentity(
         type="python-group",
         environment="application",
@@ -100,12 +119,13 @@ def test_exact_host_uv_resolves_one_real_complete_group() -> None:
         python_version=DEFAULT_MANAGED_PYTHON_VERSION,
         platform="linux/amd64",
         index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=_uv_descriptor_digest(),
         members=[
             DirectPythonRequestMember(package="packaging", extras=[], selector="==26.2")
         ],
     )
 
-    resolved = UvPythonGroupResolver(locate_host_uv()).resolve(request)
+    resolved = DockerPythonGroupResolver().resolve(request)
 
     assert [(item.package, item.version) for item in resolved.members] == [
         ("packaging", "26.2")
@@ -113,12 +133,37 @@ def test_exact_host_uv_resolves_one_real_complete_group() -> None:
 
 
 @pytest.mark.network
+@pytest.mark.docker
+@pytest.mark.smoke
+def test_exact_oci_uv_resolves_one_isolated_uv_tool() -> None:
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="uv-tool:ruff",
+        group="uv-tool",
+        python_version=DEFAULT_MANAGED_PYTHON_VERSION,
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=_uv_descriptor_digest(),
+        members=[
+            DirectPythonRequestMember(package="ruff", extras=[], selector="==0.15.18")
+        ],
+    )
+
+    resolved = DockerPythonGroupResolver().resolve(request)
+
+    assert [(item.package, item.version) for item in resolved.members] == [
+        ("ruff", "0.15.18")
+    ]
+
+
+@pytest.mark.network
+@pytest.mark.docker
 @pytest.mark.smoke
 @pytest.mark.parametrize(
     "python_version",
     RELEASE_PYTHON_PROFILES,
 )
-def test_exact_host_uv_resolves_optional_comfy_cli_for_every_target_profile(
+def test_exact_oci_uv_resolves_optional_comfy_cli_for_every_target_profile(
     python_version: str,
 ) -> None:
     request = ComfyCliRequestIdentity(
@@ -130,9 +175,10 @@ def test_exact_host_uv_resolves_optional_comfy_cli_for_every_target_profile(
         python_version=python_version,
         platform="linux/amd64",
         index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=_uv_descriptor_digest(),
     )
 
-    resolved = UvPythonGroupResolver(locate_host_uv()).resolve(request)
+    resolved = DockerPythonGroupResolver().resolve(request)
 
     assert len(resolved.members) == 1
     member = resolved.members[0]
@@ -145,12 +191,13 @@ def test_exact_host_uv_resolves_optional_comfy_cli_for_every_target_profile(
 
 
 @pytest.mark.network
+@pytest.mark.docker
 @pytest.mark.smoke
 @pytest.mark.parametrize(
     "python_version",
     RELEASE_PYTHON_PROFILES,
 )
-def test_exact_host_uv_resolves_cu130_pytorch_group_for_every_release_profile(
+def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
     python_version: str,
 ) -> None:
     request = PyTorchRequestIdentity(
@@ -163,6 +210,7 @@ def test_exact_host_uv_resolves_cu130_pytorch_group_for_every_release_profile(
         platform="linux/amd64",
         python_index_url="https://pypi.org/simple",
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
+        resolver_descriptor_digest=_uv_descriptor_digest(),
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
             DirectPythonRequestMember(
@@ -172,7 +220,7 @@ def test_exact_host_uv_resolves_cu130_pytorch_group_for_every_release_profile(
         ],
     )
 
-    resolved = UvPythonGroupResolver(locate_host_uv()).resolve(request)
+    resolved = DockerPythonGroupResolver().resolve(request)
 
     assert [(item.package, item.version) for item in resolved.members] == [
         ("torch", "2.12.1+cu130"),
@@ -183,6 +231,7 @@ def test_exact_host_uv_resolves_cu130_pytorch_group_for_every_release_profile(
 
 
 @pytest.mark.network
+@pytest.mark.docker
 @pytest.mark.smoke
 def test_pytorch_direct_extra_does_not_fall_back_to_python_index() -> None:
     request = PyTorchRequestIdentity(
@@ -195,6 +244,7 @@ def test_pytorch_direct_extra_does_not_fall_back_to_python_index() -> None:
         platform="linux/amd64",
         python_index_url="https://pypi.org/simple",
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
+        resolver_descriptor_digest=_uv_descriptor_digest(),
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
             DirectPythonRequestMember(
@@ -204,7 +254,7 @@ def test_pytorch_direct_extra_does_not_fall_back_to_python_index() -> None:
     )
 
     with pytest.raises(CanonicalAcquisitionError, match="resolution failed") as raised:
-        UvPythonGroupResolver(locate_host_uv()).resolve(request)
+        DockerPythonGroupResolver().resolve(request)
 
     message = str(raised.value)
     for expected in (

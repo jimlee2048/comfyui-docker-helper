@@ -20,7 +20,7 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         f"{plan.toolchain.uv_image.reference} AS uv",
         f"FROM --platform={plan.toolchain.platform} "
         f"{plan.toolchain.cuda_image.reference}",
-        "COPY --from=uv /uv /uvx /usr/local/bin/",
+        "COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/",
         "COPY build-plan.json /opt/cdh/build/build-plan.json",
         "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
     ]

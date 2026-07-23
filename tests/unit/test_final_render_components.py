@@ -57,7 +57,10 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
         f"FROM --platform=linux/amd64 {plan.toolchain.cuda_image.reference}\n"
         in rendered
     )
-    assert "COPY --from=uv /uv /uvx /usr/local/bin/" in rendered
+    assert (
+        "COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/"
+        in rendered
+    )
     assert "ARG " not in rendered
     assert "\nCMD " not in rendered
     assert "${PATH}" in rendered

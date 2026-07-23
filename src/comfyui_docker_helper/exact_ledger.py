@@ -1,7 +1,6 @@
 """Single code authority for exact release-owned toolchain identities."""
 
 UV_VERSION = "0.11.28"
-UV_RUNTIME_REQUIREMENT = f"uv=={UV_VERSION}"
 UV_BUILD_REQUIREMENT = f"uv_build=={UV_VERSION}"
 UV_IMAGE_REPOSITORY = "ghcr.io/astral-sh/uv"
 COMFYUI_REPOSITORY = "https://github.com/comfyanonymous/ComfyUI.git"

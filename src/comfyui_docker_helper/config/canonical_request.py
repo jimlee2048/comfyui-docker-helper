@@ -196,9 +196,14 @@ def uv_oci_request(config: FinalConfig) -> OciRequestIdentity:
         type="oci",
         role="uv-tool",
         repository=UV_IMAGE_REPOSITORY,
-        tag=config.python.uv_version,
+        tag=uv_provider_tag(config.python.uv_version),
         platform=TargetPlatform(config.build.platforms[0]).value,
     )
+
+
+def uv_provider_tag(selector: str) -> str:
+    """Map one validated public uv release selector to cdh's provider family."""
+    return "debian-slim" if selector == "latest" else f"{selector}-debian-slim"
 
 
 def comfyui_request(config: FinalConfig) -> ComfyUIRequestIdentity:
@@ -283,6 +288,7 @@ def build_canonical_request_graph(
                 index_url=config.python.index_url,
                 python_version=config.python.version,
                 platform=platform.value,
+                resolver_descriptor_digest=uv_descriptor_digest,
             )
         )
     python_members = _members(domains, "python")
@@ -295,6 +301,7 @@ def build_canonical_request_graph(
                 python_version=config.python.version,
                 platform=platform.value,
                 index_url=config.python.index_url,
+                resolver_descriptor_digest=uv_descriptor_digest,
                 members=python_members,
             )
         )
@@ -307,6 +314,7 @@ def build_canonical_request_graph(
                 python_version=config.python.version,
                 platform=platform.value,
                 index_url=config.python.index_url,
+                resolver_descriptor_digest=uv_descriptor_digest,
                 members=(member,),
             )
         )
@@ -359,6 +367,7 @@ def build_canonical_request_graph(
             pytorch_index_url=(
                 f"{config.pytorch.index_base_url.rstrip('/')}/{backend.package_channel}"
             ),
+            resolver_descriptor_digest=uv_descriptor_digest,
             upstream_protected=tuple(
                 ProtectedRequirementProjection(
                     package=item.package,

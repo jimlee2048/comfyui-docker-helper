@@ -300,6 +300,35 @@ def test_python_accepts_unlisted_patch_inside_package_support() -> None:
     assert _diagnostics(config) == ()
 
 
+@pytest.mark.parametrize("selector", ["0.11.28", "latest"])
+def test_uv_release_selector_accepts_exact_or_rolling_authority(selector: str) -> None:
+    document = _document()
+    document["python"] = {"uv_version": selector}
+    config = validate_final_config_structure(document)
+
+    assert _diagnostics(config) == ()
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "0.11",
+        "0.11.28rc1",
+        "v0.11.28",
+        "0.11.28-debian-slim",
+        "debian-slim",
+        "custom",
+        "bad/tag",
+    ],
+)
+def test_uv_release_selector_rejects_non_release_provider_tags(selector: str) -> None:
+    document = _document()
+    document["python"] = {"uv_version": selector}
+    config = validate_final_config_structure(document)
+
+    assert "python.invalid_uv_version" in _codes(config)
+
+
 @pytest.mark.parametrize("version", ["2.12", "2.12.1rc1", "latest", "v2.12.1"])
 def test_pytorch_requires_an_exact_stable_public_version(version: str) -> None:
     document = _document()

@@ -18,6 +18,7 @@ from comfyui_docker_helper.exact_ledger import (
 )
 from comfyui_docker_helper.host.identity_providers import (
     DirectGitIdentityRequest,
+    DockerManagedPythonIdentityProvider,
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
     HttpOciIdentityProvider,
@@ -26,9 +27,7 @@ from comfyui_docker_helper.host.identity_providers import (
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
     RegistryNodeIdentityRequest,
-    UvManagedPythonIdentityProvider,
 )
-from comfyui_docker_helper.host.uv_runner import locate_host_uv
 
 pytestmark = [
     pytest.mark.smoke,
@@ -48,7 +47,7 @@ CUSTOM_SCRIPTS_URL = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.gi
             CUDA_IMAGE_REPOSITORY,
             f"{CUDA_VERSION}-{DEFAULT_CUDA_IMAGE_FLAVOR}-{DEFAULT_CUDA_IMAGE_DISTRO}",
         ),
-        ("uv-tool", "ghcr.io/astral-sh/uv", UV_VERSION),
+        ("uv-tool", "ghcr.io/astral-sh/uv", f"{UV_VERSION}-debian-slim"),
     ],
 )
 def test_live_oci_descriptor_and_linux_amd64_binding(
@@ -67,12 +66,17 @@ def test_live_oci_descriptor_and_linux_amd64_binding(
     "version",
     RELEASE_PYTHON_PROFILES,
 )
+@pytest.mark.docker
 def test_live_exact_uv_managed_python_catalog(version: str) -> None:
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
         uv_identity = HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("uv-tool", "ghcr.io/astral-sh/uv", UV_VERSION)
+            OciIdentityRequest(
+                "uv-tool",
+                "ghcr.io/astral-sh/uv",
+                f"{UV_VERSION}-debian-slim",
+            )
         )
-    identity = UvManagedPythonIdentityProvider(locate_host_uv()).resolve(
+    identity = DockerManagedPythonIdentityProvider().resolve(
         ManagedPythonIdentityRequest(version, uv_identity.descriptor_digest)
     )
 

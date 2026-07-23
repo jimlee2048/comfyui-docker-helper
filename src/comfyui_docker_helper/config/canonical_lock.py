@@ -645,6 +645,7 @@ class ComfyCliRequestIdentity(_StrictLockModel):
     index_url: str = Field(min_length=1)
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
+    resolver_descriptor_digest: str
 
     @field_validator("minimum_version")
     @classmethod
@@ -662,6 +663,11 @@ class ComfyCliRequestIdentity(_StrictLockModel):
     @classmethod
     def _validate_python_version(cls, value: str) -> str:
         return _require_exact_stable_version(value)
+
+    @field_validator("resolver_descriptor_digest")
+    @classmethod
+    def _validate_resolver_digest(cls, value: str) -> str:
+        return _require_sha256(value)
 
 
 class RegistryRequestIdentity(_StrictLockModel):
@@ -730,6 +736,7 @@ class DirectPythonRequestIdentity(_StrictLockModel):
     python_version: str = Field(min_length=1)
     platform: Literal["linux/amd64"]
     index_url: str = Field(min_length=1)
+    resolver_descriptor_digest: str
     members: tuple[DirectPythonRequestMember, ...] = Field(min_length=1)
 
     @field_validator("environment")
@@ -762,6 +769,11 @@ class DirectPythonRequestIdentity(_StrictLockModel):
     def _validate_index_url(cls, value: str) -> str:
         return _require_http_url(value, "index_url")
 
+    @field_validator("resolver_descriptor_digest")
+    @classmethod
+    def _validate_resolver_digest(cls, value: str) -> str:
+        return _require_sha256(value)
+
     @model_validator(mode="after")
     def _validate_group_ownership(self) -> DirectPythonRequestIdentity:
         if self.group == "uv-tool":
@@ -791,6 +803,7 @@ class PyTorchRequestIdentity(_StrictLockModel):
     platform: Literal["linux/amd64"]
     python_index_url: str = Field(min_length=1)
     pytorch_index_url: str = Field(min_length=1)
+    resolver_descriptor_digest: str
     upstream_protected: tuple[ProtectedRequirementProjection, ...] = Field(
         default_factory=tuple
     )
@@ -855,6 +868,11 @@ class PyTorchRequestIdentity(_StrictLockModel):
     @classmethod
     def _validate_index_url(cls, value: str) -> str:
         return _require_http_url(value, "index_url")
+
+    @field_validator("resolver_descriptor_digest")
+    @classmethod
+    def _validate_resolver_digest(cls, value: str) -> str:
+        return _require_sha256(value)
 
     @model_validator(mode="after")
     def _validate_source_channel(self) -> PyTorchRequestIdentity:
@@ -1185,7 +1203,7 @@ def pytorch_index_matches_channel(index_url: str, channel: str) -> bool:
 
 
 def uv_image_version_matches_tag(tag: str, resolved_version: str | None) -> bool:
-    """Bind exact uv semver tags while allowing descriptor-locked moving tags."""
+    """Bind cdh's exact or rolling Debian provider tag to observed uv."""
     if resolved_version is None:
         return False
     try:
@@ -1198,13 +1216,12 @@ def uv_image_version_matches_tag(tag: str, resolved_version: str | None) -> bool
         or resolved.is_devrelease
     ):
         return False
-    try:
-        selector = Version(tag)
-    except InvalidVersion:
+    if tag == "debian-slim":
         return True
-    if str(selector) != tag or selector.is_prerelease or selector.is_devrelease:
-        return True
-    return resolved_version == tag
+    suffix = "-debian-slim"
+    if not tag.endswith(suffix):
+        return False
+    return resolved_version == tag.removesuffix(suffix)
 
 
 def _require_exact_registry_version(value: str) -> str:

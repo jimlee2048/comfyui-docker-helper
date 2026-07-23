@@ -30,10 +30,19 @@ from comfyui_docker_helper.config.value_validation import (
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.file_admission import read_regular_absolute_file
-from comfyui_docker_helper.host.uv_runner import HostUvRunner
+from comfyui_docker_helper.host.uv_docker_executor import (
+    ManagedPythonCatalogOperation,
+    UvDockerExecutor,
+    UvDockerExecutorError,
+    UvResolverDescriptor,
+)
 
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_UV_IMAGE_VERSION_LABEL_PATTERN = re.compile(
+    r"^(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*))(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$"
+)
 _BEARER_PARAMETER = re.compile(r'(\w+)="([^"]*)"')
 _OCI_INDEX_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.list.v2+json",
@@ -347,47 +356,28 @@ type ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 @dataclass(frozen=True, slots=True)
-class UvManagedPythonIdentityProvider:
-    """Read the release-bundled managed-Python catalog through exact host uv."""
+class DockerManagedPythonIdentityProvider:
+    """Read the managed-Python catalog through the exact uv OCI descriptor."""
 
-    uv: HostUvRunner
-    runner: ProcessRunner = subprocess.run
+    executor: UvDockerExecutor | None = None
 
     def resolve(self, request: ManagedPythonIdentityRequest) -> ManagedPythonIdentity:
         source = "managed Python catalog"
         if not _DIGEST_PATTERN.fullmatch(request.catalog_descriptor_digest):
             raise IdentityProviderError(source, ProviderFailureKind.INVALID_REQUEST)
         _normalized_exact_version_request(request.version, source)
-        argv = self.uv.argv(
-            (
-                "python",
-                "list",
-                "--only-downloads",
-                "--all-versions",
-                "--all-platforms",
-                "--all-arches",
-                "--show-urls",
-                "--output-format",
-                "json",
-                request.version,
-            )
-        )
         try:
-            completed = self.runner(
-                argv,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                env={**os.environ, "UV_NO_PROGRESS": "1"},
+            result = (self.executor or UvDockerExecutor()).execute(
+                UvResolverDescriptor(
+                    request.catalog_descriptor_digest, request.platform
+                ),
+                ManagedPythonCatalogOperation(request.version),
             )
-        except (OSError, subprocess.SubprocessError) as error:
+        except UvDockerExecutorError as error:
             raise IdentityProviderError(source, ProviderFailureKind.NETWORK) from error
-        if completed.returncode != 0:
-            raise IdentityProviderError(source, ProviderFailureKind.NETWORK)
         try:
-            rows = json.loads(completed.stdout)
-        except (json.JSONDecodeError, TypeError) as error:
+            rows = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as error:
             raise IdentityProviderError(
                 source, ProviderFailureKind.INVALID_RESPONSE
             ) from error
@@ -825,15 +815,19 @@ def _uv_version_from_config(document: Mapping[str, object], source: str) -> str:
     value = labels.get("org.opencontainers.image.version")
     if not isinstance(value, str):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    match = _UV_IMAGE_VERSION_LABEL_PATTERN.fullmatch(value)
+    if match is None:
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    release = match.group("version")
     try:
-        version = Version(value)
+        version = Version(release)
     except InvalidVersion as error:
         raise IdentityProviderError(
             source, ProviderFailureKind.INVALID_RESPONSE
         ) from error
-    if str(version) != value or version.is_prerelease or version.is_devrelease:
+    if str(version) != release or version.is_prerelease or version.is_devrelease:
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    return value
+    return release
 
 
 def _require_config_platform(

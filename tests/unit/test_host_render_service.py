@@ -57,9 +57,12 @@ from comfyui_docker_helper.container.runtime_files import (
 )
 from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
 from comfyui_docker_helper.host.canonical_acquisition import (
+    DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
+    ProviderIdentityAcquirer,
 )
 from comfyui_docker_helper.host.identity_providers import (
+    DockerManagedPythonIdentityProvider,
     FilesystemLocalExecutableIdentityProvider,
 )
 from comfyui_docker_helper.host.planning_authority import (
@@ -347,7 +350,7 @@ class NoLocalInputs:
 def _prepare(
     config: Path,
     output: Path,
-    fake: FakeAcquirer,
+    fake: object,
     *,
     options: PlanningOptions | None = None,
     overwrite: bool = False,
@@ -752,6 +755,53 @@ def test_locked_performs_zero_provider_calls_and_zero_writes(tmp_path: Path) -> 
     assert _tree(output) == before
 
 
+class _NoProviderCalls:
+    def __getattr__(self, name):
+        raise AssertionError(f"matching lock must not call provider method {name}")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [PlanningOptions(), PlanningOptions(check=True), PlanningOptions(locked=True)],
+)
+def test_matching_lock_modes_do_not_construct_docker_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    options: PlanningOptions,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+
+    def fail_docker_client():
+        raise AssertionError("matching lock must not construct DockerClient")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.uv_docker_executor.DockerClient",
+        fail_docker_client,
+    )
+    unused = _NoProviderCalls()
+    docker_backed = ProviderIdentityAcquirer(
+        oci=unused,
+        managed_python=DockerManagedPythonIdentityProvider(),
+        comfyui=unused,
+        registry=unused,
+        git=unused,
+        python_group=DockerPythonGroupResolver(),
+    )
+
+    prepared = _prepare(
+        config,
+        output,
+        docker_backed,
+        options=options,
+        overwrite=options == PlanningOptions(),
+    )
+
+    assert prepared.lock_result.provider_calls == ()
+
+
 def test_locked_rejects_stale_context_for_config_only_build_changes(
     tmp_path: Path,
 ) -> None:
@@ -796,7 +846,7 @@ def test_uv_descriptor_pre_reuse_validates_cross_dependent_lock_in_every_mode(
         entry for entry in corrected.entries if isinstance(entry, UvImageLockEntry)
     )
     assert uv_entry.repository == "ghcr.io/astral-sh/uv"
-    assert uv_entry.tag == "0.11.28"
+    assert uv_entry.tag == "0.11.28-debian-slim"
     assert uv_entry.digest == DIGEST_B
 
     _write_cross_dependent_incompatible_uv_lock(output)

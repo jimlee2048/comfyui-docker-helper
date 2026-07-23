@@ -296,12 +296,14 @@ def _validate_python_domain(
                     "must satisfy the supported range >=3.12,<3.15",
                 )
             )
-    if not is_oci_tag(config.python.uv_version):
+    if config.python.uv_version != "latest" and not _is_exact_stable_release(
+        config.python.uv_version
+    ):
         diagnostics.append(
             Diagnostic(
                 ("python", "uv_version"),
                 "python.invalid_uv_version",
-                "must be one non-empty control-free OCI tag",
+                "must be latest or an exact stable major.minor.patch release",
             )
         )
     _validate_http_index(

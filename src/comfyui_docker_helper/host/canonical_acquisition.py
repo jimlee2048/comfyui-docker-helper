@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import subprocess
-import tempfile
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -81,13 +78,18 @@ from comfyui_docker_helper.host.identity_providers import (
     RegistryNodeIdentityProvider,
     RegistryNodeIdentityRequest,
 )
-from comfyui_docker_helper.host.uv_runner import HostUvRunner
+from comfyui_docker_helper.host.uv_docker_executor import (
+    PyTorchCompileOperation,
+    RequirementsCompileOperation,
+    UvDockerExecutor,
+    UvDockerExecutorError,
+    UvResolverDescriptor,
+)
 from comfyui_docker_helper.pytorch_resolution import (
     pytorch_resolution_manifest_bytes,
 )
 
 _COMFYUI_FLOOR = Version(COMFYUI_MINIMUM_VERSION)
-_LINUX_AMD64_UV_PLATFORM = "x86_64-unknown-linux-gnu"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +110,6 @@ class PythonGroupResolver(Protocol):
     ) -> ResolvedPythonGroup: ...
 
 
-type ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
 type MetadataReader = Callable[[str], str]
 type RequirementsReader = Callable[[ComfyUIRequirementsRequestIdentity], bytes]
 
@@ -139,11 +140,10 @@ def _read_comfyui_requirements(
 
 
 @dataclass(frozen=True, slots=True)
-class UvPythonGroupResolver:
-    """Resolve one complete group through the exact absolute cdh-owned uv."""
+class DockerPythonGroupResolver:
+    """Resolve one complete group through its exact uv OCI descriptor."""
 
-    uv: HostUvRunner
-    runner: ProcessRunner = subprocess.run
+    executor: UvDockerExecutor | None = None
     metadata_reader: MetadataReader = _read_metadata_sidecar
 
     def resolve(
@@ -157,6 +157,7 @@ class UvPythonGroupResolver:
                 python_version=request.python_version,
                 platform=request.platform,
                 index_url=request.index_url,
+                resolver_descriptor_digest=request.resolver_descriptor_digest,
                 members=[
                     DirectPythonRequestMember(
                         package=request.package,
@@ -172,52 +173,21 @@ class UvPythonGroupResolver:
             _requirement_text(member.package, member.extras, member.selector)
             for member in request.members
         )
-        argv = self.uv.argv(
-            (
-                "pip",
-                "compile",
-                "-",
-                "--no-header",
-                "--no-annotate",
-                "--no-strip-extras",
-                "--python-version",
-                request.python_version,
-                "--python-platform",
-                _uv_platform(request.platform),
-                "--default-index",
-                request.index_url,
-                "--resolution",
-                "highest",
-                "--prerelease",
-                "disallow",
-                "--no-sources",
-                "--no-python-downloads",
-                "--color",
-                "never",
-            )
-        )
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("UV_", "PIP_"))
-        }
-        environment.update({"UV_NO_CONFIG": "1", "UV_NO_PROGRESS": "1"})
         try:
-            completed = self.runner(
-                argv,
-                input=f"{requirements}\n",
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                cwd="/",
-                env=environment,
+            result = (self.executor or UvDockerExecutor()).execute(
+                UvResolverDescriptor(
+                    request.resolver_descriptor_digest, request.platform
+                ),
+                RequirementsCompileOperation(
+                    request.python_version,
+                    request.index_url,
+                    f"{requirements}\n".encode(),
+                ),
             )
-        except (OSError, subprocess.SubprocessError) as error:
+            output = result.stdout.decode("utf-8")
+        except (UvDockerExecutorError, UnicodeDecodeError) as error:
             raise CanonicalAcquisitionError("Python group resolution failed") from error
-        if completed.returncode != 0:
-            raise CanonicalAcquisitionError("Python group resolution failed")
-        resolved = _parse_direct_members(completed.stdout, request)
+        resolved = _parse_direct_members(output, request)
         if isinstance(request, PyTorchRequestIdentity) and any(
             not pytorch_core_version_matches_channel(
                 member.package, member.version, request.channel
@@ -240,56 +210,23 @@ class UvPythonGroupResolver:
             python_index_url=request.python_index_url,
             pytorch_index_url=request.pytorch_index_url,
         )
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("UV_", "PIP_"))
-        }
-        environment.update({"UV_NO_CONFIG": "1", "UV_NO_PROGRESS": "1"})
-        with tempfile.TemporaryDirectory(prefix="cdh-pytorch-resolution-") as root:
-            path = Path(root) / "pyproject.toml"
-            path.write_bytes(manifest)
-            argv = self.uv.argv(
-                (
-                    "pip",
-                    "compile",
-                    str(path),
-                    "--format",
-                    "pylock.toml",
-                    "--no-header",
-                    "--python-version",
-                    request.python_version,
-                    "--python-platform",
-                    _uv_platform(request.platform),
-                    "--resolution",
-                    "highest",
-                    "--prerelease",
-                    "disallow",
-                    "--no-python-downloads",
-                    "--color",
-                    "never",
-                    "--project",
-                    root,
-                )
-            )
-            try:
-                completed = self.runner(
-                    argv,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    cwd=root,
-                    env=environment,
-                )
-            except (OSError, subprocess.SubprocessError) as error:
-                raise _pytorch_resolution_error(request, "resolution failed") from error
-        if completed.returncode != 0:
-            raise _pytorch_resolution_error(request, "resolution failed")
         try:
-            document = tomllib.loads(completed.stdout)
+            result = (self.executor or UvDockerExecutor()).execute(
+                UvResolverDescriptor(
+                    request.resolver_descriptor_digest, request.platform
+                ),
+                PyTorchCompileOperation(request.python_version, manifest),
+            )
+            document = tomllib.loads(result.stdout.decode("utf-8"))
             packages = document["packages"]
-        except (KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        except UvDockerExecutorError as error:
+            raise _pytorch_resolution_error(request, "resolution failed") from error
+        except (
+            KeyError,
+            TypeError,
+            UnicodeDecodeError,
+            tomllib.TOMLDecodeError,
+        ) as error:
             raise _pytorch_resolution_error(
                 request, "resolver returned invalid PyTorch metadata"
             ) from error
@@ -798,12 +735,6 @@ def _pytorch_resolution_error(
         f"Python {request.python_version}, platform {request.platform}, "
         f"source {request.pytorch_index_url}"
     )
-
-
-def _uv_platform(platform: str) -> str:
-    if platform != "linux/amd64":
-        raise ValueError("unsupported Python resolver platform")
-    return _LINUX_AMD64_UV_PLATFORM
 
 
 def _selector_matches(selector: str, version: Version) -> bool:

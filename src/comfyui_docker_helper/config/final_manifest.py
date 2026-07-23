@@ -191,7 +191,6 @@ class ComfyCliEvidence(ToolEnvironmentEvidence):
 
 
 class ToolchainEvidence(_ManifestModel):
-    host_uv_resolver_version: str
     container_uv: VersionEvidence
     container_uvx: VersionEvidence
     python: VersionEvidence
@@ -200,11 +199,6 @@ class ToolchainEvidence(_ManifestModel):
     cdh: CdhToolEnvironmentEvidence
     comfy_cli: ComfyCliEvidence | None = None
     uv_tools: tuple[ToolEnvironmentEvidence, ...]
-
-    @field_validator("host_uv_resolver_version")
-    @classmethod
-    def _validate_release_version(cls, value: str) -> str:
-        return validate_exact_stable_distribution_version(value)
 
     @field_validator("python_catalog_descriptor_digest")
     @classmethod

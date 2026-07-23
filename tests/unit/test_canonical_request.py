@@ -23,6 +23,7 @@ from comfyui_docker_helper.config.canonical_request import (
     SelectorStability,
     request_keys,
     request_stability,
+    uv_provider_tag,
 )
 
 DIGEST = f"sha256:{'a' * 64}"
@@ -57,6 +58,7 @@ def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
             platform="linux/amd64",
             python_index_url="https://pypi.org/simple",
             pytorch_index_url="https://download.pytorch.org/whl/cu130",
+            resolver_descriptor_digest=DIGEST,
             members=(
                 DirectPythonRequestMember(
                     package="torch", extras=(), selector="==2.12.1"
@@ -73,6 +75,7 @@ def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
             python_version="3.13.14",
             platform="linux/amd64",
             index_url="https://pypi.org/simple",
+            resolver_descriptor_digest=DIGEST,
             members=(
                 DirectPythonRequestMember(
                     package="numpy", extras=(), selector="<3,>=2"
@@ -89,6 +92,7 @@ def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
             python_version="3.13.14",
             platform="linux/amd64",
             index_url="https://pypi.org/simple",
+            resolver_descriptor_digest=DIGEST,
             members=(
                 DirectPythonRequestMember(
                     package="ruff", extras=(), selector="<0.16,>=0.15"
@@ -117,6 +121,7 @@ def test_non_python_domains_use_semantic_grouped_keys() -> None:
         index_url="https://pypi.org/simple",
         python_version="3.13.14",
         platform="linux/amd64",
+        resolver_descriptor_digest=DIGEST,
     )
     registry = RegistryRequestIdentity(
         type="registry", id="example-node", selector="latest"
@@ -179,6 +184,90 @@ def test_release_inputs_bind_wheel_without_affecting_resolution_keys() -> None:
     )
 
     assert release == PlanningReleaseInputs("26.1.2", "0.5.0", DIGEST)
+
+
+@pytest.mark.parametrize(
+    ("selector", "tag"),
+    [("0.11.28", "0.11.28-debian-slim"), ("latest", "debian-slim")],
+)
+def test_uv_release_selector_maps_to_owned_provider_family(
+    selector: str, tag: str
+) -> None:
+    assert uv_provider_tag(selector) == tag
+
+
+# Every uv-produced result changes identity when its executable descriptor changes.
+def test_uv_descriptor_digest_invalidates_every_uv_backed_request_domain() -> None:
+    def requests(digest: str):
+        direct_member = DirectPythonRequestMember(
+            package="packaging", extras=(), selector="==26.2"
+        )
+        return (
+            ManagedPythonRequestIdentity(
+                type="managed-python",
+                version="3.13.14",
+                implementation="cpython",
+                platform="linux/amd64",
+                libc="gnu",
+                catalog_descriptor_digest=digest,
+            ),
+            DirectPythonRequestIdentity(
+                type="python-group",
+                environment="application",
+                group="application-extra",
+                python_version="3.13.14",
+                platform="linux/amd64",
+                index_url="https://pypi.org/simple",
+                resolver_descriptor_digest=digest,
+                members=(direct_member,),
+            ),
+            DirectPythonRequestIdentity(
+                type="python-group",
+                environment="uv-tool:packaging",
+                group="uv-tool",
+                python_version="3.13.14",
+                platform="linux/amd64",
+                index_url="https://pypi.org/simple",
+                resolver_descriptor_digest=digest,
+                members=(direct_member,),
+            ),
+            PyTorchRequestIdentity(
+                type="pytorch-group",
+                environment="application",
+                group="pytorch",
+                backend="cuda",
+                channel="cu130",
+                python_version="3.13.14",
+                platform="linux/amd64",
+                python_index_url="https://pypi.org/simple",
+                pytorch_index_url="https://download.pytorch.org/whl/cu130",
+                resolver_descriptor_digest=digest,
+                members=(
+                    DirectPythonRequestMember(
+                        package="torch", extras=(), selector="==2.12.1"
+                    ),
+                ),
+            ),
+            ComfyCliRequestIdentity(
+                type="comfy-cli",
+                package="comfy-cli",
+                policy="highest-target-compatible-stable",
+                minimum_version="1.7.0",
+                environment="uv-tool:comfy-cli",
+                index_url="https://pypi.org/simple",
+                python_version="3.13.14",
+                platform="linux/amd64",
+                resolver_descriptor_digest=digest,
+            ),
+        )
+
+    current = requests(DIGEST)
+    changed = requests(f"sha256:{'b' * 64}")
+
+    assert all(
+        compute_request_digest(before) != compute_request_digest(after)
+        for before, after in zip(current, changed, strict=True)
+    )
 
 
 def test_moving_and_exact_stability_remain_group_scoped() -> None:

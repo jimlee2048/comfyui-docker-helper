@@ -60,7 +60,7 @@ def _requests(*, application_extras: bool = False):
             type="oci",
             role="uv-tool",
             repository="ghcr.io/astral-sh/uv",
-            tag="0.11.28",
+            tag="0.11.28-debian-slim",
             platform="linux/amd64",
         ),
         ManagedPythonRequestIdentity(
@@ -93,6 +93,7 @@ def _requests(*, application_extras: bool = False):
             platform="linux/amd64",
             python_index_url="https://pypi.org/simple",
             pytorch_index_url="https://download.pytorch.org/whl/cu130",
+            resolver_descriptor_digest=DIGEST_A,
             members=(
                 DirectPythonRequestMember(
                     package="torch", extras=(), selector="==2.12.1"
@@ -109,6 +110,7 @@ def _requests(*, application_extras: bool = False):
                 python_version="3.13.14",
                 platform="linux/amd64",
                 index_url="https://pypi.org/simple",
+                resolver_descriptor_digest=DIGEST_A,
                 members=(
                     DirectPythonRequestMember(
                         package="numpy", extras=(), selector="<3,>=2"

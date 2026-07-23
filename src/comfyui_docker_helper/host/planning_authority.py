@@ -43,21 +43,20 @@ from comfyui_docker_helper.exact_ledger import (
     PIP_VERSION,
 )
 from comfyui_docker_helper.host.canonical_acquisition import (
+    DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
     ProviderIdentityAcquirer,
-    UvPythonGroupResolver,
 )
 from comfyui_docker_helper.host.identity_providers import (
+    DockerManagedPythonIdentityProvider,
     FilesystemLocalExecutableIdentityProvider,
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
     HttpOciIdentityProvider,
     HttpRegistryNodeIdentityProvider,
     LocalExecutableIdentityRequest,
-    UvManagedPythonIdentityProvider,
 )
 from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
-from comfyui_docker_helper.host.uv_runner import locate_host_uv
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 
 
@@ -87,16 +86,15 @@ class DefaultPlanningProviders:
 @contextmanager
 def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
     """Create concrete final providers only for render/build, never validate."""
-    uv = locate_host_uv()
     canonical_wheel = build_canonical_wheel()
     with httpx.Client(follow_redirects=True, timeout=30.0) as client:
         provider = ProviderIdentityAcquirer(
             oci=HttpOciIdentityProvider(client),
-            managed_python=UvManagedPythonIdentityProvider(uv),
+            managed_python=DockerManagedPythonIdentityProvider(),
             comfyui=GitOfficialComfyUIIdentityProvider(),
             registry=HttpRegistryNodeIdentityProvider(client),
             git=GitDirectIdentityProvider(),
-            python_group=UvPythonGroupResolver(uv),
+            python_group=DockerPythonGroupResolver(),
         )
         yield DefaultPlanningProviders(
             CachingCanonicalAcquirer(provider),

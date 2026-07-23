@@ -17,6 +17,7 @@ from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.identity_providers import (
     DirectGitIdentityRequest,
+    DockerManagedPythonIdentityProvider,
     FilesystemLocalExecutableIdentityProvider,
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
@@ -30,9 +31,8 @@ from comfyui_docker_helper.host.identity_providers import (
     ProviderFailureKind,
     RegistryNodeIdentityRequest,
     SelectorStability,
-    UvManagedPythonIdentityProvider,
 )
-from comfyui_docker_helper.host.uv_runner import HostUvRunner
+from comfyui_docker_helper.host.uv_docker_executor import UvResolverResult
 
 INDEX_DIGEST_A = f"sha256:{'a' * 64}"
 INDEX_DIGEST_B = f"sha256:{'b' * 64}"
@@ -44,7 +44,7 @@ CONFIG_DOCUMENT = {
     "os": "linux",
     "architecture": "amd64",
     "config": {
-        "Labels": {"org.opencontainers.image.version": "0.11.28"},
+        "Labels": {"org.opencontainers.image.version": "0.11.28-trixie-slim"},
     },
 }
 CONFIG_CONTENT = json.dumps(CONFIG_DOCUMENT, separators=(",", ":")).encode()
@@ -445,6 +445,16 @@ def _completed(stdout: str, *, returncode: int = 0) -> subprocess.CompletedProce
 
 
 # Managed-Python catalog rows must select one exact canonical target identity.
+class _UvExecutor:
+    def __init__(self, stdout: bytes) -> None:
+        self.stdout = stdout
+        self.calls: list[tuple[object, object]] = []
+
+    def execute(self, descriptor, operation):
+        self.calls.append((descriptor, operation))
+        return UvResolverResult(self.stdout, b"")
+
+
 @pytest.mark.parametrize("version", ["3.12.13", "3.13.14", "3.14.6"])
 def test_managed_python_selects_exact_uv_catalog_identity(version: str) -> None:
     rows = [
@@ -471,17 +481,8 @@ def test_managed_python_selects_exact_uv_catalog_identity(version: str) -> None:
             "libc": "gnu",
         },
     ]
-    calls: list[tuple[Sequence[str], Mapping[str, object]]] = []
-
-    def runner(
-        args: Sequence[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((args, kwargs))
-        return _completed(json.dumps(rows))
-
-    provider = UvManagedPythonIdentityProvider(
-        HostUvRunner(Path("/owned/uv")), runner=runner
-    )
+    executor = _UvExecutor(json.dumps(rows).encode())
+    provider = DockerManagedPythonIdentityProvider(executor)
     request = ManagedPythonIdentityRequest(version, INDEX_DIGEST_A)
 
     identity = provider.resolve(request)
@@ -494,16 +495,15 @@ def test_managed_python_selects_exact_uv_catalog_identity(version: str) -> None:
     assert identity.provider == "uv-managed"
     assert identity.catalog_descriptor_digest == INDEX_DIGEST_A
     assert identity.catalog_key.endswith("linux-x86_64-gnu")
-    assert calls[0][0][0] == "/owned/uv"
-    assert "--no-config" in calls[0][0]
-    assert "--all-platforms" in calls[0][0]
+    descriptor, operation = executor.calls[0]
+    assert descriptor.digest == INDEX_DIGEST_A
+    assert descriptor.platform == "linux/amd64"
+    assert operation.python_version == version
 
 
 def test_managed_python_rejects_missing_and_duplicate_catalog_rows() -> None:
     request = ManagedPythonIdentityRequest("3.13.14", INDEX_DIGEST_A)
-    provider = UvManagedPythonIdentityProvider(
-        HostUvRunner(Path("/owned/uv")), runner=lambda *args, **kwargs: _completed("[]")
-    )
+    provider = DockerManagedPythonIdentityProvider(_UvExecutor(b"[]"))
     with pytest.raises(IdentityProviderError) as missing:
         provider.resolve(request)
     assert missing.value.kind is ProviderFailureKind.NOT_FOUND
@@ -519,9 +519,8 @@ def test_managed_python_rejects_missing_and_duplicate_catalog_rows() -> None:
         "arch": "x86_64",
         "libc": "gnu",
     }
-    duplicate = UvManagedPythonIdentityProvider(
-        HostUvRunner(Path("/owned/uv")),
-        runner=lambda *args, **kwargs: _completed(json.dumps([row, row])),
+    duplicate = DockerManagedPythonIdentityProvider(
+        _UvExecutor(json.dumps([row, row]).encode())
     )
     with pytest.raises(IdentityProviderError) as ambiguous:
         duplicate.resolve(request)
@@ -557,9 +556,8 @@ def test_managed_python_rejects_missing_and_duplicate_catalog_rows() -> None:
 def test_managed_python_maps_malformed_catalog_rows_to_invalid_response(
     row: dict[str, object],
 ) -> None:
-    provider = UvManagedPythonIdentityProvider(
-        HostUvRunner(Path("/owned/uv")),
-        runner=lambda *args, **kwargs: _completed(json.dumps([row])),
+    provider = DockerManagedPythonIdentityProvider(
+        _UvExecutor(json.dumps([row]).encode())
     )
 
     with pytest.raises(IdentityProviderError) as raised:
@@ -589,9 +587,8 @@ def test_managed_python_maps_unsafe_catalog_key_to_invalid_response(
         "arch": "x86_64",
         "libc": "gnu",
     }
-    provider = UvManagedPythonIdentityProvider(
-        HostUvRunner(Path("/owned/uv")),
-        runner=lambda *args, **kwargs: _completed(json.dumps([row])),
+    provider = DockerManagedPythonIdentityProvider(
+        _UvExecutor(json.dumps([row]).encode())
     )
 
     with pytest.raises(IdentityProviderError) as raised:
@@ -613,9 +610,8 @@ def test_managed_python_preserves_safe_opaque_catalog_key() -> None:
         "arch": "x86_64",
         "libc": "gnu",
     }
-    provider = UvManagedPythonIdentityProvider(
-        HostUvRunner(Path("/owned/uv")),
-        runner=lambda *args, **kwargs: _completed(json.dumps([row])),
+    provider = DockerManagedPythonIdentityProvider(
+        _UvExecutor(json.dumps([row]).encode())
     )
 
     identity = provider.resolve(ManagedPythonIdentityRequest(version, INDEX_DIGEST_A))
@@ -624,21 +620,13 @@ def test_managed_python_preserves_safe_opaque_catalog_key() -> None:
 
 
 def test_managed_python_rejects_invalid_catalog_descriptor_before_uv() -> None:
-    called = False
-
-    def runner(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        nonlocal called
-        called = True
-        return _completed("[]")
-
-    provider = UvManagedPythonIdentityProvider(
-        HostUvRunner(Path("/owned/uv")), runner=runner
-    )
+    executor = _UvExecutor(b"[]")
+    provider = DockerManagedPythonIdentityProvider(executor)
     with pytest.raises(IdentityProviderError) as raised:
         provider.resolve(ManagedPythonIdentityRequest("3.13.14", "sha256:bad"))
 
     assert raised.value.kind is ProviderFailureKind.INVALID_REQUEST
-    assert called is False
+    assert executor.calls == []
 
 
 def _git_runner(

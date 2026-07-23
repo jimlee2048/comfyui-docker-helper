@@ -196,6 +196,7 @@ def accepted_resolution(
             platform="linux/amd64",
             python_index_url=config.python.index_url,
             pytorch_index_url=(f"{config.pytorch.index_base_url.rstrip('/')}/cu130"),
+            resolver_descriptor_digest=DIGEST_B,
             upstream_protected=[
                 ProtectedRequirementProjection(
                     package=item.package,
@@ -227,7 +228,7 @@ def accepted_resolution(
         UvImageLockEntry(
             request_digest=DIGEST_B,
             repository=UV_IMAGE_REPOSITORY,
-            tag="0.11.28",
+            tag="0.11.28-debian-slim",
             digest=DIGEST_B,
             kind="index",
             platform="linux/amd64",
@@ -288,6 +289,7 @@ def accepted_resolution(
             index_url=config.python.index_url,
             python_version=config.python.version,
             platform="linux/amd64",
+            resolver_descriptor_digest=DIGEST_B,
         )
         entries.insert(
             4,

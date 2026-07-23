@@ -10,8 +10,10 @@ import pytest
 from comfyui_docker_helper.config.canonical_lock import (
     MAX_COMFYUI_REQUIREMENTS_BYTES,
     BuildHookLockEntry,
+    ComfyCliRequestIdentity,
     ComfyUIRequirementsLockEntry,
     ComfyUIRequirementsRequestIdentity,
+    DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
@@ -29,6 +31,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.canonical_acquisition import (
+    DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
     ProviderIdentityAcquirer,
     ResolvedPythonGroup,
@@ -40,6 +43,7 @@ from comfyui_docker_helper.host.identity_providers import (
     ManagedPythonIdentity,
     OciIdentity,
 )
+from comfyui_docker_helper.host.uv_docker_executor import UvResolverResult
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
@@ -97,6 +101,16 @@ class _PythonGroup:
         )
 
 
+class _UvExecutor:
+    def __init__(self, stdout: bytes) -> None:
+        self.stdout = stdout
+        self.calls: list[tuple[object, object]] = []
+
+    def execute(self, descriptor, operation):
+        self.calls.append((descriptor, operation))
+        return UvResolverResult(self.stdout, b"")
+
+
 def _acquirer(**changes):
     values = {
         "oci": _Oci(),
@@ -117,7 +131,7 @@ def test_uv_provider_returns_one_fixed_image_domain_result() -> None:
         type="oci",
         role="uv-tool",
         repository="ghcr.io/astral-sh/uv",
-        tag="0.11.28",
+        tag="0.11.28-debian-slim",
         platform="linux/amd64",
     )
 
@@ -239,6 +253,7 @@ def test_pytorch_provider_returns_one_complete_atomic_group() -> None:
         platform="linux/amd64",
         python_index_url="https://pypi.org/simple",
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
+        resolver_descriptor_digest=DIGEST_A,
         members=(
             DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
             DirectPythonRequestMember(
@@ -257,6 +272,107 @@ def test_pytorch_provider_returns_one_complete_atomic_group() -> None:
         "torchvision",
     )
     assert entry.setuptools_specifier == "<82"
+
+
+# The OCI adapter preserves each request's exact descriptor and existing result parser.
+def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests() -> (
+    None
+):
+    ordinary_executor = _UvExecutor(b"packaging==26.2\n")
+    ordinary = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(
+                package="packaging", extras=(), selector="==26.2"
+            ),
+        ),
+    )
+
+    resolved = DockerPythonGroupResolver(ordinary_executor).resolve(ordinary)
+
+    assert [(item.package, item.version) for item in resolved.members] == [
+        ("packaging", "26.2")
+    ]
+    assert ordinary_executor.calls[0][0].digest == DIGEST_A
+    assert ordinary_executor.calls[0][1].index_url == "https://pypi.org/simple"
+
+    cli_executor = _UvExecutor(b"comfy-cli==1.8.0\n")
+    cli = ComfyCliRequestIdentity(
+        type="comfy-cli",
+        package="comfy-cli",
+        policy="highest-target-compatible-stable",
+        minimum_version="1.7.0",
+        environment="uv-tool:comfy-cli",
+        index_url="https://pypi.org/simple",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        resolver_descriptor_digest=DIGEST_B,
+    )
+
+    cli_result = DockerPythonGroupResolver(cli_executor).resolve(cli)
+
+    assert [(item.package, item.version) for item in cli_result.members] == [
+        ("comfy-cli", "1.8.0")
+    ]
+    assert cli_executor.calls[0][0].digest == DIGEST_B
+
+
+def test_docker_python_group_resolver_preserves_pytorch_routing_and_metadata() -> None:
+    executor = _UvExecutor(
+        b"""
+[[packages]]
+name = "torch"
+version = "2.12.1+cu130"
+wheels = [{ url = "https://download.pytorch.org/whl/cu130/torch.whl" }]
+
+[[packages]]
+name = "torchvision"
+version = "0.27.1+cu130"
+wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
+"""
+    )
+    request = PyTorchRequestIdentity(
+        type="pytorch-group",
+        environment="application",
+        group="pytorch",
+        backend="cuda",
+        channel="cu130",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        python_index_url="https://pypi.org/simple",
+        pytorch_index_url="https://download.pytorch.org/whl/cu130",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+            DirectPythonRequestMember(
+                package="torchvision", extras=(), selector="==0.27.1"
+            ),
+        ),
+    )
+    metadata = (
+        "Metadata-Version: 2.4\n"
+        "Name: torch\n"
+        "Version: 2.12.1+cu130\n"
+        "Requires-Dist: setuptools<82\n"
+    )
+
+    resolved = DockerPythonGroupResolver(
+        executor, metadata_reader=lambda _url: metadata
+    ).resolve(request)
+
+    assert [(item.package, item.version) for item in resolved.members] == [
+        ("torch", "2.12.1+cu130"),
+        ("torchvision", "0.27.1+cu130"),
+    ]
+    assert resolved.setuptools_specifier == "<82"
+    assert executor.calls[0][0].digest == DIGEST_A
+    assert b'name = "pytorch"' in executor.calls[0][1].pyproject
 
 
 # Local hook acquisition removes the host-only prefix and retains typed content

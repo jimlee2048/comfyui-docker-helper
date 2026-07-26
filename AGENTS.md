@@ -1,92 +1,18 @@
-# Repository Guidelines
+# Repository Agent Instructions
 
-## About this Project
+## Mandatory Shared Authorities
 
-`comfyui-docker-helper`: A Python CLI package helps to build and run ComfyUI in docker container.
-
-
-## Project Structure
-
-This project uses a src/ layout.
-
-- `src/comfyui_docker_helper/`: The importable Python CLI package.
-    - `config/`: config models, validation, merge, and render plans.
-    - `rendering/`: materializes Docker build contexts.
-    - `host/`: commands executed on the host machine.
-    - `container/`: helpers executed inside Docker build containers.
-    - `resources/`: stores package-owned files used by the internal implementation.
-- `tests/`: Test suites and fixtures.
-    - `tests/unit/`: unit tests.
-    - `tests/integration/`: integration tests.
-    - `tests/smoke/`: smoke tests.
-    - `tests/fixtures/<set>/`: test fixture sets.
-- `examples/`: User-facing config examples.
-
-
-## Development Toolchain
-
-Use `uv` for Python execution, dependency management, and packaging:
-- `uv sync --locked`: install the locked development environment.
-- `uv run --locked python -m build`: build wheel and source distribution artifacts.
-- `uv run cdh --help`: verify the local CLI entry point.
-- `uv run cdh host validate -f examples/minimal.toml`: validate a sample config.
-
-Use `ruff` for formatting and lint checks:
-- `uv run ruff format --check .`: check formatting without rewriting files.
-- `uv run ruff check .`: run lint checks.
-
-Use `pytest` for testing:
-- `uv run pytest`: run the full pytest suite.
-
-
-## Coding Guidelines
-
-### General
-- Use spaces for indentation, LF line endings, double quotes.
-- Use English for identifiers, code comments, commit messages, and technical docs.
-- Keep comments simple and useful. Explain intent or non-obvious constraints, not obvious code.
-- Keep CLI-facing errors, warnings, and information short, user-readable, and actionable; remove noisy or misleading messages instead of adding more logging.
-- Remove dead fallbacks, migration paths, unused options, debug prints, and unreachable code when newer infrastructure makes them obsolete.
-- Pass the narrowest data needed across module boundaries; avoid broad context objects unless the callee owns that responsibility.
-
-### Python
-- Keep modules, functions, variables, and pytest tests in `snake_case`; use `PascalCase` for classes and Pydantic models.
-- Keep imports at module scope; avoid inline imports unless needed to prevent circular dependencies.
-- Avoid unnecessary `try`/`except` blocks and catch specific exception types.
-- Avoid probing child objects with arbitrary `getattr(..., default)` calls for parent control flow; prefer explicit fields or typed models.
-- Use Pydantic models for structured configuration and validation boundaries.
-- Keep Pydantic models strictly typed; prefer precise field types, `Literal`, and discriminated unions over broad `dict`, `object`, or `Any`.
-- Prefer `pathlib.Path` for filesystem code.
-- When using Python language features, check the requires-python field in pyproject.toml for the current minimum supported runtime.
-
-
-## Testing Guidelines
-
-- Name test files `test_*.py` and place focused unit coverage in `tests/unit/`.
-- Pytest is configured with strict markers. Mark expensive or environment-dependent tests with `docker`, `network`, `gpu`, or `slow`; each cost marker also requires its matching `--run-docker`, `--run-network`, `--run-gpu`, or `--run-slow` authorization. `smoke` classifies smoke coverage but does not authorize external access.
-- Use `tests/integration/` when behavior crosses CLI, rendering, subprocess, or filesystem boundaries.
-- Test the current behavior contract; avoid guard tests that only assert deprecated legacy behavior is absent.
-- Mark temporary development-only tests with a code comment, and remove them before the related work is complete.
-- The default `uv run pytest` suite is offline and skips cost-marked tests without their explicit authorizations. For quicker local checks, run targeted paths such as `uv run pytest tests/unit` before the full offline suite. See `tests/README.md` for cost tiers and acceptance execution rules.
-
-
-## Commit & Pull Request Guidelines
-
-- Write concise commit messages in English, following [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/#specification).
-- Pull requests should describe behavior changes, list validation commands run, link related issues when available, and include screenshots or logs only when CLI output, Docker rendering, or diagnostics changed.
-
-
-## External Resources
-
-### ComfyUI
-- [ComfyUI App](https://github.com/Comfy-Org/ComfyUI)
-- [comfy-cli](https://github.com/Comfy-Org/comfy-cli)
-- [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager/tree/manager-v4):
-    - Provides `cm-cli`, which cdh uses for Registry node operations.
-    - cdh installs the exact Manager requirement declared by the selected
-      ComfyUI checkout.
-- [Comfy Registry](https://registry.comfy.org/): the official registry of ComfyUI custom_nodes.
-
+- Before any project work, read
+  [`docs/dev/contributing.md`](docs/dev/contributing.md) completely and follow
+  its environment, repository structure, coding, testing-workflow, Git, and
+  review rules.
+- Before selecting, adding, changing, or running tests, read
+  [`tests/README.md`](tests/README.md) completely and follow its test-layer,
+  cost-authorization, acceptance, validation-selection, and
+  resource-discipline rules.
+- Before changing tracked documentation, read
+  [`docs/dev/README.md`](docs/dev/README.md) completely and follow its audience,
+  canonical-ownership, current-only, and maintenance rules.
 
 ## Agent-Specific Working Rules
 
@@ -95,12 +21,18 @@ Use `pytest` for testing:
 - Keep work planning details in `docs/workdesk/`; do not mention milestones, task plans, or implementation work status in docs, examples, code comments, or user-facing copy.
 - Work on one active plan at a time, and one plan task inside it at a time.
 - Load task-relevant skills when the current agent runtime provides them.
-- For real browser verification, use the browser verification tool selected by the current agent runtime when it declares a preference. Delegate browser verification to a sub-agent when sub-agents are available.
-- Sub-agents may take a long time to complete. After delegation, patiently wait for completion until the sub-agent has clearly stalled or terminated. While waiting for sub-agents, do not interrupt or require immediate report, do not perform unnecessary parallel tasks.
+- For real browser verification, use the browser verification tool selected by
+  the current agent runtime when it declares a preference. When using Codex,
+  prefer Chrome plugin [@chrome](plugin://chrome@openai-bundled), then In-App
+  Browser plugin [@Browser](plugin://browser@openai-bundled). Delegate browser
+  verification to a sub-agent when sub-agents are available.
+- Sub-agents may take a long time to complete. After delegation, patiently wait
+  for completion until the sub-agent has clearly stalled or terminated. While
+  waiting for sub-agents, do not interrupt or require immediate report, and do
+  not perform unnecessary parallel tasks.
 
 ### Codex-Specific
 - Run the following commands with elevated execution permissions:
     - Docker CLI commands, such as `docker build`.
     - Commands that may access a local GPU, such as `nvidia-smi`.
     - Commands that write to or update Git state, such as `git commit`.
-- Browser verification tool selection: prefer Chrome plugin [@chrome](plugin://chrome@openai-bundled), then In-App Browser plugin [@Browser](plugin://browser@openai-bundled).

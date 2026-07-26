@@ -48,8 +48,8 @@ managed context directory.
   building, reconciliation modes, and generated artifacts.
 - [Runtime](docs/user/runtime.md) covers container configuration, downloads,
   hooks, SSH, and lifecycle behavior.
-- [Developer documentation](docs/dev/README.md) covers architecture,
-  cross-module contracts, and documentation governance.
+- [Developer documentation](docs/dev/README.md) covers contribution workflow,
+  architecture, cross-module contracts, and documentation governance.
 - The [documentation index](docs/README.md) links every user and developer
   guide currently available.
 - The [testing handbook](tests/README.md) covers test layers, cost

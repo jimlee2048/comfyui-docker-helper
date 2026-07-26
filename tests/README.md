@@ -4,6 +4,9 @@ The test suite is offline by default. `uv run pytest` may collect tests that
 describe network, Docker, GPU, or slow behavior, but those tests are skipped
 unless every matching cost authorization is present.
 
+See the [contribution guide](../docs/dev/contributing.md) for environment
+setup, shared coding rules, and the general development workflow.
+
 ## Suite layout
 
 - `tests/unit/` covers isolated business, validation, serialization, and trust
@@ -30,6 +33,9 @@ authorization:
 | `gpu` | `--run-gpu` | Local GPU and driver |
 | `slow` | `--run-slow` | Intentionally long execution |
 
+`unit`, `smoke`, and `acceptance` classify tests; they do not authorize
+network, Docker, GPU, or slow execution.
+
 A test with multiple cost markers requires every corresponding option. The
 options authorize marked tests; they do not add tests or make an unavailable
 external dependency successful.
@@ -49,17 +55,18 @@ CDH_APPLICATION_ZERO_CONTEXT=/path/to/rendered-context \
 ```
 
 Canonical-lock tests should use the Docker-free matching-lock path unless they
-specifically own provider acquisition or resolution behavior. Live resolver
-tests require both `docker` and `network`, use the local/default Linux x86_64
-Docker baseline, and must clean only their uniquely owned containers or images.
+specifically own provider acquisition or resolution behavior. Live
+Python-group resolver tests require both `docker` and `network`, use the
+local/default Linux x86_64 Docker baseline, and must clean only their uniquely
+owned containers or images.
 Do not assume Docker Desktop, TLS, SSH, or remote-daemon compatibility from the
 local baseline.
 
 ## Acceptance scenarios
 
 `tests/acceptance_scenarios.py` is the machine-consumed authority for scenario
-identity, public config input, Python profile, capabilities, cost, release or
-canary classification, and required image/context inputs. The referenced TOML
+identity, public config input, Python profile, capabilities, cost, scenario
+classification, and required image/context inputs. The referenced TOML
 files remain the public configuration authority for exact nodes, versions,
 hooks, and downloads. Test modules own assertions about the behavior they
 observe; do not copy either authority into prose.

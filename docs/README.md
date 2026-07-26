@@ -12,6 +12,8 @@
 ## Development
 
 - [Developer guide](dev/README.md) — entry point for maintainers.
+- [Contributing](dev/contributing.md) — development environment, coding,
+  validation, and review workflow.
 - [Architecture](dev/architecture.md) — current components, responsibilities,
   dependency direction, and execution scenarios.
 - [Cross-module contracts](dev/contracts.md) — authority, ownership, trust,

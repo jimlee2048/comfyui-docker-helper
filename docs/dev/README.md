@@ -7,6 +7,8 @@ and maintained.
 
 ## Guides
 
+- [Contributing](contributing.md) covers the shared development environment,
+  repository structure, coding and validation workflow, and review rules.
 - [Architecture](architecture.md) describes the current system context,
   component responsibilities, dependency direction, and the small set of
   execution scenarios needed to understand the design.
@@ -40,6 +42,8 @@ Keep test policy in the [testing handbook](../../tests/README.md) and
 agent-specific automatic-context instructions in
 [`AGENTS.md`](../../AGENTS.md). The [documentation index](../README.md) owns
 cross-audience navigation rather than duplicating guide content.
+Shared environment, coding, Git, and review guidance belongs in
+[Contributing](contributing.md).
 
 ### Machine and behavioral authority
 

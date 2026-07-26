@@ -95,9 +95,7 @@ external-cost gates solely because they exist.
 ## Code guidelines
 
 - Use spaces for indentation, LF line endings, and double quotes.
-- Use English for identifiers, code comments, commit messages, and normative
-  technical documentation. Maintained localized documentation may use its
-  target language while preserving and linking its English source.
+- Use English for identifiers, code comments, and commit messages.
 - Use `snake_case` for modules, functions, variables, and pytest tests, and
   `PascalCase` for classes and Pydantic models.
 - Name test files `test_*.py`; keep focused unit coverage in `tests/unit/` and

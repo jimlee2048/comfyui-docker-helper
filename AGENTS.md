@@ -20,10 +20,6 @@
 - Project work planning and progress documents live under `docs/workdesk/`. That path is intentionally gitignored and must not be committed.
 - Keep work planning details in `docs/workdesk/`; do not mention milestones, task plans, or implementation work status in docs, examples, code comments, or user-facing copy.
 - Work on one active plan at a time, and one plan task inside it at a time.
-- Use English for normative tracked technical documentation. Maintained
-  localized documentation may use its target language, but it must link its
-  normative English source, preserve the same behavior and safety boundaries,
-  and be assessed whenever either member of the pair changes.
 - Load task-relevant skills when the current agent runtime provides them.
 - For real browser verification, use the browser verification tool selected by
   the current agent runtime when it declares a preference. When using Codex,

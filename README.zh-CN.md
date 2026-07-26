@@ -2,6 +2,11 @@
 
 [English](README.md) | 简体中文
 
+> [!IMPORTANT]
+>
+> - 本项目尚处于早期开发阶段，暂不保证功能和配置的稳定性。
+> - Coding AI Agents 主导大部分开发工作，人类负责提供整体方向指导。
+
 `comfyui-docker-helper`（`cdh`）根据声明式 TOML 配置构建定制的、
 支持 CUDA 的 ComfyUI 镜像。它负责管理选定的 Python 和 PyTorch 环境、
 ComfyUI 官方检出版本、可选的 Manager 和 comfy-cli 功能、自定义节点、

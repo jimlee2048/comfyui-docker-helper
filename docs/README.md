@@ -11,6 +11,11 @@
 
 ## Development
 
+- [Developer guide](dev/README.md) — entry point for maintainers.
+- [Architecture](dev/architecture.md) — current components, responsibilities,
+  dependency direction, and execution scenarios.
+- [Cross-module contracts](dev/contracts.md) — authority, ownership, trust,
+  replay, evidence, and lifecycle boundaries.
 - [Testing handbook](../tests/README.md) — test layers, cost authorization,
   the acceptance catalog, and test-resource rules.
 

@@ -1,5 +1,7 @@
 # Runtime and lifecycle
 
+English | [简体中文](runtime.zh-CN.md)
+
 This guide is for people running an image built by cdh. It explains which
 settings can change without rebuilding the image, when runtime downloads and
 hooks run, how optional SSH access is activated, and what happens when the

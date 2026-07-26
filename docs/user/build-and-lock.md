@@ -1,5 +1,7 @@
 # Build and lock images
 
+English | [简体中文](build-and-lock.zh-CN.md)
+
 This guide covers local validation, canonical-lock reconciliation, rendered
 build contexts, and Docker image builds. Start with the
 [configuration guide](configuration.md) to choose and layer configuration

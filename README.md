@@ -1,5 +1,7 @@
 # ComfyUI Docker Helper
 
+English | [简体中文](README.zh-CN.md)
+
 `comfyui-docker-helper` (`cdh`) builds customized, CUDA-backed ComfyUI images
 from declarative TOML. It manages the selected Python and PyTorch environment,
 the official ComfyUI checkout, optional Manager and comfy-cli capabilities,

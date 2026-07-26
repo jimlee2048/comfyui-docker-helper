@@ -95,8 +95,9 @@ external-cost gates solely because they exist.
 ## Code guidelines
 
 - Use spaces for indentation, LF line endings, and double quotes.
-- Use English for identifiers, code comments, technical documentation, and
-  commit messages.
+- Use English for identifiers, code comments, commit messages, and normative
+  technical documentation. Maintained localized documentation may use its
+  target language while preserving and linking its English source.
 - Use `snake_case` for modules, functions, variables, and pytest tests, and
   `PascalCase` for classes and Pydantic models.
 - Name test files `test_*.py`; keep focused unit coverage in `tests/unit/` and
@@ -129,7 +130,8 @@ Update or remove affected documentation in the same change as behavior. Follow
 the canonical ownership, current-state, and bounded-duplication rules in the
 [developer documentation index](README.md). Keep exact fields, options, and
 accepted values in their machine authorities instead of creating parallel
-prose inventories.
+prose inventories. When changing one member of a maintained English/localized
+pair, assess and update its counterpart in the same change when affected.
 
 ## Commits and pull requests
 

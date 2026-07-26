@@ -72,10 +72,14 @@ archive.
 
 ### Writing and maintenance
 
-Use current-tense English, relative repository links, stable descriptive
-headings, and directly runnable commands where commands add value. Remove
-obsolete wording when its authority changes, and avoid speculative future
-design, generated filler, and repeated examples.
+Use current-tense English for normative technical documentation, relative
+repository links, stable descriptive headings, and directly runnable commands
+where commands add value. Maintained localizations may use their target
+language, but they must identify and link their normative English source,
+preserve its meaning and safety boundaries, and be assessed in the same change
+when either member of the pair changes. Remove obsolete wording when its
+authority changes, and avoid speculative future design, generated filler, and
+repeated examples.
 
 There is no mechanical line target. Concision follows from a document's
 audience, canonical ownership, durable value, and the rule to link instead of

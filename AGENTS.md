@@ -18,6 +18,11 @@
 
 ### General
 - Project work planning and progress documents live under `docs/workdesk/`. That path is intentionally gitignored and must not be committed.
+- Each workdesk uses the canonical phase directories `01-discussion/`, `02-plan/`, and `03-progress/`. Create a phase directory when that phase begins; empty phase directories are not required.
+  - `01-discussion/`: discussion evidence, open questions, and decisions.
+  - `02-plan/`: accepted implementation plans.
+  - `03-progress/`: execution status, validation evidence, and handoff records.
+- Before using or modifying an existing workdesk, inspect its current directory and file structure and the relevant neighboring documents once for the task. Preserve the canonical phase ownership; do not create a new file until its intended role and location are clear.
 - Keep work planning details in `docs/workdesk/`; do not mention milestones, task plans, or implementation work status in docs, examples, code comments, or user-facing copy.
 - Work on one active plan at a time, and one plan task inside it at a time.
 - Load task-relevant skills when the current agent runtime provides them.

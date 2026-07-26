@@ -1,18 +1,10 @@
 # Architecture
 
-This document gives maintainers a current system map: where responsibilities
-live, which direction dependencies and data flow, and how the main execution
-paths cross host, Docker build, and container runtime boundaries. See
-[Cross-module contracts](contracts.md) for the strict authority, ownership,
-trust, replay, evidence, and lifecycle invariants behind these boundaries.
+This document gives maintainers a current system map: where responsibilities live, which direction dependencies and data flow, and how the main execution paths cross host, Docker build, and container runtime boundaries. See [Cross-module contracts](contracts.md) for the strict authority, ownership, trust, replay, evidence, and lifecycle invariants behind these boundaries.
 
 ## System context
 
-The same `comfyui-docker-helper` distribution provides operator-facing host
-commands and image-internal container helpers. Host commands turn declarative
-configuration and selected local inputs into a Docker build context. Docker
-Buildx executes that context, and the installed cdh wheel supplies both build
-helpers and the runtime entrypoint inside the resulting image.
+The same `comfyui-docker-helper` distribution provides operator-facing host commands and image-internal container helpers. Host commands turn declarative configuration and selected local inputs into a Docker build context. Docker Buildx executes that context, and the installed cdh wheel supplies both build helpers and the runtime entrypoint inside the resulting image.
 
 ```mermaid
 flowchart LR
@@ -28,10 +20,7 @@ flowchart LR
     Runtime --> Services["ComfyUI, downloads, optional SSH and hooks"]
 ```
 
-The host build boundary and the runtime boundary admit different inputs.
-Runtime configuration and mounted hooks can change deployment behavior, but
-they do not re-enter host planning or rewrite the image's final build
-observation.
+The host build boundary and the runtime boundary admit different inputs. Runtime configuration and mounted hooks can change deployment behavior, but they do not re-enter host planning or rewrite the image's final build observation.
 
 ## Component responsibilities
 
@@ -42,23 +31,13 @@ observation.
 | [`rendering/`](../../src/comfyui_docker_helper/rendering/) | Deterministic projection of one BuildPlan plus verified release/local inputs into a directly Buildx-usable context and Dockerfile. Rendering does not plan or resolve identities. |
 | [`container/`](../../src/comfyui_docker_helper/container/) | Image-internal BuildPlan admission, build-time installation/download/final observation, and runtime configuration, transfer, hook, SSH, process, and lifecycle services. |
 
-Package-level modules provide shared bounded helpers such as ComfyUI
-requirements parsing, PyTorch resolution rules, release artifacts, and exact
-project-owned identities. They support the four main components without
-creating another orchestration layer.
+Package-level modules provide shared bounded helpers such as ComfyUI requirements parsing, PyTorch resolution rules, release artifacts, and exact project-owned identities. They support the four main components without creating another orchestration layer.
 
 ## Dependency direction
 
-Host orchestration is the outer build-time composition root. It calls shared
-configuration and planning code, supplies concrete acquisition providers, and
-hands an accepted BuildPlan to rendering. Rendering depends on config-owned
-types and release inputs; it does not call provider orchestration or container
-services.
+Host orchestration is the outer build-time composition root. It calls shared configuration and planning code, supplies concrete acquisition providers, and hands an accepted BuildPlan to rendering. Rendering depends on config-owned types and release inputs; it does not call provider orchestration or container services.
 
-The Docker build is a process boundary rather than an in-process dependency.
-The rendered Dockerfile invokes the installed `cdh container` commands inside
-the build. Container helpers depend on config-owned models and their own
-container-local services; they do not call host planning or rendering.
+The Docker build is a process boundary rather than an in-process dependency. The rendered Dockerfile invokes the installed `cdh container` commands inside the build. Container helpers depend on config-owned models and their own container-local services; they do not call host planning or rendering.
 
 Data flows forward:
 
@@ -72,15 +51,11 @@ effective config
   -> final observation
 ```
 
-Neither rendering nor container helpers reconstruct intent from host
-configuration. The final observation does not feed back into reconciliation
-or planning.
+Neither rendering nor container helpers reconstruct intent from host configuration. The final observation does not feed back into reconciliation or planning.
 
 ## Planning and artifact placement
 
-The following table locates the main planning and evidence concepts. The
-[cross-module contracts](contracts.md) define their exact authority and
-non-authority boundaries.
+The following table locates the main planning and evidence concepts. The [cross-module contracts](contracts.md) define their exact authority and non-authority boundaries.
 
 | Concept | Location and role |
 | --- | --- |
@@ -90,59 +65,28 @@ non-authority boundaries.
 | [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) | A host-side projection boundary that verifies supplied wheel and local bytes, writes the BuildPlan-derived context, and performs no planning or resolution. Host orchestration publishes or compares the complete cdh-owned context. |
 | [Final manifest](../../src/comfyui_docker_helper/container/final_manifest.py) | Final image-state observation emitted only after build mutations and checks succeed. It records observed state but does not become a resolver, lock, or planning input. |
 
-The canonical cdh wheel crosses the host-to-build boundary as one verified
-release artifact. Host planning constructs it from package-owned release
-projection inputs, materialization binds its exact bytes to the BuildPlan, and
-the image installs cdh from that wheel. The uv image used for resolution and
-the isolated wheel build backend remain separate responsibilities even when
-their version strings happen to match.
+The canonical cdh wheel crosses the host-to-build boundary as one verified release artifact. Host planning constructs it from package-owned release projection inputs, materialization binds its exact bytes to the BuildPlan, and the image installs cdh from that wheel. The uv image used for resolution and the isolated wheel build backend remain separate responsibilities even when their version strings happen to match.
 
 ## Execution scenarios
 
 ### Validate configuration
 
-`cdh host validate` loads the requested TOML layers, merges them in command-line
-order, and applies strict structural, domain, and cross-field validation to the
-effective configuration. This path does not construct providers, call Docker,
-reconcile a lock, create a BuildPlan, or write files.
+`cdh host validate` loads the requested TOML layers, merges them in command-line order, and applies strict structural, domain, and cross-field validation to the effective configuration. This path does not construct providers, call Docker, reconcile a lock, create a BuildPlan, or write files.
 
 ### Render and reconcile a context
 
-The host render service admits local hook roots and any existing canonical
-lock, then obtains the prerequisite exact identities needed to assemble the
-canonical request graph. It reconciles the graph according to the selected
-policy, constructs one BuildPlan from the accepted lock, and passes the plan
-with the canonical wheel and exact local sources to materialization.
+The host render service admits local hook roots and any existing canonical lock, then obtains the prerequisite exact identities needed to assemble the canonical request graph. It reconciles the graph according to the selected policy, constructs one BuildPlan from the accepted lock, and passes the plan with the canonical wheel and exact local sources to materialization.
 
-Materialization writes into owned staging space, re-verifies supplied local
-and release bytes, and projects the complete context. Host orchestration then
-publishes that context atomically or compares the complete expected tree for a
-no-write check. See [Build and lock images](../user/build-and-lock.md) for the
-operator workflow and reconciliation modes.
+Materialization writes into owned staging space, re-verifies supplied local and release bytes, and projects the complete context. Host orchestration then publishes that context atomically or compares the complete expected tree for a no-write check. See [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
 
 ### Build and observe the final image
 
-`cdh host build` prepares the context through the same path and then invokes
-Docker Buildx. The rendered Dockerfile carries the expected BuildPlan digest
-literally. Each image-internal build helper admits the fixed materialized
-BuildPlan against that digest and receives only its command-specific typed
-projection.
+`cdh host build` prepares the context through the same path and then invokes Docker Buildx. The rendered Dockerfile carries the expected BuildPlan digest literally. Each image-internal build helper admits the fixed materialized BuildPlan against that digest and receives only its command-specific typed projection.
 
-The Dockerfile installs the toolchain and application, processes configured
-nodes and files, and invokes final observation after all build mutations.
-Final observation rechecks current image state and publishes the manifest; it
-does not make another planning decision.
+The Dockerfile installs the toolchain and application, processes configured nodes and files, and invokes final observation after all build mutations. Final observation rechecks current image state and publishes the manifest; it does not make another planning decision.
 
 ### Run the container lifecycle
 
-Tini runs as image PID 1 and starts `cdh container entrypoint`. The entrypoint
-loads the effective runtime configuration, discovers baked and mounted hooks,
-and composes download, SSH, ComfyUI, readiness, hook, signal, and cleanup
-services under one lifecycle owner.
+Tini runs as image PID 1 and starts `cdh container entrypoint`. The entrypoint loads the effective runtime configuration, discovers baked and mounted hooks, and composes download, SSH, ComfyUI, readiness, hook, signal, and cleanup services under one lifecycle owner.
 
-This runtime path consumes the generated runtime projection and
-deployment-time overrides rather than host configuration, the canonical lock,
-or reconciliation providers. See [Runtime and lifecycle](../user/runtime.md)
-for operational order and shutdown behavior, and
-[Cross-module contracts](contracts.md) for process-ownership and trust
-boundaries.
+This runtime path consumes the generated runtime projection and deployment-time overrides rather than host configuration, the canonical lock, or reconciliation providers. See [Runtime and lifecycle](../user/runtime.md) for operational order and shutdown behavior, and [Cross-module contracts](contracts.md) for process-ownership and trust boundaries.

@@ -4,8 +4,7 @@
 
 本指南面向运行由 cdh 构建的镜像的用户。它说明了哪些设置无需重新构建镜像即可更改、运行时下载与 Hook 何时运行、如何启用可选的 SSH 访问，以及容器停止时会发生什么。
 
-如需查看带完整注释的主机配置，请参阅
-[`examples/full.toml`](../../examples/full.toml)。[配置指南](configuration.zh-CN.md)说明主机配置和分层；[构建与锁定指南](build-and-lock.zh-CN.md)说明主机端的选择如何成为固化到镜像中的输入。
+如需查看带完整注释的主机配置，请参阅 [`examples/full.toml`](../../examples/full.toml)。[配置指南](configuration.zh-CN.md)说明主机配置和分层；[构建与锁定指南](build-and-lock.zh-CN.md)说明主机端的选择如何成为固化到镜像中的输入。
 
 ## 运行时配置优先级
 
@@ -21,11 +20,8 @@ built-in defaults < baked config < mounted config < environment
 
 支持的环境变量覆盖项如下：
 
-- `CDH_COMFYUI_LISTEN`、`CDH_COMFYUI_PORT` 和
-  `CDH_COMFYUI_EXTRA_ARGS`；
-- `CDH_DEFAULT_DOWNLOADER`、`CDH_DEFAULT_DOWNLOAD_MODE`、
-  `CDH_DOWNLOAD_MAX_ATTEMPTS`、`CDH_DOWNLOAD_FAILURE_POLICY` 和
-  `CDH_SHUTDOWN_TIMEOUT`；以及
+- `CDH_COMFYUI_LISTEN`、`CDH_COMFYUI_PORT` 和 `CDH_COMFYUI_EXTRA_ARGS`；
+- `CDH_DEFAULT_DOWNLOADER`、`CDH_DEFAULT_DOWNLOAD_MODE`、`CDH_DOWNLOAD_MAX_ATTEMPTS`、`CDH_DOWNLOAD_FAILURE_POLICY` 和 `CDH_SHUTDOWN_TIMEOUT`；以及
 - `SSH_ENABLE`、`SSH_PORT`、`SSH_PASSWORD` 和 `SSH_PUB_KEY`。
 
 `CDH_COMFYUI_EXTRA_ARGS` 使用 POSIX shell 风格的单词解析，但不会执行 shell。运行时 TOML 和环境变量都不能在 `extra_args` 中放入 `--listen`、`--port`、`--auto-launch` 或 `--disable-auto-launch`；这些容器启动控制项由 cdh 负责。
@@ -125,10 +121,6 @@ synchronous downloads
 
 第二个 `SIGTERM` 或 `SIGINT` 会跳过剩余的宽限期并立即进入强制关闭。被强制终止的 ComfyUI 通常会使容器以代码 137 退出。当 ComfyUI 自然退出时，cdh 会保留其退出结果、清理辅助工作，并且不会运行仅限信号路径的 stop Hook。
 
-Docker 或其他编排器拥有独立的外部硬性时间限制。未配置容器专用超时时，Docker Engine 对 Linux 容器使用 10 秒的默认值，而 Docker Compose 的 `stop_grace_period` 默认为 10 秒。cdh 的八秒默认值只留下尽力而为的调度余量。当 Hook 需要更多时间时，请将 Docker
-[`--stop-timeout`](https://docs.docker.com/reference/cli/docker/container/run/#options)
-或 Compose
-[`stop_grace_period`](https://docs.docker.com/reference/compose-file/services/#stop_grace_period)
-配置为大于 cdh 总时间。
+Docker 或其他编排器拥有独立的外部硬性时间限制。未配置容器专用超时时，Docker Engine 对 Linux 容器使用 10 秒的默认值，而 Docker Compose 的 `stop_grace_period` 默认为 10 秒。cdh 的八秒默认值只留下尽力而为的调度余量。当 Hook 需要更多时间时，请将 Docker [`--stop-timeout`](https://docs.docker.com/reference/cli/docker/container/run/#options) 或 Compose [`stop_grace_period`](https://docs.docker.com/reference/compose-file/services/#stop_grace_period) 配置为大于 cdh 总时间。
 
 设置 `shutdown_timeout = -1` 只会禁用 cdh 外层和 Hook 的截止时间。由 cdh 管理的组件操作仍然有界，而 Docker 自身的超时与之独立。外部 `SIGKILL` 后无法继续执行任何清理。

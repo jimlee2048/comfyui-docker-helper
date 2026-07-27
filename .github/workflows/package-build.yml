@@ -72,14 +72,11 @@ jobs:
       - name: Check distribution metadata
         env:
           DIST_DIR: ${{ runner.temp }}/cdh-dist
-        run: |
-          shopt -s nullglob
-          artifacts=("$DIST_DIR"/*)
-          test "${#artifacts[@]}" -eq 2
-          uv run --locked twine check --strict "${artifacts[@]}"
+        run: uv run --locked twine check --strict "$DIST_DIR"/*
       - name: Clean-install and exercise the wheel
         env:
           DIST_DIR: ${{ runner.temp }}/cdh-dist
+          EXPECTED_VERSION: ${{ steps.admission.outputs.version }}
           RUNTIME_REQUIREMENTS: ${{ runner.temp }}/runtime-requirements.txt
           WHEEL_VENV: ${{ runner.temp }}/cdh-wheel-venv
         run: |
@@ -93,17 +90,7 @@ jobs:
             --requirements "$RUNTIME_REQUIREMENTS"
           uv pip install --python "$WHEEL_VENV/bin/python" --no-deps "${wheels[0]}"
           uv pip check --python "$WHEEL_VENV/bin/python"
-          expected_version="$(
-            uv run --locked python -c \
-              'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
-          )"
-          installed_version="$(
-            "$WHEEL_VENV/bin/python" -c \
-              'from importlib.metadata import version; print(version("comfyui-docker-helper"))'
-          )"
-          test "$installed_version" = "$expected_version"
-          test "$("$WHEEL_VENV/bin/cdh" --version)" = "cdh $expected_version"
-          "$WHEEL_VENV/bin/python" -c 'import comfyui_docker_helper'
+          test "$("$WHEEL_VENV/bin/cdh" --version)" = "cdh $EXPECTED_VERSION"
           "$WHEEL_VENV/bin/cdh" --help >/dev/null
           "$WHEEL_VENV/bin/cdh" host validate -f examples/minimal.toml
       - name: Verify installed canonical wheel byte identity

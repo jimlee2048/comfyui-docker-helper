@@ -355,8 +355,9 @@ def test_aria2_resume_authority_drift_fails_closed_without_touching_foreign_leaf
         _delay: float,
         _cancel_requested,
     ) -> bool:
-        staging.unlink()
-        staging.write_bytes(b"foreign")
+        replacement = staging.with_name(f"{staging.name}.foreign")
+        replacement.write_bytes(b"foreign")
+        os.replace(replacement, staging)
         return False
 
     with pytest.raises(DownloadFilesError, match="does not match authority"):

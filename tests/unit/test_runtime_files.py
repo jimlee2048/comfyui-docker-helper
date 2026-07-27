@@ -780,8 +780,9 @@ def test_current_resume_inode_mismatch_is_fatal_without_state_change(
     entry, staging, control = _resume_entry_for_item(item)
     digest = _state_digest(item)
     state = _state({digest: entry})
-    control.unlink()
-    control.write_bytes(b"foreign")
+    replacement = control.with_name(f"{control.name}.foreign")
+    replacement.write_bytes(b"foreign")
+    os.replace(replacement, control)
 
     with pytest.raises(DownloadFilesError, match="failed exact admission"):
         reconcile_runtime_file_plan(

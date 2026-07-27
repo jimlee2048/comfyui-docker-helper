@@ -21,6 +21,19 @@ uv run cdh host validate -f examples/minimal.toml
 
 When using Python language features, keep them within the `requires-python` range declared in the project configuration.
 
+### Optional workflow diagnostics
+
+uv remains the sole authority for Python installation, environments, dependency management, and package execution. Maintainers changing GitHub workflow files may optionally install the lightweight workflow diagnostics declared in the root `mise.toml`:
+
+```bash
+mise install
+mise exec -- actionlint \
+  -ignore 'unexpected key "queue" for "concurrency" section' \
+  .github/workflows/*.yml
+```
+
+The narrow ignore covers actionlint 1.7.12's stale schema for GitHub's supported `concurrency.queue` field; remove it after the installed actionlint release supports that field. The mise environment also makes ShellCheck available to actionlint for embedded shell diagnostics. These tools are workflow-maintenance conveniences, not prerequisites for ordinary contributions and not an alternative Python toolchain.
+
 ## Repository structure
 
 The project uses a `src` layout:
@@ -63,7 +76,10 @@ uv run cdh host validate -f examples/minimal.toml
 Build the source distribution and wheel through the declared PyPA backend:
 
 ```bash
-uv run --locked python -m build
+uv build \
+  --no-sources \
+  --force-pep517 \
+  --no-create-gitignore
 ```
 
 The required validation depth depends on the changed risk. Do not treat a high-cost run as a substitute for focused contract tests, and do not run external-cost gates solely because they exist.

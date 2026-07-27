@@ -1,0 +1,369 @@
+name: Package Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_call:
+    inputs:
+      mode:
+        description: Run as an untagged source check or a formal release build.
+        required: true
+        type: string
+    outputs:
+      artifact-name:
+        description: Exact same-run artifact name, or an empty string.
+        value: ${{ jobs.package.outputs.artifact-name }}
+      version:
+        description: Normalized package version read from the checked-out source.
+        value: ${{ jobs.package.outputs.version }}
+
+permissions: {}
+
+jobs:
+  package:
+    name: Build and qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      artifact-name: ${{ steps.admission.outputs.artifact_name }}
+      version: ${{ steps.admission.outputs.version }}
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: false
+      - name: Synchronize locked environment
+        run: uv sync --locked --all-groups
+      - name: Admit source and package identity
+        id: admission
+        env:
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run --locked python - <<'PY'
+          import os
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          from packaging.version import InvalidVersion, Version
+
+          PROJECT = "comfyui-docker-helper"
+
+
+          def git(*arguments: str) -> str:
+              return subprocess.run(
+                  ["git", *arguments],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout.strip()
+
+
+          input_mode = os.environ.get("INPUT_MODE", "")
+          if input_mode:
+              if input_mode not in {"source", "formal"}:
+                  raise SystemExit("workflow_call mode must be source or formal")
+              mode = input_mode
+          else:
+              if (
+                  os.environ["EVENT_NAME"] != "push"
+                  or os.environ["REF_TYPE"] != "tag"
+              ):
+                  raise SystemExit("direct execution requires a tag-push event")
+              mode = "candidate"
+
+          root = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          projection = tomllib.loads(
+              Path(
+                  "src/comfyui_docker_helper/resources/release-projection/"
+                  "pyproject.toml"
+              ).read_text()
+          )["project"]
+          lock = tomllib.loads(Path("uv.lock").read_text())
+          lock_projects = [
+              package
+              for package in lock["package"]
+              if package["name"] == PROJECT
+              and package.get("source", {}).get("editable") == "."
+          ]
+          if (
+              root != projection
+              or root["name"] != PROJECT
+              or len(lock_projects) != 1
+              or lock_projects[0]["version"] != root["version"]
+          ):
+              raise SystemExit("root, release projection, and lock identity differ")
+
+          raw_version = root["version"]
+          try:
+              version = Version(raw_version)
+          except InvalidVersion as error:
+              raise SystemExit("project version is not valid PEP 440") from error
+          if (
+              str(version) != raw_version
+              or version.epoch
+              or version.post is not None
+              or version.local is not None
+          ):
+              raise SystemExit("project version is outside the package-tag contract")
+
+          expected_tag = ""
+          if mode == "candidate":
+              expected_tag = os.environ["REF_NAME"]
+          elif mode == "formal":
+              if (
+                  os.environ["EVENT_NAME"] != "release"
+                  or os.environ["EVENT_ACTION"] != "published"
+                  or os.environ["RELEASE_DRAFT"] != "false"
+                  or os.environ["RELEASE_PRERELEASE"] != "false"
+              ):
+                  raise SystemExit("formal mode requires a published stable Release")
+              if version.is_prerelease or version.is_devrelease:
+                  raise SystemExit("formal publication requires a stable final version")
+              expected_tag = os.environ["RELEASE_TAG"]
+
+          head = git("rev-parse", "HEAD")
+          if head != os.environ["GITHUB_SHA"]:
+              raise SystemExit("checkout commit differs from the event commit")
+
+          if expected_tag:
+              expected_ref = f"refs/tags/{expected_tag}"
+              if (
+                  expected_tag != f"v{raw_version}"
+                  or os.environ["GITHUB_REF"] != expected_ref
+                  or os.environ["REF_TYPE"] != "tag"
+              ):
+                  raise SystemExit("tag, event ref, and static version differ")
+              tag_commit = git("rev-parse", "--verify", f"{expected_ref}^{{commit}}")
+              if tag_commit != head:
+                  raise SystemExit("tag no longer peels to the event commit")
+
+          if mode == "formal":
+              git("rev-parse", "--verify", "refs/remotes/origin/main^{commit}")
+              ancestry = subprocess.run(
+                  [
+                      "git",
+                      "merge-base",
+                      "--is-ancestor",
+                      "HEAD",
+                      "refs/remotes/origin/main",
+                  ]
+              )
+              if ancestry.returncode != 0:
+                  raise SystemExit("release tag commit is not in main history")
+
+          artifact_name = (
+              ""
+              if mode == "source"
+              else f"{mode}-distributions-attempt-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              print(f"artifact_name={artifact_name}", file=output)
+              print(f"version={raw_version}", file=output)
+          PY
+      - name: Build distributions through the sdist
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-dist
+        run: |
+          test ! -e "$DIST_DIR"
+          uv build \
+            --no-sources \
+            --force-pep517 \
+            --no-create-gitignore \
+            --out-dir "$DIST_DIR"
+      - name: Verify distribution identities and archives
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-dist
+        run: |
+          uv run --locked python - <<'PY'
+          import os
+          import stat
+          import tarfile
+          import tomllib
+          import zipfile
+          from email.parser import BytesParser
+          from pathlib import Path, PurePosixPath
+
+          from packaging.utils import (
+              canonicalize_name,
+              parse_sdist_filename,
+              parse_wheel_filename,
+          )
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          normalized_name = canonicalize_name(project["name"])
+          version = project["version"]
+          filename_name = normalized_name.replace("-", "_")
+          wheel_name = f"{filename_name}-{version}-py3-none-any.whl"
+          sdist_name = f"{filename_name}-{version}.tar.gz"
+          dist_dir = Path(os.environ["DIST_DIR"])
+          entries = tuple(sorted(dist_dir.iterdir()))
+          if (
+              {entry.name for entry in entries} != {wheel_name, sdist_name}
+              or any(not entry.is_file() or entry.is_symlink() for entry in entries)
+          ):
+              raise SystemExit("distribution set is not the expected two files")
+
+          wheel_distribution, wheel_version, wheel_build, wheel_tags = (
+              parse_wheel_filename(wheel_name)
+          )
+          if (
+              canonicalize_name(wheel_distribution) != normalized_name
+              or str(wheel_version) != version
+              or wheel_build
+              or {str(tag) for tag in wheel_tags} != {"py3-none-any"}
+          ):
+              raise SystemExit("wheel filename identity is invalid")
+
+          metadata_root = f"{filename_name}-{version}.dist-info"
+          with zipfile.ZipFile(dist_dir / wheel_name) as archive:
+              if archive.testzip() is not None:
+                  raise SystemExit("wheel archive is corrupt")
+              for info in archive.infolist():
+                  path = PurePosixPath(info.filename)
+                  mode = info.external_attr >> 16
+                  if (
+                      path.is_absolute()
+                      or ".." in path.parts
+                      or "\\" in info.filename
+                      or stat.S_ISLNK(mode)
+                  ):
+                      raise SystemExit("wheel archive contains an unsafe entry")
+              metadata = BytesParser().parsebytes(
+                  archive.read(f"{metadata_root}/METADATA")
+              )
+              wheel_metadata = BytesParser().parsebytes(
+                  archive.read(f"{metadata_root}/WHEEL")
+              )
+          if (
+              canonicalize_name(metadata.get("Name", "")) != normalized_name
+              or metadata.get("Version") != version
+              or wheel_metadata.get("Root-Is-Purelib") != "true"
+              or wheel_metadata.get_all("Tag", []) != ["py3-none-any"]
+          ):
+              raise SystemExit("wheel metadata identity is invalid")
+
+          sdist_distribution, sdist_version = parse_sdist_filename(sdist_name)
+          if (
+              canonicalize_name(sdist_distribution) != normalized_name
+              or str(sdist_version) != version
+          ):
+              raise SystemExit("sdist filename identity is invalid")
+          sdist_root = f"{filename_name}-{version}"
+          with tarfile.open(dist_dir / sdist_name, mode="r:gz") as archive:
+              members = archive.getmembers()
+              for member in members:
+                  path = PurePosixPath(member.name)
+                  if (
+                      path.is_absolute()
+                      or not path.parts
+                      or path.parts[0] != sdist_root
+                      or ".." in path.parts
+                      or "\\" in member.name
+                      or not (member.isfile() or member.isdir())
+                  ):
+                      raise SystemExit("sdist archive contains an unsafe entry")
+              package_info_file = archive.extractfile(f"{sdist_root}/PKG-INFO")
+              if package_info_file is None:
+                  raise SystemExit("sdist has no PKG-INFO")
+              package_info = BytesParser().parsebytes(package_info_file.read())
+          if (
+              not members
+              or canonicalize_name(package_info.get("Name", "")) != normalized_name
+              or package_info.get("Version") != version
+          ):
+              raise SystemExit("sdist metadata identity is invalid")
+          PY
+      - name: Check distribution metadata
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-dist
+        run: |
+          shopt -s nullglob
+          artifacts=("$DIST_DIR"/*)
+          test "${#artifacts[@]}" -eq 2
+          uv run --locked twine check --strict "${artifacts[@]}"
+      - name: Clean-install and exercise the wheel
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-dist
+          RUNTIME_REQUIREMENTS: ${{ runner.temp }}/runtime-requirements.txt
+          WHEEL_VENV: ${{ runner.temp }}/cdh-wheel-venv
+        run: |
+          shopt -s nullglob
+          wheels=("$DIST_DIR"/*.whl)
+          test "${#wheels[@]}" -eq 1
+          uv export --locked --no-dev --no-emit-project \
+            --output-file "$RUNTIME_REQUIREMENTS"
+          uv venv --python "3.12" "$WHEEL_VENV"
+          uv pip install --python "$WHEEL_VENV/bin/python" --require-hashes \
+            --requirements "$RUNTIME_REQUIREMENTS"
+          uv pip install --python "$WHEEL_VENV/bin/python" --no-deps "${wheels[0]}"
+          uv pip check --python "$WHEEL_VENV/bin/python"
+          expected_version="$(
+            uv run --locked python -c \
+              'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
+          )"
+          installed_version="$(
+            "$WHEEL_VENV/bin/python" -c \
+              'from importlib.metadata import version; print(version("comfyui-docker-helper"))'
+          )"
+          test "$installed_version" = "$expected_version"
+          test "$("$WHEEL_VENV/bin/cdh" --version)" = "cdh $expected_version"
+          "$WHEEL_VENV/bin/python" -c 'import comfyui_docker_helper'
+          "$WHEEL_VENV/bin/cdh" --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" host validate -f examples/minimal.toml
+      - name: Verify installed canonical wheel byte identity
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-dist
+          WHEEL_VENV: ${{ runner.temp }}/cdh-wheel-venv
+        run: |
+          "$WHEEL_VENV/bin/python" - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
+
+          candidates = tuple(Path(os.environ["DIST_DIR"]).glob("*.whl"))
+          if len(candidates) != 1:
+              raise SystemExit("candidate wheel set is invalid")
+          candidate = candidates[0]
+          content = candidate.read_bytes()
+          rebuilt = build_canonical_wheel()
+          if (
+              rebuilt.filename != candidate.name
+              or rebuilt.digest != f"sha256:{hashlib.sha256(content).hexdigest()}"
+              or rebuilt.content != content
+          ):
+              raise SystemExit("installed canonical wheel differs from candidate")
+          PY
+      - name: Record distribution digests
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-dist
+        run: sha256sum "$DIST_DIR"/*
+      - name: Upload retained distributions
+        if: ${{ steps.admission.outputs.artifact_name != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.admission.outputs.artifact_name }}
+          path: ${{ runner.temp }}/cdh-dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

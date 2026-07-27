@@ -52,6 +52,7 @@ from comfyui_docker_helper.exact_ledger import (
 )
 from comfyui_docker_helper.host.planning_authority import planning_release_inputs
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.version import package_version
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
@@ -62,9 +63,10 @@ CANONICAL_WHEEL_CONTENT = b"canonical cdh wheel test artifact"
 
 
 def canonical_wheel() -> CanonicalWheel:
+    version = package_version()
     return CanonicalWheel(
-        filename="comfyui_docker_helper-0.5.0-py3-none-any.whl",
-        version="0.5.0",
+        filename=f"comfyui_docker_helper-{version}-py3-none-any.whl",
+        version=version,
         digest=(f"sha256:{hashlib.sha256(CANONICAL_WHEEL_CONTENT).hexdigest()}"),
         content=CANONICAL_WHEEL_CONTENT,
     )

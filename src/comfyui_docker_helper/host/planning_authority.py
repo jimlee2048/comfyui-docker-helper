@@ -38,10 +38,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.hook_validation import hook_lock_identity
-from comfyui_docker_helper.exact_ledger import (
-    CDH_VERSION,
-    PIP_VERSION,
-)
+from comfyui_docker_helper.exact_ledger import PIP_VERSION
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
@@ -58,6 +55,7 @@ from comfyui_docker_helper.host.identity_providers import (
 )
 from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.version import package_version
 
 
 @dataclass(slots=True)
@@ -283,6 +281,6 @@ def planning_release_inputs(canonical_wheel: CanonicalWheel) -> PlanningReleaseI
     """Collect exact release-owned request and toolchain artifacts once."""
     return PlanningReleaseInputs(
         pip_version=PIP_VERSION,
-        cdh_version=CDH_VERSION,
+        cdh_version=package_version(),
         cdh_wheel_digest=canonical_wheel.digest,
     )

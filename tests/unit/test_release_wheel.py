@@ -9,23 +9,23 @@ from pathlib import Path
 import pytest
 from build import BuildBackendException
 
-from comfyui_docker_helper.exact_ledger import CDH_VERSION
 from comfyui_docker_helper.host import release_wheel
 from comfyui_docker_helper.host.release_wheel import (
     CanonicalWheelError,
     build_canonical_wheel,
 )
 
-WHEEL_NAME = f"comfyui_docker_helper-{CDH_VERSION}-py3-none-any.whl"
+TEST_VERSION = "1.2.3"
+WHEEL_NAME = f"comfyui_docker_helper-{TEST_VERSION}-py3-none-any.whl"
 TEST_BUILD_REQUIREMENT = "test-build-backend==1.2.3"
 
 
 def _write_wheel(path: Path, *, name: str = "comfyui-docker-helper") -> bytes:
-    metadata_root = f"comfyui_docker_helper-{CDH_VERSION}.dist-info"
+    metadata_root = f"comfyui_docker_helper-{TEST_VERSION}.dist-info"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
             f"{metadata_root}/METADATA",
-            f"Metadata-Version: 2.4\nName: {name}\nVersion: {CDH_VERSION}\n",
+            f"Metadata-Version: 2.4\nName: {name}\nVersion: {TEST_VERSION}\n",
         )
         archive.writestr(
             f"{metadata_root}/WHEEL",
@@ -33,6 +33,11 @@ def _write_wheel(path: Path, *, name: str = "comfyui-docker-helper") -> bytes:
         )
         archive.writestr(f"{metadata_root}/RECORD", "")
     return path.read_bytes()
+
+
+@pytest.fixture(autouse=True)
+def _use_test_package_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(release_wheel, "package_version", lambda: TEST_VERSION)
 
 
 def _install_builder_fakes(
@@ -98,7 +103,7 @@ def test_build_canonical_wheel_returns_the_single_validated_artifact(
     assert len(builds) == 1
     assert builds[0][0] == "wheel"
     assert wheel.filename == WHEEL_NAME
-    assert wheel.version == CDH_VERSION
+    assert wheel.version == TEST_VERSION
     assert wheel.content == expected[0]
     assert wheel.digest == f"sha256:{hashlib.sha256(expected[0]).hexdigest()}"
 

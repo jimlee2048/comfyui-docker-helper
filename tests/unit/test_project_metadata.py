@@ -10,15 +10,22 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
-from comfyui_docker_helper.exact_ledger import CDH_VERSION
 from comfyui_docker_helper.release_artifacts import (
     PACKAGE_ROOT,
     PROJECTED_LICENSE,
     PROJECTED_PYPROJECT,
     release_projection_files,
 )
+from comfyui_docker_helper.version import package_version
 
 PROJECT_ROOT = Path(__file__).parents[2]
+INLINE_README = """\
+`comfyui-docker-helper` (`cdh`) is a command-line helper for using ComfyUI with
+Docker.
+
+See the [GitHub repository](https://github.com/jimlee2048/comfyui-docker-helper)
+for current capabilities, requirements, documentation, examples, and issue
+tracking."""
 
 
 def _project_metadata() -> dict[str, object]:
@@ -26,6 +33,15 @@ def _project_metadata() -> dict[str, object]:
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
     return pyproject
+
+
+def _locked_project() -> dict[str, object]:
+    lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    return next(
+        package
+        for package in lock["package"]
+        if package["name"] == "comfyui-docker-helper"
+    )
 
 
 # Published metadata and projected source artifacts stay aligned with release authority.
@@ -55,10 +71,27 @@ def test_project_release_identity_matches_package_metadata() -> None:
     """Package metadata matches the current release and runtime dependencies."""
 
     pyproject = _project_metadata()
+    project = pyproject["project"]
+    locked = _locked_project()
 
-    assert pyproject["project"]["version"] == CDH_VERSION
-    assert "build>=1,<2" in pyproject["project"]["dependencies"]
-    assert "python-on-whales>=0.81.0" in pyproject["project"]["dependencies"]
+    assert project["version"] == package_version() == locked["version"]
+    assert project["description"] == (
+        "Command-line helper for using ComfyUI with Docker"
+    )
+    assert project["readme"] == {
+        "text": INLINE_README,
+        "content-type": "text/markdown",
+    }
+    assert "Operating System :: OS Independent" not in project["classifiers"]
+    assert (
+        project["urls"]["Changelog"]
+        == "https://github.com/jimlee2048/comfyui-docker-helper/releases"
+    )
+    assert "build>=1,<2" in project["dependencies"]
+    assert "python-on-whales>=0.81.0" in project["dependencies"]
+    assert "twine" in pyproject["dependency-groups"]["dev"]
+    assert "twine" in {item["name"] for item in locked["dev-dependencies"]["dev"]}
+    assert "twine" not in {item["name"] for item in locked["dependencies"]}
 
 
 def test_projected_release_metadata_matches_repository_metadata() -> None:
@@ -76,7 +109,6 @@ def test_projected_release_metadata_matches_repository_metadata() -> None:
         == repository["tool"]["uv"]["build-backend"]
     )
     assert PROJECTED_LICENSE.read_bytes() == (PROJECT_ROOT / "LICENSE").read_bytes()
-    assert "readme" not in repository["project"]
     assert build_system["build-backend"] == "uv_build"
     assert len(build_requirements) == 1
 

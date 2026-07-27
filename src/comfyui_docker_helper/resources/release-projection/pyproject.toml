@@ -1,7 +1,14 @@
 [project]
 name = "comfyui-docker-helper"
-version = "0.5.0"
-description = "Build customized ComfyUI Docker images from declarative configuration"
+version = "0.5.1"
+description = "Command-line helper for using ComfyUI with Docker"
+readme = { text = """
+`comfyui-docker-helper` (`cdh`) is a command-line helper for using ComfyUI with
+Docker.
+
+See the [GitHub repository](https://github.com/jimlee2048/comfyui-docker-helper)
+for current capabilities, requirements, documentation, examples, and issue
+tracking.""", content-type = "text/markdown" }
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.15"
@@ -24,7 +31,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
@@ -53,6 +59,7 @@ cdh = "comfyui_docker_helper.cli:app"
 Homepage = "https://github.com/jimlee2048/comfyui-docker-helper"
 Repository = "https://github.com/jimlee2048/comfyui-docker-helper"
 Issues = "https://github.com/jimlee2048/comfyui-docker-helper/issues"
+Changelog = "https://github.com/jimlee2048/comfyui-docker-helper/releases"
 
 [build-system]
 requires = ["uv_build==0.11.28"]

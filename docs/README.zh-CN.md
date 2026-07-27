@@ -14,6 +14,7 @@
 
 - [开发者指南](dev/README.md)——维护者入口。
 - [贡献指南](dev/contributing.md)——开发环境、编码、验证和评审流程。
+- [发布指南（英文）](dev/releasing.md)——Package tag、候选构建、GitHub Release 授权、受保护的 PyPI 发布、验证和异常恢复操作。
 - [架构](dev/architecture.md)——当前组件、职责、依赖方向和执行场景。
 - [跨模块契约](dev/contracts.md)——权威、所有权、信任、重放、证据和生命周期边界。
 - [测试手册](../tests/README.md)——测试层级、成本授权、验收目录和测试资源规则。

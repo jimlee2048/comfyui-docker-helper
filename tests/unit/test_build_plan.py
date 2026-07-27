@@ -48,6 +48,7 @@ from comfyui_docker_helper.config.final_validation import (
 from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )
+from comfyui_docker_helper.version import package_version
 
 
 # BuildPlan projection binds every execution input to admitted immutable authorities.
@@ -273,6 +274,7 @@ def test_constructor_projects_isolated_uv_tool_exact_result() -> None:
     tool = plan.toolchain.tool_store.uv_tools[0]
     assert tool.environment == "uv-tool:ruff"
     assert tool.requirement == "ruff==0.15.18"
+    assert plan.toolchain.tool_store.cdh.version == package_version()
     assert plan.toolchain.tool_store.cdh.wheel_digest == canonical_wheel().digest
 
 

@@ -5,6 +5,7 @@ This index is for contributors and maintainers who need to understand, change, o
 ## Guides
 
 - [Contributing](contributing.md) covers the shared development environment, repository structure, coding and validation workflow, and review rules.
+- [Releasing](releasing.md) owns the recurring maintainer workflow for package tags, candidate validation, human GitHub Release publication, automatic protected PyPI publication, verification, and exceptional recovery.
 - [Architecture](architecture.md) describes the current system context, component responsibilities, dependency direction, and the small set of execution scenarios needed to understand the design.
 - [Contracts](contracts.md) records cross-module authority, schema, ownership, trust, replay, evidence, transfer, and process/lifecycle invariants.
 - The [testing handbook](../../tests/README.md) owns test layers, cost authorization, acceptance selection, and test-resource discipline.

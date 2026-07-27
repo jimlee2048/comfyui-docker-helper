@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directories:
+      - "/"
+      - "/src/comfyui_docker_helper/resources/release-projection"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    allow:
+      - dependency-name: "uv-build"
+    groups:
+      uv-build:
+        group-by: "dependency-name"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"

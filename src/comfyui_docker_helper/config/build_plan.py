@@ -101,7 +101,6 @@ from comfyui_docker_helper.config.value_validation import (
     validate_managed_python_support_range,
 )
 from comfyui_docker_helper.exact_ledger import (
-    CDH_VERSION,
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_MINIMUM_VERSION,
@@ -110,6 +109,7 @@ from comfyui_docker_helper.exact_ledger import (
     PIP_VERSION,
     UV_IMAGE_REPOSITORY,
 )
+from comfyui_docker_helper.version import package_version
 
 BUILD_PLAN_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
@@ -225,8 +225,8 @@ class CdhToolPlan(_PlanModel):
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        if validate_exact_stable_version(value) != CDH_VERSION:
-            raise ValueError("cdh version does not match the exact ledger")
+        if validate_exact_stable_version(value) != package_version():
+            raise ValueError("cdh version does not match package metadata")
         return value
 
     @field_validator("wheel_digest")

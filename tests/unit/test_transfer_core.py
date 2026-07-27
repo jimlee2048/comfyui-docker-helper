@@ -261,8 +261,9 @@ def test_existing_target_skip_fails_closed_when_exact_discard_identity_drifts(
     request.target.parent.mkdir(parents=True, exist_ok=True)
     request.target.write_bytes(b"existing")
     staging = transfer_staging_target(request)
-    staging.unlink()
-    staging.write_bytes(b"foreign replacement")
+    replacement = staging.with_name(f"{staging.name}.foreign")
+    replacement.write_bytes(b"foreign replacement")
+    os.replace(replacement, staging)
     control = Path(f"{staging}.aria2")
     backend = BytesBackend(b"unused")
 
@@ -1587,9 +1588,9 @@ def test_displaced_old_cleanup_race_preserves_foreign_claim(
             and not injected
         ):
             injected = True
-            os.unlink(source_name, dir_fd=source_fd)
+            replacement_name = f"{source_name}.foreign"
             fd = os.open(
-                source_name,
+                replacement_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 0o600,
                 dir_fd=source_fd,
@@ -1598,6 +1599,12 @@ def test_displaced_old_cleanup_race_preserves_foreign_claim(
                 os.write(fd, b"foreign")
             finally:
                 os.close(fd)
+            os.replace(
+                replacement_name,
+                source_name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=source_fd,
+            )
         original(*args, flags=flags)
 
     monkeypatch.setattr(

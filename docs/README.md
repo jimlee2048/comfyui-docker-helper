@@ -12,6 +12,7 @@ English | [简体中文](README.zh-CN.md)
 
 - [Developer guide](dev/README.md) — entry point for maintainers.
 - [Contributing](dev/contributing.md) — development environment, coding, validation, and review workflow.
+- [Releasing](dev/releasing.md) — package tags, candidate validation, GitHub Release authorization, protected PyPI publication, verification, and recovery operations.
 - [Architecture](dev/architecture.md) — current components, responsibilities, dependency direction, and execution scenarios.
 - [Cross-module contracts](dev/contracts.md) — authority, ownership, trust, replay, evidence, and lifecycle boundaries.
 - [Testing handbook](../tests/README.md) — test layers, cost authorization, the acceptance catalog, and test-resource rules.

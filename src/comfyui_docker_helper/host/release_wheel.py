@@ -19,14 +19,13 @@ from build.env import DefaultIsolatedEnv
 from packaging.utils import canonicalize_name, parse_wheel_filename
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
-from comfyui_docker_helper.exact_ledger import CDH_VERSION
 from comfyui_docker_helper.release_artifacts import (
     CanonicalWheel,
     release_projection_files,
 )
+from comfyui_docker_helper.version import package_version
 
 _DISTRIBUTION = "comfyui-docker-helper"
-_WHEEL_FILENAME = f"comfyui_docker_helper-{CDH_VERSION}-py3-none-any.whl"
 
 
 class CanonicalWheelError(DiagnosticError):
@@ -35,6 +34,8 @@ class CanonicalWheelError(DiagnosticError):
 
 def build_canonical_wheel() -> CanonicalWheel:
     """Build exactly once in owned temporary storage and return verified bytes."""
+    version = package_version()
+    wheel_filename = f"comfyui_docker_helper-{version}-py3-none-any.whl"
     try:
         with tempfile.TemporaryDirectory(prefix="cdh-canonical-wheel-") as raw:
             root = Path(raw)
@@ -50,7 +51,7 @@ def build_canonical_wheel() -> CanonicalWheel:
                 environment.install(builder.get_requires_for_build("wheel"))
                 builder.build("wheel", output)
             wheels = tuple(sorted(output.glob("*.whl")))
-            if len(wheels) != 1 or wheels[0].name != _WHEEL_FILENAME:
+            if len(wheels) != 1 or wheels[0].name != wheel_filename:
                 raise _wheel_error("canonical wheel filename is invalid")
             content = wheels[0].read_bytes()
     except CanonicalWheelError:
@@ -65,21 +66,21 @@ def build_canonical_wheel() -> CanonicalWheel:
     ) as error:
         raise _wheel_error("canonical wheel could not be built") from error
 
-    _validate_wheel(_WHEEL_FILENAME, content)
+    _validate_wheel(wheel_filename, content, expected_version=version)
     return CanonicalWheel(
-        filename=_WHEEL_FILENAME,
-        version=CDH_VERSION,
+        filename=wheel_filename,
+        version=version,
         digest=f"sha256:{hashlib.sha256(content).hexdigest()}",
         content=content,
     )
 
 
-def _validate_wheel(filename: str, content: bytes) -> None:
+def _validate_wheel(filename: str, content: bytes, *, expected_version: str) -> None:
     try:
         name, version, build, tags = parse_wheel_filename(filename)
         if (
             canonicalize_name(name) != _DISTRIBUTION
-            or str(version) != CDH_VERSION
+            or str(version) != expected_version
             or build != ()
             or {str(tag) for tag in tags} != {"py3-none-any"}
         ):
@@ -88,7 +89,7 @@ def _validate_wheel(filename: str, content: bytes) -> None:
             path = Path(raw) / filename
             path.write_bytes(content)
             with zipfile.ZipFile(path) as archive:
-                prefix = f"comfyui_docker_helper-{CDH_VERSION}.dist-info/"
+                prefix = f"comfyui_docker_helper-{expected_version}.dist-info/"
                 metadata = BytesParser().parsebytes(archive.read(prefix + "METADATA"))
                 wheel = BytesParser().parsebytes(archive.read(prefix + "WHEEL"))
     except CanonicalWheelError:
@@ -97,7 +98,7 @@ def _validate_wheel(filename: str, content: bytes) -> None:
         raise _wheel_error("canonical wheel metadata is invalid") from error
     if (
         canonicalize_name(metadata.get("Name", "")) != _DISTRIBUTION
-        or metadata.get("Version") != CDH_VERSION
+        or metadata.get("Version") != expected_version
         or wheel.get("Root-Is-Purelib") != "true"
         or wheel.get_all("Tag", []) != ["py3-none-any"]
     ):

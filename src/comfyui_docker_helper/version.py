@@ -8,7 +8,7 @@ _DISTRIBUTION_NAME = "comfyui-docker-helper"
 
 
 def package_version() -> str:
-    """Return the installed distribution version for the CLI."""
+    """Return the package release identity from distribution or project metadata."""
     try:
         return metadata.version(_DISTRIBUTION_NAME)
     except metadata.PackageNotFoundError:

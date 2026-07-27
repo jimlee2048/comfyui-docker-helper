@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import typer
+from rich.text import Text
 from tests.build_plan_support import (
     accepted_resolution,
     build_plan,
@@ -30,6 +31,10 @@ from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
+
+
+def _plain_output(output: str) -> str:
+    return Text.from_ansi(output).plain
 
 
 def _write_minimal_config(path: Path) -> None:
@@ -135,7 +140,7 @@ def test_help_succeeds(
     result = cli_runner.invoke(app, [*args, help_flag])
 
     assert result.exit_code == 0
-    assert usage in result.output
+    assert usage in _plain_output(result.output)
 
 
 def test_container_helper_help_exposes_build_plan_binding(
@@ -145,7 +150,7 @@ def test_container_helper_help_exposes_build_plan_binding(
     result = cli_runner.invoke(app, ["container", "download-files", "--help"])
 
     assert result.exit_code == 0
-    assert "--build-plan-digest" in result.output
+    assert "--build-plan-digest" in _plain_output(result.output)
 
 
 def test_registry_helper_help_exposes_only_owned_inputs(
@@ -157,9 +162,10 @@ def test_registry_helper_help_exposes_only_owned_inputs(
     )
 
     assert result.exit_code == 0
-    assert "--build-plan-digest" in result.output
-    assert "--constraints" in result.output
-    assert "--build-hooks-directory" in result.output
+    output = _plain_output(result.output)
+    assert "--build-plan-digest" in output
+    assert "--constraints" in output
+    assert "--build-hooks-directory" in output
 
 
 @pytest.mark.parametrize(
@@ -406,12 +412,15 @@ def test_host_hook_option_is_preserved_only_on_render_and_build(
     build_help = cli_runner.invoke(app, ["host", "build", "--help"])
     validate_help = cli_runner.invoke(app, ["host", "validate", "--help"])
 
-    assert "--runtime-hooks-dir" in render_help.output
-    assert "--runtime-hooks-dir" in build_help.output
-    assert "--runtime-hooks-dir" not in validate_help.output
-    assert "--build-hooks-dir" in render_help.output
-    assert "--build-hooks-dir" in build_help.output
-    assert "--build-hooks-dir" in validate_help.output
+    render_output = _plain_output(render_help.output)
+    build_output = _plain_output(build_help.output)
+    validate_output = _plain_output(validate_help.output)
+    assert "--runtime-hooks-dir" in render_output
+    assert "--runtime-hooks-dir" in build_output
+    assert "--runtime-hooks-dir" not in validate_output
+    assert "--build-hooks-dir" in render_output
+    assert "--build-hooks-dir" in build_output
+    assert "--build-hooks-dir" in validate_output
 
 
 # Host help distinguishes Docker-backed resolution from later Buildx
@@ -422,13 +431,15 @@ def test_host_render_and_build_help_explain_locked_docker_boundaries(
     render_help = cli_runner.invoke(app, ["host", "render", "--help"])
     build_help = cli_runner.invoke(app, ["host", "build", "--help"])
 
-    assert "Docker may be used when new uv resolution is needed" in render_help.output
-    for output in (render_help.output, build_help.output):
+    render_output = _plain_output(render_help.output)
+    build_output = _plain_output(build_help.output)
+    assert "Docker may be used when new uv resolution is needed" in render_output
+    for output in (render_output, build_output):
         normalized = " ".join(output.replace("│", " ").split())
         assert "matching lock" in normalized
         assert "without resolving" in normalized
         assert "updating the context" in normalized
-    assert "build it with Docker Buildx" in build_help.output
+    assert "build it with Docker Buildx" in build_output
 
 
 def test_host_hook_roots_have_no_implicit_defaults() -> None:
@@ -1050,7 +1061,7 @@ def test_unimplemented_groups_do_not_silently_succeed(
     result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 2
-    assert usage in result.output
+    assert usage in _plain_output(result.output)
 
 
 def test_unknown_command_fails(cli_runner: CliRunner) -> None:

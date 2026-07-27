@@ -3,41 +3,59 @@
 English | [简体中文](README.zh-CN.md)
 
 [![CI](https://github.com/jimlee2048/comfyui-docker-helper/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/jimlee2048/comfyui-docker-helper/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![PyPI version](https://img.shields.io/pypi/v/comfyui-docker-helper.svg)](https://pypi.org/project/comfyui-docker-helper/)
+[![Python versions](https://img.shields.io/pypi/pyversions/comfyui-docker-helper.svg)](https://pypi.org/project/comfyui-docker-helper/)
 
 > [!IMPORTANT]
 >
+> - This is an independent, unofficial project. It is not affiliated with or endorsed by the ComfyUI project.
 > - This project is in early development; features and configuration are not guaranteed to remain stable.
 > - Coding AI agents lead most of the development work, while humans provide overall direction.
 
-`comfyui-docker-helper` (`cdh`) builds customized, CUDA-backed ComfyUI images from declarative TOML. It manages the selected Python and PyTorch environment, the official ComfyUI checkout, optional Manager and comfy-cli capabilities, custom nodes, files, and lifecycle hooks.
+`comfyui-docker-helper` (`cdh`) is a command-line helper for using ComfyUI with Docker.
 
-## Requirements
+## Features
 
-- Python 3.12, 3.13, or 3.14 to run cdh.
-- Docker when canonical resolution needs a new uv-backed result, and Docker with Buildx to build an image.
-- A Linux x86_64 (`linux/amd64`) image target. GPU execution also requires NVIDIA Container Toolkit support, an NVIDIA driver `>=580.65.06`, and a Turing-or-newer NVIDIA GPU.
+- Validate and layer declarative TOML configurations.
+- Resolve and lock selected Python, PyTorch, ComfyUI, tool, custom-node, and remote-file inputs.
+- Build customized CUDA-backed ComfyUI images for Linux `amd64` with Docker Buildx.
+- Add optional Manager, comfy-cli, custom nodes, files, downloads, lifecycle hooks, and SSH support.
 
-CUDA, PyTorch, and ComfyUI versions are explicit configuration selections.
+## Host requirements
+
+To build images with cdh, the host needs:
+
+- Python 3.12, 3.13, or 3.14.
+- A working Docker installation with Buildx.
 
 ## Install
 
+Install with `uv tool` (recommended):
+
 ```bash
 uv tool install comfyui-docker-helper
-cdh --help
 ```
 
-Plain `pip install comfyui-docker-helper` is also supported. cdh does not require a host uv executable; uv-backed canonical resolution runs through Docker.
+Installation with `pip` is also supported:
+
+```bash
+pip install comfyui-docker-helper
+```
+
+Run `cdh --help` after installation.
 
 ## Quick start
 
-From a repository checkout, validate the [minimal configuration](examples/minimal.toml), then build and load an image:
+### Build an image
+
+Save the repository's [minimal configuration](examples/minimal.toml) as `cdh.toml`, then validate it and build a local image:
 
 ```bash
-cdh host validate -f examples/minimal.toml
-cdh host build -f examples/minimal.toml -t my-comfy:dev --load
+cdh host validate -f cdh.toml
+cdh host build -f cdh.toml -t my-comfy:dev --load
 ```
 
-Validation is local and offline. The build uses `.cdh/build/current` as its managed context directory.
+A successful build loads `my-comfy:dev` into the local Docker image store.
 
 ## Documentation
 

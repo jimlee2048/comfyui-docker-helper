@@ -1,10 +1,11 @@
 [project]
 name = "comfyui-docker-helper"
 version = "0.5.1"
-description = "Command-line helper for using ComfyUI with Docker"
+description = "Unofficial command-line helper for using ComfyUI with Docker"
 readme = { text = """
-`comfyui-docker-helper` (`cdh`) is a command-line helper for using ComfyUI with
-Docker.
+`comfyui-docker-helper` (`cdh`) is an independent, unofficial command-line
+helper for using ComfyUI with Docker. It is not affiliated with or endorsed by
+the ComfyUI project.
 
 See the [GitHub repository](https://github.com/jimlee2048/comfyui-docker-helper)
 for current capabilities, requirements, documentation, examples, and issue

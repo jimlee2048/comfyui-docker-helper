@@ -20,8 +20,9 @@ from comfyui_docker_helper.version import package_version
 
 PROJECT_ROOT = Path(__file__).parents[2]
 INLINE_README = """\
-`comfyui-docker-helper` (`cdh`) is a command-line helper for using ComfyUI with
-Docker.
+`comfyui-docker-helper` (`cdh`) is an independent, unofficial command-line
+helper for using ComfyUI with Docker. It is not affiliated with or endorsed by
+the ComfyUI project.
 
 See the [GitHub repository](https://github.com/jimlee2048/comfyui-docker-helper)
 for current capabilities, requirements, documentation, examples, and issue
@@ -76,7 +77,7 @@ def test_project_release_identity_matches_package_metadata() -> None:
 
     assert project["version"] == package_version() == locked["version"]
     assert project["description"] == (
-        "Command-line helper for using ComfyUI with Docker"
+        "Unofficial command-line helper for using ComfyUI with Docker"
     )
     assert project["readme"] == {
         "text": INLINE_README,

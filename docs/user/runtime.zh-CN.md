@@ -6,6 +6,10 @@
 
 如需查看带完整注释的主机配置，请参阅 [`examples/full.toml`](../../examples/full.toml)。[配置指南](configuration.zh-CN.md)说明主机配置和分层；[构建与锁定指南](build-and-lock.zh-CN.md)说明主机端的选择如何成为固化到镜像中的输入。
 
+## GPU 宿主机要求
+
+使用 GPU 运行由 cdh 构建的镜像需要 NVIDIA Container Toolkit、版本不低于 `580.65.06` 的 NVIDIA 驱动，以及 Turing 或更新架构的 NVIDIA GPU。
+
 ## 运行时配置优先级
 
 每个镜像都在 `/opt/cdh/runtime/config.toml` 中包含生成的运行时默认配置。你可以挂载可选的 `/etc/cdh/runtime/config.toml`，无需重新构建镜像即可更改仅限运行时的行为。

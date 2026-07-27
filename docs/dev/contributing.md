@@ -44,6 +44,7 @@ The project uses a `src` layout:
 - `src/comfyui_docker_helper/container/` owns build-container and runtime helpers.
 - `src/comfyui_docker_helper/resources/` contains package-owned implementation inputs.
 - `tests/` contains unit, integration, smoke, acceptance support, and fixtures.
+- `tools/ci/` contains directly runnable, read-only package-build validators.
 - `examples/` contains the minimal and comprehensive public configurations.
 - `docs/user/` and `docs/dev/` contain user and developer documentation.
 

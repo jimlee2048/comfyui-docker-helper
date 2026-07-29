@@ -734,14 +734,16 @@ def _require_local_linux_docker(harness: _LiveHarness) -> None:
 
 def test_private_git_root_and_recursive_submodule_use_isolated_ssh_inputs() -> None:
     suffix = uuid.uuid4().hex[:12]
-    root = Path(tempfile.mkdtemp(prefix=f"cdh-w5-{suffix}-"))
+    root = Path(tempfile.mkdtemp(prefix=f"cdh-private-git-{suffix}-"))
     harness = _LiveHarness(
         root=root,
-        network=f"cdh-w5-{suffix}-network",
-        service_container=f"cdh-w5-{suffix}-git",
-        residue_container=f"cdh-w5-{suffix}-residue",
-        builders=tuple(f"cdh-w5-{suffix}-builder-{attempt}" for attempt in range(1, 4)),
-        image_tag=f"cdh-w5-private-git-live:{suffix}",
+        network=f"cdh-private-git-{suffix}-network",
+        service_container=f"cdh-private-git-{suffix}-git",
+        residue_container=f"cdh-private-git-{suffix}-residue",
+        builders=tuple(
+            f"cdh-private-git-{suffix}-builder-{attempt}" for attempt in range(1, 4)
+        ),
+        image_tag=f"cdh-private-git-live:{suffix}",
     )
     try:
         harness.path("docker-config").mkdir()

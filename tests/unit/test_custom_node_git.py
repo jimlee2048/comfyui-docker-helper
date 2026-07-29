@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -399,6 +400,38 @@ def test_failed_direct_git_clone_cleans_only_owned_stage(
     assert unrelated.joinpath("keep").read_text() == "keep"
     assert not (custom_nodes / "direct").exists()
     assert not tuple(custom_nodes.glob(".direct.cdh-stage-*"))
+
+
+# Git failures keep stderr on the live build stream while returning concise cdh errors.
+def test_failed_git_command_preserves_stderr_diagnostic(
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    command = (
+        sys.executable,
+        "-c",
+        (
+            "import sys; "
+            "print('captured stdout'); "
+            "print('streamed Git diagnostic', file=sys.stderr); "
+            "raise SystemExit(19)"
+        ),
+    )
+
+    with pytest.raises(
+        CustomNodeInstallError,
+        match="Git diagnostic probe failed with exit code 19",
+    ):
+        custom_node_installer._run_git(
+            command,
+            cwd=tmp_path,
+            env=os.environ,
+            description="Git diagnostic probe",
+        )
+
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == "streamed Git diagnostic\n"
 
 
 def test_stage_replacement_race_fails_without_removing_replacement(

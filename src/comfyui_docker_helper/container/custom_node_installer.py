@@ -1353,7 +1353,7 @@ def _run_git_allowing(
             cwd=cwd,
             env=dict(env),
             check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise CustomNodeInstallError(f"{description} failed to start") from error

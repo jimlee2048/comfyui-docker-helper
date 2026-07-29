@@ -83,6 +83,8 @@ Materialization writes into owned staging space, re-verifies supplied local and 
 
 `cdh host build` prepares the context through the same path and then invokes Docker Buildx. The rendered Dockerfile carries the expected BuildPlan digest literally. Each image-internal build helper admits the fixed materialized BuildPlan against that digest and receives only its command-specific typed projection.
 
+When `host build --ssh` is applicable to a direct-Git custom node, the host admits only a non-empty default-agent environment reference before provider work. After context preparation, it maps the default agent and whichever default user/system known-hosts paths exist directly into the Buildx invocation. These compatibility inputs bypass configuration, reconciliation, BuildPlan, and materialization; rendering remains a function of BuildPlan and declares only stable optional mount identities for a direct-Git plan.
+
 The Dockerfile installs the toolchain and application, processes configured nodes and files, and invokes final observation after all build mutations. Final observation rechecks current image state and publishes the manifest; it does not make another planning decision.
 
 ### Run the container lifecycle

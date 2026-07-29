@@ -4,7 +4,12 @@ import json
 import shlex
 from pathlib import PurePosixPath
 
-from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
+from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
+from comfyui_docker_helper.config.build_plan import (
+    BuildPlan,
+    GitNodePlan,
+    build_plan_digest,
+)
 
 
 def render_build_plan_dockerfile(plan: BuildPlan) -> str:
@@ -244,11 +249,13 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         "--constraints /opt/cdh/build/python-package-constraints.txt"
     )
     lines.append(
-        f"RUN {uv_cache_mount} {uv_cache_export} {_shell_word(cdh.executable)} "
-        "container install-custom-nodes "
-        f"--build-plan-digest {plan_digest} "
-        "--constraints /opt/cdh/build/python-package-constraints.txt "
-        "--build-hooks-directory /opt/cdh/build/hooks"
+        _custom_node_install_line(
+            plan,
+            uv_cache_mount=uv_cache_mount,
+            uv_cache_export=uv_cache_export,
+            cdh_executable=cdh.executable,
+            plan_digest=plan_digest,
+        )
     )
     if plan.files.files:
         lines.append(
@@ -262,6 +269,55 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         f"--build-plan-digest {plan_digest}"
     )
     return lines
+
+
+def _custom_node_install_line(
+    plan: BuildPlan,
+    *,
+    uv_cache_mount: str,
+    uv_cache_export: str,
+    cdh_executable: str,
+    plan_digest: str,
+) -> str:
+    mounts = [uv_cache_mount]
+    environment = ""
+    if any(isinstance(node, GitNodePlan) for node in plan.custom_nodes.nodes):
+        mounts.append("--mount=type=ssh,id=default,required=false")
+        mounts.extend(
+            "--mount=type=secret,"
+            f"id={descriptor.secret_id},target={descriptor.target},required=false"
+            for descriptor in KNOWN_HOSTS_MOUNTS
+        )
+        environment = f"GIT_SSH_COMMAND={_shell_word(_git_ssh_command())} "
+    mount_prefix = " \\\n    ".join(mounts)
+    return (
+        f"RUN {mount_prefix} {uv_cache_export} {environment}"
+        f"{_shell_word(cdh_executable)} container install-custom-nodes "
+        f"--build-plan-digest {plan_digest} "
+        "--constraints /opt/cdh/build/python-package-constraints.txt "
+        "--build-hooks-directory /opt/cdh/build/hooks"
+    )
+
+
+def _git_ssh_command() -> str:
+    user_paths = " ".join(
+        descriptor.target
+        for descriptor in KNOWN_HOSTS_MOUNTS
+        if descriptor.scope == "user"
+    )
+    system_paths = " ".join(
+        descriptor.target
+        for descriptor in KNOWN_HOSTS_MOUNTS
+        if descriptor.scope == "system"
+    )
+    return (
+        "/usr/bin/ssh -F none "
+        "-o BatchMode=yes "
+        "-o StrictHostKeyChecking=yes "
+        "-o KnownHostsCommand=none "
+        f'-o UserKnownHostsFile="{user_paths}" '
+        f'-o GlobalKnownHostsFile="{system_paths}"'
+    )
 
 
 def _docker_word(value: str) -> str:

@@ -19,7 +19,8 @@ English | [简体中文](README.zh-CN.md)
 - Validate and layer declarative TOML configurations.
 - Resolve and lock selected Python, PyTorch, ComfyUI, tool, custom-node, and remote-file inputs.
 - Build customized CUDA-backed ComfyUI images for Linux `amd64` with Docker Buildx.
-- Add optional Manager, comfy-cli, custom nodes, files, downloads, lifecycle hooks, and SSH support.
+- Use the host's default SSH agent to build private direct-Git custom nodes.
+- Add optional Manager, comfy-cli, custom nodes, files, downloads, lifecycle hooks, and runtime SSH access.
 
 ## Host requirements
 

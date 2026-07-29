@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -20,6 +21,7 @@ from tests.build_plan_support import (
 )
 
 from comfyui_docker_helper import file_admission
+from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
@@ -108,7 +110,15 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
         "container emit-final-manifest",
     ):
         block = next(item for item in run_blocks if marker in item)
-        assert block.startswith(uv_cache_prefix)
+        if marker == "container install-custom-nodes":
+            assert block.startswith(
+                "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \\\n"
+            )
+            assert block.index("export UV_CACHE_DIR=/root/.cache/uv &&") < block.index(
+                marker
+            )
+        else:
+            assert block.startswith(uv_cache_prefix)
 
     wheel_block = next(item for item in run_blocks if "source=bootstrap/" in item)
     assert wheel_block.startswith(
@@ -255,36 +265,131 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
     assert rendered.index("container install-comfyui") < rendered.index(
         "container install-custom-nodes"
     )
-    custom_node_line = next(
-        line for line in rendered.splitlines() if "install-custom-nodes" in line
+    custom_node_block = next(
+        block for block in _run_blocks(rendered) if "install-custom-nodes" in block
     )
-    assert custom_node_line.startswith(
-        "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked "
-        "export UV_CACHE_DIR=/root/.cache/uv && /opt/uv/bin/cdh container"
+    assert custom_node_block.startswith(
+        "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \\\n"
+        "    --mount=type=ssh,id=default,required=false"
     )
-    assert f"--build-plan-digest {build_plan_digest(plan)}" in custom_node_line
-    assert "--constraints /opt/cdh/build/python-package-constraints.txt" in (
-        custom_node_line
+    assert (
+        "export UV_CACHE_DIR=/root/.cache/uv && GIT_SSH_COMMAND=" in custom_node_block
     )
-    assert "--build-hooks-directory /opt/cdh/build/hooks" in custom_node_line
+    assert f"--build-plan-digest {build_plan_digest(plan)}" in custom_node_block
+    assert (
+        "--constraints /opt/cdh/build/python-package-constraints.txt"
+        in custom_node_block
+    )
+    assert "--build-hooks-directory /opt/cdh/build/hooks" in custom_node_block
+    assert rendered.index("container install-custom-nodes") < rendered.index(
+        "container download-files"
+    )
+    assert rendered.index("container download-files") < rendered.index(
+        "container emit-final-manifest"
+    )
     assert "comfy node" not in rendered
     assert "comfy install" not in rendered
 
 
-@pytest.mark.parametrize("node_type", ["git", "registry", "empty"])
-def test_renderer_always_emits_one_custom_node_layer(node_type: str) -> None:
+# Default OpenSSH trust sources map to stable identities shared by host and
+# renderer.
+def test_known_hosts_mount_descriptors_define_the_public_mapping() -> None:
+    expected = (
+        (
+            "cdh-ssh-known-hosts-user",
+            "/run/secrets/cdh-ssh-known-hosts-user",
+            "~/.ssh/known_hosts",
+            "user",
+        ),
+        (
+            "cdh-ssh-known-hosts-user-legacy",
+            "/run/secrets/cdh-ssh-known-hosts-user-legacy",
+            "~/.ssh/known_hosts2",
+            "user",
+        ),
+        (
+            "cdh-ssh-known-hosts-system",
+            "/run/secrets/cdh-ssh-known-hosts-system",
+            "/etc/ssh/ssh_known_hosts",
+            "system",
+        ),
+        (
+            "cdh-ssh-known-hosts-system-legacy",
+            "/run/secrets/cdh-ssh-known-hosts-system-legacy",
+            "/etc/ssh/ssh_known_hosts2",
+            "system",
+        ),
+    )
+    assert expected == KNOWN_HOSTS_MOUNTS
+
+
+# Direct-Git plans alone receive optional, strict, non-interactive SSH inputs.
+@pytest.mark.parametrize(
+    ("node_types", "uses_ssh"),
+    [
+        (("git",), True),
+        (("registry", "git"), True),
+        (("registry",), False),
+        ((), False),
+    ],
+)
+def test_renderer_scopes_strict_optional_ssh_mounts_to_direct_git_plans(
+    node_types: tuple[str, ...],
+    uses_ssh: bool,
+) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     document = plan.model_dump(mode="python")
     document["custom_nodes"]["nodes"] = tuple(
-        node
-        for node in document["custom_nodes"]["nodes"]
-        if node_type != "empty" and node["type"] == node_type
+        node for node in document["custom_nodes"]["nodes"] if node["type"] in node_types
     )
     changed = BuildPlan.model_validate(document)
 
     rendered = render_build_plan_dockerfile(changed)
+    custom_node_block = next(
+        block for block in _run_blocks(rendered) if "install-custom-nodes" in block
+    )
 
     assert rendered.count("container install-custom-nodes") == 1
+    ssh_mount = "--mount=type=ssh,id=default,required=false"
+    secret_mounts = tuple(
+        "--mount=type=secret,"
+        f"id={descriptor.secret_id},target={descriptor.target},required=false"
+        for descriptor in KNOWN_HOSTS_MOUNTS
+    )
+    user_paths = " ".join(
+        descriptor.target
+        for descriptor in KNOWN_HOSTS_MOUNTS
+        if descriptor.scope == "user"
+    )
+    system_paths = " ".join(
+        descriptor.target
+        for descriptor in KNOWN_HOSTS_MOUNTS
+        if descriptor.scope == "system"
+    )
+    ssh_command = (
+        "/usr/bin/ssh -F none "
+        "-o BatchMode=yes "
+        "-o StrictHostKeyChecking=yes "
+        "-o KnownHostsCommand=none "
+        f'-o UserKnownHostsFile="{user_paths}" '
+        f'-o GlobalKnownHostsFile="{system_paths}"'
+    )
+
+    if uses_ssh:
+        assert custom_node_block.count(ssh_mount) == 1
+        for secret_mount in secret_mounts:
+            assert custom_node_block.count(secret_mount) == 1
+        assert f"GIT_SSH_COMMAND={shlex.quote(ssh_command)}" in custom_node_block
+        assert custom_node_block.index(ssh_mount) < custom_node_block.index(
+            secret_mounts[0]
+        )
+        assert custom_node_block.index(secret_mounts[-1]) < custom_node_block.index(
+            "export UV_CACHE_DIR"
+        )
+    else:
+        assert ssh_mount not in custom_node_block
+        assert all(mount not in custom_node_block for mount in secret_mounts)
+        assert "GIT_SSH_COMMAND" not in custom_node_block
 
 
 # Materialization writes one deterministic BuildPlan and verified local inputs.
@@ -372,6 +477,10 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
         plan.files,
         plan.application.paths.comfyui,
     )
+
+
+def _run_blocks(rendered: str) -> tuple[str, ...]:
+    return tuple(f"RUN {block}" for block in rendered.split("\nRUN ")[1:])
 
 
 # Materialization rechecks the retained wheel bytes before admitting them.

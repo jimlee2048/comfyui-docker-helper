@@ -37,6 +37,40 @@ cdh host build \
 
 `host build` 会渲染所选上下文，然后调用 Buildx。请提供一个或多个 `-t/--tag` 值，或者配置 `[build].tags`。使用 `--load` 将镜像载入本地 Docker 镜像存储，或使用 `--push` 推送至 registry；这两个选项互斥。
 
+## 通过 SSH 访问私有 Git 自定义节点
+
+当 direct-Git 自定义节点或其递归 submodule 需要宿主机上的 SSH 身份时，使用 `--ssh`。构建前，请将所需身份加载到默认 SSH agent，并将服务器主机密钥加入默认的 OpenSSH known-hosts 文件。
+
+```bash
+cdh host build \
+  -f examples/full.toml \
+  --context-dir .cdh/build/current \
+  -t my-comfy:dev \
+  --load \
+  --ssh
+```
+
+该选项要求 `SSH_AUTH_SOCK` 非空。cdh 使用默认 agent 以及现有的默认用户和系统 known-hosts 文件；它不会检查 agent、添加主机密钥、复制私钥或读取 `~/.ssh/config`。对于自托管服务或非默认端口，请使用 `ssh://git@example.test:2222/group/node.git` 之类的显式 locator，并将对应的主机及端口条目加入默认 known-hosts 文件。该选项不支持 SSH alias、`ProxyJump`、自定义密钥或信任文件 selector、原始密钥文件以及 HTTPS token 鉴权。
+
+如果生效配置没有 direct-Git 节点，`--ssh` 会输出一次 warning，并在不转发任何内容的情况下继续。否则，缺少 agent 会在解析源码前失败；主机密钥、鉴权以及 Git/submodule 的失败则会保留其底层诊断。
+
+请将配置的自定义节点 Hook 和安装程序视为受信任代码：在安装自定义节点期间，它们能够使用转发的 agent 并读取提供的信任文件。私钥字节仍由 agent 持有，cdh 不会自动将 agent 或信任文件放入渲染上下文或镜像。缓存的自定义节点层也可能在不联系当前 agent 或不重新检查已更新信任的情况下被复用；需要重新验证鉴权时，请绕过相应的 BuildKit 缓存。
+
+### 直接构建渲染上下文
+
+渲染后的 direct-Git 上下文也可以直接通过 Buildx 构建。请提供默认 SSH agent，并为构建所需的每个 known-hosts 文件提供一个 secret。以下示例使用最常见的用户信任文件：
+
+```bash
+docker buildx build \
+  --ssh default \
+  --secret "type=file,id=cdh-ssh-known-hosts-user,src=$HOME/.ssh/known_hosts" \
+  --load \
+  -t my-comfy:dev \
+  .cdh/build/current
+```
+
+渲染后的 Dockerfile 会显示其他受支持默认信任文件各自的稳定 secret ID。请省略源文件不存在的 secret。
+
 ## Hook 源目录
 
 自定义节点配置所引用的 build hooks 没有隐式源目录。请向 `validate`、`render` 和 `build` 传入 `--build-hooks-dir`：

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Literal
 
@@ -21,6 +24,22 @@ class BuildxBuildError(ApplicationError):
 BuildxLogger = Callable[[str], None]
 
 
+@dataclass(frozen=True, slots=True)
+class KnownHostsBinding:
+    """One host known-hosts file bound to a stable BuildKit secret ID."""
+
+    secret_id: str
+    source: Path
+
+
+def _render_known_hosts_secret(binding: KnownHostsBinding) -> str:
+    output = StringIO(newline="")
+    csv.writer(output, lineterminator="").writerow(
+        ("type=file", f"id={binding.secret_id}", f"src={binding.source}")
+    )
+    return output.getvalue()
+
+
 def build_image_with_buildx(
     *,
     image_tags: Sequence[str],
@@ -29,6 +48,8 @@ def build_image_with_buildx(
     platforms: Sequence[str] = ("linux/amd64",),
     cwd: str | Path | None = None,
     log: BuildxLogger = print,
+    forward_default_ssh: bool = False,
+    known_hosts_bindings: Sequence[KnownHostsBinding] = (),
 ) -> None:
     """Build one image through the public python-on-whales Buildx API."""
     base_directory = Path(cwd) if cwd is not None else Path.cwd()
@@ -43,6 +64,13 @@ def build_image_with_buildx(
         "Running Docker Buildx "
         f"({output}) for {tag_summary} on {', '.join(target_platforms)}"
     )
+    buildkit_inputs: dict[str, object] = {}
+    if forward_default_ssh:
+        buildkit_inputs["ssh"] = "default"
+    if known_hosts_bindings:
+        buildkit_inputs["secrets"] = [
+            _render_known_hosts_secret(binding) for binding in known_hosts_bindings
+        ]
 
     try:
         stream = DockerClient().buildx.build(
@@ -53,6 +81,7 @@ def build_image_with_buildx(
             platforms=list(target_platforms),
             progress="plain",
             stream_logs=True,
+            **buildkit_inputs,
         )
         if stream is None:  # pragma: no cover - public API contract
             raise BuildxBuildError("Docker Buildx did not provide its live log stream")

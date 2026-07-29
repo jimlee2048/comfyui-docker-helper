@@ -19,6 +19,7 @@ from tests.build_plan_support import (
 from typer.main import get_command
 from typer.testing import CliRunner
 
+from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
 from comfyui_docker_helper.config.build_plan import BuildOutputPlan, build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
@@ -29,6 +30,7 @@ from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
+from comfyui_docker_helper.host.buildx import KnownHostsBinding
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
 
@@ -65,6 +67,72 @@ ref = "1111111111111111111111111111111111111111"
 pre_install_hooks = ["nested/pre.sh"]
 """
         )
+
+
+def _write_direct_git_config(path: Path) -> None:
+    _write_minimal_config(path)
+    with path.open("a") as config:
+        config.write(
+            """
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://example.test/private-node.git"
+ref = "1111111111111111111111111111111111111111"
+"""
+        )
+
+
+def _write_registry_config(path: Path) -> None:
+    _write_minimal_config(path)
+    path.write_text(
+        path.read_text().replace("install_manager = false", "install_manager = true")
+    )
+    with path.open("a") as config:
+        config.write(
+            """
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example.registry.node"
+version = "1.2.3"
+"""
+        )
+
+
+@contextmanager
+def _stub_planning_providers():
+    yield SimpleNamespace(
+        acquirer=object(),
+        local_acquirer=object(),
+        canonical_wheel=canonical_wheel(),
+    )
+
+
+def _prepared_build() -> SimpleNamespace:
+    return SimpleNamespace(
+        warnings=(),
+        plan=SimpleNamespace(
+            build=BuildOutputPlan(
+                tags=("example:test",),
+                output="load",
+                platforms=("linux/amd64",),
+            )
+        ),
+    )
+
+
+def _build_ssh_args(config: Path, *, context: Path | None = None) -> list[str]:
+    args = [
+        "host",
+        "build",
+        "-f",
+        str(config),
+        "-t",
+        "example:test",
+        "--ssh",
+    ]
+    if context is not None:
+        args.extend(("--context-dir", str(context)))
+    return args
 
 
 # The public command surface, adapters, and error boundary stay executable and concise.
@@ -421,6 +489,25 @@ def test_host_hook_option_is_preserved_only_on_render_and_build(
     assert "--build-hooks-dir" in render_output
     assert "--build-hooks-dir" in build_output
     assert "--build-hooks-dir" in validate_output
+
+
+def test_ssh_option_is_exposed_only_by_host_build(cli_runner: CliRunner) -> None:
+    build_output = _plain_output(
+        cli_runner.invoke(app, ["host", "build", "--help"]).output
+    )
+    render_output = _plain_output(
+        cli_runner.invoke(app, ["host", "render", "--help"]).output
+    )
+    validate_output = _plain_output(
+        cli_runner.invoke(app, ["host", "validate", "--help"]).output
+    )
+
+    assert "--ssh" in build_output
+    assert "default SSH agent and known-hosts trust" in " ".join(
+        build_output.replace("│", " ").split()
+    )
+    assert "--ssh" not in render_output
+    assert "--ssh" not in validate_output
 
 
 # Host help distinguishes Docker-backed resolution from later Buildx
@@ -886,6 +973,11 @@ platforms = ["linux/amd64"]
         )
 
     def buildx(**kwargs):
+        seen["buildx_ssh_keys"] = {
+            key
+            for key in ("forward_default_ssh", "known_hosts_bindings")
+            if key in kwargs
+        }
         seen["buildx"] = {
             "image_tags": kwargs["image_tags"],
             "output": kwargs["output"],
@@ -935,6 +1027,220 @@ platforms = ["linux/amd64"]
         "platforms": plan_build.platforms,
         "context_dir": context,
     }
+    assert seen["buildx_ssh_keys"] == set()
+
+
+def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def prepare(*args, **kwargs):
+        del args, kwargs
+        return _prepared_build()
+
+    def buildx(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+    monkeypatch.setattr(
+        host_cli,
+        "_collect_default_known_hosts_bindings",
+        lambda: pytest.fail("ignored --ssh must not collect known-hosts sources"),
+    )
+    config = tmp_path / "config.toml"
+    _write_registry_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        _build_ssh_args(config, context=tmp_path / "context"),
+    )
+
+    warning = (
+        "Warning: --ssh ignored because the effective configuration has no "
+        "direct-Git custom nodes."
+    )
+    assert result.exit_code == 0
+    assert result.output.count(warning) == 1
+    assert "forward_default_ssh" not in seen
+    assert "known_hosts_bindings" not in seen
+
+
+def test_build_ssh_does_not_replace_configuration_validation(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("invalid configuration must fail before planning providers")
+
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+    config = tmp_path / "invalid.toml"
+    config.write_text("unknown = true\n")
+
+    result = cli_runner.invoke(
+        app,
+        _build_ssh_args(config),
+    )
+
+    assert result.exit_code == 1
+    assert "Unable to process configuration" in result.output
+    assert "SSH_AUTH_SOCK" not in result.output
+
+
+@pytest.mark.parametrize("agent_socket", [None, ""])
+def test_build_ssh_requires_nonempty_agent_before_planning_providers(
+    agent_socket: str | None,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("SSH input admission must precede planning providers")
+
+    if agent_socket is None:
+        monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    else:
+        monkeypatch.setenv("SSH_AUTH_SOCK", agent_socket)
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        _build_ssh_args(config),
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid value for --ssh" in _plain_output(result.output)
+    assert "non-empty SSH_AUTH_SOCK" in _plain_output(result.output)
+
+
+@pytest.mark.parametrize("existing_indexes", [(0, 3), ()])
+def test_build_ssh_forwards_agent_and_only_existing_default_trust_after_context(
+    existing_indexes: tuple[int, ...],
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+    checked_sources: list[Path] = []
+    original_exists = Path.exists
+
+    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+    agent_socket = tmp_path / "not-a-real-agent-socket"
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(agent_socket))
+    default_sources = tuple(
+        Path(descriptor.default_source).expanduser()
+        for descriptor in KNOWN_HOSTS_MOUNTS
+    )
+    existing_sources = {default_sources[index] for index in existing_indexes}
+
+    def selective_exists(path: Path) -> bool:
+        if path in default_sources:
+            checked_sources.append(path)
+            return path in existing_sources
+        return original_exists(path)
+
+    def prepare(*args, **kwargs):
+        del args, kwargs
+        assert checked_sources == []
+        return _prepared_build()
+
+    def buildx(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(Path, "exists", selective_exists)
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        _build_ssh_args(config),
+    )
+
+    assert result.exit_code == 0
+    assert seen["forward_default_ssh"] is True
+    assert seen["known_hosts_bindings"] == tuple(
+        KnownHostsBinding(
+            secret_id=KNOWN_HOSTS_MOUNTS[index].secret_id,
+            source=default_sources[index],
+        )
+        for index in existing_indexes
+    )
+    assert checked_sources == list(default_sources)
+    assert agent_socket not in checked_sources
+
+
+def test_build_ssh_host_sources_enter_only_buildx_bindings(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    context = tmp_path / "context"
+    host_home = tmp_path / "host-source-marker"
+    user_ssh = host_home / ".ssh"
+    user_ssh.mkdir(parents=True)
+    known_hosts = user_ssh / "known_hosts"
+    known_hosts.write_text("host-trust-content-marker")
+    agent_socket = host_home / "agent-socket-marker"
+    seen: dict[str, object] = {}
+
+    def prepare(output_dir, **kwargs):
+        del kwargs
+        Path(output_dir).mkdir()
+        materialize_build_plan(
+            plan,
+            output_dir,
+            canonical_wheel=canonical_wheel(),
+        )
+        return SimpleNamespace(warnings=(), plan=plan)
+
+    def buildx(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(agent_socket))
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        _build_ssh_args(config, context=context),
+    )
+
+    assert result.exit_code == 0
+    assert (
+        KnownHostsBinding(
+            secret_id=KNOWN_HOSTS_MOUNTS[0].secret_id,
+            source=known_hosts,
+        )
+        in seen["known_hosts_bindings"]
+    )
+    source_markers = (str(host_home).encode(), b"host-trust-content-marker")
+    for path in context.rglob("*"):
+        if path.is_file():
+            content = path.read_bytes()
+            assert all(marker not in content for marker in source_markers)
 
 
 def test_locked_build_override_stops_before_buildx_when_context_is_stale(

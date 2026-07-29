@@ -1,19 +1,26 @@
 """Host command group."""
 
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
+from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
     ConfigurationServiceError,
     load_validate_config_result,
 )
 from comfyui_docker_helper.config.value_validation import has_control_characters
-from comfyui_docker_helper.host.buildx import BuildxOutput, build_image_with_buildx
+from comfyui_docker_helper.host.buildx import (
+    BuildxOutput,
+    KnownHostsBinding,
+    build_image_with_buildx,
+)
 from comfyui_docker_helper.host.diagnostics import (
     render_configuration_diagnostics,
     render_configuration_warnings,
@@ -241,6 +248,16 @@ def build(
             help="Push the built image tags to their registry.",
         ),
     ] = False,
+    ssh: Annotated[
+        bool,
+        typer.Option(
+            "--ssh",
+            help=(
+                "Allow custom-node installation to use the host's default SSH "
+                "agent and known-hosts trust."
+            ),
+        ),
+    ] = False,
     build_hooks_dir: Annotated[
         Path | None,
         typer.Option(
@@ -295,6 +312,7 @@ def build(
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    use_ssh = _prepare_build_ssh_input(requested=ssh, result=validated)
     effective_tags = _resolve_effective_image_tags(
         cli_tags=cli_tags,
         config_tags=validated.config.build.tags,
@@ -339,6 +357,13 @@ def build(
         raise typer.Exit(code=1) from error
     render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
 
+    buildx_ssh_inputs: dict[str, object] = {}
+    if use_ssh:
+        buildx_ssh_inputs = {
+            "forward_default_ssh": True,
+            "known_hosts_bindings": _collect_default_known_hosts_bindings(),
+        }
+
     typer.echo(f"Build context: {context_dir}")
     build_plan = prepared.plan.build
     build_image_with_buildx(
@@ -348,6 +373,43 @@ def build(
         platforms=build_plan.platforms,
         cwd=Path.cwd(),
         log=typer.echo,
+        **buildx_ssh_inputs,
+    )
+
+
+def _prepare_build_ssh_input(
+    *,
+    requested: bool,
+    result: ConfigurationResult,
+) -> bool:
+    if not requested:
+        return False
+    if not any(
+        isinstance(node, FinalGitCustomNodeConfig)
+        for node in result.config.comfyui.custom_nodes
+    ):
+        typer.echo(
+            "Warning: --ssh ignored because the effective configuration has no "
+            "direct-Git custom nodes.",
+            err=True,
+        )
+        return False
+    if not os.environ.get("SSH_AUTH_SOCK"):
+        raise typer.BadParameter(
+            "requires a non-empty SSH_AUTH_SOCK environment variable",
+            param_hint="--ssh",
+        )
+    return True
+
+
+def _collect_default_known_hosts_bindings() -> tuple[KnownHostsBinding, ...]:
+    return tuple(
+        KnownHostsBinding(
+            secret_id=descriptor.secret_id,
+            source=source,
+        )
+        for descriptor in KNOWN_HOSTS_MOUNTS
+        if (source := Path(descriptor.default_source).expanduser()).exists()
     )
 
 

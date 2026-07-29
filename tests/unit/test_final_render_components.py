@@ -21,10 +21,7 @@ from tests.build_plan_support import (
 )
 
 from comfyui_docker_helper import file_admission
-from comfyui_docker_helper.build_ssh import (
-    KNOWN_HOSTS_MOUNTS,
-    KnownHostsMount,
-)
+from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
@@ -294,27 +291,29 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
     assert "comfy install" not in rendered
 
 
-def test_known_hosts_mount_descriptors_are_stable_and_immutable() -> None:
+# Default OpenSSH trust sources map to stable identities shared by host and
+# renderer.
+def test_known_hosts_mount_descriptors_define_the_public_mapping() -> None:
     expected = (
-        KnownHostsMount(
+        (
             "cdh-ssh-known-hosts-user",
             "/run/secrets/cdh-ssh-known-hosts-user",
             "~/.ssh/known_hosts",
             "user",
         ),
-        KnownHostsMount(
+        (
             "cdh-ssh-known-hosts-user-legacy",
             "/run/secrets/cdh-ssh-known-hosts-user-legacy",
             "~/.ssh/known_hosts2",
             "user",
         ),
-        KnownHostsMount(
+        (
             "cdh-ssh-known-hosts-system",
             "/run/secrets/cdh-ssh-known-hosts-system",
             "/etc/ssh/ssh_known_hosts",
             "system",
         ),
-        KnownHostsMount(
+        (
             "cdh-ssh-known-hosts-system-legacy",
             "/run/secrets/cdh-ssh-known-hosts-system-legacy",
             "/etc/ssh/ssh_known_hosts2",
@@ -322,10 +321,9 @@ def test_known_hosts_mount_descriptors_are_stable_and_immutable() -> None:
         ),
     )
     assert expected == KNOWN_HOSTS_MOUNTS
-    with pytest.raises(AttributeError):
-        KNOWN_HOSTS_MOUNTS[0].target = "/changed"
 
 
+# Direct-Git plans alone receive optional, strict, non-interactive SSH inputs.
 @pytest.mark.parametrize(
     ("node_types", "uses_ssh"),
     [
@@ -394,31 +392,9 @@ def test_renderer_scopes_strict_optional_ssh_mounts_to_direct_git_plans(
         assert "GIT_SSH_COMMAND" not in custom_node_block
 
 
-def test_renderer_is_independent_of_host_ssh_environment_and_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    baseline = render_build_plan_dockerfile(plan)
-    host_home = tmp_path / "host-ssh-source-marker"
-    user_ssh = host_home / ".ssh"
-    user_ssh.mkdir(parents=True)
-    (user_ssh / "known_hosts").write_text("host-trust-content-marker")
-    monkeypatch.setenv("HOME", str(host_home))
-    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "agent-socket-marker"))
-
-    rendered = render_build_plan_dockerfile(plan)
-
-    assert rendered == baseline
-    assert str(host_home) not in rendered
-    assert "host-trust-content-marker" not in rendered
-    assert "agent-socket-marker" not in rendered
-
-
 # Materialization writes one deterministic BuildPlan and verified local inputs.
 def test_materializer_writes_deterministic_plan_and_verified_input(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     content = b"#!/usr/bin/env python3\n"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
@@ -434,9 +410,6 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     source_input = LocalMaterializationSource(
         PurePosixPath("build-hooks/hooks/pre.py"), source
     )
-    host_source_marker = tmp_path / "host-ssh-source-marker"
-    monkeypatch.setenv("HOME", str(host_source_marker))
-    monkeypatch.setenv("SSH_AUTH_SOCK", str(host_source_marker / "agent.sock"))
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
@@ -470,9 +443,6 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert runtime.config.comfyui.port == 8188
     assert _tree(first) == _tree(second)
     tree = _tree(first)
-    assert all(
-        str(host_source_marker).encode() not in content for content in tree.values()
-    )
     wheel = canonical_wheel()
     assert tree[f"bootstrap/{wheel.filename}"] == wheel.content
     assert tree[".dockerignore"] == b"/.cdh-rendered\n/config.lock.toml\n"

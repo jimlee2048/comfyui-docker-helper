@@ -402,6 +402,7 @@ def test_failed_direct_git_clone_cleans_only_owned_stage(
     assert not tuple(custom_nodes.glob(".direct.cdh-stage-*"))
 
 
+# Git failures keep stderr on the live build stream while returning concise cdh errors.
 def test_failed_git_command_preserves_stderr_diagnostic(
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],

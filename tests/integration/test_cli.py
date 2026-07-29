@@ -491,6 +491,7 @@ def test_host_hook_option_is_preserved_only_on_render_and_build(
     assert "--build-hooks-dir" in validate_output
 
 
+# SSH authentication is an explicit build-only public capability.
 def test_ssh_option_is_exposed_only_by_host_build(cli_runner: CliRunner) -> None:
     build_output = _plain_output(
         cli_runner.invoke(app, ["host", "build", "--help"]).output
@@ -1029,6 +1030,8 @@ platforms = ["linux/amd64"]
     assert seen["buildx_ssh"] == (False, ())
 
 
+# SSH build admission preserves opt-in defaults, validation order, and
+# host-data isolation.
 def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
     cli_runner: CliRunner,
     tmp_path: Path,

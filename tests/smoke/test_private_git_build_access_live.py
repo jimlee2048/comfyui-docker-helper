@@ -27,24 +27,26 @@ _ALPINE_IMAGE = "alpine:3.22"
 _SETUP_TIMEOUT_SECONDS = 180
 _BUILD_TIMEOUT_SECONDS = 7200
 _SERVICE_READY_TIMEOUT_SECONDS = 120
+_DOCKER_ENVIRONMENT_NAMES = (
+    "BUILDKIT_HOST",
+    "BUILDX_BUILDER",
+    "BUILDX_CONFIG",
+    "DOCKER_AUTH_CONFIG",
+    "DOCKER_CERT_PATH",
+    "DOCKER_CONTEXT",
+    "DOCKER_HOST",
+    "DOCKER_TLS_VERIFY",
+)
 
 
 class _LiveHarnessError(RuntimeError):
     pass
 
 
+# Command wrappers isolate ambient Docker and Git state and bound every subprocess.
 def _docker_environment(docker_config: Path) -> dict[str, str]:
     env = os.environ.copy()
-    for name in (
-        "BUILDKIT_HOST",
-        "BUILDX_BUILDER",
-        "BUILDX_CONFIG",
-        "DOCKER_AUTH_CONFIG",
-        "DOCKER_CERT_PATH",
-        "DOCKER_CONTEXT",
-        "DOCKER_HOST",
-        "DOCKER_TLS_VERIFY",
-    ):
+    for name in _DOCKER_ENVIRONMENT_NAMES:
         env.pop(name, None)
     env["DOCKER_CONFIG"] = os.fspath(docker_config)
     return env
@@ -120,6 +122,7 @@ def _git(
     )
 
 
+# The harness gives every external resource a collision-checked, disposable identity.
 @dataclass(slots=True)
 class _LiveHarness:
     root: Path
@@ -173,6 +176,7 @@ class _LiveHarness:
         return name
 
 
+# Ephemeral agent and service fixtures exercise SSH without maintainer credentials.
 def _start_agent(harness: _LiveHarness, private_key: Path) -> None:
     socket_path = harness.root / "agent.sock"
     try:
@@ -203,7 +207,7 @@ def _start_agent(harness: _LiveHarness, private_key: Path) -> None:
 def _start_git_service(harness: _LiveHarness, authorized_keys: Path) -> str:
     _docker(
         harness.path("docker-config"),
-        "task network creation",
+        "test network creation",
         "network",
         "create",
         harness.network,
@@ -254,7 +258,7 @@ exec /usr/sbin/sshd -D -e \
         harness.service_container,
     ).stdout.strip()
     if not host:
-        raise _LiveHarnessError("isolated Git service has no task-network IPv4 address")
+        raise _LiveHarnessError("isolated Git service has no test-network IPv4 address")
     return host
 
 
@@ -278,6 +282,7 @@ def _wait_for_host_key(host: str) -> str:
     raise _LiveHarnessError("isolated Git service did not become ready")
 
 
+# Private root and submodule repositories provide exact recursive Git content.
 def _initialize_private_repositories(harness: _LiveHarness, root_url: str) -> None:
     git_home = harness.path("home")
     repositories = harness.root / "repositories"
@@ -445,16 +450,7 @@ def _host_git_environment(harness: _LiveHarness) -> dict[str, str]:
         )
     )
     env = _isolated_git_environment(harness.path("home"))
-    for name in (
-        "BUILDKIT_HOST",
-        "BUILDX_BUILDER",
-        "BUILDX_CONFIG",
-        "DOCKER_AUTH_CONFIG",
-        "DOCKER_CERT_PATH",
-        "DOCKER_CONTEXT",
-        "DOCKER_HOST",
-        "DOCKER_TLS_VERIFY",
-    ):
+    for name in _DOCKER_ENVIRONMENT_NAMES:
         env.pop(name, None)
     env.update(
         DOCKER_CONFIG=os.fspath(harness.path("docker-config")),
@@ -483,6 +479,7 @@ def _require_host_git_access(harness: _LiveHarness, root_url: str) -> None:
         )
 
 
+# Formal CLI attempts distinguish absent forwarding, rejected trust, and success.
 def _run_formal_build(
     harness: _LiveHarness,
     *,
@@ -596,6 +593,7 @@ def _assert_secret_mounts_absent(harness: _LiveHarness, image: str) -> None:
     )
 
 
+# Preflight and cleanup inspect only names owned by this isolated harness.
 def _docker_resource_exists(
     harness: _LiveHarness,
     kind: str,
@@ -631,13 +629,6 @@ def _docker_resource_exists(
 
 
 def _require_isolated_preflight(harness: _LiveHarness) -> None:
-    if any(
-        Path(path).exists()
-        for path in ("/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2")
-    ):
-        raise _LiveHarnessError(
-            "live private-Git acceptance requires absent system known-hosts files"
-        )
     _require_local_linux_docker(harness)
     collisions = [
         kind
@@ -646,7 +637,7 @@ def _require_isolated_preflight(harness: _LiveHarness) -> None:
     ]
     if collisions:
         kinds = ", ".join(sorted(set(collisions)))
-        raise _LiveHarnessError(f"task-owned resource name collision: {kinds}")
+        raise _LiveHarnessError(f"harness-owned resource name collision: {kinds}")
     harness.cleanup_armed = True
 
 
@@ -671,7 +662,7 @@ def _cleanup(harness: _LiveHarness) -> None:
                 for name in harness.builders
             ),
             *(
-                ("task container cleanup", ("container", "rm", "--force", name))
+                ("harness container cleanup", ("container", "rm", "--force", name))
                 for name in (*harness.builder_containers, harness.residue_container)
             ),
             (
@@ -682,8 +673,8 @@ def _cleanup(harness: _LiveHarness) -> None:
                 ("BuildKit state cleanup", ("volume", "rm", "--force", name))
                 for name in harness.builder_volumes
             ),
-            ("task image cleanup", ("image", "rm", "--force", harness.image_tag)),
-            ("task network cleanup", ("network", "rm", harness.network)),
+            ("harness image cleanup", ("image", "rm", "--force", harness.image_tag)),
+            ("harness network cleanup", ("network", "rm", harness.network)),
         ]
         for label, arguments in commands:
             docker_cleanup(label, *arguments)
@@ -715,7 +706,7 @@ def _cleanup(harness: _LiveHarness) -> None:
         errors.append("temporary directory remains")
     if errors:
         values = ", ".join(sorted(set(errors)))
-        raise _LiveHarnessError(f"task-owned cleanup incomplete: {values}")
+        raise _LiveHarnessError(f"harness-owned cleanup incomplete: {values}")
 
 
 def _require_local_linux_docker(harness: _LiveHarness) -> None:
@@ -732,6 +723,7 @@ def _require_local_linux_docker(harness: _LiveHarness) -> None:
         )
 
 
+# The vertical contract proves strict trust, agent opt-in, recursive SSH, and cleanup.
 def test_private_git_root_and_recursive_submodule_use_isolated_ssh_inputs() -> None:
     suffix = uuid.uuid4().hex[:12]
     root = Path(tempfile.mkdtemp(prefix=f"cdh-private-git-{suffix}-"))

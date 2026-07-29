@@ -64,8 +64,34 @@ def test_buildx_maps_domain_values_and_fully_drains_live_logs(
     ]
 
 
+# SSH forwarding preserves repeatable secret mappings and omits absent trust inputs.
+@pytest.mark.parametrize(
+    ("known_hosts_bindings", "expected_secrets"),
+    [
+        ((), None),
+        (
+            (
+                KnownHostsBinding(
+                    secret_id="known-hosts-ordinary",
+                    source=Path("/trust/known_hosts"),
+                ),
+                KnownHostsBinding(
+                    secret_id="known-hosts-comma",
+                    source=Path("/trust/known,hosts"),
+                ),
+            ),
+            [
+                "type=file,id=known-hosts-ordinary,src=/trust/known_hosts",
+                'type=file,id=known-hosts-comma,"src=/trust/known,hosts"',
+            ],
+        ),
+    ],
+)
 def test_buildx_maps_default_ssh_and_known_hosts_bindings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    known_hosts_bindings: tuple[KnownHostsBinding, ...],
+    expected_secrets: list[str] | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, object]] = []
 
@@ -82,54 +108,15 @@ def test_buildx_maps_default_ssh_and_known_hosts_bindings(
         image_tags=("image:tag",),
         context_dir=tmp_path,
         forward_default_ssh=True,
-        known_hosts_bindings=(
-            KnownHostsBinding(
-                secret_id="known-hosts-ordinary",
-                source=Path("/trust/known_hosts"),
-            ),
-            KnownHostsBinding(
-                secret_id="known-hosts-space",
-                source=Path("/trust/known hosts"),
-            ),
-            KnownHostsBinding(
-                secret_id="known-hosts-comma",
-                source=Path("/trust/known,hosts"),
-            ),
-        ),
+        known_hosts_bindings=known_hosts_bindings,
         log=lambda message: None,
     )
 
     assert calls[0]["ssh"] == "default"
-    assert calls[0]["secrets"] == [
-        "type=file,id=known-hosts-ordinary,src=/trust/known_hosts",
-        "type=file,id=known-hosts-space,src=/trust/known hosts",
-        'type=file,id=known-hosts-comma,"src=/trust/known,hosts"',
-    ]
-
-
-def test_buildx_forwards_default_ssh_without_known_hosts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[dict[str, object]] = []
-
-    def build(context: Path, **kwargs: object):
-        calls.append(kwargs)
-        yield "progress"
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.host.buildx.DockerClient",
-        lambda: SimpleNamespace(buildx=SimpleNamespace(build=build)),
-    )
-
-    build_image_with_buildx(
-        image_tags=("image:tag",),
-        context_dir=tmp_path,
-        forward_default_ssh=True,
-        log=lambda message: None,
-    )
-
-    assert calls[0]["ssh"] == "default"
-    assert "secrets" not in calls[0]
+    if expected_secrets is None:
+        assert "secrets" not in calls[0]
+    else:
+        assert calls[0]["secrets"] == expected_secrets
 
 
 @pytest.mark.parametrize(

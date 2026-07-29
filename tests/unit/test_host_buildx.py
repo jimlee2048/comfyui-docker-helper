@@ -8,6 +8,7 @@ from python_on_whales.exceptions import DockerException
 
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,
+    KnownHostsBinding,
     build_image_with_buildx,
 )
 
@@ -63,6 +64,74 @@ def test_buildx_maps_domain_values_and_fully_drains_live_logs(
     ]
 
 
+def test_buildx_maps_default_ssh_and_known_hosts_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def build(context: Path, **kwargs: object):
+        calls.append({"context": context, **kwargs})
+        yield "progress"
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.buildx.DockerClient",
+        lambda: SimpleNamespace(buildx=SimpleNamespace(build=build)),
+    )
+
+    build_image_with_buildx(
+        image_tags=("image:tag",),
+        context_dir=tmp_path,
+        forward_default_ssh=True,
+        known_hosts_bindings=(
+            KnownHostsBinding(
+                secret_id="known-hosts-ordinary",
+                source=Path("/trust/known_hosts"),
+            ),
+            KnownHostsBinding(
+                secret_id="known-hosts-space",
+                source=Path("/trust/known hosts"),
+            ),
+            KnownHostsBinding(
+                secret_id="known-hosts-comma",
+                source=Path("/trust/known,hosts"),
+            ),
+        ),
+        log=lambda message: None,
+    )
+
+    assert calls[0]["ssh"] == "default"
+    assert calls[0]["secrets"] == [
+        "type=file,id=known-hosts-ordinary,src=/trust/known_hosts",
+        "type=file,id=known-hosts-space,src=/trust/known hosts",
+        'type=file,id=known-hosts-comma,"src=/trust/known,hosts"',
+    ]
+
+
+def test_buildx_forwards_default_ssh_without_known_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def build(context: Path, **kwargs: object):
+        calls.append(kwargs)
+        yield "progress"
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.buildx.DockerClient",
+        lambda: SimpleNamespace(buildx=SimpleNamespace(build=build)),
+    )
+
+    build_image_with_buildx(
+        image_tags=("image:tag",),
+        context_dir=tmp_path,
+        forward_default_ssh=True,
+        log=lambda message: None,
+    )
+
+    assert calls[0]["ssh"] == "default"
+    assert "secrets" not in calls[0]
+
+
 @pytest.mark.parametrize(
     ("output", "load", "push", "completed"),
     [
@@ -107,9 +176,11 @@ def test_buildx_selects_one_output_mode(
 def test_buildx_translates_public_api_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    logs: list[str] = []
+
     def build(*args: object, **kwargs: object):
         del args, kwargs
-        yield "progress"
+        yield "underlying Docker diagnostic\n"
         raise DockerException(["docker", "buildx"], 17)
 
     monkeypatch.setattr(
@@ -121,7 +192,42 @@ def test_buildx_translates_public_api_failure(
         build_image_with_buildx(
             image_tags=("image:tag",),
             context_dir=tmp_path,
-            log=lambda message: None,
+            log=logs.append,
+        )
+
+    assert logs[-1] == "underlying Docker diagnostic"
+
+
+@pytest.mark.parametrize(
+    ("raised", "message"),
+    [
+        (
+            FileNotFoundError(),
+            "Docker was not found; install Docker with Buildx and ensure it is on PATH",
+        ),
+        (OSError("unavailable"), "Docker Buildx could not be started: unavailable"),
+    ],
+)
+def test_buildx_translates_start_failure(
+    raised: OSError,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def build(*args: object, **kwargs: object):
+        del args, kwargs
+        raise raised
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.buildx.DockerClient",
+        lambda: SimpleNamespace(buildx=SimpleNamespace(build=build)),
+    )
+
+    with pytest.raises(BuildxBuildError, match=message):
+        build_image_with_buildx(
+            image_tags=("image:tag",),
+            context_dir=tmp_path,
+            log=lambda line: None,
         )
 
 

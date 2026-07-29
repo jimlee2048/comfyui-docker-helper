@@ -6,6 +6,15 @@
 - Before selecting, adding, changing, or running tests, read [`tests/README.md`](tests/README.md) completely and follow its test-layer, cost-authorization, acceptance, validation-selection, and resource-discipline rules.
 - Before changing tracked documentation, read [`docs/dev/README.md`](docs/dev/README.md) completely and follow its audience, canonical-ownership, current-only, and maintenance rules.
 
+## External References
+
+### ComfyUI
+
+- [ComfyUI](https://github.com/Comfy-Org/ComfyUI)
+- [comfy-cli](https://github.com/Comfy-Org/comfy-cli)
+- [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager)
+- [Comfy Registry](https://registry.comfy.org/)
+
 ## Agent-Specific Working Rules
 
 ### General

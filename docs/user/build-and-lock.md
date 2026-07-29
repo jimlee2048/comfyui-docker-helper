@@ -39,7 +39,7 @@ cdh host build \
 
 ## Private Git custom nodes over SSH
 
-Use `--ssh` when a direct-Git custom node, one of its recursive submodules, or a Git URL rewrite needs the host's default SSH identity:
+Use `--ssh` when a direct-Git custom node or one of its recursive submodules needs an SSH identity from the host. Before building, load the required identity into the default SSH agent and add the server's host key to a default OpenSSH known-hosts file.
 
 ```bash
 cdh host build \
@@ -50,27 +50,26 @@ cdh host build \
   --ssh
 ```
 
-The option requires a non-empty `SSH_AUTH_SOCK` and forwards BuildKit's default SSH agent input. cdh also supplies whichever of the host's default OpenSSH trust files currently exist: `~/.ssh/known_hosts`, `~/.ssh/known_hosts2`, `/etc/ssh/ssh_known_hosts`, and `/etc/ssh/ssh_known_hosts2`. It does not inspect the agent, parse trust entries, check target coverage, or add host keys. Prepare the agent and trust on the host before building. For a self-hosted service or non-default port, use an explicit locator such as `ssh://git@example.test:2222/group/node.git` and place the corresponding host-and-port entry in a default known-hosts file.
+The option requires a non-empty `SSH_AUTH_SOCK`. cdh uses the default agent together with existing default user and system known-hosts files; it does not inspect the agent, add host keys, copy private keys, or read `~/.ssh/config`. For a self-hosted service or non-default port, use an explicit locator such as `ssh://git@example.test:2222/group/node.git` and add the corresponding host-and-port entry to a default known-hosts file. SSH aliases, `ProxyJump`, custom key/trust-file selectors, raw key files, and HTTPS token authentication are not supported by this option.
 
-The rendered direct-Git Dockerfile declares optional mounts, so public HTTPS builds remain usable without `--ssh`. When the option is effective, the agent and mounted trust are available to the complete declaration-ordered custom-node installation `RUN`, including selected pre/post hooks and installers. Treat all configured node and hook code as trusted. Private key bytes remain in the agent, and cdh and BuildKit do not automatically copy the agent or trust inputs into the rendered context or an image layer. Trusted code in the instruction can nevertheless read and deliberately copy or disclose the mounted trust files.
+If the effective configuration has no direct-Git node, `--ssh` prints one warning and continues without forwarding anything. Otherwise, a missing agent fails before source resolution, while host-key, authentication, and Git/submodule failures keep their underlying diagnostics.
 
-cdh deliberately disables ambient SSH client configuration for this instruction and enforces strict host-key checking against only the mounted default trust files. SSH aliases, `ProxyJump`, custom `IdentityFile` or `UserKnownHostsFile` selectors, copied raw keys, and HTTPS PAT/token authentication are not supported by this option. An HTTPS root locator is still eligible because a recursive submodule or URL rewrite may use SSH.
+Treat configured custom-node hooks and installers as trusted code: during custom-node installation they can use the forwarded agent and read the supplied trust files. Private key bytes remain in the agent, and cdh does not automatically place the agent or trust files in the rendered context or image. A cached custom-node layer may also be reused without contacting the current agent or rechecking updated trust; bypass the relevant BuildKit cache when a fresh authentication check is required.
 
-To build a rendered context directly, supply the equivalent Buildx inputs for each default trust file that exists. For example:
+### Build a rendered context directly
+
+A rendered direct-Git context can also be built with Buildx. Supply the default SSH agent and a secret for each known-hosts file the build needs. This example uses the common user trust file:
 
 ```bash
 docker buildx build \
   --ssh default \
   --secret "type=file,id=cdh-ssh-known-hosts-user,src=$HOME/.ssh/known_hosts" \
-  --secret "type=file,id=cdh-ssh-known-hosts-user-legacy,src=$HOME/.ssh/known_hosts2" \
-  --secret "type=file,id=cdh-ssh-known-hosts-system,src=/etc/ssh/ssh_known_hosts" \
-  --secret "type=file,id=cdh-ssh-known-hosts-system-legacy,src=/etc/ssh/ssh_known_hosts2" \
   --load \
   -t my-comfy:dev \
   .cdh/build/current
 ```
 
-Omit a `--secret` whose source does not exist. Invoking `--ssh` when the effective configuration has no direct-Git node prints one warning and continues without forwarding SSH inputs. A missing or empty `SSH_AUTH_SOCK` for an applicable build fails before provider work. Provider, Buildx source-admission, host-key, authentication, and Git/submodule failures otherwise retain their underlying diagnostics. BuildKit does not normally invalidate a cached `RUN` when SSH-agent or secret contents change, so a cache hit may reuse an earlier completed custom-node layer without contacting the current agent or rechecking current trust.
+The rendered Dockerfile shows the stable secret ID for each other supported default trust file. Omit any secret whose source does not exist.
 
 ## Hook source directories
 

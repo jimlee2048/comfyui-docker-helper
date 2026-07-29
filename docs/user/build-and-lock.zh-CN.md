@@ -39,7 +39,7 @@ cdh host build \
 
 ## 通过 SSH 访问私有 Git 自定义节点
 
-当 direct-Git 自定义节点、其递归 submodule 或 Git URL rewrite 需要宿主机的默认 SSH 身份时，使用 `--ssh`：
+当 direct-Git 自定义节点或其递归 submodule 需要宿主机上的 SSH 身份时，使用 `--ssh`。构建前，请将所需身份加载到默认 SSH agent，并将服务器主机密钥加入默认的 OpenSSH known-hosts 文件。
 
 ```bash
 cdh host build \
@@ -50,27 +50,26 @@ cdh host build \
   --ssh
 ```
 
-该选项要求 `SSH_AUTH_SOCK` 非空，并转发 BuildKit 的默认 SSH agent 输入。cdh 还会提供宿主机上当前存在的以下默认 OpenSSH 信任文件：`~/.ssh/known_hosts`、`~/.ssh/known_hosts2`、`/etc/ssh/ssh_known_hosts` 和 `/etc/ssh/ssh_known_hosts2`。cdh 不检查 agent、不解析信任条目、不检查目标覆盖范围，也不添加主机密钥。请在构建前于宿主机上准备好 agent 和信任。对于自托管服务或非默认端口，请使用 `ssh://git@example.test:2222/group/node.git` 之类的显式 locator，并在默认 known-hosts 文件中加入对应的主机及端口条目。
+该选项要求 `SSH_AUTH_SOCK` 非空。cdh 使用默认 agent 以及现有的默认用户和系统 known-hosts 文件；它不会检查 agent、添加主机密钥、复制私钥或读取 `~/.ssh/config`。对于自托管服务或非默认端口，请使用 `ssh://git@example.test:2222/group/node.git` 之类的显式 locator，并将对应的主机及端口条目加入默认 known-hosts 文件。该选项不支持 SSH alias、`ProxyJump`、自定义密钥或信任文件 selector、原始密钥文件以及 HTTPS token 鉴权。
 
-渲染后的 direct-Git Dockerfile 声明的是可选 mount，因此不使用 `--ssh` 时仍可构建公开的 HTTPS 仓库。当该选项生效时，agent 和挂载的信任会在整个按声明顺序执行的自定义节点安装 `RUN` 中可用，其中包括选定的 pre/post hooks 和安装程序。请将所有配置的节点及 Hook 代码视为受信任代码。私钥字节仍由 agent 持有，cdh 和 BuildKit 不会自动将 agent 或信任输入复制到渲染上下文或镜像层；但该指令内的受信任代码仍可读取并主动复制或披露挂载的信任文件。
+如果生效配置没有 direct-Git 节点，`--ssh` 会输出一次 warning，并在不转发任何内容的情况下继续。否则，缺少 agent 会在解析源码前失败；主机密钥、鉴权以及 Git/submodule 的失败则会保留其底层诊断。
 
-cdh 会为这条指令禁用容器内的环境 SSH client 配置，并且只依据挂载的默认信任文件执行严格的主机密钥检查。该选项不支持 SSH alias、`ProxyJump`、自定义 `IdentityFile` 或 `UserKnownHostsFile` selector、复制原始密钥以及 HTTPS PAT/token 鉴权。HTTPS 根 locator 仍适用，因为递归 submodule 或 URL rewrite 可能使用 SSH。
+请将配置的自定义节点 Hook 和安装程序视为受信任代码：在安装自定义节点期间，它们能够使用转发的 agent 并读取提供的信任文件。私钥字节仍由 agent 持有，cdh 不会自动将 agent 或信任文件放入渲染上下文或镜像。缓存的自定义节点层也可能在不联系当前 agent 或不重新检查已更新信任的情况下被复用；需要重新验证鉴权时，请绕过相应的 BuildKit 缓存。
 
-若要直接构建渲染上下文，请为每个实际存在的默认信任文件提供等效的 Buildx 输入。例如：
+### 直接构建渲染上下文
+
+渲染后的 direct-Git 上下文也可以直接通过 Buildx 构建。请提供默认 SSH agent，并为构建所需的每个 known-hosts 文件提供一个 secret。以下示例使用最常见的用户信任文件：
 
 ```bash
 docker buildx build \
   --ssh default \
   --secret "type=file,id=cdh-ssh-known-hosts-user,src=$HOME/.ssh/known_hosts" \
-  --secret "type=file,id=cdh-ssh-known-hosts-user-legacy,src=$HOME/.ssh/known_hosts2" \
-  --secret "type=file,id=cdh-ssh-known-hosts-system,src=/etc/ssh/ssh_known_hosts" \
-  --secret "type=file,id=cdh-ssh-known-hosts-system-legacy,src=/etc/ssh/ssh_known_hosts2" \
   --load \
   -t my-comfy:dev \
   .cdh/build/current
 ```
 
-如果某个 `--secret` 的源不存在，请将其省略。如果在生效配置没有 direct-Git 节点时传入 `--ssh`，cdh 会输出一次 warning，并在不转发 SSH 输入的情况下继续。适用的构建若缺少非空的 `SSH_AUTH_SOCK`，会在 provider 工作之前失败。provider、Buildx 源接纳、主机密钥、鉴权以及 Git/submodule 的其他失败均保留其底层诊断。SSH agent 或 secret 内容发生变化时，BuildKit 通常不会使缓存的 `RUN` 失效，因此缓存命中可能会复用之前已完成的自定义节点层，而不联系当前 agent 或重新检查当前信任。
+渲染后的 Dockerfile 会显示其他受支持默认信任文件各自的稳定 secret ID。请省略源文件不存在的 secret。
 
 ## Hook 源目录
 

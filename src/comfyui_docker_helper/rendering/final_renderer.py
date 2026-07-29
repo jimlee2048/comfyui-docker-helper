@@ -312,6 +312,7 @@ def _git_ssh_command() -> str:
     )
     return (
         "/usr/bin/ssh -F none "
+        "-o BatchMode=yes "
         "-o StrictHostKeyChecking=yes "
         "-o KnownHostsCommand=none "
         f'-o UserKnownHostsFile="{user_paths}" '

@@ -973,11 +973,10 @@ platforms = ["linux/amd64"]
         )
 
     def buildx(**kwargs):
-        seen["buildx_ssh_keys"] = {
-            key
-            for key in ("forward_default_ssh", "known_hosts_bindings")
-            if key in kwargs
-        }
+        seen["buildx_ssh"] = (
+            kwargs["forward_default_ssh"],
+            kwargs["known_hosts_bindings"],
+        )
         seen["buildx"] = {
             "image_tags": kwargs["image_tags"],
             "output": kwargs["output"],
@@ -1027,7 +1026,7 @@ platforms = ["linux/amd64"]
         "platforms": plan_build.platforms,
         "context_dir": context,
     }
-    assert seen["buildx_ssh_keys"] == set()
+    assert seen["buildx_ssh"] == (False, ())
 
 
 def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
@@ -1069,8 +1068,8 @@ def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
     )
     assert result.exit_code == 0
     assert result.output.count(warning) == 1
-    assert "forward_default_ssh" not in seen
-    assert "known_hosts_bindings" not in seen
+    assert seen["forward_default_ssh"] is False
+    assert seen["known_hosts_bindings"] == ()
 
 
 def test_build_ssh_does_not_replace_configuration_validation(

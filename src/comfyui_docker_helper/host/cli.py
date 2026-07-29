@@ -357,12 +357,7 @@ def build(
         raise typer.Exit(code=1) from error
     render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
 
-    buildx_ssh_inputs: dict[str, object] = {}
-    if use_ssh:
-        buildx_ssh_inputs = {
-            "forward_default_ssh": True,
-            "known_hosts_bindings": _collect_default_known_hosts_bindings(),
-        }
+    known_hosts_bindings = _collect_default_known_hosts_bindings() if use_ssh else ()
 
     typer.echo(f"Build context: {context_dir}")
     build_plan = prepared.plan.build
@@ -373,7 +368,8 @@ def build(
         platforms=build_plan.platforms,
         cwd=Path.cwd(),
         log=typer.echo,
-        **buildx_ssh_inputs,
+        forward_default_ssh=use_ssh,
+        known_hosts_bindings=known_hosts_bindings,
     )
 
 

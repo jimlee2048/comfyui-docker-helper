@@ -370,6 +370,7 @@ def test_renderer_scopes_strict_optional_ssh_mounts_to_direct_git_plans(
     )
     ssh_command = (
         "/usr/bin/ssh -F none "
+        "-o BatchMode=yes "
         "-o StrictHostKeyChecking=yes "
         "-o KnownHostsCommand=none "
         f'-o UserKnownHostsFile="{user_paths}" '

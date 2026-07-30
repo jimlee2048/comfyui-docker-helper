@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
 import tempfile
@@ -53,7 +54,7 @@ from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
     LocalMaterializationSource,
-    materialize_build_plan,
+    _materialize_private_stage,
 )
 
 _LOCK_FILE = "config.lock.toml"
@@ -263,17 +264,20 @@ def _write_context(
         raise _render_error("render.context_write_failed", str(error)) from error
     backup_root: Path | None = None
     try:
-        materialize_build_plan(
+        stage.chmod(0o700)
+        _materialize_private_stage(
             plan,
             stage,
             canonical_wheel=canonical_wheel,
             local_sources=sources,
         )
-        (stage / _LOCK_FILE).write_text(
-            dump_canonical_lock_toml(lock), encoding="utf-8"
+        _write_private_stage_metadata(
+            stage, _LOCK_FILE, dump_canonical_lock_toml(lock).encode("utf-8")
         )
-        (stage / _MARKER_FILE).write_text(
-            json.dumps(_MARKER, sort_keys=True) + "\n", encoding="utf-8"
+        _write_private_stage_metadata(
+            stage,
+            _MARKER_FILE,
+            (json.dumps(_MARKER, sort_keys=True) + "\n").encode("utf-8"),
         )
         if output.exists():
             backup_root = Path(
@@ -300,11 +304,6 @@ def _write_context(
         _cleanup_owned_after_failure(stage)
         _cleanup_empty_backup_root(backup_root)
         raise
-    if stage.exists():
-        try:
-            shutil.rmtree(stage)
-        except OSError as error:
-            raise _render_error("render.context_write_failed", str(error)) from error
 
 
 def _check_context(
@@ -323,17 +322,20 @@ def _check_context(
             prefix=".cdh-check-", dir=output.parent
         ) as raw:
             expected = Path(raw)
-            materialize_build_plan(
+            expected.chmod(0o700)
+            _materialize_private_stage(
                 plan,
                 expected,
                 canonical_wheel=canonical_wheel,
                 local_sources=sources,
             )
-            (expected / _LOCK_FILE).write_text(
-                dump_canonical_lock_toml(lock), encoding="utf-8"
+            _write_private_stage_metadata(
+                expected, _LOCK_FILE, dump_canonical_lock_toml(lock).encode("utf-8")
             )
-            (expected / _MARKER_FILE).write_text(
-                json.dumps(_MARKER, sort_keys=True) + "\n", encoding="utf-8"
+            _write_private_stage_metadata(
+                expected,
+                _MARKER_FILE,
+                (json.dumps(_MARKER, sort_keys=True) + "\n").encode("utf-8"),
             )
             if _tree(expected) != _tree(output):
                 raise _render_error(
@@ -343,6 +345,12 @@ def _check_context(
         raise
     except (FinalMaterializationError, OSError) as error:
         raise _render_error("render.context_check_failed", str(error)) from error
+
+
+def _write_private_stage_metadata(stage: Path, name: str, content: bytes) -> None:
+    with (stage / name).open("xb") as output:
+        output.write(content)
+        os.fchmod(output.fileno(), 0o644)
 
 
 def _tree(root: Path) -> dict[str, tuple[str, int, bytes | None]]:

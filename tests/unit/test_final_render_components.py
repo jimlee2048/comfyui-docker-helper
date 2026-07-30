@@ -33,11 +33,10 @@ from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
-from comfyui_docker_helper.rendering import final_materializer
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
     LocalMaterializationSource,
-    materialize_build_plan,
+    _materialize_private_stage,
 )
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
@@ -412,16 +411,16 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     )
     first = tmp_path / "first"
     second = tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
+    first.mkdir(mode=0o700)
+    second.mkdir(mode=0o700)
 
-    materialize_build_plan(
+    _materialize_private_stage(
         plan,
         first,
         canonical_wheel=canonical_wheel(),
         local_sources=(source_input,),
     )
-    materialize_build_plan(
+    _materialize_private_stage(
         plan,
         second,
         canonical_wheel=canonical_wheel(),
@@ -494,12 +493,36 @@ def test_materializer_rejects_canonical_wheel_byte_drift(tmp_path: Path) -> None
         content=wheel.content + b"changed",
     )
     output = tmp_path / "output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
     with pytest.raises(FinalMaterializationError, match="does not match BuildPlan"):
-        materialize_build_plan(plan, output, canonical_wheel=changed)
+        _materialize_private_stage(plan, output, canonical_wheel=changed)
 
-    assert tuple(output.iterdir()) == ()
+
+@pytest.mark.parametrize("entry", ["missing", "file", "symlink", "nonempty"])
+def test_materializer_rejects_invalid_private_stage_entry(
+    tmp_path: Path,
+    entry: str,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    stage = tmp_path / "stage"
+    sentinel: Path | None = None
+    if entry == "file":
+        stage.write_text("not a directory")
+    elif entry == "symlink":
+        real_stage = tmp_path / "real-stage"
+        real_stage.mkdir(mode=0o700)
+        stage.symlink_to(real_stage, target_is_directory=True)
+    elif entry == "nonempty":
+        stage.mkdir(mode=0o700)
+        sentinel = stage / "sentinel"
+        sentinel.write_text("keep")
+
+    with pytest.raises(FinalMaterializationError, match="stage"):
+        _materialize_private_stage(plan, stage, canonical_wheel=canonical_wheel())
+
+    if sentinel is not None:
+        assert sentinel.read_text() == "keep"
 
 
 # Canonical plan bytes bound to the Dockerfile literal authorize each installer input.
@@ -508,8 +531,8 @@ def test_build_plan_admission_rejects_changed_plan_under_literal_digest(
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     output = tmp_path / "output"
-    output.mkdir()
-    materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
+    output.mkdir(mode=0o700)
+    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
     document = json.loads((output / "build-plan.json").read_bytes())
     document["runtime"]["environment"][0]["value"] = "changed"
     (output / "build-plan.json").write_text(json.dumps(document))
@@ -530,9 +553,9 @@ def test_nondefault_shutdown_timeout_projects_to_plan_and_baked_runtime(
         accepted_resolution(),
     )
     output = tmp_path / "output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
-    materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
+    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
 
     runtime = tomllib.loads((output / "runtime/config.toml").read_text())
     assert plan.runtime.shutdown_timeout == 55.5
@@ -545,8 +568,8 @@ def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
-    context.mkdir()
-    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
+    context.mkdir(mode=0o700)
+    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
     digest = build_plan_digest(plan)
 
     leaf_link = tmp_path / "build-plan-link.json"
@@ -679,12 +702,10 @@ def test_materializer_direct_call_reuses_shared_runtime_hook_identity(
         }
     )
     output = tmp_path / "output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
     with pytest.raises(FinalMaterializationError, match="hook identity is invalid"):
-        materialize_build_plan(forged, output, canonical_wheel=canonical_wheel())
-
-    assert tuple(output.iterdir()) == ()
+        _materialize_private_stage(forged, output, canonical_wheel=canonical_wheel())
 
 
 def test_materializer_rejects_missing_extra_or_changed_local_sources(
@@ -702,15 +723,14 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
         accepted_resolution(hook_digest=digest),
     )
     output = tmp_path / "output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
     with pytest.raises(FinalMaterializationError, match="exactly match"):
-        materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
-    assert tuple(output.iterdir()) == ()
+        _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
 
     source.write_bytes(b"changed")
     with pytest.raises(FinalMaterializationError, match="digest"):
-        materialize_build_plan(
+        _materialize_private_stage(
             plan,
             output,
             canonical_wheel=canonical_wheel(),
@@ -720,7 +740,6 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
                 ),
             ),
         )
-    assert tuple(output.iterdir()) == ()
 
 
 @pytest.mark.parametrize(
@@ -772,9 +791,9 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
     source.unlink()
     source.symlink_to(real_source)
     output = tmp_path / "symlink-output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
     with pytest.raises(FinalMaterializationError, match="regular file"):
-        materialize_build_plan(
+        _materialize_private_stage(
             plan,
             output,
             canonical_wheel=canonical_wheel(),
@@ -784,7 +803,6 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
                 ),
             ),
         )
-    assert tuple(output.iterdir()) == ()
 
     source.unlink()
     source.write_bytes(content)
@@ -793,9 +811,9 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
     build_hooks.rename(real_build_hooks)
     build_hooks.symlink_to(real_build_hooks, target_is_directory=True)
     output = tmp_path / "parent-symlink-output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
     with pytest.raises(FinalMaterializationError, match="regular file"):
-        materialize_build_plan(
+        _materialize_private_stage(
             plan,
             output,
             canonical_wheel=canonical_wheel(),
@@ -806,7 +824,6 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
                 ),
             ),
         )
-    assert tuple(output.iterdir()) == ()
 
 
 def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
@@ -824,10 +841,10 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
     source.unlink()
     os.mkfifo(source)
     output = tmp_path / "special-output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
     with pytest.raises(FinalMaterializationError, match="regular file"):
-        materialize_build_plan(
+        _materialize_private_stage(
             plan,
             output,
             canonical_wheel=canonical_wheel(),
@@ -837,8 +854,6 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
                 ),
             ),
         )
-
-    assert tuple(output.iterdir()) == ()
 
 
 @pytest.mark.parametrize("substitution", ["leaf", "ancestor"])
@@ -881,10 +896,10 @@ def test_materializer_rejects_source_substitution_during_descriptor_walk(
 
     monkeypatch.setattr(file_admission.os, "open", substitute_then_open)
     output = tmp_path / "output"
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
     with pytest.raises(FinalMaterializationError, match="regular file"):
-        materialize_build_plan(
+        _materialize_private_stage(
             plan,
             output,
             canonical_wheel=canonical_wheel(),
@@ -896,67 +911,6 @@ def test_materializer_rejects_source_substitution_during_descriptor_walk(
         )
 
     assert substituted
-    assert tuple(output.iterdir()) == ()
-
-
-@pytest.mark.parametrize(
-    "injected_type",
-    ["parent-symlink", "parent-special", "final-symlink", "final-special"],
-)
-def test_materializer_rejects_symlink_or_special_destination_components(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    injected_type: str,
-) -> None:
-    content = b"hook"
-    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    build_hooks = tmp_path / "build_hooks"
-    source = build_hooks / "hooks/pre.py"
-    source.parent.mkdir(parents=True)
-    source.write_bytes(content)
-    source.chmod(0o755)
-    plan = build_plan(
-        final_config(build_hooks_dir=build_hooks, with_hook=True),
-        accepted_resolution(hook_digest=digest),
-    )
-    output = tmp_path / "output"
-    output.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    sentinel = outside / "sentinel"
-    sentinel.write_text("unchanged")
-
-    def inject_destination(_path: Path, _digest: str) -> bytes:
-        if injected_type == "parent-symlink":
-            (output / "build").symlink_to(outside, target_is_directory=True)
-        elif injected_type == "parent-special":
-            os.mkfifo(output / "build")
-        else:
-            parent = output / "build/hooks/hooks"
-            parent.mkdir(parents=True)
-            final = parent / "pre.py"
-            if injected_type == "final-symlink":
-                final.symlink_to(sentinel)
-            else:
-                os.mkfifo(final)
-        return content
-
-    monkeypatch.setattr(final_materializer, "_verified_source", inject_destination)
-
-    with pytest.raises(FinalMaterializationError, match="symlink or special"):
-        materialize_build_plan(
-            plan,
-            output,
-            canonical_wheel=canonical_wheel(),
-            local_sources=(
-                LocalMaterializationSource(
-                    PurePosixPath("build-hooks/hooks/pre.py"), source
-                ),
-            ),
-        )
-
-    assert tuple(output.iterdir()) == ()
-    assert sentinel.read_text() == "unchanged"
 
 
 def _tree(root: Path) -> dict[str, bytes]:

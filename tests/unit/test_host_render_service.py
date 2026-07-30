@@ -56,6 +56,7 @@ from comfyui_docker_helper.container.runtime_files import (
     runtime_downloader_settings,
 )
 from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
+from comfyui_docker_helper.host import render_service as render_service_module
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
@@ -75,6 +76,9 @@ from comfyui_docker_helper.host.render_service import (
     prepare_render_context,
 )
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.rendering.final_materializer import (
+    FinalMaterializationError,
+)
 from comfyui_docker_helper.version import package_version
 
 DIGEST_A = f"sha256:{'a' * 64}"
@@ -1397,6 +1401,123 @@ def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
     assert (tmp_path / "context/runtime/hooks/pre-start.d/10-hook.sh").read_text() == (
         "hook\n"
     )
+
+
+def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    original = render_service_module._materialize_private_stage
+    observed_stages: list[Path] = []
+
+    def inspect_stage(plan, directory, **kwargs):
+        stage = Path(directory)
+        assert stage.parent == output.parent
+        assert stage != output
+        assert stage not in observed_stages
+        assert stage.stat().st_mode & 0o777 == 0o700
+        assert tuple(stage.iterdir()) == ()
+        observed_stages.append(stage)
+        return original(plan, stage, **kwargs)
+
+    monkeypatch.setattr(
+        render_service_module, "_materialize_private_stage", inspect_stage
+    )
+    _prepare(config, output, FakeAcquirer())
+
+    _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        options=PlanningOptions(check=True),
+    )
+    assert len(observed_stages) == 2
+
+
+def test_host_context_modes_are_deterministic_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = _runtime_hooks(tmp_path / "hooks")
+    output = tmp_path / "context"
+    previous_umask = os.umask(0o077)
+    try:
+        _prepare(config, output, FakeAcquirer(), runtime_hooks_dir=hooks)
+    finally:
+        os.umask(previous_umask)
+
+    assert output.stat().st_mode & 0o777 == 0o700
+    for path in output.rglob("*"):
+        permissions = path.stat().st_mode & 0o777
+        if path.is_dir() or output / "runtime/hooks" in path.parents:
+            assert permissions == 0o755
+        else:
+            assert permissions == 0o644
+
+
+def test_host_removes_partial_private_stage_after_materializer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    observed_stages: list[Path] = []
+
+    def fail_after_partial_write(_plan, directory, **_kwargs):
+        stage = Path(directory)
+        observed_stages.append(stage)
+        (stage / "partial").write_text("partial")
+        raise FinalMaterializationError("materialization failed")
+
+    monkeypatch.setattr(
+        render_service_module,
+        "_materialize_private_stage",
+        fail_after_partial_write,
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert not output.exists()
+    assert len(observed_stages) == 1
+    assert not observed_stages[0].exists()
+
+
+@pytest.mark.parametrize("name", ["config.lock.toml", ".cdh-rendered"])
+def test_host_metadata_writes_are_exclusive_and_clean_failed_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    original = render_service_module._materialize_private_stage
+    observed_stages: list[Path] = []
+
+    def create_collision(plan, directory, **kwargs):
+        stage = Path(directory)
+        observed_stages.append(stage)
+        original(plan, stage, **kwargs)
+        (stage / name).write_text("collision")
+
+    monkeypatch.setattr(
+        render_service_module, "_materialize_private_stage", create_collision
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert not output.exists()
+    assert len(observed_stages) == 1
+    assert not observed_stages[0].exists()
 
 
 # Context replacement owns unique staging/backup paths and preserves foreign siblings.

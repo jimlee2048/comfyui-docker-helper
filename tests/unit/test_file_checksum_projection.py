@@ -18,7 +18,9 @@ from tests.build_plan_support import (
 from comfyui_docker_helper.config.build_plan import BuildPlan, dump_build_plan_json
 from comfyui_docker_helper.config.canonical_lock import dump_canonical_lock_toml
 from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
+from comfyui_docker_helper.rendering.final_materializer import (
+    _materialize_private_stage,
+)
 
 UPPER_CHECKSUM = f"sha256:{'AB' * 32}"
 CANONICAL_CHECKSUM = UPPER_CHECKSUM.lower()
@@ -89,9 +91,9 @@ def test_materialization_projects_checksum_to_runtime_and_real_build_consumer(
 ) -> None:
     plan = build_plan(_config_with_checksum(UPPER_CHECKSUM), accepted_resolution())
     output = tmp_path / "context"
-    output.mkdir()
+    output.mkdir(mode=0o700)
 
-    materialize_build_plan(plan, output, canonical_wheel=canonical_wheel())
+    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
 
     runtime = tomllib.loads((output / "runtime/config.toml").read_text())
     assert runtime["files"][0]["checksum"] == CANONICAL_CHECKSUM

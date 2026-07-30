@@ -58,18 +58,11 @@ An optional `checksum = "sha256:<64 hexadecimal digits>"` declares trusted conte
 
 cdh keeps an existing final file unchanged until a complete replacement is ready for atomic publication. Without a checksum, successful transport and atomic replacement are not proof that the downloaded bytes are authentic.
 
-The atomic rename is the replacement commit point. A later durability,
-verification, cleanup, or recovery-state persistence failure still stops that
-operation, but the complete new file may remain at the target; cdh does not
-roll it back to the old file.
+The atomic rename is the replacement commit point. A later durability, verification, cleanup, or recovery-state persistence failure still stops that operation, but the complete new file may remain at the target; cdh does not roll it back to the old file.
 
 Runtime reconciliation state lives at `/var/lib/cdh/runtime/state.json`. This file is cdh-owned internal recovery state, not user configuration or a download-history API. Do not edit it. Runtime downloads require the state location to be writable. Mount `/var/lib/cdh/runtime` to preserve recovery state across container replacement, and mount each target directory that must preserve downloaded files. Preserving the state file alone does not preserve the downloaded files.
 
-Stop the old cdh container before its replacement starts using the preserved
-state and download targets. Do not share the writable state, or targets and
-staging files governed by it, between overlapping rolling instances or
-replicas. Using different state files does not make concurrent writers safe
-when they control the same download target or staging namespace.
+Stop the old cdh container before its replacement starts using the preserved state and download targets. Do not share the writable state, or targets and staging files governed by it, between overlapping rolling instances or replicas. Using different state files does not make concurrent writers safe when they control the same download target or staging namespace.
 
 ## SSH and confidential values
 

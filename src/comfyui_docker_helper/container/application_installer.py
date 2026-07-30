@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat
@@ -305,22 +306,71 @@ def _write_constraints(
     owner_uid: int,
     owner_gid: int,
 ) -> None:
-    if path.exists() or path.is_symlink():
-        raise ApplicationInstallError("managed constraints target already exists")
-    temporary: Path | None = None
     try:
-        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary = Path(name)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o444)
-            os.fchown(stream.fileno(), owner_uid, owner_gid)
-        temporary.replace(path)
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            try:
+                descriptor = os.open(
+                    path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except OSError as error:
+                if error.errno == errno.EEXIST:
+                    raise ApplicationInstallError(
+                        "managed constraints target already exists"
+                    ) from error
+                raise
+            try:
+                stream = os.fdopen(descriptor, "w+b")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with stream:
+                written = stream.write(content)
+                if written != len(content):
+                    raise ApplicationInstallError(
+                        "managed constraints could not be written"
+                    )
+                stream.flush()
+                os.fchown(stream.fileno(), owner_uid, owner_gid)
+                os.fchmod(stream.fileno(), 0o444)
+
+                metadata = os.fstat(stream.fileno())
+                stream.seek(0)
+                observed = stream.read(len(content) + 1)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != owner_uid
+                    or metadata.st_gid != owner_gid
+                    or stat.S_IMODE(metadata.st_mode) != 0o444
+                    or observed != content
+                ):
+                    raise ApplicationInstallError(
+                        "managed constraints verification failed"
+                    )
+
+                target_metadata = os.stat(
+                    path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if not stat.S_ISREG(target_metadata.st_mode) or (
+                    target_metadata.st_dev,
+                    target_metadata.st_ino,
+                ) != (metadata.st_dev, metadata.st_ino):
+                    raise ApplicationInstallError(
+                        "managed constraints verification failed"
+                    )
+        finally:
+            os.close(parent_fd)
+    except ApplicationInstallError:
+        raise
     except OSError as error:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
         raise ApplicationInstallError(
             "managed constraints could not be written"
         ) from error

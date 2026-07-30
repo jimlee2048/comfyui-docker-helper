@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import os
 import re
-import shutil
 import stat
 import subprocess
-import tempfile
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -73,12 +69,6 @@ class _ObservedRegistryIdentity:
     normalized_name: str
     version: str
     parsed_version: Version
-
-
-@dataclass(frozen=True, slots=True)
-class _FilesystemIdentity:
-    device: int
-    inode: int
 
 
 @dataclass(slots=True)
@@ -468,72 +458,55 @@ def _install_git_node(
     git_environment: Mapping[str, str],
     python_environment: Mapping[str, str],
 ) -> None:
-    target = _planned_git_target(node, custom_nodes_root)
-    _require_absent(target, f"Git target {target.name}")
-    stage = Path(
-        tempfile.mkdtemp(prefix=f".{target.name}.cdh-stage-", dir=custom_nodes_root)
-    )
-    stage_identity = _capture_owned_stage(stage, custom_nodes_root)
-    placed = False
+    root = _require_real_directory(custom_nodes_root, "custom-nodes root")
+    target = _planned_git_target(node, root)
     try:
-        _run_git(
-            (git_path, "clone", "--no-checkout", "--", node.url, stage),
-            cwd=custom_nodes_root,
-            env=git_environment,
-            description=f"Git node {target.name} clone",
-        )
-        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
-        _run_git(
-            (git_path, "-C", stage, "checkout", "--detach", node.commit, "--"),
-            cwd=custom_nodes_root,
-            env=git_environment,
-            description=f"Git node {target.name} exact checkout",
-        )
-        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
-        _run_git(
-            (
-                git_path,
-                "-C",
-                stage,
-                "submodule",
-                "update",
-                "--init",
-                "--recursive",
-                "--checkout",
-            ),
-            cwd=custom_nodes_root,
-            env=git_environment,
-            description=f"Git node {target.name} recursive submodule checkout",
-        )
-        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
-        _verify_git_provenance(
-            node,
-            stage,
-            custom_nodes_root,
+        target.mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise CustomNodeInstallError(
+            f"Git target {target.name} already exists"
+        ) from error
+    except OSError as error:
+        raise CustomNodeInstallError(
+            f"Git target {target.name} could not be created"
+        ) from error
+    _run_git(
+        (git_path, "clone", "--no-checkout", "--", node.url, target),
+        cwd=root,
+        env=git_environment,
+        description=f"Git node {target.name} clone",
+    )
+    _run_git(
+        (git_path, "-C", target, "checkout", "--detach", node.commit, "--"),
+        cwd=root,
+        env=git_environment,
+        description=f"Git node {target.name} exact checkout",
+    )
+    _run_git(
+        (
             git_path,
-            git_environment,
-            owned_stage=True,
-            stage_identity=stage_identity,
-        )
-        _require_absent(target, f"Git target {target.name}")
-        _verify_owned_stage(stage, custom_nodes_root, stage_identity)
-        _rename_noreplace(stage, target, stage_identity)
-        placed = True
-        _verify_git_provenance(
-            node, target, custom_nodes_root, git_path, git_environment
-        )
-        _install_git_root_surfaces(
-            node,
+            "-C",
             target,
-            application,
-            runtime,
-            uv_path,
-            constraints_path,
-            python_environment,
-        )
-    finally:
-        if not placed and _is_owned_stage(stage, custom_nodes_root, stage_identity):
-            shutil.rmtree(stage, ignore_errors=True)
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+            "--checkout",
+        ),
+        cwd=root,
+        env=git_environment,
+        description=f"Git node {target.name} recursive submodule checkout",
+    )
+    _verify_git_provenance(node, target, root, git_path, git_environment)
+    _install_git_root_surfaces(
+        node,
+        target,
+        application,
+        runtime,
+        uv_path,
+        constraints_path,
+        python_environment,
+    )
 
 
 def _install_git_root_surfaces(
@@ -799,17 +772,10 @@ def _verify_git_provenance(
     custom_nodes_root: Path,
     git_path: Path,
     environment: Mapping[str, str],
-    *,
-    owned_stage: bool = False,
-    stage_identity: _FilesystemIdentity | None = None,
 ) -> None:
     root = _require_real_directory(custom_nodes_root, "custom-nodes root")
     expected_target = _planned_git_target(node, root)
-    if owned_stage:
-        if stage_identity is None:
-            raise CustomNodeInstallError("Git stage identity is unavailable")
-        _verify_owned_stage(target, root, stage_identity)
-    elif target != expected_target:
+    if target != expected_target:
         raise CustomNodeInstallError("Git node target does not match BuildPlan")
     actual = _require_real_directory(target, f"Git node {expected_target.name}")
     if actual.parent != root:
@@ -1238,87 +1204,6 @@ def _require_absent(path: Path, subject: str) -> None:
     except OSError as error:
         raise CustomNodeInstallError(f"{subject} could not be inspected") from error
     raise CustomNodeInstallError(f"{subject} already exists")
-
-
-def _capture_owned_stage(stage: Path, parent: Path) -> _FilesystemIdentity:
-    _verify_owned_stage(stage, parent)
-    metadata = stage.lstat()
-    return _FilesystemIdentity(metadata.st_dev, metadata.st_ino)
-
-
-def _verify_owned_stage(
-    stage: Path,
-    parent: Path,
-    identity: _FilesystemIdentity | None = None,
-) -> None:
-    if not _is_owned_stage(stage, parent, identity):
-        raise CustomNodeInstallError(
-            "Git stage identity is not one owned same-filesystem sibling"
-        )
-
-
-def _is_owned_stage(
-    stage: Path,
-    parent: Path,
-    identity: _FilesystemIdentity | None = None,
-) -> bool:
-    try:
-        metadata = stage.lstat()
-        resolved = stage.resolve(strict=True)
-        parent_metadata = parent.lstat()
-    except OSError:
-        return False
-    return (
-        not stat.S_ISLNK(metadata.st_mode)
-        and stat.S_ISDIR(metadata.st_mode)
-        and resolved == stage
-        and stage.parent == parent
-        and stage.name.startswith(".")
-        and metadata.st_uid == os.geteuid()
-        and metadata.st_dev == parent_metadata.st_dev
-        and (
-            identity is None
-            or (metadata.st_dev, metadata.st_ino) == (identity.device, identity.inode)
-        )
-    )
-
-
-def _rename_noreplace(
-    source: Path,
-    target: Path,
-    identity: _FilesystemIdentity,
-) -> None:
-    _verify_owned_stage(source, source.parent, identity)
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = libc.renameat2
-    except (OSError, AttributeError) as error:  # pragma: no cover - Ubuntu owns it.
-        raise CustomNodeInstallError("atomic Git placement is unavailable") from error
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1)
-    if result == 0:
-        try:
-            metadata = target.lstat()
-        except OSError as error:
-            raise CustomNodeInstallError(
-                "atomic Git placement identity is unavailable"
-            ) from error
-        if (metadata.st_dev, metadata.st_ino) != (identity.device, identity.inode):
-            raise CustomNodeInstallError("atomic Git placement identity changed")
-        return
-    error_number = ctypes.get_errno()
-    if error_number == errno.EEXIST:
-        raise CustomNodeInstallError("Git target already exists")
-    raise CustomNodeInstallError(
-        f"atomic Git placement failed: {os.strerror(error_number)}"
-    )
 
 
 def _run_git(

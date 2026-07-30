@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
+import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -39,73 +39,78 @@ class LocalMaterializationSource:
     source_path: Path
 
 
-def materialize_build_plan(
+def _materialize_private_stage(
     plan: BuildPlan,
     directory: str | Path,
     *,
     canonical_wheel: CanonicalWheel,
     local_sources: tuple[LocalMaterializationSource, ...] = (),
 ) -> None:
-    """Populate one existing empty directory without re-reading config or lock."""
-    target = Path(directory)
-    if not target.is_dir() or target.is_symlink():
-        raise FinalMaterializationError(
-            "materialization target must be a real directory"
-        )
-    if next(target.iterdir(), None) is not None:
-        raise FinalMaterializationError("materialization target must be empty")
+    """Populate one existing real empty private stage owned by HostRenderService."""
+    stage = Path(directory)
     try:
-        build_hooks, runtime_hooks = _expected_hooks(plan)
-        expected = {**build_hooks, **runtime_hooks}
-        sources = {item.relative_path.as_posix(): item for item in local_sources}
-        if len(sources) != len(local_sources) or set(sources) != set(expected):
-            raise FinalMaterializationError(
-                "local materialization sources must exactly match locked inputs"
+        stage_mode = stage.lstat().st_mode
+    except OSError as error:
+        raise FinalMaterializationError(
+            "materialization stage could not be inspected"
+        ) from error
+    if not stat.S_ISDIR(stage_mode):
+        raise FinalMaterializationError(
+            "materialization stage must be a real directory"
+        )
+    try:
+        first_entry = next(stage.iterdir(), None)
+    except OSError as error:
+        raise FinalMaterializationError(
+            "materialization stage contents could not be inspected"
+        ) from error
+    if first_entry is not None:
+        raise FinalMaterializationError("materialization stage must be empty")
+
+    build_hooks, runtime_hooks = _expected_hooks(plan)
+    expected = {**build_hooks, **runtime_hooks}
+    sources = {item.relative_path.as_posix(): item for item in local_sources}
+    if len(sources) != len(local_sources) or set(sources) != set(expected):
+        raise FinalMaterializationError(
+            "local materialization sources must exactly match locked inputs"
+        )
+    _write(
+        stage,
+        PurePosixPath(".dockerignore"),
+        b"/.cdh-rendered\n/config.lock.toml\n",
+    )
+    _write(stage, PurePosixPath("build-plan.json"), dump_build_plan_json(plan))
+    for relative_path, hook in expected.items():
+        source = sources[relative_path].source_path
+        content = _verified_source(source, hook.digest)
+        if relative_path in runtime_hooks:
+            runtime_relative = PurePosixPath(
+                relative_path.removeprefix(f"{RUNTIME_HOOK_LOCK_PREFIX}/")
             )
-        _write(
-            target / ".dockerignore",
-            b"/.cdh-rendered\n/config.lock.toml\n",
-            root=target,
-        )
-        _write(target / "build-plan.json", dump_build_plan_json(plan), root=target)
-        for relative_path, hook in expected.items():
-            source = sources[relative_path].source_path
-            content = _verified_source(source, hook.digest)
-            if relative_path in runtime_hooks:
-                runtime_relative = relative_path.removeprefix(
-                    f"{RUNTIME_HOOK_LOCK_PREFIX}/"
-                )
-                output = target / "runtime" / "hooks" / runtime_relative
-            else:
-                build_relative = relative_path.removeprefix(
-                    f"{BUILD_HOOK_LOCK_PREFIX}/"
-                )
-                output = target / "build" / "hooks" / build_relative
-            _write(output, content, root=target, executable=True)
-        _write(
-            target / "runtime" / "config.toml",
-            _runtime_config_bytes(plan),
-            root=target,
-        )
-        _materialize_canonical_wheel(plan, canonical_wheel, target)
-        _write(
-            target / "Dockerfile",
-            render_build_plan_dockerfile(plan).encode("utf-8"),
-            root=target,
-        )
-    except BaseException:
-        for child in tuple(target.iterdir()):
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-        raise
+            output = PurePosixPath("runtime/hooks") / runtime_relative
+        else:
+            build_relative = PurePosixPath(
+                relative_path.removeprefix(f"{BUILD_HOOK_LOCK_PREFIX}/")
+            )
+            output = PurePosixPath("build/hooks") / build_relative
+        _write(stage, output, content, executable=True)
+    _write(
+        stage,
+        PurePosixPath("runtime/config.toml"),
+        _runtime_config_bytes(plan),
+    )
+    _materialize_canonical_wheel(plan, canonical_wheel, stage)
+    _write(
+        stage,
+        PurePosixPath("Dockerfile"),
+        render_build_plan_dockerfile(plan).encode("utf-8"),
+    )
 
 
 def _materialize_canonical_wheel(
     plan: BuildPlan,
     wheel: CanonicalWheel,
-    target: Path,
+    stage: Path,
 ) -> None:
     cdh = plan.toolchain.tool_store.cdh
     expected_filename = f"comfyui_docker_helper-{cdh.version}-py3-none-any.whl"
@@ -117,7 +122,7 @@ def _materialize_canonical_wheel(
         or observed_digest != wheel.digest
     ):
         raise FinalMaterializationError("canonical cdh wheel does not match BuildPlan")
-    _write(target / "bootstrap" / wheel.filename, wheel.content, root=target)
+    _write(stage, PurePosixPath("bootstrap") / wheel.filename, wheel.content)
 
 
 def _expected_hooks(
@@ -209,105 +214,28 @@ def _verified_source(path: Path, expected_digest: str) -> bytes:
 
 
 def _write(
-    path: Path,
+    stage: Path,
+    relative_path: PurePosixPath,
     content: bytes,
     *,
-    root: Path,
     executable: bool = False,
 ) -> None:
-    root_absolute = root.absolute()
-    path_absolute = path.absolute()
-    if root_absolute not in path_absolute.parents:
-        raise FinalMaterializationError("materialized target escapes context root")
-    _ensure_real_directory_chain(path.parent)
+    parent = stage
     try:
-        root_resolved = root.resolve(strict=True)
-        parent_resolved = path.parent.resolve(strict=True)
+        for part in relative_path.parts[:-1]:
+            parent /= part
+            parent.mkdir(mode=0o755, exist_ok=True)
+            parent.chmod(0o755)
     except OSError as error:
         raise FinalMaterializationError(
-            "materialized target containment could not be verified"
+            "materialized parent could not be created"
         ) from error
-    if (
-        root_resolved != parent_resolved
-        and root_resolved not in parent_resolved.parents
-    ):
-        raise FinalMaterializationError("materialized target escapes context root")
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError as error:
-        raise FinalMaterializationError(
-            "materialized target could not be inspected"
-        ) from error
-    else:
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise FinalMaterializationError(
-                "materialized target must not be a symlink or special file"
-            )
-        raise FinalMaterializationError("materialized target already exists")
+    path = stage.joinpath(*relative_path.parts)
     try:
         with path.open("xb") as output:
             output.write(content)
+            os.fchmod(output.fileno(), 0o755 if executable else 0o644)
     except OSError as error:
         raise FinalMaterializationError(
             "materialized target could not be written"
         ) from error
-    path.chmod(0o755 if executable else 0o644)
-
-
-def _ensure_real_directory_chain(directory: Path) -> None:
-    missing: list[Path] = []
-    current = directory
-    while True:
-        try:
-            metadata = current.lstat()
-        except FileNotFoundError as error:
-            missing.append(current)
-            parent = current.parent
-            if parent == current:
-                raise FinalMaterializationError(
-                    "materialized target has no existing directory anchor"
-                ) from error
-            current = parent
-            continue
-        except NotADirectoryError as error:
-            raise FinalMaterializationError(
-                "materialized parent must not be a symlink or special file"
-            ) from error
-        except OSError as error:
-            raise FinalMaterializationError(
-                "materialized parent could not be inspected"
-            ) from error
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise FinalMaterializationError(
-                "materialized parent must not be a symlink or special file"
-            )
-        break
-    for item in reversed(missing):
-        try:
-            item.mkdir(mode=0o755)
-        except OSError as error:
-            raise FinalMaterializationError(
-                "materialized parent could not be created"
-            ) from error
-        metadata = item.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise FinalMaterializationError(
-                "materialized parent must remain a real directory"
-            )
-
-
-def _require_real_directory_chain(directory: Path) -> None:
-    absolute = directory.absolute()
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        current /= part
-        try:
-            metadata = current.lstat()
-        except OSError as error:
-            raise FinalMaterializationError("local source parent is invalid") from error
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise FinalMaterializationError(
-                "local source parent must not be a symlink or special file"
-            )

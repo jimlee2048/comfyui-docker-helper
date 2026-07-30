@@ -77,7 +77,7 @@ The canonical cdh wheel crosses the host-to-build boundary as one verified relea
 
 The host render service admits local hook roots and any existing canonical lock, then obtains the prerequisite exact identities needed to assemble the canonical request graph. It reconciles the graph according to the selected policy, constructs one BuildPlan from the accepted lock, and passes the plan with the canonical wheel and exact local sources to materialization.
 
-Materialization writes into owned staging space, re-verifies supplied local and release bytes, and projects the complete context. Host orchestration then publishes that context atomically or compares the complete expected tree for a no-write check. See [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
+Materialization re-verifies supplied local and release bytes and projects the complete context in a host-owned private stage. The host service owns stage cleanup and context publication. Overwrite is portable but not crash-durable, while a no-write check compares the complete expected tree. See the [materialization contract](contracts.md#materialization-boundary) for the exact ownership and failure boundaries and [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
 
 ### Build and observe the final image
 

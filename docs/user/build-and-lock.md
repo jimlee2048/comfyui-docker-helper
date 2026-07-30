@@ -25,6 +25,8 @@ cdh host render \
 
 Rendering reuses a matching lock. It may use Docker when a missing or changed uv-backed result must be resolved. `--overwrite` replaces only an existing valid cdh-owned context; otherwise cdh refuses the replacement.
 
+cdh prepares a complete replacement before changing an existing context. `--overwrite` is not crash-safe: a process or host interruption can leave the output missing while the previous complete context remains in a sibling backup. If a diagnostic reports a retained backup path, preserve that backup for manual recovery before retrying.
+
 Build an image with Docker Buildx:
 
 ```bash
@@ -112,9 +114,9 @@ Provider policy and filesystem/build side effects are separate. Choose among the
 
 | Mode | Resolution behavior | Context and build behavior |
 | --- | --- | --- |
-| Default | Reuse unchanged entries, resolve missing or changed inputs, and remove deleted identities. | Atomically write the accepted lock and rendered context. |
+| Default | Reuse unchanged entries, resolve missing or changed inputs, and remove deleted identities. | Write the accepted lock and rendered context. |
 | `--locked` | Require the existing lock and local inputs to match exactly; make no provider or Docker calls during reconciliation. | Compare the existing context and write nothing. `host build` still invokes Buildx after the checks pass. |
-| `--upgrade-lock` | Refresh moving selectors while retaining unchanged exact selections. | Atomically write the updated lock and context. |
+| `--upgrade-lock` | Refresh moving selectors while retaining unchanged exact selections. | Write the updated lock and rendered context. |
 | `--check` | Apply default reconciliation policy. | Compare the complete expected context with the existing one; write nothing and do not build. |
 | `--dry-run` | Use default policy unless combined with `--locked` or `--upgrade-lock`. | Print the exact BuildPlan preview; write nothing and do not build. |
 

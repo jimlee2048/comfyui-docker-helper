@@ -468,6 +468,28 @@ assert stat.S_IMODE(manifest_metadata.st_mode) == 0o444
 assert (manifest_metadata.st_uid, manifest_metadata.st_gid) == (0, 0)
 manifest = json.loads(manifest_path.read_text())
 assert manifest["schema_version"] == 1
+strict_manifest_source = (
+    "import pathlib;"
+    "from comfyui_docker_helper.config.final_manifest import "
+    "dump_final_manifest,parse_final_manifest;"
+    "path=pathlib.Path('/opt/cdh/build/manifest.json');"
+    "content=path.read_bytes();"
+    "assert dump_final_manifest(parse_final_manifest(content)) == content"
+)
+subprocess.run(
+    [
+        "/opt/uv/tools/comfyui-docker-helper/bin/python",
+        "-I", "-c", strict_manifest_source,
+    ],
+    check=True,
+)
+assert manifest["binding"] == {
+    "schema_version": 1,
+    "build_plan_schema_version": plan["schema_version"],
+    "build_plan_digest": os.environ["EXPECTED_BUILD_PLAN_DIGEST"],
+    "config_digest": os.environ["EXPECTED_CONFIG_DIGEST"],
+    "lock_digest": os.environ["EXPECTED_LOCK_DIGEST"],
+}
 expected_cli = os.environ["EXPECTED_CLI"] == "1"
 expected_manager = os.environ["EXPECTED_MANAGER"] == "1"
 expected_mixed = os.environ["EXPECTED_MIXED"] == "1"
@@ -1263,6 +1285,7 @@ def test_image_has_exact_environment_and_disposition(
             "EXPECTED_MIXED": str(int(scenario.mixed)),
             "EXPECTED_PYTHON_VERSION": scenario.python_version,
             "EXPECTED_BUILD_PLAN_DIGEST": binding.build_plan_digest,
+            "EXPECTED_CONFIG_DIGEST": binding.config_digest,
             "EXPECTED_LOCK_DIGEST": lock_digest,
         },
     )

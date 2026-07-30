@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
 import os
@@ -292,8 +290,6 @@ class RuntimeStateStore:
         )
         try:
             temp_fd = os.open(temp_name, flags, 0o600, dir_fd=self._parent_fd)
-            temp_metadata = os.fstat(temp_fd)
-            _require_safe_state_leaf(temp_metadata, self.path.with_name(temp_name))
             _write_fd(temp_fd, payload)
             os.fsync(temp_fd)
             temp_metadata = os.fstat(temp_fd)
@@ -305,33 +301,14 @@ class RuntimeStateStore:
                 temp_metadata,
                 self.path.with_name(temp_name),
             )
-            self._verify_parent()
             self._verify_current()
-            if self._leaf is None:
-                _renameat2(
-                    self._parent_fd,
-                    temp_name,
-                    self._parent_fd,
-                    self.path.name,
-                    flags=1,
-                )
-                committed = True
-            else:
-                _renameat2(
-                    self._parent_fd,
-                    temp_name,
-                    self._parent_fd,
-                    self.path.name,
-                    flags=2,
-                )
-                committed = True
-                self._verify_exchange_or_rollback(temp_name, temp_metadata)
-                _unlink_exact_state_leaf(
-                    self._parent_fd,
-                    temp_name,
-                    self._leaf.metadata,
-                    self.path.with_name(temp_name),
-                )
+            os.replace(
+                temp_name,
+                self.path.name,
+                src_dir_fd=self._parent_fd,
+                dst_dir_fd=self._parent_fd,
+            )
+            committed = True
             os.fsync(self._parent_fd)
             self._verify_parent()
             new_leaf = _open_state_leaf(
@@ -348,70 +325,22 @@ class RuntimeStateStore:
                 os.close(self._leaf.fd)
             self._leaf = new_leaf
         except Exception as error:
-            if committed:
-                with suppress(Exception):
-                    self._refresh_committed_leaf(temp_metadata)
             if isinstance(error, RuntimeStateError):
                 raise
             raise RuntimeStateError(
                 f"failed to write runtime state: {self.path}"
             ) from error
         finally:
-            cleanup_metadata = temp_metadata
             if temp_fd is not None:
-                current_temp = os.fstat(temp_fd)
-                if temp_metadata is None or _same_inode(current_temp, temp_metadata):
-                    cleanup_metadata = current_temp
-                os.close(temp_fd)
-            if cleanup_metadata is not None:
-                with suppress(Exception):
-                    _unlink_exact_state_leaf(
-                        self._parent_fd,
-                        temp_name,
-                        cleanup_metadata,
-                        self.path.with_name(temp_name),
-                    )
-
-    def _verify_exchange_or_rollback(
-        self,
-        temp_name: str,
-        temp_metadata: os.stat_result,
-    ) -> None:
-        assert self._leaf is not None
-        current = _stat_leaf(self._parent_fd, self.path.name)
-        displaced = _stat_leaf(self._parent_fd, temp_name)
-        if (
-            current is not None
-            and _same_inode(current, temp_metadata)
-            and displaced is not None
-            and _same_inode(displaced, self._leaf.metadata)
-        ):
-            return
-        try:
-            _renameat2(
-                self._parent_fd,
-                temp_name,
-                self._parent_fd,
-                self.path.name,
-                flags=2,
-            )
-            os.fsync(self._parent_fd)
-        except OSError as error:
-            raise RuntimeStateError(
-                f"runtime state replacement rollback is uncertain: {self.path}"
-            ) from error
-        raise RuntimeStateError(
-            f"runtime state changed during atomic replacement: {self.path}"
-        )
-
-    def _refresh_committed_leaf(self, expected: os.stat_result) -> None:
-        current = _open_state_leaf(self._parent_fd, self.path.name, self.path)
-        if not _same_inode(current.metadata, expected):
-            os.close(current.fd)
-            return
-        if self._leaf is not None:
-            os.close(self._leaf.fd)
-        self._leaf = current
+                try:
+                    if not committed:
+                        with suppress(OSError):
+                            current = os.fstat(temp_fd)
+                            observed = _stat_leaf(self._parent_fd, temp_name)
+                            if observed is not None and _same_stat(observed, current):
+                                os.unlink(temp_name, dir_fd=self._parent_fd)
+                finally:
+                    os.close(temp_fd)
 
     def _verify_current(self) -> None:
         self._verify_parent()
@@ -621,87 +550,6 @@ def _require_same_state_leaf(
         raise RuntimeStateError(f"runtime state changed during operation: {display}")
 
 
-def _unlink_exact_state_leaf(
-    directory_fd: int,
-    name: str,
-    expected: os.stat_result,
-    display: Path,
-) -> None:
-    observed = _stat_leaf(directory_fd, name)
-    if observed is None:
-        return
-    quarantine_name = f".{name}.cleanup-{secrets.token_hex(32)}"
-    try:
-        _renameat2(
-            directory_fd,
-            name,
-            directory_fd,
-            quarantine_name,
-            flags=1,
-        )
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        raise RuntimeStateError(
-            f"runtime state leaf could not be quarantined: {display}"
-        ) from error
-    quarantined = _stat_leaf(directory_fd, quarantine_name)
-    if quarantined is None:
-        raise RuntimeStateError(
-            f"runtime state quarantined identity is uncertain: {display}"
-        )
-    if not _same_stat(quarantined, expected):
-        _restore_or_preserve_state_leaf(
-            directory_fd,
-            name,
-            quarantine_name,
-            display,
-        )
-        raise RuntimeStateError(f"runtime state temporary changed: {display}")
-    try:
-        os.unlink(quarantine_name, dir_fd=directory_fd)
-        os.fsync(directory_fd)
-    except OSError as error:
-        with suppress(Exception):
-            _restore_or_preserve_state_leaf(
-                directory_fd,
-                name,
-                quarantine_name,
-                display,
-            )
-        raise RuntimeStateError(
-            f"runtime state leaf cleanup could not be made durable: {display}"
-        ) from error
-
-
-def _restore_or_preserve_state_leaf(
-    directory_fd: int,
-    original_name: str,
-    quarantine_name: str,
-    display: Path,
-) -> None:
-    try:
-        _renameat2(
-            directory_fd,
-            quarantine_name,
-            directory_fd,
-            original_name,
-            flags=1,
-        )
-    except FileExistsError:
-        pass
-    except OSError as error:
-        raise RuntimeStateError(
-            f"runtime state foreign leaf could not be preserved: {display}"
-        ) from error
-    try:
-        os.fsync(directory_fd)
-    except OSError as error:
-        raise RuntimeStateError(
-            f"runtime state foreign leaf preservation is uncertain: {display}"
-        ) from error
-
-
 def _stat_leaf(directory_fd: int, name: str) -> os.stat_result | None:
     try:
         return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -745,41 +593,3 @@ def _same_parent(left: os.stat_result, right: os.stat_result) -> bool:
         right.st_mode,
         right.st_uid,
     )
-
-
-def _renameat2(
-    source_fd: int,
-    source_name: str,
-    target_fd: int,
-    target_name: str,
-    *,
-    flags: int,
-) -> None:
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = libc.renameat2
-    except (OSError, AttributeError) as error:  # pragma: no cover - Ubuntu owns it.
-        raise RuntimeStateError(
-            "atomic runtime state replacement is unavailable"
-        ) from error
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    result = renameat2(
-        source_fd,
-        os.fsencode(source_name),
-        target_fd,
-        os.fsencode(target_name),
-        flags,
-    )
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number == errno.EEXIST:
-        raise FileExistsError(error_number, os.strerror(error_number), target_name)
-    raise OSError(error_number, os.strerror(error_number), target_name)

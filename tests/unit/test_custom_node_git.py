@@ -31,9 +31,7 @@ from comfyui_docker_helper.config.final_validation import (
 from comfyui_docker_helper.container import custom_node_installer
 from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,
-    _capture_owned_stage,
     _install_git_node,
-    _rename_noreplace,
     _verify_git_provenance,
 )
 
@@ -134,7 +132,7 @@ def _verify(custom_nodes: Path, node: GitNodePlan) -> None:
     )
 
 
-# Direct-Git identity binds committed recursive content and safe atomic placement.
+# Direct-Git identity binds committed recursive content and exact target placement.
 def test_real_git_proof_uses_committed_recursive_gitlinks_not_dirty_index(
     tmp_path: Path,
 ) -> None:
@@ -298,24 +296,7 @@ def test_final_proof_rejects_a_different_valid_sibling_repository(
         )
 
 
-# Clone staging is atomic, owns cleanup, and receives the declared locator unchanged.
-def test_atomic_placement_never_replaces_an_existing_target(tmp_path: Path) -> None:
-    source = tmp_path / ".stage"
-    source.mkdir()
-    source.joinpath("source").write_text("source")
-    target = tmp_path / "target"
-    target.mkdir()
-    target.joinpath("existing").write_text("existing")
-
-    identity = _capture_owned_stage(source, tmp_path)
-    with pytest.raises(CustomNodeInstallError, match="already exists"):
-        _rename_noreplace(source, target, identity)
-
-    assert source.joinpath("source").read_text() == "source"
-    assert target.joinpath("existing").read_text() == "existing"
-
-
-def test_direct_git_install_stages_places_and_retains_repository_metadata(
+def test_direct_git_install_clones_into_final_target_and_retains_repository_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -358,12 +339,104 @@ def test_direct_git_install_stages_places_and_retains_repository_metadata(
     )
     assert symbolic.returncode == 1
     assert target.joinpath(".git").exists()
-    assert not tuple(custom_nodes.glob(".direct.cdh-stage-*"))
 
 
-def test_failed_direct_git_clone_cleans_only_owned_stage(
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
+def test_direct_git_install_never_replaces_an_occupied_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = runtime.comfyui_path / "custom_nodes"
+    target = custom_nodes / "direct"
+    if kind == "file":
+        target.write_text("foreign")
+    elif kind == "directory":
+        target.mkdir()
+    else:
+        foreign = tmp_path / "missing-foreign-target"
+        target.symlink_to(foreign, target_is_directory=True)
+    node = GitNodePlan.model_construct(
+        type="git",
+        url=str(tmp_path / "source"),
+        commit="a" * 40,
+        target=str(target),
+        pre_install_hooks=(),
+        post_install_hooks=(),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_run_git",
+        lambda *_args, **_kwargs: pytest.fail("occupied target must stop before Git"),
+    )
+
+    with pytest.raises(CustomNodeInstallError, match="already exists"):
+        _install_git_node(
+            node,
+            custom_nodes,
+            application,
+            runtime,
+            Path("/usr/bin/git"),
+            Path("/usr/local/bin/uv"),
+            tmp_path / "constraints.txt",
+            os.environ,
+            {},
+        )
+
+    if kind == "file":
+        assert target.read_text() == "foreign"
+    elif kind == "directory":
+        assert target.is_dir()
+        assert not tuple(target.iterdir())
+    else:
+        assert target.is_symlink()
+        assert target.readlink() == foreign
+
+
+def test_direct_git_install_readmits_the_real_custom_nodes_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    custom_nodes = runtime.comfyui_path / "custom_nodes"
+    custom_nodes.rmdir()
+    replacement = tmp_path / "replacement-custom-nodes"
+    replacement.mkdir()
+    custom_nodes.symlink_to(replacement, target_is_directory=True)
+    node = GitNodePlan.model_construct(
+        type="git",
+        url=str(tmp_path / "source"),
+        commit="a" * 40,
+        target=str(custom_nodes / "direct"),
+        pre_install_hooks=(),
+        post_install_hooks=(),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "_run_git",
+        lambda *_args, **_kwargs: pytest.fail("unsafe root must stop before Git"),
+    )
+
+    with pytest.raises(CustomNodeInstallError, match="must be one real directory"):
+        _install_git_node(
+            node,
+            custom_nodes,
+            application,
+            runtime,
+            Path("/usr/bin/git"),
+            Path("/usr/local/bin/uv"),
+            tmp_path / "constraints.txt",
+            os.environ,
+            {},
+        )
+
+    assert custom_nodes.is_symlink()
+    assert not (replacement / "direct").exists()
+
+
+def test_failed_direct_git_clone_leaves_created_target_for_failed_layer(
+    tmp_path: Path,
 ) -> None:
     application, runtime = _application(tmp_path)
     custom_nodes = runtime.comfyui_path / "custom_nodes"
@@ -378,10 +451,6 @@ def test_failed_direct_git_clone_cleans_only_owned_stage(
         target=str(custom_nodes / "direct"),
         pre_install_hooks=(),
         post_install_hooks=(),
-    )
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.custom_node_installer._install_git_root_surfaces",
-        lambda *_args: None,
     )
 
     with pytest.raises(CustomNodeInstallError, match="clone failed"):
@@ -398,8 +467,7 @@ def test_failed_direct_git_clone_cleans_only_owned_stage(
         )
 
     assert unrelated.joinpath("keep").read_text() == "keep"
-    assert not (custom_nodes / "direct").exists()
-    assert not tuple(custom_nodes.glob(".direct.cdh-stage-*"))
+    assert (custom_nodes / "direct").is_dir()
 
 
 # Git failures keep stderr on the live build stream while returning concise cdh errors.
@@ -434,54 +502,7 @@ def test_failed_git_command_preserves_stderr_diagnostic(
     assert captured.err == "streamed Git diagnostic\n"
 
 
-def test_stage_replacement_race_fails_without_removing_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    application, runtime = _application(tmp_path)
-    custom_nodes = runtime.comfyui_path / "custom_nodes"
-    node = GitNodePlan(
-        type="git",
-        url="https://example.invalid/node.git",
-        commit="a" * 40,
-        target=str(custom_nodes / "direct"),
-        pre_install_hooks=(),
-        post_install_hooks=(),
-    )
-    replacement: Path | None = None
-
-    def replace_stage(argv, **_kwargs) -> bytes:
-        nonlocal replacement
-        stage = Path(argv[-1])
-        original = stage.with_name(f"{stage.name}.original")
-        stage.rename(original)
-        stage.mkdir()
-        stage.joinpath("replacement").write_text("keep")
-        replacement = stage
-        return b""
-
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.custom_node_installer._run_git",
-        replace_stage,
-    )
-
-    with pytest.raises(CustomNodeInstallError, match="stage identity"):
-        _install_git_node(
-            node,
-            custom_nodes,
-            application,
-            runtime,
-            Path("/usr/bin/git"),
-            Path("/usr/local/bin/uv"),
-            tmp_path / "constraints.txt",
-            os.environ,
-            {},
-        )
-
-    assert replacement is not None
-    assert replacement.joinpath("replacement").read_text() == "keep"
-
-
+# Direct-Git acquisition passes the locked raw locator unchanged.
 def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -564,18 +585,15 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     )
 
     assert commands[0][-2] == locator
+    assert commands[0][-1] == os.fspath(custom_nodes / "direct")
     proof_and_install = [
         event for event in events if event[0] in {"proof", "root-install"}
     ]
     assert [event[0] for event in proof_and_install] == [
         "proof",
-        "proof",
         "root-install",
     ]
-    assert proof_and_install[0][1] is not None
-    assert proof_and_install[0][1].parent == custom_nodes
-    assert proof_and_install[0][1].name.startswith(".direct.cdh-stage-")
-    assert proof_and_install[1] == ("proof", custom_nodes / "direct")
+    assert proof_and_install[0] == ("proof", custom_nodes / "direct")
     evidence = custom_node_inventory((node,)).nodes[0]
     assert evidence.type == "git" and evidence.url == locator
 

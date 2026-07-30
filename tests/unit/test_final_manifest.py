@@ -46,6 +46,9 @@ from comfyui_docker_helper.config.final_manifest import (
 from comfyui_docker_helper.container import final_manifest as final_manifest_service
 from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 from comfyui_docker_helper.container.final_manifest import FinalManifestError
+from comfyui_docker_helper.container.final_manifest_writer import (
+    FinalManifestWriteError,
+)
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
@@ -531,6 +534,7 @@ def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:
     )
 
 
+# Manifest emission observes first, writes canonical bytes, and projects writer errors.
 def test_manifest_service_publishes_only_after_successful_observation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -545,7 +549,7 @@ def test_manifest_service_publishes_only_after_successful_observation(
     )
     monkeypatch.setattr(
         final_manifest_service,
-        "write_application_evidence",
+        "write_final_manifest_file",
         lambda path, content: published.append((path, content)),
     )
 
@@ -573,6 +577,31 @@ def test_manifest_service_publishes_only_after_successful_observation(
     assert published == []
 
 
+def test_manifest_service_projects_writer_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    expected = _manifest(plan)
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_observe_final_manifest",
+        lambda *_args, **_kwargs: expected,
+    )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "write_final_manifest_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            FinalManifestWriteError("final manifest target already exists")
+        ),
+    )
+
+    with pytest.raises(FinalManifestError) as error:
+        final_manifest_service.emit_final_manifest(projection, runtime=object())
+    assert str(error.value) == "final manifest target already exists"
+
+
+# Final probes use authenticated inputs and reject untruthful success evidence.
 def test_final_probe_runner_uses_the_exact_application_python_and_typed_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

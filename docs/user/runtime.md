@@ -58,7 +58,11 @@ An optional `checksum = "sha256:<64 hexadecimal digits>"` declares trusted conte
 
 cdh keeps an existing final file unchanged until a complete replacement is ready for atomic publication. Without a checksum, successful transport and atomic replacement are not proof that the downloaded bytes are authentic.
 
+If an operation fails after replacing a target, the complete new file may already be present; cdh does not restore the old file. Inspect the target before retrying.
+
 Runtime reconciliation state lives at `/var/lib/cdh/runtime/state.json`. This file is cdh-owned internal recovery state, not user configuration or a download-history API. Do not edit it. Runtime downloads require the state location to be writable. Mount `/var/lib/cdh/runtime` to preserve recovery state across container replacement, and mount each target directory that must preserve downloaded files. Preserving the state file alone does not preserve the downloaded files.
+
+Stop the old cdh container before starting its replacement with the same persisted state and download targets. Do not let overlapping instances or replicas write the same state file or the same download targets; separate state files do not make a shared target safe.
 
 ## SSH and confidential values
 

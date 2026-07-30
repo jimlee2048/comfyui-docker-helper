@@ -1,4 +1,4 @@
-"""Canonical render-service modes and atomic context contracts."""
+"""Canonical render-service modes and complete-context publication contracts."""
 
 from __future__ import annotations
 
@@ -56,6 +56,7 @@ from comfyui_docker_helper.container.runtime_files import (
     runtime_downloader_settings,
 )
 from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
+from comfyui_docker_helper.host import render_service as render_service_module
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
@@ -75,6 +76,9 @@ from comfyui_docker_helper.host.render_service import (
     prepare_render_context,
 )
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.rendering.final_materializer import (
+    FinalMaterializationError,
+)
 from comfyui_docker_helper.version import package_version
 
 DIGEST_A = f"sha256:{'a' * 64}"
@@ -249,7 +253,7 @@ class FakeAcquirer:
         return AcquiredCanonicalEntries(entries, True)
 
 
-# Host rendering reconciles once and atomically publishes one canonical context.
+# Host rendering reconciles once and publishes one complete canonical context.
 def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
     tmp_path: Path,
 ) -> None:
@@ -508,7 +512,7 @@ def test_request_diagnostic_is_adapted_without_unexpected_exception_handling(
     assert isinstance(raised.value.__cause__, CanonicalRequestError)
 
 
-# Public planning modes reconcile exact identities and control publication atomically.
+# Public planning modes reconcile exact identities and control context publication.
 def test_default_writes_canonical_context_and_second_default_reuses_lock(
     tmp_path: Path,
 ) -> None:
@@ -1399,6 +1403,128 @@ def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
     )
 
 
+# Host owns private-stage creation, deterministic modes, and whole-stage cleanup.
+def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    original = render_service_module._materialize_private_stage
+    observed_stages: list[Path] = []
+    observed_phases: set[str] = set()
+    phase = "normal"
+
+    def inspect_stage(plan, directory, **kwargs):
+        stage = Path(directory)
+        assert stage.parent == output.parent
+        assert stage != output
+        assert stage not in observed_stages
+        assert stage.stat().st_mode & 0o777 == 0o700
+        assert tuple(stage.iterdir()) == ()
+        observed_stages.append(stage)
+        observed_phases.add(phase)
+        return original(plan, stage, **kwargs)
+
+    monkeypatch.setattr(
+        render_service_module, "_materialize_private_stage", inspect_stage
+    )
+    _prepare(config, output, FakeAcquirer())
+
+    phase = "check"
+    _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        options=PlanningOptions(check=True),
+    )
+    assert observed_phases == {"normal", "check"}
+
+
+def test_host_context_modes_are_deterministic_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = _runtime_hooks(tmp_path / "hooks")
+    output = tmp_path / "context"
+    previous_umask = os.umask(0o077)
+    try:
+        _prepare(config, output, FakeAcquirer(), runtime_hooks_dir=hooks)
+    finally:
+        os.umask(previous_umask)
+
+    assert output.stat().st_mode & 0o777 == 0o700
+    for path in output.rglob("*"):
+        permissions = path.stat().st_mode & 0o777
+        if path.is_dir() or output / "runtime/hooks" in path.parents:
+            assert permissions == 0o755
+        else:
+            assert permissions == 0o644
+
+
+def test_host_removes_partial_private_stage_after_materializer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    observed_stages: list[Path] = []
+
+    def fail_after_partial_write(_plan, directory, **_kwargs):
+        stage = Path(directory)
+        observed_stages.append(stage)
+        (stage / "partial").write_text("partial")
+        raise FinalMaterializationError("materialization failed")
+
+    monkeypatch.setattr(
+        render_service_module,
+        "_materialize_private_stage",
+        fail_after_partial_write,
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert not output.exists()
+    assert observed_stages
+    assert all(not stage.exists() for stage in observed_stages)
+
+
+@pytest.mark.parametrize("name", ["config.lock.toml", ".cdh-rendered"])
+def test_host_metadata_writes_are_exclusive_and_clean_failed_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    original = render_service_module._materialize_private_stage
+    observed_stages: list[Path] = []
+
+    def create_collision(plan, directory, **kwargs):
+        stage = Path(directory)
+        observed_stages.append(stage)
+        original(plan, stage, **kwargs)
+        (stage / name).write_text("collision")
+
+    monkeypatch.setattr(
+        render_service_module, "_materialize_private_stage", create_collision
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert not output.exists()
+    assert observed_stages
+    assert all(not stage.exists() for stage in observed_stages)
+
+
 # Context replacement owns unique staging/backup paths and preserves foreign siblings.
 def test_overwrite_uses_unique_owned_backup_and_preserves_sibling(
     tmp_path: Path,
@@ -1488,24 +1614,86 @@ def test_restore_rename_failure_retains_original_in_owned_backup(
     sibling = tmp_path / ".context.previous"
     sibling.write_text("keep")
     original_rename = Path.rename
+    previous_path: Path | None = None
+    stage_path: Path | None = None
 
     def fail_stage_and_restore(self: Path, target: Path):
+        nonlocal previous_path, stage_path
         target = Path(target)
-        if self.name.startswith(".context.stage-") and target == output:
+        if self == output:
+            result = original_rename(self, target)
+            previous_path = target
+            return result
+        if target == output and previous_path is not None:
+            if self == previous_path:
+                raise OSError("restore rename denied")
+            stage_path = self
             raise OSError("stage rename denied")
-        if self.name == "previous" and target == output:
-            raise OSError("restore rename denied")
         return original_rename(self, target)
 
     monkeypatch.setattr(Path, "rename", fail_stage_and_restore)
     with pytest.raises(HostRenderServiceError) as raised:
         _prepare(config, output, FakeAcquirer(), overwrite=True)
 
-    assert raised.value.diagnostics[0].code == "render.context_write_failed"
-    backups = list(tmp_path.glob(".context.backup-*"))
-    assert len(backups) == 1
-    assert _tree(backups[0] / "previous") == before
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "render.context_restore_failed"
+    assert previous_path is not None
+    assert stage_path is not None
+    retained = previous_path
+    assert "stage rename denied" in diagnostic.message
+    assert "restore rename denied" in diagnostic.message
+    assert str(retained) in diagnostic.message
+    assert raised.value.__cause__ is not None
+    assert str(raised.value.__cause__) == "restore rename denied"
+    assert str(raised.value.__cause__.__context__) == "stage rename denied"
+    assert not output.exists()
+    assert _tree(retained) == before
+    assert not stage_path.exists()
     assert sibling.read_text() == "keep"
+
+
+def test_unexpected_publication_failure_restores_output_and_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedPublicationFailure(BaseException):
+        pass
+
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    before = _tree(output)
+    original_rename = Path.rename
+    previous_path: Path | None = None
+    stage_path: Path | None = None
+    restore_attempted = False
+
+    def interrupt_stage(self: Path, target: Path):
+        nonlocal previous_path, restore_attempted, stage_path
+        target = Path(target)
+        if self == output:
+            result = original_rename(self, target)
+            previous_path = target
+            return result
+        if target == output and previous_path is not None:
+            if self == previous_path:
+                restore_attempted = True
+                return original_rename(self, target)
+            stage_path = self
+            raise UnexpectedPublicationFailure("publication interrupted")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", interrupt_stage)
+    with pytest.raises(UnexpectedPublicationFailure, match="publication interrupted"):
+        _prepare(config, output, FakeAcquirer(), overwrite=True)
+
+    assert restore_attempted
+    assert previous_path is not None
+    assert stage_path is not None
+    assert _tree(output) == before
+    assert not previous_path.parent.exists()
+    assert not stage_path.exists()
 
 
 def test_context_parent_filesystem_failure_is_stable_render_diagnostic(
@@ -1523,6 +1711,7 @@ def test_context_parent_filesystem_failure_is_stable_render_diagnostic(
     assert parent.read_text() == "sentinel"
 
 
+# Check mode compares the complete path, content, and executable-mode result.
 @pytest.mark.parametrize("mutation", ["extra-dir", "missing-dir", "symlink", "special"])
 def test_check_compares_complete_path_type_and_bytes_without_following(
     tmp_path: Path,

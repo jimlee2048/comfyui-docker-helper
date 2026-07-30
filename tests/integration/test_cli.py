@@ -32,7 +32,9 @@ from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
 from comfyui_docker_helper.host.buildx import KnownHostsBinding
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
-from comfyui_docker_helper.rendering.final_materializer import materialize_build_plan
+from comfyui_docker_helper.rendering.final_materializer import (
+    _materialize_private_stage,
+)
 
 
 def _plain_output(output: str) -> str:
@@ -254,8 +256,8 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
     """Parse one plan and pass only each command's typed projection."""
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
-    context.mkdir()
-    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
+    context.mkdir(mode=0o700)
+    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
     parse_count = 0
     parse = build_plan_input_module.parse_build_plan_json
 
@@ -371,8 +373,8 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
     plan = build_plan(config, accepted_resolution())
     custom_root.mkdir(parents=True)
     context = tmp_path / "context"
-    context.mkdir()
-    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
+    context.mkdir(mode=0o700)
+    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
 
     class WritingBackend:
         def download(self, item, settings):
@@ -418,8 +420,8 @@ def test_container_plan_admission_hides_invalid_plan_secret_values(
     sentinel = "password-sentinel-do-not-print"
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
-    context.mkdir()
-    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
+    context.mkdir(mode=0o700)
+    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
     plan_path = context / "build-plan.json"
     document = json.loads(plan_path.read_bytes())
     document["runtime"]["ssh"]["password"] = f"{sentinel}\n"
@@ -449,8 +451,8 @@ def test_container_cli_rejects_registry_without_manager(
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     context = tmp_path / "context"
-    context.mkdir()
-    materialize_build_plan(plan, context, canonical_wheel=canonical_wheel())
+    context.mkdir(mode=0o700)
+    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
     plan_path = context / "build-plan.json"
     document = json.loads(plan_path.read_bytes())
     document["application"]["comfyui"]["manager"] = None
@@ -1204,8 +1206,8 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
 
     def prepare(output_dir, **kwargs):
         del kwargs
-        Path(output_dir).mkdir()
-        materialize_build_plan(
+        Path(output_dir).mkdir(mode=0o700)
+        _materialize_private_stage(
             plan,
             output_dir,
             canonical_wheel=canonical_wheel(),

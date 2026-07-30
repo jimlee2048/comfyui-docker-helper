@@ -40,7 +40,9 @@ The manifest is downstream evidence. It is not configuration, a resolver result,
 
 [Host rendering](../../src/comfyui_docker_helper/host/render_service.py) constructs the accepted lock and BuildPlan. [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) does not plan. It accepts exactly one validated BuildPlan, the exact canonical cdh wheel, and the complete set of plan-owned local executable inputs.
 
-The materializer reopens local inputs as contained regular files and verifies their digests before copying them. It writes a complete context into a fresh staging directory; the host service then atomically publishes it or compares a complete expected tree. Replacement is restricted to a marked cdh-owned context. These rules keep partial output, host-local paths, stale hook bytes, and mismatched wheel bytes from becoming Docker input.
+The internal materializer accepts only a fresh, empty private stage created by the host service. It reopens local inputs as contained regular files, verifies their digests before copying them, and applies deterministic directory and file modes. The host service is the sole owner of whole-stage cleanup and either publishes the complete stage or compares a complete expected tree.
+
+First publication renames the complete stage into place. Replacement is restricted to a marked cdh-owned context and uses a portable two-rename sequence: the host moves the old context to a unique backup, renames the complete stage into place, and attempts an in-process restore if the second rename fails. This sequence is not a gap-free or crash-durable directory exchange; an interrupted overwrite can leave the output absent and the complete old context in its backup. These rules keep partial output, host-local paths, stale hook bytes, and mismatched wheel bytes from becoming Docker input.
 
 The Dockerfile is rendered from the BuildPlan only. Host reconciliation state and the ownership marker are excluded through `.dockerignore`; the BuildPlan, canonical wheel, derived runtime configuration, and verified selected hooks are the build inputs.
 
@@ -83,7 +85,7 @@ The exact direct results and any compatibility constraint derived from the selec
 
 ## Official ComfyUI source and requirements
 
-cdh owns one fixed official ComfyUI repository. A user selector resolves to one exact commit, and the container stages a detached checkout whose repository, HEAD, and ancestry from the immutable support-floor commit are proved before package mutation.
+cdh owns one fixed official ComfyUI repository. A user selector resolves to one exact commit. The container exclusively creates the required-absent final directory, materializes the detached checkout there, and proves its repository, HEAD, and ancestry from the immutable support-floor commit before package mutation.
 
 The exact checkout owns the admitted root `requirements.txt` snapshot and, when Manager is enabled, `manager_requirements.txt`. Host acquisition, canonical lock, BuildPlan, and container installation must refer to that same source identity and content. cdh installs the checkout directly; comfy-cli is not an installer authority, and Manager has no independent floating source.
 
@@ -154,7 +156,7 @@ The transfer path deliberately splits policy from mechanism:
 | Owner | Owns | Must not become |
 | --- | --- | --- |
 | Build and runtime orchestrators | Ordering, attempt budgets, applicable backend and mode selection, failure policy, and cancellation | A second placement implementation |
-| [`transfer_core.py`](../../src/comfyui_docker_helper/container/transfer_core.py) | Target admission, transfer identity, transport sinks, verification, atomic final placement, rollback, durability, and exact cleanup | A scheduler or runtime-policy interpreter |
+| [`transfer_core.py`](../../src/comfyui_docker_helper/container/transfer_core.py) | Target admission, transfer identity, transport sinks, verification, atomic final placement, durability, and exact cleanup | A scheduler or runtime-policy interpreter |
 | Transport adapters in [`download_files.py`](../../src/comfyui_docker_helper/container/download_files.py) | Moving bytes through the sink supplied by the core | Owners of final paths, overwrite policy, verification, or cleanup |
 | Runtime state modules | Minimal persisted recovery authority and its transition API | User configuration, history, telemetry, or a second retry policy |
 
@@ -162,7 +164,7 @@ Build orchestration currently shares [`download_files.py`](../../src/comfyui_doc
 
 The HTTPX adapter can write through a core-opened sink. aria2 instead requires an anchored directory/name interface and maintains its own control file. The core defends ordinary replacement races and unsafe filesystem shapes around that interface, but it cannot isolate aria2 artifacts from independently malicious code running with the same effective UID. Tests and documentation must not turn those defenses into a same-UID isolation claim.
 
-A configured checksum is trusted content intent supplied from outside the transport. Without it, completed transport and atomic placement do not prove content authenticity. Existing final content remains in place until a complete replacement is accepted. Containment, type, permission, identity, persistence, and durability failures fail closed and are never converted into ordinary runtime `continue` outcomes. The user guide owns the complete target-result matrix.
+A configured checksum is trusted content intent supplied from outside the transport. Without it, completed transport and atomic placement do not prove content authenticity. Existing final content remains in place until a complete verified replacement commits through rename. Rename is the placement commit point: a later durability, final-verification, cleanup, or state-persistence failure remains fatal, but the complete new final may remain and is not rolled back. Containment, type, permission, identity, persistence, and durability failures fail closed and are never converted into ordinary runtime `continue` outcomes. The user guide owns the complete target-result matrix.
 
 ### Runtime state is minimal recovery authority
 
@@ -171,6 +173,8 @@ A configured checksum is trusted content intent supplied from outside the transp
 The state records only the startup generation, desired download identity, actionable recovery status, and exact resume authority needed for safe reconciliation. It is not a durable attempt log, error history, progress feed, or user-editable control surface. Do not add telemetry fields and then make runtime policy depend on them.
 
 Reconciliation acts only on desired input and state-backed transfer authority. It preserves completed final files when configuration changes and does not replace exact ownership with a broad filesystem scan. Invalid state or a required persistence failure stops reconciliation. The user runtime guide owns mounting and persistence instructions.
+
+One active cdh instance owns the state file, its state-indexed transfer namespaces, and the declared targets governed by those entries. Container replacement must be serial: the old owner stops before its replacement takes ownership. Overlapping rolling instances, replicas sharing writable state, and different state files controlling the same target or staging namespace are not supported. The state `run_id` admits the synchronous-to-asynchronous handoff within one container start; it is not a lock or lease between instances.
 
 ### SSH protects a narrow credential path, not arbitrary values
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -135,7 +137,8 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     assert constraints.read_bytes() == managed_constraints_bytes(group)
 
 
-def test_constraints_are_complete_deterministic_and_read_only(tmp_path: Path) -> None:
+# Managed constraints preserve exact content and never replace foreign entries.
+def test_constraints_are_exact_exclusive_and_read_only(tmp_path: Path) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     constraints = tmp_path / "constraints.txt"
     _write_constraints(
@@ -149,9 +152,121 @@ def test_constraints_are_complete_deterministic_and_read_only(tmp_path: Path) ->
         b"setuptools<82\ntorch==2.12.1+cu130\n"
         b"torchaudio==2.11.0+cu130\ntorchvision==0.27.1+cu130\n"
     )
-    assert constraints.stat().st_mode & 0o777 == 0o444
+    metadata = constraints.lstat()
+    assert stat.S_ISREG(metadata.st_mode)
+    assert metadata.st_uid == os.getuid()
+    assert metadata.st_gid == os.getgid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o444
+    assert list(tmp_path.iterdir()) == [constraints]
 
 
+@pytest.mark.parametrize("kind", ["regular", "symlink", "directory"])
+def test_constraints_never_replace_an_occupied_target(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    constraints = tmp_path / "constraints.txt"
+    if kind == "regular":
+        constraints.write_bytes(b"foreign")
+    elif kind == "symlink":
+        constraints.symlink_to(tmp_path / "missing")
+    else:
+        constraints.mkdir()
+    before = constraints.lstat()
+
+    with pytest.raises(ApplicationInstallError, match="target already exists"):
+        _write_constraints(
+            constraints,
+            b"expected\n",
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+    after = constraints.lstat()
+    assert (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode)) == (
+        before.st_dev,
+        before.st_ino,
+        stat.S_IFMT(before.st_mode),
+    )
+    if kind == "regular":
+        assert constraints.read_bytes() == b"foreign"
+    elif kind == "symlink":
+        assert constraints.readlink() == tmp_path / "missing"
+
+
+def test_constraints_reject_a_direct_symlink_parent(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real-build"
+    real_parent.mkdir()
+    parent = tmp_path / "build"
+    parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(ApplicationInstallError, match="could not be written"):
+        _write_constraints(
+            parent / "constraints.txt",
+            b"expected\n",
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+    assert list(real_parent.iterdir()) == []
+
+
+def test_constraints_detect_identity_substitution_without_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constraints = tmp_path / "constraints.txt"
+    real_stat = os.stat
+    substituted = False
+
+    def substitute_before_stat(file, *args, **kwargs):
+        nonlocal substituted
+        if (
+            not substituted
+            and file == "constraints.txt"
+            and kwargs.get("dir_fd") is not None
+        ):
+            substituted = True
+            constraints.unlink()
+            constraints.write_bytes(b"foreign")
+        return real_stat(file, *args, **kwargs)
+
+    monkeypatch.setattr(application_installer.os, "stat", substitute_before_stat)
+    with pytest.raises(ApplicationInstallError, match="verification failed"):
+        _write_constraints(
+            constraints,
+            b"expected\n",
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+    assert substituted
+    assert constraints.read_bytes() == b"foreign"
+
+
+def test_constraints_surface_post_creation_error_without_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constraints = tmp_path / "constraints.txt"
+
+    def fail_fchown(_descriptor: int, _uid: int, _gid: int) -> None:
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(application_installer.os, "fchown", fail_fchown)
+    with pytest.raises(ApplicationInstallError, match="could not be written"):
+        _write_constraints(
+            constraints,
+            b"expected\n",
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+    assert stat.S_ISREG(constraints.lstat().st_mode)
+    assert list(tmp_path.iterdir()) == [constraints]
+
+
+# Python extras retain their declared source and cannot overlap managed package owners.
 def test_python_extras_install_exact_results_from_python_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

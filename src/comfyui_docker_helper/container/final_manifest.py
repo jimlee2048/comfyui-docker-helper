@@ -54,9 +54,9 @@ from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,
     observe_custom_node_state,
 )
-from comfyui_docker_helper.container.evidence_writer import (
-    ApplicationEvidenceError,
-    write_application_evidence,
+from comfyui_docker_helper.container.final_manifest_writer import (
+    FinalManifestWriteError,
+    write_final_manifest_file,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.container.transfer_core import verify_required_final
@@ -90,9 +90,9 @@ def emit_final_manifest(
     """Publish the canonical manifest only after every final observation passes."""
     manifest = _observe_final_manifest(projection, runtime=runtime)
     try:
-        write_application_evidence(_MANIFEST_PATH, dump_final_manifest(manifest))
-    except ApplicationEvidenceError as error:
-        raise FinalManifestError(f"final manifest {error}") from error
+        write_final_manifest_file(_MANIFEST_PATH, dump_final_manifest(manifest))
+    except FinalManifestWriteError as error:
+        raise FinalManifestError(str(error)) from error
     return manifest
 
 

@@ -40,7 +40,9 @@ The manifest is downstream evidence. It is not configuration, a resolver result,
 
 [Host rendering](../../src/comfyui_docker_helper/host/render_service.py) constructs the accepted lock and BuildPlan. [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) does not plan. It accepts exactly one validated BuildPlan, the exact canonical cdh wheel, and the complete set of plan-owned local executable inputs.
 
-The materializer reopens local inputs as contained regular files and verifies their digests before copying them. It writes a complete context into a fresh staging directory; the host service then atomically publishes it or compares a complete expected tree. Replacement is restricted to a marked cdh-owned context. These rules keep partial output, host-local paths, stale hook bytes, and mismatched wheel bytes from becoming Docker input.
+The internal materializer accepts only a fresh, empty private stage created by the host service. It reopens local inputs as contained regular files, verifies their digests before copying them, and applies deterministic directory and file modes. The host service is the sole owner of whole-stage cleanup and either publishes the complete stage or compares a complete expected tree.
+
+First publication renames the complete stage into place. Replacement is restricted to a marked cdh-owned context and uses a portable two-rename sequence: the host moves the old context to a unique backup, renames the complete stage into place, and attempts an in-process restore if the second rename fails. This sequence is not a gap-free or crash-durable directory exchange; an interrupted overwrite can leave the output absent and the complete old context in its backup. These rules keep partial output, host-local paths, stale hook bytes, and mismatched wheel bytes from becoming Docker input.
 
 The Dockerfile is rendered from the BuildPlan only. Host reconciliation state and the ownership marker are excluded through `.dockerignore`; the BuildPlan, canonical wheel, derived runtime configuration, and verified selected hooks are the build inputs.
 

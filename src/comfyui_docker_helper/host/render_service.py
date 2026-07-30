@@ -287,6 +287,17 @@ def _write_context(
             output.rename(previous)
             try:
                 stage.rename(output)
+            except OSError as publication_error:
+                try:
+                    previous.rename(output)
+                except OSError as restore_error:
+                    raise _render_error(
+                        "render.context_restore_failed",
+                        "context publication failed: "
+                        f"{publication_error}; old context restore failed: "
+                        f"{restore_error}; old context retained at {previous}",
+                    ) from restore_error
+                raise
             except BaseException:
                 with suppress(OSError):
                     previous.rename(output)

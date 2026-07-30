@@ -25,7 +25,7 @@ cdh host render \
 
 Rendering reuses a matching lock. It may use Docker when a missing or changed uv-backed result must be resolved. `--overwrite` replaces only an existing valid cdh-owned context; otherwise cdh refuses the replacement.
 
-cdh completes a private sibling stage before publication. First publication renames that complete stage into place. For `--overwrite`, cdh moves the old context to a unique sibling backup, renames the complete stage into place, and attempts an in-process restore if the second rename fails. This portable overwrite is neither gap-free nor crash-durable. If publication and its in-process restore both report filesystem errors, the diagnostic names the retained backup path. A process or host interruption between renames can instead leave the output absent and the complete old context in a unique sibling backup without a recovery guarantee.
+cdh prepares a complete replacement before changing an existing context. `--overwrite` is not crash-safe: a process or host interruption can leave the output missing while the previous complete context remains in a sibling backup. If a diagnostic reports a retained backup path, preserve that backup for manual recovery before retrying.
 
 Build an image with Docker Buildx:
 
@@ -114,9 +114,9 @@ Provider policy and filesystem/build side effects are separate. Choose among the
 
 | Mode | Resolution behavior | Context and build behavior |
 | --- | --- | --- |
-| Default | Reuse unchanged entries, resolve missing or changed inputs, and remove deleted identities. | Publish the complete staged context with the accepted lock. An overwrite uses the portable backup and rename behavior described above. |
+| Default | Reuse unchanged entries, resolve missing or changed inputs, and remove deleted identities. | Write the accepted lock and rendered context. |
 | `--locked` | Require the existing lock and local inputs to match exactly; make no provider or Docker calls during reconciliation. | Compare the existing context and write nothing. `host build` still invokes Buildx after the checks pass. |
-| `--upgrade-lock` | Refresh moving selectors while retaining unchanged exact selections. | Publish the complete staged context with the updated lock. An overwrite uses the portable backup and rename behavior described above. |
+| `--upgrade-lock` | Refresh moving selectors while retaining unchanged exact selections. | Write the updated lock and rendered context. |
 | `--check` | Apply default reconciliation policy. | Compare the complete expected context with the existing one; write nothing and do not build. |
 | `--dry-run` | Use default policy unless combined with `--locked` or `--upgrade-lock`. | Print the exact BuildPlan preview; write nothing and do not build. |
 

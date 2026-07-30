@@ -293,8 +293,8 @@ def _write_context(
                 except OSError as restore_error:
                     raise _render_error(
                         "render.context_restore_failed",
-                        "context publication failed: "
-                        f"{publication_error}; old context restore failed: "
+                        "context replacement failed: "
+                        f"{publication_error}; old context could not be restored: "
                         f"{restore_error}; old context retained at {previous}",
                     ) from restore_error
                 raise

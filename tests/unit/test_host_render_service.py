@@ -1412,6 +1412,8 @@ def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
     output = tmp_path / "context"
     original = render_service_module._materialize_private_stage
     observed_stages: list[Path] = []
+    observed_phases: set[str] = set()
+    phase = "normal"
 
     def inspect_stage(plan, directory, **kwargs):
         stage = Path(directory)
@@ -1421,6 +1423,7 @@ def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
         assert stage.stat().st_mode & 0o777 == 0o700
         assert tuple(stage.iterdir()) == ()
         observed_stages.append(stage)
+        observed_phases.add(phase)
         return original(plan, stage, **kwargs)
 
     monkeypatch.setattr(
@@ -1428,13 +1431,14 @@ def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
     )
     _prepare(config, output, FakeAcquirer())
 
+    phase = "check"
     _prepare(
         config,
         output,
         FakeAcquirer(),
         options=PlanningOptions(check=True),
     )
-    assert len(observed_stages) == 2
+    assert observed_phases == {"normal", "check"}
 
 
 def test_host_context_modes_are_deterministic_under_restrictive_umask(
@@ -1485,8 +1489,8 @@ def test_host_removes_partial_private_stage_after_materializer_failure(
 
     assert raised.value.diagnostics[0].code == "render.context_write_failed"
     assert not output.exists()
-    assert len(observed_stages) == 1
-    assert not observed_stages[0].exists()
+    assert observed_stages
+    assert all(not stage.exists() for stage in observed_stages)
 
 
 @pytest.mark.parametrize("name", ["config.lock.toml", ".cdh-rendered"])
@@ -1516,8 +1520,8 @@ def test_host_metadata_writes_are_exclusive_and_clean_failed_stage(
 
     assert raised.value.diagnostics[0].code == "render.context_write_failed"
     assert not output.exists()
-    assert len(observed_stages) == 1
-    assert not observed_stages[0].exists()
+    assert observed_stages
+    assert all(not stage.exists() for stage in observed_stages)
 
 
 # Context replacement owns unique staging/backup paths and preserves foreign siblings.

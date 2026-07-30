@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 from pathlib import Path
@@ -25,7 +26,10 @@ from comfyui_docker_helper.container.comfyui_installer import (
     _verify_floor_ancestry,
     observe_application_state,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runners import (
+    ContainerCommandError,
+    ContainerRuntime,
+)
 
 _REQUIREMENTS = b"torch\ntorchvision\ntorchaudio\nnumpy>=1.25\n"
 _MANAGER_REQUIREMENTS = b"comfyui_manager==4.0.5\n"
@@ -552,7 +556,8 @@ def test_ordinary_requirements_use_only_python_index_constraints_and_cleanup(
             path = Path(command[command.index("--requirements") + 1])
             temporary_paths.append(path)
             captured_requirements.append(path.read_text())
-            assert path.stat().st_mode & 0o777 == 0o444
+            assert path.name.startswith("comfyui-requirements-")
+            assert path.stat().st_mode & 0o077 == 0
 
     monkeypatch.setattr(comfyui_installer, "_BUILD_DIRECTORY", tmp_path)
     monkeypatch.setattr(comfyui_installer, "run_argv", fake_run_argv)
@@ -582,6 +587,38 @@ def test_ordinary_requirements_use_only_python_index_constraints_and_cleanup(
     assert not temporary_paths[0].exists()
 
 
+def test_ordinary_requirements_input_is_removed_after_child_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application, runtime = _application(tmp_path)
+    constraints = tmp_path / "python-package-constraints.txt"
+    constraints.write_text("torch==2.12.1+cu130\n")
+    temporary_paths: list[Path] = []
+
+    def fail_run_argv(argv, **_kwargs) -> None:
+        command = tuple(os.fspath(item) for item in argv)
+        path = Path(command[command.index("--requirements") + 1])
+        temporary_paths.append(path)
+        assert path.read_text() == "numpy>=1.25\nrequests\n"
+        raise ContainerCommandError("injected uv failure")
+
+    monkeypatch.setattr(comfyui_installer, "_BUILD_DIRECTORY", tmp_path)
+    monkeypatch.setattr(comfyui_installer, "run_argv", fail_run_argv)
+
+    with pytest.raises(ContainerCommandError, match="injected uv failure"):
+        comfyui_installer._install_ordinary_requirements(
+            application,
+            ("numpy>=1.25", "requests"),
+            runtime,
+            Path("/usr/local/bin/uv"),
+            constraints,
+            {},
+        )
+
+    assert len(temporary_paths) == 1
+    assert not temporary_paths[0].exists()
+
+
 def test_manager_requirements_are_verified_before_install_and_use_python_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -608,7 +645,8 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
             path = Path(command[command.index("--requirements") + 1])
             requirements_paths.append(path)
             assert path.read_text() == "comfyui_manager==4.0.5\n"
-            assert path.stat().st_mode & 0o777 == 0o444
+            assert path.name.startswith("manager-requirements-")
+            assert path.stat().st_mode & 0o077 == 0
 
     monkeypatch.setattr(comfyui_installer, "_BUILD_DIRECTORY", tmp_path)
     monkeypatch.setattr(comfyui_installer, "run_argv", fake_run_argv)
@@ -668,6 +706,47 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
         "declared distributions",
         f"cm-cli:{manager.executable}:{runtime.python}",
     ]
+    assert not requirements_paths[0].exists()
+
+
+def test_manager_requirements_input_is_removed_after_child_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application, runtime = _application(tmp_path)
+    manager = application.comfyui.manager
+    assert manager is not None
+    parsed = parse_manager_requirements(
+        _MANAGER_REQUIREMENTS,
+        python_version="3.13.14",
+        platform="linux/amd64",
+        machine="x86_64",
+    )
+    constraints = tmp_path / "python-package-constraints.txt"
+    constraints.write_text("torch==2.12.1+cu130\n")
+    requirements_paths: list[Path] = []
+
+    def fail_run_argv(argv, **_kwargs) -> None:
+        command = tuple(os.fspath(item) for item in argv)
+        path = Path(command[command.index("--requirements") + 1])
+        requirements_paths.append(path)
+        assert path.read_text() == "comfyui_manager==4.0.5\n"
+        raise ContainerCommandError("injected uv failure")
+
+    monkeypatch.setattr(comfyui_installer, "_BUILD_DIRECTORY", tmp_path)
+    monkeypatch.setattr(comfyui_installer, "run_argv", fail_run_argv)
+
+    with pytest.raises(ContainerCommandError, match="injected uv failure"):
+        comfyui_installer._install_manager_capability(
+            application,
+            manager,
+            parsed,
+            runtime,
+            Path("/usr/local/bin/uv"),
+            constraints,
+            {},
+        )
+
+    assert len(requirements_paths) == 1
     assert not requirements_paths[0].exists()
 
 
@@ -749,6 +828,24 @@ def test_manager_import_anchor_is_exclusive_read_only_and_exact(
 
     assert anchor.read_text() == f"{runtime.comfyui_path}\n"
     assert anchor.stat().st_mode & 0o777 == 0o444
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
+def test_manager_import_anchor_never_replaces_an_occupied_target(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    _application_plan, runtime, anchor = _local_manager_application(tmp_path)
+    if kind == "file":
+        anchor.write_text("foreign")
+    elif kind == "directory":
+        anchor.mkdir()
+        (anchor / "owned").write_text("foreign")
+    else:
+        foreign = tmp_path / "foreign-anchor"
+        foreign.write_text("foreign")
+        anchor.symlink_to(foreign)
+
     with pytest.raises(ComfyUIInstallError, match="already exists"):
         comfyui_installer._write_import_anchor(
             anchor,
@@ -756,6 +853,56 @@ def test_manager_import_anchor_is_exclusive_read_only_and_exact(
             owner_uid=os.getuid(),
             owner_gid=os.getgid(),
         )
+
+    if kind == "file":
+        assert anchor.read_text() == "foreign"
+    elif kind == "directory":
+        assert (anchor / "owned").read_text() == "foreign"
+    else:
+        assert anchor.is_symlink()
+        assert anchor.readlink() == foreign
+
+
+def test_manager_import_anchor_rejects_a_direct_symlink_parent(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-site-packages"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "site-packages"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    anchor = linked_parent / "comfyui-docker-helper-comfyui.pth"
+
+    with pytest.raises(ComfyUIInstallError, match="could not be written"):
+        comfyui_installer._write_import_anchor(
+            anchor,
+            tmp_path / "ComfyUI",
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+    assert not (real_parent / anchor.name).exists()
+
+
+def test_manager_import_anchor_post_creation_failure_leaves_the_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _application_plan, runtime, anchor = _local_manager_application(tmp_path)
+
+    def fail_fchown(*_args) -> None:
+        raise OSError(errno.EIO, "injected ownership failure")
+
+    monkeypatch.setattr(comfyui_installer.os, "fchown", fail_fchown)
+
+    with pytest.raises(ComfyUIInstallError, match="could not be written"):
+        comfyui_installer._write_import_anchor(
+            anchor,
+            runtime.comfyui_path,
+            owner_uid=os.getuid(),
+            owner_gid=os.getgid(),
+        )
+
+    assert anchor.is_file()
 
 
 @pytest.mark.parametrize(

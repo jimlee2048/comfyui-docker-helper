@@ -9,7 +9,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
@@ -387,17 +388,9 @@ def _install_ordinary_requirements(
 ) -> None:
     if not ordinary:
         return
-    temporary: Path | None = None
-    try:
-        descriptor, name = tempfile.mkstemp(
-            prefix="comfyui-requirements-", suffix=".txt", dir=_BUILD_DIRECTORY
-        )
-        temporary = Path(name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write("\n".join(ordinary) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o444)
+    with _temporary_requirements_input(
+        ordinary, prefix="comfyui-requirements-"
+    ) as temporary:
         run_argv(
             (
                 uv_path,
@@ -420,9 +413,6 @@ def _install_ordinary_requirements(
             ),
             description="ComfyUI ordinary requirements install",
         )
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
 
 
 def _install_manager_capability(
@@ -436,17 +426,9 @@ def _install_manager_capability(
 ) -> None:
     if parsed is None:
         raise ComfyUIInstallError("Manager requirements were not verified")
-    temporary: Path | None = None
-    try:
-        descriptor, name = tempfile.mkstemp(
-            prefix="manager-requirements-", suffix=".txt", dir=_BUILD_DIRECTORY
-        )
-        temporary = Path(name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write("\n".join(parsed.rows) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o444)
+    with _temporary_requirements_input(
+        parsed.rows, prefix="manager-requirements-"
+    ) as temporary:
         run_argv(
             (
                 uv_path,
@@ -469,9 +451,6 @@ def _install_manager_capability(
             ),
             description="Manager requirements install",
         )
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
     _write_import_anchor(Path(manager.import_anchor), runtime.comfyui_path)
     _verify_manager_capability(
         application,
@@ -479,6 +458,31 @@ def _install_manager_capability(
         parsed,
         runtime,
     )
+
+
+@contextmanager
+def _temporary_requirements_input(
+    rows: tuple[str, ...],
+    *,
+    prefix: str,
+) -> Iterator[Path]:
+    descriptor, name = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=".txt",
+        dir=_BUILD_DIRECTORY,
+    )
+    path = Path(name)
+    try:
+        try:
+            stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with stream:
+            stream.write("\n".join(rows) + "\n")
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _verify_manager_capability(
@@ -701,47 +705,37 @@ def _write_import_anchor(
     owner_gid: int = 0,
 ) -> None:
     content = f"{comfyui_path}\n".encode()
-    _require_existing_real_directory(path.parent)
-    temporary: Path | None = None
-    linked = False
     try:
-        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary = Path(name)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o444)
-            os.fchown(stream.fileno(), owner_uid, owner_gid)
-        os.link(temporary, path, follow_symlinks=False)
-        linked = True
-        temporary.unlink()
-        temporary = None
-        metadata = path.lstat()
-        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-            raise ComfyUIInstallError("Manager import anchor must be a regular file")
-        if (
-            metadata.st_uid != owner_uid
-            or metadata.st_gid != owner_gid
-            or stat.S_IMODE(metadata.st_mode) != 0o444
-            or path.read_bytes() != content
-        ):
-            raise ComfyUIInstallError("Manager import anchor verification failed")
-    except FileExistsError as error:
-        raise ComfyUIInstallError("Manager import anchor already exists") from error
-    except ComfyUIInstallError:
-        if linked:
-            path.unlink(missing_ok=True)
-        raise
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            try:
+                remaining = memoryview(content)
+                while remaining:
+                    written = os.write(descriptor, remaining)
+                    if written == 0:
+                        raise OSError(errno.EIO, "incomplete anchor write")
+                    remaining = remaining[written:]
+                os.fchown(descriptor, owner_uid, owner_gid)
+                os.fchmod(descriptor, 0o444)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(parent_descriptor)
     except OSError as error:
-        if linked:
-            path.unlink(missing_ok=True)
+        if error.errno == errno.EEXIST:
+            raise ComfyUIInstallError("Manager import anchor already exists") from error
         raise ComfyUIInstallError(
             "Manager import anchor could not be written"
         ) from error
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
 
 
 def _verify_cm_cli(

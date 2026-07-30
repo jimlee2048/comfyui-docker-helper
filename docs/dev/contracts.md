@@ -83,7 +83,7 @@ The exact direct results and any compatibility constraint derived from the selec
 
 ## Official ComfyUI source and requirements
 
-cdh owns one fixed official ComfyUI repository. A user selector resolves to one exact commit, and the container stages a detached checkout whose repository, HEAD, and ancestry from the immutable support-floor commit are proved before package mutation.
+cdh owns one fixed official ComfyUI repository. A user selector resolves to one exact commit. The container exclusively creates the required-absent final directory, materializes the detached checkout there, and proves its repository, HEAD, and ancestry from the immutable support-floor commit before package mutation.
 
 The exact checkout owns the admitted root `requirements.txt` snapshot and, when Manager is enabled, `manager_requirements.txt`. Host acquisition, canonical lock, BuildPlan, and container installation must refer to that same source identity and content. cdh installs the checkout directly; comfy-cli is not an installer authority, and Manager has no independent floating source.
 

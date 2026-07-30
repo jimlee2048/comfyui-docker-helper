@@ -1,4 +1,4 @@
-"""Exact detached ComfyUI staging and requirements verification contracts."""
+"""Exact detached ComfyUI checkout and requirements verification contracts."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from comfyui_docker_helper.container import comfyui_installer
 from comfyui_docker_helper.container.comfyui_installer import (
     ComfyUIInstallError,
     _checkout_exact,
-    _rename_noreplace,
     _verify_checkout,
     _verify_floor_ancestry,
     observe_application_state,
@@ -131,7 +130,7 @@ def _local_manager_application(
 
 
 # ComfyUI installation preserves exact checkout, source routing, and capability proofs.
-def test_checkout_is_detached_exact_atomic_and_retains_git_metadata(
+def test_checkout_is_detached_exact_and_retains_git_metadata(
     tmp_path: Path,
 ) -> None:
     application, runtime = _application(tmp_path)
@@ -148,7 +147,6 @@ def test_checkout_is_detached_exact_atomic_and_retains_git_metadata(
         check=False,
     )
     assert symbolic.returncode != 0
-    assert not list(runtime.workspace.glob(".ComfyUI.stage-*"))
 
 
 def test_floor_ancestry_accepts_descendant_and_rejects_older_or_unprovable(
@@ -180,7 +178,7 @@ def test_floor_ancestry_accepts_descendant_and_rejects_older_or_unprovable(
         )
 
 
-def test_checkout_wires_ancestry_after_identity_before_requirements_and_placement(
+def test_checkout_wires_final_target_and_proofs_before_requirements(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application, runtime = _application(tmp_path)
@@ -190,11 +188,14 @@ def test_checkout_wires_ancestry_after_identity_before_requirements_and_placemen
         del cwd, env, description
         command = tuple(os.fspath(item) for item in argv)
         if "clone" in command:
-            stage = Path(command[-1])
-            (stage / "main.py").write_text("print('ok')\n")
-            (stage / "requirements.txt").write_bytes(_REQUIREMENTS)
-            (stage / "manager_requirements.txt").write_bytes(_MANAGER_REQUIREMENTS)
-            audio = stage / "comfy_extras/nodes_audio.py"
+            checkout = Path(command[-1])
+            assert checkout == runtime.comfyui_path
+            assert checkout.is_dir()
+            assert not tuple(checkout.iterdir())
+            (checkout / "main.py").write_text("print('ok')\n")
+            (checkout / "requirements.txt").write_bytes(_REQUIREMENTS)
+            (checkout / "manager_requirements.txt").write_bytes(_MANAGER_REQUIREMENTS)
+            audio = checkout / "comfy_extras/nodes_audio.py"
             audio.parent.mkdir()
             audio.write_text("NODE_CLASS_MAPPINGS = {}\n")
             events.append("clone")
@@ -229,11 +230,6 @@ def test_checkout_wires_ancestry_after_identity_before_requirements_and_placemen
         "_read_manager_requirements",
         lambda *_args: events.append("manager requirements"),
     )
-    monkeypatch.setattr(
-        comfyui_installer,
-        "_rename_noreplace",
-        lambda *_args: events.append("placement"),
-    )
 
     _checkout_exact(application, runtime, Path("/usr/bin/git"), {})
 
@@ -246,7 +242,6 @@ def test_checkout_wires_ancestry_after_identity_before_requirements_and_placemen
         "ancestry",
         "requirements",
         "manager requirements",
-        "placement",
     ]
 
 
@@ -261,13 +256,23 @@ def test_checkout_rejects_every_preexisting_target_type(
     elif kind == "directory":
         target.mkdir()
     else:
-        target.symlink_to(tmp_path / "missing")
+        missing = tmp_path / "missing"
+        target.symlink_to(missing)
 
     with pytest.raises(ComfyUIInstallError, match="already exists"):
         _checkout_exact(application, runtime, Path("/usr/bin/git"), {})
 
+    if kind == "file":
+        assert target.read_text() == "occupied"
+    elif kind == "directory":
+        assert target.is_dir()
+        assert not tuple(target.iterdir())
+    else:
+        assert target.is_symlink()
+        assert target.readlink() == missing
 
-def test_checkout_failure_cleans_only_owned_stage(tmp_path: Path) -> None:
+
+def test_checkout_failure_preserves_unrelated_siblings(tmp_path: Path) -> None:
     application, runtime = _application(tmp_path)
     changed = application.model_copy(
         update={"comfyui": application.comfyui.model_copy(update={"commit": "f" * 40})}
@@ -279,23 +284,7 @@ def test_checkout_failure_cleans_only_owned_stage(tmp_path: Path) -> None:
         _checkout_exact(changed, runtime, Path("/usr/bin/git"), {})
 
     assert sibling.read_text() == "keep"
-    assert not runtime.comfyui_path.exists()
-    assert not list(runtime.workspace.glob(".ComfyUI.stage-*"))
-
-
-def test_atomic_placement_never_replaces_a_racing_target(tmp_path: Path) -> None:
-    source = tmp_path / "stage"
-    target = tmp_path / "target"
-    source.mkdir()
-    target.mkdir()
-    (source / "source").write_text("source")
-    (target / "owner").write_text("owner")
-
-    with pytest.raises(ComfyUIInstallError, match="already exists"):
-        _rename_noreplace(source, target)
-
-    assert (source / "source").read_text() == "source"
-    assert (target / "owner").read_text() == "owner"
+    assert runtime.comfyui_path.is_dir()
 
 
 # Checkout and requirements proofs complete before any application package mutation.
@@ -510,7 +499,7 @@ def test_application_observation_rechecks_source_input_and_environment(
     events: list[object] = []
     monkeypatch.setattr(
         comfyui_installer,
-        "_verify_stage_identity",
+        "_verify_checkout_identity",
         lambda *_args: events.append("source"),
     )
     monkeypatch.setattr(

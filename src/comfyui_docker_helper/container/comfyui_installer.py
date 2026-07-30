@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import ctypes
 import errno
 import os
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -140,7 +138,7 @@ def observe_application_state(
     """Observe complete application health against immutable requirements input."""
     _validate_paths(application, runtime)
     environment = application_install_environment(environ)
-    _verify_stage_identity(application, runtime.comfyui_path, git_path, environment)
+    _verify_checkout_identity(application, runtime.comfyui_path, git_path, environment)
     current = _verify_requirements(
         application,
         runtime.comfyui_path / application.comfyui.requirements.path,
@@ -183,76 +181,73 @@ def _checkout_exact(
     environ: Mapping[str, str] | None,
 ) -> None:
     target = runtime.comfyui_path
-    _require_absent(target)
     parent = _ensure_real_directory(target.parent)
-    stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=parent))
-    environment = application_install_environment(environ)
     try:
-        _run_git(
-            (
-                git_path,
-                "clone",
-                "--no-checkout",
-                "--filter=blob:none",
-                "--",
-                application.comfyui.repository,
-                stage,
-            ),
-            cwd=parent,
-            env=environment,
-            description="ComfyUI source clone",
+        target.mkdir(mode=0o700, exist_ok=False)
+    except FileExistsError:
+        raise ComfyUIInstallError("ComfyUI target already exists") from None
+    except OSError as error:
+        raise ComfyUIInstallError("ComfyUI target could not be created") from error
+    environment = application_install_environment(environ)
+    _run_git(
+        (
+            git_path,
+            "clone",
+            "--no-checkout",
+            "--filter=blob:none",
+            "--",
+            application.comfyui.repository,
+            target,
+        ),
+        cwd=parent,
+        env=environment,
+        description="ComfyUI source clone",
+    )
+    _run_git(
+        (
+            git_path,
+            "-C",
+            target,
+            "checkout",
+            "--detach",
+            application.comfyui.commit,
+            "--",
+        ),
+        cwd=parent,
+        env=environment,
+        description="ComfyUI exact checkout",
+    )
+    _verify_checkout_identity(application, target, git_path, environment)
+    _verify_requirements(application, target / application.comfyui.requirements.path)
+    if application.comfyui.manager is not None:
+        _read_manager_requirements(
+            application,
+            application.comfyui.manager,
+            target,
         )
-        _run_git(
-            (
-                git_path,
-                "-C",
-                stage,
-                "checkout",
-                "--detach",
-                application.comfyui.commit,
-                "--",
-            ),
-            cwd=parent,
-            env=environment,
-            description="ComfyUI exact checkout",
-        )
-        _verify_stage_identity(application, stage, git_path, environment)
-        _verify_requirements(application, stage / application.comfyui.requirements.path)
-        if application.comfyui.manager is not None:
-            _read_manager_requirements(
-                application,
-                application.comfyui.manager,
-                stage,
-            )
-        _require_absent(target)
-        _rename_noreplace(stage, target)
-    except BaseException:
-        if stage.exists() and not stage.is_symlink():
-            shutil.rmtree(stage, ignore_errors=True)
-        raise
 
 
-def _verify_stage_identity(
+def _verify_checkout_identity(
     application: ApplicationPhase,
-    stage: Path,
+    checkout: Path,
     git_path: Path,
     environment: Mapping[str, str],
 ) -> None:
     head = _run_git(
-        (git_path, "-C", stage, "rev-parse", "HEAD"),
-        cwd=stage.parent,
+        (git_path, "-C", checkout, "rev-parse", "HEAD"),
+        cwd=checkout.parent,
         env=environment,
         description="ComfyUI commit verification",
     )
     branch = _run_git(
-        (git_path, "-C", stage, "rev-parse", "--abbrev-ref", "HEAD"),
-        cwd=stage.parent,
+        (git_path, "-C", checkout, "rev-parse", "--abbrev-ref", "HEAD"),
+        cwd=checkout.parent,
         env=environment,
         description="ComfyUI detached checkout verification",
     )
     origin = _run_git(
-        (git_path, "-C", stage, "remote", "get-url", "origin"),
-        cwd=stage.parent,
+        (git_path, "-C", checkout, "remote", "get-url", "origin"),
+        cwd=checkout.parent,
         env=environment,
         description="ComfyUI origin verification",
     )
@@ -261,7 +256,7 @@ def _verify_stage_identity(
     if origin != application.comfyui.repository:
         raise ComfyUIInstallError("ComfyUI checkout origin does not match BuildPlan")
     _verify_floor_ancestry(
-        stage,
+        checkout,
         application.comfyui.floor_commit,
         application.comfyui.commit,
         git_path,
@@ -271,7 +266,7 @@ def _verify_stage_identity(
     if application.comfyui.manager is not None:
         required.append(application.comfyui.manager.requirements_path)
     for relative in required:
-        path = stage / relative
+        path = checkout / relative
         try:
             metadata = path.lstat()
         except OSError as error:
@@ -285,7 +280,7 @@ def _verify_stage_identity(
 
 
 def _verify_floor_ancestry(
-    stage: Path,
+    checkout: Path,
     floor_commit: str,
     commit: str,
     git_path: Path,
@@ -294,7 +289,7 @@ def _verify_floor_ancestry(
     command = [
         os.fspath(git_path),
         "-C",
-        os.fspath(stage),
+        os.fspath(checkout),
         "merge-base",
         "--is-ancestor",
         floor_commit,
@@ -303,7 +298,7 @@ def _verify_floor_ancestry(
     try:
         completed = subprocess.run(
             command,
-            cwd=stage.parent,
+            cwd=checkout.parent,
             env=dict(environment),
             check=False,
             capture_output=True,
@@ -808,16 +803,6 @@ def _require_existing_real_directory(path: Path) -> None:
         )
 
 
-def _require_absent(path: Path) -> None:
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        raise ComfyUIInstallError("ComfyUI target could not be inspected") from error
-    raise ComfyUIInstallError("ComfyUI target already exists")
-
-
 def _ensure_real_directory(path: Path) -> Path:
     missing: list[Path] = []
     current = path
@@ -856,38 +841,6 @@ def _ensure_real_directory(path: Path) -> Path:
         raise ComfyUIInstallError(
             "ComfyUI target parent could not be resolved"
         ) from error
-
-
-def _rename_noreplace(source: Path, target: Path) -> None:
-    """Atomically place one Linux directory without replacing any target entry."""
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = libc.renameat2
-    except (OSError, AttributeError) as error:  # pragma: no cover - Ubuntu owns it.
-        raise ComfyUIInstallError("atomic ComfyUI placement is unavailable") from error
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    result = renameat2(
-        -100,
-        os.fsencode(source),
-        -100,
-        os.fsencode(target),
-        1,
-    )
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number == errno.EEXIST:
-        raise ComfyUIInstallError("ComfyUI target already exists")
-    raise ComfyUIInstallError(
-        f"atomic ComfyUI placement failed: {os.strerror(error_number)}"
-    )
 
 
 def _run_git(

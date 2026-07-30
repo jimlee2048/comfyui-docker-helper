@@ -277,7 +277,8 @@ def test_existing_target_skip_fails_closed_when_exact_discard_identity_drifts(
     assert request.target.read_bytes() == b"existing"
 
 
-def test_failed_replacement_preserves_old_final_and_cleans_only_owned_staging(
+# Backend failure before placement preserves the old target and cleans owned staging.
+def test_transport_failure_preserves_old_final_and_cleans_only_owned_staging(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "ComfyUI"
@@ -488,6 +489,7 @@ def test_resume_rejection_without_authority_fails_closed(tmp_path: Path) -> None
     assert not transfer_staging_target(request).exists()
 
 
+# Aria2 reconciliation admits only quiescent, durable, lineage-bound controls.
 def test_aria2_atomic_control_successor_becomes_resume_authority(
     tmp_path: Path,
 ) -> None:
@@ -997,7 +999,7 @@ def test_control_generation_requires_durable_stable_recheck(
     assert not staging.exists()
 
 
-# Fresh work refuses ambiguous regular partials instead of deleting them.
+# Staging and control admission reject foreign, aliased, or unsafe authority.
 def test_fresh_transfer_rejects_foreign_regular_staging(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     root.mkdir()
@@ -1012,7 +1014,6 @@ def test_fresh_transfer_rejects_foreign_regular_staging(tmp_path: Path) -> None:
     assert staging.read_bytes() == b"foreign"
 
 
-# Resume authority cannot bless a hardlinked partial or final alias.
 def test_preserved_staging_rejects_hardlink_alias(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     request = _request(root, overwrite=True)
@@ -1060,7 +1061,6 @@ def test_preserved_staging_rejects_wrong_owner_metadata(
     assert Path(f"{staging}.aria2").read_bytes() == b"aria2 control"
 
 
-# Resume control state must also be an unaliased authority-bound inode.
 def test_preserved_control_rejects_foreign_hardlink(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     root.mkdir()
@@ -1089,7 +1089,6 @@ def test_preserved_control_rejects_foreign_hardlink(tmp_path: Path) -> None:
     assert control.read_bytes() == b"foreign"
 
 
-# Unsafe control creation preserves foreign data but cleans the exact owned partial.
 def test_unsafe_new_control_never_redirects_cleanup(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     root.mkdir()
@@ -1115,6 +1114,7 @@ def test_unsafe_new_control_never_redirects_cleanup(tmp_path: Path) -> None:
     assert Path(f"{transfer_staging_target(request)}.aria2").is_symlink()
 
 
+# Final targets and anchored transfer paths reject unsafe shapes before transport.
 @pytest.mark.parametrize("kind", ["directory", "symlink", "fifo"])
 def test_non_regular_final_fails_before_transport(tmp_path: Path, kind: str) -> None:
     root = tmp_path / "ComfyUI"
@@ -1358,7 +1358,7 @@ def test_transport_length_mismatch_is_retryable_and_never_placed(
     assert not transfer_staging_target(request).exists()
 
 
-# Conditional placement must preserve a final that appears after preflight.
+# Placement preserves precommit state and exposes only complete old or new target bytes.
 def test_missing_target_race_is_preserved_without_overwrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1385,7 +1385,6 @@ def test_missing_target_race_is_preserved_without_overwrite(
     assert not transfer_staging_target(request).exists()
 
 
-# A target change before the final placement window is preserved and rejected.
 def test_existing_target_drift_before_placement_is_preserved(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     request = _request(root, overwrite=True)
@@ -1409,7 +1408,35 @@ def test_existing_target_drift_before_placement_is_preserved(tmp_path: Path) -> 
     assert not transfer_staging_target(request).exists()
 
 
-# A staging name that changes before placement never supplies final bytes.
+def test_existing_target_replace_failure_preserves_precommit_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    request = _request(root, overwrite=True)
+    request.target.parent.mkdir(parents=True)
+    request.target.write_bytes(b"old")
+    foreign = request.target.parent / "foreign.part"
+    foreign.write_bytes(b"foreign")
+    staging = transfer_staging_target(request)
+
+    def fail_replace(*_args, **_kwargs) -> None:
+        raise OSError("replacement denied")
+
+    monkeypatch.setattr(transfer_core.os, "replace", fail_replace)
+
+    with pytest.raises(
+        DownloadFilesError, match="atomic download placement failed"
+    ) as raised:
+        transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert str(raised.value.__cause__) == "replacement denied"
+    assert request.target.read_bytes() == b"old"
+    assert foreign.read_bytes() == b"foreign"
+    assert not staging.exists()
+
+
 def test_staging_leaf_drift_before_placement_never_commits_foreign_inode(
     tmp_path: Path,
 ) -> None:
@@ -1437,7 +1464,6 @@ def test_staging_leaf_drift_before_placement_never_commits_foreign_inode(
     assert staging.read_bytes() == b"foreign"
 
 
-# Atomic replacement leaves an already-open reader on complete old bytes.
 def test_existing_target_reader_sees_complete_old_inode_after_replacement(
     tmp_path: Path,
 ) -> None:
@@ -1451,6 +1477,7 @@ def test_existing_target_reader_sees_complete_old_inode_after_replacement(
     assert request.target.read_bytes() == b"new"
 
 
+# Fault results retain complete old data before commit or complete new data after it.
 def test_staging_file_durability_failure_preserves_old_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1677,7 +1704,6 @@ def test_created_target_directory_chain_is_durable_before_transfer(
     assert request.target.read_bytes() == b"new"
 
 
-# A failed ancestor barrier stops before any transport-owned bytes are created.
 def test_created_target_directory_durability_failure_precedes_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1701,6 +1727,7 @@ def test_created_target_directory_durability_failure_precedes_transport(
     assert not request.target.exists()
 
 
+# Staging identity depends on content identity rather than placement policy.
 def test_staging_identity_changes_with_content_identity_only(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     root.mkdir()

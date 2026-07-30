@@ -499,6 +499,7 @@ def test_materializer_rejects_canonical_wheel_byte_drift(tmp_path: Path) -> None
         _materialize_private_stage(plan, output, canonical_wheel=changed)
 
 
+# Private-stage admission rejects invalid entry shapes before writing any output.
 @pytest.mark.parametrize("entry", ["missing", "file", "symlink", "nonempty"])
 def test_materializer_rejects_invalid_private_stage_entry(
     tmp_path: Path,
@@ -507,6 +508,7 @@ def test_materializer_rejects_invalid_private_stage_entry(
     plan = build_plan(final_config(), accepted_resolution())
     stage = tmp_path / "stage"
     sentinel: Path | None = None
+    real_stage: Path | None = None
     if entry == "file":
         stage.write_text("not a directory")
     elif entry == "symlink":
@@ -521,7 +523,18 @@ def test_materializer_rejects_invalid_private_stage_entry(
     with pytest.raises(FinalMaterializationError, match="stage"):
         _materialize_private_stage(plan, stage, canonical_wheel=canonical_wheel())
 
-    if sentinel is not None:
+    if entry == "missing":
+        assert not stage.exists()
+    elif entry == "file":
+        assert stage.read_text() == "not a directory"
+    elif entry == "symlink":
+        assert real_stage is not None
+        assert stage.is_symlink()
+        assert stage.readlink() == real_stage
+        assert tuple(real_stage.iterdir()) == ()
+    else:
+        assert sentinel is not None
+        assert tuple(stage.iterdir()) == (sentinel,)
         assert sentinel.read_text() == "keep"
 
 
@@ -683,6 +696,7 @@ def test_file_admission_reports_local_close_error_inside_outer_handler(
     assert len(closed) == len(set(closed))
 
 
+# Materialization accepts only exact locked hook identities and verified source bytes.
 def test_materializer_direct_call_reuses_shared_runtime_hook_identity(
     tmp_path: Path,
 ) -> None:

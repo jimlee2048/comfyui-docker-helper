@@ -16,6 +16,7 @@ from comfyui_docker_helper.container.final_manifest_writer import (
 )
 
 
+# Direct creation preserves exact bytes, metadata, no-replace, and final identity.
 def test_final_manifest_writer_creates_exact_read_only_regular_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,6 +148,7 @@ def test_final_manifest_writer_detects_identity_substitution_without_cleanup(
     assert list(tmp_path.iterdir()) == [path]
 
 
+# The direct writer works without O_TMPFILE and leaves failed-step cleanup to BuildKit.
 def test_final_manifest_writer_succeeds_when_otmpfile_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

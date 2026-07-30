@@ -1403,6 +1403,7 @@ def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
     )
 
 
+# Host owns private-stage creation, deterministic modes, and whole-stage cleanup.
 def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1710,6 +1711,7 @@ def test_context_parent_filesystem_failure_is_stable_render_diagnostic(
     assert parent.read_text() == "sentinel"
 
 
+# Check mode compares the complete path, content, and executable-mode result.
 @pytest.mark.parametrize("mutation", ["extra-dir", "missing-dir", "symlink", "special"])
 def test_check_compares_complete_path_type_and_bytes_without_following(
     tmp_path: Path,

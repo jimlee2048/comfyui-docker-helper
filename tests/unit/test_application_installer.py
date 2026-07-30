@@ -137,6 +137,7 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     assert constraints.read_bytes() == managed_constraints_bytes(group)
 
 
+# Managed constraints preserve exact content and never replace foreign entries.
 def test_constraints_are_exact_exclusive_and_read_only(tmp_path: Path) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     constraints = tmp_path / "constraints.txt"
@@ -265,6 +266,7 @@ def test_constraints_surface_post_creation_error_without_cleanup(
     assert list(tmp_path.iterdir()) == [constraints]
 
 
+# Python extras retain their declared source and cannot overlap managed package owners.
 def test_python_extras_install_exact_results_from_python_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

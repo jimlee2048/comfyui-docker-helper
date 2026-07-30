@@ -534,6 +534,7 @@ def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:
     )
 
 
+# Manifest emission observes first, writes canonical bytes, and projects writer errors.
 def test_manifest_service_publishes_only_after_successful_observation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -600,6 +601,7 @@ def test_manifest_service_projects_writer_failure(
     assert str(error.value) == "final manifest target already exists"
 
 
+# Final probes use authenticated inputs and reject untruthful success evidence.
 def test_final_probe_runner_uses_the_exact_application_python_and_typed_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -502,6 +502,7 @@ def test_failed_git_command_preserves_stderr_diagnostic(
     assert captured.err == "streamed Git diagnostic\n"
 
 
+# Direct-Git acquisition passes the locked raw locator unchanged.
 def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

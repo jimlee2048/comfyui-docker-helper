@@ -172,6 +172,14 @@ The state records only the startup generation, desired download identity, action
 
 Reconciliation acts only on desired input and state-backed transfer authority. It preserves completed final files when configuration changes and does not replace exact ownership with a broad filesystem scan. Invalid state or a required persistence failure stops reconciliation. The user runtime guide owns mounting and persistence instructions.
 
+One active cdh instance owns the state file, its state-indexed transfer
+namespaces, and the declared targets governed by those entries. Container
+replacement must be serial: the old owner stops before its replacement takes
+ownership. Overlapping rolling instances, replicas sharing writable state, and
+different state files controlling the same target or staging namespace are not
+supported. The state `run_id` admits the synchronous-to-asynchronous handoff
+within one container start; it is not a lock or lease between instances.
+
 ### SSH protects a narrow credential path, not arbitrary values
 
 [`ssh.py`](../../src/comfyui_docker_helper/container/ssh.py) owns root credential preparation and foreground sshd startup. Password material reaches credential tooling through standard input rather than command arguments or diagnostic text. Image finalization removes package-generated host keys; an activated SSH service generates container host keys at startup. [`runtime_ssh_service.py`](../../src/comfyui_docker_helper/container/runtime_ssh_service.py) owns the published startup operation, foreground child, monitoring, bounded shutdown, and reap.

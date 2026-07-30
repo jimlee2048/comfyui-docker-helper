@@ -164,7 +164,7 @@ def test_runtime_download_entry_rejects_invalid_target_paths(target: str) -> Non
         _entry(target=target)
 
 
-# Atomic writes protect the state file from partial updates and foreign races.
+# Atomic writes expose only complete state and define one observable commit point.
 def test_atomic_write_replaces_file(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     write_runtime_state(path, _state(run_id="old-run"))
@@ -193,14 +193,10 @@ def test_atomic_write_preserves_old_file_on_replace_failure(
     old_state = _state(run_id="old-run")
     write_runtime_state(path, old_state)
 
-    real_renameat2 = runtime_state._renameat2
+    def fail_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("replace failed")
 
-    def fail_replace(*args: object, **kwargs: object) -> None:
-        if kwargs["flags"] == 2:
-            raise OSError("replace failed")
-        real_renameat2(*args, **kwargs)
-
-    monkeypatch.setattr(runtime_state, "_renameat2", fail_replace)
+    monkeypatch.setattr(runtime_state.os, "replace", fail_replace)
 
     with pytest.raises(RuntimeStateError):
         write_runtime_state(path, _state())
@@ -209,11 +205,35 @@ def test_atomic_write_preserves_old_file_on_replace_failure(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_state_file_durability_failure_preserves_old_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.json"
+    old_state = _state(run_id="old-run")
+    write_runtime_state(path, old_state)
+    real_fsync = runtime_state.os.fsync
+
+    def fail_file_fsync(fd: int) -> None:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("file fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(runtime_state.os, "fsync", fail_file_fsync)
+
+    with pytest.raises(RuntimeStateError, match="failed to write runtime state"):
+        write_runtime_state(path, _state(run_id="new-run"))
+
+    assert load_runtime_state(path) == old_state
+
+
 def test_state_parent_durability_failure_is_fatal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "state.json"
+    write_runtime_state(path, _state(run_id="old-run"))
+    new_state = _state(run_id="new-run")
     real_fsync = runtime_state.os.fsync
 
     def fail_directory_fsync(fd: int) -> None:
@@ -224,9 +244,46 @@ def test_state_parent_durability_failure_is_fatal(
     monkeypatch.setattr(runtime_state.os, "fsync", fail_directory_fsync)
 
     with pytest.raises(RuntimeStateError, match="failed to write runtime state"):
-        write_runtime_state(path, _state())
+        write_runtime_state(path, new_state)
 
-    assert not list(tmp_path.glob(".*.tmp"))
+    assert load_runtime_state(path) == new_state
+
+
+def test_final_state_verification_failure_is_fatal_without_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.json"
+    write_runtime_state(path, _state(run_id="old-run"))
+    new_state = _state(run_id="new-run")
+    real_open_state_leaf = runtime_state._open_state_leaf
+
+    def fail_final_open(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeStateError("final state verification failed")
+
+    monkeypatch.setattr(runtime_state, "_open_state_leaf", fail_final_open)
+
+    with pytest.raises(RuntimeStateError, match="final state verification failed"):
+        write_runtime_state(path, new_state)
+
+    monkeypatch.setattr(runtime_state, "_open_state_leaf", real_open_state_leaf)
+    assert load_runtime_state(path) == new_state
+
+
+def test_store_refreshes_held_leaf_after_each_successful_write(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    write_runtime_state(path, _state(run_id="old-run"))
+    store = RuntimeStateStore.open(path, create_parent=False)
+    assert store is not None
+    assert store.read() == _state(run_id="old-run")
+
+    try:
+        store.write(_state(run_id="middle-run"))
+        store.write(_state(run_id="new-run"))
+    finally:
+        store.close()
+
+    assert load_runtime_state(path) == _state(run_id="new-run")
 
 
 # Descriptor admission rejects non-private state leaves before parsing or mutation.
@@ -338,123 +395,32 @@ def test_runtime_state_temp_collision_preserves_foreign_leaf(
     assert not path.exists()
 
 
-def test_exchange_cleanup_name_replacement_preserves_foreign_and_owned_old(
+def test_precommit_recheck_rejects_changed_leaf_without_touching_foreign(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "state.json"
     old_state = _state(run_id="old-run")
-    new_state = _state(run_id="new-run")
     write_runtime_state(path, old_state)
-    real_renameat2 = runtime_state._renameat2
-    exchanged_temp: str | None = None
+    original = tmp_path / "original.json"
+    real_fsync = runtime_state.os.fsync
     injected = False
-    owned_old = tmp_path / "owned-old.json"
 
-    def replace_displaced_name(
-        source_fd: int,
-        source_name: str,
-        target_fd: int,
-        target_name: str,
-        *,
-        flags: int,
-    ) -> None:
-        nonlocal exchanged_temp, injected
-        if flags == 2 and target_name == path.name:
-            exchanged_temp = source_name
-        if (
-            flags == 1
-            and source_name == exchanged_temp
-            and ".cleanup-" in target_name
-            and not injected
-        ):
+    def replace_state_after_temp_fsync(fd: int) -> None:
+        nonlocal injected
+        real_fsync(fd)
+        if not injected and stat.S_ISREG(os.fstat(fd).st_mode):
             injected = True
-            real_renameat2(
-                source_fd,
-                source_name,
-                source_fd,
-                owned_old.name,
-                flags=1,
-            )
-            (tmp_path / source_name).write_text("foreign", encoding="utf-8")
-        real_renameat2(
-            source_fd,
-            source_name,
-            target_fd,
-            target_name,
-            flags=flags,
-        )
+            path.rename(original)
+            path.write_text("foreign", encoding="utf-8")
 
-    monkeypatch.setattr(runtime_state, "_renameat2", replace_displaced_name)
+    monkeypatch.setattr(runtime_state.os, "fsync", replace_state_after_temp_fsync)
 
-    with pytest.raises(RuntimeStateError, match="temporary changed"):
-        write_runtime_state(path, new_state)
+    with pytest.raises(RuntimeStateError, match="changed during operation"):
+        write_runtime_state(path, _state(run_id="new-run"))
 
-    assert exchanged_temp is not None
-    assert (tmp_path / exchanged_temp).read_text(encoding="utf-8") == "foreign"
-    assert load_runtime_state(owned_old) == old_state
-    assert load_runtime_state(path) == new_state
-
-
-def test_precommit_temp_cleanup_name_replacement_preserves_both_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "state.json"
-    state = _state(run_id="new-run")
-    real_verify_current = RuntimeStateStore._verify_current
-    verify_calls = 0
-
-    def fail_precommit(store: RuntimeStateStore) -> None:
-        nonlocal verify_calls
-        verify_calls += 1
-        if verify_calls == 2:
-            raise RuntimeStateError("precommit stopped")
-        real_verify_current(store)
-
-    real_renameat2 = runtime_state._renameat2
-    injected = False
-    temp_name: str | None = None
-    owned_temp = tmp_path / "owned-temp.json"
-
-    def replace_temp_name(
-        source_fd: int,
-        source_name: str,
-        target_fd: int,
-        target_name: str,
-        *,
-        flags: int,
-    ) -> None:
-        nonlocal injected, temp_name
-        if flags == 1 and ".cleanup-" in target_name and not injected:
-            injected = True
-            temp_name = source_name
-            real_renameat2(
-                source_fd,
-                source_name,
-                source_fd,
-                owned_temp.name,
-                flags=1,
-            )
-            (tmp_path / source_name).write_text("foreign", encoding="utf-8")
-        real_renameat2(
-            source_fd,
-            source_name,
-            target_fd,
-            target_name,
-            flags=flags,
-        )
-
-    monkeypatch.setattr(RuntimeStateStore, "_verify_current", fail_precommit)
-    monkeypatch.setattr(runtime_state, "_renameat2", replace_temp_name)
-
-    with pytest.raises(RuntimeStateError, match="precommit stopped"):
-        write_runtime_state(path, state)
-
-    assert temp_name is not None
-    assert (tmp_path / temp_name).read_text(encoding="utf-8") == "foreign"
-    assert load_runtime_state(owned_temp) == state
-    assert not path.exists()
+    assert path.read_text(encoding="utf-8") == "foreign"
+    assert load_runtime_state(original) == old_state
 
 
 # Startup preparation validates existing state and binds one top-level generation;

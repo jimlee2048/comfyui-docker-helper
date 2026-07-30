@@ -60,6 +60,12 @@ cdh keeps an existing final file unchanged until a complete replacement is ready
 
 Runtime reconciliation state lives at `/var/lib/cdh/runtime/state.json`. This file is cdh-owned internal recovery state, not user configuration or a download-history API. Do not edit it. Runtime downloads require the state location to be writable. Mount `/var/lib/cdh/runtime` to preserve recovery state across container replacement, and mount each target directory that must preserve downloaded files. Preserving the state file alone does not preserve the downloaded files.
 
+Stop the old cdh container before its replacement starts using the preserved
+state and download targets. Do not share the writable state, or targets and
+staging files governed by it, between overlapping rolling instances or
+replicas. Using different state files does not make concurrent writers safe
+when they control the same download target or staging namespace.
+
 ## SSH and confidential values
 
 SSH provides opt-in root access and is disabled by default. Enable it in runtime TOML or with `SSH_ENABLE=true`, and provide at least one valid public key or password. Credentials do not enable SSH by themselves. If SSH is enabled without an effective credential, cdh warns, does not start sshd, and continues normal ComfyUI startup.

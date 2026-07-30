@@ -9,7 +9,6 @@ import json
 import math
 import os
 import re
-import secrets
 import stat
 from contextlib import suppress
 from dataclasses import dataclass
@@ -75,8 +74,8 @@ class PreservedTransferCleanupError(DownloadFilesError):
         super().__init__(message)
 
 
-class _PlacementUncertain(DownloadFilesError):
-    """Placement may have mutated final state, so cleanup is forbidden."""
+class _PlacementCommittedError(DownloadFilesError):
+    """Placement committed before a fatal post-commit failure."""
 
 
 class DownloadStatus(StrEnum):
@@ -691,7 +690,7 @@ def transfer_file(
                 staging=staging,
                 initial=initial,
             )
-        except _PlacementUncertain:
+        except _PlacementCommittedError:
             raise
         except _TransportRetryableObserved as observed:
             authority = None
@@ -1337,6 +1336,19 @@ def _verify_and_place(
         and observed_checksum != request.expected_checksum
     ):
         raise _ChecksumMismatch
+    outcome = FileTransferOutcome(
+        status=DownloadStatus.DOWNLOADED,
+        target=request.target,
+        staging_target=staging.display_path,
+        expected_checksum=request.expected_checksum,
+        observed_checksum=observed_checksum,
+        observed_length=observed_length,
+        verification=(
+            VerificationStatus.VERIFIED
+            if request.expected_checksum is not None
+            else VerificationStatus.UNVERIFIED
+        ),
+    )
 
     anchor.verify_visible()
     current = _stat_leaf(anchor.parent.fd, anchor.target_name)
@@ -1344,253 +1356,98 @@ def _verify_and_place(
         raise DownloadFilesError(
             f"download target changed before atomic placement: {request.target}"
         )
-    _claim_verified_inode(staging, staged_stat)
+    _require_staged_file_unchanged(staging, staged_stat)
     try:
         if initial is None:
-            _place_missing_target(staging, anchor, staged_stat)
+            _place_missing_target(staging, anchor)
         else:
-            _place_replacement(staging, anchor, staged_stat, initial)
-        try:
-            os.fsync(staging.directory_fd)
-            os.fsync(anchor.parent.fd)
-        except OSError:
-            _rollback_placement(staging, anchor, staged_stat, initial)
-            raise
-        placed = _stat_leaf(anchor.parent.fd, anchor.target_name)
-        if placed is None or not _same_inode(staged_stat, placed):
-            if initial is not None:
-                _rollback_exchange_or_preserve(
-                    staging,
-                    anchor,
-                    initial=initial,
-                )
-            raise _PlacementUncertain(
-                "download target identity is uncertain after placement: "
-                f"{request.target}"
+            os.replace(
+                staging.name,
+                anchor.target_name,
+                src_dir_fd=staging.directory_fd,
+                dst_dir_fd=anchor.parent.fd,
             )
-        anchor.verify_visible()
-        if initial is not None:
-            displaced = _stat_leaf(staging.directory_fd, staging.name)
-            if displaced is None or not _same_stat(initial, displaced):
-                raise _PlacementUncertain(
-                    f"displaced download target identity is uncertain: {request.target}"
-                )
-            _unlink_exact_leaf(
-                directory_fd=staging.directory_fd,
-                name=staging.name,
-                expected=initial,
-                display_path=staging.display_path,
-                uncertain_on_mismatch=True,
-            )
-            os.fsync(staging.directory_fd)
-        return FileTransferOutcome(
-            status=DownloadStatus.DOWNLOADED,
-            target=request.target,
-            staging_target=staging.display_path,
-            expected_checksum=request.expected_checksum,
-            observed_checksum=observed_checksum,
-            observed_length=observed_length,
-            verification=(
-                VerificationStatus.VERIFIED
-                if request.expected_checksum is not None
-                else VerificationStatus.UNVERIFIED
-            ),
-        )
     except OSError as error:
         raise DownloadFilesError(
-            f"download staging could not be durably placed: {request.target}: {error}"
+            f"atomic download placement failed: {request.target}: {error}"
         ) from error
 
+    try:
+        os.fsync(staging.directory_fd)
+        os.fsync(anchor.parent.fd)
+        _require_final_matches_staging(anchor, staged_stat)
+        anchor.verify_visible()
+    except Exception as error:
+        raise _PlacementCommittedError(
+            f"download placement committed before postcondition failure: "
+            f"{request.target}: {error}"
+        ) from error
 
-def _claim_verified_inode(staging: _OwnedLeaf, staged_stat: os.stat_result) -> None:
-    if not _same_stat(staged_stat, os.fstat(staging.fd)):
+    return outcome
+
+
+def _require_staged_file_unchanged(
+    staging: _OwnedLeaf,
+    expected: os.stat_result,
+) -> None:
+    current = os.fstat(staging.fd)
+    _require_safe_staging_metadata(current, staging.display_path)
+    observed = _stat_leaf(staging.directory_fd, staging.name)
+    if (
+        observed is None
+        or not _same_complete_metadata(expected, current)
+        or not _same_complete_metadata(expected, observed)
+    ):
         raise DownloadFilesError(
-            f"download staging changed before atomic claim: {staging.display_path}"
-        )
-    claim_name = f".{staging.name}.commit-{secrets.token_hex(32)}"
-    _link_fd_noreplace(staging.fd, staging.directory_fd, claim_name)
-    claim = _stat_leaf(staging.directory_fd, claim_name)
-    original = _stat_leaf(staging.directory_fd, staging.name)
-    if claim is None or not _same_inode(staged_stat, claim):
-        raise _PlacementUncertain(
-            f"download staging claim identity is uncertain: {staging.display_path}"
-        )
-    if original is None or not _same_inode(staged_stat, original):
-        _unlink_exact_leaf(
-            directory_fd=staging.directory_fd,
-            name=claim_name,
-            expected=claim,
-            display_path=staging.display_path,
-            uncertain_on_mismatch=True,
-        )
-        raise DownloadFilesError(
-            f"download staging changed before atomic claim: {staging.display_path}"
-        )
-    original_name = staging.name
-    staging.name = claim_name
-    _unlink_exact_leaf(
-        directory_fd=staging.directory_fd,
-        name=original_name,
-        expected=staged_stat,
-        display_path=staging.display_path,
-        uncertain_on_mismatch=False,
-    )
-    staging.metadata = os.fstat(staging.fd)
-    if not _same_stat(staged_stat, staging.metadata):
-        raise _PlacementUncertain(
-            f"download staging changed during atomic claim: {staging.display_path}"
+            f"download staging changed before atomic placement: {staging.display_path}"
         )
 
 
 def _place_missing_target(
     staging: _OwnedLeaf,
     anchor: _TargetAnchor,
-    staged_stat: os.stat_result,
 ) -> None:
     try:
-        _renameat2(
+        _rename_noreplace(
             staging.directory_fd,
             staging.name,
             anchor.parent.fd,
             anchor.target_name,
-            flags=1,
         )
     except FileExistsError as error:
         raise DownloadFilesError(
             f"download target appeared before atomic placement: {anchor.target}"
         ) from error
     except OSError as error:
-        final = _stat_leaf(anchor.parent.fd, anchor.target_name)
-        claim = _stat_leaf(staging.directory_fd, staging.name)
-        if final is not None and _same_inode(staged_stat, final) and claim is None:
-            return
-        if claim is not None and _same_inode(staged_stat, claim):
-            raise DownloadFilesError(
-                f"atomic download placement failed: {anchor.target}: {error}"
-            ) from error
-        raise _PlacementUncertain(
-            f"atomic download placement is uncertain: {anchor.target}: {error}"
+        raise DownloadFilesError(
+            f"atomic download placement failed: {anchor.target}: {error}"
         ) from error
 
 
-def _place_replacement(
-    staging: _OwnedLeaf,
+def _require_final_matches_staging(
     anchor: _TargetAnchor,
-    staged_stat: os.stat_result,
-    initial: os.stat_result,
+    expected: os.stat_result,
 ) -> None:
-    try:
-        _renameat2(
-            staging.directory_fd,
-            staging.name,
-            anchor.parent.fd,
-            anchor.target_name,
-            flags=2,
-        )
-    except OSError as error:
-        raise _PlacementUncertain(
-            f"atomic download replacement is uncertain: {anchor.target}: {error}"
-        ) from error
-    final = _stat_leaf(anchor.parent.fd, anchor.target_name)
-    displaced = _stat_leaf(staging.directory_fd, staging.name)
-    if (
-        final is not None
-        and _same_inode(staged_stat, final)
-        and displaced is not None
-        and _same_stat(initial, displaced)
-    ):
-        return
-    _rollback_exchange_or_preserve(staging, anchor, initial=initial)
-    raise DownloadFilesError(
-        f"download target changed during atomic placement: {anchor.target}"
+    fd = _open_regular_leaf(
+        anchor.parent.fd,
+        anchor.target_name,
+        "placed download target",
     )
-
-
-def _rollback_placement(
-    staging: _OwnedLeaf,
-    anchor: _TargetAnchor,
-    staged_stat: os.stat_result,
-    initial: os.stat_result | None,
-) -> None:
-    if initial is None:
-        final = _stat_leaf(anchor.parent.fd, anchor.target_name)
-        claim = _stat_leaf(staging.directory_fd, staging.name)
-        if final is None or not _same_inode(staged_stat, final) or claim is not None:
-            raise _PlacementUncertain(
-                f"new download target cannot be safely rolled back: {anchor.target}"
+    try:
+        current = os.fstat(fd)
+        if not _same_stat(expected, current):
+            raise DownloadFilesError(
+                f"placed download target identity changed: {anchor.target}"
             )
-        _renameat2(
+        _require_same_safe_final_leaf(
             anchor.parent.fd,
             anchor.target_name,
-            staging.directory_fd,
-            staging.name,
-            flags=1,
+            current,
+            anchor.target,
+            label="placed download target",
         )
-    else:
-        final = _stat_leaf(anchor.parent.fd, anchor.target_name)
-        displaced = _stat_leaf(staging.directory_fd, staging.name)
-        if (
-            final is None
-            or not _same_inode(staged_stat, final)
-            or displaced is None
-            or not _same_stat(initial, displaced)
-        ):
-            raise _PlacementUncertain(
-                "replaced download target cannot be safely rolled back: "
-                f"{anchor.target}"
-            )
-        _renameat2(
-            staging.directory_fd,
-            staging.name,
-            anchor.parent.fd,
-            anchor.target_name,
-            flags=2,
-        )
-    try:
-        os.fsync(staging.directory_fd)
-        os.fsync(anchor.parent.fd)
-    except OSError as error:
-        raise _PlacementUncertain(
-            f"download placement rollback durability is uncertain: {anchor.target}"
-        ) from error
-
-
-def _rollback_exchange_or_preserve(
-    staging: _OwnedLeaf,
-    anchor: _TargetAnchor,
-    *,
-    initial: os.stat_result,
-) -> None:
-    final = _stat_leaf(anchor.parent.fd, anchor.target_name)
-    displaced = _stat_leaf(staging.directory_fd, staging.name)
-    if displaced is None or not _same_inode(initial, displaced) or final is None:
-        raise _PlacementUncertain(
-            f"download replacement cannot be safely rolled back: {anchor.target}"
-        )
-    try:
-        _renameat2(
-            staging.directory_fd,
-            staging.name,
-            anchor.parent.fd,
-            anchor.target_name,
-            flags=2,
-        )
-    except OSError as error:
-        raise _PlacementUncertain(
-            f"download replacement rollback failed: {anchor.target}: {error}"
-        ) from error
-    restored = _stat_leaf(anchor.parent.fd, anchor.target_name)
-    if restored is None or not _same_inode(initial, restored):
-        raise _PlacementUncertain(
-            f"download replacement rollback identity is uncertain: {anchor.target}"
-        )
-    try:
-        os.fsync(staging.directory_fd)
-        os.fsync(anchor.parent.fd)
-    except OSError as error:
-        raise _PlacementUncertain(
-            f"download replacement rollback durability is uncertain: {anchor.target}"
-        ) from error
+    finally:
+        os.close(fd)
 
 
 def _inspect_staged_file(
@@ -1823,7 +1680,7 @@ def _stabilize_managed_control_leaf(
         raise DownloadFilesError(
             f"aria2 control is not owned by the effective user: {leaf.display_path}"
         )
-    if expected is not None and not _same_control_metadata(expected, before):
+    if expected is not None and not _same_complete_metadata(expected, before):
         raise DownloadFilesError(
             f"aria2 held control changed during transport: {leaf.display_path}"
         )
@@ -1848,8 +1705,8 @@ def _stabilize_managed_control_leaf(
     observed = _stat_leaf(leaf.directory_fd, leaf.name)
     if (
         observed is None
-        or not _same_control_metadata(before, after)
-        or not _same_control_metadata(before, observed)
+        or not _same_complete_metadata(before, after)
+        or not _same_complete_metadata(before, observed)
         or after.st_uid != os.geteuid()
         or observed.st_uid != os.geteuid()
     ):
@@ -1864,7 +1721,7 @@ def _stabilize_managed_control_leaf(
     )
 
 
-def _same_control_metadata(
+def _same_complete_metadata(
     expected: os.stat_result,
     observed: os.stat_result,
 ) -> bool:
@@ -1975,86 +1832,22 @@ def _cleanup_owned_transfer(
 
 
 def _unlink_owned_leaf(leaf: _OwnedLeaf) -> None:
-    _unlink_exact_leaf(
-        directory_fd=leaf.directory_fd,
-        name=leaf.name,
-        expected=os.fstat(leaf.fd),
-        display_path=leaf.display_path,
-        uncertain_on_mismatch=False,
-    )
-
-
-def _unlink_exact_leaf(
-    *,
-    directory_fd: int,
-    name: str,
-    expected: os.stat_result,
-    display_path: Path,
-    uncertain_on_mismatch: bool,
-) -> None:
-    quarantine_name = f".{name}.cleanup-{secrets.token_hex(32)}"
-    try:
-        _renameat2(
-            directory_fd,
-            name,
-            directory_fd,
-            quarantine_name,
-            flags=1,
+    expected = os.fstat(leaf.fd)
+    observed = _stat_leaf(leaf.directory_fd, leaf.name)
+    if observed is None or not _same_inode(expected, observed):
+        raise DownloadFilesError(
+            f"owned download artifact identity changed: {leaf.display_path}"
         )
+    _require_safe_staging_metadata(expected, leaf.display_path)
+    if not _same_complete_metadata(expected, observed):
+        raise DownloadFilesError(
+            f"owned download artifact identity changed: {leaf.display_path}"
+        )
+    try:
+        os.unlink(leaf.name, dir_fd=leaf.directory_fd)
     except OSError as error:
         raise DownloadFilesError(
-            f"owned download artifact could not be quarantined: {display_path}"
-        ) from error
-    moved = _stat_leaf(directory_fd, quarantine_name)
-    if moved is None:
-        raise _PlacementUncertain(
-            f"quarantined download artifact identity is uncertain: {display_path}"
-        )
-    if not _same_inode(expected, moved):
-        _restore_or_preserve_quarantined_leaf(
-            directory_fd=directory_fd,
-            original_name=name,
-            quarantine_name=quarantine_name,
-            display_path=display_path,
-        )
-        error_type = (
-            _PlacementUncertain if uncertain_on_mismatch else DownloadFilesError
-        )
-        raise error_type(f"owned download artifact identity changed: {display_path}")
-    try:
-        os.unlink(quarantine_name, dir_fd=directory_fd)
-    except OSError as error:
-        raise DownloadFilesError(
-            f"owned download artifact could not be cleaned: {display_path}"
-        ) from error
-
-
-def _restore_or_preserve_quarantined_leaf(
-    *,
-    directory_fd: int,
-    original_name: str,
-    quarantine_name: str,
-    display_path: Path,
-) -> None:
-    try:
-        _renameat2(
-            directory_fd,
-            quarantine_name,
-            directory_fd,
-            original_name,
-            flags=1,
-        )
-    except FileExistsError:
-        pass
-    except OSError as error:
-        raise _PlacementUncertain(
-            f"foreign download artifact could not be safely restored: {display_path}"
-        ) from error
-    try:
-        os.fsync(directory_fd)
-    except OSError as error:
-        raise _PlacementUncertain(
-            f"foreign download artifact preservation is uncertain: {display_path}"
+            f"owned download artifact could not be cleaned: {leaf.display_path}"
         ) from error
 
 
@@ -2216,43 +2009,11 @@ def _same_stat(expected: os.stat_result, observed: os.stat_result) -> bool:
     )
 
 
-def _link_fd_noreplace(source_fd: int, target_fd: int, target_name: str) -> None:
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        linkat = libc.linkat
-    except (OSError, AttributeError) as error:  # pragma: no cover
-        # Supported Ubuntu/glibc images provide this required symbol.
-        raise DownloadFilesError("exact staging inode claim is unavailable") from error
-    linkat.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-    ]
-    linkat.restype = ctypes.c_int
-    result = linkat(
-        source_fd,
-        b"",
-        target_fd,
-        os.fsencode(target_name),
-        0x1000,
-    )
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    raise DownloadFilesError(
-        f"exact staging inode could not be claimed: {os.strerror(error_number)}"
-    )
-
-
-def _renameat2(
+def _rename_noreplace(
     source_fd: int,
     source_name: str,
     target_fd: int,
     target_name: str,
-    *,
-    flags: int,
 ) -> None:
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -2273,7 +2034,7 @@ def _renameat2(
         os.fsencode(source_name),
         target_fd,
         os.fsencode(target_name),
-        flags,
+        1,
     )
     if result == 0:
         return

@@ -544,7 +544,7 @@ def test_clean_aria2_success_cleans_admitted_first_control_generation(
 
 
 def test_safe_residual_aria2_temp_is_cleaned_then_fails_closed(tmp_path: Path) -> None:
-    """A proven temp leaf is quarantined, but never accepted as resume state."""
+    """A proven temp leaf is cleaned, but never accepted as resume state."""
     root = tmp_path / "ComfyUI"
     root.mkdir()
     request = _request(root)
@@ -901,7 +901,7 @@ def test_terminal_artifacts_require_effective_uid_owner(
         )
 
     assert control.read_bytes() == b"control"
-    assert not staging.exists()
+    assert staging.read_bytes() == b"partial"
 
 
 @pytest.mark.parametrize("drift", ["root", "parent"])
@@ -1366,17 +1366,17 @@ def test_missing_target_race_is_preserved_without_overwrite(
     root = tmp_path / "ComfyUI"
     root.mkdir()
     request = _request(root)
-    original = transfer_core._renameat2
+    original = transfer_core._rename_noreplace
     injected = False
 
-    def race_then_place(*args, flags: int) -> None:
+    def race_then_place(*args) -> None:
         nonlocal injected
-        if flags == 1 and not injected:
+        if not injected:
             injected = True
             request.target.write_bytes(b"racing")
-        original(*args, flags=flags)
+        original(*args)
 
-    monkeypatch.setattr(transfer_core, "_renameat2", race_then_place)
+    monkeypatch.setattr(transfer_core, "_rename_noreplace", race_then_place)
 
     with pytest.raises(DownloadFilesError, match="appeared"):
         transfer_file(request, backend=BytesBackend(b"download"), settings=_settings())
@@ -1385,152 +1385,73 @@ def test_missing_target_race_is_preserved_without_overwrite(
     assert not transfer_staging_target(request).exists()
 
 
-# Exchange placement detects and restores a replacement racing after preflight.
-def test_existing_target_race_is_restored_before_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+# A target change before the final placement window is preserved and rejected.
+def test_existing_target_drift_before_placement_is_preserved(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     request = _request(root, overwrite=True)
     request.target.parent.mkdir(parents=True)
     request.target.write_bytes(b"initial")
-    original = transfer_core._renameat2
-    injected = False
 
-    def race_then_exchange(*args, flags: int) -> None:
-        nonlocal injected
-        if flags == 2 and not injected:
-            injected = True
+    class TargetDriftBackend(BytesBackend):
+        def download(self, transport, settings):
+            outcome = super().download(transport, settings)
             request.target.write_bytes(b"racing replacement")
-        original(*args, flags=flags)
+            return outcome
 
-    monkeypatch.setattr(
-        transfer_core,
-        "_renameat2",
-        race_then_exchange,
-    )
-
-    with pytest.raises(DownloadFilesError, match="changed during atomic placement"):
-        transfer_file(request, backend=BytesBackend(b"download"), settings=_settings())
+    with pytest.raises(DownloadFilesError, match="changed during transport"):
+        transfer_file(
+            request,
+            backend=TargetDriftBackend(b"download"),
+            settings=_settings(),
+        )
 
     assert request.target.read_bytes() == b"racing replacement"
     assert not transfer_staging_target(request).exists()
 
 
-# The commit claim binds the verified inode even if its staging name is replaced.
-def test_staging_leaf_replacement_before_claim_never_commits_foreign_inode(
+# A staging name that changes before placement never supplies final bytes.
+def test_staging_leaf_drift_before_placement_never_commits_foreign_inode(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "ComfyUI"
     root.mkdir()
     request = _request(root)
     staging = transfer_staging_target(request)
-    original = transfer_core._link_fd_noreplace
 
-    def replace_leaf_then_claim(*args) -> None:
-        staging.unlink()
-        staging.write_bytes(b"foreign")
-        original(*args)
+    class StagingDriftBackend(BytesBackend):
+        def download(self, transport, settings):
+            outcome = super().download(transport, settings)
+            replacement = staging.with_name(f"{staging.name}.foreign")
+            replacement.write_bytes(b"foreign")
+            os.replace(replacement, staging)
+            return outcome
 
-    monkeypatch.setattr(transfer_core, "_link_fd_noreplace", replace_leaf_then_claim)
-
-    with pytest.raises(DownloadFilesError, match="artifact identity changed"):
-        transfer_file(request, backend=BytesBackend(b"verified"), settings=_settings())
-
-    assert not request.target.exists()
-    assert staging.read_bytes() == b"foreign"
-    assert not list(staging.parent.glob(f".{staging.name}.commit-*"))
-
-
-# Cleanup first quarantines a raced leaf and restores foreign bytes by identity.
-def test_owned_cleanup_race_never_unlinks_foreign_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "ComfyUI"
-    root.mkdir()
-    request = _request(root)
-    staging = transfer_staging_target(request)
-    original = transfer_core._renameat2
-    injected = False
-
-    def replace_before_quarantine(*args, flags: int) -> None:
-        nonlocal injected
-        source_name = args[1]
-        target_name = args[3]
-        if (
-            flags == 1
-            and source_name == staging.name
-            and ".cleanup-" in target_name
-            and not injected
-        ):
-            injected = True
-            staging.unlink()
-            staging.write_bytes(b"foreign")
-        original(*args, flags=flags)
-
-    monkeypatch.setattr(transfer_core, "_renameat2", replace_before_quarantine)
-
-    with pytest.raises(DownloadFilesError, match="artifact identity changed"):
+    with pytest.raises(DownloadFilesError, match="identity changed"):
         transfer_file(
             request,
-            backend=BytesBackend(
-                b"partial",
-                error=TransferDownloadFilesError("network interrupted"),
-            ),
+            backend=StagingDriftBackend(b"verified"),
             settings=_settings(),
         )
 
-    assert staging.read_bytes() == b"foreign"
-    assert not list(staging.parent.glob("*.cleanup-*"))
     assert not request.target.exists()
+    assert staging.read_bytes() == b"foreign"
 
 
-# Claim cleanup uses the same quarantine rule when the original name is raced.
-def test_claim_cleanup_race_preserves_foreign_original_leaf(
+# Atomic replacement leaves an already-open reader on complete old bytes.
+def test_existing_target_reader_sees_complete_old_inode_after_replacement(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "ComfyUI"
-    root.mkdir()
-    request = _request(root)
-    staging = transfer_staging_target(request)
-    original = transfer_core._renameat2
-    injected = False
-
-    def replace_original_before_quarantine(*args, flags: int) -> None:
-        nonlocal injected
-        source_name = args[1]
-        target_name = args[3]
-        if (
-            flags == 1
-            and source_name == staging.name
-            and ".cleanup-" in target_name
-            and not injected
-        ):
-            injected = True
-            staging.unlink()
-            staging.write_bytes(b"foreign")
-        original(*args, flags=flags)
-
-    monkeypatch.setattr(
-        transfer_core,
-        "_renameat2",
-        replace_original_before_quarantine,
-    )
-
-    with pytest.raises(DownloadFilesError, match="artifact identity changed"):
-        transfer_file(request, backend=BytesBackend(b"verified"), settings=_settings())
-
-    assert staging.read_bytes() == b"foreign"
-    assert not list(staging.parent.glob(f".{staging.name}.commit-*"))
-    assert not list(staging.parent.glob("*.cleanup-*"))
-    assert not request.target.exists()
+    request = _request(root, overwrite=True)
+    request.target.parent.mkdir(parents=True)
+    request.target.write_bytes(b"old")
+    with request.target.open("rb") as old_reader:
+        transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
+        assert old_reader.read() == b"old"
+    assert request.target.read_bytes() == b"new"
 
 
-# An ambiguous exchange preserves the displaced old final under the commit claim.
-def test_uncertain_replacement_never_cleans_displaced_old_final(
+def test_staging_file_durability_failure_preserves_old_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1538,131 +1459,71 @@ def test_uncertain_replacement_never_cleans_displaced_old_final(
     request = _request(root, overwrite=True)
     request.target.parent.mkdir(parents=True)
     request.target.write_bytes(b"old")
-    staging = transfer_staging_target(request)
-    original = transfer_core._renameat2
-    injected = False
+    original_fsync = transfer_core.os.fsync
+    failed = False
 
-    def exchange_then_report_error(*args, flags: int) -> None:
-        nonlocal injected
-        original(*args, flags=flags)
-        if flags == 2 and not injected:
-            injected = True
-            raise OSError("ambiguous exchange result")
+    def fail_staging_file_barrier(fd: int) -> None:
+        nonlocal failed
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISREG(mode) and not failed:
+            failed = True
+            raise OSError("staging file durability unavailable")
+        original_fsync(fd)
 
-    monkeypatch.setattr(
-        transfer_core,
-        "_renameat2",
-        exchange_then_report_error,
-    )
+    monkeypatch.setattr(transfer_core.os, "fsync", fail_staging_file_barrier)
 
-    with pytest.raises(DownloadFilesError, match="replacement is uncertain"):
+    with pytest.raises(OSError, match="staging file durability unavailable"):
         transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
 
-    assert request.target.read_bytes() == b"new"
-    claims = list(staging.parent.glob(f".{staging.name}.commit-*"))
-    assert len(claims) == 1
-    assert claims[0].read_bytes() == b"old"
+    assert request.target.read_bytes() == b"old"
+    assert not transfer_staging_target(request).exists()
 
 
-# Displaced-old cleanup cannot delete a replacement raced under its claim name.
-def test_displaced_old_cleanup_race_preserves_foreign_claim(
+@pytest.mark.parametrize("barrier", ["staging", "target"])
+def test_postcommit_directory_durability_failure_keeps_complete_new_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    barrier: str,
 ) -> None:
     root = tmp_path / "ComfyUI"
     request = _request(root, overwrite=True)
     request.target.parent.mkdir(parents=True)
     request.target.write_bytes(b"old")
     staging = transfer_staging_target(request)
-    original = transfer_core._renameat2
-    injected = False
-
-    def replace_displaced_before_quarantine(*args, flags: int) -> None:
-        nonlocal injected
-        source_fd, source_name = args[:2]
-        target_name = args[3]
-        if (
-            flags == 1
-            and ".commit-" in source_name
-            and ".cleanup-" in target_name
-            and not injected
-        ):
-            injected = True
-            replacement_name = f"{source_name}.foreign"
-            fd = os.open(
-                replacement_name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-                dir_fd=source_fd,
-            )
-            try:
-                os.write(fd, b"foreign")
-            finally:
-                os.close(fd)
-            os.replace(
-                replacement_name,
-                source_name,
-                src_dir_fd=source_fd,
-                dst_dir_fd=source_fd,
-            )
-        original(*args, flags=flags)
-
-    monkeypatch.setattr(
-        transfer_core,
-        "_renameat2",
-        replace_displaced_before_quarantine,
-    )
-
-    with pytest.raises(DownloadFilesError, match="artifact identity changed"):
-        transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
-
-    assert request.target.read_bytes() == b"new"
-    claims = list(staging.parent.glob(f".{staging.name}.commit-*"))
-    assert len(claims) == 1
-    assert claims[0].read_bytes() == b"foreign"
-    assert not list(staging.parent.glob("*.cleanup-*"))
-
-
-# A failed directory durability barrier rolls placement back before reporting failure.
-@pytest.mark.parametrize("existing", [None, b"old"])
-def test_durability_failure_restores_precommit_target_state(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    existing: bytes | None,
-) -> None:
-    root = tmp_path / "ComfyUI"
-    request = _request(root, overwrite=True)
-    request.target.parent.mkdir(parents=True)
-    if existing is not None:
-        request.target.write_bytes(existing)
     original_fsync = transfer_core.os.fsync
     staged_bytes_synced = False
     failed = False
+    selected = staging.parent if barrier == "staging" else request.target.parent
 
-    def fail_first_directory_barrier(fd: int) -> None:
+    def fail_selected_directory_barrier(fd: int) -> None:
         nonlocal staged_bytes_synced, failed
         mode = os.fstat(fd).st_mode
         if stat.S_ISREG(mode):
             staged_bytes_synced = True
-        elif staged_bytes_synced and not failed:
+        elif (
+            staged_bytes_synced
+            and not failed
+            and Path(os.readlink(f"/proc/self/fd/{fd}")) == selected
+        ):
             failed = True
-            raise OSError("durability unavailable")
+            raise OSError(f"{barrier} directory durability unavailable")
         original_fsync(fd)
 
-    monkeypatch.setattr(transfer_core.os, "fsync", fail_first_directory_barrier)
+    monkeypatch.setattr(
+        transfer_core.os,
+        "fsync",
+        fail_selected_directory_barrier,
+    )
 
-    with pytest.raises(DownloadFilesError, match="durably placed"):
+    with pytest.raises(DownloadFilesError, match="committed") as raised:
         transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
 
-    if existing is None:
-        assert not request.target.exists()
-    else:
-        assert request.target.read_bytes() == existing
-    assert not transfer_staging_target(request).exists()
+    assert isinstance(raised.value.__cause__, OSError)
+    assert request.target.read_bytes() == b"new"
+    assert not staging.exists()
 
 
-# Rollback is not reported safe unless both exchanged directories are durable.
-def test_exchange_rollback_barrier_failure_preserves_both_identities(
+def test_postcommit_final_proof_failure_keeps_complete_new_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1671,33 +1532,109 @@ def test_exchange_rollback_barrier_failure_preserves_both_identities(
     request.target.parent.mkdir(parents=True)
     request.target.write_bytes(b"old")
     staging = transfer_staging_target(request)
-    original_rename = transfer_core._renameat2
-    original_fsync = transfer_core.os.fsync
-    exchange_calls = 0
 
-    def race_then_exchange(*args, flags: int) -> None:
-        nonlocal exchange_calls
-        if flags == 2:
-            exchange_calls += 1
-            if exchange_calls == 1:
-                request.target.write_bytes(b"racing old")
-        original_rename(*args, flags=flags)
+    def fail_final_proof(*args) -> None:
+        del args
+        raise DownloadFilesError("injected final proof failure")
 
-    def fail_rollback_barrier(fd: int) -> None:
-        if exchange_calls == 2:
-            raise OSError("rollback barrier unavailable")
-        original_fsync(fd)
+    monkeypatch.setattr(
+        transfer_core,
+        "_require_final_matches_staging",
+        fail_final_proof,
+    )
 
-    monkeypatch.setattr(transfer_core, "_renameat2", race_then_exchange)
-    monkeypatch.setattr(transfer_core.os, "fsync", fail_rollback_barrier)
-
-    with pytest.raises(DownloadFilesError, match="rollback durability is uncertain"):
+    with pytest.raises(DownloadFilesError, match="committed") as raised:
         transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
 
-    assert request.target.read_bytes() == b"racing old"
-    claims = list(staging.parent.glob(f".{staging.name}.commit-*"))
-    assert len(claims) == 1
-    assert claims[0].read_bytes() == b"new"
+    assert isinstance(raised.value.__cause__, DownloadFilesError)
+    assert "injected final proof failure" in str(raised.value.__cause__)
+    assert request.target.read_bytes() == b"new"
+    assert not staging.exists()
+
+
+def test_postcommit_control_identity_drift_preserves_foreign_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    request = _request(root, overwrite=True)
+    request.target.parent.mkdir(parents=True)
+    request.target.write_bytes(b"old")
+    staging = transfer_staging_target(request)
+    control = Path(f"{staging}.aria2")
+    original_unlink = transfer_core._unlink_owned_leaf
+
+    class ControlBackend(BytesBackend):
+        def download(self, transport, settings):
+            outcome = super().download(transport, settings)
+            control.write_bytes(b"admitted control")
+            return TransportSuccess(length=outcome.length, namespace="aria2")
+
+    def drift_control_then_unlink(leaf) -> None:
+        if leaf.display_path == control:
+            replacement = control.with_name(f"{control.name}.foreign")
+            replacement.write_bytes(b"foreign control")
+            os.replace(replacement, control)
+        original_unlink(leaf)
+
+    monkeypatch.setattr(
+        transfer_core,
+        "_unlink_owned_leaf",
+        drift_control_then_unlink,
+    )
+
+    with pytest.raises(DownloadFilesError, match="identity changed"):
+        transfer_file(request, backend=ControlBackend(b"new"), settings=_settings())
+
+    assert request.target.read_bytes() == b"new"
+    assert not staging.exists()
+    assert control.read_bytes() == b"foreign control"
+
+
+def test_postcommit_control_cleanup_durability_failure_keeps_complete_new_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    request = _request(root, overwrite=True)
+    request.target.parent.mkdir(parents=True)
+    request.target.write_bytes(b"old")
+    staging = transfer_staging_target(request)
+    control = Path(f"{staging}.aria2")
+    original_fsync = transfer_core.os.fsync
+    failed = False
+
+    class ControlBackend(BytesBackend):
+        def download(self, transport, settings):
+            outcome = super().download(transport, settings)
+            control.write_bytes(b"control")
+            return TransportSuccess(length=outcome.length, namespace="aria2")
+
+    def fail_control_cleanup_barrier(fd: int) -> None:
+        nonlocal failed
+        path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if (
+            not failed
+            and path == staging.parent
+            and request.target.exists()
+            and not control.exists()
+        ):
+            failed = True
+            raise OSError("control cleanup durability unavailable")
+        original_fsync(fd)
+
+    monkeypatch.setattr(
+        transfer_core.os,
+        "fsync",
+        fail_control_cleanup_barrier,
+    )
+
+    with pytest.raises(DownloadFilesError, match="control cleanup"):
+        transfer_file(request, backend=ControlBackend(b"new"), settings=_settings())
+
+    assert request.target.read_bytes() == b"new"
+    assert not staging.exists()
+    assert not control.exists()
 
 
 # New nested directory entries are persisted deepest-first before transport starts.

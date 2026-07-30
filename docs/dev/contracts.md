@@ -154,7 +154,7 @@ The transfer path deliberately splits policy from mechanism:
 | Owner | Owns | Must not become |
 | --- | --- | --- |
 | Build and runtime orchestrators | Ordering, attempt budgets, applicable backend and mode selection, failure policy, and cancellation | A second placement implementation |
-| [`transfer_core.py`](../../src/comfyui_docker_helper/container/transfer_core.py) | Target admission, transfer identity, transport sinks, verification, atomic final placement, rollback, durability, and exact cleanup | A scheduler or runtime-policy interpreter |
+| [`transfer_core.py`](../../src/comfyui_docker_helper/container/transfer_core.py) | Target admission, transfer identity, transport sinks, verification, atomic final placement, durability, and exact cleanup | A scheduler or runtime-policy interpreter |
 | Transport adapters in [`download_files.py`](../../src/comfyui_docker_helper/container/download_files.py) | Moving bytes through the sink supplied by the core | Owners of final paths, overwrite policy, verification, or cleanup |
 | Runtime state modules | Minimal persisted recovery authority and its transition API | User configuration, history, telemetry, or a second retry policy |
 
@@ -162,7 +162,7 @@ Build orchestration currently shares [`download_files.py`](../../src/comfyui_doc
 
 The HTTPX adapter can write through a core-opened sink. aria2 instead requires an anchored directory/name interface and maintains its own control file. The core defends ordinary replacement races and unsafe filesystem shapes around that interface, but it cannot isolate aria2 artifacts from independently malicious code running with the same effective UID. Tests and documentation must not turn those defenses into a same-UID isolation claim.
 
-A configured checksum is trusted content intent supplied from outside the transport. Without it, completed transport and atomic placement do not prove content authenticity. Existing final content remains in place until a complete replacement is accepted. Containment, type, permission, identity, persistence, and durability failures fail closed and are never converted into ordinary runtime `continue` outcomes. The user guide owns the complete target-result matrix.
+A configured checksum is trusted content intent supplied from outside the transport. Without it, completed transport and atomic placement do not prove content authenticity. Existing final content remains in place until a complete verified replacement commits through rename. Rename is the placement commit point: a later durability, final-verification, cleanup, or state-persistence failure remains fatal, but the complete new final may remain and is not rolled back. Containment, type, permission, identity, persistence, and durability failures fail closed and are never converted into ordinary runtime `continue` outcomes. The user guide owns the complete target-result matrix.
 
 ### Runtime state is minimal recovery authority
 

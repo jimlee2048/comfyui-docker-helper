@@ -221,9 +221,7 @@ def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
-            DirectPythonRequestMember(
-                package="torchvision", extras=[], selector="==0.27.1"
-            ),
+            DirectPythonRequestMember(package="torchvision", extras=[], selector=""),
             DirectPythonRequestMember(package="torchaudio", extras=[], selector=""),
         ],
     )

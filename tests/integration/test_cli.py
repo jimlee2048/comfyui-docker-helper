@@ -1119,10 +1119,11 @@ def test_build_cache_options_fail_before_provider_work(
     )
 
     assert result.exit_code == 2
-    assert expected_option in result.output
-    normalized = " ".join(result.output.replace("│", " ").split())
+    plain_output = _plain_output(result.output)
+    assert expected_option in plain_output
+    normalized = " ".join(plain_output.replace("│", " ").split())
     assert expected_message in normalized
-    assert "invalid cache input reached provider work" not in result.output
+    assert "invalid cache input reached provider work" not in plain_output
 
 
 @pytest.mark.parametrize(

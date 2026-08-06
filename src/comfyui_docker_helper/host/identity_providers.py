@@ -17,11 +17,17 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
+from docker import DockerClient, from_env
+from docker.errors import DockerException
 from packaging.version import InvalidVersion, Version
 
+from comfyui_docker_helper.config.canonical_lock import (
+    validate_oci_repository,
+    validate_oci_tag,
+)
 from comfyui_docker_helper.config.canonical_request import SelectorStability
 from comfyui_docker_helper.config.selector_validation import normalize_registry_version
 from comfyui_docker_helper.config.value_validation import (
@@ -34,7 +40,9 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     ManagedPythonCatalogOperation,
     UvDockerExecutor,
     UvDockerExecutorError,
+    UvImageEvidenceError,
     UvResolverDescriptor,
+    uv_image_version_label,
 )
 
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -43,7 +51,6 @@ _UV_IMAGE_VERSION_LABEL_PATTERN = re.compile(
     r"^(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*))(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$"
 )
-_BEARER_PARAMETER = re.compile(r'(\w+)="([^"]*)"')
 _OCI_INDEX_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.list.v2+json",
     "application/vnd.oci.image.index.v1+json",
@@ -52,9 +59,6 @@ _OCI_MANIFEST_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
 }
-_OCI_ACCEPT = ", ".join(
-    (*sorted(_OCI_INDEX_MEDIA_TYPES), *sorted(_OCI_MANIFEST_MEDIA_TYPES))
-)
 _GIT_TIMEOUT_SECONDS = 30.0
 
 
@@ -251,101 +255,57 @@ class LocalExecutableIdentityProvider(Protocol):
     ) -> LocalExecutableIdentity: ...
 
 
-@dataclass(frozen=True, slots=True)
-class HttpOciIdentityProvider:
-    """Resolve an OCI tag to its immutable top-level registry descriptor."""
+type DockerClientFactory = Callable[[], DockerClient]
+type UvImageEvidence = Callable[[UvResolverDescriptor], str | None]
 
-    client: httpx.Client
+
+def _default_docker_client() -> DockerClient:
+    return from_env(
+        version="auto",
+        timeout=30,
+        use_context=True,
+        use_ssh_client=True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DockerEngineOciIdentityProvider:
+    """Resolve project-owned OCI tags through Docker Engine metadata."""
+
+    client_factory: DockerClientFactory = _default_docker_client
+    uv_image_evidence: UvImageEvidence = uv_image_version_label
 
     def resolve(self, request: OciIdentityRequest) -> OciIdentity:
-        if request.role not in {"cuda-base", "uv-tool"} or (
-            not is_argv_value(request.tag) or request.tag.startswith("-")
-        ):
-            raise IdentityProviderError(
-                "OCI registry", ProviderFailureKind.INVALID_REQUEST
-            )
-        registry, repository = _split_oci_repository(request.repository)
-        source = "OCI registry"
-        tag = quote(request.tag, safe="")
-        url = f"https://{registry}/v2/{repository}/manifests/{tag}"
-        headers = {"Accept": _OCI_ACCEPT}
-        response = _oci_get(self.client, url, headers=headers, source=source)
-        if response.status_code == 401:
-            authorization = _oci_bearer_authorization(
-                self.client,
-                response.headers.get("WWW-Authenticate", ""),
-                repository,
-            )
-            response = _oci_get(
-                self.client,
-                url,
-                headers={**headers, "Authorization": authorization},
-                source=source,
-            )
-        _raise_for_http_status(response, source)
-        document = _response_json(response, source)
-        media_type = _required_string(document, "mediaType", source)
-        digest = response.headers.get("Docker-Content-Digest", "")
-        if not _content_matches_digest(response.content, digest):
-            raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+        source = "Docker Engine OCI identity"
+        if not _valid_oci_request(request):
+            raise IdentityProviderError(source, ProviderFailureKind.INVALID_REQUEST)
+        try:
+            client = self.client_factory()
+            try:
+                document = client.api.inspect_distribution(
+                    f"{request.repository}:{request.tag}"
+                )
+            finally:
+                client.close()
+        except (DockerException, OSError) as error:
+            raise IdentityProviderError(source, ProviderFailureKind.NETWORK) from error
 
-        authorization = response.request.headers.get("Authorization", "")
-        if media_type in _OCI_INDEX_MEDIA_TYPES:
-            child_digest, child_media_type = _select_index_platform(
-                document, request.platform, source
-            )
-            child_url = f"https://{registry}/v2/{repository}/manifests/{child_digest}"
-            child_response = _oci_get(
-                self.client,
-                child_url,
-                headers={"Accept": _OCI_ACCEPT, "Authorization": authorization},
-                source=source,
-            )
-            _raise_for_http_status(child_response, source)
-            if child_response.headers.get(
-                "Docker-Content-Digest"
-            ) != child_digest or not _content_matches_digest(
-                child_response.content, child_digest
-            ):
+        digest, kind = _engine_descriptor_identity(document, request.platform, source)
+        resolved_version = None
+        if request.role == "uv-tool":
+            try:
+                label = self.uv_image_evidence(
+                    UvResolverDescriptor(digest, request.platform)
+                )
+            except UvImageEvidenceError as error:
                 raise IdentityProviderError(
                     source, ProviderFailureKind.INVALID_RESPONSE
-                )
-            child_document = _response_json(child_response, source)
-            actual_child_media_type = _required_string(
-                child_document, "mediaType", source
-            )
-            if (
-                child_media_type not in _OCI_MANIFEST_MEDIA_TYPES
-                or actual_child_media_type != child_media_type
-            ):
+                ) from error
+            except UvDockerExecutorError as error:
                 raise IdentityProviderError(
-                    source, ProviderFailureKind.INVALID_RESPONSE
-                )
-            config_document = _verify_manifest_config_platform(
-                self.client,
-                child_document,
-                registry=registry,
-                repository=repository,
-                authorization=authorization,
-                platform=request.platform,
-                platform_mismatch_kind=ProviderFailureKind.INVALID_RESPONSE,
-                source=source,
-            )
-            kind: Literal["index", "manifest"] = "index"
-        elif media_type in _OCI_MANIFEST_MEDIA_TYPES:
-            config_document = _verify_manifest_config_platform(
-                self.client,
-                document,
-                registry=registry,
-                repository=repository,
-                authorization=authorization,
-                platform=request.platform,
-                platform_mismatch_kind=ProviderFailureKind.NOT_FOUND,
-                source=source,
-            )
-            kind = "manifest"
-        else:
-            raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+                    source, ProviderFailureKind.NETWORK
+                ) from error
+            resolved_version = _uv_version_from_label(label, source)
         return OciIdentity(
             role=request.role,
             repository=request.repository,
@@ -353,11 +313,7 @@ class HttpOciIdentityProvider:
             descriptor_digest=digest,
             descriptor_kind=kind,
             platform=request.platform,
-            resolved_version=(
-                _uv_version_from_config(config_document, source)
-                if request.role == "uv-tool"
-                else None
-            ),
+            resolved_version=resolved_version,
         )
 
 
@@ -635,58 +591,47 @@ class FilesystemLocalExecutableIdentityProvider:
         )
 
 
-def _split_oci_repository(value: str) -> tuple[str, str]:
-    if not value or any(character in value for character in "@:\r\n\0"):
-        raise IdentityProviderError("OCI registry", ProviderFailureKind.INVALID_REQUEST)
-    first, separator, remainder = value.partition("/")
-    if separator and ("." in first or first == "localhost"):
-        registry, repository = first, remainder
-    else:
-        registry, repository = "registry-1.docker.io", value
-    if not repository or any(part in {"", ".", ".."} for part in repository.split("/")):
-        raise IdentityProviderError("OCI registry", ProviderFailureKind.INVALID_REQUEST)
-    if "/" not in repository and registry == "registry-1.docker.io":
-        repository = f"library/{repository}"
-    return registry, repository
-
-
-def _oci_get(
-    client: httpx.Client,
-    url: str,
-    *,
-    headers: Mapping[str, str],
-    source: str,
-) -> httpx.Response:
+def _valid_oci_request(request: OciIdentityRequest) -> bool:
     try:
-        return client.get(
-            url, headers={key: value for key, value in headers.items() if value}
-        )
-    except httpx.RequestError as error:
-        raise IdentityProviderError(source, ProviderFailureKind.NETWORK) from error
+        validate_oci_repository(request.repository)
+        validate_oci_tag(request.tag)
+    except ValueError:
+        return False
+    return (
+        request.role in {"cuda-base", "uv-tool"} and request.platform == "linux/amd64"
+    )
 
 
-def _oci_bearer_authorization(
-    client: httpx.Client, challenge: str, repository: str
-) -> str:
-    source = "OCI registry"
-    scheme, _, parameters = challenge.partition(" ")
-    if scheme.lower() != "bearer":
-        raise IdentityProviderError(source, ProviderFailureKind.AUTHENTICATION)
-    values = dict(_BEARER_PARAMETER.findall(parameters))
-    realm = values.get("realm", "")
-    parsed_realm = urlparse(realm)
-    if parsed_realm.scheme != "https" or not parsed_realm.netloc:
+def _engine_descriptor_identity(
+    document: object,
+    platform: str,
+    source: str,
+) -> tuple[str, Literal["index", "manifest"]]:
+    if not isinstance(document, Mapping):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    query = {
-        "service": values.get("service", ""),
-        "scope": values.get("scope", f"repository:{repository}:pull"),
-    }
-    token_response = _http_get(client, f"{realm}?{urlencode(query)}", source)
-    token_document = _response_json(token_response, source)
-    token = token_document.get("token", token_document.get("access_token"))
-    if not isinstance(token, str) or not token:
+    descriptor = document.get("Descriptor")
+    platforms = document.get("Platforms")
+    if not isinstance(descriptor, Mapping) or not isinstance(platforms, list):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    return f"Bearer {token}"
+    digest = descriptor.get("digest")
+    media_type = descriptor.get("mediaType")
+    if not isinstance(digest, str) or _DIGEST_PATTERN.fullmatch(digest) is None:
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    if media_type in _OCI_INDEX_MEDIA_TYPES:
+        kind: Literal["index", "manifest"] = "index"
+    elif media_type in _OCI_MANIFEST_MEDIA_TYPES:
+        kind = "manifest"
+    else:
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    operating_system, architecture = platform.split("/", maxsplit=1)
+    if not any(
+        isinstance(item, Mapping)
+        and item.get("os") == operating_system
+        and item.get("architecture") == architecture
+        for item in platforms
+    ):
+        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
+    return digest, kind
 
 
 def _http_get(client: httpx.Client, url: str, source: str) -> httpx.Response:
@@ -715,13 +660,6 @@ def _raise_for_http_status(response: httpx.Response, source: str) -> None:
     raise IdentityProviderError(source, kind)
 
 
-def _response_json(response: httpx.Response, source: str) -> Mapping[str, object]:
-    document = _response_json_value(response, source)
-    if not isinstance(document, Mapping):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    return document
-
-
 def _response_json_value(response: httpx.Response, source: str) -> object:
     try:
         document = response.json()
@@ -739,93 +677,7 @@ def _required_string(document: Mapping[str, object], field: str, source: str) ->
     return value
 
 
-def _content_matches_digest(content: bytes, digest: str) -> bool:
-    if not _DIGEST_PATTERN.fullmatch(digest):
-        return False
-    observed = hashlib.sha256(content).hexdigest()
-    return digest == f"sha256:{observed}"
-
-
-def _select_index_platform(
-    document: Mapping[str, object], platform: str, source: str
-) -> tuple[str, str]:
-    operating_system, architecture = platform.split("/", maxsplit=1)
-    manifests = document.get("manifests")
-    if not isinstance(manifests, list):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    matches = []
-    for descriptor in manifests:
-        if not isinstance(descriptor, Mapping):
-            raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-        descriptor_platform = descriptor.get("platform")
-        if not isinstance(descriptor_platform, Mapping):
-            continue
-        if (
-            descriptor_platform.get("os") == operating_system
-            and descriptor_platform.get("architecture") == architecture
-        ):
-            matches.append(descriptor)
-    if len(matches) != 1:
-        raise IdentityProviderError(
-            source,
-            ProviderFailureKind.NOT_FOUND
-            if not matches
-            else ProviderFailureKind.INVALID_RESPONSE,
-        )
-    digest = matches[0].get("digest")
-    if not isinstance(digest, str) or not _DIGEST_PATTERN.fullmatch(digest):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    media_type = matches[0].get("mediaType")
-    if not isinstance(media_type, str) or not media_type:
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    return digest, media_type
-
-
-def _verify_manifest_config_platform(
-    client: httpx.Client,
-    document: Mapping[str, object],
-    *,
-    registry: str,
-    repository: str,
-    authorization: str,
-    platform: str,
-    platform_mismatch_kind: ProviderFailureKind,
-    source: str,
-) -> Mapping[str, object]:
-    config = document.get("config")
-    if not isinstance(config, Mapping):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    config_digest = _required_string(config, "digest", source)
-    if not _DIGEST_PATTERN.fullmatch(config_digest):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    blob_url = f"https://{registry}/v2/{repository}/blobs/{config_digest}"
-    blob_response = _oci_get(
-        client,
-        blob_url,
-        headers={"Authorization": authorization},
-        source=source,
-    )
-    _raise_for_http_status(blob_response, source)
-    if not _content_matches_digest(blob_response.content, config_digest):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    config_document = _response_json(blob_response, source)
-    _require_config_platform(
-        config_document,
-        platform,
-        source,
-        mismatch_kind=platform_mismatch_kind,
-    )
-    return config_document
-
-
-def _uv_version_from_config(document: Mapping[str, object], source: str) -> str:
-    config = document.get("config")
-    if not isinstance(config, Mapping):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    labels = config.get("Labels")
-    if not isinstance(labels, Mapping):
-        raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
-    value = labels.get("org.opencontainers.image.version")
+def _uv_version_from_label(value: str | None, source: str) -> str:
     if not isinstance(value, str):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
     match = _UV_IMAGE_VERSION_LABEL_PATTERN.fullmatch(value)
@@ -841,21 +693,6 @@ def _uv_version_from_config(document: Mapping[str, object], source: str) -> str:
     if str(version) != release or version.is_prerelease or version.is_devrelease:
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_RESPONSE)
     return release
-
-
-def _require_config_platform(
-    document: Mapping[str, object],
-    platform: str,
-    source: str,
-    *,
-    mismatch_kind: ProviderFailureKind,
-) -> None:
-    operating_system, architecture = platform.split("/", maxsplit=1)
-    if (
-        document.get("os") != operating_system
-        or document.get("architecture") != architecture
-    ):
-        raise IdentityProviderError(source, mismatch_kind)
 
 
 def _managed_python_row_matches(

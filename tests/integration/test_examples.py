@@ -7,6 +7,12 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import load_validate_config_result
+from comfyui_docker_helper.config.runtime_hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
+)
+from comfyui_docker_helper.host.runtime_hook_inputs import (
+    discover_runtime_hook_inputs,
+)
 
 EXAMPLES = Path("examples")
 
@@ -36,6 +42,17 @@ def test_full_example_references_existing_hook_scripts() -> None:
 
     assert hooks
     assert all((EXAMPLES / "build-hooks" / hook).is_file() for hook in hooks)
+
+
+def test_runtime_hook_examples_cover_every_supported_phase() -> None:
+    inputs = discover_runtime_hook_inputs(
+        EXAMPLES / "runtime-hooks",
+        working_directory=Path.cwd(),
+    )
+
+    assert {
+        request.relative_path.parts[0] for request in inputs.requests
+    } == RUNTIME_HOOK_PHASE_DIRECTORY_NAMES
 
 
 # Runtime hook examples preserve executable policy without relying on Git mode repair.

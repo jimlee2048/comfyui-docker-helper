@@ -258,6 +258,28 @@ def build(
             ),
         ),
     ] = False,
+    cache_from_specs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--cache-from",
+            help=(
+                "Docker Buildx external cache import specification. "
+                "May be provided once."
+            ),
+            metavar="CACHE-SPEC",
+        ),
+    ] = None,
+    cache_to_specs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--cache-to",
+            help=(
+                "Docker Buildx external cache export specification. "
+                "May be provided once."
+            ),
+            metavar="CACHE-SPEC",
+        ),
+    ] = None,
     build_hooks_dir: Annotated[
         Path | None,
         typer.Option(
@@ -299,6 +321,8 @@ def build(
 ) -> None:
     """Render a build context and build it with Docker Buildx."""
     config_files = _require_at_least_one(config_files, "--file/-f")
+    cache_from = _admit_single_cache_spec(cache_from_specs or [], "--cache-from")
+    cache_to = _admit_single_cache_spec(cache_to_specs or [], "--cache-to")
     cli_tags = image_tags or []
     cli_output = _resolve_cli_build_output(load=load, push=push)
 
@@ -370,6 +394,8 @@ def build(
         log=typer.echo,
         forward_default_ssh=use_ssh,
         known_hosts_bindings=known_hosts_bindings,
+        cache_from=cache_from,
+        cache_to=cache_to,
     )
 
 
@@ -438,6 +464,23 @@ def _resolve_cli_build_output(*, load: bool, push: bool) -> BuildxOutput | None:
     if load:
         return "load"
     return None
+
+
+def _admit_single_cache_spec(values: list[str], param_hint: str) -> str | None:
+    if len(values) > 1:
+        raise typer.BadParameter(
+            "may be provided at most once",
+            param_hint=param_hint,
+        )
+    if not values:
+        return None
+    value = values[0]
+    if not value or has_control_characters(value):
+        raise typer.BadParameter(
+            "must be non-empty and must not contain control characters",
+            param_hint=param_hint,
+        )
+    return value
 
 
 def _apply_build_overrides(

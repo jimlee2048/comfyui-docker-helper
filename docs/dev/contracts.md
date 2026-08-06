@@ -73,6 +73,8 @@ Four related toolchain identities have independent owners:
 
 Current version equality between uv and `uv_build` does not couple them. The installed cdh package has no host uv runtime dependency. Canonical wheel construction uses PyPA's isolated build interface and package-owned release projection inputs rather than the repository checkout as an installed runtime source.
 
+The host Buildx invocation owns selected external-cache specifications and passes them as opaque values through the Docker transport. Docker and Buildx own backend syntax, credentials, compatibility, and cache transport. Cache selection is external execution state, so it remains outside the canonical planning, materialization, and evidence chain and carries no cdh replay or authentication claim.
+
 The release projection deliberately contains the package/build metadata and runtime resources required for the canonical wheel. The root and release-projection project tables declare identical package-owned inline Markdown `project.readme.text`; repository README file bytes are not package or wheel inputs. Replacing the inline value with a repository file or otherwise changing this input boundary requires an explicit packaging decision rather than an incidental documentation edit.
 
 ## Python and PyTorch package-source ownership

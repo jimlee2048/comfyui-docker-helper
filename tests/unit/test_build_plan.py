@@ -912,7 +912,7 @@ def test_build_plan_rejects_syntactic_but_semantic_authority_forgery(
     if mutation == "cuda-repository":
         document["toolchain"]["cuda_image"]["repository"] = "ghcr.io/attacker/cuda"
     elif mutation == "uv-repository":
-        document["toolchain"]["uv_image"]["repository"] = "ghcr.io/attacker/uv"
+        document["toolchain"]["uv_image"]["repository"] = "ghcr.io/astral-sh/uv"
     elif mutation == "cuda-tag-grammar":
         document["toolchain"]["cuda_image"]["tag"] = "13.0.3-cudnn-devel-ubuntu20.04"
     elif mutation == "cuda-derived-channel":

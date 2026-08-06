@@ -1,6 +1,6 @@
 """Single code authority for exact project-owned identities."""
 
-UV_IMAGE_REPOSITORY = "ghcr.io/astral-sh/uv"
+UV_IMAGE_REPOSITORY = "astral/uv"
 COMFYUI_REPOSITORY = "https://github.com/comfyanonymous/ComfyUI.git"
 # v0.11.0 is the first formal release to declare its runtime requests dependency.
 COMFYUI_MINIMUM_VERSION = "0.11.0"

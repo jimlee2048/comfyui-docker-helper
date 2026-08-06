@@ -26,7 +26,7 @@ _DIGEST = f"sha256:{'1' * 64}"
 class _FakeImage:
     os = "linux"
     architecture = "amd64"
-    repo_digests = (f"ghcr.io/astral-sh/uv@{_DIGEST}",)
+    repo_digests = (f"astral/uv@{_DIGEST}",)
 
 
 class _FakeContainer:
@@ -127,7 +127,7 @@ def test_requirements_compile_uses_one_exact_owned_container(
         ),
     )
 
-    reference = f"ghcr.io/astral-sh/uv@{_DIGEST}"
+    reference = f"astral/uv@{_DIGEST}"
     assert client.image.inspect_calls == [reference]
     assert client.image.pulls == []
     assert len(client.container.create_calls) == 1
@@ -185,7 +185,7 @@ def test_cache_miss_pulls_and_reinspects_exact_descriptor(
         ManagedPythonCatalogOperation("3.12.13"),
     )
 
-    reference = f"ghcr.io/astral-sh/uv@{_DIGEST}"
+    reference = f"astral/uv@{_DIGEST}"
     assert client.image.inspect_calls == [reference, reference]
     assert client.image.pulls == [(reference, "linux/amd64")]
     container = client.container.remove_calls[0][0]

@@ -173,7 +173,7 @@ def test_oci_tag_movement_returns_current_descriptor_without_local_catalog() -> 
             request, marker=INDEX_DIGEST_A if top_calls == 1 else INDEX_DIGEST_B
         )
 
-    request = OciIdentityRequest("uv-tool", "ghcr.io/astral-sh/uv", "latest")
+    request = OciIdentityRequest("uv-tool", "astral/uv", "latest")
     with _client(handler) as client:
         provider = HttpOciIdentityProvider(client)
         first = provider.resolve(request)

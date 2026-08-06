@@ -144,7 +144,7 @@ def test_uv_provider_returns_one_fixed_image_domain_result() -> None:
     request = OciRequestIdentity(
         type="oci",
         role="uv-tool",
-        repository="ghcr.io/astral-sh/uv",
+        repository="astral/uv",
         tag="0.11.28-debian-slim",
         platform="linux/amd64",
     )

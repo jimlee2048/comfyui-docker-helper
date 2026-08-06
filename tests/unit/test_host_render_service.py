@@ -553,7 +553,7 @@ def test_omitted_uv_selector_reconciles_the_rolling_provider_request(
         for entry in prepared.lock_result.lock.entries
         if isinstance(entry, UvImageLockEntry)
     )
-    assert uv_entry.repository == "ghcr.io/astral-sh/uv"
+    assert uv_entry.repository == "astral/uv"
     assert uv_entry.tag == "debian-slim"
     assert uv_entry.digest == DIGEST_B
     assert uv_entry.observed_version == "0.11.28"
@@ -875,7 +875,7 @@ def test_uv_descriptor_pre_reuse_validates_cross_dependent_lock_in_every_mode(
     uv_entry = next(
         entry for entry in corrected.entries if isinstance(entry, UvImageLockEntry)
     )
-    assert uv_entry.repository == "ghcr.io/astral-sh/uv"
+    assert uv_entry.repository == "astral/uv"
     assert uv_entry.tag == "0.11.28-debian-slim"
     assert uv_entry.digest == DIGEST_B
 

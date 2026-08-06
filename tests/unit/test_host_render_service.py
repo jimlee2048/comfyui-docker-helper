@@ -63,6 +63,7 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     ProviderIdentityAcquirer,
 )
 from comfyui_docker_helper.host.identity_providers import (
+    DockerEngineOciIdentityProvider,
     DockerManagedPythonIdentityProvider,
     FilesystemLocalExecutableIdentityProvider,
 )
@@ -804,16 +805,19 @@ def test_matching_lock_modes_do_not_construct_docker_authority(
     output = tmp_path / "context"
     _prepare(config, output, FakeAcquirer())
 
-    def fail_docker_client():
-        raise AssertionError("matching lock must not construct DockerClient")
+    def fail_cli_docker_client():
+        raise AssertionError("matching lock must not construct CLI DockerClient")
+
+    def fail_engine_docker_client():
+        raise AssertionError("matching lock must not construct Engine DockerClient")
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.uv_docker_executor.DockerClient",
-        fail_docker_client,
+        fail_cli_docker_client,
     )
     unused = _NoProviderCalls()
     docker_backed = ProviderIdentityAcquirer(
-        oci=unused,
+        oci=DockerEngineOciIdentityProvider(fail_engine_docker_client),
         managed_python=DockerManagedPythonIdentityProvider(),
         comfyui=unused,
         registry=unused,

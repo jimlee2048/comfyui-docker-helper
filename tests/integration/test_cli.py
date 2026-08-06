@@ -1080,6 +1080,16 @@ platforms = ["linux/amd64"]
             "must be non-empty and must not contain control characters",
         ),
         (
+            ["--cache-from", "   "],
+            "--cache-from",
+            "must be non-empty and must not contain control characters",
+        ),
+        (
+            ["--cache-to", "   "],
+            "--cache-to",
+            "must be non-empty and must not contain control characters",
+        ),
+        (
             ["--cache-to", "type=local,dest=/cache\nbroken"],
             "--cache-to",
             "must be non-empty and must not contain control characters",

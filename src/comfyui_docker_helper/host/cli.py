@@ -15,7 +15,10 @@ from comfyui_docker_helper.config.service import (
     ConfigurationServiceError,
     load_validate_config_result,
 )
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.value_validation import (
+    has_control_characters,
+    is_argv_value,
+)
 from comfyui_docker_helper.host.buildx import (
     BuildxOutput,
     KnownHostsBinding,
@@ -475,7 +478,7 @@ def _admit_single_cache_spec(values: list[str], param_hint: str) -> str | None:
     if not values:
         return None
     value = values[0]
-    if not value or has_control_characters(value):
+    if not is_argv_value(value):
         raise typer.BadParameter(
             "must be non-empty and must not contain control characters",
             param_hint=param_hint,

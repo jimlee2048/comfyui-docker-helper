@@ -120,7 +120,6 @@ version = "{python_version}"
 {uv_tools}
 [pytorch]
 version = "2.12.1"
-extra_packages = ["torchvision==0.27.1"]
 [comfyui]
 version = "0.11.0"
 install_cli = {str(install_cli).lower()}

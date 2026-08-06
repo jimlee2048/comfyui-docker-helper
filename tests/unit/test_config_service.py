@@ -19,7 +19,6 @@ type = "cuda"
 version = "13.0.3"
 [pytorch]
 version = "2.12.1"
-extra_packages = ["torchvision==0.27.1"]
 [comfyui]
 version = "0.11.0"
 install_cli = true

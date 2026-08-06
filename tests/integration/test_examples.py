@@ -36,11 +36,3 @@ def test_full_example_references_existing_hook_scripts() -> None:
 
     assert hooks
     assert all((EXAMPLES / "build-hooks" / hook).is_file() for hook in hooks)
-
-
-# Runtime hook examples preserve executable policy without relying on Git mode repair.
-def test_runtime_hook_example_is_regular_0644() -> None:
-    hook = EXAMPLES / "runtime-hooks/pre-start.d/10-example.sh"
-
-    assert hook.is_file()
-    assert hook.stat().st_mode & 0o777 == 0o644

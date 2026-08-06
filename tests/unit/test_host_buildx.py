@@ -119,6 +119,46 @@ def test_buildx_maps_default_ssh_and_known_hosts_bindings(
         assert calls[0]["secrets"] == expected_secrets
 
 
+def test_buildx_maps_opaque_cache_specs_without_logging_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+    logs: list[str] = []
+    cache_from = "type=local,src=/cache source"
+    cache_to = "type=registry,ref=example/cache:build,mode=max"
+    binding = KnownHostsBinding(
+        secret_id="known-hosts",
+        source=Path("/trust/known_hosts"),
+    )
+
+    def build(context: Path, **kwargs: object):
+        calls.append({"context": context, **kwargs})
+        yield "progress"
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.buildx.DockerClient",
+        lambda: SimpleNamespace(buildx=SimpleNamespace(build=build)),
+    )
+
+    build_image_with_buildx(
+        image_tags=("image:tag",),
+        context_dir=tmp_path,
+        forward_default_ssh=True,
+        known_hosts_bindings=(binding,),
+        cache_from=cache_from,
+        cache_to=cache_to,
+        log=logs.append,
+    )
+
+    assert calls[0]["ssh"] == "default"
+    assert calls[0]["secrets"] == ["type=file,id=known-hosts,src=/trust/known_hosts"]
+    assert calls[0]["cache_from"] == cache_from
+    assert calls[0]["cache_to"] == cache_to
+    assert all(
+        cache_from not in message and cache_to not in message for message in logs
+    )
+
+
 @pytest.mark.parametrize(
     ("output", "load", "push", "completed"),
     [

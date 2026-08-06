@@ -39,6 +39,22 @@ cdh host build \
 
 `host build` 会渲染所选上下文，然后调用 Buildx。请提供一个或多个 `-t/--tag` 值，或者配置 `[build].tags`。使用 `--load` 将镜像载入本地 Docker 镜像存储，或使用 `--push` 推送至 registry；这两个选项互斥。
 
+### 复用外部构建缓存
+
+使用 `--cache-from` 复用已有的 BuildKit 缓存，使用 `--cache-to` 保存本次构建生成的缓存：
+
+```bash
+cdh host build \
+  -f examples/minimal.toml \
+  --context-dir .cdh/build/current \
+  -t registry.example.com/my-comfy:dev \
+  --push \
+  --cache-from "type=registry,ref=registry.example.com/cache/my-comfy:build" \
+  --cache-to "type=registry,ref=registry.example.com/cache/my-comfy:build,mode=max"
+```
+
+每个选项接受一个 Docker Buildx 缓存参数，也可以单独使用。请选择当前 Buildx builder 支持的缓存后端，并通过 Docker 或缓存后端支持的凭据机制完成认证，不要把凭据放入选项值中。请参阅 Docker 的[缓存后端文档](https://docs.docker.com/build/cache/backends/)。
+
 ## 通过 SSH 访问私有 Git 自定义节点
 
 当 direct-Git 自定义节点或其递归 submodule 需要宿主机上的 SSH 身份时，使用 `--ssh`。构建前，请将所需身份加载到默认 SSH agent，并将服务器主机密钥加入默认的 OpenSSH known-hosts 文件。

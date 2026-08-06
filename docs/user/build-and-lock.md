@@ -39,6 +39,22 @@ cdh host build \
 
 `host build` renders the selected context and then invokes Buildx. Supply one or more `-t/--tag` values or configure `[build].tags`. Use `--load` for the local Docker image store or `--push` for a registry; the two options are mutually exclusive.
 
+### Reuse an external build cache
+
+Use `--cache-from` to reuse an existing BuildKit cache and `--cache-to` to save the cache produced by the build:
+
+```bash
+cdh host build \
+  -f examples/minimal.toml \
+  --context-dir .cdh/build/current \
+  -t registry.example.com/my-comfy:dev \
+  --push \
+  --cache-from "type=registry,ref=registry.example.com/cache/my-comfy:build" \
+  --cache-to "type=registry,ref=registry.example.com/cache/my-comfy:build,mode=max"
+```
+
+Each option accepts one Docker Buildx cache specification and may be used independently. Use any cache backend supported by the active Buildx builder. Authenticate through Docker or the backend's supported credential mechanism rather than placing credentials in the option value. See Docker's [cache backend documentation](https://docs.docker.com/build/cache/backends/).
+
 ## Private Git custom nodes over SSH
 
 Use `--ssh` when a direct-Git custom node or one of its recursive submodules needs an SSH identity from the host. Before building, load the required identity into the default SSH agent and add the server's host key to a default OpenSSH known-hosts file.

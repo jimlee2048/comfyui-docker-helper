@@ -50,6 +50,8 @@ def build_image_with_buildx(
     log: BuildxLogger = print,
     forward_default_ssh: bool = False,
     known_hosts_bindings: Sequence[KnownHostsBinding] = (),
+    cache_from: str | None = None,
+    cache_to: str | None = None,
 ) -> None:
     """Build one image through the public python-on-whales Buildx API."""
     base_directory = Path(cwd) if cwd is not None else Path.cwd()
@@ -71,6 +73,12 @@ def build_image_with_buildx(
         buildkit_inputs["secrets"] = [
             _render_known_hosts_secret(binding) for binding in known_hosts_bindings
         ]
+    # The public python-on-whales API cannot express repeated opaque cache
+    # specifications. Keep these values single and do not parse Buildx CSV.
+    if cache_from is not None:
+        buildkit_inputs["cache_from"] = cache_from
+    if cache_to is not None:
+        buildkit_inputs["cache_to"] = cache_to
 
     try:
         stream = DockerClient().buildx.build(

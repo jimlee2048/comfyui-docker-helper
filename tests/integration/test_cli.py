@@ -513,6 +513,27 @@ def test_ssh_option_is_exposed_only_by_host_build(cli_runner: CliRunner) -> None
     assert "--ssh" not in validate_output
 
 
+def test_build_cache_options_are_exposed_only_by_host_build(
+    cli_runner: CliRunner,
+) -> None:
+    build_output = _plain_output(
+        cli_runner.invoke(app, ["host", "build", "--help"]).output
+    )
+    render_output = _plain_output(
+        cli_runner.invoke(app, ["host", "render", "--help"]).output
+    )
+    validate_output = _plain_output(
+        cli_runner.invoke(app, ["host", "validate", "--help"]).output
+    )
+
+    for option in ("--cache-from", "--cache-to"):
+        assert option in build_output
+        assert option not in render_output
+        assert option not in validate_output
+    normalized = " ".join(build_output.replace("│", " ").split())
+    assert normalized.count("May be provided once") == 2
+
+
 # Host help distinguishes Docker-backed resolution from later Buildx
 # materialization.
 def test_host_render_and_build_help_explain_locked_docker_boundaries(
@@ -985,6 +1006,8 @@ platforms = ["linux/amd64"]
             "output": kwargs["output"],
             "platforms": kwargs["platforms"],
             "context_dir": kwargs["context_dir"],
+            "cache_from": kwargs["cache_from"],
+            "cache_to": kwargs["cache_to"],
         }
 
     monkeypatch.setattr(
@@ -1014,6 +1037,10 @@ platforms = ["linux/amd64"]
             "--tag",
             "cli:second",
             "--push",
+            "--cache-from",
+            "type=local,src=/cache source",
+            "--cache-to",
+            "type=gha,scope=build",
         ],
     )
 
@@ -1028,8 +1055,155 @@ platforms = ["linux/amd64"]
         "output": plan_build.output,
         "platforms": plan_build.platforms,
         "context_dir": context,
+        "cache_from": "type=local,src=/cache source",
+        "cache_to": "type=gha,scope=build",
     }
     assert seen["buildx_ssh"] == (False, ())
+
+
+@pytest.mark.parametrize(
+    ("cache_args", "expected_option", "expected_message"),
+    [
+        (
+            ["--cache-from", "first", "--cache-from", "second"],
+            "--cache-from",
+            "may be provided at most once",
+        ),
+        (
+            ["--cache-to", "first", "--cache-to", "second"],
+            "--cache-to",
+            "may be provided at most once",
+        ),
+        (
+            ["--cache-from", ""],
+            "--cache-from",
+            "must be non-empty and must not contain control characters",
+        ),
+        (
+            ["--cache-from", "   "],
+            "--cache-from",
+            "must be non-empty and must not contain control characters",
+        ),
+        (
+            ["--cache-to", "   "],
+            "--cache-to",
+            "must be non-empty and must not contain control characters",
+        ),
+        (
+            ["--cache-to", "type=local,dest=/cache\nbroken"],
+            "--cache-to",
+            "must be non-empty and must not contain control characters",
+        ),
+    ],
+)
+def test_build_cache_options_fail_before_provider_work(
+    cache_args: list[str],
+    expected_option: str,
+    expected_message: str,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+
+    def forbidden_providers():
+        raise AssertionError("invalid cache input reached provider work")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers",
+        forbidden_providers,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--tag",
+            "image:test",
+            *cache_args,
+        ],
+    )
+
+    assert result.exit_code == 2
+    plain_output = _plain_output(result.output)
+    assert expected_option in plain_output
+    normalized = " ".join(plain_output.replace("│", " ").split())
+    assert expected_message in normalized
+    assert "invalid cache input reached provider work" not in plain_output
+
+
+@pytest.mark.parametrize(
+    ("cache_args", "expected_cache_from", "expected_cache_to"),
+    [
+        (["--cache-from", "type=local,src=/cache"], "type=local,src=/cache", None),
+        (["--cache-to", "type=gha,scope=build"], None, "type=gha,scope=build"),
+    ],
+)
+def test_build_cache_import_and_export_are_independent(
+    cache_args: list[str],
+    expected_cache_from: str | None,
+    expected_cache_to: str | None,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    plan_build = BuildOutputPlan(
+        tags=("image:test",),
+        output="load",
+        platforms=("linux/amd64",),
+    )
+
+    @contextmanager
+    def providers():
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(warnings=(), plan=SimpleNamespace(build=plan_build))
+
+    def buildx(**kwargs):
+        seen["cache_from"] = kwargs["cache_from"]
+        seen["cache_to"] = kwargs["cache_to"]
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.default_planning_providers", providers
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.prepare_render_context", prepare
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.cli.build_image_with_buildx", buildx
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--tag",
+            "image:test",
+            *cache_args,
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen == {
+        "cache_from": expected_cache_from,
+        "cache_to": expected_cache_to,
+    }
 
 
 # SSH build admission preserves opt-in defaults, validation order, and

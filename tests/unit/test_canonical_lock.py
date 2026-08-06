@@ -53,7 +53,7 @@ def _entries():
         ),
         UvImageLockEntry(
             request_digest=DIGEST_B,
-            repository="ghcr.io/astral-sh/uv",
+            repository="astral/uv",
             tag="0.11.28-debian-slim",
             digest=DIGEST_C,
             kind="index",

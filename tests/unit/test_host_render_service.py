@@ -63,6 +63,7 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     ProviderIdentityAcquirer,
 )
 from comfyui_docker_helper.host.identity_providers import (
+    DockerEngineOciIdentityProvider,
     DockerManagedPythonIdentityProvider,
     FilesystemLocalExecutableIdentityProvider,
 )
@@ -120,7 +121,6 @@ version = "{python_version}"
 {uv_tools}
 [pytorch]
 version = "2.12.1"
-extra_packages = ["torchvision==0.27.1"]
 [comfyui]
 version = "0.11.0"
 install_cli = {str(install_cli).lower()}
@@ -553,7 +553,7 @@ def test_omitted_uv_selector_reconciles_the_rolling_provider_request(
         for entry in prepared.lock_result.lock.entries
         if isinstance(entry, UvImageLockEntry)
     )
-    assert uv_entry.repository == "ghcr.io/astral-sh/uv"
+    assert uv_entry.repository == "astral/uv"
     assert uv_entry.tag == "debian-slim"
     assert uv_entry.digest == DIGEST_B
     assert uv_entry.observed_version == "0.11.28"
@@ -804,16 +804,19 @@ def test_matching_lock_modes_do_not_construct_docker_authority(
     output = tmp_path / "context"
     _prepare(config, output, FakeAcquirer())
 
-    def fail_docker_client():
-        raise AssertionError("matching lock must not construct DockerClient")
+    def fail_cli_docker_client():
+        raise AssertionError("matching lock must not construct CLI DockerClient")
+
+    def fail_engine_docker_client():
+        raise AssertionError("matching lock must not construct Engine DockerClient")
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.uv_docker_executor.DockerClient",
-        fail_docker_client,
+        fail_cli_docker_client,
     )
     unused = _NoProviderCalls()
     docker_backed = ProviderIdentityAcquirer(
-        oci=unused,
+        oci=DockerEngineOciIdentityProvider(fail_engine_docker_client),
         managed_python=DockerManagedPythonIdentityProvider(),
         comfyui=unused,
         registry=unused,
@@ -875,7 +878,7 @@ def test_uv_descriptor_pre_reuse_validates_cross_dependent_lock_in_every_mode(
     uv_entry = next(
         entry for entry in corrected.entries if isinstance(entry, UvImageLockEntry)
     )
-    assert uv_entry.repository == "ghcr.io/astral-sh/uv"
+    assert uv_entry.repository == "astral/uv"
     assert uv_entry.tag == "0.11.28-debian-slim"
     assert uv_entry.digest == DIGEST_B
 

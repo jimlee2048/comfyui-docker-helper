@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -9,7 +10,7 @@ import stat
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from types import FrameType
 from typing import Literal
 
 from python_on_whales import Container, DockerClient, Image
+from python_on_whales.client_config import ParsingError
 from python_on_whales.exceptions import DockerException, NoSuchContainer, NoSuchImage
 
 from comfyui_docker_helper.errors import ApplicationError
@@ -29,6 +31,7 @@ _VERSION_PATTERN = re.compile(
 _OWNER_LABEL = "comfyui-docker-helper.uv-operation"
 _CONTAINER_PREFIX = "cdh-uv-resolver-"
 _UV_PATH = "/usr/local/bin/uv"
+_UV_VERSION_LABEL = "org.opencontainers.image.version"
 _KEEPER_COMMAND = ("/usr/bin/sleep", "infinity")
 _REQUIREMENTS_INPUT_PATH = "/tmp/requirements.in"
 _PYTORCH_INPUT_PATH = "/tmp/pyproject.toml"
@@ -57,6 +60,10 @@ class UvDockerExecutorError(ApplicationError):
         self.stdout = stdout
         self.stderr = stderr
         super().__init__(message)
+
+
+class UvImageEvidenceError(UvDockerExecutorError):
+    """An inspected uv image does not match its required exact evidence."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +234,24 @@ class UvDockerExecutor:
         return result
 
 
+def uv_image_version_label(descriptor: UvResolverDescriptor) -> str | None:
+    """Ensure one exact uv image and return its unparsed version label."""
+    try:
+        image = _ensure_exact_image(DockerClient(), descriptor)
+        config = image.config
+        labels = config.labels if config is not None else None
+        if not isinstance(labels, Mapping):
+            return None
+        value = labels.get(_UV_VERSION_LABEL)
+        return value if isinstance(value, str) else None
+    except UvImageEvidenceError:
+        raise
+    except UvDockerExecutorError:
+        raise
+    except (DockerException, ParsingError, json.JSONDecodeError, OSError) as error:
+        raise UvDockerExecutorError("uv resolver image operation failed") from error
+
+
 @dataclass(frozen=True, slots=True)
 class _OwnedContainerIdentity:
     name: str
@@ -265,9 +290,10 @@ def _ensure_exact_image(
     if (
         image.os != "linux"
         or image.architecture != "amd64"
-        or f"{UV_IMAGE_REPOSITORY}@{descriptor.digest}" not in image.repo_digests
+        or f"{UV_IMAGE_REPOSITORY}@{descriptor.digest}"
+        not in (image.repo_digests or ())
     ):
-        raise UvDockerExecutorError(
+        raise UvImageEvidenceError(
             "uv resolver image does not match the exact descriptor and platform"
         )
     return image

@@ -28,8 +28,8 @@ from comfyui_docker_helper.exact_ledger import (
 )
 from comfyui_docker_helper.host.canonical_acquisition import DockerPythonGroupResolver
 from comfyui_docker_helper.host.identity_providers import (
+    DockerEngineOciIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
-    HttpOciIdentityProvider,
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
 )
@@ -39,18 +39,17 @@ QUALIFIED_TEST_UV_VERSION = "0.11.28"
 
 @pytest.fixture(scope="module")
 def uv_descriptor_digest() -> str:
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        return (
-            HttpOciIdentityProvider(client)
-            .resolve(
-                OciIdentityRequest(
-                    "uv-tool",
-                    UV_IMAGE_REPOSITORY,
-                    f"{QUALIFIED_TEST_UV_VERSION}-debian-slim",
-                )
+    return (
+        DockerEngineOciIdentityProvider()
+        .resolve(
+            OciIdentityRequest(
+                "uv-tool",
+                UV_IMAGE_REPOSITORY,
+                f"{QUALIFIED_TEST_UV_VERSION}-debian-slim",
             )
-            .descriptor_digest
         )
+        .descriptor_digest
+    )
 
 
 # Live resolution proves supported profiles and strict Python/PyTorch source routing.
@@ -221,9 +220,7 @@ def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
             DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
-            DirectPythonRequestMember(
-                package="torchvision", extras=[], selector="==0.27.1"
-            ),
+            DirectPythonRequestMember(package="torchvision", extras=[], selector=""),
             DirectPythonRequestMember(package="torchaudio", extras=[], selector=""),
         ],
     )

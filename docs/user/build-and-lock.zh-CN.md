@@ -23,7 +23,7 @@ cdh host render \
   --overwrite
 ```
 
-渲染会复用匹配的 lock。当缺失或已变更的基于 uv 的解析结果必须重新生成时，它可能会使用 Docker。`--overwrite` 只会替换现有且有效的 cdh 管理上下文；否则 cdh 会拒绝替换。
+渲染会复用匹配的 lock。当必须解析缺失或已变化的镜像身份时，它可能会使用 Docker。`--overwrite` 只会替换现有且有效的 cdh 管理上下文；否则 cdh 会拒绝替换。
 
 cdh 会先准备好完整的替代上下文，再更改现有上下文。`--overwrite` 不保证崩溃恢复：进程或宿主机中断可能导致输出缺失，而先前的完整上下文仍保留在同级备份中。如果诊断给出了保留备份的路径，请保留该备份，以便在重试前进行人工恢复。
 
@@ -38,6 +38,22 @@ cdh host build \
 ```
 
 `host build` 会渲染所选上下文，然后调用 Buildx。请提供一个或多个 `-t/--tag` 值，或者配置 `[build].tags`。使用 `--load` 将镜像载入本地 Docker 镜像存储，或使用 `--push` 推送至 registry；这两个选项互斥。
+
+### 复用外部构建缓存
+
+使用 `--cache-from` 复用已有的 BuildKit 缓存，使用 `--cache-to` 保存本次构建生成的缓存：
+
+```bash
+cdh host build \
+  -f examples/minimal.toml \
+  --context-dir .cdh/build/current \
+  -t registry.example.com/my-comfy:dev \
+  --push \
+  --cache-from "type=registry,ref=registry.example.com/cache/my-comfy:build" \
+  --cache-to "type=registry,ref=registry.example.com/cache/my-comfy:build,mode=max"
+```
+
+每个选项接受一个 Docker Buildx 缓存参数，也可以单独使用。请选择当前 Buildx builder 支持的缓存后端，并通过 Docker 或缓存后端支持的凭据机制完成认证，不要把凭据放入选项值中。请参阅 Docker 的[缓存后端文档](https://docs.docker.com/build/cache/backends/)。
 
 ## 通过 SSH 访问私有 Git 自定义节点
 
@@ -122,7 +138,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 `--check` 不能与 lock 策略或 dry-run 修饰选项组合使用。`--locked` 与 `--upgrade-lock` 互斥。当 `--dry-run` 与 lock 策略组合使用时，预览行为会取代上下文比较或发布。
 
-不写入并不一定意味着离线。默认、`--check` 和 `--dry-run` 可能会调用解析提供方；当当前 lock 无法提供所需的基于 uv 的解析结果时，它们可能还需要 Docker。完整且匹配的 lock 可使这些路径无需 Docker。只有 `--locked` 禁止在协调期间调用解析提供方和 Docker；Docker Buildx 仍是 `host build` 的一项独立要求。
+不写入并不一定意味着离线。默认、`--check` 和 `--dry-run` 可能会调用解析提供方；当当前 lock 无法提供所需的镜像身份时，它们可能还需要 Docker。完整且匹配的 lock 可使这些路径无需 Docker。只有 `--locked` 禁止在协调期间调用解析提供方和 Docker；Docker Buildx 仍是 `host build` 的一项独立要求。
 
 格式错误或不受支持的 lock 文件会以失败关闭，并给出诊断信息，提示删除并重新生成 lock。
 

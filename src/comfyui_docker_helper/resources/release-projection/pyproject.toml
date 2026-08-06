@@ -44,6 +44,7 @@ classifiers = [
 dependencies = [
     "aria2p",
     "build>=1,<2",
+    "docker>=7.2,<8",
     "httpx",
     "packaging>=26.2",
     "pydantic>=2,<3",
@@ -63,7 +64,7 @@ Issues = "https://github.com/jimlee2048/comfyui-docker-helper/issues"
 Changelog = "https://github.com/jimlee2048/comfyui-docker-helper/releases"
 
 [build-system]
-requires = ["uv_build==0.11.32"]
+requires = ["uv_build==0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

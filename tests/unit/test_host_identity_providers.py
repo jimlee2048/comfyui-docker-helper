@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any
 
 import httpx
 import pytest
+from docker.errors import APIError, DockerException
 
 from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.identity_providers import (
     DirectGitIdentityRequest,
+    DockerEngineOciIdentityProvider,
     DockerManagedPythonIdentityProvider,
     FilesystemLocalExecutableIdentityProvider,
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
-    HttpOciIdentityProvider,
     HttpRegistryNodeIdentityProvider,
     IdentityProviderError,
     LocalExecutableIdentityRequest,
@@ -34,409 +33,270 @@ from comfyui_docker_helper.host.identity_providers import (
 )
 from comfyui_docker_helper.host.uv_docker_executor import (
     UvDockerExecutorError,
+    UvImageEvidenceError,
     UvResolverResult,
 )
 
 INDEX_DIGEST_A = f"sha256:{'a' * 64}"
-INDEX_DIGEST_B = f"sha256:{'b' * 64}"
-ARM64_DIGEST = f"sha256:{'d' * 64}"
 COMMIT_A = "1" * 40
 COMMIT_B = "2" * 40
-
-CONFIG_DOCUMENT = {
-    "os": "linux",
-    "architecture": "amd64",
-    "config": {
-        "Labels": {"org.opencontainers.image.version": "0.11.28-trixie-slim"},
-    },
-}
-CONFIG_CONTENT = json.dumps(CONFIG_DOCUMENT, separators=(",", ":")).encode()
-CONFIG_DIGEST = f"sha256:{hashlib.sha256(CONFIG_CONTENT).hexdigest()}"
-CHILD_DOCUMENT = {
-    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-    "config": {"digest": CONFIG_DIGEST},
-}
-CHILD_CONTENT = json.dumps(CHILD_DOCUMENT, separators=(",", ":")).encode()
-AMD64_DIGEST = f"sha256:{hashlib.sha256(CHILD_CONTENT).hexdigest()}"
 
 
 def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def _index_response(
-    request: httpx.Request,
+_MEDIA_TYPES = (
+    ("application/vnd.docker.distribution.manifest.list.v2+json", "index"),
+    ("application/vnd.oci.image.index.v1+json", "index"),
+    ("application/vnd.docker.distribution.manifest.v2+json", "manifest"),
+    ("application/vnd.oci.image.manifest.v1+json", "manifest"),
+)
+
+
+def _distribution_document(
     *,
-    digest: str = INDEX_DIGEST_A,
-    platforms: Sequence[tuple[str, str, str]] = (
-        ("linux", "amd64", AMD64_DIGEST),
-        ("linux", "arm64", ARM64_DIGEST),
-    ),
-) -> httpx.Response:
-    manifests = [
-        {
-            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-            "digest": child_digest,
-            "platform": {"os": os_name, "architecture": architecture},
-        }
-        for os_name, architecture, child_digest in platforms
-    ]
-    response = httpx.Response(
-        200,
-        request=request,
-        json={
-            "mediaType": "application/vnd.oci.image.index.v1+json",
-            "manifests": manifests,
-            "annotations": {"test.identity": digest},
+    digest: object = INDEX_DIGEST_A,
+    media_type: object = "application/vnd.oci.image.index.v1+json",
+    platforms: object = None,
+) -> object:
+    return {
+        "Descriptor": {
+            "digest": digest,
+            "mediaType": media_type,
+            "size": "ignored",
+            "future-field": {"ignored": True},
         },
+        "Platforms": (
+            [
+                {"os": "linux", "architecture": "amd64", "variant": "ignored"},
+                {"os": "linux", "architecture": "arm64"},
+            ]
+            if platforms is None
+            else platforms
+        ),
+        "future-top-level": "ignored",
+    }
+
+
+class _FakeDistributionApi:
+    def __init__(self, response: object, error: BaseException | None = None) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[str] = []
+
+    def inspect_distribution(self, reference: str) -> object:
+        self.calls.append(reference)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class _FakeDockerSdkClient:
+    def __init__(self, response: object, error: BaseException | None = None) -> None:
+        self.api = _FakeDistributionApi(response, error)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+@pytest.mark.parametrize(("media_type", "kind"), _MEDIA_TYPES)
+def test_engine_oci_accepts_supported_descriptor_media_types(
+    media_type: str, kind: str
+) -> None:
+    client = _FakeDockerSdkClient(_distribution_document(media_type=media_type))
+    evidence_calls: list[object] = []
+    provider = DockerEngineOciIdentityProvider(
+        lambda: client,
+        evidence_calls.append,  # type: ignore[arg-type]
     )
-    response.headers["Docker-Content-Digest"] = (
-        f"sha256:{hashlib.sha256(response.content).hexdigest()}"
-    )
-    return response
 
-
-def _child_response(
-    request: httpx.Request,
-    *,
-    content: bytes = CHILD_CONTENT,
-    digest: str = AMD64_DIGEST,
-) -> httpx.Response:
-    return httpx.Response(
-        200,
-        request=request,
-        headers={"Docker-Content-Digest": digest},
-        content=content,
+    identity = provider.resolve(
+        OciIdentityRequest("cuda-base", "nvidia/cuda", "13.0.3-cudnn-devel-ubuntu24.04")
     )
 
-
-def _config_response(
-    request: httpx.Request, *, content: bytes = CONFIG_CONTENT
-) -> httpx.Response:
-    return httpx.Response(200, request=request, content=content)
-
-
-def _oci_index_handler(
-    request: httpx.Request,
-    *,
-    marker: str = INDEX_DIGEST_A,
-    platforms: Sequence[tuple[str, str, str]] = (
-        ("linux", "amd64", AMD64_DIGEST),
-        ("linux", "arm64", ARM64_DIGEST),
-    ),
-) -> httpx.Response:
-    if "/blobs/" in request.url.path:
-        return _config_response(request)
-    if request.url.path.endswith(f"/manifests/{AMD64_DIGEST}"):
-        return _child_response(request)
-    return _index_response(request, digest=marker, platforms=platforms)
-
-
-# Host providers authenticate exact upstream identities and sanitize all failures.
-def test_oci_index_preserves_top_descriptor_and_exact_platform_binding() -> None:
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return _oci_index_handler(request)
-
-    with _client(handler) as client:
-        identity = HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest(
-                "cuda-base", "nvidia/cuda", "13.0.3-cudnn-devel-ubuntu24.04"
-            )
-        )
-
-    assert identity.role == "cuda-base"
-    assert identity.repository == "nvidia/cuda"
-    assert identity.descriptor_digest.startswith("sha256:")
-    assert identity.descriptor_kind == "index"
+    assert identity.descriptor_digest == INDEX_DIGEST_A
+    assert identity.descriptor_kind == kind
     assert identity.platform == "linux/amd64"
-    assert seen[0].url.host == "registry-1.docker.io"
-    assert seen[0].url.path.startswith("/v2/nvidia/cuda/manifests/")
-    assert "application/vnd.oci.image.index.v1+json" in seen[0].headers["Accept"]
-    assert seen[1].url.path.endswith(f"/manifests/{AMD64_DIGEST}")
-    assert seen[2].url.path.endswith(f"/blobs/{CONFIG_DIGEST}")
+    assert identity.resolved_version is None
+    assert client.api.calls == ["nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04"]
+    assert client.close_calls == 1
+    assert evidence_calls == []
 
 
-def test_oci_tag_movement_returns_current_descriptor_without_local_catalog() -> None:
-    top_calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal top_calls
-        if (
-            "/blobs/" not in request.url.path
-            and "/manifests/sha256:" not in request.url.path
-        ):
-            top_calls += 1
-        return _oci_index_handler(
-            request, marker=INDEX_DIGEST_A if top_calls == 1 else INDEX_DIGEST_B
+def test_engine_oci_ignores_unused_fields_and_duplicate_target_platforms() -> None:
+    client = _FakeDockerSdkClient(
+        _distribution_document(
+            platforms=[
+                {"os": "linux", "architecture": "amd64"},
+                {"os": "windows", "architecture": "amd64"},
+                {"os": "linux", "architecture": "amd64", "future": True},
+                "ignored platform",
+            ]
         )
+    )
 
-    request = OciIdentityRequest("uv-tool", "ghcr.io/astral-sh/uv", "latest")
-    with _client(handler) as client:
-        provider = HttpOciIdentityProvider(client)
-        first = provider.resolve(request)
-        second = provider.resolve(request)
+    identity = DockerEngineOciIdentityProvider(lambda: client).resolve(
+        OciIdentityRequest("cuda-base", "nvidia/cuda", "exact")
+    )
 
-    assert request.stability is SelectorStability.MOVING
-    assert first.descriptor_digest != second.descriptor_digest
-    assert first.resolved_version == second.resolved_version == "0.11.28"
-
-
-def test_oci_missing_tag_is_a_typed_not_found_failure() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, request=request)
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest(
-                "cuda-base",
-                "nvidia/cuda",
-                "13.0.3-cudnn-devel-ubuntu-does-not-exist",
-            )
-        )
-
-    assert raised.value.source == "OCI registry"
-    assert raised.value.kind is ProviderFailureKind.NOT_FOUND
-
-
-def test_oci_bearer_challenge_retries_without_exposing_token() -> None:
-    calls: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        if request.url.host == "auth.example.test":
-            return httpx.Response(200, request=request, json={"token": "secret-token"})
-        if "Authorization" not in request.headers:
-            return httpx.Response(
-                401,
-                request=request,
-                headers={
-                    "WWW-Authenticate": (
-                        'Bearer realm="https://auth.example.test/token",'
-                        'service="registry.test",scope="repository:owner/image:pull"'
-                    )
-                },
-            )
-        assert request.headers["Authorization"] == "Bearer secret-token"
-        return _oci_index_handler(request)
-
-    with _client(handler) as client:
-        identity = HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "moving")
-        )
-
-    assert identity.descriptor_digest.startswith("sha256:")
-    assert len(calls) == 5
-
-
-def test_oci_single_manifest_checks_config_platform() -> None:
-    config_content = b'{"os":"linux","architecture":"amd64"}'
-    config_digest = f"sha256:{hashlib.sha256(config_content).hexdigest()}"
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "/blobs/" in request.url.path:
-            return httpx.Response(
-                200,
-                request=request,
-                content=config_content,
-            )
-        response = httpx.Response(
-            200,
-            request=request,
-            json={
-                "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "config": {"digest": config_digest},
-            },
-        )
-        response.headers["Docker-Content-Digest"] = (
-            f"sha256:{hashlib.sha256(response.content).hexdigest()}"
-        )
-        return response
-
-    with _client(handler) as client:
-        identity = HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "exact")
-        )
-
-    assert identity.descriptor_kind == "manifest"
-    assert identity.descriptor_digest.startswith("sha256:")
-
-
-def test_oci_rejects_descriptor_header_that_does_not_match_manifest_bytes() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        response = _index_response(request)
-        response.headers["Docker-Content-Digest"] = INDEX_DIGEST_A
-        return response
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "tag")
-        )
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
-
-
-def test_oci_index_rejects_child_manifest_digest_mismatch() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith(f"/manifests/{AMD64_DIGEST}"):
-            return _child_response(request, content=b"not the selected manifest")
-        return _oci_index_handler(request)
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "tag")
-        )
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
-
-
-def test_oci_index_rejects_child_manifest_media_type_mismatch() -> None:
-    child_document = {
-        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-        "config": {"digest": CONFIG_DIGEST},
-    }
-    child_content = json.dumps(child_document, separators=(",", ":")).encode()
-    child_digest = f"sha256:{hashlib.sha256(child_content).hexdigest()}"
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith(f"/manifests/{child_digest}"):
-            return _child_response(request, content=child_content, digest=child_digest)
-        return _index_response(request, platforms=(("linux", "amd64", child_digest),))
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "tag")
-        )
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
-
-
-def test_oci_index_rejects_child_config_digest_mismatch() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "/blobs/" in request.url.path:
-            return _config_response(request, content=b'{"os":"linux"}')
-        return _oci_index_handler(request)
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "tag")
-        )
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
-
-
-def test_oci_index_rejects_config_platform_mismatch() -> None:
-    config_content = b'{"os":"linux","architecture":"arm64"}'
-    config_digest = f"sha256:{hashlib.sha256(config_content).hexdigest()}"
-    child_document = {
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "config": {"digest": config_digest},
-    }
-    child_content = json.dumps(child_document, separators=(",", ":")).encode()
-    child_digest = f"sha256:{hashlib.sha256(child_content).hexdigest()}"
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "/blobs/" in request.url.path:
-            return _config_response(request, content=config_content)
-        if request.url.path.endswith(f"/manifests/{child_digest}"):
-            return _child_response(request, content=child_content, digest=child_digest)
-        return _index_response(request, platforms=(("linux", "amd64", child_digest),))
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "tag")
-        )
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
-
-
-@pytest.mark.parametrize("tag", ["", "-bad", "bad\ntag"])
-def test_oci_rejects_invalid_tags_before_http(tag: str) -> None:
-    called = False
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal called
-        called = True
-        return _index_response(request)
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", tag)
-        )
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_REQUEST
-    assert called is False
-
-
-def test_oci_rejects_invalid_role_before_http() -> None:
-    called = False
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal called
-        called = True
-        return _index_response(request)
-
-    with (
-        _client(handler) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("invalid", "registry.test/owner/image", "tag")  # type: ignore[arg-type]
-        )
-
-    assert raised.value.kind is ProviderFailureKind.INVALID_REQUEST
-    assert called is False
+    assert identity.descriptor_digest == INDEX_DIGEST_A
 
 
 @pytest.mark.parametrize(
-    ("platforms", "kind"),
+    "oci_request",
     [
-        (("linux", "arm64", ARM64_DIGEST), ProviderFailureKind.NOT_FOUND),
-        (
-            (
-                ("linux", "amd64", AMD64_DIGEST),
-                ("linux", "amd64", ARM64_DIGEST),
-            ),
-            ProviderFailureKind.INVALID_RESPONSE,
+        OciIdentityRequest("cuda-base", "nvidia/cuda", ""),
+        OciIdentityRequest("cuda-base", "bad:repository", "tag"),
+        OciIdentityRequest("invalid", "nvidia/cuda", "tag"),  # type: ignore[arg-type]
+        OciIdentityRequest(
+            "cuda-base",
+            "nvidia/cuda",
+            "tag",
+            "linux/arm64",  # type: ignore[arg-type]
         ),
     ],
 )
-def test_oci_rejects_missing_or_ambiguous_platform(
-    platforms: Any, kind: ProviderFailureKind
+def test_engine_oci_rejects_invalid_request_before_client_construction(
+    oci_request: OciIdentityRequest,
 ) -> None:
-    normalized = platforms if isinstance(platforms[0], tuple) else (platforms,)
-    with (
-        _client(
-            lambda request: _index_response(request, platforms=normalized)
-        ) as client,
-        pytest.raises(IdentityProviderError) as raised,
-    ):
-        HttpOciIdentityProvider(client).resolve(
-            OciIdentityRequest("cuda-base", "registry.test/owner/image", "tag")
-        )
+    factory_calls = 0
+
+    def factory() -> _FakeDockerSdkClient:
+        nonlocal factory_calls
+        factory_calls += 1
+        return _FakeDockerSdkClient(_distribution_document())
+
+    provider = DockerEngineOciIdentityProvider(factory)  # type: ignore[arg-type]
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(oci_request)
+
+    assert raised.value.kind is ProviderFailureKind.INVALID_REQUEST
+    assert factory_calls == 0
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        None,
+        {},
+        {"Descriptor": {}, "Platforms": []},
+        _distribution_document(digest="sha256:not-canonical"),
+        _distribution_document(media_type="application/octet-stream"),
+        _distribution_document(platforms=[{"os": "linux", "architecture": "arm64"}]),
+    ],
+)
+def test_engine_oci_rejects_missing_or_malformed_consumed_response_fields(
+    document: object,
+) -> None:
+    provider = DockerEngineOciIdentityProvider(
+        lambda: _FakeDockerSdkClient(document)  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(OciIdentityRequest("cuda-base", "nvidia/cuda", "tag"))
+
+    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        DockerException("secret daemon failure"),
+        APIError("secret not found", response=httpx.Response(404)),
+        OSError("secret socket failure"),
+    ],
+)
+def test_engine_oci_maps_sdk_and_engine_failures_to_coarse_network(
+    error: BaseException,
+) -> None:
+    client = _FakeDockerSdkClient(_distribution_document(), error)
+    provider = DockerEngineOciIdentityProvider(lambda: client)  # type: ignore[arg-type]
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(OciIdentityRequest("cuda-base", "nvidia/cuda", "missing"))
+
+    assert raised.value.kind is ProviderFailureKind.NETWORK
+    assert "secret" not in str(raised.value)
+    assert client.api.calls == ["nvidia/cuda:missing"]
+    assert client.close_calls == 1
+
+
+def test_engine_oci_maps_client_factory_failure_without_cleanup() -> None:
+    def factory() -> _FakeDockerSdkClient:
+        raise OSError("secret connection failure")
+
+    provider = DockerEngineOciIdentityProvider(factory)  # type: ignore[arg-type]
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(OciIdentityRequest("cuda-base", "nvidia/cuda", "tag"))
+
+    assert raised.value.kind is ProviderFailureKind.NETWORK
+
+
+@pytest.mark.parametrize(
+    ("label", "resolved_version"),
+    [
+        ("0.11.28", "0.11.28"),
+        ("0.11.28-trixie-slim", "0.11.28"),
+    ],
+)
+def test_engine_oci_uv_uses_exact_image_label_evidence(
+    label: str, resolved_version: str
+) -> None:
+    client = _FakeDockerSdkClient(_distribution_document())
+    descriptors = []
+
+    def evidence(descriptor):
+        descriptors.append(descriptor)
+        return label
+
+    identity = DockerEngineOciIdentityProvider(lambda: client, evidence).resolve(
+        OciIdentityRequest("uv-tool", "astral/uv", "latest")
+    )
+
+    assert identity.resolved_version == resolved_version
+    assert descriptors[0].digest == INDEX_DIGEST_A
+    assert descriptors[0].platform == "linux/amd64"
+
+
+@pytest.mark.parametrize("label", [None, "", "v0.11.28", "0.11"])
+def test_engine_oci_uv_rejects_missing_or_malformed_version_label(
+    label: str | None,
+) -> None:
+    provider = DockerEngineOciIdentityProvider(
+        lambda: _FakeDockerSdkClient(_distribution_document()),
+        lambda descriptor: label,
+    )
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(OciIdentityRequest("uv-tool", "astral/uv", "latest"))
+
+    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (UvImageEvidenceError("mismatch"), ProviderFailureKind.INVALID_RESPONSE),
+        (UvDockerExecutorError("pull failed"), ProviderFailureKind.NETWORK),
+    ],
+)
+def test_engine_oci_uv_maps_narrow_image_evidence_failures(
+    error: UvDockerExecutorError, kind: ProviderFailureKind
+) -> None:
+    def evidence(descriptor):
+        del descriptor
+        raise error
+
+    provider = DockerEngineOciIdentityProvider(
+        lambda: _FakeDockerSdkClient(_distribution_document()), evidence
+    )
+
+    with pytest.raises(IdentityProviderError) as raised:
+        provider.resolve(OciIdentityRequest("uv-tool", "astral/uv", "latest"))
 
     assert raised.value.kind is kind
 

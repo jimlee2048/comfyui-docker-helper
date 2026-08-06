@@ -68,10 +68,12 @@ Four related toolchain identities have independent owners:
 
 - The configuration-selected official uv OCI image resolves to an exact descriptor. That descriptor owns uv-backed canonical resolution and the final image's `uv` and `uvx`.
 - The exact `uv_build` requirement in the root and [release projection](../../src/comfyui_docker_helper/resources/release-projection/pyproject.toml) owns only the isolated backend used to build the cdh wheel.
-- `python-on-whales` owns the closed host Docker transport used by resolver containers and Buildx. It is not serialized as an image identity.
+- Host Docker access has two boundaries. Tag-to-descriptor acquisition goes through the selected Docker Engine and remains metadata-only, so daemon-owned registry routing and authentication apply without materializing image layers. Exact-image materialization and inspection, resolver-container lifecycle, and Buildx use the CLI-backed Docker transport. The current adapters are the official Docker SDK and `python-on-whales`, respectively; neither transport dependency is serialized as an image identity.
 - The one validated canonical cdh wheel, bound by version and SHA-256, is the package-to-image installation boundary.
 
 Current version equality between uv and `uv_build` does not couple them. The installed cdh package has no host uv runtime dependency. Canonical wheel construction uses PyPA's isolated build interface and package-owned release projection inputs rather than the repository checkout as an installed runtime source.
+
+The host Buildx invocation owns selected external-cache specifications and passes them as opaque values through the Docker transport. Docker and Buildx own backend syntax, credentials, compatibility, and cache transport. Cache selection is external execution state, so it remains outside the canonical planning, materialization, and evidence chain and carries no cdh replay or authentication claim.
 
 The release projection deliberately contains the package/build metadata and runtime resources required for the canonical wheel. The root and release-projection project tables declare identical package-owned inline Markdown `project.readme.text`; repository README file bytes are not package or wheel inputs. Replacing the inline value with a repository file or otherwise changing this input boundary requires an explicit packaging decision rather than an incidental documentation edit.
 

@@ -85,6 +85,8 @@ Materialization re-verifies supplied local and release bytes and projects the co
 
 When `host build --ssh` is applicable to a direct-Git custom node, the host admits only a non-empty default-agent environment reference before provider work. After context preparation, it maps the default agent and whichever default user/system known-hosts paths exist directly into the Buildx invocation. These compatibility inputs bypass configuration, reconciliation, BuildPlan, and materialization; rendering remains a function of BuildPlan and declares only stable optional mount identities for a direct-Git plan.
 
+After context preparation, the host forwards any selected external-cache import or export specification directly to Buildx. Cache selection belongs to host Docker execution rather than the BuildPlan or rendered context; see the [Docker transport contract](contracts.md#uv-release-backend-docker-transport-and-cdh-wheel) for the complete ownership boundary.
+
 The Dockerfile installs the toolchain and application, processes configured nodes and files, and invokes final observation after all build mutations. Final observation rechecks current image state and publishes the manifest; it does not make another planning decision.
 
 ### Run the container lifecycle

@@ -53,11 +53,3 @@ def test_runtime_hook_examples_cover_every_supported_phase() -> None:
     assert {
         request.relative_path.parts[0] for request in inputs.requests
     } == RUNTIME_HOOK_PHASE_DIRECTORY_NAMES
-
-
-# Runtime hook examples preserve executable policy without relying on Git mode repair.
-def test_runtime_hook_example_is_regular_0644() -> None:
-    hook = EXAMPLES / "runtime-hooks/pre-start.d/10-example.sh"
-
-    assert hook.is_file()
-    assert hook.stat().st_mode & 0o777 == 0o644

@@ -59,7 +59,7 @@ def _requests(*, application_extras: bool = False):
         OciRequestIdentity(
             type="oci",
             role="uv-tool",
-            repository="ghcr.io/astral-sh/uv",
+            repository="astral/uv",
             tag="0.11.28-debian-slim",
             platform="linux/amd64",
         ),

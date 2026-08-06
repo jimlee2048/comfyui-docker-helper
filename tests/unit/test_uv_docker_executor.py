@@ -17,16 +17,39 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     RequirementsCompileOperation,
     UvDockerExecutor,
     UvDockerExecutorError,
+    UvImageEvidenceError,
     UvResolverDescriptor,
+    uv_image_version_label,
 )
 
 _DIGEST = f"sha256:{'1' * 64}"
 
 
 class _FakeImage:
-    os = "linux"
-    architecture = "amd64"
-    repo_digests = (f"astral/uv@{_DIGEST}",)
+    def __init__(
+        self,
+        *,
+        os_name: str = "linux",
+        architecture: str = "amd64",
+        repo_digests: tuple[str, ...] | None = (f"astral/uv@{_DIGEST}",),
+        labels: object = None,
+        config_error: BaseException | None = None,
+    ) -> None:
+        self.os = os_name
+        self.architecture = architecture
+        self.repo_digests = repo_digests
+        self._labels = (
+            {"org.opencontainers.image.version": "0.11.28-trixie-slim"}
+            if labels is None
+            else labels
+        )
+        self._config_error = config_error
+
+    @property
+    def config(self) -> object:
+        if self._config_error is not None:
+            raise self._config_error
+        return SimpleNamespace(labels=self._labels)
 
 
 class _FakeContainer:
@@ -49,8 +72,11 @@ class _FakeContainer:
 
 
 class _FakeImageApi:
-    def __init__(self, *, cache_miss: bool = False) -> None:
+    def __init__(
+        self, *, cache_miss: bool = False, image: _FakeImage | None = None
+    ) -> None:
         self.cache_miss = cache_miss
+        self.image = image or _FakeImage()
         self.inspect_calls: list[str] = []
         self.pulls: list[tuple[str, str]] = []
 
@@ -58,7 +84,7 @@ class _FakeImageApi:
         self.inspect_calls.append(reference)
         if self.cache_miss and len(self.inspect_calls) == 1:
             raise NoSuchImage(["docker", "image", "inspect"], 1)
-        return _FakeImage()
+        return self.image
 
 
 class _FakeContainerApi:
@@ -94,13 +120,15 @@ class _FakeContainerApi:
 
 
 class _FakeDockerClient:
-    def __init__(self, *, cache_miss: bool = False) -> None:
-        self.image = _FakeImageApi(cache_miss=cache_miss)
+    def __init__(
+        self, *, cache_miss: bool = False, image: _FakeImage | None = None
+    ) -> None:
+        self.image = _FakeImageApi(cache_miss=cache_miss, image=image)
         self.container = _FakeContainerApi()
 
     def pull(self, reference: str, *, platform: str) -> _FakeImage:
         self.image.pulls.append((reference, platform))
-        return _FakeImage()
+        return self.image.image
 
 
 def _install_client(monkeypatch: pytest.MonkeyPatch, client: _FakeDockerClient) -> None:
@@ -194,6 +222,69 @@ def test_cache_miss_pulls_and_reinspects_exact_descriptor(
     assert resolver_argv[-1] == "3.12.13"
 
 
+@pytest.mark.parametrize("cache_miss", [False, True])
+def test_uv_image_version_label_reuses_exact_image_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    cache_miss: bool,
+) -> None:
+    client = _FakeDockerClient(cache_miss=cache_miss)
+    _install_client(monkeypatch, client)
+    descriptor = UvResolverDescriptor(_DIGEST)
+
+    label = uv_image_version_label(descriptor)
+
+    reference = f"astral/uv@{_DIGEST}"
+    assert label == "0.11.28-trixie-slim"
+    assert client.image.inspect_calls == (
+        [reference, reference] if cache_miss else [reference]
+    )
+    assert client.image.pulls == ([(reference, "linux/amd64")] if cache_miss else [])
+
+
+def test_uv_evidence_then_executor_does_not_pull_exact_image_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeDockerClient(cache_miss=True)
+    _install_client(monkeypatch, client)
+    descriptor = UvResolverDescriptor(_DIGEST)
+
+    assert uv_image_version_label(descriptor) == "0.11.28-trixie-slim"
+    UvDockerExecutor().execute(
+        descriptor,
+        ManagedPythonCatalogOperation("3.12.13"),
+    )
+
+    reference = f"astral/uv@{_DIGEST}"
+    assert client.image.inspect_calls == [reference, reference, reference]
+    assert client.image.pulls == [(reference, "linux/amd64")]
+
+
+@pytest.mark.parametrize("labels", [None, {}, {"unrelated": "value"}])
+def test_uv_image_version_label_returns_none_without_string_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    labels: object,
+) -> None:
+    image = _FakeImage(labels=labels if labels is not None else [])
+    client = _FakeDockerClient(image=image)
+    _install_client(monkeypatch, client)
+
+    assert uv_image_version_label(UvResolverDescriptor(_DIGEST)) is None
+
+
+def test_uv_image_version_label_maps_complete_attribute_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeDockerClient(image=_FakeImage(config_error=OSError("secret")))
+    _install_client(monkeypatch, client)
+
+    with pytest.raises(UvDockerExecutorError) as raised:
+        uv_image_version_label(UvResolverDescriptor(_DIGEST))
+
+    assert type(raised.value) is UvDockerExecutorError
+    assert str(raised.value) == "uv resolver image operation failed"
+    assert "secret" not in str(raised.value)
+
+
 @pytest.mark.parametrize(
     ("attribute", "value"),
     [
@@ -207,15 +298,13 @@ def test_image_verification_rejects_wrong_descriptor_or_platform(
     attribute: str,
     value: object,
 ) -> None:
-    client = _FakeDockerClient()
+    image = _FakeImage()
+    client = _FakeDockerClient(image=image)
     _install_client(monkeypatch, client)
-    monkeypatch.setattr(_FakeImage, attribute, value)
+    setattr(image, attribute, value)
 
-    with pytest.raises(UvDockerExecutorError, match="exact descriptor"):
-        UvDockerExecutor().execute(
-            UvResolverDescriptor(_DIGEST),
-            ManagedPythonCatalogOperation("3.13.14"),
-        )
+    with pytest.raises(UvImageEvidenceError, match="exact descriptor"):
+        uv_image_version_label(UvResolverDescriptor(_DIGEST))
 
     assert client.container.create_calls == []
 

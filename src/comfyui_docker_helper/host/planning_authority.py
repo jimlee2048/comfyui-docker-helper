@@ -45,11 +45,11 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     ProviderIdentityAcquirer,
 )
 from comfyui_docker_helper.host.identity_providers import (
+    DockerEngineOciIdentityProvider,
     DockerManagedPythonIdentityProvider,
     FilesystemLocalExecutableIdentityProvider,
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
-    HttpOciIdentityProvider,
     HttpRegistryNodeIdentityProvider,
     LocalExecutableIdentityRequest,
 )
@@ -87,7 +87,7 @@ def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
     canonical_wheel = build_canonical_wheel()
     with httpx.Client(follow_redirects=True, timeout=30.0) as client:
         provider = ProviderIdentityAcquirer(
-            oci=HttpOciIdentityProvider(client),
+            oci=DockerEngineOciIdentityProvider(),
             managed_python=DockerManagedPythonIdentityProvider(),
             comfyui=GitOfficialComfyUIIdentityProvider(),
             registry=HttpRegistryNodeIdentityProvider(client),

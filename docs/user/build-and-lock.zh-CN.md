@@ -23,7 +23,7 @@ cdh host render \
   --overwrite
 ```
 
-渲染会复用匹配的 lock。当缺失或已变更的基于 uv 的解析结果必须重新生成时，它可能会使用 Docker。`--overwrite` 只会替换现有且有效的 cdh 管理上下文；否则 cdh 会拒绝替换。
+渲染会复用匹配的 lock。当必须解析缺失或已变化的镜像身份时，它可能会使用 Docker。`--overwrite` 只会替换现有且有效的 cdh 管理上下文；否则 cdh 会拒绝替换。
 
 cdh 会先准备好完整的替代上下文，再更改现有上下文。`--overwrite` 不保证崩溃恢复：进程或宿主机中断可能导致输出缺失，而先前的完整上下文仍保留在同级备份中。如果诊断给出了保留备份的路径，请保留该备份，以便在重试前进行人工恢复。
 
@@ -138,7 +138,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 `--check` 不能与 lock 策略或 dry-run 修饰选项组合使用。`--locked` 与 `--upgrade-lock` 互斥。当 `--dry-run` 与 lock 策略组合使用时，预览行为会取代上下文比较或发布。
 
-不写入并不一定意味着离线。默认、`--check` 和 `--dry-run` 可能会调用解析提供方；当当前 lock 无法提供所需的基于 uv 的解析结果时，它们可能还需要 Docker。完整且匹配的 lock 可使这些路径无需 Docker。只有 `--locked` 禁止在协调期间调用解析提供方和 Docker；Docker Buildx 仍是 `host build` 的一项独立要求。
+不写入并不一定意味着离线。默认、`--check` 和 `--dry-run` 可能会调用解析提供方；当当前 lock 无法提供所需的镜像身份时，它们可能还需要 Docker。完整且匹配的 lock 可使这些路径无需 Docker。只有 `--locked` 禁止在协调期间调用解析提供方和 Docker；Docker Buildx 仍是 `host build` 的一项独立要求。
 
 格式错误或不受支持的 lock 文件会以失败关闭，并给出诊断信息，提示删除并重新生成 lock。
 

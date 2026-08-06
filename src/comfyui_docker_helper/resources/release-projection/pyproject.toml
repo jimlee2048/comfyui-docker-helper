@@ -44,6 +44,7 @@ classifiers = [
 dependencies = [
     "aria2p",
     "build>=1,<2",
+    "docker>=7.2,<8",
     "httpx",
     "packaging>=26.2",
     "pydantic>=2,<3",

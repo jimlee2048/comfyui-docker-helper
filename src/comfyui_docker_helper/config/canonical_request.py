@@ -44,6 +44,9 @@ from comfyui_docker_helper.config.final_planning import (
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigDomainResult,
 )
+from comfyui_docker_helper.config.git_credentials import (
+    canonicalize_git_credential_context,
+)
 from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
 from comfyui_docker_helper.exact_ledger import (
@@ -589,7 +592,18 @@ def _image_config_digest(config: FinalConfig) -> str:
 
 def _image_config_projection(config: FinalConfig) -> dict[str, object]:
     document: dict[str, object] = config.model_dump(mode="json")
+    document.pop("secrets")
     build = cast(dict[str, object], document["build"])
+    cdh = cast(dict[str, object], document["cdh"])
+    git = cast(dict[str, object], cdh["git"])
+    git["credentials"] = [
+        {
+            "match": canonicalize_git_credential_context(route.match),
+            "username": route.username,
+            "password": {"secret": route.password.secret},
+        }
+        for route in config.cdh.git.credentials
+    ]
     return {
         **document,
         "build": {

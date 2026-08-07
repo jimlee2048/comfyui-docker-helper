@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticError,
+    DiagnosticSeverity,
+)
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigError,
@@ -21,6 +25,23 @@ def _document() -> dict[str, Any]:
         "pytorch": {"version": "2.12.1"},
         "comfyui": {"version": "0.11.0", "install_manager": False},
     }
+
+
+def _credential_document() -> dict[str, Any]:
+    document = _document()
+    document["secrets"] = {"private_git": {"env": "CDH_PRIVATE_GIT_TOKEN"}}
+    document["cdh"] = {
+        "git": {
+            "credentials": [
+                {
+                    "match": "https://github.com/acme/",
+                    "username": "x-access-token",
+                    "password": {"secret": "private_git"},
+                }
+            ]
+        }
+    }
+    return document
 
 
 def _codes(config: FinalConfig, *, build_hooks_dir: Path | None = None) -> set[str]:
@@ -50,6 +71,130 @@ def test_final_structure_uses_exact_baseline_defaults() -> None:
     assert config.compute_platform.cuda.image_distro == "ubuntu24.04"
     assert config.comfyui.install_cli is True
     assert _diagnostics(config) == ()
+
+
+def test_secret_sources_and_git_credentials_use_typed_complete_values() -> None:
+    config = validate_final_config_structure(_credential_document())
+
+    assert config.secrets["private_git"].env == "CDH_PRIVATE_GIT_TOKEN"
+    route = config.cdh.git.credentials[0]
+    assert route.password.secret == "private_git"
+    assert _diagnostics(config) == ()
+
+    document = _credential_document()
+    document["cdh"]["git"]["credentials"][0]["password"] = "plaintext-token"
+    with pytest.raises(FinalConfigError) as raised:
+        validate_final_config_structure(document)
+    assert raised.value.diagnostics[0].path == (
+        "cdh",
+        "git",
+        "credentials",
+        0,
+        "password",
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("invalid-secret-name", "secret.invalid_name"),
+        ("missing-source", "secret.invalid_source"),
+        ("two-sources", "secret.invalid_source"),
+        ("invalid-env", "secret.invalid_env"),
+        ("invalid-reference", "secret.invalid_reference"),
+        ("unknown-reference", "secret.unknown_reference"),
+        ("empty-username", "git_credential.invalid_username"),
+        ("query-match", "git_credential.invalid_match"),
+        ("password-userinfo", "git_credential.password_userinfo_forbidden"),
+    ],
+)
+def test_secret_and_credential_domains_reject_only_invalid_authored_metadata(
+    mutation: str,
+    code: str,
+) -> None:
+    document = _credential_document()
+    source = document["secrets"]["private_git"]
+    route = document["cdh"]["git"]["credentials"][0]
+    if mutation == "invalid-secret-name":
+        document["secrets"] = {"Bad.Name": source}
+    elif mutation == "missing-source":
+        source.clear()
+    elif mutation == "two-sources":
+        source["file"] = "token-file"
+    elif mutation == "invalid-env":
+        source["env"] = "9INVALID"
+    elif mutation == "invalid-reference":
+        route["password"]["secret"] = "Bad.Name"
+    elif mutation == "unknown-reference":
+        route["password"]["secret"] = "not_defined"
+    elif mutation == "empty-username":
+        route["username"] = ""
+    elif mutation == "query-match":
+        route["match"] = "https://github.com/acme/?"
+    else:
+        route["match"] = "https://user:synthetic-marker@github.com/acme/"
+
+    config = validate_final_config_structure(document)
+
+    assert code in _codes(config)
+    assert all("synthetic-marker" not in item.message for item in _diagnostics(config))
+
+
+def test_git_credential_context_duplicates_and_http_warnings_are_semantic() -> None:
+    document = _credential_document()
+    document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "http://EXAMPLE.com:80/team/",
+            "username": "first",
+            "password": {"secret": "private_git"},
+        },
+        {
+            "match": "http://example.com/team",
+            "username": "second",
+            "password": {"secret": "private_git"},
+        },
+        {
+            "match": "https://example.com/other/",
+            "username": "secure",
+            "password": {"secret": "private_git"},
+        },
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [item.code for item in diagnostics] == [
+        "git_credential.insecure_http",
+        "git_credential.insecure_http",
+        "git_credential.duplicate_match",
+    ]
+    assert [item.severity for item in diagnostics] == [
+        DiagnosticSeverity.WARNING,
+        DiagnosticSeverity.WARNING,
+        DiagnosticSeverity.ERROR,
+    ]
+
+
+def test_direct_git_password_userinfo_is_rejected_but_username_only_is_valid() -> None:
+    document = _document()
+    document["comfyui"]["custom_nodes"] = [
+        {
+            "type": "git",
+            "url": "https://alice@example.com/public.git",
+        },
+        {
+            "type": "git",
+            "url": "https://alice:synthetic-marker@example.com/private.git",
+        },
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [item.code for item in diagnostics] == [
+        "custom_node.password_userinfo_forbidden"
+    ]
+    assert "synthetic-marker" not in diagnostics[0].message
 
 
 @pytest.mark.parametrize(

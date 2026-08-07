@@ -225,7 +225,7 @@ def prepare_render_context(
         plan=plan,
         lock_result=accepted,
         output_plan=output_plan,
-        warnings=result.warnings,
+        warnings=(),
     )
 
 

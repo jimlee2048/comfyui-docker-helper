@@ -11,7 +11,9 @@ type MergeKey = tuple[str, ...]
 
 _CUSTOM_NODES_PATH = ("comfyui", "custom_nodes")
 _FILES_PATH = ("files",)
-_KEYED_ARRAY_PATHS = frozenset({_CUSTOM_NODES_PATH, _FILES_PATH})
+_GIT_CREDENTIALS_PATH = ("cdh", "git", "credentials")
+_SECRETS_PATH = ("secrets",)
+_KEYED_ARRAY_PATHS = frozenset({_CUSTOM_NODES_PATH, _FILES_PATH, _GIT_CREDENTIALS_PATH})
 
 
 def merge_toml_documents(documents: Iterable[RawDocument]) -> dict[str, Any]:
@@ -38,6 +40,14 @@ def _merge_mapping(
 
 
 def _merge_value(base: Any, override: Any, path: RawPath) -> Any:
+    if (
+        len(path) == 2
+        and path[:1] == _SECRETS_PATH
+        and isinstance(base, Mapping)
+        and isinstance(override, Mapping)
+    ):
+        return deepcopy(override)
+
     if isinstance(base, Mapping) and isinstance(override, Mapping):
         return _merge_mapping(base, override, path)
 
@@ -68,7 +78,11 @@ def _merge_keyed_array(
         key = _item_key(item, path)
         if key is not None and base_counts[key] == 1 and override_counts[key] == 1:
             index = unique_base_indexes[key]
-            result[index] = _merge_value(result[index], item, (*path, "*"))
+            result[index] = (
+                deepcopy(item)
+                if path == _GIT_CREDENTIALS_PATH
+                else _merge_value(result[index], item, (*path, "*"))
+            )
         else:
             result.append(deepcopy(item))
 
@@ -114,5 +128,9 @@ def _item_key(item: Any, path: RawPath) -> MergeKey | None:
         filename = item.get("filename")
         if isinstance(directory, str) and isinstance(filename, str):
             return ("file", directory, filename)
+
+    if path == _GIT_CREDENTIALS_PATH:
+        match = item.get("match")
+        return ("git-credential", match) if isinstance(match, str) else None
 
     return None

@@ -174,6 +174,9 @@ def render(
         validated = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
         )
+        render_configuration_warnings(
+            _format_config_files(config_files), validated.warnings
+        )
         build_hook_source_root = admit_build_hook_source(
             validated,
             build_hooks_dir,
@@ -342,6 +345,9 @@ def build(
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
+    render_configuration_warnings(
+        _format_config_files(config_files), validated.warnings
+    )
     effective_tags = _resolve_effective_image_tags(
         cli_tags=cli_tags,
         config_tags=validated.config.build.tags,

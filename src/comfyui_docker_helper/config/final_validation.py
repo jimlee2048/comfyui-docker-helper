@@ -19,11 +19,18 @@ from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticError,
     DiagnosticPath,
+    DiagnosticSeverity,
 )
 from comfyui_docker_helper.config.final_models import (
     FinalConfig,
+    FinalGitCredentialConfig,
     FinalGitCustomNodeConfig,
     FinalRegistryCustomNodeConfig,
+)
+from comfyui_docker_helper.config.git_credentials import (
+    GitCredentialContextError,
+    has_password_userinfo,
+    parse_git_credential_context,
 )
 from comfyui_docker_helper.config.hook_validation import validate_hook_relative_path
 from comfyui_docker_helper.config.os_packages import (
@@ -60,6 +67,7 @@ _EXACT_RELEASE_PATTERN = re.compile(
 )
 _CUDA_VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_SECRET_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _OCI_TAG_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z")
 _SCP_GIT_URL_PATTERN = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+:[^\s:][^\s]*\Z")
 _GIT_REF_FORBIDDEN_CHARACTERS = frozenset(" ~^:?*[\\")
@@ -115,6 +123,7 @@ class FinalConfigDomainResult:
     git_targets: tuple[LocatedValue, ...]
     file_targets: tuple[LocatedValue, ...]
     controlled_extra_args: tuple[LocatedValue, ...]
+    git_credential_contexts: tuple[LocatedValue, ...]
     workspace: PurePosixPath | None
     comfyui_path: PurePosixPath | None
 
@@ -150,6 +159,7 @@ def validate_final_config_domains(
     git_targets: list[LocatedValue] = []
     file_targets: list[LocatedValue] = []
     controlled_extra_args: list[LocatedValue] = []
+    git_credential_contexts: list[LocatedValue] = []
 
     _validate_platform_domain(config, diagnostics)
     _validate_python_domain(config, package_requirements, diagnostics)
@@ -169,6 +179,8 @@ def validate_final_config_domains(
     )
     _validate_file_domains(config, file_targets, diagnostics)
     _validate_build_domains(config, diagnostics)
+    _validate_secret_domains(config, diagnostics)
+    _validate_git_credential_domains(config, git_credential_contexts, diagnostics)
 
     return FinalConfigDomainResult(
         diagnostics=tuple(diagnostics),
@@ -184,6 +196,7 @@ def validate_final_config_domains(
         git_targets=tuple(git_targets),
         file_targets=tuple(file_targets),
         controlled_extra_args=tuple(controlled_extra_args),
+        git_credential_contexts=tuple(git_credential_contexts),
         workspace=workspace,
         comfyui_path=comfyui_path,
     )
@@ -222,6 +235,13 @@ def validate_final_config_semantics(
         "Git URLs must be unique",
         diagnostics,
     )
+    _duplicate_diagnostics(
+        domains.git_credential_contexts,
+        "git_credential.duplicate_match",
+        "credential match contexts must be unique after normalization",
+        diagnostics,
+    )
+    _secret_reference_diagnostics(config, diagnostics)
     _duplicate_diagnostics(
         domains.git_targets,
         "custom_node.duplicate_git_target_dir",
@@ -834,8 +854,17 @@ def _validate_git_node(
     git_targets: list[LocatedValue],
     diagnostics: list[Diagnostic],
 ) -> None:
-    url_valid = is_git_source_url(node.url)
-    if not url_valid:
+    password_userinfo = has_password_userinfo(node.url)
+    url_valid = is_git_source_url(node.url) and not password_userinfo
+    if password_userinfo:
+        diagnostics.append(
+            Diagnostic(
+                (*path, "url"),
+                "custom_node.password_userinfo_forbidden",
+                "HTTP(S) Git URLs must not contain a password",
+            )
+        )
+    elif not url_valid:
         diagnostics.append(
             Diagnostic(
                 (*path, "url"),
@@ -1058,6 +1087,117 @@ def _validate_build_domains(
             release_available=release_available,
         )
     )
+
+
+def _validate_secret_domains(
+    config: FinalConfig,
+    diagnostics: list[Diagnostic],
+) -> None:
+    for name, source in config.secrets.items():
+        path: DiagnosticPath = ("secrets", name)
+        if _SECRET_NAME_PATTERN.fullmatch(name) is None:
+            diagnostics.append(
+                Diagnostic(
+                    path,
+                    "secret.invalid_name",
+                    "names must match [a-z][a-z0-9_-]{0,63}",
+                )
+            )
+        if (source.env is None) == (source.file is None):
+            diagnostics.append(
+                Diagnostic(
+                    path,
+                    "secret.invalid_source",
+                    "must define exactly one of env or file",
+                )
+            )
+        if (
+            source.env is not None
+            and _ENVIRONMENT_NAME_PATTERN.fullmatch(source.env) is None
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "env"),
+                    "secret.invalid_env",
+                    "environment variable names must match [A-Za-z_][A-Za-z0-9_]*",
+                )
+            )
+
+
+def _validate_git_credential_domains(
+    config: FinalConfig,
+    contexts: list[LocatedValue],
+    diagnostics: list[Diagnostic],
+) -> None:
+    for index, route in enumerate(config.cdh.git.credentials):
+        path: DiagnosticPath = ("cdh", "git", "credentials", index)
+        _validate_git_credential_route(route, path, contexts, diagnostics)
+
+
+def _validate_git_credential_route(
+    route: FinalGitCredentialConfig,
+    path: DiagnosticPath,
+    contexts: list[LocatedValue],
+    diagnostics: list[Diagnostic],
+) -> None:
+    try:
+        context = parse_git_credential_context(route.match)
+    except GitCredentialContextError as error:
+        code = (
+            "git_credential.password_userinfo_forbidden"
+            if error.code == "password_userinfo"
+            else "git_credential.invalid_match"
+        )
+        diagnostics.append(Diagnostic((*path, "match"), code, str(error)))
+    else:
+        contexts.append(LocatedValue((*path, "match"), context.canonical_url))
+        if context.scheme == "http":
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "match"),
+                    "git_credential.insecure_http",
+                    "credentials sent over HTTP lack TLS transport confidentiality",
+                    DiagnosticSeverity.WARNING,
+                )
+            )
+
+    if not route.username or any(
+        character in route.username for character in "\x00\r\n"
+    ):
+        diagnostics.append(
+            Diagnostic(
+                (*path, "username"),
+                "git_credential.invalid_username",
+                "must be non-empty and contain no NUL, CR, or LF",
+            )
+        )
+    if _SECRET_NAME_PATTERN.fullmatch(route.password.secret) is None:
+        diagnostics.append(
+            Diagnostic(
+                (*path, "password", "secret"),
+                "secret.invalid_reference",
+                "Secret references must match [a-z][a-z0-9_-]{0,63}",
+            )
+        )
+
+
+def _secret_reference_diagnostics(
+    config: FinalConfig,
+    diagnostics: list[Diagnostic],
+) -> None:
+    for index, route in enumerate(config.cdh.git.credentials):
+        name = route.password.secret
+        if (
+            _SECRET_NAME_PATTERN.fullmatch(name) is not None
+            and name not in config.secrets
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    ("cdh", "git", "credentials", index, "password", "secret"),
+                    "secret.unknown_reference",
+                    "must reference a defined Secret",
+                )
+            )
 
 
 def _duplicate_diagnostics(

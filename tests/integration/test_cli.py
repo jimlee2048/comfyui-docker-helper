@@ -84,6 +84,22 @@ ref = "1111111111111111111111111111111111111111"
         )
 
 
+def _write_http_credential_config(path: Path) -> None:
+    _write_minimal_config(path)
+    with path.open("a") as config:
+        config.write(
+            """
+[secrets.private_git]
+file = "missing-token-file"
+
+[[cdh.git.credentials]]
+match = "http://git.example.test/team/"
+username = "token-user"
+password = { secret = "private_git" }
+"""
+        )
+
+
 def _write_registry_config(path: Path) -> None:
     _write_minimal_config(path)
     path.write_text(
@@ -745,6 +761,39 @@ def test_host_validate_remains_offline_and_does_not_construct_providers(
 
     assert result.exit_code == 0
     assert result.output == ""
+
+
+@pytest.mark.parametrize("command", ["validate", "render", "build"])
+def test_http_credential_warning_precedes_provider_or_docker_initialization(
+    command: str,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_http_credential_config(config)
+
+    class BoundaryReached(RuntimeError):
+        pass
+
+    def fail_providers():
+        raise BoundaryReached("planning provider boundary reached")
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+    args = ["host", command, "-f", str(config)]
+    if command == "render":
+        args.extend(("-o", str(tmp_path / "context")))
+    elif command == "build":
+        args.extend(("-t", "example:test", "--context-dir", str(tmp_path / "context")))
+
+    result = cli_runner.invoke(app, args)
+
+    assert result.output.count("git_credential.insecure_http") == 1
+    if command == "validate":
+        assert result.exit_code == 0
+        assert result.exception is None
+    else:
+        assert isinstance(result.exception, BoundaryReached)
 
 
 def test_render_option_conflict_is_one_short_diagnostic_without_traceback(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 
 import pytest
 from pydantic import ValidationError
@@ -459,6 +460,68 @@ def test_publication_only_config_change_does_not_change_image_plan(
     )
     assert first == second
     assert dump_build_plan_json(first) == dump_build_plan_json(second)
+
+
+def test_secret_sources_and_unused_definitions_do_not_change_image_plan() -> None:
+    base_document = final_config().model_dump(mode="python")
+    base_document["secrets"] = {
+        "private_git": {"env": "FIRST_TOKEN"},
+        "unused": {"file": "/first/unused"},
+    }
+    base_document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "https://EXAMPLE.com:443/team/",
+            "username": "token-user",
+            "password": {"secret": "private_git"},
+        }
+    ]
+    changed_document = deepcopy(base_document)
+    changed_document["secrets"] = {
+        "private_git": {"file": "../second-token"},
+        "another_unused": {"env": "OTHER_TOKEN"},
+    }
+    changed_document["cdh"]["git"]["credentials"][0]["match"] = (
+        "https://example.com/team"
+    )
+    first_config = FinalConfig.model_validate(base_document)
+    second_config = FinalConfig.model_validate(changed_document)
+
+    first = build_plan(first_config, accepted_resolution())
+    second = build_plan(second_config, accepted_resolution())
+
+    assert first.image_config_digest == second.image_config_digest
+    assert first == second
+
+
+@pytest.mark.parametrize("field", ["match", "username", "password"])
+def test_effective_git_credential_behavior_changes_image_identity(field: str) -> None:
+    document = final_config().model_dump(mode="python")
+    document["secrets"] = {
+        "first": {"env": "FIRST_TOKEN"},
+        "second": {"env": "SECOND_TOKEN"},
+    }
+    document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "https://example.com/team/",
+            "username": "token-user",
+            "password": {"secret": "first"},
+        }
+    ]
+    changed_document = deepcopy(document)
+    route = changed_document["cdh"]["git"]["credentials"][0]
+    if field == "match":
+        route["match"] = "https://example.com/other/"
+    elif field == "username":
+        route["username"] = "other-user"
+    else:
+        route["password"] = {"secret": "second"}
+
+    first = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+    second = build_plan(
+        FinalConfig.model_validate(changed_document), accepted_resolution()
+    )
+
+    assert first.image_config_digest != second.image_config_digest
 
 
 def test_image_config_change_updates_binding_deterministically() -> None:

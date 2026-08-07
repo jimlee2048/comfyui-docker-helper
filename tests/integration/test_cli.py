@@ -23,7 +23,7 @@ from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
 from comfyui_docker_helper.config.build_plan import build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
-from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
@@ -32,6 +32,10 @@ from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan, KnownHostsBinding
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
+from comfyui_docker_helper.host.secret_session import (
+    GIT_CREDENTIAL_SESSION_ENV,
+    HostSecretSessionError,
+)
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
 )
@@ -776,7 +780,7 @@ def test_http_credential_warning_precedes_provider_or_docker_initialization(
     class BoundaryReached(RuntimeError):
         pass
 
-    def fail_providers():
+    def fail_providers(**_kwargs):
         raise BoundaryReached("planning provider boundary reached")
 
     monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
@@ -794,6 +798,74 @@ def test_http_credential_warning_precedes_provider_or_docker_initialization(
         assert result.exception is None
     else:
         assert isinstance(result.exception, BoundaryReached)
+
+
+def test_render_emits_secret_warning_before_cleanup_failure(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = Diagnostic(
+        ("secrets", "private_git", "file"),
+        "secret.permissive_file_mode",
+        "Secret file has group or world permission bits set",
+        DiagnosticSeverity.WARNING,
+    )
+
+    class FailingCleanupSession:
+        drained = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            raise HostSecretSessionError("cleanup_failed")
+
+        def git_binding(self):
+            return None
+
+        def drain_warnings(self):
+            if self.drained:
+                return ()
+            self.drained = True
+            return (warning,)
+
+    @contextmanager
+    def providers():
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **_kwargs):
+        return SimpleNamespace(warnings=())
+
+    monkeypatch.setattr(
+        host_cli.HostSecretSession,
+        "from_configuration",
+        lambda _result: FailingCleanupSession(),
+    )
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.output.count("secret.permissive_file_mode") == 1
+    assert "secret.cleanup_failed" in result.output
 
 
 def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
@@ -1251,6 +1323,70 @@ platforms = ["linux/amd64"]
         "cache_to": "type=gha,scope=build",
     }
     assert seen["buildx_ssh"] == (False, ())
+
+
+def test_build_keeps_one_secret_session_alive_through_buildx(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    with config.open("a") as stream:
+        stream.write(
+            """
+[secrets.private_git]
+env = "CDH_TEST_PRIVATE_GIT_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://example.test/team/"
+username = "token-user"
+password = { secret = "private_git" }
+"""
+        )
+    observed_root: Path | None = None
+
+    @contextmanager
+    def providers(*, git_credential_binding):
+        nonlocal observed_root
+        observed_root = Path(
+            git_credential_binding.environment[GIT_CREDENTIAL_SESSION_ENV]
+        )
+        assert observed_root.is_dir()
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **_kwargs):
+        assert observed_root is not None and observed_root.is_dir()
+        return _prepared_build()
+
+    def buildx(**_kwargs):
+        assert observed_root is not None and observed_root.is_dir()
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert observed_root is not None
+    assert not observed_root.exists()
 
 
 @pytest.mark.parametrize(

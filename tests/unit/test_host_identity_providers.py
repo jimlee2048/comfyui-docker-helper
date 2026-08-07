@@ -31,6 +31,7 @@ from comfyui_docker_helper.host.identity_providers import (
     RegistryNodeIdentityRequest,
     SelectorStability,
 )
+from comfyui_docker_helper.host.secret_session import GitCredentialProcessBinding
 from comfyui_docker_helper.host.uv_docker_executor import (
     UvDockerExecutorError,
     UvImageEvidenceError,
@@ -626,9 +627,10 @@ def test_official_comfyui_rejects_non_official_repository_before_git() -> None:
 
 
 def test_direct_git_resolves_moving_ref_to_full_commit() -> None:
+    calls: list[tuple[Sequence[str], Mapping[str, object]]] = []
     request = DirectGitIdentityRequest("https://example.test/node.git", "main")
     provider = GitDirectIdentityProvider(
-        runner=_git_runner(f"{COMMIT_A}\trefs/heads/main\n", [])
+        runner=_git_runner(f"{COMMIT_A}\trefs/heads/main\n", calls)
     )
 
     identity = provider.resolve(request)
@@ -637,6 +639,55 @@ def test_direct_git_resolves_moving_ref_to_full_commit() -> None:
     assert identity.type == "git"
     assert identity.url == request.url
     assert identity.commit == COMMIT_A
+    assert calls[0][0] == (
+        "git",
+        "ls-remote",
+        "--end-of-options",
+        request.url,
+        "main",
+    )
+
+
+def test_direct_git_places_credential_config_before_ls_remote_and_adds_session_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Sequence[str], Mapping[str, object]]] = []
+    request = DirectGitIdentityRequest("https://example.test/team/node.git", "main")
+    binding = GitCredentialProcessBinding(
+        config_args=(
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!cdh-private-helper",
+            "-c",
+            "credential.useHttpPath=true",
+        ),
+        environment={"CDH_GIT_CREDENTIAL_SESSION": "/private/session"},
+    )
+    monkeypatch.setenv("GIT_SSL_CAINFO", "/preserved/ca.pem")
+    provider = GitDirectIdentityProvider(
+        runner=_git_runner(f"{COMMIT_A}\trefs/heads/main\n", calls),
+        credential_binding=binding,
+    )
+
+    identity = provider.resolve(request)
+
+    assert identity.commit == COMMIT_A
+    args, kwargs = calls[0]
+    assert tuple(args) == (
+        "git",
+        *binding.config_args,
+        "ls-remote",
+        "--end-of-options",
+        request.url,
+        "main",
+    )
+    environment = kwargs["env"]
+    assert isinstance(environment, dict)
+    assert environment["CDH_GIT_CREDENTIAL_SESSION"] == "/private/session"
+    assert environment["GIT_SSL_CAINFO"] == "/preserved/ca.pem"
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert environment["GIT_ASKPASS"] == ""
 
 
 def test_direct_git_full_commit_request_is_classified_exact() -> None:
@@ -784,7 +835,13 @@ def test_git_provider_errors_do_not_reproduce_url_or_stderr_secrets() -> None:
         "https://user:password@example.test/node.git?token=secret", "main"
     )
     provider = GitDirectIdentityProvider(
-        runner=lambda *args, **kwargs: _completed("", returncode=128)
+        runner=lambda *args, **kwargs: _completed("", returncode=128),
+        credential_binding=GitCredentialProcessBinding(
+            config_args=("-c", "credential.helper=!cdh-private-helper"),
+            environment={
+                "CDH_GIT_CREDENTIAL_SESSION": "/private/session-source-marker"
+            },
+        ),
     )
 
     with pytest.raises(IdentityProviderError) as raised:
@@ -793,6 +850,7 @@ def test_git_provider_errors_do_not_reproduce_url_or_stderr_secrets() -> None:
     assert raised.value.kind is ProviderFailureKind.NETWORK
     assert "password" not in str(raised.value)
     assert "secret" not in str(raised.value)
+    assert "session-source-marker" not in str(raised.value)
 
 
 # Local executable identity binds canonical regular-file paths and content digests.

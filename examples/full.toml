@@ -111,9 +111,47 @@ min_split_size = "1M"
 # not resume, and any clean fallback still consumes the next available attempt.
 resume_download = true
 
+# Secret names are logical identifiers; values are resolved lazily only when a
+# selected Git credential route needs them. Environment values are consumed as
+# exact bytes. Do not put a real token in this configuration file.
+[secrets.github_pat]
+env = "CDH_GITHUB_PAT"
+
+# Relative file locators use the real parent of the first -f configuration
+# file. The admitted source must be one non-symlink regular file no larger than
+# 65,525 bytes. A trailing newline is invalid for a Git password.
+[secrets.gitlab_pat]
+file = "secrets/gitlab-pat"
+
+# This example also contains a public direct-Git node. Before `host build`, set
+# CDH_GITHUB_PAT and create the GitLab token file, or remove these unused routes;
+# all configured route Secrets are granted to the combined custom-node step.
+# Offline validation, and rendering with a compatible lock, remain source-lazy.
+[[cdh.git.credentials]]
+# HTTP(S) credential-context prefix. Scheme, host, port, and path boundaries
+# participate in matching; the longest matching route wins.
+match = "https://github.com/example-private/"
+# A GitHub PAT is the password. GitHub requires a non-empty username but the PAT
+# performs authentication; x-access-token avoids recording a personal username.
+username = "x-access-token"
+password = { secret = "github_pat" }
+
+[[cdh.git.credentials]]
+# GitLab.com and self-managed GitLab accept a PAT as the password with a
+# non-empty username such as oauth2. Other token types may prescribe a username.
+match = "https://gitlab.example.com/example-private/"
+username = "oauth2"
+password = { secret = "gitlab_pat" }
+
 [build]
 # Optional for render. Required by host build when no CLI -t/--tag is supplied.
-tags = ["my-comfy:dev", "registry.example.com/my-comfy:dev"]
+# Expressions use the accepted ComfyUI identity. release has no leading v;
+# commit.prefix(n) accepts 12 through 40 characters.
+tags = [
+    "registry.example.com/my-comfy:latest",
+    "registry.example.com/my-comfy:v${{ comfyui.release }}",
+    "registry.example.com/my-comfy:custom-${{ comfyui.commit.prefix(12) }}",
+]
 # Default: "load". Supported: "load", "push".
 output = "load"
 # The current schema accepts exactly this ordered target list.

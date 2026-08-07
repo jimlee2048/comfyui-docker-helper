@@ -26,13 +26,15 @@ A no-write purpose may still need provider or Docker-backed acquisition. Locked 
 
 ### BuildPlan
 
-The [BuildPlan](../../src/comfyui_docker_helper/config/build_plan.py) is strict schema-v1 immutable build execution authority. It is constructed once from the canonical request graph and an accepted lock. Construction rejects missing, incompatible, duplicate, or unused lock identities and binds the effective configuration and canonical-lock digests.
+The [BuildPlan](../../src/comfyui_docker_helper/config/build_plan.py) is strict schema-v1 immutable build execution authority. It is constructed once from the canonical request graph and an accepted lock. Construction rejects missing, incompatible, duplicate, or unused lock identities and binds the image-configuration and canonical-lock digests. Image configuration excludes Secret source definitions and the process-local publication fields `build.tags` and `build.output`, while retaining safe Git credential route metadata needed by image execution.
 
 The canonical `build-plan.json` is admitted in the container as a regular file whose bytes match the expected digest. The [container admission boundary](../../src/comfyui_docker_helper/container/build_plan_input.py) then exposes only command-specific typed projections. Installers and other helpers must not reload host configuration, read the canonical lock, or reconstruct unrelated phases.
 
+Resolved publication tags and output selection belong to the host's process-local Buildx output plan. They never enter the canonical lock, BuildPlan, rendered context, final manifest, or image identity. CLI tags replace configured tags as one publication list; neither source may become a second image-construction authority.
+
 ### Final manifest
 
-The [final manifest schema](../../src/comfyui_docker_helper/config/final_manifest.py) and [observer](../../src/comfyui_docker_helper/container/final_manifest.py) own strict schema-v1 final image evidence. Observation runs only after build mutations, re-proves the selected final state, binds the effective-config, lock, and BuildPlan digests, and publishes no partial manifest when an observation fails.
+The [final manifest schema](../../src/comfyui_docker_helper/config/final_manifest.py) and [observer](../../src/comfyui_docker_helper/container/final_manifest.py) own strict schema-v1 final image evidence. Observation runs only after build mutations, re-proves the selected final state, binds the image-config, lock, and BuildPlan digests, and publishes no partial manifest when an observation fails.
 
 The manifest is downstream evidence. It is not configuration, a resolver result, canonical-lock input, BuildPlan input, an attestation, a support verdict, or a general application health check.
 
@@ -114,9 +116,21 @@ The source types retain distinct identity contracts:
 
 Direct-Git automatic execution is limited to a root `requirements.txt` and then root `install.py` when present. Hooks and installers are trusted code. cdh re-proves admitted repository and target state across these mutations, but an exact commit does not make the resulting worktree or arbitrary script effects deterministic. Final custom-node observation does not import or execute node code.
 
+## Secret source and Git credential boundary
+
+Top-level Secret definitions are host-only source locators. Each logical source selects exactly one environment variable or file and is resolved lazily inside one command-scoped [host Secret session](../../src/comfyui_docker_helper/host/secret_session.py). POSIX environment bytes are preserved exactly. File sources use descriptor-based, no-symlink regular-file admission with a 65,525-byte limit; snapshots are private regular files under a `0700` session directory and are reused for the same logical source. Normal stack unwinding cleans the session after success, handled failure, or `KeyboardInterrupt`; uncatchable termination cannot guarantee in-process cleanup. A permissive source mode produces a content-free warning rather than changing the admitted bytes.
+
+The canonical request graph and BuildPlan carry only normalized route match context, username, and a stable logical Secret ID. They never carry the source kind, source locator, or resolved credential value. The host Git provider uses the command session through a fixed credential helper with inherited helpers reset, path-aware matching enabled, and interactive prompting disabled. Buildx receives each distinct Secret needed by a direct-Git plan once under its stable required mount ID. The image helper re-admits the expected BuildPlan, applies the same longest-match route policy, and reads only the selected fixed mount.
+
+Credential mounts span the complete combined custom-node instruction. Root clone and checkout, provenance checks, recursive submodules, and applicable Git calls share the fixed helper policy; SSH forwarding and known-hosts mounts remain independent and may coexist. Git configuration can rewrite a URL before helper selection, and redirects remain Git-owned, so a credential route selects a context rather than attesting the contacted endpoint.
+
+The structural non-persistence guarantee is limited to cdh-owned behavior: cdh does not print or persist resolved values or Secret source locators in the canonical lock, BuildPlan, rendered context, final manifest, image metadata, image history, or cdh-controlled final filesystem. Credential values do not appear in Git URLs or command arguments. Hooks and custom-node installers are trusted code inside the same instruction and can deliberately read, print, transform, or copy mounted values; cdh provides no general sandbox or arbitrary-output redactor.
+
+BuildKit Secret contents do not ordinarily invalidate the combined instruction cache; only Secret IDs and mount properties participate in that cache key. Token rotation can therefore reuse a completed layer. cdh must not add a token digest or other value-derived cachebuster to serialized authority; callers use ordinary BuildKit cache controls when they require a fresh authentication attempt.
+
 For an opted-in host build containing a direct-Git node, default SSH-agent forwarding and existing default user/system known-hosts files are invocation-only compatibility inputs. They do not enter configuration, canonical reconciliation, the BuildPlan, the rendered context, final observation, or runtime configuration. The direct-Git Dockerfile projection declares stable optional BuildKit mount identities and forces strict host-key checking with ambient container SSH configuration disabled. cdh and BuildKit do not automatically copy or persist the socket, host paths, or trust contents into an image layer, and private key bytes remain agent-owned.
 
-The SSH and trust mounts span the existing complete custom-node instruction, so selected hooks, Registry/direct-Git installers, and other trusted code in that instruction can access the agent socket and mounted trust files when forwarding is enabled. Such code can deliberately copy or disclose mounted trust content; cdh does not sandbox it, restrict agent use to Git, or attest per-use confirmation. Authentication, host-key, and submodule errors remain Git/OpenSSH diagnostics streamed through Buildx. SSH and secret contents do not ordinarily invalidate the instruction cache, so a cache hit may reuse a completed layer without exercising the current inputs.
+The SSH and trust mounts span the existing complete custom-node instruction, so selected hooks, Registry/direct-Git installers, and other trusted code in that instruction can access the agent socket and mounted trust files when forwarding is enabled. Such code can deliberately copy or disclose mounted trust content; cdh does not sandbox it, restrict agent use to Git, or attest per-use confirmation. Authentication, host-key, and submodule errors remain Git/OpenSSH diagnostics streamed through Buildx. SSH-agent state and mounted trust contents do not ordinarily invalidate the instruction cache, so a cache hit may reuse a completed layer without exercising the current inputs.
 
 ## Executable input identity and opaque effects
 

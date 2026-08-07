@@ -39,6 +39,18 @@ cdh host build \
 
 `host build` renders the selected context and then invokes Buildx. Supply one or more `-t/--tag` values or configure `[build].tags`. Use `--load` for the local Docker image store or `--push` for a registry; the two options are mutually exclusive.
 
+### Dynamic publication tags
+
+Publication tags may interpolate the accepted ComfyUI identity with exactly these expressions:
+
+- `${{ comfyui.release }}` is the normalized formal release without a leading `v`;
+- `${{ comfyui.commit }}` is the full 40-character commit; and
+- `${{ comfyui.commit.prefix(n) }}` uses `n` commit characters, where `n` is from 12 through 40.
+
+Expressions are allowed only in an explicit tag component. A literal image name without a tag still means `latest`. Referencing `comfyui.release` is a hard error when the accepted identity has no formal release, including nightly and direct-commit builds; cdh neither skips that tag nor supplies a fallback. A `-t/--tag` list replaces `[build].tags` as a whole and accepts the same syntax. The resolved ordered targets must remain unique after familiar Docker-name normalization.
+
+Tags and `[build].output` are process-local publication choices. They do not enter the canonical lock, BuildPlan, rendered context, final manifest, image-configuration digest, or image-content identity. Changing only these choices can therefore reuse the same rendered context and image build. Registry publication is not transactional: if a multi-tag `--push` fails partway through, inspect the registry and retry any missing targets.
+
 ### Reuse an external build cache
 
 Use `--cache-from` to reuse an existing BuildKit cache and `--cache-to` to save the cache produced by the build:
@@ -55,6 +67,29 @@ cdh host build \
 
 Each option accepts one Docker Buildx cache specification and may be used independently. Use any cache backend supported by the active Buildx builder. Authenticate through Docker or the backend's supported credential mechanism rather than placing credentials in the option value. See Docker's [cache backend documentation](https://docs.docker.com/build/cache/backends/).
 
+## Private Git custom nodes over HTTPS
+
+Configure Secret sources and `[[cdh.git.credentials]]` routes as described in [Supply private HTTP(S) Git credentials](configuration.md#supply-private-https-git-credentials). During a host command, cdh uses the selected route for direct-Git identity resolution and then supplies the required credential snapshots to BuildKit for custom-node installation and recursive submodules. Tokens are not placed in Git URLs or command arguments.
+
+The host Secret session is command-scoped and lazy: it creates private `0700` session state, writes `0600` snapshots, reads a used source at most once, and cleans the session during normal unwinding after success, handled failure, or `KeyboardInterrupt`. An uncatchable process or host termination cannot guarantee in-process cleanup. cdh keeps source locators and resolved values out of durable build artifacts and its own diagnostics. This is a structural boundary, not a sandbox: trusted custom-node hooks and installers can still read, print, or copy credentials available to their combined build step. An `http://` credential route is allowed but warns because it lacks TLS transport confidentiality.
+
+BuildKit does not include Secret contents in a `RUN` instruction's cache key; only the Secret ID and mount properties participate. Rotating a token can therefore reuse an already completed custom-node layer without contacting the current credential source. When building a rendered context directly, use Buildx `--no-cache`, or use other ordinary BuildKit cache controls, when a fresh authentication check is required. cdh deliberately does not hash a token into a cachebuster.
+
+### Build a rendered HTTPS context directly
+
+The rendered Dockerfile declares a stable, required Secret ID for each credential used by a direct-Git build. When invoking Buildx yourself, bind every declared ID to the corresponding value. For example, the logical names in `examples/full.toml` produce:
+
+```bash
+docker buildx build \
+  --secret "type=env,id=cdh-git-credential-github_pat,env=CDH_GITHUB_PAT" \
+  --secret "type=file,id=cdh-git-credential-gitlab_pat,src=/path/to/gitlab-pat" \
+  --load \
+  -t my-comfy:dev \
+  .cdh/build/current
+```
+
+The manual caller owns source admission and cleanup. Credential Secrets, SSH forwarding, and known-hosts Secrets are independent inputs and may be supplied together.
+
 ## Private Git custom nodes over SSH
 
 Use `--ssh` when a direct-Git custom node or one of its recursive submodules needs an SSH identity from the host. Before building, load the required identity into the default SSH agent and add the server's host key to a default OpenSSH known-hosts file.
@@ -68,7 +103,7 @@ cdh host build \
   --ssh
 ```
 
-The option requires a non-empty `SSH_AUTH_SOCK`. cdh uses the default agent together with existing default user and system known-hosts files; it does not inspect the agent, add host keys, copy private keys, or read `~/.ssh/config`. For a self-hosted service or non-default port, use an explicit locator such as `ssh://git@example.test:2222/group/node.git` and add the corresponding host-and-port entry to a default known-hosts file. SSH aliases, `ProxyJump`, custom key/trust-file selectors, raw key files, and HTTPS token authentication are not supported by this option.
+The option requires a non-empty `SSH_AUTH_SOCK`. cdh uses the default agent together with existing default user and system known-hosts files; it does not inspect the agent, add host keys, copy private keys, or read `~/.ssh/config`. For a self-hosted service or non-default port, use an explicit locator such as `ssh://git@example.test:2222/group/node.git` and add the corresponding host-and-port entry to a default known-hosts file. SSH aliases, `ProxyJump`, custom key/trust-file selectors, and raw key files are not supported. `--ssh` does not supply HTTPS tokens; configure those with `cdh.git.credentials`.
 
 If the effective configuration has no direct-Git node, `--ssh` prints one warning and continues without forwarding anything. Otherwise, a missing agent fails before source resolution, while host-key, authentication, and Git/submodule failures keep their underlying diagnostics.
 
@@ -134,9 +169,9 @@ Provider policy and filesystem/build side effects are separate. Choose among the
 | `--locked` | Require the existing lock and local inputs to match exactly; make no provider or Docker calls during reconciliation. | Compare the existing context and write nothing. `host build` still invokes Buildx after the checks pass. |
 | `--upgrade-lock` | Refresh moving selectors while retaining unchanged exact selections. | Write the updated lock and rendered context. |
 | `--check` | Apply default reconciliation policy. | Compare the complete expected context with the existing one; write nothing and do not build. |
-| `--dry-run` | Use default policy unless combined with `--locked` or `--upgrade-lock`. | Print the exact BuildPlan preview; write nothing and do not build. |
+| `--dry-run` | Use default policy unless combined with `--locked` or `--upgrade-lock`. | Print the exact BuildPlan plus a separate process-local `Buildx output` section containing the expanded mode and tags when applicable, or `None`; write nothing and do not build. |
 
-`--check` cannot be combined with a lock-policy or dry-run modifier. `--locked` and `--upgrade-lock` are mutually exclusive. When `--dry-run` is combined with a lock policy, preview behavior replaces context comparison or publication.
+`--check` cannot be combined with a lock-policy or dry-run modifier. `--locked` and `--upgrade-lock` are mutually exclusive. When `--dry-run` is combined with a lock policy, preview behavior replaces context comparison or publication. `Buildx output: None` means that this invocation has no publication output plan; it is not part of, or a missing field from, the BuildPlan.
 
 No-write does not necessarily mean offline. Default, `--check`, and `--dry-run` may call providers and may require Docker when the current lock cannot supply a required image identity. A complete matching lock keeps those paths Docker-free. Only `--locked` forbids provider and Docker calls during reconciliation; Docker Buildx remains a separate requirement for `host build`.
 
@@ -156,7 +191,7 @@ A rendered context contains:
 - `Dockerfile`, rendered with literal digest-qualified base-image references; and
 - `.dockerignore`, which excludes `config.lock.toml` and `.cdh-rendered` from Buildx input.
 
-The context contains no root `config.toml`. Host-local source paths are not BuildPlan inputs, and the Dockerfile has no argument that can replace lock-authoritative image identities.
+The context contains no root `config.toml`. Host-local source paths, Secret source locators, resolved Secret values, publication tags, and output selection are not BuildPlan inputs. The Dockerfile has no argument that can replace lock-authoritative image identities.
 
 ## Python environments and package sources
 
@@ -172,6 +207,6 @@ cdh-controlled ordinary Python resolution and installation use `[python].index_u
 
 ## Final evidence and replay boundary
 
-After all image mutations succeed, cdh writes the strict final-state observation `/opt/cdh/build/manifest.json`. It binds the effective configuration, canonical lock, and BuildPlan digests and records intended and observed direct identities. The manifest is evidence, not another resolver, lock, replay input, support verdict, or general service-health check.
+After all image mutations succeed, cdh writes the strict final-state observation `/opt/cdh/build/manifest.json`. It binds the image-configuration, canonical lock, and BuildPlan digests and records intended and observed direct identities. The manifest is evidence, not another resolver, lock, replay input, support verdict, or general service-health check.
 
 cdh provides bounded verified replay of cdh-controlled direct inputs. This does not promise an offline or byte-identical build, a complete lock of transitive dependencies or every fetched artifact, authenticity for downloads without a user-supplied checksum, deterministic effects from trusted installers or hooks, or replay of deployment-time mutations.

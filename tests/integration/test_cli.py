@@ -1367,6 +1367,131 @@ platforms = ["linux/amd64"]
     assert seen["buildx_ssh"] == (False, ())
 
 
+def test_layered_credentials_and_dynamic_tags_compose_through_build(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = tmp_path / "base.toml"
+    github = tmp_path / "github.toml"
+    gitlab = tmp_path / "gitlab.toml"
+    _write_direct_git_config(base)
+    with base.open("a") as stream:
+        stream.write(
+            """
+[build]
+tags = [
+  "example/comfyui:v${{ comfyui.release }}",
+  "example/comfyui:custom-${{ comfyui.commit.prefix(12) }}",
+]
+output = "push"
+"""
+        )
+    github.write_text(
+        """
+[secrets.root_token]
+env = "CDH_TEST_ROOT_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://example.test/"
+username = "root-user"
+password = { secret = "root_token" }
+
+[[cdh.git.credentials]]
+match = "https://example.test/team/"
+username = "team-user"
+password = { secret = "root_token" }
+"""
+    )
+    gitlab.write_text(
+        """
+[secrets.team_token]
+env = "CDH_TEST_TEAM_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://gitlab.example.test/"
+username = "oauth2"
+password = { secret = "team_token" }
+"""
+    )
+    monkeypatch.setenv("CDH_TEST_ROOT_TOKEN", "root-token")
+    monkeypatch.setenv("CDH_TEST_TEAM_TOKEN", "team-token")
+    plan = _credential_build_plan()
+    output_plan = BuildxOutputPlan(
+        tags=(
+            "example/comfyui:v0.11.0",
+            "example/comfyui:custom-111111111111",
+        ),
+        output="push",
+    )
+    seen: dict[str, object] = {}
+
+    @contextmanager
+    def providers(*, git_credential_binding):
+        assert git_credential_binding is not None
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **kwargs):
+        configuration = kwargs["configuration_result"].config
+        seen["routes"] = [
+            (route.match, route.username) for route in configuration.cdh.git.credentials
+        ]
+        seen["tag_templates"] = tuple(kwargs["tag_templates"])
+        seen["output_mode"] = kwargs["output_mode"]
+        return SimpleNamespace(warnings=(), plan=plan, output_plan=output_plan)
+
+    def buildx(**kwargs):
+        seen["buildx_tags"] = kwargs["image_tags"]
+        seen["buildx_output"] = kwargs["output"]
+        seen["secret_ids"] = tuple(
+            binding.secret_id for binding in kwargs["file_secret_bindings"]
+        )
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(base),
+            "-f",
+            str(github),
+            "-f",
+            str(gitlab),
+            "--context-dir",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == {
+        "routes": [
+            ("https://example.test/", "root-user"),
+            ("https://example.test/team/", "team-user"),
+            ("https://gitlab.example.test/", "oauth2"),
+        ],
+        "tag_templates": (
+            "example/comfyui:v${{ comfyui.release }}",
+            "example/comfyui:custom-${{ comfyui.commit.prefix(12) }}",
+        ),
+        "output_mode": "push",
+        "buildx_tags": output_plan.tags,
+        "buildx_output": "push",
+        "secret_ids": (
+            "cdh-git-credential-root_token",
+            "cdh-git-credential-team_token",
+        ),
+    }
+
+
 def test_build_keeps_one_secret_session_alive_through_buildx(
     cli_runner: CliRunner,
     tmp_path: Path,

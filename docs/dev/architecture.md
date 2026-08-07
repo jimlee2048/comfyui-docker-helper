@@ -9,10 +9,12 @@ The same `comfyui-docker-helper` distribution provides operator-facing host comm
 ```mermaid
 flowchart LR
     Operator["Operator or CI"] --> Host["cdh host"]
-    Inputs["TOML, local hooks, existing lock"] --> Host
+    Inputs["TOML, Secret sources, local hooks, existing lock"] --> Host
     Host <--> Providers["Git, registries, package sources, Docker"]
     Host --> Context["Rendered build context"]
+    Host --> Publication["Process-local tags and output"]
     Context --> Buildx["Docker Buildx"]
+    Publication --> Buildx
     Buildx --> Helpers["cdh container build helpers"]
     Helpers --> Image["ComfyUI image and final manifest"]
     Image --> Runtime["Tini → cdh container entrypoint"]
@@ -27,7 +29,7 @@ The host build boundary and the runtime boundary admit different inputs. Runtime
 | Component | Responsibility |
 | --- | --- |
 | [`config/`](../../src/comfyui_docker_helper/config/) | Strict public and runtime models, merge and validation, canonical request/lock/reconciliation models, BuildPlan construction, and final-manifest schemas. It owns shared decisions and serialized shapes, not concrete external I/O orchestration. |
-| [`host/`](../../src/comfyui_docker_helper/host/) | Operator CLI composition, provider acquisition, Docker-backed uv resolution, canonical-wheel construction, lock/context orchestration, diagnostics, and Buildx invocation. It owns host filesystem, network, Git, Docker, and package-build effects. |
+| [`host/`](../../src/comfyui_docker_helper/host/) | Operator CLI composition, provider acquisition, command-scoped Secret resolution and credential delivery, Docker-backed uv resolution, canonical-wheel construction, lock/context orchestration, publication choices, diagnostics, and Buildx invocation. It owns host filesystem, network, Git, Docker, and package-build effects. |
 | [`rendering/`](../../src/comfyui_docker_helper/rendering/) | Deterministic projection of one BuildPlan plus verified release/local inputs into a directly Buildx-usable context and Dockerfile. Rendering does not plan or resolve identities. |
 | [`container/`](../../src/comfyui_docker_helper/container/) | Image-internal BuildPlan admission, build-time installation/download/final observation, and runtime configuration, transfer, hook, SSH, process, and lifecycle services. |
 
@@ -62,6 +64,7 @@ The following table locates the main planning and evidence concepts. The [cross-
 | [Canonical request graph](../../src/comfyui_docker_helper/config/canonical_request.py) | An immutable in-memory projection assembled during host planning. Reconciliation consumes its desired requests, and BuildPlan construction consumes the same graph with the accepted lock. |
 | [Canonical lock](../../src/comfyui_docker_helper/config/canonical_lock.py) | Strict serialized host reconciliation state containing accepted exact external and local-content identities. It is written beside the context but excluded from Docker build input. |
 | [BuildPlan](../../src/comfyui_docker_helper/config/build_plan.py) | The immutable build execution plan constructed from the request graph and accepted lock, then serialized into the Docker context for authenticated, command-specific container consumption. |
+| [Buildx output plan](../../src/comfyui_docker_helper/host/buildx.py) | Process-local resolved publication tags and output selection for one Buildx invocation. It is not part of the BuildPlan, rendered context, final manifest, or image identity. |
 | [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) | A host-side projection boundary that verifies supplied wheel and local bytes, writes the BuildPlan-derived context, and performs no planning or resolution. Host orchestration publishes or compares the complete cdh-owned context. |
 | [Final manifest](../../src/comfyui_docker_helper/container/final_manifest.py) | Final image-state observation emitted only after build mutations and checks succeed. It records observed state but does not become a resolver, lock, or planning input. |
 
@@ -71,17 +74,21 @@ The canonical cdh wheel crosses the host-to-build boundary as one verified relea
 
 ### Validate configuration
 
-`cdh host validate` loads the requested TOML layers, merges them in command-line order, and applies strict structural, domain, and cross-field validation to the effective configuration. This path does not construct providers, call Docker, reconcile a lock, create a BuildPlan, or write files.
+`cdh host validate` loads the requested TOML layers, merges them in command-line order, and applies strict structural, domain, and cross-field validation to the effective configuration. It validates Secret source locators and credential references structurally but does not read a Secret source. This path does not construct providers, call Docker, reconcile a lock, create a BuildPlan, or write files.
 
 ### Render and reconcile a context
 
 The host render service admits local hook roots and any existing canonical lock, then obtains the prerequisite exact identities needed to assemble the canonical request graph. It reconciles the graph according to the selected policy, constructs one BuildPlan from the accepted lock, and passes the plan with the canonical wheel and exact local sources to materialization.
 
+Canonical Git credential route metadata—normalized match context, username, and logical Secret identity—enters the request graph, image-configuration digest, and BuildPlan. The host-only Secret source locator and resolved value do not. A command-scoped host Secret session supplies credentials to direct-Git providers through a fixed Git credential helper. During reconciliation and rendering, a source remains unread unless the helper requests it, so an accepted lock can keep provider credentials lazy.
+
 Materialization re-verifies supplied local and release bytes and projects the complete context in a host-owned private stage. The host service owns stage cleanup and context publication. Overwrite is portable but not crash-durable, while a no-write check compares the complete expected tree. See the [materialization contract](contracts.md#materialization-boundary) for the exact ownership and failure boundaries and [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
 
 ### Build and observe the final image
 
-`cdh host build` prepares the context through the same path and then invokes Docker Buildx. The rendered Dockerfile carries the expected BuildPlan digest literally. Each image-internal build helper admits the fixed materialized BuildPlan against that digest and receives only its command-specific typed projection.
+`cdh host build` prepares the context through the same path and then invokes Docker Buildx. It resolves publication templates from the accepted ComfyUI identity into a process-local Buildx output plan, keeping image construction authority separate from registry naming and output selection. The rendered Dockerfile carries the expected BuildPlan digest literally. Each image-internal build helper admits the fixed materialized BuildPlan against that digest and receives only its command-specific typed projection.
+
+For a direct-Git plan with HTTP(S) credential routes, the build path snapshots at most once every distinct logical value granted by the effective route set. Provider Git receives the session helper environment; Buildx receives private snapshot files under stable required Secret IDs; and the image-side helper admits the expected BuildPlan, selects the longest matching safe route, and reads only that route's fixed Secret mount. The mounts span the combined custom-node instruction so recursive submodules and trusted installers share their boundary. Git remains authoritative for URL rewrites and redirects.
 
 When `host build --ssh` is applicable to a direct-Git custom node, the host admits only a non-empty default-agent environment reference before provider work. After context preparation, it maps the default agent and whichever default user/system known-hosts paths exist directly into the Buildx invocation. These compatibility inputs bypass configuration, reconciliation, BuildPlan, and materialization; rendering remains a function of BuildPlan and declares only stable optional mount identities for a direct-Git plan.
 

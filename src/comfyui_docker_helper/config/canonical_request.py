@@ -151,6 +151,15 @@ type CustomNodeRequest = RegistryNodeRequest | GitNodeRequest
 
 
 @dataclass(frozen=True, slots=True)
+class GitCredentialRouteRequest:
+    """Safe in-memory Git credential intent before BuildPlan projection."""
+
+    match: str
+    username: str
+    secret: str
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationRequest:
     workspace: str
     comfyui_path: str
@@ -180,6 +189,7 @@ class CanonicalRequestGraph:
     desired: tuple[DesiredResolution, ...]
     application: ApplicationRequest
     custom_nodes: tuple[CustomNodeRequest, ...]
+    git_credentials: tuple[GitCredentialRouteRequest, ...]
     downloader: DownloaderRequest
     files: tuple[FileRequest, ...]
     runtime: RuntimeRequest
@@ -460,6 +470,14 @@ def build_canonical_request_graph(
             install_manager=config.comfyui.install_manager,
         ),
         custom_nodes=tuple(nodes),
+        git_credentials=tuple(
+            GitCredentialRouteRequest(
+                match=canonicalize_git_credential_context(route.match),
+                username=route.username,
+                secret=route.password.secret,
+            )
+            for route in config.cdh.git.credentials
+        ),
         downloader=downloader,
         files=files,
         runtime=RuntimeRequest(

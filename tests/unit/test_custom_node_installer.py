@@ -150,6 +150,7 @@ def _phase(
         install_manager=install_manager,
         user_directory=str(runtime.comfyui_path / "user"),
         nodes=nodes,
+        git_credentials=(),
     )
 
 

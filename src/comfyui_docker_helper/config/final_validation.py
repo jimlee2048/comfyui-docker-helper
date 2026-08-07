@@ -28,6 +28,7 @@ from comfyui_docker_helper.config.final_models import (
     FinalRegistryCustomNodeConfig,
 )
 from comfyui_docker_helper.config.git_credentials import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
     GitCredentialContextError,
     has_password_userinfo,
     parse_git_credential_context,
@@ -1161,14 +1162,17 @@ def _validate_git_credential_route(
                 )
             )
 
-    if not route.username or any(
-        character in route.username for character in "\x00\r\n"
+    if (
+        not route.username
+        or any(character in route.username for character in "\x00\r\n")
+        or len(route.username.encode("utf-8")) > GIT_CREDENTIAL_VALUE_MAX_BYTES
     ):
         diagnostics.append(
             Diagnostic(
                 (*path, "username"),
                 "git_credential.invalid_username",
-                "must be non-empty and contain no NUL, CR, or LF",
+                "must be non-empty, contain no NUL, CR, or LF, and fit the Git "
+                "credential protocol",
             )
         )
     if _SECRET_NAME_PATTERN.fullmatch(route.password.secret) is None:

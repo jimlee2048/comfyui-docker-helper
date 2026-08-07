@@ -175,6 +175,25 @@ def test_git_credential_context_duplicates_and_http_warnings_are_semantic() -> N
     ]
 
 
+def test_git_credential_username_uses_the_protocol_utf8_byte_limit() -> None:
+    document = _credential_document()
+    route = document["cdh"]["git"]["credentials"][0]
+    route["username"] = "é" * 32_762 + "a"
+    maximum = validate_final_config_structure(document)
+
+    assert "git_credential.invalid_username" not in _codes(maximum)
+    route["username"] += "a"
+    oversized = validate_final_config_structure(document)
+    diagnostics = _diagnostics(oversized)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (
+            ("cdh", "git", "credentials", 0, "username"),
+            "git_credential.invalid_username",
+        )
+    ]
+
+
 def test_direct_git_password_userinfo_is_rejected_but_username_only_is_valid() -> None:
     document = _document()
     document["comfyui"]["custom_nodes"] = [

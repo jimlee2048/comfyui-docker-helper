@@ -10,13 +10,17 @@ from urllib.parse import urlsplit
 from comfyui_docker_helper.config.value_validation import has_control_characters
 
 __all__ = [
+    "GIT_CREDENTIAL_VALUE_MAX_BYTES",
     "GitCredentialContext",
     "GitCredentialContextError",
     "canonicalize_git_credential_context",
     "has_password_userinfo",
     "parse_git_credential_context",
+    "parse_git_credential_fields",
     "select_git_credential_context",
 ]
+
+GIT_CREDENTIAL_VALUE_MAX_BYTES = 65_525
 
 type GitCredentialScheme = Literal["http", "https"]
 type GitCredentialContextErrorCode = Literal[
@@ -115,6 +119,38 @@ def parse_git_credential_context(value: str) -> GitCredentialContext:
 def canonicalize_git_credential_context(value: str) -> str:
     """Return the safe canonical spelling of one authored route context."""
     return parse_git_credential_context(value).canonical_url
+
+
+def parse_git_credential_fields(
+    protocol: str,
+    host: str,
+    path: str | None = None,
+) -> GitCredentialContext | None:
+    """Normalize the protocol, host, and optional path supplied by Git."""
+    if (
+        not protocol
+        or not host
+        or has_control_characters(protocol)
+        or has_control_characters(host)
+        or any(character.isspace() for character in protocol)
+        or any(character.isspace() for character in host)
+        or any(character in host for character in "@/\\?#")
+        or (
+            path is not None
+            and (has_control_characters(path) or "?" in path or "#" in path)
+        )
+    ):
+        return None
+    try:
+        authority = parse_git_credential_context(f"{protocol}://{host}/")
+    except GitCredentialContextError:
+        return None
+    return GitCredentialContext(
+        scheme=authority.scheme,
+        host=authority.host,
+        port=authority.port,
+        path_segments=_path_segments(path or ""),
+    )
 
 
 def select_git_credential_context(

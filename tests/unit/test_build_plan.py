@@ -24,11 +24,14 @@ from comfyui_docker_helper.config import canonical_request as canonical_request_
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
+    CustomNodesPhase,
     ExactPackagePlan,
+    GitCredentialRoutePlan,
     ManifestBinding,
     RuntimePlanningProvenance,
     build_plan_digest,
     dump_build_plan_json,
+    git_credential_secret_ids,
     manifest_binding,
     parse_build_plan_json,
 )
@@ -491,6 +494,116 @@ def test_secret_sources_and_unused_definitions_do_not_change_image_plan() -> Non
 
     assert first.image_config_digest == second.image_config_digest
     assert first == second
+
+
+def test_git_credential_routes_project_only_safe_ordered_plan_metadata() -> None:
+    document = final_config().model_dump(mode="python")
+    document["secrets"] = {
+        "shared": {"env": "SYNTHETIC_SHARED_TOKEN"},
+        "other": {"file": "/synthetic/private-token"},
+    }
+    document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "https://EXAMPLE.com:443/team/",
+            "username": "first-user",
+            "password": {"secret": "shared"},
+        },
+        {
+            "match": "https://example.com/team/subgroup/",
+            "username": "second-user",
+            "password": {"secret": "shared"},
+        },
+        {
+            "match": "http://git.example.com:80/other/",
+            "username": "third-user",
+            "password": {"secret": "other"},
+        },
+    ]
+
+    plan = build_plan(
+        FinalConfig.model_validate(document),
+        accepted_resolution(),
+    )
+
+    assert [
+        route.model_dump(mode="python") for route in plan.custom_nodes.git_credentials
+    ] == [
+        {
+            "match": "https://example.com/team",
+            "username": "first-user",
+            "secret_id": "cdh-git-credential-shared",
+        },
+        {
+            "match": "https://example.com/team/subgroup",
+            "username": "second-user",
+            "secret_id": "cdh-git-credential-shared",
+        },
+        {
+            "match": "http://git.example.com/other",
+            "username": "third-user",
+            "secret_id": "cdh-git-credential-other",
+        },
+    ]
+    assert git_credential_secret_ids(plan.custom_nodes) == (
+        "cdh-git-credential-shared",
+        "cdh-git-credential-other",
+    )
+    serialized = dump_build_plan_json(plan)
+    assert b"SYNTHETIC_SHARED_TOKEN" not in serialized
+    assert b"/synthetic/private-token" not in serialized
+    assert parse_build_plan_json(serialized) == plan
+
+
+def test_git_credential_secret_projection_is_inert_without_direct_git_nodes() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    phase = CustomNodesPhase(
+        install_manager=plan.custom_nodes.install_manager,
+        user_directory=plan.custom_nodes.user_directory,
+        nodes=tuple(
+            node for node in plan.custom_nodes.nodes if node.type == "registry"
+        ),
+        git_credentials=(
+            GitCredentialRoutePlan(
+                match="https://example.com/team",
+                username="token-user",
+                secret_id="cdh-git-credential-private_git",
+            ),
+        ),
+    )
+
+    assert git_credential_secret_ids(phase) == ()
+
+
+def test_git_credential_plan_revalidates_protocol_bounds_and_unique_contexts() -> None:
+    maximum_username = "é" * 32_762 + "a"
+    route = GitCredentialRoutePlan(
+        match="https://example.com/team",
+        username=maximum_username,
+        secret_id="cdh-git-credential-private_git",
+    )
+
+    assert len(route.username.encode("utf-8")) == 65_525
+    with pytest.raises(ValidationError, match="username is invalid"):
+        GitCredentialRoutePlan(
+            match=route.match,
+            username=maximum_username + "a",
+            secret_id=route.secret_id,
+        )
+    with pytest.raises(ValidationError, match="Secret ID must be canonical"):
+        GitCredentialRoutePlan(
+            match=route.match,
+            username="token-user",
+            secret_id="private_git",
+        )
+
+    plan = build_plan(final_config(), accepted_resolution())
+    with pytest.raises(ValidationError, match="match contexts must be unique"):
+        CustomNodesPhase(
+            install_manager=plan.custom_nodes.install_manager,
+            user_directory=plan.custom_nodes.user_directory,
+            nodes=plan.custom_nodes.nodes,
+            git_credentials=(route, route),
+        )
 
 
 @pytest.mark.parametrize("field", ["match", "username", "password"])

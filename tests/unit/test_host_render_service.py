@@ -57,7 +57,7 @@ from comfyui_docker_helper.container.runtime_files import (
 )
 from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
 from comfyui_docker_helper.host import render_service as render_service_module
-from comfyui_docker_helper.host.buildx import BuildxOutputPlan
+from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
@@ -136,6 +136,7 @@ platforms = ["linux/amd64"]
 class FakeAcquirer:
     calls: list[str] = field(default_factory=list)
     requirements_content: bytes = b"torch\ntorchvision\ntorchaudio\n"
+    formal_release: str | None = "0.11.0"
 
     def acquire(self, request, request_digest: str) -> AcquiredCanonicalEntries:
         self.calls.append(request.type)
@@ -172,7 +173,7 @@ class FakeAcquirer:
                     request_digest=request_digest,
                     repository=request.repository,
                     commit=COMMIT,
-                    formal_release="0.11.0",
+                    formal_release=self.formal_release,
                 ),
             )
         elif isinstance(request, ComfyUIRequirementsRequestIdentity):
@@ -366,7 +367,8 @@ def _prepare(
     runtime_hooks_dir: Path | None = None,
     working_directory: Path | None = None,
     build_hooks_dir: Path | str | None = None,
-    output_plan: BuildxOutputPlan | None = None,
+    tag_templates: tuple[str, ...] = (),
+    output_mode: BuildxOutput = "load",
 ):
     configuration_result = load_validate_config_result(
         config, build_hooks_dir=build_hooks_dir
@@ -386,7 +388,8 @@ def _prepare(
             FilesystemLocalExecutableIdentityProvider()
         ),
         canonical_wheel=CANONICAL_WHEEL,
-        output_plan=output_plan,
+        tag_templates=tag_templates,
+        output_mode=output_mode,
         options=options,
         overwrite=overwrite,
         runtime_hooks_dir=runtime_hooks_dir,
@@ -849,12 +852,11 @@ def test_publication_only_config_changes_do_not_make_context_stale(
     config = tmp_path / "config.toml"
     config.write_text(_config())
     output = tmp_path / "context"
-    initial_output = BuildxOutputPlan(tags=("example:test",), output="load")
     initial = _prepare(
         config,
         output,
         FakeAcquirer(),
-        output_plan=initial_output,
+        tag_templates=("example:test",),
     )
     before = _tree(output)
     config.write_text(
@@ -864,23 +866,88 @@ def test_publication_only_config_changes_do_not_make_context_stale(
         )
     )
     fake = FakeAcquirer()
-    changed_output = BuildxOutputPlan(
-        tags=("cli:first", "cli:second"),
-        output="push",
-    )
-
     prepared = _prepare(
         config,
         output,
         fake,
         options=options,
-        output_plan=changed_output,
+        tag_templates=("cli:first", "cli:second"),
+        output_mode="push",
     )
 
-    assert initial.output_plan is initial_output
-    assert prepared.output_plan is changed_output
+    assert initial.output_plan == BuildxOutputPlan(
+        tags=("example:test",), output="load"
+    )
+    assert prepared.output_plan == BuildxOutputPlan(
+        tags=("cli:first", "cli:second"), output="push"
+    )
     assert fake.calls == []
     assert _tree(output) == before
+
+
+def test_publication_templates_expand_from_the_accepted_comfyui_identity(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+
+    prepared = _prepare(
+        config,
+        tmp_path / "context",
+        FakeAcquirer(),
+        tag_templates=(
+            "example/comfyui:latest",
+            "example/comfyui:v${{ comfyui.release }}",
+            "example/comfyui:custom-${{ comfyui.commit.prefix(12) }}",
+        ),
+        output_mode="push",
+    )
+
+    assert prepared.output_plan == BuildxOutputPlan(
+        tags=(
+            "example/comfyui:latest",
+            "example/comfyui:v0.11.0",
+            f"example/comfyui:custom-{COMMIT[:12]}",
+        ),
+        output="push",
+    )
+
+
+@pytest.mark.parametrize("options", [PlanningOptions(), PlanningOptions(check=True)])
+def test_missing_release_fails_before_context_write_or_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    options: PlanningOptions,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config().replace('version = "0.11.0"', 'version = "nightly"'))
+    monkeypatch.setattr(
+        render_service_module,
+        "_write_context",
+        lambda *args, **kwargs: pytest.fail("tag resolution must precede writing"),
+    )
+    monkeypatch.setattr(
+        render_service_module,
+        "_check_context",
+        lambda *args, **kwargs: pytest.fail("tag resolution must precede checking"),
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            tmp_path / "context",
+            FakeAcquirer(formal_release=None),
+            tag_templates=("example/comfyui:v${{ comfyui.release }}",),
+            options=options,
+        )
+
+    assert raised.value.diagnostics == (
+        Diagnostic(
+            ("build", "tags", 0),
+            "build.release_unavailable",
+            "comfyui.release is unavailable for this ComfyUI selector",
+        ),
+    )
 
 
 def test_uv_descriptor_pre_reuse_validates_cross_dependent_lock_in_every_mode(

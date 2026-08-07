@@ -9,18 +9,18 @@ import typer
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
+from comfyui_docker_helper.config.publication_tags import (
+    static_release_availability,
+    validate_publication_tags,
+)
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
     ConfigurationServiceError,
     load_validate_config_result,
 )
-from comfyui_docker_helper.config.value_validation import (
-    has_control_characters,
-    is_argv_value,
-)
+from comfyui_docker_helper.config.value_validation import is_argv_value
 from comfyui_docker_helper.host.buildx import (
     BuildxOutput,
-    BuildxOutputPlan,
     KnownHostsBinding,
     build_image_with_buildx,
 )
@@ -174,7 +174,6 @@ def render(
         validated = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
         )
-        output_plan = _configured_buildx_output_plan(validated)
         build_hook_source_root = admit_build_hook_source(
             validated,
             build_hooks_dir,
@@ -190,7 +189,8 @@ def render(
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
                 canonical_wheel=providers.canonical_wheel,
-                output_plan=output_plan,
+                tag_templates=validated.config.build.tags,
+                output_mode=validated.config.build.output,
                 options=options,
                 overwrite=overwrite,
                 working_directory=Path.cwd(),
@@ -212,6 +212,7 @@ def render(
             prepared.plan,
             lock_result=prepared.lock_result,
             options=options,
+            output_plan=prepared.output_plan,
         )
         return
 
@@ -341,16 +342,13 @@ def build(
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
-    use_ssh = _prepare_build_ssh_input(requested=ssh, result=validated)
     effective_tags = _resolve_effective_image_tags(
         cli_tags=cli_tags,
         config_tags=validated.config.build.tags,
+        comfyui_selector=validated.config.comfyui.version,
     )
+    use_ssh = _prepare_build_ssh_input(requested=ssh, result=validated)
     effective_output = cli_output or validated.config.build.output
-    output_plan = BuildxOutputPlan(
-        tags=effective_tags,
-        output=effective_output,
-    )
 
     try:
         options = PlanningOptions(locked=locked, upgrade_lock=upgrade_lock)
@@ -369,7 +367,8 @@ def build(
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
                 canonical_wheel=providers.canonical_wheel,
-                output_plan=output_plan,
+                tag_templates=effective_tags,
+                output_mode=effective_output,
                 options=options,
                 overwrite=True,
                 working_directory=Path.cwd(),
@@ -490,21 +489,13 @@ def _admit_single_cache_spec(values: list[str], param_hint: str) -> str | None:
     return value
 
 
-def _configured_buildx_output_plan(
-    result: ConfigurationResult,
-) -> BuildxOutputPlan | None:
-    tags = tuple(result.config.build.tags)
-    if not tags:
-        return None
-    return BuildxOutputPlan(tags=tags, output=result.config.build.output)
-
-
 def _resolve_effective_image_tags(
     *,
     cli_tags: list[str],
     config_tags: list[str],
+    comfyui_selector: str,
 ) -> tuple[str, ...]:
-    _validate_cli_image_tags(cli_tags)
+    _validate_cli_image_tags(cli_tags, comfyui_selector=comfyui_selector)
     tags = tuple(cli_tags or config_tags)
     if not tags:
         raise typer.BadParameter(
@@ -514,18 +505,17 @@ def _resolve_effective_image_tags(
     return tags
 
 
-def _validate_cli_image_tags(tags: list[str]) -> None:
-    for tag in tags:
-        if (
-            not tag
-            or any(character.isspace() for character in tag)
-            or has_control_characters(tag)
-        ):
-            raise typer.BadParameter(
-                "must be non-empty and must not contain whitespace "
-                "or control characters",
-                param_hint="--tag/-t",
-            )
+def _validate_cli_image_tags(tags: list[str], *, comfyui_selector: str) -> None:
+    issues = validate_publication_tags(
+        tags,
+        release_available=static_release_availability(comfyui_selector),
+    )
+    if issues:
+        first = issues[0]
+        raise typer.BadParameter(
+            f"tag {first.index + 1}: {first.message} ({first.code})",
+            param_hint="--tag/-t",
+        )
 
 
 def _format_config_files(config_files: list[Path]) -> str | Path:

@@ -453,6 +453,47 @@ def test_comfyui_selector_satisfiability_uses_discrete_formal_releases() -> None
     assert "comfyui.unsatisfiable_selector" not in _codes(config)
 
 
+def test_build_tags_admit_dynamic_publication_expressions() -> None:
+    document = _document()
+    document["build"] = {
+        "tags": [
+            "example/image:v${{ comfyui.release }}",
+            "example/image:${{ comfyui.commit }}",
+            "example/image:custom-${{ comfyui.commit.prefix(12) }}",
+        ]
+    }
+    config = validate_final_config_structure(document)
+
+    assert _diagnostics(config) == ()
+
+
+@pytest.mark.parametrize(
+    "selector", ["nightly", "09725967cf76304371c390ca1d6483e04061da48"]
+)
+def test_release_expression_rejects_selectors_without_formal_releases(
+    selector: str,
+) -> None:
+    document = _document()
+    document["comfyui"]["version"] = selector
+    document["build"] = {"tags": ["example/image:v${{ comfyui.release }}"]}
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (("build", "tags", 0), "build.release_unavailable")
+    ]
+
+
+def test_invalid_comfyui_selector_does_not_cascade_release_diagnostic() -> None:
+    document = _document()
+    document["comfyui"]["version"] = "not a selector"
+    document["build"] = {"tags": ["example/image:v${{ comfyui.release }}"]}
+    config = validate_final_config_structure(document)
+
+    assert [item.code for item in _diagnostics(config)] == ["comfyui.invalid_version"]
+
+
 def test_registry_nodes_require_manager_but_direct_git_nodes_do_not() -> None:
     document = _document()
     document["comfyui"]["custom_nodes"] = [

@@ -3,6 +3,7 @@
 import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -28,6 +29,10 @@ from comfyui_docker_helper.config.hook_validation import validate_hook_relative_
 from comfyui_docker_helper.config.os_packages import (
     DEFAULT_OS_PACKAGES,
     validate_apt_package_identity,
+)
+from comfyui_docker_helper.config.publication_tags import (
+    static_release_availability,
+    validate_publication_tags,
 )
 from comfyui_docker_helper.config.selector_validation import (
     normalize_comfyui_version,
@@ -1042,19 +1047,17 @@ def _validate_build_domains(
     config: FinalConfig,
     diagnostics: list[Diagnostic],
 ) -> None:
-    for index, tag in enumerate(config.build.tags):
-        if (
-            not tag
-            or any(character.isspace() for character in tag)
-            or has_control_characters(tag)
-        ):
-            diagnostics.append(
-                Diagnostic(
-                    ("build", "tags", index),
-                    "build.invalid_tag",
-                    "must be non-empty and contain no whitespace or controls",
-                )
-            )
+    release_available: bool | None = None
+    with suppress(ValueError):
+        release_available = static_release_availability(config.comfyui.version)
+
+    diagnostics.extend(
+        Diagnostic(("build", "tags", issue.index), issue.code, issue.message)
+        for issue in validate_publication_tags(
+            config.build.tags,
+            release_available=release_available,
+        )
+    )
 
 
 def _duplicate_diagnostics(

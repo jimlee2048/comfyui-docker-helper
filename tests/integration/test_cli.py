@@ -830,6 +830,148 @@ platforms = ["linux/amd64"]
     assert "Traceback" not in result.output
 
 
+@pytest.mark.parametrize(
+    ("selector", "cli_tags", "expected_code"),
+    [
+        (
+            "0.11.0",
+            ["example/image:${{comfyui.commit}}"],
+            "build.invalid_tag_expression",
+        ),
+        (
+            "0.11.0",
+            ["busybox:x", "docker.io/library/busybox:x"],
+            "build.duplicate_tag",
+        ),
+        (
+            "nightly",
+            ["example/image:v${{ comfyui.release }}"],
+            "build.release_unavailable",
+        ),
+        (
+            "1111111111111111111111111111111111111111",
+            ["example/image:v${{ comfyui.release }}"],
+            "build.release_unavailable",
+        ),
+    ],
+)
+def test_cli_tags_use_shared_static_validation_before_provider_construction(
+    selector: str,
+    cli_tags: list[str],
+    expected_code: str,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("invalid CLI tags must fail before planning providers")
+
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    config.write_text(
+        config.read_text().replace('version = "0.11.0"', f'version = "{selector}"')
+    )
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+
+    args = ["host", "build", "-f", str(config)]
+    for tag in cli_tags:
+        args.extend(("--tag", tag))
+    result = cli_runner.invoke(app, args)
+
+    assert result.exit_code == 2
+    assert expected_code in _plain_output(result.output)
+
+
+def test_cli_tag_override_does_not_hide_invalid_config_tags(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("invalid configuration must fail before planning providers")
+
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    with config.open("a") as stream:
+        stream.write('\n[build]\ntags = ["example/Image:bad"]\n')
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "build", "-f", str(config), "--tag", "example/image:valid"],
+    )
+
+    assert result.exit_code == 1
+    assert "build.invalid_image_reference" in result.output
+
+
+@pytest.mark.parametrize("with_tags", [False, True])
+def test_dry_run_renders_an_independent_buildx_output_section(
+    with_tags: bool,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolution = accepted_resolution()
+    plan = build_plan(final_config(), resolution)
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    tag_templates: tuple[str, ...] = ()
+    output_plan: BuildxOutputPlan | None = None
+    if with_tags:
+        tag_templates = (
+            "example/comfyui:v${{ comfyui.release }}",
+            "example/comfyui:custom-${{ comfyui.commit.prefix(12) }}",
+        )
+        with config.open("a") as stream:
+            stream.write(
+                "\n[build]\n"
+                'tags = ["example/comfyui:v${{ comfyui.release }}", '
+                '"example/comfyui:custom-${{ comfyui.commit.prefix(12) }}"]\n'
+                'output = "push"\n'
+            )
+        output_plan = BuildxOutputPlan(
+            tags=("example/comfyui:v0.11.0", "example/comfyui:custom-111111111111"),
+            output="push",
+        )
+
+    def prepare(*args, **kwargs):
+        del args
+        assert tuple(kwargs["tag_templates"]) == tag_templates
+        return SimpleNamespace(
+            warnings=(),
+            plan=plan,
+            lock_result=resolution,
+            output_plan=output_plan,
+        )
+
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+            "--dry-run",
+        ],
+    )
+
+    plain = _plain_output(result.output)
+    assert result.exit_code == 0
+    assert plain.index("Custom nodes:") < plain.index("Buildx output")
+    if output_plan is None:
+        assert "Buildx output\n  None" in plain
+    else:
+        assert "Buildx output\n  Mode: push\n  Tags:" in plain
+        assert plain.index(output_plan.tags[0]) < plain.index(output_plan.tags[1])
+
+
 def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -987,11 +1129,12 @@ platforms = ["linux/amd64"]
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         configuration = kwargs["configuration_result"]
         seen["configuration_build"] = configuration.config.build
-        seen["output_plan"] = kwargs["output_plan"]
+        seen["tag_templates"] = kwargs["tag_templates"]
+        seen["output"] = kwargs["output_mode"]
         return SimpleNamespace(
             warnings=(),
             plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
-            output_plan=kwargs["output_plan"],
+            output_plan=output_plan,
         )
 
     def buildx(**kwargs):
@@ -1048,7 +1191,8 @@ platforms = ["linux/amd64"]
     assert configuration_build.tags == ["config:test"]
     assert configuration_build.output == "load"
     assert configuration_build.platforms == ["linux/amd64"]
-    assert seen["output_plan"] == output_plan
+    assert seen["tag_templates"] == output_plan.tags
+    assert seen["output"] == output_plan.output
     assert seen["buildx"] == {
         "image_tags": output_plan.tags,
         "output": output_plan.output,
@@ -1168,11 +1312,12 @@ def test_build_cache_import_and_export_are_independent(
 
     def prepare(*args, **kwargs):
         del args
-        assert kwargs["output_plan"] == output_plan
+        assert kwargs["tag_templates"] == output_plan.tags
+        assert kwargs["output_mode"] == output_plan.output
         return SimpleNamespace(
             warnings=(),
             plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
-            output_plan=kwargs["output_plan"],
+            output_plan=output_plan,
         )
 
     def buildx(**kwargs):
@@ -1382,7 +1527,9 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
     seen: dict[str, object] = {}
 
     def prepare(output_dir, **kwargs):
-        output_plan = kwargs["output_plan"]
+        output_plan = BuildxOutputPlan(
+            tags=tuple(kwargs["tag_templates"]), output=kwargs["output_mode"]
+        )
         Path(output_dir).mkdir(mode=0o700)
         _materialize_private_stage(
             plan,
@@ -1459,13 +1606,13 @@ platforms = ["linux/amd64"]
         configuration = kwargs["configuration_result"]
         assert configuration.config.build.tags == ["config:test"]
         assert kwargs["options"].locked is True
-        assert kwargs["output_plan"] == BuildxOutputPlan(
-            tags=("cli:test",), output="load"
-        )
+        assert kwargs["tag_templates"] == ("cli:test",)
+        assert kwargs["output_mode"] == "load"
+        output_plan = BuildxOutputPlan(tags=("cli:test",), output="load")
         return SimpleNamespace(
             warnings=(),
             plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
-            output_plan=kwargs["output_plan"],
+            output_plan=output_plan,
         )
 
     def buildx(**kwargs):

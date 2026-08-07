@@ -79,6 +79,8 @@ from comfyui_docker_helper.config.git_credentials import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
     GitCredentialContextError,
     canonicalize_git_credential_context,
+    git_credential_secret_id,
+    git_credential_secret_target,
 )
 from comfyui_docker_helper.config.hook_validation import (
     hook_lock_identity,
@@ -120,9 +122,6 @@ from comfyui_docker_helper.version import package_version
 BUILD_PLAN_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
 _VENV_PATH = "/opt/venv"
-_GIT_CREDENTIAL_SECRET_ID_PATTERN = re.compile(
-    r"cdh-git-credential-[a-z][a-z0-9_-]{0,63}\Z"
-)
 
 
 class _PlanModel(BaseModel):
@@ -768,8 +767,7 @@ class GitCredentialRoutePlan(_PlanModel):
     @field_validator("secret_id")
     @classmethod
     def _validate_secret_id(cls, value: str) -> str:
-        if _GIT_CREDENTIAL_SECRET_ID_PATTERN.fullmatch(value) is None:
-            raise ValueError("Git credential Secret ID must be canonical")
+        git_credential_secret_target(value)
         return value
 
 
@@ -1394,7 +1392,7 @@ def _git_credential_route(route: GitCredentialRouteRequest) -> GitCredentialRout
     return GitCredentialRoutePlan(
         match=route.match,
         username=route.username,
-        secret_id=f"cdh-git-credential-{route.secret}",
+        secret_id=git_credential_secret_id(route.secret),
     )
 
 

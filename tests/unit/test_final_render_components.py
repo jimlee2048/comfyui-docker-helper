@@ -24,6 +24,7 @@ from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
+    GitCredentialRoutePlan,
     HookPlan,
     build_plan_digest,
     dump_build_plan_json,
@@ -391,6 +392,73 @@ def test_renderer_scopes_strict_optional_ssh_mounts_to_direct_git_plans(
         assert "GIT_SSH_COMMAND" not in custom_node_block
 
 
+def test_renderer_mounts_distinct_git_credentials_as_required_fixed_targets() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    routes = (
+        GitCredentialRoutePlan(
+            match="https://example.test/team",
+            username="first",
+            secret_id="cdh-git-credential-shared",
+        ),
+        GitCredentialRoutePlan(
+            match="https://example.test/team/subgroup",
+            username="second",
+            secret_id="cdh-git-credential-shared",
+        ),
+        GitCredentialRoutePlan(
+            match="https://git.example.test/other",
+            username="third",
+            secret_id="cdh-git-credential-other",
+        ),
+    )
+    plan = plan.model_copy(
+        update={
+            "custom_nodes": plan.custom_nodes.model_copy(
+                update={"git_credentials": routes}
+            )
+        }
+    )
+
+    rendered = render_build_plan_dockerfile(plan)
+    block = next(
+        item for item in _run_blocks(rendered) if "install-custom-nodes" in item
+    )
+    shared = (
+        "--mount=type=secret,id=cdh-git-credential-shared,"
+        "target=/run/secrets/cdh-git-credential-shared,required=true"
+    )
+    other = (
+        "--mount=type=secret,id=cdh-git-credential-other,"
+        "target=/run/secrets/cdh-git-credential-other,required=true"
+    )
+
+    assert block.count(shared) == 1
+    assert block.count(other) == 1
+    assert block.index(shared) < block.index(other)
+    assert "CDH_PRIVATE_TOKEN" not in rendered
+    assert "/host/source" not in rendered
+
+    registry_only = plan.model_copy(
+        update={
+            "custom_nodes": plan.custom_nodes.model_copy(
+                update={
+                    "nodes": tuple(
+                        node
+                        for node in plan.custom_nodes.nodes
+                        if node.type == "registry"
+                    )
+                }
+            )
+        }
+    )
+    registry_block = next(
+        item
+        for item in _run_blocks(render_build_plan_dockerfile(registry_only))
+        if "install-custom-nodes" in item
+    )
+    assert "cdh-git-credential-" not in registry_block
+
+
 # Materialization writes one deterministic BuildPlan and verified local inputs.
 def test_materializer_writes_deterministic_plan_and_verified_input(
     tmp_path: Path,
@@ -472,6 +540,7 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
         plan.custom_nodes,
         plan.application,
     )
+    assert admission.git_credential_routes() == plan.custom_nodes.git_credentials
     assert admission.file_downloads() == (
         plan.files,
         plan.application.paths.comfyui,

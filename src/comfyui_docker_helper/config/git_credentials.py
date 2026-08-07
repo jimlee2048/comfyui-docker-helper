@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -14,6 +15,8 @@ __all__ = [
     "GitCredentialContext",
     "GitCredentialContextError",
     "canonicalize_git_credential_context",
+    "git_credential_secret_id",
+    "git_credential_secret_target",
     "has_password_userinfo",
     "parse_git_credential_context",
     "parse_git_credential_fields",
@@ -30,6 +33,22 @@ type GitCredentialContextErrorCode = Literal[
 ]
 
 _DEFAULT_PORTS: dict[GitCredentialScheme, int] = {"http": 80, "https": 443}
+_SECRET_ID_PATTERN = re.compile(r"cdh-git-credential-[a-z][a-z0-9_-]{0,63}\Z")
+
+
+def git_credential_secret_id(secret_name: str) -> str:
+    """Project one admitted logical Secret name to its stable BuildKit ID."""
+    secret_id = f"cdh-git-credential-{secret_name}"
+    if _SECRET_ID_PATTERN.fullmatch(secret_id) is None:
+        raise ValueError("Git credential Secret name must be canonical")
+    return secret_id
+
+
+def git_credential_secret_target(secret_id: str) -> str:
+    """Project one admitted stable ID to its fixed BuildKit mount target."""
+    if _SECRET_ID_PATTERN.fullmatch(secret_id) is None:
+        raise ValueError("Git credential Secret ID must be canonical")
+    return f"/run/secrets/{secret_id}"
 
 
 @dataclass(frozen=True, slots=True)

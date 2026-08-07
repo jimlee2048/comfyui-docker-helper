@@ -19,12 +19,14 @@ from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSever
 from comfyui_docker_helper.config.git_credentials import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
     canonicalize_git_credential_context,
+    git_credential_secret_id,
     parse_git_credential_context,
 )
 from comfyui_docker_helper.config.service import ConfigurationResult
 from comfyui_docker_helper.file_admission import (
     read_bounded_regular_absolute_file,
 )
+from comfyui_docker_helper.git_credential_policy import git_credential_config_args
 from comfyui_docker_helper.git_credential_protocol import GitCredentialRuntimeRoute
 
 __all__ = [
@@ -176,16 +178,7 @@ class HostSecretSession:
             "-m comfyui_docker_helper.host.git_credential_helper"
         )
         return GitCredentialProcessBinding(
-            config_args=(
-                "-c",
-                "credential.helper=",
-                "-c",
-                f"credential.helper={helper}",
-                "-c",
-                "credential.useHttpPath=true",
-                "-c",
-                "credential.interactive=false",
-            ),
+            config_args=git_credential_config_args(helper),
             environment={GIT_CREDENTIAL_SESSION_ENV: os.fspath(root)},
         )
 
@@ -239,6 +232,13 @@ class HostSecretSession:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
             finally:
                 os.close(lock_fd)
+
+    def snapshot_git_credential(self, secret_id: str) -> Path:
+        """Resolve one accepted BuildPlan credential ID through this session."""
+        for route in self._routes:
+            if git_credential_secret_id(route.secret) == secret_id:
+                return self.snapshot(route.secret)
+        raise HostSecretSessionError("unknown_credential_secret")
 
     def drain_warnings(self) -> tuple[Diagnostic, ...]:
         """Return newly recorded content-free warnings in stable route-name order."""

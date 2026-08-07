@@ -8,6 +8,7 @@ import typer
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
+from comfyui_docker_helper.config.build_plan import git_credential_secret_ids
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
 from comfyui_docker_helper.config.publication_tags import (
@@ -22,7 +23,7 @@ from comfyui_docker_helper.config.service import (
 from comfyui_docker_helper.config.value_validation import is_argv_value
 from comfyui_docker_helper.host.buildx import (
     BuildxOutput,
-    KnownHostsBinding,
+    FileSecretBinding,
     build_image_with_buildx,
 )
 from comfyui_docker_helper.host.diagnostics import (
@@ -412,6 +413,16 @@ def build(
             render_configuration_warnings(
                 _format_config_files(config_files), prepared.warnings
             )
+            credential_bindings = tuple(
+                FileSecretBinding(
+                    secret_id,
+                    secret_session.snapshot_git_credential(secret_id),
+                )
+                for secret_id in git_credential_secret_ids(prepared.plan.custom_nodes)
+            )
+            render_configuration_warnings(
+                _format_config_files(config_files), secret_session.drain_warnings()
+            )
 
             known_hosts_bindings = (
                 _collect_default_known_hosts_bindings() if use_ssh else ()
@@ -429,7 +440,7 @@ def build(
                 cwd=Path.cwd(),
                 log=typer.echo,
                 forward_default_ssh=use_ssh,
-                known_hosts_bindings=known_hosts_bindings,
+                file_secret_bindings=(*credential_bindings, *known_hosts_bindings),
                 cache_from=cache_from,
                 cache_to=cache_to,
             )
@@ -503,9 +514,9 @@ def _prepare_build_ssh_input(
     return True
 
 
-def _collect_default_known_hosts_bindings() -> tuple[KnownHostsBinding, ...]:
+def _collect_default_known_hosts_bindings() -> tuple[FileSecretBinding, ...]:
     return tuple(
-        KnownHostsBinding(
+        FileSecretBinding(
             secret_id=descriptor.secret_id,
             source=source,
         )

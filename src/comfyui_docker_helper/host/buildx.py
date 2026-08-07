@@ -37,14 +37,14 @@ class BuildxOutputPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class KnownHostsBinding:
-    """One host known-hosts file bound to a stable BuildKit secret ID."""
+class FileSecretBinding:
+    """One host file bound to a stable BuildKit secret ID."""
 
     secret_id: str
     source: Path
 
 
-def _render_known_hosts_secret(binding: KnownHostsBinding) -> str:
+def _render_file_secret(binding: FileSecretBinding) -> str:
     output = StringIO(newline="")
     csv.writer(output, lineterminator="").writerow(
         ("type=file", f"id={binding.secret_id}", f"src={binding.source}")
@@ -61,7 +61,7 @@ def build_image_with_buildx(
     cwd: str | Path | None = None,
     log: BuildxLogger = print,
     forward_default_ssh: bool = False,
-    known_hosts_bindings: Sequence[KnownHostsBinding] = (),
+    file_secret_bindings: Sequence[FileSecretBinding] = (),
     cache_from: str | None = None,
     cache_to: str | None = None,
 ) -> None:
@@ -81,9 +81,9 @@ def build_image_with_buildx(
     buildkit_inputs: dict[str, object] = {}
     if forward_default_ssh:
         buildkit_inputs["ssh"] = "default"
-    if known_hosts_bindings:
+    if file_secret_bindings:
         buildkit_inputs["secrets"] = [
-            _render_known_hosts_secret(binding) for binding in known_hosts_bindings
+            _render_file_secret(binding) for binding in file_secret_bindings
         ]
     # The public python-on-whales API cannot express repeated opaque cache
     # specifications. Keep these values single and do not parse Buildx CSV.
@@ -114,9 +114,7 @@ def build_image_with_buildx(
     except KeyboardInterrupt:
         raise
     except OSError as error:
-        raise BuildxBuildError(
-            f"Docker Buildx could not be started: {error}"
-        ) from error
+        raise BuildxBuildError("Docker Buildx could not be started") from error
     except DockerException as error:
         raise BuildxBuildError(
             f"Docker Buildx failed with exit code {error.return_code}"

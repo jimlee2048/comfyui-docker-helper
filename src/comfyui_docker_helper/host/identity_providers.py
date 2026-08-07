@@ -36,6 +36,9 @@ from comfyui_docker_helper.config.value_validation import (
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.file_admission import read_regular_absolute_file
+from comfyui_docker_helper.git_credential_policy import (
+    noninteractive_git_environment,
+)
 from comfyui_docker_helper.host.secret_session import GitCredentialProcessBinding
 from comfyui_docker_helper.host.uv_docker_executor import (
     ManagedPythonCatalogOperation,
@@ -825,17 +828,12 @@ def _run_git_ls_remote(
         not is_argv_value(value) for value in (*options, *patterns)
     ):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_REQUEST)
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "",
-        "GCM_INTERACTIVE": "never",
-        "SSH_ASKPASS": "",
-    }
     config_args: tuple[str, ...] = ()
+    environment: Mapping[str, str] = {}
     if credential_binding is not None:
         config_args = credential_binding.config_args
-        env.update(credential_binding.environment)
+        environment = credential_binding.environment
+    env = noninteractive_git_environment(os.environ, overlay=environment)
     try:
         completed = runner(
             (

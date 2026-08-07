@@ -21,7 +21,10 @@ from typer.testing import CliRunner
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config.build_plan import build_plan_digest
+from comfyui_docker_helper.config.build_plan import (
+    GitCredentialRoutePlan,
+    build_plan_digest,
+)
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -30,10 +33,16 @@ from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
-from comfyui_docker_helper.host.buildx import BuildxOutputPlan, KnownHostsBinding
+from comfyui_docker_helper.host import secret_session as secret_session_module
+from comfyui_docker_helper.host.buildx import (
+    BuildxBuildError,
+    BuildxOutputPlan,
+    FileSecretBinding,
+)
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.secret_session import (
     GIT_CREDENTIAL_SESSION_ENV,
+    HostSecretSession,
     HostSecretSessionError,
 )
 from comfyui_docker_helper.rendering.final_materializer import (
@@ -134,8 +143,38 @@ def _prepared_build() -> SimpleNamespace:
         warnings=(),
         plan=SimpleNamespace(
             toolchain=SimpleNamespace(platform="linux/amd64"),
+            custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
         ),
         output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+    )
+
+
+def _credential_build_plan():
+    plan = build_plan(final_config(), accepted_resolution())
+    return plan.model_copy(
+        update={
+            "custom_nodes": plan.custom_nodes.model_copy(
+                update={
+                    "git_credentials": (
+                        GitCredentialRoutePlan(
+                            match="https://example.test/",
+                            username="root-user",
+                            secret_id="cdh-git-credential-root_token",
+                        ),
+                        GitCredentialRoutePlan(
+                            match="https://example.test/team",
+                            username="team-user",
+                            secret_id="cdh-git-credential-root_token",
+                        ),
+                        GitCredentialRoutePlan(
+                            match="https://gitlab.example.test/",
+                            username="oauth2",
+                            secret_id="cdh-git-credential-team_token",
+                        ),
+                    )
+                }
+            )
+        }
     )
 
 
@@ -1254,14 +1293,17 @@ platforms = ["linux/amd64"]
         seen["output"] = kwargs["output_mode"]
         return SimpleNamespace(
             warnings=(),
-            plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
+            plan=SimpleNamespace(
+                toolchain=SimpleNamespace(platform="linux/amd64"),
+                custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+            ),
             output_plan=output_plan,
         )
 
     def buildx(**kwargs):
         seen["buildx_ssh"] = (
             kwargs["forward_default_ssh"],
-            kwargs["known_hosts_bindings"],
+            kwargs["file_secret_bindings"],
         )
         seen["buildx"] = {
             "image_tags": kwargs["image_tags"],
@@ -1390,6 +1432,208 @@ password = { secret = "private_git" }
 
 
 @pytest.mark.parametrize(
+    "buildx_failure",
+    [None, BuildxBuildError("synthetic Buildx failure"), KeyboardInterrupt()],
+)
+def test_build_fills_distinct_plan_credentials_and_reuses_provider_snapshot(
+    buildx_failure: BaseException | None,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+    with config.open("a") as stream:
+        stream.write(
+            """
+[secrets.root_token]
+env = "CDH_TEST_ROOT_TOKEN"
+[secrets.team_token]
+env = "CDH_TEST_TEAM_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://example.test/"
+username = "root-user"
+password = { secret = "root_token" }
+[[cdh.git.credentials]]
+match = "https://example.test/team/"
+username = "team-user"
+password = { secret = "root_token" }
+[[cdh.git.credentials]]
+match = "https://gitlab.example.test/"
+username = "oauth2"
+password = { secret = "team_token" }
+"""
+        )
+    values = {
+        b"CDH_TEST_ROOT_TOKEN": b"root-secret-marker",
+        b"CDH_TEST_TEAM_TOKEN": b"team-secret-marker",
+    }
+    reads: list[bytes] = []
+
+    class CountingEnvironment(dict[bytes, bytes]):
+        def get(self, key: bytes, default=None):
+            reads.append(key)
+            return super().get(key, default)
+
+    monkeypatch.setattr(
+        secret_session_module.os,
+        "environb",
+        CountingEnvironment(values),
+    )
+    plan = _credential_build_plan()
+    observed_root: Path | None = None
+    captured_bindings: tuple[FileSecretBinding, ...] = ()
+
+    @contextmanager
+    def providers(*, git_credential_binding):
+        nonlocal observed_root
+        observed_root = Path(
+            git_credential_binding.environment[GIT_CREDENTIAL_SESSION_ENV]
+        )
+        attached = HostSecretSession._attach(observed_root)
+        attached.snapshot_git_credential("cdh-git-credential-root_token")
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **_kwargs):
+        return SimpleNamespace(
+            warnings=(),
+            plan=plan,
+            output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+        )
+
+    def buildx(**kwargs):
+        nonlocal captured_bindings
+        captured_bindings = tuple(kwargs["file_secret_bindings"])
+        assert all(binding.source.is_file() for binding in captured_bindings)
+        if buildx_failure is not None:
+            raise buildx_failure
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    expected_exit_code = (
+        130
+        if isinstance(buildx_failure, KeyboardInterrupt)
+        else (0 if buildx_failure is None else 1)
+    )
+    assert result.exit_code == expected_exit_code
+    assert [binding.secret_id for binding in captured_bindings] == [
+        "cdh-git-credential-root_token",
+        "cdh-git-credential-team_token",
+    ]
+    assert reads == [b"CDH_TEST_ROOT_TOKEN", b"CDH_TEST_TEAM_TOKEN"]
+    assert observed_root is not None and not observed_root.exists()
+    assert "CDH_TEST_ROOT_TOKEN" not in result.output
+    assert "CDH_TEST_TEAM_TOKEN" not in result.output
+    assert "root-secret-marker" not in result.output
+    assert "team-secret-marker" not in result.output
+
+
+def test_build_missing_plan_credential_fails_before_buildx(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+    missing_locator = "synthetic-missing-credential-source"
+    with config.open("a") as stream:
+        stream.write(
+            f"""
+[secrets.root_token]
+file = "{missing_locator}"
+[secrets.team_token]
+env = "CDH_TEST_TEAM_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://example.test/"
+username = "root-user"
+password = {{ secret = "root_token" }}
+[[cdh.git.credentials]]
+match = "https://gitlab.example.test/"
+username = "oauth2"
+password = {{ secret = "team_token" }}
+"""
+        )
+    plan = _credential_build_plan()
+    observed_root: Path | None = None
+
+    @contextmanager
+    def providers(*, git_credential_binding):
+        nonlocal observed_root
+        observed_root = Path(
+            git_credential_binding.environment[GIT_CREDENTIAL_SESSION_ENV]
+        )
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **_kwargs):
+        return SimpleNamespace(
+            warnings=(
+                Diagnostic(
+                    ("render",),
+                    "render.synthetic_planning_warning",
+                    "Synthetic planning warning",
+                    DiagnosticSeverity.WARNING,
+                ),
+            ),
+            plan=plan,
+            output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+        )
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(
+        host_cli,
+        "build_image_with_buildx",
+        lambda **_kwargs: pytest.fail("missing Secret reached Docker boundary"),
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.output.count("render.synthetic_planning_warning") == 1
+    assert "secret.source_unavailable" in result.output
+    assert missing_locator not in result.output
+    assert observed_root is not None and not observed_root.exists()
+
+
+@pytest.mark.parametrize(
     ("cache_args", "expected_option", "expected_message"),
     [
         (
@@ -1501,7 +1745,10 @@ def test_build_cache_import_and_export_are_independent(
         assert kwargs["output_mode"] == output_plan.output
         return SimpleNamespace(
             warnings=(),
-            plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
+            plan=SimpleNamespace(
+                toolchain=SimpleNamespace(platform="linux/amd64"),
+                custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+            ),
             output_plan=output_plan,
         )
 
@@ -1581,7 +1828,7 @@ def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
     assert result.exit_code == 0
     assert result.output.count(warning) == 1
     assert seen["forward_default_ssh"] is False
-    assert seen["known_hosts_bindings"] == ()
+    assert seen["file_secret_bindings"] == ()
 
 
 def test_build_ssh_does_not_replace_configuration_validation(
@@ -1685,8 +1932,8 @@ def test_build_ssh_forwards_agent_and_only_existing_default_trust_after_context(
 
     assert result.exit_code == 0
     assert seen["forward_default_ssh"] is True
-    assert seen["known_hosts_bindings"] == tuple(
-        KnownHostsBinding(
+    assert seen["file_secret_bindings"] == tuple(
+        FileSecretBinding(
             secret_id=KNOWN_HOSTS_MOUNTS[index].secret_id,
             source=default_sources[index],
         )
@@ -1743,11 +1990,11 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
 
     assert result.exit_code == 0
     assert (
-        KnownHostsBinding(
+        FileSecretBinding(
             secret_id=KNOWN_HOSTS_MOUNTS[0].secret_id,
             source=known_hosts,
         )
-        in seen["known_hosts_bindings"]
+        in seen["file_secret_bindings"]
     )
     source_markers = (str(host_home).encode(), b"host-trust-content-marker")
     for path in context.rglob("*"):
@@ -1796,7 +2043,10 @@ platforms = ["linux/amd64"]
         output_plan = BuildxOutputPlan(tags=("cli:test",), output="load")
         return SimpleNamespace(
             warnings=(),
-            plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
+            plan=SimpleNamespace(
+                toolchain=SimpleNamespace(platform="linux/amd64"),
+                custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+            ),
             output_plan=output_plan,
         )
 

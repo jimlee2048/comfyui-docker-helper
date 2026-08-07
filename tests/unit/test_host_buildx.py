@@ -8,9 +8,15 @@ from python_on_whales.exceptions import DockerException
 
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,
+    BuildxOutputPlan,
     KnownHostsBinding,
     build_image_with_buildx,
 )
+
+
+def test_buildx_output_plan_requires_an_image_tag() -> None:
+    with pytest.raises(ValueError, match="requires at least one image tag"):
+        BuildxOutputPlan(tags=(), output="load")
 
 
 # The Buildx mapping block protects cdh-owned domain values without treating

@@ -25,6 +25,18 @@ BuildxLogger = Callable[[str], None]
 
 
 @dataclass(frozen=True, slots=True)
+class BuildxOutputPlan:
+    """Process-local image publication choices for one Buildx invocation."""
+
+    tags: tuple[str, ...]
+    output: BuildxOutput
+
+    def __post_init__(self) -> None:
+        if not self.tags:
+            raise ValueError("a Buildx output plan requires at least one image tag")
+
+
+@dataclass(frozen=True, slots=True)
 class KnownHostsBinding:
     """One host known-hosts file bound to a stable BuildKit secret ID."""
 

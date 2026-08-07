@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config.build_plan import BuildOutputPlan, build_plan_digest
+from comfyui_docker_helper.config.build_plan import build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -30,7 +30,7 @@ from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
-from comfyui_docker_helper.host.buildx import KnownHostsBinding
+from comfyui_docker_helper.host.buildx import BuildxOutputPlan, KnownHostsBinding
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
@@ -113,12 +113,9 @@ def _prepared_build() -> SimpleNamespace:
     return SimpleNamespace(
         warnings=(),
         plan=SimpleNamespace(
-            build=BuildOutputPlan(
-                tags=("example:test",),
-                output="load",
-                platforms=("linux/amd64",),
-            )
+            toolchain=SimpleNamespace(platform="linux/amd64"),
         ),
+        output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
     )
 
 
@@ -981,19 +978,20 @@ output = "load"
 platforms = ["linux/amd64"]
 """
     )
-    plan_build = BuildOutputPlan(
+    output_plan = BuildxOutputPlan(
         tags=("cli:first", "cli:second"),
         output="push",
-        platforms=("linux/amd64",),
     )
 
     def prepare(*args, **kwargs):
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         configuration = kwargs["configuration_result"]
         seen["configuration_build"] = configuration.config.build
+        seen["output_plan"] = kwargs["output_plan"]
         return SimpleNamespace(
             warnings=(),
-            plan=SimpleNamespace(build=plan_build),
+            plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
+            output_plan=kwargs["output_plan"],
         )
 
     def buildx(**kwargs):
@@ -1047,13 +1045,14 @@ platforms = ["linux/amd64"]
     assert result.exit_code == 0
     assert seen["runtime_hooks_dir"] == hooks
     configuration_build = seen["configuration_build"]
-    assert configuration_build.tags == list(plan_build.tags)
-    assert configuration_build.output == plan_build.output
-    assert configuration_build.platforms == list(plan_build.platforms)
+    assert configuration_build.tags == ["config:test"]
+    assert configuration_build.output == "load"
+    assert configuration_build.platforms == ["linux/amd64"]
+    assert seen["output_plan"] == output_plan
     assert seen["buildx"] == {
-        "image_tags": plan_build.tags,
-        "output": plan_build.output,
-        "platforms": plan_build.platforms,
+        "image_tags": output_plan.tags,
+        "output": output_plan.output,
+        "platforms": ("linux/amd64",),
         "context_dir": context,
         "cache_from": "type=local,src=/cache source",
         "cache_to": "type=gha,scope=build",
@@ -1154,10 +1153,9 @@ def test_build_cache_import_and_export_are_independent(
     seen: dict[str, object] = {}
     config = tmp_path / "config.toml"
     _write_minimal_config(config)
-    plan_build = BuildOutputPlan(
+    output_plan = BuildxOutputPlan(
         tags=("image:test",),
         output="load",
-        platforms=("linux/amd64",),
     )
 
     @contextmanager
@@ -1169,8 +1167,13 @@ def test_build_cache_import_and_export_are_independent(
         )
 
     def prepare(*args, **kwargs):
-        del args, kwargs
-        return SimpleNamespace(warnings=(), plan=SimpleNamespace(build=plan_build))
+        del args
+        assert kwargs["output_plan"] == output_plan
+        return SimpleNamespace(
+            warnings=(),
+            plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
+            output_plan=kwargs["output_plan"],
+        )
 
     def buildx(**kwargs):
         seen["cache_from"] = kwargs["cache_from"]
@@ -1379,14 +1382,14 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
     seen: dict[str, object] = {}
 
     def prepare(output_dir, **kwargs):
-        del kwargs
+        output_plan = kwargs["output_plan"]
         Path(output_dir).mkdir(mode=0o700)
         _materialize_private_stage(
             plan,
             output_dir,
             canonical_wheel=canonical_wheel(),
         )
-        return SimpleNamespace(warnings=(), plan=plan)
+        return SimpleNamespace(warnings=(), plan=plan, output_plan=output_plan)
 
     def buildx(**kwargs):
         seen.update(kwargs)
@@ -1421,7 +1424,7 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
             assert all(marker not in content for marker in source_markers)
 
 
-def test_locked_build_override_stops_before_buildx_when_context_is_stale(
+def test_locked_build_override_does_not_mutate_image_configuration(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1454,20 +1457,21 @@ platforms = ["linux/amd64"]
 
     def prepare(*args, **kwargs):
         configuration = kwargs["configuration_result"]
-        assert configuration.config.build.tags == ["cli:test"]
+        assert configuration.config.build.tags == ["config:test"]
         assert kwargs["options"].locked is True
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    ("render",),
-                    "render.context_changed",
-                    "rendered context differs from the current BuildPlan",
-                ),
-            )
+        assert kwargs["output_plan"] == BuildxOutputPlan(
+            tags=("cli:test",), output="load"
+        )
+        return SimpleNamespace(
+            warnings=(),
+            plan=SimpleNamespace(toolchain=SimpleNamespace(platform="linux/amd64")),
+            output_plan=kwargs["output_plan"],
         )
 
-    def fail_buildx(**kwargs):
-        pytest.fail("stale locked context must stop before Docker Buildx")
+    def buildx(**kwargs):
+        assert kwargs["image_tags"] == ("cli:test",)
+        assert kwargs["output"] == "load"
+        assert kwargs["platforms"] == ("linux/amd64",)
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.default_planning_providers", providers
@@ -1476,7 +1480,7 @@ platforms = ["linux/amd64"]
         "comfyui_docker_helper.host.cli.prepare_render_context", prepare
     )
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.build_image_with_buildx", fail_buildx
+        "comfyui_docker_helper.host.cli.build_image_with_buildx", buildx
     )
 
     result = cli_runner.invoke(
@@ -1494,9 +1498,7 @@ platforms = ["linux/amd64"]
         ],
     )
 
-    assert result.exit_code == 1
-    assert "render.context_changed" in result.output
-    assert "Traceback" not in result.output
+    assert result.exit_code == 0
 
 
 def test_container_entrypoint_invokes_service_and_propagates_exit_code(

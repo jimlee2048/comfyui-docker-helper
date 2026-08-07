@@ -38,6 +38,7 @@ from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
 )
+from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
     build_local_executable_requests,
@@ -106,6 +107,7 @@ class PlanningOptions:
 class PreparedContext:
     plan: BuildPlan
     lock_result: AcceptedCanonicalLock
+    output_plan: BuildxOutputPlan | None = None
     warnings: tuple[Diagnostic, ...] = ()
 
 
@@ -124,6 +126,7 @@ def prepare_render_context(
     acquirer: CachingCanonicalAcquirer,
     local_acquirer: LocalExecutableEntryAcquirer,
     canonical_wheel: CanonicalWheel,
+    output_plan: BuildxOutputPlan | None = None,
     options: PlanningOptions | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
@@ -200,7 +203,12 @@ def prepare_render_context(
             sources,
             overwrite=overwrite,
         )
-    return PreparedContext(plan, accepted, result.warnings)
+    return PreparedContext(
+        plan=plan,
+        lock_result=accepted,
+        output_plan=output_plan,
+        warnings=result.warnings,
+    )
 
 
 def admit_build_hook_source(

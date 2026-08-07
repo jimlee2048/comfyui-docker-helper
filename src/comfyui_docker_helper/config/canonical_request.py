@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Literal, cast
 
 from comfyui_docker_helper.comfyui_requirements import (
     COMFYUI_REQUIREMENTS_PATH,
@@ -94,13 +94,6 @@ class DesiredResolution:
 
 
 @dataclass(frozen=True, slots=True)
-class BuildRequest:
-    tags: tuple[str, ...]
-    output: Literal["load", "push"]
-    platforms: tuple[Literal["linux/amd64"], ...]
-
-
-@dataclass(frozen=True, slots=True)
 class SshRequest:
     enable: bool
     port: int
@@ -175,14 +168,13 @@ class RuntimeRequest:
 class CanonicalRequestGraph:
     """One immutable source for reconciliation and phase projection."""
 
-    config_digest: str
+    image_config_digest: str
     target_platform: TargetPlatform
     backend: BackendPlan
     release: PlanningReleaseInputs
     protected_requirement_names: tuple[str, ...]
     comfyui_requirements: ParsedComfyUIRequirements
     desired: tuple[DesiredResolution, ...]
-    build: BuildRequest
     application: ApplicationRequest
     custom_nodes: tuple[CustomNodeRequest, ...]
     downloader: DownloaderRequest
@@ -450,16 +442,13 @@ def build_canonical_request_graph(
         for item in config.files
     )
     return CanonicalRequestGraph(
-        config_digest=_config_digest(config),
+        image_config_digest=_image_config_digest(config),
         target_platform=platform,
         backend=backend,
         release=release,
         protected_requirement_names=protected_requirement_names,
         comfyui_requirements=requirements_projection,
         desired=desired,
-        build=BuildRequest(
-            tuple(config.build.tags), config.build.output, tuple(config.build.platforms)
-        ),
         application=ApplicationRequest(
             workspace=workspace,
             comfyui_path=comfyui_path,
@@ -585,10 +574,10 @@ def _members(
     )
 
 
-def _config_digest(config: FinalConfig) -> str:
+def _image_config_digest(config: FinalConfig) -> str:
     canonical = (
         json.dumps(
-            config.model_dump(mode="json"),
+            _image_config_projection(config),
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -596,3 +585,14 @@ def _config_digest(config: FinalConfig) -> str:
         + "\n"
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _image_config_projection(config: FinalConfig) -> dict[str, object]:
+    document: dict[str, object] = config.model_dump(mode="json")
+    build = cast(dict[str, object], document["build"])
+    return {
+        **document,
+        "build": {
+            key: value for key, value in build.items() if key not in {"tags", "output"}
+        },
+    }

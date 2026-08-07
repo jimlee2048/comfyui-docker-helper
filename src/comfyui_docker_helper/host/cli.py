@@ -1,7 +1,6 @@
 """Host command group."""
 
 import os
-from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -21,6 +20,7 @@ from comfyui_docker_helper.config.value_validation import (
 )
 from comfyui_docker_helper.host.buildx import (
     BuildxOutput,
+    BuildxOutputPlan,
     KnownHostsBinding,
     build_image_with_buildx,
 )
@@ -174,6 +174,7 @@ def render(
         validated = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
         )
+        output_plan = _configured_buildx_output_plan(validated)
         build_hook_source_root = admit_build_hook_source(
             validated,
             build_hooks_dir,
@@ -189,6 +190,7 @@ def render(
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
                 canonical_wheel=providers.canonical_wheel,
+                output_plan=output_plan,
                 options=options,
                 overwrite=overwrite,
                 working_directory=Path.cwd(),
@@ -345,9 +347,8 @@ def build(
         config_tags=validated.config.build.tags,
     )
     effective_output = cli_output or validated.config.build.output
-    validated = _apply_build_overrides(
-        validated,
-        image_tags=effective_tags,
+    output_plan = BuildxOutputPlan(
+        tags=effective_tags,
         output=effective_output,
     )
 
@@ -368,6 +369,7 @@ def build(
                 acquirer=providers.acquirer,
                 local_acquirer=providers.local_acquirer,
                 canonical_wheel=providers.canonical_wheel,
+                output_plan=output_plan,
                 options=options,
                 overwrite=True,
                 working_directory=Path.cwd(),
@@ -387,12 +389,14 @@ def build(
     known_hosts_bindings = _collect_default_known_hosts_bindings() if use_ssh else ()
 
     typer.echo(f"Build context: {context_dir}")
-    build_plan = prepared.plan.build
+    buildx_output = prepared.output_plan
+    if buildx_output is None:  # pragma: no cover - host build always supplies one
+        raise RuntimeError("host build requires a Buildx output plan")
     build_image_with_buildx(
-        image_tags=build_plan.tags,
-        output=build_plan.output,
+        image_tags=buildx_output.tags,
+        output=buildx_output.output,
         context_dir=context_dir,
-        platforms=build_plan.platforms,
+        platforms=(prepared.plan.toolchain.platform,),
         cwd=Path.cwd(),
         log=typer.echo,
         forward_default_ssh=use_ssh,
@@ -486,17 +490,13 @@ def _admit_single_cache_spec(values: list[str], param_hint: str) -> str | None:
     return value
 
 
-def _apply_build_overrides(
+def _configured_buildx_output_plan(
     result: ConfigurationResult,
-    *,
-    image_tags: tuple[str, ...],
-    output: BuildxOutput,
-) -> ConfigurationResult:
-    build = result.config.build.model_copy(
-        update={"tags": list(image_tags), "output": output}
-    )
-    config = result.config.model_copy(update={"build": build})
-    return replace(result, config=config)
+) -> BuildxOutputPlan | None:
+    tags = tuple(result.config.build.tags)
+    if not tags:
+        return None
+    return BuildxOutputPlan(tags=tags, output=result.config.build.output)
 
 
 def _resolve_effective_image_tags(

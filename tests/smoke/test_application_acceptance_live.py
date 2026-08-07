@@ -318,7 +318,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     lock_digest = f"sha256:{hashlib.sha256(canonical_lock_bytes).hexdigest()}"
 
     assert binding.build_plan_digest == build_plan_digest(plan)
-    assert binding.config_digest == plan.config_digest
+    assert binding.image_config_digest == plan.image_config_digest
     assert binding.lock_digest == plan.lock_digest
     assert plan.lock_digest == lock_digest
     assert plan.toolchain.python.version == scenario.python_version
@@ -487,7 +487,7 @@ assert manifest["binding"] == {
     "schema_version": 1,
     "build_plan_schema_version": plan["schema_version"],
     "build_plan_digest": os.environ["EXPECTED_BUILD_PLAN_DIGEST"],
-    "config_digest": os.environ["EXPECTED_CONFIG_DIGEST"],
+    "image_config_digest": os.environ["EXPECTED_IMAGE_CONFIG_DIGEST"],
     "lock_digest": os.environ["EXPECTED_LOCK_DIGEST"],
 }
 expected_cli = os.environ["EXPECTED_CLI"] == "1"
@@ -1285,7 +1285,7 @@ def test_image_has_exact_environment_and_disposition(
             "EXPECTED_MIXED": str(int(scenario.mixed)),
             "EXPECTED_PYTHON_VERSION": scenario.python_version,
             "EXPECTED_BUILD_PLAN_DIGEST": binding.build_plan_digest,
-            "EXPECTED_CONFIG_DIGEST": binding.config_digest,
+            "EXPECTED_IMAGE_CONFIG_DIGEST": binding.image_config_digest,
             "EXPECTED_LOCK_DIGEST": lock_digest,
         },
     )

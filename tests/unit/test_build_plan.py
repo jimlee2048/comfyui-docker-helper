@@ -417,7 +417,7 @@ def test_plan_round_trip_is_strict_and_immutable() -> None:
 
     assert parse_build_plan_json(dump_build_plan_json(plan)) == plan
     with pytest.raises(ValidationError, match="frozen"):
-        plan.config_digest = DIGEST_A
+        plan.image_config_digest = DIGEST_A
 
     document = plan.model_dump(mode="json")
     document["unknown"] = True
@@ -425,13 +425,13 @@ def test_plan_round_trip_is_strict_and_immutable() -> None:
         BuildPlan.model_validate(document)
 
 
-def test_plan_and_manifest_bind_config_lock_and_plan_without_request_digests() -> None:
+def test_plan_and_manifest_bind_image_config_and_lock_without_requests() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     binding = manifest_binding(plan)
     serialized = dump_build_plan_json(plan)
 
     assert binding.build_plan_digest == build_plan_digest(plan)
-    assert binding.config_digest == plan.config_digest
+    assert binding.image_config_digest == plan.image_config_digest
     assert binding.lock_digest == plan.lock_digest
     assert ManifestBinding.model_validate_json(binding.model_dump_json()) == binding
     assert b"request_digest" not in serialized
@@ -439,16 +439,38 @@ def test_plan_and_manifest_bind_config_lock_and_plan_without_request_digests() -
     assert b"host" not in serialized
 
 
-def test_execution_only_config_change_updates_binding_deterministically() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("tags", ["example:changed"]), ("output", "push")],
+)
+def test_publication_only_config_change_does_not_change_image_plan(
+    field: str, value: object
+) -> None:
     config = final_config()
     changed_document = config.model_dump(mode="python")
-    changed_document["build"]["tags"] = ["example:changed"]
+    changed_document["build"][field] = value
     changed = FinalConfig.model_validate(changed_document)
 
     first = build_plan(config, accepted_resolution())
     second = build_plan(changed, accepted_resolution())
 
-    assert first.config_digest != second.config_digest
+    assert request_graph(config, accepted_resolution()) == request_graph(
+        changed, accepted_resolution()
+    )
+    assert first == second
+    assert dump_build_plan_json(first) == dump_build_plan_json(second)
+
+
+def test_image_config_change_updates_binding_deterministically() -> None:
+    config = final_config()
+    changed_document = config.model_dump(mode="python")
+    changed_document["system"]["env"]["IMAGE_INPUT"] = "changed"
+    changed = FinalConfig.model_validate(changed_document)
+
+    first = build_plan(config, accepted_resolution())
+    second = build_plan(changed, accepted_resolution())
+
+    assert first.image_config_digest != second.image_config_digest
     assert first.lock_digest == second.lock_digest
     assert build_plan_digest(first) != build_plan_digest(second)
 
@@ -875,7 +897,7 @@ def test_build_plan_parser_rejects_execution_sensitive_scalar_forgery(
     elif mutation == "shutdown-timeout":
         document["runtime"]["shutdown_timeout"] = "8"
     else:
-        document["config_digest"] = "bad"
+        document["image_config_digest"] = "bad"
 
     with pytest.raises(ValidationError, match=message):
         BuildPlan.model_validate(document)

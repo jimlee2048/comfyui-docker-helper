@@ -57,6 +57,7 @@ from comfyui_docker_helper.container.runtime_files import (
 )
 from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
 from comfyui_docker_helper.host import render_service as render_service_module
+from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
@@ -365,6 +366,7 @@ def _prepare(
     runtime_hooks_dir: Path | None = None,
     working_directory: Path | None = None,
     build_hooks_dir: Path | str | None = None,
+    output_plan: BuildxOutputPlan | None = None,
 ):
     configuration_result = load_validate_config_result(
         config, build_hooks_dir=build_hooks_dir
@@ -384,6 +386,7 @@ def _prepare(
             FilesystemLocalExecutableIdentityProvider()
         ),
         canonical_wheel=CANONICAL_WHEEL,
+        output_plan=output_plan,
         options=options,
         overwrite=overwrite,
         runtime_hooks_dir=runtime_hooks_dir,
@@ -835,13 +838,24 @@ def test_matching_lock_modes_do_not_construct_docker_authority(
     assert prepared.lock_result.provider_calls == ()
 
 
-def test_locked_rejects_stale_context_for_config_only_build_changes(
+@pytest.mark.parametrize(
+    "options",
+    [PlanningOptions(locked=True), PlanningOptions(check=True)],
+)
+def test_publication_only_config_changes_do_not_make_context_stale(
     tmp_path: Path,
+    options: PlanningOptions,
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
     output = tmp_path / "context"
-    _prepare(config, output, FakeAcquirer())
+    initial_output = BuildxOutputPlan(tags=("example:test",), output="load")
+    initial = _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        output_plan=initial_output,
+    )
     before = _tree(output)
     config.write_text(
         _config().replace(
@@ -850,11 +864,21 @@ def test_locked_rejects_stale_context_for_config_only_build_changes(
         )
     )
     fake = FakeAcquirer()
+    changed_output = BuildxOutputPlan(
+        tags=("cli:first", "cli:second"),
+        output="push",
+    )
 
-    with pytest.raises(HostRenderServiceError) as raised:
-        _prepare(config, output, fake, options=PlanningOptions(locked=True))
+    prepared = _prepare(
+        config,
+        output,
+        fake,
+        options=options,
+        output_plan=changed_output,
+    )
 
-    assert raised.value.diagnostics[0].code == "render.context_changed"
+    assert initial.output_plan is initial_output
+    assert prepared.output_plan is changed_output
     assert fake.calls == []
     assert _tree(output) == before
 

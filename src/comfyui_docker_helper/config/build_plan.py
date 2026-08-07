@@ -865,38 +865,19 @@ class RuntimePhase(_PlanModel):
         return value
 
 
-class BuildOutputPlan(_PlanModel):
-    tags: tuple[str, ...]
-    output: Literal["load", "push"]
-    platforms: tuple[Literal["linux/amd64"], ...]
-
-    @field_validator("tags")
-    @classmethod
-    def _validate_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(
-            not tag
-            or any(character.isspace() for character in tag)
-            or has_control_characters(tag)
-            for tag in value
-        ):
-            raise ValueError("build tags must contain no whitespace or controls")
-        return value
-
-
 class BuildPlan(_PlanModel):
     """Complete immutable build execution authority."""
 
     schema_version: Literal[1]
-    config_digest: str
+    image_config_digest: str
     lock_digest: str
-    build: BuildOutputPlan
     toolchain: ToolchainPhase
     application: ApplicationPhase
     custom_nodes: CustomNodesPhase
     files: FilesPhase
     runtime: RuntimePhase
 
-    @field_validator("config_digest", "lock_digest")
+    @field_validator("image_config_digest", "lock_digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return validate_sha256_digest(value)
@@ -1029,10 +1010,10 @@ class ManifestBinding(_PlanModel):
     schema_version: Literal[1]
     build_plan_schema_version: Literal[1]
     build_plan_digest: str
-    config_digest: str
+    image_config_digest: str
     lock_digest: str
 
-    @field_validator("build_plan_digest", "config_digest", "lock_digest")
+    @field_validator("build_plan_digest", "image_config_digest", "lock_digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return validate_sha256_digest(value)
@@ -1092,13 +1073,8 @@ def construct_build_plan(
         raise ValueError(f"canonical lock contains unused identities: {unused!r}")
     return BuildPlan(
         schema_version=BUILD_PLAN_SCHEMA_VERSION,
-        config_digest=graph.config_digest,
+        image_config_digest=graph.image_config_digest,
         lock_digest=_digest_bytes(dump_canonical_lock_toml(lock).encode("utf-8")),
-        build=BuildOutputPlan(
-            tags=graph.build.tags,
-            output=graph.build.output,
-            platforms=graph.build.platforms,
-        ),
         toolchain=toolchain,
         application=application,
         custom_nodes=custom_nodes,
@@ -1432,7 +1408,7 @@ def manifest_binding(plan: BuildPlan) -> ManifestBinding:
         schema_version=MANIFEST_SCHEMA_VERSION,
         build_plan_schema_version=plan.schema_version,
         build_plan_digest=build_plan_digest(plan),
-        config_digest=plan.config_digest,
+        image_config_digest=plan.image_config_digest,
         lock_digest=plan.lock_digest,
     )
 

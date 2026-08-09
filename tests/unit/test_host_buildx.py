@@ -1,5 +1,6 @@
 """Tests for the narrow public-API Buildx adapter."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,9 +9,15 @@ from python_on_whales.exceptions import DockerException
 
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,
-    KnownHostsBinding,
+    BuildxOutputPlan,
+    FileSecretBinding,
     build_image_with_buildx,
 )
+
+
+def test_buildx_output_plan_requires_an_image_tag() -> None:
+    with pytest.raises(ValueError, match="requires at least one image tag"):
+        BuildxOutputPlan(tags=(), output="load")
 
 
 # The Buildx mapping block protects cdh-owned domain values without treating
@@ -64,36 +71,37 @@ def test_buildx_maps_domain_values_and_fully_drains_live_logs(
     ]
 
 
-# SSH forwarding preserves repeatable secret mappings and omits absent trust inputs.
+# Credential snapshots and known-hosts files share one ordered Secret input.
 @pytest.mark.parametrize(
-    ("known_hosts_bindings", "expected_secrets"),
+    ("file_secret_bindings", "expected_secrets"),
     [
         ((), None),
         (
             (
-                KnownHostsBinding(
-                    secret_id="known-hosts-ordinary",
-                    source=Path("/trust/known_hosts"),
+                FileSecretBinding(
+                    secret_id="cdh-git-credential-private",
+                    source=Path("/session/snapshot-private"),
                 ),
-                KnownHostsBinding(
-                    secret_id="known-hosts-comma",
-                    source=Path("/trust/known,hosts"),
+                FileSecretBinding(
+                    secret_id="cdh-ssh-known-hosts-user",
+                    source=Path('/trust/known,"hosts'),
                 ),
             ),
             [
-                "type=file,id=known-hosts-ordinary,src=/trust/known_hosts",
-                'type=file,id=known-hosts-comma,"src=/trust/known,hosts"',
+                "type=file,id=cdh-git-credential-private,src=/session/snapshot-private",
+                'type=file,id=cdh-ssh-known-hosts-user,"src=/trust/known,""hosts"',
             ],
         ),
     ],
 )
-def test_buildx_maps_default_ssh_and_known_hosts_bindings(
-    known_hosts_bindings: tuple[KnownHostsBinding, ...],
+def test_buildx_maps_default_ssh_and_ordered_file_secret_bindings(
+    file_secret_bindings: tuple[FileSecretBinding, ...],
     expected_secrets: list[str] | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, object]] = []
+    logs: list[str] = []
 
     def build(context: Path, **kwargs: object):
         calls.append({"context": context, **kwargs})
@@ -108,8 +116,8 @@ def test_buildx_maps_default_ssh_and_known_hosts_bindings(
         image_tags=("image:tag",),
         context_dir=tmp_path,
         forward_default_ssh=True,
-        known_hosts_bindings=known_hosts_bindings,
-        log=lambda message: None,
+        file_secret_bindings=file_secret_bindings,
+        log=logs.append,
     )
 
     assert calls[0]["ssh"] == "default"
@@ -117,6 +125,11 @@ def test_buildx_maps_default_ssh_and_known_hosts_bindings(
         assert "secrets" not in calls[0]
     else:
         assert calls[0]["secrets"] == expected_secrets
+    assert all(
+        os.fspath(binding.source) not in message
+        for binding in file_secret_bindings
+        for message in logs
+    )
 
 
 def test_buildx_maps_opaque_cache_specs_without_logging_them(
@@ -126,7 +139,7 @@ def test_buildx_maps_opaque_cache_specs_without_logging_them(
     logs: list[str] = []
     cache_from = "type=local,src=/cache source"
     cache_to = "type=registry,ref=example/cache:build,mode=max"
-    binding = KnownHostsBinding(
+    binding = FileSecretBinding(
         secret_id="known-hosts",
         source=Path("/trust/known_hosts"),
     )
@@ -144,7 +157,7 @@ def test_buildx_maps_opaque_cache_specs_without_logging_them(
         image_tags=("image:tag",),
         context_dir=tmp_path,
         forward_default_ssh=True,
-        known_hosts_bindings=(binding,),
+        file_secret_bindings=(binding,),
         cache_from=cache_from,
         cache_to=cache_to,
         log=logs.append,
@@ -232,7 +245,7 @@ def test_buildx_translates_public_api_failure(
             FileNotFoundError(),
             "Docker was not found; install Docker with Buildx and ensure it is on PATH",
         ),
-        (OSError("unavailable"), "Docker Buildx could not be started: unavailable"),
+        (OSError("unavailable"), "Docker Buildx could not be started"),
     ],
 )
 def test_buildx_translates_start_failure(
@@ -241,21 +254,30 @@ def test_buildx_translates_start_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    source = tmp_path / "synthetic-source-marker"
+    binding = FileSecretBinding("cdh-git-credential-private", source)
+
     def build(*args: object, **kwargs: object):
         del args, kwargs
-        raise raised
+        if isinstance(raised, FileNotFoundError):
+            raise raised
+        raise OSError(f"synthetic failure containing {source}")
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.buildx.DockerClient",
         lambda: SimpleNamespace(buildx=SimpleNamespace(build=build)),
     )
 
-    with pytest.raises(BuildxBuildError, match=message):
+    with pytest.raises(BuildxBuildError, match=message) as captured:
         build_image_with_buildx(
             image_tags=("image:tag",),
             context_dir=tmp_path,
+            file_secret_bindings=(binding,),
             log=lambda line: None,
         )
+
+    assert os.fspath(source) not in str(captured.value)
+    assert "synthetic failure" not in str(captured.value)
 
 
 def test_buildx_preserves_keyboard_interrupt(

@@ -16,6 +16,7 @@ from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     CustomNodePlan,
     CustomNodesPhase,
+    GitCredentialRoutePlan,
     GitNodePlan,
     HookPlan,
     RegistryNodePlan,
@@ -145,11 +146,13 @@ def _phase(
     nodes: tuple[CustomNodePlan, ...],
     *,
     install_manager: bool = True,
+    git_credentials: tuple[GitCredentialRoutePlan, ...] = (),
 ) -> CustomNodesPhase:
     return CustomNodesPhase(
         install_manager=install_manager,
         user_directory=str(runtime.comfyui_path / "user"),
         nodes=nodes,
+        git_credentials=git_credentials,
     )
 
 
@@ -868,6 +871,104 @@ def test_git_requirements_reject_source_control_before_any_install_surface(
             tmp_path / "constraints.txt",
             {},
         )
+
+
+def test_git_credential_policy_covers_install_and_provenance_with_ssh_coexistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    node = _git_node(runtime)
+    route = GitCredentialRoutePlan(
+        match="https://example.invalid/Raw",
+        username="token-user",
+        secret_id="cdh-git-credential-private_git",
+    )
+    phase = _phase(runtime, (node,), git_credentials=(route,))
+    environment = custom_node_installer._git_environment(
+        phase,
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.ssh://mirror/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://example.invalid/",
+            "GIT_SSH_COMMAND": "ssh -F none",
+            "GIT_SSL_CAINFO": "/custom/ca.pem",
+        },
+        build_plan_digest=f"sha256:{'a' * 64}",
+    )
+    observed: list[tuple[str, dict[str, str]]] = []
+
+    def run_git(_argv, *, env, description, **_kwargs):
+        observed.append((description, dict(env)))
+        return b""
+
+    def verify(_node, _target, _root, _git_path, env):
+        observed.append(("provenance", dict(env)))
+
+    monkeypatch.setattr(custom_node_installer, "_run_git", run_git)
+    monkeypatch.setattr(custom_node_installer, "_verify_git_provenance", verify)
+    monkeypatch.setattr(
+        custom_node_installer, "_install_git_root_surfaces", lambda *_args: None
+    )
+
+    custom_node_installer._install_git_node(
+        node,
+        runtime.comfyui_path / "custom_nodes",
+        application,
+        runtime,
+        Path("/usr/bin/git"),
+        Path("/usr/local/bin/uv"),
+        tmp_path / "constraints.txt",
+        environment,
+        {},
+    )
+
+    descriptions = {item for item, _env in observed}
+    assert {
+        "Git node direct clone",
+        "Git node direct exact checkout",
+        "Git node direct recursive submodule checkout",
+        "provenance",
+    }.issubset(descriptions)
+    for _description, git_environment in observed:
+        assert git_environment["GIT_CONFIG_COUNT"] == "5"
+        assert git_environment["GIT_CONFIG_KEY_0"] == ("url.ssh://mirror/.insteadOf")
+        assert git_environment["GIT_CONFIG_VALUE_0"] == ("https://example.invalid/")
+        assert git_environment["GIT_CONFIG_KEY_1"] == "credential.helper"
+        assert git_environment["GIT_CONFIG_VALUE_1"] == ""
+        assert git_environment["GIT_CONFIG_KEY_2"] == "credential.helper"
+        assert (
+            "container.git_credential_helper" in git_environment["GIT_CONFIG_VALUE_2"]
+        )
+        assert git_environment["GIT_CONFIG_KEY_3"] == "credential.useHttpPath"
+        assert git_environment["GIT_CONFIG_VALUE_3"] == "true"
+        assert git_environment["GIT_CONFIG_KEY_4"] == "credential.interactive"
+        assert git_environment["GIT_CONFIG_VALUE_4"] == "false"
+        assert git_environment["GIT_TERMINAL_PROMPT"] == "0"
+        assert git_environment["GIT_ASKPASS"] == ""
+        assert git_environment["GIT_SSH_COMMAND"] == "ssh -F none"
+        assert git_environment["GIT_SSL_CAINFO"] == "/custom/ca.pem"
+
+
+def test_git_credential_policy_rejects_an_invalid_ambient_config_count(
+    tmp_path: Path,
+) -> None:
+    _application_phase, runtime = _application(tmp_path)
+    route = GitCredentialRoutePlan(
+        match="https://example.invalid/Raw",
+        username="token-user",
+        secret_id="cdh-git-credential-private_git",
+    )
+    phase = _phase(runtime, (_git_node(runtime),), git_credentials=(route,))
+
+    with pytest.raises(CustomNodeInstallError) as raised:
+        custom_node_installer._git_environment(
+            phase,
+            {"GIT_CONFIG_COUNT": "1_0"},
+            build_plan_digest=f"sha256:{'a' * 64}",
+        )
+
+    assert str(raised.value) == "Git credential process policy is invalid"
 
 
 # Mixed execution preserves declaration order and every typed mutation boundary.

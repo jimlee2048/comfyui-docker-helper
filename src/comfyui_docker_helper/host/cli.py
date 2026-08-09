@@ -1,7 +1,6 @@
 """Host command group."""
 
 import os
-from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -9,19 +8,22 @@ import typer
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
+from comfyui_docker_helper.config.build_plan import git_credential_secret_ids
+from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
+from comfyui_docker_helper.config.publication_tags import (
+    static_release_availability,
+    validate_publication_tags,
+)
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
     ConfigurationServiceError,
     load_validate_config_result,
 )
-from comfyui_docker_helper.config.value_validation import (
-    has_control_characters,
-    is_argv_value,
-)
+from comfyui_docker_helper.config.value_validation import is_argv_value
 from comfyui_docker_helper.host.buildx import (
     BuildxOutput,
-    KnownHostsBinding,
+    FileSecretBinding,
     build_image_with_buildx,
 )
 from comfyui_docker_helper.host.diagnostics import (
@@ -36,6 +38,10 @@ from comfyui_docker_helper.host.render_service import (
     PlanningOptions,
     admit_build_hook_source,
     prepare_render_context,
+)
+from comfyui_docker_helper.host.secret_session import (
+    HostSecretSession,
+    HostSecretSessionError,
 )
 
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
@@ -174,24 +180,40 @@ def render(
         validated = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
         )
+        render_configuration_warnings(
+            _format_config_files(config_files), validated.warnings
+        )
         build_hook_source_root = admit_build_hook_source(
             validated,
             build_hooks_dir,
             output_dir,
             working_directory=Path.cwd(),
         )
-        with default_planning_providers() as providers:
-            prepared = prepare_render_context(
-                output_dir,
-                configuration_result=validated,
-                build_hook_source_root=build_hook_source_root,
-                runtime_hooks_dir=runtime_hooks_dir,
-                acquirer=providers.acquirer,
-                local_acquirer=providers.local_acquirer,
-                canonical_wheel=providers.canonical_wheel,
-                options=options,
-                overwrite=overwrite,
-                working_directory=Path.cwd(),
+        secret_session = HostSecretSession.from_configuration(validated)
+        try:
+            with secret_session:
+                with _planning_providers(secret_session) as providers:
+                    prepared = prepare_render_context(
+                        output_dir,
+                        configuration_result=validated,
+                        build_hook_source_root=build_hook_source_root,
+                        runtime_hooks_dir=runtime_hooks_dir,
+                        acquirer=providers.acquirer,
+                        local_acquirer=providers.local_acquirer,
+                        canonical_wheel=providers.canonical_wheel,
+                        tag_templates=validated.config.build.tags,
+                        output_mode=validated.config.build.output,
+                        options=options,
+                        overwrite=overwrite,
+                        working_directory=Path.cwd(),
+                    )
+                render_configuration_warnings(
+                    _format_config_files(config_files),
+                    secret_session.drain_warnings(),
+                )
+        finally:
+            render_configuration_warnings(
+                _format_config_files(config_files), secret_session.drain_warnings()
             )
     except (
         CanonicalWheelError,
@@ -203,13 +225,16 @@ def render(
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
-    render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
+    except HostSecretSessionError as error:
+        _render_secret_session_failure(config_files, error)
+        raise typer.Exit(code=1) from error
 
     if dry_run:
         render_plan_preview(
             prepared.plan,
             lock_result=prepared.lock_result,
             options=options,
+            output_plan=prepared.output_plan,
         )
         return
 
@@ -339,17 +364,16 @@ def build(
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
-    use_ssh = _prepare_build_ssh_input(requested=ssh, result=validated)
+    render_configuration_warnings(
+        _format_config_files(config_files), validated.warnings
+    )
     effective_tags = _resolve_effective_image_tags(
         cli_tags=cli_tags,
         config_tags=validated.config.build.tags,
+        comfyui_selector=validated.config.comfyui.version,
     )
+    use_ssh = _prepare_build_ssh_input(requested=ssh, result=validated)
     effective_output = cli_output or validated.config.build.output
-    validated = _apply_build_overrides(
-        validated,
-        image_tags=effective_tags,
-        output=effective_output,
-    )
 
     try:
         options = PlanningOptions(locked=locked, upgrade_lock=upgrade_lock)
@@ -359,18 +383,68 @@ def build(
             context_dir,
             working_directory=Path.cwd(),
         )
-        with default_planning_providers() as providers:
-            prepared = prepare_render_context(
-                context_dir,
-                configuration_result=validated,
-                build_hook_source_root=build_hook_source_root,
-                runtime_hooks_dir=runtime_hooks_dir,
-                acquirer=providers.acquirer,
-                local_acquirer=providers.local_acquirer,
-                canonical_wheel=providers.canonical_wheel,
-                options=options,
-                overwrite=True,
-                working_directory=Path.cwd(),
+        secret_session = HostSecretSession.from_configuration(validated)
+        try:
+            with secret_session:
+                with _planning_providers(secret_session) as providers:
+                    prepared = prepare_render_context(
+                        context_dir,
+                        configuration_result=validated,
+                        build_hook_source_root=build_hook_source_root,
+                        runtime_hooks_dir=runtime_hooks_dir,
+                        acquirer=providers.acquirer,
+                        local_acquirer=providers.local_acquirer,
+                        canonical_wheel=providers.canonical_wheel,
+                        tag_templates=effective_tags,
+                        output_mode=effective_output,
+                        options=options,
+                        overwrite=True,
+                        working_directory=Path.cwd(),
+                    )
+                render_configuration_warnings(
+                    _format_config_files(config_files),
+                    secret_session.drain_warnings(),
+                )
+                credential_bindings = tuple(
+                    FileSecretBinding(
+                        secret_id,
+                        secret_session.snapshot_git_credential(secret_id),
+                    )
+                    for secret_id in git_credential_secret_ids(
+                        prepared.plan.custom_nodes
+                    )
+                )
+                render_configuration_warnings(
+                    _format_config_files(config_files),
+                    secret_session.drain_warnings(),
+                )
+
+                known_hosts_bindings = (
+                    _collect_default_known_hosts_bindings() if use_ssh else ()
+                )
+
+                typer.echo(f"Build context: {context_dir}")
+                buildx_output = prepared.output_plan
+                if buildx_output is None:  # pragma: no cover
+                    raise RuntimeError("host build requires a Buildx output plan")
+                build_image_with_buildx(
+                    image_tags=buildx_output.tags,
+                    output=buildx_output.output,
+                    context_dir=context_dir,
+                    platforms=(prepared.plan.toolchain.platform,),
+                    cwd=Path.cwd(),
+                    log=typer.echo,
+                    forward_default_ssh=use_ssh,
+                    file_secret_bindings=(
+                        *credential_bindings,
+                        *known_hosts_bindings,
+                    ),
+                    cache_from=cache_from,
+                    cache_to=cache_to,
+                )
+        finally:
+            render_configuration_warnings(
+                _format_config_files(config_files), secret_session.drain_warnings()
             )
     except (
         CanonicalWheelError,
@@ -382,23 +456,30 @@ def build(
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
-    render_configuration_warnings(_format_config_files(config_files), prepared.warnings)
+    except HostSecretSessionError as error:
+        _render_secret_session_failure(config_files, error)
+        raise typer.Exit(code=1) from error
 
-    known_hosts_bindings = _collect_default_known_hosts_bindings() if use_ssh else ()
 
-    typer.echo(f"Build context: {context_dir}")
-    build_plan = prepared.plan.build
-    build_image_with_buildx(
-        image_tags=build_plan.tags,
-        output=build_plan.output,
-        context_dir=context_dir,
-        platforms=build_plan.platforms,
-        cwd=Path.cwd(),
-        log=typer.echo,
-        forward_default_ssh=use_ssh,
-        known_hosts_bindings=known_hosts_bindings,
-        cache_from=cache_from,
-        cache_to=cache_to,
+def _planning_providers(secret_session: HostSecretSession):
+    binding = secret_session.git_binding()
+    if binding is None:
+        return default_planning_providers()
+    return default_planning_providers(git_credential_binding=binding)
+
+
+def _render_secret_session_failure(
+    config_files: list[Path], error: HostSecretSessionError
+) -> None:
+    render_configuration_diagnostics(
+        _format_config_files(config_files),
+        (
+            Diagnostic(
+                ("secrets",),
+                f"secret.{error.code}",
+                str(error),
+            ),
+        ),
     )
 
 
@@ -427,9 +508,9 @@ def _prepare_build_ssh_input(
     return True
 
 
-def _collect_default_known_hosts_bindings() -> tuple[KnownHostsBinding, ...]:
+def _collect_default_known_hosts_bindings() -> tuple[FileSecretBinding, ...]:
     return tuple(
-        KnownHostsBinding(
+        FileSecretBinding(
             secret_id=descriptor.secret_id,
             source=source,
         )
@@ -486,25 +567,13 @@ def _admit_single_cache_spec(values: list[str], param_hint: str) -> str | None:
     return value
 
 
-def _apply_build_overrides(
-    result: ConfigurationResult,
-    *,
-    image_tags: tuple[str, ...],
-    output: BuildxOutput,
-) -> ConfigurationResult:
-    build = result.config.build.model_copy(
-        update={"tags": list(image_tags), "output": output}
-    )
-    config = result.config.model_copy(update={"build": build})
-    return replace(result, config=config)
-
-
 def _resolve_effective_image_tags(
     *,
     cli_tags: list[str],
     config_tags: list[str],
+    comfyui_selector: str,
 ) -> tuple[str, ...]:
-    _validate_cli_image_tags(cli_tags)
+    _validate_cli_image_tags(cli_tags, comfyui_selector=comfyui_selector)
     tags = tuple(cli_tags or config_tags)
     if not tags:
         raise typer.BadParameter(
@@ -514,18 +583,17 @@ def _resolve_effective_image_tags(
     return tags
 
 
-def _validate_cli_image_tags(tags: list[str]) -> None:
-    for tag in tags:
-        if (
-            not tag
-            or any(character.isspace() for character in tag)
-            or has_control_characters(tag)
-        ):
-            raise typer.BadParameter(
-                "must be non-empty and must not contain whitespace "
-                "or control characters",
-                param_hint="--tag/-t",
-            )
+def _validate_cli_image_tags(tags: list[str], *, comfyui_selector: str) -> None:
+    issues = validate_publication_tags(
+        tags,
+        release_available=static_release_availability(comfyui_selector),
+    )
+    if issues:
+        first = issues[0]
+        raise typer.BadParameter(
+            f"tag {first.index + 1}: {first.message} ({first.code})",
+            param_hint="--tag/-t",
+        )
 
 
 def _format_config_files(config_files: list[Path]) -> str | Path:

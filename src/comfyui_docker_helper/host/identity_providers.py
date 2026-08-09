@@ -36,6 +36,10 @@ from comfyui_docker_helper.config.value_validation import (
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.file_admission import read_regular_absolute_file
+from comfyui_docker_helper.git_credential_policy import (
+    noninteractive_git_environment,
+)
+from comfyui_docker_helper.host.secret_session import GitCredentialProcessBinding
 from comfyui_docker_helper.host.uv_docker_executor import (
     ManagedPythonCatalogOperation,
     UvDockerExecutor,
@@ -548,6 +552,7 @@ class HttpRegistryNodeIdentityProvider:
 class GitDirectIdentityProvider:
     git_executable: str = "git"
     runner: ProcessRunner = subprocess.run
+    credential_binding: GitCredentialProcessBinding | None = None
 
     def resolve(self, request: DirectGitIdentityRequest) -> DirectGitIdentity:
         commit = _resolve_git_ref(
@@ -556,6 +561,7 @@ class GitDirectIdentityProvider:
             source="direct Git",
             git_executable=self.git_executable,
             runner=self.runner,
+            credential_binding=self.credential_binding,
         )
         return DirectGitIdentity(type="git", url=request.url, commit=commit)
 
@@ -816,22 +822,23 @@ def _run_git_ls_remote(
     source: str,
     git_executable: str,
     runner: ProcessRunner,
+    credential_binding: GitCredentialProcessBinding | None = None,
 ) -> str:
     if not is_argv_value(url) or any(
         not is_argv_value(value) for value in (*options, *patterns)
     ):
         raise IdentityProviderError(source, ProviderFailureKind.INVALID_REQUEST)
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "",
-        "GCM_INTERACTIVE": "never",
-        "SSH_ASKPASS": "",
-    }
+    config_args: tuple[str, ...] = ()
+    environment: Mapping[str, str] = {}
+    if credential_binding is not None:
+        config_args = credential_binding.config_args
+        environment = credential_binding.environment
+    env = noninteractive_git_environment(os.environ, overlay=environment)
     try:
         completed = runner(
             (
                 git_executable,
+                *config_args,
                 "ls-remote",
                 *options,
                 "--end-of-options",
@@ -871,6 +878,7 @@ def _resolve_git_ref(
     source: str,
     git_executable: str,
     runner: ProcessRunner,
+    credential_binding: GitCredentialProcessBinding | None = None,
 ) -> str:
     output = _run_git_ls_remote(
         url,
@@ -879,6 +887,7 @@ def _resolve_git_ref(
         source=source,
         git_executable=git_executable,
         runner=runner,
+        credential_binding=credential_binding,
     )
     resolved = list(_parse_git_output(output, source))
     if not resolved:

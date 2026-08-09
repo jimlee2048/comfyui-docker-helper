@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,9 +36,14 @@ from comfyui_docker_helper.config.canonical_resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.publication_tags import (
+    PublicationTagError,
+    resolve_publication_tags,
+)
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
 )
+from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
     build_local_executable_requests,
@@ -106,7 +112,7 @@ class PlanningOptions:
 class PreparedContext:
     plan: BuildPlan
     lock_result: AcceptedCanonicalLock
-    warnings: tuple[Diagnostic, ...] = ()
+    output_plan: BuildxOutputPlan | None = None
 
 
 class HostRenderServiceError(ValueError):
@@ -124,6 +130,8 @@ def prepare_render_context(
     acquirer: CachingCanonicalAcquirer,
     local_acquirer: LocalExecutableEntryAcquirer,
     canonical_wheel: CanonicalWheel,
+    tag_templates: Sequence[str] = (),
+    output_mode: BuildxOutput = "load",
     options: PlanningOptions | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
@@ -176,12 +184,24 @@ def prepare_render_context(
             accepted.lock,
             runtime_provenance=_runtime_provenance(result),
         )
+        output_plan = _resolve_buildx_output_plan(
+            tag_templates,
+            output=output_mode,
+            plan=plan,
+        )
     except RuntimeHookInputError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except CanonicalResolutionError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except CanonicalRequestError as error:
         raise HostRenderServiceError(error.diagnostics) from error
+    except PublicationTagError as error:
+        raise HostRenderServiceError(
+            tuple(
+                Diagnostic(("build", "tags", issue.index), issue.code, issue.message)
+                for issue in error.issues
+            )
+        ) from error
 
     sources = tuple(
         LocalMaterializationSource(
@@ -200,7 +220,30 @@ def prepare_render_context(
             sources,
             overwrite=overwrite,
         )
-    return PreparedContext(plan, accepted, result.warnings)
+    return PreparedContext(
+        plan=plan,
+        lock_result=accepted,
+        output_plan=output_plan,
+    )
+
+
+def _resolve_buildx_output_plan(
+    tag_templates: Sequence[str],
+    *,
+    output: BuildxOutput,
+    plan: BuildPlan,
+) -> BuildxOutputPlan | None:
+    if not tag_templates:
+        return None
+    comfyui = plan.application.comfyui
+    return BuildxOutputPlan(
+        tags=resolve_publication_tags(
+            tag_templates,
+            commit=comfyui.commit,
+            formal_release=comfyui.formal_release,
+        ),
+        output=output,
+    )
 
 
 def admit_build_hook_source(

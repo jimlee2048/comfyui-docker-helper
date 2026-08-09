@@ -54,6 +54,7 @@ from comfyui_docker_helper.host.identity_providers import (
     LocalExecutableIdentityRequest,
 )
 from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
+from comfyui_docker_helper.host.secret_session import GitCredentialProcessBinding
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.version import package_version
 
@@ -82,7 +83,9 @@ class DefaultPlanningProviders:
 
 
 @contextmanager
-def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
+def default_planning_providers(
+    *, git_credential_binding: GitCredentialProcessBinding | None = None
+) -> Iterator[DefaultPlanningProviders]:
     """Create concrete final providers only for render/build, never validate."""
     canonical_wheel = build_canonical_wheel()
     with httpx.Client(follow_redirects=True, timeout=30.0) as client:
@@ -91,7 +94,9 @@ def default_planning_providers() -> Iterator[DefaultPlanningProviders]:
             managed_python=DockerManagedPythonIdentityProvider(),
             comfyui=GitOfficialComfyUIIdentityProvider(),
             registry=HttpRegistryNodeIdentityProvider(client),
-            git=GitDirectIdentityProvider(),
+            git=GitDirectIdentityProvider(
+                credential_binding=git_credential_binding,
+            ),
             python_group=DockerPythonGroupResolver(),
         )
         yield DefaultPlanningProviders(

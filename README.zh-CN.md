@@ -20,6 +20,8 @@
 - 解析并锁定选定的 Python、PyTorch、ComfyUI、工具、自定义节点和远程文件输入。
 - 使用 Docker Buildx 构建面向 Linux `amd64`、支持 CUDA 的定制 ComfyUI 镜像。
 - 使用宿主机的默认 SSH agent 构建私有 direct-Git 自定义节点。
+- 使用已配置的凭据通过 HTTP(S) 访问私有 direct-Git 自定义节点。
+- 根据已接受的 ComfyUI release 或 commit 为同一次构建生成确定性的发布标签。
 - 添加可选的 Manager、comfy-cli、自定义节点、文件、下载、生命周期 Hook 和运行时 SSH 访问。
 
 ## 宿主机要求

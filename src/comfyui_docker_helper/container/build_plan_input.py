@@ -13,6 +13,7 @@ from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     CustomNodesPhase,
     FilesPhase,
+    GitCredentialRoutePlan,
     ManifestBinding,
     ToolchainPhase,
     build_plan_digest,
@@ -100,6 +101,10 @@ class BuildPlanInputAdmission:
     def custom_node_install(self) -> tuple[CustomNodesPhase, ApplicationPhase]:
         """Project only the custom-node installer inputs."""
         return self._plan.custom_nodes, self._plan.application
+
+    def git_credential_routes(self) -> tuple[GitCredentialRoutePlan, ...]:
+        """Project only safe image-side Git credential routing metadata."""
+        return self._plan.custom_nodes.git_credentials
 
     def file_downloads(self) -> tuple[FilesPhase, str]:
         """Project file policy with its authoritative ComfyUI root."""

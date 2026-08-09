@@ -28,6 +28,8 @@ Keep test policy in the [testing handbook](../../tests/README.md) and agent-spec
 
 Production code, strict models, CLI help, executable examples, and behavioral tests are the authorities for exact fields, defaults, accepted values, command options, and behavior. Documentation explains how to use or preserve those authorities; it must not become a parallel schema, option inventory, or test oracle.
 
+[`examples/minimal.toml`](../../examples/minimal.toml) is the runnable quick-start baseline. [`examples/full.toml`](../../examples/full.toml) is the comprehensive annotated reference: its active TOML remains offline-validatable, but it is not a build acceptance profile. Operational documentation uses `cdh.toml` unless a command deliberately exercises a shipped example.
+
 When a behavior change makes documentation stale, update or remove that copy in the same change. Resolve disagreement against the current machine and behavioral authorities instead of preserving obsolete prose for compatibility.
 
 ### Current rationale, not provenance

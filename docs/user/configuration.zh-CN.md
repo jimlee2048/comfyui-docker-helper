@@ -6,10 +6,10 @@
 
 ## 选择起始示例
 
-- [`minimal.toml`](../../examples/minimal.toml) 是可运行且受支持的最小配置。
-- [`full.toml`](../../examples/full.toml) 是附有全面注释的示例。它标出了必填字段并记录实际默认值。
+- [`minimal.toml`](../../examples/minimal.toml) 是可运行且受支持的最小配置，也是通常使用的起点。
+- [`full.toml`](../../examples/full.toml) 是附有全面注释的配置参考。其生效 TOML 可保持离线验证通过，但它不是端到端构建配置。
 
-示例中的每一个值都是该示例作出的显式选择，并不代表隐含的默认值。请复制最接近你所需镜像的示例，然后移除或更改其中的选择。
+示例中的每一个值都是该示例作出的显式选择，并不代表隐含的默认值。需要可运行配置时请从最小示例开始，并按需查阅或复制完整参考中的配置段。
 
 在本地验证配置，无需访问网络、使用 Docker 或执行写入：
 
@@ -24,12 +24,13 @@ cdh host validate \
 
 ## 对配置进行分层
 
-重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。有两个集合会按稳定标识合并：
+重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。有三个集合会按稳定标识合并：
 
 - `comfyui.custom_nodes` 使用 Registry ID 或直接 Git URL；以及
-- `files` 使用 `dir` 加 `filename`。
+- `files` 使用 `dir` 加 `filename`；以及
+- `cdh.git.credentials` 使用原样编写的精确 `match` 字符串。
 
-靠后的空 `custom_nodes = []` 或 `files = []` 会重置相应集合。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
+重复的 credential `match` 会在原位置原子替换完整的靠前 route；route 字段不会逐字段合并。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子 source 定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。使用不同原始字符串写出的规范等价 credential context 仍是不同的合并键，随后会因重复验证而失败。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
 
 例如，将以下内容保存为 `local.toml`，以禁用 comfy-cli，并移除完整示例所选择的节点和文件：
 
@@ -72,12 +73,39 @@ Manager 和 comfy-cli 是分别独立控制的可选功能。省略其开关时�
 
 构建 Hook 和自定义节点安装程序会在镜像构建期间执行由用户选择的可信代码。使用前请检查这些代码；不要在 Hook 文件中放置机密信息，因为其内容会保留在镜像及其各层中。
 
+## 提供私有 HTTP(S) Git 凭据
+
+在 `[secrets.<name>]` 下定义逻辑 Secret source，然后由一个或多个 `[[cdh.git.credentials]]` route 引用这个完整值。每个 source 只能选择一个环境变量或文件；配置只包含 locator，绝不包含解析后的值。逻辑名称与环境变量名、文件名彼此独立。
+
+```toml
+[secrets.github_pat]
+env = "CDH_GITHUB_PAT"
+
+[secrets.gitlab_pat]
+file = "secrets/gitlab-pat"
+
+[[cdh.git.credentials]]
+match = "https://github.com/example-private/"
+username = "x-access-token"
+password = { secret = "github_pat" }
+```
+
+Secret 名称和引用必须匹配 `[a-z][a-z0-9_-]{0,63}`。`env` locator 必须是有效的环境变量名。`password` 始终是结构化的完整值 Secret 引用；它不接受内联 token 或字符串插值。
+
+环境变量和文件 source 仅在需要它们的命令中惰性解析。仅语法验证绝不会读取它们，匹配且已接受的 lock 也可能避免 provider 阶段的读取。相对文件 locator 统一以第一个 `-f` 文件的真实父目录为基准；允许绝对路径和规范化后的父目录跳转。Secret 文件必须是常规文件而非符号链接，值不能超过 65,525 字节；设置了 group 或 world 权限位时，cdh 会发出 warning。Git 密码还必须非空，且不能包含 NUL、回车或换行；创建 token 文件时不要留下末尾换行。
+
+Credential route 是通用 HTTP(S) 用户名/密码 context，而不是特定 provider 对象。GitHub 或 GitLab personal access token 应放在所引用的 `password` 中。用户名必须非空；如果不想记录个人用户名，GitHub 可便利地使用 `x-access-token`，GitLab 支持使用 `oauth2`。其他凭据类型可能要求 provider 指定的用户名。建议使用只读、仅限单个仓库且会过期的 token。
+
+`match` 使用精确 scheme、规范化大小写的 host、等价的默认端口、精确的非默认端口以及按 path segment 的前缀匹配。最长匹配 route 胜出；host 范围的 route 以 `/` 结尾。`http://` 仍可使用，但会产生 warning，因为 Basic 风格凭据没有 TLS 传输保密性。带密码的 URL userinfo 会被拒绝；仅含用户名的 userinfo 必须与选中 route 的用户名一致。URL rewrite、redirect、CA 和 proxy 行为仍归 Git 所有，因此 route 只为 Git 提供的 context 选择凭据，并不是 endpoint attestation。
+
+对于包含任意 direct-Git 节点的构建，cdh 会让生效 route 引用的每个不同 Secret 可用于合并后的自定义节点构建步骤，使递归 submodule 可以独立选择 route。该步骤中的 Hook、节点安装程序及其他用户选择代码均属于受信任代码，能够读取、输出、转换或复制这些凭据。cdh 会让解析后的值和 source locator 避开其 lock、BuildPlan、渲染上下文、manifest、镜像元数据及自身输出；它不会沙箱化受信任代码，也不会重写任意输出。构建和手动 Buildx 行为参见[构建与锁定](build-and-lock.zh-CN.md#通过-https-访问私有-git-自定义节点)。
+
 当配置引用 Hook 时，请将同一个根目录传给验证、渲染或构建操作：
 
 ```bash
 cdh host validate \
-  -f examples/full.toml \
-  --build-hooks-dir examples/build-hooks
+  -f cdh.toml \
+  --build-hooks-dir build-hooks
 ```
 
 ## 后续步骤

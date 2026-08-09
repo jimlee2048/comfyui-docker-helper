@@ -9,7 +9,9 @@ from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     GitNodePlan,
     build_plan_digest,
+    git_credential_secret_ids,
 )
+from comfyui_docker_helper.config.git_credentials import git_credential_secret_target
 
 
 def render_build_plan_dockerfile(plan: BuildPlan) -> str:
@@ -287,6 +289,12 @@ def _custom_node_install_line(
             "--mount=type=secret,"
             f"id={descriptor.secret_id},target={descriptor.target},required=false"
             for descriptor in KNOWN_HOSTS_MOUNTS
+        )
+        mounts.extend(
+            "--mount=type=secret,"
+            f"id={secret_id},target={git_credential_secret_target(secret_id)},"
+            "required=true"
+            for secret_id in git_credential_secret_ids(plan.custom_nodes)
         )
         environment = f"GIT_SSH_COMMAND={_shell_word(_git_ssh_command())} "
     mount_prefix = " \\\n    ".join(mounts)

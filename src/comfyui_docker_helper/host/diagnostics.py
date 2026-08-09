@@ -8,6 +8,7 @@ from rich.text import Text
 from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
+from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.render_service import PlanningOptions
 
 
@@ -54,6 +55,7 @@ def render_plan_preview(
     *,
     lock_result: AcceptedCanonicalLock,
     options: PlanningOptions,
+    output_plan: BuildxOutputPlan | None,
     console: Console | None = None,
 ) -> None:
     """Render only exact BuildPlan authority; never reconstruct from config/lock."""
@@ -82,6 +84,14 @@ def render_plan_preview(
             output.print(f"    - registry {node.id}@{node.version}")
         else:
             output.print(f"    - git {node.url}@{node.commit} -> {node.target}")
+    output.print("Buildx output")
+    if output_plan is None:
+        output.print("  None")
+    else:
+        output.print(f"  Mode: {output_plan.output}")
+        output.print("  Tags:")
+        for tag in output_plan.tags:
+            output.print(f"    - {tag}")
 
 
 def _render_items(diagnostics: tuple[Diagnostic, ...], output: Console) -> None:

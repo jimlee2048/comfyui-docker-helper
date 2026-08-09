@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticError,
+    DiagnosticSeverity,
+)
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigError,
@@ -21,6 +25,28 @@ def _document() -> dict[str, Any]:
         "pytorch": {"version": "2.12.1"},
         "comfyui": {"version": "0.11.0", "install_manager": False},
     }
+
+
+def _credential_document() -> dict[str, Any]:
+    document = _document()
+    document["secrets"] = {"private_git": {"env": "CDH_PRIVATE_GIT_TOKEN"}}
+    document["cdh"] = {
+        "git": {
+            "credentials": [
+                {
+                    "match": "https://github.com/acme/",
+                    "username": "x-access-token",
+                    "password": {"secret": "private_git"},
+                }
+            ]
+        }
+    }
+    return document
+
+
+_PRIVATE_SECRET_PATH = ("secrets", "private_git")
+_CREDENTIAL_PATH = ("cdh", "git", "credentials", 0)
+_CREDENTIAL_SECRET_PATH = (*_CREDENTIAL_PATH, "password", "secret")
 
 
 def _codes(config: FinalConfig, *, build_hooks_dir: Path | None = None) -> set[str]:
@@ -50,6 +76,245 @@ def test_final_structure_uses_exact_baseline_defaults() -> None:
     assert config.compute_platform.cuda.image_distro == "ubuntu24.04"
     assert config.comfyui.install_cli is True
     assert _diagnostics(config) == ()
+
+
+def test_secret_sources_and_git_credentials_use_typed_complete_values() -> None:
+    config = validate_final_config_structure(_credential_document())
+
+    assert config.secrets["private_git"].env == "CDH_PRIVATE_GIT_TOKEN"
+    route = config.cdh.git.credentials[0]
+    assert route.password.secret == "private_git"
+    assert _diagnostics(config) == ()
+
+    document = _credential_document()
+    document["cdh"]["git"]["credentials"][0]["password"] = "plaintext-token"
+    with pytest.raises(FinalConfigError) as raised:
+        validate_final_config_structure(document)
+    assert raised.value.diagnostics[0].path == (
+        "cdh",
+        "git",
+        "credentials",
+        0,
+        "password",
+    )
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "token",
+        "tokens/private git token",
+        "./token",
+        "../token",
+        "tokens/../token",
+        "/run/secrets/token",
+    ],
+)
+def test_secret_file_locators_accept_posix_file_spellings(locator: str) -> None:
+    document = _credential_document()
+    document["secrets"]["private_git"] = {"file": locator}
+    config = validate_final_config_structure(document)
+
+    assert _diagnostics(config) == ()
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "",
+        "token\x00file",
+        "token\nfile",
+        "tokens\\private",
+        "tokens/",
+        "//server/token",
+        ".",
+        "..",
+        "tokens/.",
+        "tokens/..",
+    ],
+)
+def test_secret_file_locators_reject_non_file_spellings(locator: str) -> None:
+    document = _credential_document()
+    document["secrets"]["private_git"] = {"file": locator}
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("secrets", "private_git", "file"),
+            "secret.invalid_file",
+            DiagnosticSeverity.ERROR,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        (
+            "invalid-secret-name",
+            (
+                (("secrets", "Bad.Name"), "secret.invalid_name"),
+                (_CREDENTIAL_SECRET_PATH, "secret.unknown_reference"),
+            ),
+        ),
+        (
+            "missing-source",
+            ((_PRIVATE_SECRET_PATH, "secret.invalid_source"),),
+        ),
+        (
+            "two-sources",
+            ((_PRIVATE_SECRET_PATH, "secret.invalid_source"),),
+        ),
+        (
+            "invalid-env",
+            (((*_PRIVATE_SECRET_PATH, "env"), "secret.invalid_env"),),
+        ),
+        (
+            "invalid-reference",
+            ((_CREDENTIAL_SECRET_PATH, "secret.invalid_reference"),),
+        ),
+        (
+            "unknown-reference",
+            ((_CREDENTIAL_SECRET_PATH, "secret.unknown_reference"),),
+        ),
+        (
+            "empty-username",
+            (((*_CREDENTIAL_PATH, "username"), "git_credential.invalid_username"),),
+        ),
+        (
+            "query-match",
+            (((*_CREDENTIAL_PATH, "match"), "git_credential.invalid_match"),),
+        ),
+        (
+            "password-userinfo",
+            (
+                (
+                    (*_CREDENTIAL_PATH, "match"),
+                    "git_credential.password_userinfo_forbidden",
+                ),
+            ),
+        ),
+    ],
+)
+def test_secret_and_credential_domains_report_exact_diagnostics(
+    mutation: str,
+    expected: tuple[tuple[tuple[str | int, ...], str], ...],
+) -> None:
+    document = _credential_document()
+    source = document["secrets"]["private_git"]
+    route = document["cdh"]["git"]["credentials"][0]
+    if mutation == "invalid-secret-name":
+        document["secrets"] = {"Bad.Name": source}
+    elif mutation == "missing-source":
+        source.clear()
+    elif mutation == "two-sources":
+        source["file"] = "token-file"
+    elif mutation == "invalid-env":
+        source["env"] = "9INVALID"
+    elif mutation == "invalid-reference":
+        route["password"]["secret"] = "Bad.Name"
+    elif mutation == "unknown-reference":
+        route["password"]["secret"] = "not_defined"
+    elif mutation == "empty-username":
+        route["username"] = ""
+    elif mutation == "query-match":
+        route["match"] = "https://github.com/acme/?"
+    else:
+        route["match"] = "https://user:synthetic-marker@github.com/acme/"
+
+    config = validate_final_config_structure(document)
+    diagnostics = _diagnostics(config)
+
+    assert tuple(
+        (item.path, item.code, item.severity) for item in diagnostics
+    ) == tuple((path, code, DiagnosticSeverity.ERROR) for path, code in expected)
+    if mutation == "password-userinfo":
+        assert all("synthetic-marker" not in item.message for item in diagnostics)
+
+
+def test_git_credential_context_duplicates_and_http_warnings_are_semantic() -> None:
+    document = _credential_document()
+    document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "http://EXAMPLE.com:80/team/",
+            "username": "first",
+            "password": {"secret": "private_git"},
+        },
+        {
+            "match": "http://example.com/team",
+            "username": "second",
+            "password": {"secret": "private_git"},
+        },
+        {
+            "match": "https://example.com/other/",
+            "username": "secure",
+            "password": {"secret": "private_git"},
+        },
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("cdh", "git", "credentials", 0, "match"),
+            "git_credential.insecure_http",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("cdh", "git", "credentials", 1, "match"),
+            "git_credential.insecure_http",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("cdh", "git", "credentials", 1, "match"),
+            "git_credential.duplicate_match",
+            DiagnosticSeverity.ERROR,
+        ),
+    ]
+
+
+def test_git_credential_username_uses_the_protocol_utf8_byte_limit() -> None:
+    document = _credential_document()
+    route = document["cdh"]["git"]["credentials"][0]
+    route["username"] = "é" * 32_762 + "a"
+    maximum = validate_final_config_structure(document)
+
+    assert "git_credential.invalid_username" not in _codes(maximum)
+    route["username"] += "a"
+    oversized = validate_final_config_structure(document)
+    diagnostics = _diagnostics(oversized)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (
+            ("cdh", "git", "credentials", 0, "username"),
+            "git_credential.invalid_username",
+        )
+    ]
+
+
+def test_direct_git_password_userinfo_is_rejected_but_username_only_is_valid() -> None:
+    document = _document()
+    document["comfyui"]["custom_nodes"] = [
+        {
+            "type": "git",
+            "url": "https://alice@example.com/public.git",
+        },
+        {
+            "type": "git",
+            "url": "https://alice:synthetic-marker@example.com/private.git",
+        },
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [item.code for item in diagnostics] == [
+        "custom_node.password_userinfo_forbidden"
+    ]
+    assert "synthetic-marker" not in diagnostics[0].message
 
 
 @pytest.mark.parametrize(
@@ -451,6 +716,47 @@ def test_comfyui_selector_satisfiability_uses_discrete_formal_releases() -> None
     config = validate_final_config_structure(document)
 
     assert "comfyui.unsatisfiable_selector" not in _codes(config)
+
+
+def test_build_tags_admit_dynamic_publication_expressions() -> None:
+    document = _document()
+    document["build"] = {
+        "tags": [
+            "example/image:v${{ comfyui.release }}",
+            "example/image:${{ comfyui.commit }}",
+            "example/image:custom-${{ comfyui.commit.prefix(12) }}",
+        ]
+    }
+    config = validate_final_config_structure(document)
+
+    assert _diagnostics(config) == ()
+
+
+@pytest.mark.parametrize(
+    "selector", ["nightly", "09725967cf76304371c390ca1d6483e04061da48"]
+)
+def test_release_expression_rejects_selectors_without_formal_releases(
+    selector: str,
+) -> None:
+    document = _document()
+    document["comfyui"]["version"] = selector
+    document["build"] = {"tags": ["example/image:v${{ comfyui.release }}"]}
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (("build", "tags", 0), "build.release_unavailable")
+    ]
+
+
+def test_invalid_comfyui_selector_does_not_cascade_release_diagnostic() -> None:
+    document = _document()
+    document["comfyui"]["version"] = "not a selector"
+    document["build"] = {"tags": ["example/image:v${{ comfyui.release }}"]}
+    config = validate_final_config_structure(document)
+
+    assert [item.code for item in _diagnostics(config)] == ["comfyui.invalid_version"]
 
 
 def test_registry_nodes_require_manager_but_direct_git_nodes_do_not() -> None:

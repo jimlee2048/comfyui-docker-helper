@@ -129,7 +129,7 @@ class _LiveHarness:
     network: str
     service_container: str
     residue_container: str
-    builders: tuple[str, str, str]
+    builders: tuple[str, ...]
     image_tag: str
     cleanup_armed: bool = False
     agent: subprocess.Popen[bytes] | None = None

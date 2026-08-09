@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigDomainResult,
@@ -27,6 +27,7 @@ class ConfigurationResult:
     config: FinalConfig
     domains: FinalConfigDomainResult
     raw_document: dict[str, Any]
+    secret_file_base: Path
     warnings: tuple[Diagnostic, ...] = ()
 
 
@@ -56,8 +57,10 @@ def load_validate_config_result(
     """Load and validate locally without providers, Docker, lock I/O, or planning."""
     paths = _coerce_config_paths(config_path)
     include_source = len(paths) > 1
-    document = merge_toml_documents(
-        _read_toml(path, include_source=include_source) for path in paths
+    documents = tuple(_read_toml(path, include_source=include_source) for path in paths)
+    document = merge_toml_documents(documents)
+    secret_file_base = _resolve_first_config_parent(
+        paths[0], include_source=include_source
     )
     try:
         config = validate_final_config_structure(document)
@@ -68,9 +71,15 @@ def load_validate_config_result(
         *domains.diagnostics,
         *validate_final_config_semantics(config, domains),
     )
-    if diagnostics:
-        raise ConfigurationServiceError(diagnostics)
-    return ConfigurationResult(config, domains, document)
+    errors = tuple(
+        item for item in diagnostics if item.severity == DiagnosticSeverity.ERROR
+    )
+    warnings = tuple(
+        item for item in diagnostics if item.severity == DiagnosticSeverity.WARNING
+    )
+    if errors:
+        raise ConfigurationServiceError(errors)
+    return ConfigurationResult(config, domains, document, secret_file_base, warnings)
 
 
 def _coerce_config_paths(
@@ -117,6 +126,23 @@ def _read_toml(
         else:
             code, message = "config.read_failed", "configuration file could not be read"
         raise _read_error(code, message, path, include_source) from error
+
+
+def _resolve_first_config_parent(
+    config_path: ConfigPath,
+    *,
+    include_source: bool,
+) -> Path:
+    path = Path(config_path)
+    try:
+        return path.resolve(strict=True).parent
+    except OSError as error:
+        raise _read_error(
+            "config.read_failed",
+            "configuration file parent could not be resolved",
+            path,
+            include_source,
+        ) from error
 
 
 def _read_error(

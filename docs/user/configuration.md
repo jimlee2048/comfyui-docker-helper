@@ -6,10 +6,10 @@ This guide is for users choosing and composing the TOML input to cdh. The [stric
 
 ## Choose a starting example
 
-- [`minimal.toml`](../../examples/minimal.toml) is the smallest runnable supported configuration.
-- [`full.toml`](../../examples/full.toml) is the comprehensive annotated example. It marks required fields and documents actual defaults.
+- [`minimal.toml`](../../examples/minimal.toml) is the smallest runnable supported configuration and the usual starting point.
+- [`full.toml`](../../examples/full.toml) is a comprehensive annotated reference. Its active TOML remains valid for offline validation, but it is not an end-to-end build profile.
 
-Every value in an example is an explicit choice made by that example, not an implied default. Copy the closest example and remove or change selections for your image.
+Every value in an example is an explicit choice made by that example, not an implied default. Start from the minimal example for a runnable configuration, and consult or copy sections from the full reference as needed.
 
 Validate a configuration locally, without network access, Docker, or writes:
 
@@ -24,12 +24,13 @@ Use `cdh host validate --help` for the current command options.
 
 ## Layer configuration
 
-Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recursively; a later scalar or ordinary array replaces the earlier value. Two collections merge by stable identity:
+Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recursively; a later scalar or ordinary array replaces the earlier value. Three collections merge by stable identity:
 
 - `comfyui.custom_nodes` uses the Registry ID or direct-Git URL; and
-- `files` uses `dir` plus `filename`.
+- `files` uses `dir` plus `filename`; and
+- `cdh.git.credentials` uses the exact authored `match` string.
 
-A later empty `custom_nodes = []` or `files = []` resets that collection. Strict structure, uniqueness, and cross-field rules are checked after all layers have produced the effective configuration.
+A repeated credential `match` atomically replaces the complete earlier route at its original position; route fields never merge individually. A later `credentials = []`, `custom_nodes = []`, or `files = []` resets that collection. Each `[secrets.<name>]` table is also an atomic source definition, so a later layer can replace `env` with `file` without retaining the old field. Canonically equivalent credential contexts written with different raw strings remain distinct merge keys and then fail duplicate validation. Strict structure, uniqueness, and cross-field rules are checked after all layers have produced the effective configuration.
 
 For example, save this as `local.toml` to disable comfy-cli and remove the nodes and files selected by the full example:
 
@@ -72,12 +73,39 @@ Each node may name pre-install or post-install hooks. Hook paths are relative to
 
 Build hooks and custom-node installers execute trusted user-selected code during the image build. Review them before use, and do not put secrets in hook files because their contents remain in the image and its layers.
 
+## Supply private HTTP(S) Git credentials
+
+Define a logical Secret source under `[secrets.<name>]`, then reference that whole value from one or more `[[cdh.git.credentials]]` routes. A source selects exactly one environment variable or file; the configuration contains the locator, never the resolved value. Logical names are independent from environment-variable and file names.
+
+```toml
+[secrets.github_pat]
+env = "CDH_GITHUB_PAT"
+
+[secrets.gitlab_pat]
+file = "secrets/gitlab-pat"
+
+[[cdh.git.credentials]]
+match = "https://github.com/example-private/"
+username = "x-access-token"
+password = { secret = "github_pat" }
+```
+
+Secret names and references must match `[a-z][a-z0-9_-]{0,63}`. An `env` locator must be a valid environment-variable name. `password` is always a structured whole-value Secret reference; it does not accept an inline token or a string interpolation.
+
+Environment and file sources are resolved lazily within the command that needs them. Syntax-only validation never reads them, and a matching accepted lock can avoid a provider-time read. Relative file locators use the real parent of the first `-f` file as their common base; absolute and normalized parent-traversal paths are allowed. Secret files must be regular files rather than symlinks, values are limited to 65,525 bytes, and cdh warns about group or world permission bits. Git passwords must also be non-empty and contain no NUL, carriage return, or newline; create token files without a trailing newline.
+
+Credential routes are generic HTTP(S) username/password contexts, not provider-specific objects. A GitHub or GitLab personal access token goes in the referenced `password`. The username must be non-empty; `x-access-token` is a convenient GitHub placeholder and `oauth2` is a GitLab-supported placeholder when you do not want to record a personal username. Other credential types may require a provider-prescribed username. Prefer read-only, repository-limited, expiring tokens.
+
+`match` uses exact scheme, case-normalized host, equivalent default ports, exact non-default ports, and path-segment prefix matching. The longest matching route wins; a host-wide route ends at `/`. `http://` remains accepted but produces a warning because Basic-style credentials have no TLS transport confidentiality. A password-bearing URL userinfo is rejected; username-only userinfo must agree with the selected route username. URL rewrites, redirects, CA, and proxy behavior remain Git-owned, so a route selects credentials for the context Git presents and is not endpoint attestation.
+
+For a build containing any direct-Git node, cdh makes every distinct Secret referenced by the effective routes available to the combined custom-node build step so recursive submodules can select their own route. Hooks, node installers, and other user-selected code in that step are trusted and can read, print, transform, or copy those credentials. cdh keeps resolved values and source locators out of its lock, BuildPlan, rendered context, manifest, image metadata, and own output; it does not sandbox trusted code or redact arbitrary output. See [Build and lock](build-and-lock.md#private-git-custom-nodes-over-https) for build and manual Buildx behavior.
+
 When a configuration references hooks, pass the same root to validation, rendering, or building:
 
 ```bash
 cdh host validate \
-  -f examples/full.toml \
-  --build-hooks-dir examples/build-hooks
+  -f cdh.toml \
+  --build-hooks-dir build-hooks
 ```
 
 ## Next steps

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 
 import pytest
 from pydantic import ValidationError
@@ -23,11 +24,14 @@ from comfyui_docker_helper.config import canonical_request as canonical_request_
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
+    CustomNodesPhase,
     ExactPackagePlan,
+    GitCredentialRoutePlan,
     ManifestBinding,
     RuntimePlanningProvenance,
     build_plan_digest,
     dump_build_plan_json,
+    git_credential_secret_ids,
     manifest_binding,
     parse_build_plan_json,
 )
@@ -417,7 +421,7 @@ def test_plan_round_trip_is_strict_and_immutable() -> None:
 
     assert parse_build_plan_json(dump_build_plan_json(plan)) == plan
     with pytest.raises(ValidationError, match="frozen"):
-        plan.config_digest = DIGEST_A
+        plan.image_config_digest = DIGEST_A
 
     document = plan.model_dump(mode="json")
     document["unknown"] = True
@@ -425,13 +429,13 @@ def test_plan_round_trip_is_strict_and_immutable() -> None:
         BuildPlan.model_validate(document)
 
 
-def test_plan_and_manifest_bind_config_lock_and_plan_without_request_digests() -> None:
+def test_plan_and_manifest_bind_image_config_and_lock_without_requests() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     binding = manifest_binding(plan)
     serialized = dump_build_plan_json(plan)
 
     assert binding.build_plan_digest == build_plan_digest(plan)
-    assert binding.config_digest == plan.config_digest
+    assert binding.image_config_digest == plan.image_config_digest
     assert binding.lock_digest == plan.lock_digest
     assert ManifestBinding.model_validate_json(binding.model_dump_json()) == binding
     assert b"request_digest" not in serialized
@@ -439,16 +443,210 @@ def test_plan_and_manifest_bind_config_lock_and_plan_without_request_digests() -
     assert b"host" not in serialized
 
 
-def test_execution_only_config_change_updates_binding_deterministically() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("tags", ["example:changed"]), ("output", "push")],
+)
+def test_publication_only_config_change_does_not_change_image_plan(
+    field: str, value: object
+) -> None:
     config = final_config()
     changed_document = config.model_dump(mode="python")
-    changed_document["build"]["tags"] = ["example:changed"]
+    changed_document["build"][field] = value
     changed = FinalConfig.model_validate(changed_document)
 
     first = build_plan(config, accepted_resolution())
     second = build_plan(changed, accepted_resolution())
 
-    assert first.config_digest != second.config_digest
+    assert request_graph(config, accepted_resolution()) == request_graph(
+        changed, accepted_resolution()
+    )
+    assert first == second
+    assert dump_build_plan_json(first) == dump_build_plan_json(second)
+
+
+def test_secret_sources_and_unused_definitions_do_not_change_image_plan() -> None:
+    base_document = final_config().model_dump(mode="python")
+    base_document["secrets"] = {
+        "private_git": {"env": "FIRST_TOKEN"},
+        "unused": {"file": "/first/unused"},
+    }
+    base_document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "https://EXAMPLE.com:443/team/",
+            "username": "token-user",
+            "password": {"secret": "private_git"},
+        }
+    ]
+    changed_document = deepcopy(base_document)
+    changed_document["secrets"] = {
+        "private_git": {"file": "../second-token"},
+        "another_unused": {"env": "OTHER_TOKEN"},
+    }
+    changed_document["cdh"]["git"]["credentials"][0]["match"] = (
+        "https://example.com/team"
+    )
+    first_config = FinalConfig.model_validate(base_document)
+    second_config = FinalConfig.model_validate(changed_document)
+
+    first = build_plan(first_config, accepted_resolution())
+    second = build_plan(second_config, accepted_resolution())
+
+    assert first.image_config_digest == second.image_config_digest
+    assert first == second
+
+
+def test_git_credential_routes_project_only_safe_ordered_plan_metadata() -> None:
+    document = final_config().model_dump(mode="python")
+    document["secrets"] = {
+        "shared": {"env": "SYNTHETIC_SHARED_TOKEN"},
+        "other": {"file": "/synthetic/private-token"},
+    }
+    document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "https://EXAMPLE.com:443/team/",
+            "username": "first-user",
+            "password": {"secret": "shared"},
+        },
+        {
+            "match": "https://example.com/team/subgroup/",
+            "username": "second-user",
+            "password": {"secret": "shared"},
+        },
+        {
+            "match": "http://git.example.com:80/other/",
+            "username": "third-user",
+            "password": {"secret": "other"},
+        },
+    ]
+
+    plan = build_plan(
+        FinalConfig.model_validate(document),
+        accepted_resolution(),
+    )
+
+    assert [
+        route.model_dump(mode="python") for route in plan.custom_nodes.git_credentials
+    ] == [
+        {
+            "match": "https://example.com/team",
+            "username": "first-user",
+            "secret_id": "cdh-git-credential-shared",
+        },
+        {
+            "match": "https://example.com/team/subgroup",
+            "username": "second-user",
+            "secret_id": "cdh-git-credential-shared",
+        },
+        {
+            "match": "http://git.example.com/other",
+            "username": "third-user",
+            "secret_id": "cdh-git-credential-other",
+        },
+    ]
+    assert git_credential_secret_ids(plan.custom_nodes) == (
+        "cdh-git-credential-shared",
+        "cdh-git-credential-other",
+    )
+    serialized = dump_build_plan_json(plan)
+    assert b"SYNTHETIC_SHARED_TOKEN" not in serialized
+    assert b"/synthetic/private-token" not in serialized
+    assert parse_build_plan_json(serialized) == plan
+
+
+def test_git_credential_secret_projection_is_inert_without_direct_git_nodes() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    phase = CustomNodesPhase(
+        install_manager=plan.custom_nodes.install_manager,
+        user_directory=plan.custom_nodes.user_directory,
+        nodes=tuple(
+            node for node in plan.custom_nodes.nodes if node.type == "registry"
+        ),
+        git_credentials=(
+            GitCredentialRoutePlan(
+                match="https://example.com/team",
+                username="token-user",
+                secret_id="cdh-git-credential-private_git",
+            ),
+        ),
+    )
+
+    assert git_credential_secret_ids(phase) == ()
+
+
+def test_git_credential_plan_revalidates_protocol_bounds_and_unique_contexts() -> None:
+    maximum_username = "é" * 32_762 + "a"
+    route = GitCredentialRoutePlan(
+        match="https://example.com/team",
+        username=maximum_username,
+        secret_id="cdh-git-credential-private_git",
+    )
+
+    assert len(route.username.encode("utf-8")) == 65_525
+    with pytest.raises(ValidationError, match="username is invalid"):
+        GitCredentialRoutePlan(
+            match=route.match,
+            username=maximum_username + "a",
+            secret_id=route.secret_id,
+        )
+    with pytest.raises(ValidationError, match="Secret ID must be canonical"):
+        GitCredentialRoutePlan(
+            match=route.match,
+            username="token-user",
+            secret_id="private_git",
+        )
+
+    plan = build_plan(final_config(), accepted_resolution())
+    with pytest.raises(ValidationError, match="match contexts must be unique"):
+        CustomNodesPhase(
+            install_manager=plan.custom_nodes.install_manager,
+            user_directory=plan.custom_nodes.user_directory,
+            nodes=plan.custom_nodes.nodes,
+            git_credentials=(route, route),
+        )
+
+
+@pytest.mark.parametrize("field", ["match", "username", "password"])
+def test_effective_git_credential_behavior_changes_image_identity(field: str) -> None:
+    document = final_config().model_dump(mode="python")
+    document["secrets"] = {
+        "first": {"env": "FIRST_TOKEN"},
+        "second": {"env": "SECOND_TOKEN"},
+    }
+    document["cdh"]["git"]["credentials"] = [
+        {
+            "match": "https://example.com/team/",
+            "username": "token-user",
+            "password": {"secret": "first"},
+        }
+    ]
+    changed_document = deepcopy(document)
+    route = changed_document["cdh"]["git"]["credentials"][0]
+    if field == "match":
+        route["match"] = "https://example.com/other/"
+    elif field == "username":
+        route["username"] = "other-user"
+    else:
+        route["password"] = {"secret": "second"}
+
+    first = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+    second = build_plan(
+        FinalConfig.model_validate(changed_document), accepted_resolution()
+    )
+
+    assert first.image_config_digest != second.image_config_digest
+
+
+def test_image_config_change_updates_binding_deterministically() -> None:
+    config = final_config()
+    changed_document = config.model_dump(mode="python")
+    changed_document["system"]["env"]["IMAGE_INPUT"] = "changed"
+    changed = FinalConfig.model_validate(changed_document)
+
+    first = build_plan(config, accepted_resolution())
+    second = build_plan(changed, accepted_resolution())
+
+    assert first.image_config_digest != second.image_config_digest
     assert first.lock_digest == second.lock_digest
     assert build_plan_digest(first) != build_plan_digest(second)
 
@@ -875,7 +1073,7 @@ def test_build_plan_parser_rejects_execution_sensitive_scalar_forgery(
     elif mutation == "shutdown-timeout":
         document["runtime"]["shutdown_timeout"] = "8"
     else:
-        document["config_digest"] = "bad"
+        document["image_config_digest"] = "bad"
 
     with pytest.raises(ValidationError, match=message):
         BuildPlan.model_validate(document)

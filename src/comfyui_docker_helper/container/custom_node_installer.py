@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import stat
 import subprocess
+import sys
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -47,8 +49,15 @@ from comfyui_docker_helper.container.comfyui_installer import (
     observe_manager_capability,
     verify_manager_authority,
 )
+from comfyui_docker_helper.container.git_credential_helper import (
+    GIT_CREDENTIAL_BUILD_PLAN_DIGEST_ENV,
+)
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
 from comfyui_docker_helper.errors import ApplicationError
+from comfyui_docker_helper.git_credential_policy import (
+    GitCredentialPolicyError,
+    git_credential_environment,
+)
 
 _GIT_PATH = Path("/usr/bin/git")
 _UV_PATH = Path("/usr/local/bin/uv")
@@ -118,6 +127,7 @@ def install_custom_nodes(
     constraints_path: Path = _CONSTRAINTS_PATH,
     build_hooks_directory: Path = _BUILD_HOOKS_DIRECTORY,
     environ: Mapping[str, str] | None = None,
+    build_plan_digest: str | None = None,
 ) -> None:
     """Install all custom nodes in one original-order admitted-prefix sequence."""
     _validate_inputs(custom_nodes, application, runtime)
@@ -142,7 +152,11 @@ def install_custom_nodes(
     )
     # Git/SSH interpretation belongs to the caller's environment. In particular,
     # cdh neither suppresses nor attests user-managed URL rewrites and transports.
-    git_environment = runtime.env(environ)
+    git_environment = _git_environment(
+        custom_nodes,
+        runtime.env(environ),
+        build_plan_digest=build_plan_digest,
+    )
     admitted: list[CustomNodePlan] = []
     observations = _VerificationObservations.initial(has_manager_observer=bool(nodes))
 
@@ -321,6 +335,34 @@ def install_custom_nodes(
         ),
         force=True,
     )
+
+
+def _git_environment(
+    custom_nodes: CustomNodesPhase,
+    environment: Mapping[str, str],
+    *,
+    build_plan_digest: str | None,
+) -> dict[str, str]:
+    if not custom_nodes.git_credentials or not any(
+        isinstance(node, GitNodePlan) for node in custom_nodes.nodes
+    ):
+        return dict(environment)
+    if not build_plan_digest:
+        raise CustomNodeInstallError("Git credential BuildPlan identity is unavailable")
+    helper = (
+        f"!exec {shlex.quote(sys.executable)} "
+        "-m comfyui_docker_helper.container.git_credential_helper"
+    )
+    try:
+        return git_credential_environment(
+            environment,
+            helper=helper,
+            overlay={GIT_CREDENTIAL_BUILD_PLAN_DIGEST_ENV: build_plan_digest},
+        )
+    except GitCredentialPolicyError:
+        raise CustomNodeInstallError(
+            "Git credential process policy is invalid"
+        ) from None
 
 
 def observe_custom_node_state(

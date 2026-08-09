@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Literal, cast
 
 from comfyui_docker_helper.comfyui_requirements import (
     COMFYUI_REQUIREMENTS_PATH,
@@ -43,6 +43,9 @@ from comfyui_docker_helper.config.final_planning import (
 )
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigDomainResult,
+)
+from comfyui_docker_helper.config.git_credentials import (
+    canonicalize_git_credential_context,
 )
 from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
@@ -91,13 +94,6 @@ class DesiredResolution:
         object.__setattr__(self, "keys", request_keys(self.request))
         object.__setattr__(self, "request_digest", compute_request_digest(self.request))
         object.__setattr__(self, "stability", request_stability(self.request))
-
-
-@dataclass(frozen=True, slots=True)
-class BuildRequest:
-    tags: tuple[str, ...]
-    output: Literal["load", "push"]
-    platforms: tuple[Literal["linux/amd64"], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +151,15 @@ type CustomNodeRequest = RegistryNodeRequest | GitNodeRequest
 
 
 @dataclass(frozen=True, slots=True)
+class GitCredentialRouteRequest:
+    """Safe in-memory Git credential intent before BuildPlan projection."""
+
+    match: str
+    username: str
+    secret: str
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationRequest:
     workspace: str
     comfyui_path: str
@@ -175,16 +180,16 @@ class RuntimeRequest:
 class CanonicalRequestGraph:
     """One immutable source for reconciliation and phase projection."""
 
-    config_digest: str
+    image_config_digest: str
     target_platform: TargetPlatform
     backend: BackendPlan
     release: PlanningReleaseInputs
     protected_requirement_names: tuple[str, ...]
     comfyui_requirements: ParsedComfyUIRequirements
     desired: tuple[DesiredResolution, ...]
-    build: BuildRequest
     application: ApplicationRequest
     custom_nodes: tuple[CustomNodeRequest, ...]
+    git_credentials: tuple[GitCredentialRouteRequest, ...]
     downloader: DownloaderRequest
     files: tuple[FileRequest, ...]
     runtime: RuntimeRequest
@@ -450,16 +455,13 @@ def build_canonical_request_graph(
         for item in config.files
     )
     return CanonicalRequestGraph(
-        config_digest=_config_digest(config),
+        image_config_digest=_image_config_digest(config),
         target_platform=platform,
         backend=backend,
         release=release,
         protected_requirement_names=protected_requirement_names,
         comfyui_requirements=requirements_projection,
         desired=desired,
-        build=BuildRequest(
-            tuple(config.build.tags), config.build.output, tuple(config.build.platforms)
-        ),
         application=ApplicationRequest(
             workspace=workspace,
             comfyui_path=comfyui_path,
@@ -468,6 +470,14 @@ def build_canonical_request_graph(
             install_manager=config.comfyui.install_manager,
         ),
         custom_nodes=tuple(nodes),
+        git_credentials=tuple(
+            GitCredentialRouteRequest(
+                match=canonicalize_git_credential_context(route.match),
+                username=route.username,
+                secret=route.password.secret,
+            )
+            for route in config.cdh.git.credentials
+        ),
         downloader=downloader,
         files=files,
         runtime=RuntimeRequest(
@@ -585,10 +595,10 @@ def _members(
     )
 
 
-def _config_digest(config: FinalConfig) -> str:
+def _image_config_digest(config: FinalConfig) -> str:
     canonical = (
         json.dumps(
-            config.model_dump(mode="json"),
+            _image_config_projection(config),
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -596,3 +606,25 @@ def _config_digest(config: FinalConfig) -> str:
         + "\n"
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _image_config_projection(config: FinalConfig) -> dict[str, object]:
+    document: dict[str, object] = config.model_dump(mode="json")
+    document.pop("secrets")
+    build = cast(dict[str, object], document["build"])
+    cdh = cast(dict[str, object], document["cdh"])
+    git = cast(dict[str, object], cdh["git"])
+    git["credentials"] = [
+        {
+            "match": canonicalize_git_credential_context(route.match),
+            "username": route.username,
+            "password": {"secret": route.password.secret},
+        }
+        for route in config.cdh.git.credentials
+    ]
+    return {
+        **document,
+        "build": {
+            key: value for key, value in build.items() if key not in {"tags", "output"}
+        },
+    }

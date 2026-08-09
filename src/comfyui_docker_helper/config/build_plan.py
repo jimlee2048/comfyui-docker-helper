@@ -61,6 +61,7 @@ from comfyui_docker_helper.config.canonical_lock import (
 from comfyui_docker_helper.config.canonical_request import (
     CanonicalRequestGraph,
     CustomNodeRequest,
+    GitCredentialRouteRequest,
     GitNodeRequest,
     RegistryNodeRequest,
 )
@@ -73,6 +74,13 @@ from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
 from comfyui_docker_helper.config.final_validation import (
     is_aria2_argument_value,
     is_managed_environment_name,
+)
+from comfyui_docker_helper.config.git_credentials import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
+    GitCredentialContextError,
+    canonicalize_git_credential_context,
+    git_credential_secret_id,
+    git_credential_secret_target,
 )
 from comfyui_docker_helper.config.hook_validation import (
     hook_lock_identity,
@@ -727,15 +735,72 @@ class GitNodePlan(_PlanModel):
 CustomNodePlan = Annotated[RegistryNodePlan | GitNodePlan, Field(discriminator="type")]
 
 
+class GitCredentialRoutePlan(_PlanModel):
+    """Safe image-side routing metadata without Secret source information."""
+
+    match: str
+    username: str
+    secret_id: str
+
+    @field_validator("match")
+    @classmethod
+    def _validate_match(cls, value: str) -> str:
+        try:
+            canonical = canonicalize_git_credential_context(value)
+        except GitCredentialContextError as error:
+            raise ValueError("Git credential match must be canonical") from error
+        if canonical != value:
+            raise ValueError("Git credential match must be canonical")
+        return value
+
+    @field_validator("username")
+    @classmethod
+    def _validate_username(cls, value: str) -> str:
+        if (
+            not value
+            or any(character in value for character in "\x00\r\n")
+            or len(value.encode("utf-8")) > GIT_CREDENTIAL_VALUE_MAX_BYTES
+        ):
+            raise ValueError("Git credential username is invalid")
+        return value
+
+    @field_validator("secret_id")
+    @classmethod
+    def _validate_secret_id(cls, value: str) -> str:
+        git_credential_secret_target(value)
+        return value
+
+
 class CustomNodesPhase(_PlanModel):
     install_manager: bool
     user_directory: str
     nodes: tuple[CustomNodePlan, ...]
+    git_credentials: tuple[GitCredentialRoutePlan, ...]
 
     @field_validator("user_directory")
     @classmethod
     def _validate_user_directory(cls, value: str) -> str:
         return _absolute_posix_path(value, "Registry user directory")
+
+    @model_validator(mode="after")
+    def _validate_git_credentials(self) -> CustomNodesPhase:
+        matches = tuple(route.match for route in self.git_credentials)
+        if len(matches) != len(set(matches)):
+            raise ValueError("Git credential match contexts must be unique")
+        return self
+
+
+def git_credential_secret_ids(custom_nodes: CustomNodesPhase) -> tuple[str, ...]:
+    """Project first-use Secret IDs only for a direct-Git install phase."""
+    if not any(isinstance(node, GitNodePlan) for node in custom_nodes.nodes):
+        return ()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for route in custom_nodes.git_credentials:
+        if route.secret_id not in seen:
+            seen.add(route.secret_id)
+            ordered.append(route.secret_id)
+    return tuple(ordered)
 
 
 class Aria2Plan(_PlanModel):
@@ -865,38 +930,19 @@ class RuntimePhase(_PlanModel):
         return value
 
 
-class BuildOutputPlan(_PlanModel):
-    tags: tuple[str, ...]
-    output: Literal["load", "push"]
-    platforms: tuple[Literal["linux/amd64"], ...]
-
-    @field_validator("tags")
-    @classmethod
-    def _validate_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(
-            not tag
-            or any(character.isspace() for character in tag)
-            or has_control_characters(tag)
-            for tag in value
-        ):
-            raise ValueError("build tags must contain no whitespace or controls")
-        return value
-
-
 class BuildPlan(_PlanModel):
     """Complete immutable build execution authority."""
 
     schema_version: Literal[1]
-    config_digest: str
+    image_config_digest: str
     lock_digest: str
-    build: BuildOutputPlan
     toolchain: ToolchainPhase
     application: ApplicationPhase
     custom_nodes: CustomNodesPhase
     files: FilesPhase
     runtime: RuntimePhase
 
-    @field_validator("config_digest", "lock_digest")
+    @field_validator("image_config_digest", "lock_digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return validate_sha256_digest(value)
@@ -1029,10 +1075,10 @@ class ManifestBinding(_PlanModel):
     schema_version: Literal[1]
     build_plan_schema_version: Literal[1]
     build_plan_digest: str
-    config_digest: str
+    image_config_digest: str
     lock_digest: str
 
-    @field_validator("build_plan_digest", "config_digest", "lock_digest")
+    @field_validator("build_plan_digest", "image_config_digest", "lock_digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return validate_sha256_digest(value)
@@ -1092,13 +1138,8 @@ def construct_build_plan(
         raise ValueError(f"canonical lock contains unused identities: {unused!r}")
     return BuildPlan(
         schema_version=BUILD_PLAN_SCHEMA_VERSION,
-        config_digest=graph.config_digest,
+        image_config_digest=graph.image_config_digest,
         lock_digest=_digest_bytes(dump_canonical_lock_toml(lock).encode("utf-8")),
-        build=BuildOutputPlan(
-            tags=graph.build.tags,
-            output=graph.build.output,
-            platforms=graph.build.platforms,
-        ),
         toolchain=toolchain,
         application=application,
         custom_nodes=custom_nodes,
@@ -1341,6 +1382,17 @@ def _project_custom_nodes(
         install_manager=graph.application.install_manager,
         user_directory=str(PurePosixPath(graph.application.comfyui_path) / "user"),
         nodes=nodes,
+        git_credentials=tuple(
+            _git_credential_route(route) for route in graph.git_credentials
+        ),
+    )
+
+
+def _git_credential_route(route: GitCredentialRouteRequest) -> GitCredentialRoutePlan:
+    return GitCredentialRoutePlan(
+        match=route.match,
+        username=route.username,
+        secret_id=git_credential_secret_id(route.secret),
     )
 
 
@@ -1432,7 +1484,7 @@ def manifest_binding(plan: BuildPlan) -> ManifestBinding:
         schema_version=MANIFEST_SCHEMA_VERSION,
         build_plan_schema_version=plan.schema_version,
         build_plan_digest=build_plan_digest(plan),
-        config_digest=plan.config_digest,
+        image_config_digest=plan.image_config_digest,
         lock_digest=plan.lock_digest,
     )
 

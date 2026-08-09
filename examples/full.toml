@@ -1,6 +1,7 @@
-# Complete annotated ComfyUI Docker Helper configuration.
-# Copy this file and remove fields you do not need. Fields not shown in
-# minimal.toml usually have defaults, but they are included here for reference.
+# Comprehensive annotated ComfyUI Docker Helper configuration reference.
+# Its active TOML remains offline-validatable, but this file is not an
+# end-to-end build or acceptance profile. Copy it and remove fields you do not
+# need; fields omitted from minimal.toml are included here for reference.
 
 [compute_platform]
 # Required. Supported: "cuda".
@@ -113,7 +114,13 @@ resume_download = true
 
 [build]
 # Optional for render. Required by host build when no CLI -t/--tag is supplied.
-tags = ["my-comfy:dev", "registry.example.com/my-comfy:dev"]
+# Expressions use the accepted ComfyUI identity. release has no leading v;
+# commit.prefix(n) accepts 12 through 40 characters.
+tags = [
+    "registry.example.com/my-comfy:latest",
+    "registry.example.com/my-comfy:v${{ comfyui.release }}",
+    "registry.example.com/my-comfy:custom-${{ comfyui.commit.prefix(12) }}",
+]
 # Default: "load". Supported: "load", "push".
 output = "load"
 # The current schema accepts exactly this ordered target list.
@@ -169,6 +176,48 @@ ref = "main"
 target_dir = "ComfyUI-Custom-Scripts"
 pre_install_hooks = []
 post_install_hooks = ["post.sh"]
+
+# For any direct-Git build, every Secret referenced by the effective credential
+# routes is granted to the combined trusted custom-node installation step.
+
+# Optional private GitHub HTTPS node. Uncomment this complete block and set the
+# environment variable. The PAT is the password; x-access-token is a permitted
+# non-personal username placeholder. Never put the token directly in this file.
+# [secrets.github_pat]
+# env = "CDH_GITHUB_PAT"
+#
+# [[cdh.git.credentials]]
+# match = "https://github.com/example-private/"
+# username = "x-access-token"
+# password = { secret = "github_pat" }
+#
+# [[comfyui.custom_nodes]]
+# type = "git"
+# url = "https://github.com/example-private/private-node.git"
+# ref = "main"
+# target_dir = "private-github-node"
+# pre_install_hooks = []
+# post_install_hooks = []
+
+# Optional private self-hosted GitLab HTTPS node. Uncomment this complete block
+# and create the token file relative to the first -f configuration. The PAT is
+# the password; oauth2 is a permitted username placeholder for GitLab PATs.
+# Never put the token directly in this file.
+# [secrets.gitlab_pat]
+# file = "secrets/gitlab-pat"
+#
+# [[cdh.git.credentials]]
+# match = "https://gitlab.example.com/example-private/"
+# username = "oauth2"
+# password = { secret = "gitlab_pat" }
+#
+# [[comfyui.custom_nodes]]
+# type = "git"
+# url = "https://gitlab.example.com/example-private/private-node.git"
+# ref = "main"
+# target_dir = "private-gitlab-node"
+# pre_install_hooks = []
+# post_install_hooks = []
 
 [[files]]
 # Required. Must be an HTTP(S) URL with a host.

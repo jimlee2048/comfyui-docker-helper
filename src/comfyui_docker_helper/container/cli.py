@@ -102,6 +102,7 @@ def install_custom_nodes_command(
         runtime=ContainerRuntime.from_env(),
         constraints_path=constraints,
         build_hooks_directory=build_hooks_directory,
+        build_plan_digest=build_plan_digest,
     )
 
 

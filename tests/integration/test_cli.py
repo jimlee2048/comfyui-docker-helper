@@ -21,7 +21,10 @@ from typer.testing import CliRunner
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config.build_plan import BuildOutputPlan, build_plan_digest
+from comfyui_docker_helper.config.build_plan import (
+    GitCredentialRoutePlan,
+    build_plan_digest,
+)
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -30,8 +33,17 @@ from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
-from comfyui_docker_helper.host.buildx import KnownHostsBinding
+from comfyui_docker_helper.host import secret_session as secret_session_module
+from comfyui_docker_helper.host.buildx import (
+    BuildxBuildError,
+    BuildxOutputPlan,
+    FileSecretBinding,
+)
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
+from comfyui_docker_helper.host.secret_session import (
+    GIT_CREDENTIAL_SESSION_ENV,
+    HostSecretSession,
+)
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
 )
@@ -84,6 +96,22 @@ ref = "1111111111111111111111111111111111111111"
         )
 
 
+def _write_http_credential_config(path: Path) -> None:
+    _write_minimal_config(path)
+    with path.open("a") as config:
+        config.write(
+            """
+[secrets.private_git]
+file = "missing-token-file"
+
+[[cdh.git.credentials]]
+match = "http://git.example.test/team/"
+username = "token-user"
+password = { secret = "private_git" }
+"""
+        )
+
+
 def _write_registry_config(path: Path) -> None:
     _write_minimal_config(path)
     path.write_text(
@@ -111,14 +139,40 @@ def _stub_planning_providers():
 
 def _prepared_build() -> SimpleNamespace:
     return SimpleNamespace(
-        warnings=(),
         plan=SimpleNamespace(
-            build=BuildOutputPlan(
-                tags=("example:test",),
-                output="load",
-                platforms=("linux/amd64",),
-            )
+            toolchain=SimpleNamespace(platform="linux/amd64"),
+            custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
         ),
+        output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+    )
+
+
+def _credential_build_plan():
+    plan = build_plan(final_config(), accepted_resolution())
+    return plan.model_copy(
+        update={
+            "custom_nodes": plan.custom_nodes.model_copy(
+                update={
+                    "git_credentials": (
+                        GitCredentialRoutePlan(
+                            match="https://example.test/",
+                            username="root-user",
+                            secret_id="cdh-git-credential-root_token",
+                        ),
+                        GitCredentialRoutePlan(
+                            match="https://example.test/team",
+                            username="team-user",
+                            secret_id="cdh-git-credential-root_token",
+                        ),
+                        GitCredentialRoutePlan(
+                            match="https://gitlab.example.test/",
+                            username="oauth2",
+                            secret_id="cdh-git-credential-team_token",
+                        ),
+                    )
+                }
+            )
+        }
     )
 
 
@@ -700,7 +754,7 @@ def test_relative_build_hook_root_is_resolved_from_invocation_directory(
 
     def prepare(_output_dir, *, build_hook_source_root, **_kwargs):
         observed.append(build_hook_source_root)
-        return SimpleNamespace(warnings=())
+        return SimpleNamespace()
 
     monkeypatch.chdir(invocation)
     monkeypatch.setattr(
@@ -748,6 +802,58 @@ def test_host_validate_remains_offline_and_does_not_construct_providers(
 
     assert result.exit_code == 0
     assert result.output == ""
+
+
+def test_host_validate_displays_http_credential_warning_offline(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_http_credential_config(config)
+
+    monkeypatch.setattr(
+        host_cli,
+        "default_planning_providers",
+        lambda **_kwargs: pytest.fail("validate must remain offline"),
+    )
+    result = cli_runner.invoke(app, ["host", "validate", "-f", str(config)])
+
+    assert result.exit_code == 0
+    assert result.output.count("git_credential.insecure_http") == 1
+
+
+def test_http_credential_warning_precedes_build_provider_initialization(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_http_credential_config(config)
+
+    class BoundaryReached(RuntimeError):
+        pass
+
+    def fail_providers(**_kwargs):
+        raise BoundaryReached("planning provider boundary reached")
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "example:test",
+            "--context-dir",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.output.count("git_credential.insecure_http") == 1
+    assert isinstance(result.exception, BoundaryReached)
 
 
 def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
@@ -833,6 +939,147 @@ platforms = ["linux/amd64"]
     assert "Traceback" not in result.output
 
 
+@pytest.mark.parametrize(
+    ("selector", "cli_tags", "expected_code"),
+    [
+        (
+            "0.11.0",
+            ["example/image:${{comfyui.commit}}"],
+            "build.invalid_tag_expression",
+        ),
+        (
+            "0.11.0",
+            ["busybox:x", "docker.io/library/busybox:x"],
+            "build.duplicate_tag",
+        ),
+        (
+            "nightly",
+            ["example/image:v${{ comfyui.release }}"],
+            "build.release_unavailable",
+        ),
+        (
+            "1111111111111111111111111111111111111111",
+            ["example/image:v${{ comfyui.release }}"],
+            "build.release_unavailable",
+        ),
+    ],
+)
+def test_cli_tags_use_shared_static_validation_before_provider_construction(
+    selector: str,
+    cli_tags: list[str],
+    expected_code: str,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("invalid CLI tags must fail before planning providers")
+
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    config.write_text(
+        config.read_text().replace('version = "0.11.0"', f'version = "{selector}"')
+    )
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+
+    args = ["host", "build", "-f", str(config)]
+    for tag in cli_tags:
+        args.extend(("--tag", tag))
+    result = cli_runner.invoke(app, args)
+
+    assert result.exit_code == 2
+    assert expected_code in _plain_output(result.output)
+
+
+def test_cli_tag_override_does_not_hide_invalid_config_tags(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("invalid configuration must fail before planning providers")
+
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    with config.open("a") as stream:
+        stream.write('\n[build]\ntags = ["example/Image:bad"]\n')
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "build", "-f", str(config), "--tag", "example/image:valid"],
+    )
+
+    assert result.exit_code == 1
+    assert "build.invalid_image_reference" in result.output
+
+
+@pytest.mark.parametrize("with_tags", [False, True])
+def test_dry_run_renders_an_independent_buildx_output_section(
+    with_tags: bool,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolution = accepted_resolution()
+    plan = build_plan(final_config(), resolution)
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    tag_templates: tuple[str, ...] = ()
+    output_plan: BuildxOutputPlan | None = None
+    if with_tags:
+        tag_templates = (
+            "example/comfyui:v${{ comfyui.release }}",
+            "example/comfyui:custom-${{ comfyui.commit.prefix(12) }}",
+        )
+        with config.open("a") as stream:
+            stream.write(
+                "\n[build]\n"
+                'tags = ["example/comfyui:v${{ comfyui.release }}", '
+                '"example/comfyui:custom-${{ comfyui.commit.prefix(12) }}"]\n'
+                'output = "push"\n'
+            )
+        output_plan = BuildxOutputPlan(
+            tags=("example/comfyui:v0.11.0", "example/comfyui:custom-111111111111"),
+            output="push",
+        )
+
+    def prepare(*args, **kwargs):
+        del args
+        assert tuple(kwargs["tag_templates"]) == tag_templates
+        return SimpleNamespace(
+            plan=plan,
+            lock_result=resolution,
+            output_plan=output_plan,
+        )
+
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+            "--dry-run",
+        ],
+    )
+
+    plain = _plain_output(result.output)
+    assert result.exit_code == 0
+    assert plain.index("Custom nodes:") < plain.index("Buildx output")
+    if output_plan is None:
+        assert "Buildx output\n  None" in plain
+    else:
+        assert "Buildx output\n  Mode: push\n  Tags:" in plain
+        assert plain.index(output_plan.tags[0]) < plain.index(output_plan.tags[1])
+
+
 def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -854,7 +1101,7 @@ def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         seen["configuration_result"] = kwargs["configuration_result"]
         seen["build_hook_source_root"] = kwargs["build_hook_source_root"]
-        return SimpleNamespace(warnings=())
+        return SimpleNamespace()
 
     def load(*args, **kwargs):
         result = original_load(*args, **kwargs)
@@ -981,25 +1228,29 @@ output = "load"
 platforms = ["linux/amd64"]
 """
     )
-    plan_build = BuildOutputPlan(
+    output_plan = BuildxOutputPlan(
         tags=("cli:first", "cli:second"),
         output="push",
-        platforms=("linux/amd64",),
     )
 
     def prepare(*args, **kwargs):
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         configuration = kwargs["configuration_result"]
         seen["configuration_build"] = configuration.config.build
+        seen["tag_templates"] = kwargs["tag_templates"]
+        seen["output"] = kwargs["output_mode"]
         return SimpleNamespace(
-            warnings=(),
-            plan=SimpleNamespace(build=plan_build),
+            plan=SimpleNamespace(
+                toolchain=SimpleNamespace(platform="linux/amd64"),
+                custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+            ),
+            output_plan=output_plan,
         )
 
     def buildx(**kwargs):
         seen["buildx_ssh"] = (
             kwargs["forward_default_ssh"],
-            kwargs["known_hosts_bindings"],
+            kwargs["file_secret_bindings"],
         )
         seen["buildx"] = {
             "image_tags": kwargs["image_tags"],
@@ -1047,18 +1298,214 @@ platforms = ["linux/amd64"]
     assert result.exit_code == 0
     assert seen["runtime_hooks_dir"] == hooks
     configuration_build = seen["configuration_build"]
-    assert configuration_build.tags == list(plan_build.tags)
-    assert configuration_build.output == plan_build.output
-    assert configuration_build.platforms == list(plan_build.platforms)
+    assert configuration_build.tags == ["config:test"]
+    assert configuration_build.output == "load"
+    assert configuration_build.platforms == ["linux/amd64"]
+    assert seen["tag_templates"] == output_plan.tags
+    assert seen["output"] == output_plan.output
     assert seen["buildx"] == {
-        "image_tags": plan_build.tags,
-        "output": plan_build.output,
-        "platforms": plan_build.platforms,
+        "image_tags": output_plan.tags,
+        "output": output_plan.output,
+        "platforms": ("linux/amd64",),
         "context_dir": context,
         "cache_from": "type=local,src=/cache source",
         "cache_to": "type=gha,scope=build",
     }
     assert seen["buildx_ssh"] == (False, ())
+
+
+@pytest.mark.parametrize(
+    "buildx_failure",
+    [None, BuildxBuildError("synthetic Buildx failure"), KeyboardInterrupt()],
+)
+def test_build_fills_distinct_plan_credentials_and_reuses_provider_snapshot(
+    buildx_failure: BaseException | None,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+    with config.open("a") as stream:
+        stream.write(
+            """
+[secrets.root_token]
+env = "CDH_TEST_ROOT_TOKEN"
+[secrets.team_token]
+env = "CDH_TEST_TEAM_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://example.test/"
+username = "root-user"
+password = { secret = "root_token" }
+[[cdh.git.credentials]]
+match = "https://example.test/team/"
+username = "team-user"
+password = { secret = "root_token" }
+[[cdh.git.credentials]]
+match = "https://gitlab.example.test/"
+username = "oauth2"
+password = { secret = "team_token" }
+"""
+        )
+    values = {
+        b"CDH_TEST_ROOT_TOKEN": b"root-secret-marker",
+        b"CDH_TEST_TEAM_TOKEN": b"team-secret-marker",
+    }
+    reads: list[bytes] = []
+
+    class CountingEnvironment(dict[bytes, bytes]):
+        def get(self, key: bytes, default=None):
+            reads.append(key)
+            return super().get(key, default)
+
+    monkeypatch.setattr(
+        secret_session_module.os,
+        "environb",
+        CountingEnvironment(values),
+    )
+    plan = _credential_build_plan()
+    observed_root: Path | None = None
+    captured_bindings: tuple[FileSecretBinding, ...] = ()
+
+    @contextmanager
+    def providers(*, git_credential_binding):
+        nonlocal observed_root
+        observed_root = Path(
+            git_credential_binding.environment[GIT_CREDENTIAL_SESSION_ENV]
+        )
+        attached = HostSecretSession._attach(observed_root)
+        attached.snapshot_git_credential("cdh-git-credential-root_token")
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **_kwargs):
+        return SimpleNamespace(
+            plan=plan,
+            output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+        )
+
+    # Buildx receives every effective route Secret because recursive submodule
+    # origins are not all known when the host finishes provider planning.
+    def buildx(**kwargs):
+        nonlocal captured_bindings
+        captured_bindings = tuple(kwargs["file_secret_bindings"])
+        assert all(binding.source.is_file() for binding in captured_bindings)
+        if buildx_failure is not None:
+            raise buildx_failure
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    expected_exit_code = (
+        130
+        if isinstance(buildx_failure, KeyboardInterrupt)
+        else (0 if buildx_failure is None else 1)
+    )
+    assert result.exit_code == expected_exit_code
+    assert [binding.secret_id for binding in captured_bindings] == [
+        "cdh-git-credential-root_token",
+        "cdh-git-credential-team_token",
+    ]
+    assert reads == [b"CDH_TEST_ROOT_TOKEN", b"CDH_TEST_TEAM_TOKEN"]
+    assert observed_root is not None and not observed_root.exists()
+    assert "CDH_TEST_ROOT_TOKEN" not in result.output
+    assert "CDH_TEST_TEAM_TOKEN" not in result.output
+    assert "root-secret-marker" not in result.output
+    assert "team-secret-marker" not in result.output
+
+
+def test_build_missing_plan_credential_fails_before_buildx(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+    missing_locator = "synthetic-missing-credential-source"
+    with config.open("a") as stream:
+        stream.write(
+            f"""
+[secrets.root_token]
+file = "{missing_locator}"
+[secrets.team_token]
+env = "CDH_TEST_TEAM_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://example.test/"
+username = "root-user"
+password = {{ secret = "root_token" }}
+[[cdh.git.credentials]]
+match = "https://gitlab.example.test/"
+username = "oauth2"
+password = {{ secret = "team_token" }}
+"""
+        )
+    plan = _credential_build_plan()
+    observed_root: Path | None = None
+
+    @contextmanager
+    def providers(*, git_credential_binding):
+        nonlocal observed_root
+        observed_root = Path(
+            git_credential_binding.environment[GIT_CREDENTIAL_SESSION_ENV]
+        )
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **_kwargs):
+        return SimpleNamespace(
+            plan=plan,
+            output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+        )
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(
+        host_cli,
+        "build_image_with_buildx",
+        lambda **_kwargs: pytest.fail("missing Secret reached Docker boundary"),
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "secret.source_unavailable" in result.output
+    assert missing_locator not in result.output
+    assert observed_root is not None and not observed_root.exists()
 
 
 @pytest.mark.parametrize(
@@ -1154,10 +1601,9 @@ def test_build_cache_import_and_export_are_independent(
     seen: dict[str, object] = {}
     config = tmp_path / "config.toml"
     _write_minimal_config(config)
-    plan_build = BuildOutputPlan(
+    output_plan = BuildxOutputPlan(
         tags=("image:test",),
         output="load",
-        platforms=("linux/amd64",),
     )
 
     @contextmanager
@@ -1169,8 +1615,16 @@ def test_build_cache_import_and_export_are_independent(
         )
 
     def prepare(*args, **kwargs):
-        del args, kwargs
-        return SimpleNamespace(warnings=(), plan=SimpleNamespace(build=plan_build))
+        del args
+        assert kwargs["tag_templates"] == output_plan.tags
+        assert kwargs["output_mode"] == output_plan.output
+        return SimpleNamespace(
+            plan=SimpleNamespace(
+                toolchain=SimpleNamespace(platform="linux/amd64"),
+                custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+            ),
+            output_plan=output_plan,
+        )
 
     def buildx(**kwargs):
         seen["cache_from"] = kwargs["cache_from"]
@@ -1248,7 +1702,7 @@ def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
     assert result.exit_code == 0
     assert result.output.count(warning) == 1
     assert seen["forward_default_ssh"] is False
-    assert seen["known_hosts_bindings"] == ()
+    assert seen["file_secret_bindings"] == ()
 
 
 def test_build_ssh_does_not_replace_configuration_validation(
@@ -1352,8 +1806,8 @@ def test_build_ssh_forwards_agent_and_only_existing_default_trust_after_context(
 
     assert result.exit_code == 0
     assert seen["forward_default_ssh"] is True
-    assert seen["known_hosts_bindings"] == tuple(
-        KnownHostsBinding(
+    assert seen["file_secret_bindings"] == tuple(
+        FileSecretBinding(
             secret_id=KNOWN_HOSTS_MOUNTS[index].secret_id,
             source=default_sources[index],
         )
@@ -1379,14 +1833,16 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
     seen: dict[str, object] = {}
 
     def prepare(output_dir, **kwargs):
-        del kwargs
+        output_plan = BuildxOutputPlan(
+            tags=tuple(kwargs["tag_templates"]), output=kwargs["output_mode"]
+        )
         Path(output_dir).mkdir(mode=0o700)
         _materialize_private_stage(
             plan,
             output_dir,
             canonical_wheel=canonical_wheel(),
         )
-        return SimpleNamespace(warnings=(), plan=plan)
+        return SimpleNamespace(plan=plan, output_plan=output_plan)
 
     def buildx(**kwargs):
         seen.update(kwargs)
@@ -1408,11 +1864,11 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
 
     assert result.exit_code == 0
     assert (
-        KnownHostsBinding(
+        FileSecretBinding(
             secret_id=KNOWN_HOSTS_MOUNTS[0].secret_id,
             source=known_hosts,
         )
-        in seen["known_hosts_bindings"]
+        in seen["file_secret_bindings"]
     )
     source_markers = (str(host_home).encode(), b"host-trust-content-marker")
     for path in context.rglob("*"):
@@ -1421,7 +1877,7 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
             assert all(marker not in content for marker in source_markers)
 
 
-def test_locked_build_override_stops_before_buildx_when_context_is_stale(
+def test_locked_build_override_does_not_mutate_image_configuration(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1454,20 +1910,23 @@ platforms = ["linux/amd64"]
 
     def prepare(*args, **kwargs):
         configuration = kwargs["configuration_result"]
-        assert configuration.config.build.tags == ["cli:test"]
+        assert configuration.config.build.tags == ["config:test"]
         assert kwargs["options"].locked is True
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    ("render",),
-                    "render.context_changed",
-                    "rendered context differs from the current BuildPlan",
-                ),
-            )
+        assert kwargs["tag_templates"] == ("cli:test",)
+        assert kwargs["output_mode"] == "load"
+        output_plan = BuildxOutputPlan(tags=("cli:test",), output="load")
+        return SimpleNamespace(
+            plan=SimpleNamespace(
+                toolchain=SimpleNamespace(platform="linux/amd64"),
+                custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+            ),
+            output_plan=output_plan,
         )
 
-    def fail_buildx(**kwargs):
-        pytest.fail("stale locked context must stop before Docker Buildx")
+    def buildx(**kwargs):
+        assert kwargs["image_tags"] == ("cli:test",)
+        assert kwargs["output"] == "load"
+        assert kwargs["platforms"] == ("linux/amd64",)
 
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.default_planning_providers", providers
@@ -1476,7 +1935,7 @@ platforms = ["linux/amd64"]
         "comfyui_docker_helper.host.cli.prepare_render_context", prepare
     )
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.cli.build_image_with_buildx", fail_buildx
+        "comfyui_docker_helper.host.cli.build_image_with_buildx", buildx
     )
 
     result = cli_runner.invoke(
@@ -1494,9 +1953,7 @@ platforms = ["linux/amd64"]
         ],
     )
 
-    assert result.exit_code == 1
-    assert "render.context_changed" in result.output
-    assert "Traceback" not in result.output
+    assert result.exit_code == 0
 
 
 def test_container_entrypoint_invokes_service_and_propagates_exit_code(

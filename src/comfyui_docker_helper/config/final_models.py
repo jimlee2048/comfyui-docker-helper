@@ -97,6 +97,33 @@ class FinalDownloaderConfig(FinalConfigModel):
     httpx: FinalHttpxConfig = Field(default_factory=FinalHttpxConfig)
 
 
+class FinalSecretSourceConfig(FinalConfigModel):
+    """One lazily resolved host Secret source."""
+
+    env: str | None = None
+    file: str | None = None
+
+
+class FinalSecretRef(FinalConfigModel):
+    """A complete typed reference to one logical Secret."""
+
+    secret: str
+
+
+class FinalGitCredentialConfig(FinalConfigModel):
+    """One cdh-managed HTTP(S) Git credential route."""
+
+    match: str
+    username: str
+    password: FinalSecretRef
+
+
+class FinalGitConfig(FinalConfigModel):
+    """Git behavior owned by cdh host and build commands."""
+
+    credentials: list[FinalGitCredentialConfig] = Field(default_factory=list)
+
+
 class FinalCdhConfig(FinalConfigModel):
     """cdh-owned transfer and lifecycle settings."""
 
@@ -106,6 +133,7 @@ class FinalCdhConfig(FinalConfigModel):
     download_failure_policy: Literal["continue", "fail"] = "fail"
     shutdown_timeout: ShutdownTimeout = 8
     downloader: FinalDownloaderConfig = Field(default_factory=FinalDownloaderConfig)
+    git: FinalGitConfig = Field(default_factory=FinalGitConfig)
 
 
 class FinalBuildConfig(FinalConfigModel):
@@ -190,3 +218,4 @@ class FinalConfig(FinalConfigModel):
     build: FinalBuildConfig = Field(default_factory=FinalBuildConfig)
     comfyui: FinalComfyUIConfig
     files: list[FinalFileConfig] = Field(default_factory=list)
+    secrets: dict[str, FinalSecretSourceConfig] = Field(default_factory=dict)

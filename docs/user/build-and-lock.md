@@ -2,14 +2,14 @@
 
 English | [简体中文](build-and-lock.zh-CN.md)
 
-This guide covers local validation, canonical-lock reconciliation, rendered build contexts, and Docker image builds. Start with the [configuration guide](configuration.md) to choose and layer configuration files. Commands below are run from the repository root.
+This guide covers local validation, canonical-lock reconciliation, rendered build contexts, and Docker image builds. Start with the [configuration guide](configuration.md) to choose and layer configuration files. The commands below assume your configuration is named `cdh.toml` and run from its directory.
 
 ## Validate, render, and build
 
 Validate configuration before resolving or building anything:
 
 ```bash
-cdh host validate -f examples/minimal.toml
+cdh host validate -f cdh.toml
 ```
 
 Validation is local: it makes no provider or Docker calls and writes no files. Repeat `-f/--file` to use configuration layers; cdh merges them in command-line order and validates the effective result.
@@ -18,7 +18,7 @@ Render a reusable build context and canonical lock:
 
 ```bash
 cdh host render \
-  -f examples/minimal.toml \
+  -f cdh.toml \
   -o .cdh/build/current \
   --overwrite
 ```
@@ -31,7 +31,7 @@ Build an image with Docker Buildx:
 
 ```bash
 cdh host build \
-  -f examples/minimal.toml \
+  -f cdh.toml \
   --context-dir .cdh/build/current \
   -t my-comfy:dev \
   --load
@@ -57,7 +57,7 @@ Use `--cache-from` to reuse an existing BuildKit cache and `--cache-to` to save 
 
 ```bash
 cdh host build \
-  -f examples/minimal.toml \
+  -f cdh.toml \
   --context-dir .cdh/build/current \
   -t registry.example.com/my-comfy:dev \
   --push \
@@ -69,15 +69,15 @@ Each option accepts one Docker Buildx cache specification and may be used indepe
 
 ## Private Git custom nodes over HTTPS
 
-Configure Secret sources and `[[cdh.git.credentials]]` routes as described in [Supply private HTTP(S) Git credentials](configuration.md#supply-private-https-git-credentials). During a host command, cdh uses the selected route for direct-Git identity resolution and then supplies the required credential snapshots to BuildKit for custom-node installation and recursive submodules. Tokens are not placed in Git URLs or command arguments.
+Configure Secret sources and `[[cdh.git.credentials]]` routes as described in [Supply private HTTP(S) Git credentials](configuration.md#supply-private-https-git-credentials). During a host command, cdh uses the selected route for direct-Git identity resolution and makes the effective route credentials available to BuildKit for custom-node installation and recursive submodules. Tokens are not placed in Git URLs or command arguments.
 
-The host Secret session is command-scoped and lazy: it creates private `0700` session state, writes `0600` snapshots, reads a used source at most once, and cleans the session during normal unwinding after success, handled failure, or `KeyboardInterrupt`. An uncatchable process or host termination cannot guarantee in-process cleanup. cdh keeps source locators and resolved values out of durable build artifacts and its own diagnostics. This is a structural boundary, not a sandbox: trusted custom-node hooks and installers can still read, print, or copy credentials available to their combined build step. An `http://` credential route is allowed but warns because it lacks TLS transport confidentiality.
+Secret handling is lazy and scoped to the command. cdh keeps source locators and resolved values out of durable build artifacts and its own diagnostics, and attempts cleanup when the command exits through supported success, error, or interruption paths. An ordinary cleanup failure is reported, but abrupt process or host termination cannot guarantee cleanup. This is a structural non-persistence boundary, not a sandbox: trusted custom-node hooks and installers can still read, print, or copy credentials available to their combined build step. An `http://` credential route is allowed but warns because it lacks TLS transport confidentiality.
 
 BuildKit does not include Secret contents in a `RUN` instruction's cache key; only the Secret ID and mount properties participate. Rotating a token can therefore reuse an already completed custom-node layer without contacting the current credential source. When building a rendered context directly, use Buildx `--no-cache`, or use other ordinary BuildKit cache controls, when a fresh authentication check is required. cdh deliberately does not hash a token into a cachebuster.
 
 ### Build a rendered HTTPS context directly
 
-The rendered Dockerfile declares a stable, required Secret ID for each credential used by a direct-Git build. When invoking Buildx yourself, bind every declared ID to the corresponding value. For example, the logical names in `examples/full.toml` produce:
+The rendered Dockerfile declares a stable, required Secret ID for each credential available to a direct-Git build. When invoking Buildx yourself, bind every declared ID to the corresponding value. For example, copying or uncommenting both complete private-HTTPS blocks in [`examples/full.toml`](../../examples/full.toml) and rendering that configuration produces these IDs:
 
 ```bash
 docker buildx build \
@@ -96,7 +96,7 @@ Use `--ssh` when a direct-Git custom node or one of its recursive submodules nee
 
 ```bash
 cdh host build \
-  -f examples/full.toml \
+  -f cdh.toml \
   --context-dir .cdh/build/current \
   -t my-comfy:dev \
   --load \
@@ -130,8 +130,8 @@ Build hooks referenced by custom-node configuration have no implicit source dire
 
 ```bash
 cdh host validate \
-  -f examples/full.toml \
-  --build-hooks-dir examples/build-hooks
+  -f cdh.toml \
+  --build-hooks-dir build-hooks
 ```
 
 Paths in configuration are relative to this directory. cdh admits only the referenced regular `.sh` and `.py` files and preserves their safe relative layout. Build hooks are trusted code, and their verified source bytes remain in the final image and its layers. Do not put secrets in them. See the [build-hook examples](../../examples/build-hooks/).
@@ -140,10 +140,10 @@ Pass `--runtime-hooks-dir` to `render` or `build` to bake a runtime hook tree:
 
 ```bash
 cdh host render \
-  -f examples/full.toml \
-  -o .cdh/build/full \
-  --build-hooks-dir examples/build-hooks \
-  --runtime-hooks-dir examples/runtime-hooks \
+  -f cdh.toml \
+  -o .cdh/build/current \
+  --build-hooks-dir build-hooks \
+  --runtime-hooks-dir runtime-hooks \
   --overwrite
 ```
 

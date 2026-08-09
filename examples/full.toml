@@ -1,6 +1,7 @@
-# Complete annotated ComfyUI Docker Helper configuration.
-# Copy this file and remove fields you do not need. Fields not shown in
-# minimal.toml usually have defaults, but they are included here for reference.
+# Comprehensive annotated ComfyUI Docker Helper configuration reference.
+# Its active TOML remains offline-validatable, but this file is not an
+# end-to-end build or acceptance profile. Copy it and remove fields you do not
+# need; fields omitted from minimal.toml are included here for reference.
 
 [compute_platform]
 # Required. Supported: "cuda".
@@ -111,38 +112,6 @@ min_split_size = "1M"
 # not resume, and any clean fallback still consumes the next available attempt.
 resume_download = true
 
-# Secret names are logical identifiers; values are resolved lazily only when a
-# selected Git credential route needs them. Environment values are consumed as
-# exact bytes. Do not put a real token in this configuration file.
-[secrets.github_pat]
-env = "CDH_GITHUB_PAT"
-
-# Relative file locators use the real parent of the first -f configuration
-# file. The admitted source must be one non-symlink regular file no larger than
-# 65,525 bytes. A trailing newline is invalid for a Git password.
-[secrets.gitlab_pat]
-file = "secrets/gitlab-pat"
-
-# This example also contains a public direct-Git node. Before `host build`, set
-# CDH_GITHUB_PAT and create the GitLab token file, or remove these unused routes;
-# all configured route Secrets are granted to the combined custom-node step.
-# Offline validation, and rendering with a compatible lock, remain source-lazy.
-[[cdh.git.credentials]]
-# HTTP(S) credential-context prefix. Scheme, host, port, and path boundaries
-# participate in matching; the longest matching route wins.
-match = "https://github.com/example-private/"
-# A GitHub PAT is the password. GitHub requires a non-empty username but the PAT
-# performs authentication; x-access-token avoids recording a personal username.
-username = "x-access-token"
-password = { secret = "github_pat" }
-
-[[cdh.git.credentials]]
-# GitLab.com and self-managed GitLab accept a PAT as the password with a
-# non-empty username such as oauth2. Other token types may prescribe a username.
-match = "https://gitlab.example.com/example-private/"
-username = "oauth2"
-password = { secret = "gitlab_pat" }
-
 [build]
 # Optional for render. Required by host build when no CLI -t/--tag is supplied.
 # Expressions use the accepted ComfyUI identity. release has no leading v;
@@ -207,6 +176,48 @@ ref = "main"
 target_dir = "ComfyUI-Custom-Scripts"
 pre_install_hooks = []
 post_install_hooks = ["post.sh"]
+
+# For any direct-Git build, every Secret referenced by the effective credential
+# routes is granted to the combined trusted custom-node installation step.
+
+# Optional private GitHub HTTPS node. Uncomment this complete block and set the
+# environment variable. The PAT is the password; x-access-token is a permitted
+# non-personal username placeholder. Never put the token directly in this file.
+# [secrets.github_pat]
+# env = "CDH_GITHUB_PAT"
+#
+# [[cdh.git.credentials]]
+# match = "https://github.com/example-private/"
+# username = "x-access-token"
+# password = { secret = "github_pat" }
+#
+# [[comfyui.custom_nodes]]
+# type = "git"
+# url = "https://github.com/example-private/private-node.git"
+# ref = "main"
+# target_dir = "private-github-node"
+# pre_install_hooks = []
+# post_install_hooks = []
+
+# Optional private self-hosted GitLab HTTPS node. Uncomment this complete block
+# and create the token file relative to the first -f configuration. The PAT is
+# the password; oauth2 is a permitted username placeholder for GitLab PATs.
+# Never put the token directly in this file.
+# [secrets.gitlab_pat]
+# file = "secrets/gitlab-pat"
+#
+# [[cdh.git.credentials]]
+# match = "https://gitlab.example.com/example-private/"
+# username = "oauth2"
+# password = { secret = "gitlab_pat" }
+#
+# [[comfyui.custom_nodes]]
+# type = "git"
+# url = "https://gitlab.example.com/example-private/private-node.git"
+# ref = "main"
+# target_dir = "private-gitlab-node"
+# pre_install_hooks = []
+# post_install_hooks = []
 
 [[files]]
 # Required. Must be an HTTP(S) URL with a host.

@@ -20,6 +20,8 @@ English | [简体中文](README.zh-CN.md)
 - Resolve and lock selected Python, PyTorch, ComfyUI, tool, custom-node, and remote-file inputs.
 - Build customized CUDA-backed ComfyUI images for Linux `amd64` with Docker Buildx.
 - Use the host's default SSH agent to build private direct-Git custom nodes.
+- Authenticate private direct-Git custom nodes over HTTP(S) with configured credentials.
+- Publish one build under deterministic tags derived from its accepted ComfyUI release or commit.
 - Add optional Manager, comfy-cli, custom nodes, files, downloads, lifecycle hooks, and runtime SSH access.
 
 ## Host requirements

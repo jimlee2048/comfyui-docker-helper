@@ -2,14 +2,14 @@
 
 [English](build-and-lock.md) | 简体中文
 
-本指南介绍本地验证、canonical lock 协调、渲染构建上下文以及 Docker 镜像构建。请先阅读[配置指南](configuration.zh-CN.md)，以选择和分层配置文件。以下命令均从仓库根目录运行。
+本指南介绍本地验证、canonical lock 协调、渲染构建上下文以及 Docker 镜像构建。请先阅读[配置指南](configuration.zh-CN.md)，以选择和分层配置文件。以下命令假定你的配置名为 `cdh.toml`，并从其所在目录运行。
 
 ## 验证、渲染和构建
 
 在解析或构建任何内容之前验证配置：
 
 ```bash
-cdh host validate -f examples/minimal.toml
+cdh host validate -f cdh.toml
 ```
 
 验证在本地完成：它不会调用解析提供方或 Docker，也不会写入文件。可以重复使用 `-f/--file` 来指定配置层；cdh 按命令行中的顺序合并这些配置层，并验证最终生效的结果。
@@ -18,7 +18,7 @@ cdh host validate -f examples/minimal.toml
 
 ```bash
 cdh host render \
-  -f examples/minimal.toml \
+  -f cdh.toml \
   -o .cdh/build/current \
   --overwrite
 ```
@@ -31,7 +31,7 @@ cdh 会先准备好完整的替代上下文，再更改现有上下文。`--over
 
 ```bash
 cdh host build \
-  -f examples/minimal.toml \
+  -f cdh.toml \
   --context-dir .cdh/build/current \
   -t my-comfy:dev \
   --load
@@ -57,7 +57,7 @@ Tag 和 `[build].output` 是进程内 publication choice。它们不会进入 ca
 
 ```bash
 cdh host build \
-  -f examples/minimal.toml \
+  -f cdh.toml \
   --context-dir .cdh/build/current \
   -t registry.example.com/my-comfy:dev \
   --push \
@@ -69,15 +69,15 @@ cdh host build \
 
 ## 通过 HTTPS 访问私有 Git 自定义节点
 
-请按照[提供私有 HTTP(S) Git 凭据](configuration.zh-CN.md#提供私有-https-git-凭据)配置 Secret source 和 `[[cdh.git.credentials]]` route。在一条宿主机命令期间，cdh 会使用选中 route 解析 direct-Git 身份，再把所需凭据 snapshot 提供给 BuildKit，用于自定义节点安装及递归 submodule。Token 不会被放入 Git URL 或命令参数。
+请按照[提供私有 HTTP(S) Git 凭据](configuration.zh-CN.md#提供私有-https-git-凭据)配置 Secret source 和 `[[cdh.git.credentials]]` route。在一条宿主机命令期间，cdh 会使用选中的 route 解析 direct-Git 身份，并让 BuildKit 可使用生效 route 的凭据来安装自定义节点和递归 submodule。Token 不会被放入 Git URL 或命令参数。
 
-宿主机 Secret session 以命令为范围且惰性工作：它创建私有的 `0700` session 状态、写入 `0600` snapshot、最多读取一次已使用的 source，并在成功、已处理的失败或 `KeyboardInterrupt` 正常展开调用栈时清理 session。无法捕获的进程终止或宿主机中止不能保证完成进程内清理。cdh 会让 source locator 和解析后的值避开持久构建工件及其自身诊断。这是结构边界，而不是沙箱：受信任的自定义节点 Hook 和安装程序仍可以读取、输出或复制其合并构建步骤可用的凭据。`http://` credential route 可以使用，但会因缺少 TLS 传输保密性而发出 warning。
+Secret 会在命令范围内惰性处理。cdh 会让 source locator 和解析后的值避开持久构建工件及其自身诊断，并在命令通过受支持的成功、错误或中断路径退出时尝试清理。普通清理失败会被报告，但进程或宿主机突然终止时无法保证完成清理。这是结构性非持久化边界，而不是沙箱：受信任的自定义节点 Hook 和安装程序仍可以读取、输出或复制其合并构建步骤可用的凭据。`http://` credential route 可以使用，但会因缺少 TLS 传输保密性而发出 warning。
 
 BuildKit 不会把 Secret 内容纳入 `RUN` 指令的 cache key；只有 Secret ID 和 mount 属性参与。轮换 token 后，已经完成的自定义节点层仍可能被复用，而不访问当前 credential source。直接构建渲染上下文时，如需重新检查鉴权，请使用 Buildx `--no-cache` 或其他常规 BuildKit cache 控制。cdh 刻意不会把 token hash 作为 cachebuster。
 
 ### 直接构建渲染后的 HTTPS 上下文
 
-渲染后的 Dockerfile 会为 direct-Git 构建使用的每个 credential 声明稳定且 required 的 Secret ID。自行调用 Buildx 时，必须把所有声明的 ID 绑定到对应值。例如，`examples/full.toml` 中的逻辑名称会生成：
+渲染后的 Dockerfile 会为 direct-Git 构建可用的每个 credential 声明稳定且 required 的 Secret ID。自行调用 Buildx 时，必须把所有声明的 ID 绑定到对应值。例如，复制或取消注释 [`examples/full.toml`](../../examples/full.toml) 中两个完整的私有 HTTPS 配置块，再渲染该配置，就会生成以下 ID：
 
 ```bash
 docker buildx build \
@@ -96,7 +96,7 @@ docker buildx build \
 
 ```bash
 cdh host build \
-  -f examples/full.toml \
+  -f cdh.toml \
   --context-dir .cdh/build/current \
   -t my-comfy:dev \
   --load \
@@ -130,8 +130,8 @@ docker buildx build \
 
 ```bash
 cdh host validate \
-  -f examples/full.toml \
-  --build-hooks-dir examples/build-hooks
+  -f cdh.toml \
+  --build-hooks-dir build-hooks
 ```
 
 配置中的路径相对于此目录。cdh 只接纳被引用的常规 `.sh` 和 `.py` 文件，并保留它们安全的相对布局。构建 Hook 是受信任代码，其经过验证的源字节会保留在最终镜像及其镜像层中。请勿在其中放入机密信息。参见[构建 Hook 示例](../../examples/build-hooks/)。
@@ -140,10 +140,10 @@ cdh host validate \
 
 ```bash
 cdh host render \
-  -f examples/full.toml \
-  -o .cdh/build/full \
-  --build-hooks-dir examples/build-hooks \
-  --runtime-hooks-dir examples/runtime-hooks \
+  -f cdh.toml \
+  -o .cdh/build/current \
+  --build-hooks-dir build-hooks \
+  --runtime-hooks-dir runtime-hooks \
   --overwrite
 ```
 

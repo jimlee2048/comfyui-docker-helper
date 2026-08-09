@@ -177,33 +177,7 @@ password = { secret = "shared" }
     ]
 
 
-def test_empty_git_credentials_layer_resets_all_inherited_routes(
-    tmp_path: Path,
-) -> None:
-    base = tmp_path / "base.toml"
-    reset = tmp_path / "reset.toml"
-    base.write_text(
-        _config()
-        + """
-
-[secrets.github]
-env = "GITHUB_TOKEN"
-
-[[cdh.git.credentials]]
-match = "https://github.com/acme/"
-username = "x-access-token"
-password = { secret = "github" }
-"""
-    )
-    reset.write_text("[cdh.git]\ncredentials = []\n")
-
-    result = load_validate_config_result([base, reset])
-
-    assert result.config.cdh.git.credentials == []
-    assert tuple(result.config.secrets) == ("github",)
-
-
-def test_git_credentials_can_accumulate_again_after_a_reset(tmp_path: Path) -> None:
+def test_git_credentials_reset_then_accumulate_in_a_later_layer(tmp_path: Path) -> None:
     base = tmp_path / "base.toml"
     reset = tmp_path / "reset.toml"
     later = tmp_path / "later.toml"
@@ -235,6 +209,7 @@ password = { secret = "shared" }
     assert [route.match for route in result.config.cdh.git.credentials] == [
         "https://gitlab.example.com/team/"
     ]
+    assert tuple(result.config.secrets) == ("shared",)
 
 
 def test_http_git_credentials_are_returned_as_non_blocking_warnings(

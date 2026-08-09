@@ -326,6 +326,8 @@ def _assert_image_evidence(
     _assert_file_omits(filesystem, forbidden, "final image filesystem")
 
 
+# The live build covers both root and recursive-submodule authentication while
+# proving that credential material is absent from logs and retained image evidence.
 def test_private_http_git_root_and_recursive_submodule_use_secret_routes() -> None:
     suffix = uuid.uuid4().hex[:12]
     token = f"cdh-synthetic-private-git-token-{suffix}".encode("ascii")

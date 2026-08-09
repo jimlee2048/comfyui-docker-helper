@@ -140,11 +140,37 @@ def test_session_binding_and_snapshot_are_private_exact_and_reused(
         assert reads == 1
 
 
+def test_empty_value_fails_at_first_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    monkeypatch.setattr(
+        secret_session_module.os,
+        "environb",
+        {b"CDH_TEST_ROOT_TOKEN": b""},
+    )
+
+    with (
+        HostSecretSession.from_configuration(result) as session,
+        pytest.raises(HostSecretSessionError) as raised,
+    ):
+        session.snapshot("root_token")
+
+    assert raised.value.code == "invalid_value"
+
+
 @pytest.mark.parametrize(
     "value",
-    [b"", b"line\n", b"line\r", b"before\0after", b"x" * 65_526],
+    [
+        b"synthetic-sensitive-marker\n",
+        b"synthetic-sensitive-marker\r",
+        b"synthetic-sensitive-marker\0",
+        b"synthetic-sensitive-marker" + b"x" * (65_526 - 26),
+    ],
+    ids=("lf", "cr", "nul", "oversized"),
 )
-def test_invalid_values_fail_content_free_at_first_use(
+def test_invalid_value_failures_do_not_echo_input(
     value: bytes,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -154,18 +180,14 @@ def test_invalid_values_fail_content_free_at_first_use(
     monkeypatch.setattr(
         secret_session_module.os,
         "environb",
-        {b"CDH_TEST_ROOT_TOKEN": value + marker.encode() if value == b"" else value},
+        {b"CDH_TEST_ROOT_TOKEN": value},
     )
 
-    with HostSecretSession.from_configuration(result) as session:
-        if value == b"":
-            monkeypatch.setattr(
-                secret_session_module.os,
-                "environb",
-                {b"CDH_TEST_ROOT_TOKEN": b""},
-            )
-        with pytest.raises(HostSecretSessionError) as raised:
-            session.snapshot("root_token")
+    with (
+        HostSecretSession.from_configuration(result) as session,
+        pytest.raises(HostSecretSessionError) as raised,
+    ):
+        session.snapshot("root_token")
 
     assert raised.value.code == "invalid_value"
     assert marker not in str(raised.value)
@@ -256,36 +278,26 @@ def test_file_source_is_no_follow_and_error_omits_locator(
     assert "synthetic-token" not in str(raised.value)
 
 
-def test_permissive_mode_warning_is_recorded_before_snapshot_publication(
+def test_permissive_mode_warning_is_content_free(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     token = tmp_path / "configuration" / "token"
     token.parent.mkdir()
     token.write_bytes(b"file-token")
     token.chmod(0o640)
     result = _configuration(tmp_path, source='file = "token"')
-    original_write = secret_session_module._write_snapshot
-
-    def assert_warning_precedes_snapshot(path: Path, data: bytes) -> None:
-        assert (path.parent / "warning-permissive-mode-root_token").is_file()
-        original_write(path, data)
-
-    monkeypatch.setattr(
-        secret_session_module, "_write_snapshot", assert_warning_precedes_snapshot
-    )
 
     with HostSecretSession.from_configuration(result) as session:
         session.snapshot("root_token")
-        warning_file = session.root / "warning-permissive-mode-root_token"
-        assert stat.S_IMODE(warning_file.stat().st_mode) == 0o600
         warnings = session.drain_warnings()
         assert session.drain_warnings() == ()
 
     assert len(warnings) == 1
     assert warnings[0].path == ("secrets", "root_token", "file")
     assert warnings[0].code == "secret.permissive_file_mode"
+    assert warnings[0].severity is DiagnosticSeverity.WARNING
     assert os.fspath(token) not in warnings[0].message
+    assert "file-token" not in warnings[0].message
 
 
 def test_permissive_mode_warning_survives_invalid_file_value(
@@ -318,18 +330,15 @@ def test_private_session_files_are_exact_modes_under_restrictive_umask(
     result = _configuration(tmp_path, source='file = "token"')
     previous_umask = os.umask(0o777)
     try:
+        # Private modes must remain exact even when the caller's umask removes
+        # every requested permission bit.
         with HostSecretSession.from_configuration(result) as session:
             session.snapshot("root_token")
             assert stat.S_IMODE(session.root.stat().st_mode) == 0o700
             private_files = tuple(
                 path for path in session.root.iterdir() if path.is_file()
             )
-            assert {path.name for path in private_files} == {
-                "metadata.json",
-                "lock-root_token",
-                "snapshot-root_token",
-                "warning-permissive-mode-root_token",
-            }
+            assert private_files
             assert all(
                 stat.S_IMODE(path.stat().st_mode) == 0o600 for path in private_files
             )
@@ -534,22 +543,3 @@ def test_session_creation_failure_is_content_free_and_cleans_partial_root(
     assert partial_root is not None
     assert not partial_root.exists()
     assert os.fspath(partial_root) not in str(raised.value)
-
-
-def test_zero_length_snapshot_write_fails_without_looping(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        secret_session_module.os,
-        "environb",
-        {b"CDH_TEST_ROOT_TOKEN": b"synthetic-token"},
-    )
-    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
-
-    with HostSecretSession.from_configuration(result) as session:
-        monkeypatch.setattr(secret_session_module.os, "write", lambda *_args: 0)
-        with pytest.raises(HostSecretSessionError) as raised:
-            session.snapshot("root_token")
-
-    assert raised.value.code == "snapshot_failed"

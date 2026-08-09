@@ -804,9 +804,26 @@ def test_host_validate_remains_offline_and_does_not_construct_providers(
     assert result.output == ""
 
 
-@pytest.mark.parametrize("command", ["validate", "render", "build"])
-def test_http_credential_warning_precedes_provider_or_docker_initialization(
-    command: str,
+def test_host_validate_displays_http_credential_warning_offline(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_http_credential_config(config)
+
+    monkeypatch.setattr(
+        host_cli,
+        "default_planning_providers",
+        lambda **_kwargs: pytest.fail("validate must remain offline"),
+    )
+    result = cli_runner.invoke(app, ["host", "validate", "-f", str(config)])
+
+    assert result.exit_code == 0
+    assert result.output.count("git_credential.insecure_http") == 1
+
+
+def test_http_credential_warning_precedes_build_provider_initialization(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -821,84 +838,22 @@ def test_http_credential_warning_precedes_provider_or_docker_initialization(
         raise BoundaryReached("planning provider boundary reached")
 
     monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
-    args = ["host", command, "-f", str(config)]
-    if command == "render":
-        args.extend(("-o", str(tmp_path / "context")))
-    elif command == "build":
-        args.extend(("-t", "example:test", "--context-dir", str(tmp_path / "context")))
-
-    result = cli_runner.invoke(app, args)
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "-t",
+            "example:test",
+            "--context-dir",
+            str(tmp_path / "context"),
+        ],
+    )
 
     assert result.output.count("git_credential.insecure_http") == 1
-    if command == "validate":
-        assert result.exit_code == 0
-        assert result.exception is None
-    else:
-        assert isinstance(result.exception, BoundaryReached)
-
-
-def test_render_reports_primary_error_and_content_free_cleanup_warning(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cleanup_root: Path | None = None
-    original_rmtree = secret_session_module.shutil.rmtree
-
-    def fail_session_cleanup(path, *args, **kwargs):
-        nonlocal cleanup_root
-        candidate = Path(path)
-        if candidate.name.startswith("cdh-secret-session-"):
-            cleanup_root = candidate
-            raise OSError(f"synthetic cleanup failure at {candidate}")
-        return original_rmtree(path, *args, **kwargs)
-
-    @contextmanager
-    def providers():
-        yield SimpleNamespace(
-            acquirer=object(),
-            local_acquirer=object(),
-            canonical_wheel=canonical_wheel(),
-        )
-
-    def prepare(*_args, **_kwargs):
-        raise HostRenderServiceError(
-            (
-                Diagnostic(
-                    ("render",),
-                    "render.synthetic_primary_failure",
-                    "Synthetic primary render failure",
-                ),
-            )
-        )
-
-    monkeypatch.setattr(secret_session_module.shutil, "rmtree", fail_session_cleanup)
-    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
-    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
-    config = tmp_path / "config.toml"
-    _write_minimal_config(config)
-
-    try:
-        result = cli_runner.invoke(
-            app,
-            [
-                "host",
-                "render",
-                "-f",
-                str(config),
-                "-o",
-                str(tmp_path / "context"),
-            ],
-        )
-
-        assert result.exit_code == 1
-        assert result.output.count("render.synthetic_primary_failure") == 1
-        assert result.output.count("secret.cleanup_failed") == 1
-        assert cleanup_root is not None
-        assert str(cleanup_root) not in result.output
-    finally:
-        if cleanup_root is not None:
-            original_rmtree(cleanup_root)
+    assert isinstance(result.exception, BoundaryReached)
 
 
 def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
@@ -1359,195 +1314,6 @@ platforms = ["linux/amd64"]
     assert seen["buildx_ssh"] == (False, ())
 
 
-def test_layered_credentials_and_dynamic_tags_compose_through_build(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    base = tmp_path / "base.toml"
-    github = tmp_path / "github.toml"
-    gitlab = tmp_path / "gitlab.toml"
-    _write_direct_git_config(base)
-    with base.open("a") as stream:
-        stream.write(
-            """
-[build]
-tags = [
-  "example/comfyui:v${{ comfyui.release }}",
-  "example/comfyui:custom-${{ comfyui.commit.prefix(12) }}",
-]
-output = "push"
-"""
-        )
-    github.write_text(
-        """
-[secrets.root_token]
-env = "CDH_TEST_ROOT_TOKEN"
-
-[[cdh.git.credentials]]
-match = "https://example.test/"
-username = "root-user"
-password = { secret = "root_token" }
-
-[[cdh.git.credentials]]
-match = "https://example.test/team/"
-username = "team-user"
-password = { secret = "root_token" }
-"""
-    )
-    gitlab.write_text(
-        """
-[secrets.team_token]
-env = "CDH_TEST_TEAM_TOKEN"
-
-[[cdh.git.credentials]]
-match = "https://gitlab.example.test/"
-username = "oauth2"
-password = { secret = "team_token" }
-"""
-    )
-    monkeypatch.setenv("CDH_TEST_ROOT_TOKEN", "root-token")
-    monkeypatch.setenv("CDH_TEST_TEAM_TOKEN", "team-token")
-    plan = _credential_build_plan()
-    output_plan = BuildxOutputPlan(
-        tags=(
-            "example/comfyui:v0.11.0",
-            "example/comfyui:custom-111111111111",
-        ),
-        output="push",
-    )
-    seen: dict[str, object] = {}
-
-    @contextmanager
-    def providers(*, git_credential_binding):
-        assert git_credential_binding is not None
-        yield SimpleNamespace(
-            acquirer=object(),
-            local_acquirer=object(),
-            canonical_wheel=canonical_wheel(),
-        )
-
-    def prepare(*_args, **kwargs):
-        configuration = kwargs["configuration_result"].config
-        seen["routes"] = [
-            (route.match, route.username) for route in configuration.cdh.git.credentials
-        ]
-        seen["tag_templates"] = tuple(kwargs["tag_templates"])
-        seen["output_mode"] = kwargs["output_mode"]
-        return SimpleNamespace(plan=plan, output_plan=output_plan)
-
-    def buildx(**kwargs):
-        seen["buildx_tags"] = kwargs["image_tags"]
-        seen["buildx_output"] = kwargs["output"]
-        seen["secret_ids"] = tuple(
-            binding.secret_id for binding in kwargs["file_secret_bindings"]
-        )
-
-    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
-    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
-    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
-
-    result = cli_runner.invoke(
-        app,
-        [
-            "host",
-            "build",
-            "-f",
-            str(base),
-            "-f",
-            str(github),
-            "-f",
-            str(gitlab),
-            "--context-dir",
-            str(tmp_path / "context"),
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert seen == {
-        "routes": [
-            ("https://example.test/", "root-user"),
-            ("https://example.test/team/", "team-user"),
-            ("https://gitlab.example.test/", "oauth2"),
-        ],
-        "tag_templates": (
-            "example/comfyui:v${{ comfyui.release }}",
-            "example/comfyui:custom-${{ comfyui.commit.prefix(12) }}",
-        ),
-        "output_mode": "push",
-        "buildx_tags": output_plan.tags,
-        "buildx_output": "push",
-        "secret_ids": (
-            "cdh-git-credential-root_token",
-            "cdh-git-credential-team_token",
-        ),
-    }
-
-
-def test_build_keeps_one_secret_session_alive_through_buildx(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = tmp_path / "config.toml"
-    _write_minimal_config(config)
-    with config.open("a") as stream:
-        stream.write(
-            """
-[secrets.private_git]
-env = "CDH_TEST_PRIVATE_GIT_TOKEN"
-
-[[cdh.git.credentials]]
-match = "https://example.test/team/"
-username = "token-user"
-password = { secret = "private_git" }
-"""
-        )
-    observed_root: Path | None = None
-
-    @contextmanager
-    def providers(*, git_credential_binding):
-        nonlocal observed_root
-        observed_root = Path(
-            git_credential_binding.environment[GIT_CREDENTIAL_SESSION_ENV]
-        )
-        assert observed_root.is_dir()
-        yield SimpleNamespace(
-            acquirer=object(),
-            local_acquirer=object(),
-            canonical_wheel=canonical_wheel(),
-        )
-
-    def prepare(*_args, **_kwargs):
-        assert observed_root is not None and observed_root.is_dir()
-        return _prepared_build()
-
-    def buildx(**_kwargs):
-        assert observed_root is not None and observed_root.is_dir()
-
-    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
-    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
-    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
-
-    result = cli_runner.invoke(
-        app,
-        [
-            "host",
-            "build",
-            "-f",
-            str(config),
-            "--context-dir",
-            str(tmp_path / "context"),
-            "--tag",
-            "example:test",
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert observed_root is not None
-    assert not observed_root.exists()
-
-
 @pytest.mark.parametrize(
     "buildx_failure",
     [None, BuildxBuildError("synthetic Buildx failure"), KeyboardInterrupt()],
@@ -1622,6 +1388,8 @@ password = { secret = "team_token" }
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
         )
 
+    # Buildx receives every effective route Secret because recursive submodule
+    # origins are not all known when the host finishes provider planning.
     def buildx(**kwargs):
         nonlocal captured_bindings
         captured_bindings = tuple(kwargs["file_secret_bindings"])

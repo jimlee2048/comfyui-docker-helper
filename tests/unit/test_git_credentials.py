@@ -157,6 +157,7 @@ def test_route_selection_uses_scheme_host_port_boundary_and_longest_path() -> No
 
 
 def test_route_selection_preserves_path_spelling_and_ignores_url_userinfo() -> None:
+    # Normalizing dots or escapes would silently broaden the credential grant.
     route = parse_git_credential_context("https://alice@example.com/a//./%2F")
     same = parse_git_credential_context("https://bob@example.com/a//./%2F/repo")
     changed_escape = parse_git_credential_context(

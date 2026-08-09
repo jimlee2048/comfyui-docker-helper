@@ -44,6 +44,11 @@ def _credential_document() -> dict[str, Any]:
     return document
 
 
+_PRIVATE_SECRET_PATH = ("secrets", "private_git")
+_CREDENTIAL_PATH = ("cdh", "git", "credentials", 0)
+_CREDENTIAL_SECRET_PATH = (*_CREDENTIAL_PATH, "password", "secret")
+
+
 def _codes(config: FinalConfig, *, build_hooks_dir: Path | None = None) -> set[str]:
     return {
         diagnostic.code
@@ -145,22 +150,57 @@ def test_secret_file_locators_reject_non_file_spellings(locator: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("mutation", "code"),
+    ("mutation", "expected"),
     [
-        ("invalid-secret-name", "secret.invalid_name"),
-        ("missing-source", "secret.invalid_source"),
-        ("two-sources", "secret.invalid_source"),
-        ("invalid-env", "secret.invalid_env"),
-        ("invalid-reference", "secret.invalid_reference"),
-        ("unknown-reference", "secret.unknown_reference"),
-        ("empty-username", "git_credential.invalid_username"),
-        ("query-match", "git_credential.invalid_match"),
-        ("password-userinfo", "git_credential.password_userinfo_forbidden"),
+        (
+            "invalid-secret-name",
+            (
+                (("secrets", "Bad.Name"), "secret.invalid_name"),
+                (_CREDENTIAL_SECRET_PATH, "secret.unknown_reference"),
+            ),
+        ),
+        (
+            "missing-source",
+            ((_PRIVATE_SECRET_PATH, "secret.invalid_source"),),
+        ),
+        (
+            "two-sources",
+            ((_PRIVATE_SECRET_PATH, "secret.invalid_source"),),
+        ),
+        (
+            "invalid-env",
+            (((*_PRIVATE_SECRET_PATH, "env"), "secret.invalid_env"),),
+        ),
+        (
+            "invalid-reference",
+            ((_CREDENTIAL_SECRET_PATH, "secret.invalid_reference"),),
+        ),
+        (
+            "unknown-reference",
+            ((_CREDENTIAL_SECRET_PATH, "secret.unknown_reference"),),
+        ),
+        (
+            "empty-username",
+            (((*_CREDENTIAL_PATH, "username"), "git_credential.invalid_username"),),
+        ),
+        (
+            "query-match",
+            (((*_CREDENTIAL_PATH, "match"), "git_credential.invalid_match"),),
+        ),
+        (
+            "password-userinfo",
+            (
+                (
+                    (*_CREDENTIAL_PATH, "match"),
+                    "git_credential.password_userinfo_forbidden",
+                ),
+            ),
+        ),
     ],
 )
-def test_secret_and_credential_domains_reject_only_invalid_authored_metadata(
+def test_secret_and_credential_domains_report_exact_diagnostics(
     mutation: str,
-    code: str,
+    expected: tuple[tuple[tuple[str | int, ...], str], ...],
 ) -> None:
     document = _credential_document()
     source = document["secrets"]["private_git"]
@@ -185,9 +225,13 @@ def test_secret_and_credential_domains_reject_only_invalid_authored_metadata(
         route["match"] = "https://user:synthetic-marker@github.com/acme/"
 
     config = validate_final_config_structure(document)
+    diagnostics = _diagnostics(config)
 
-    assert code in _codes(config)
-    assert all("synthetic-marker" not in item.message for item in _diagnostics(config))
+    assert tuple(
+        (item.path, item.code, item.severity) for item in diagnostics
+    ) == tuple((path, code, DiagnosticSeverity.ERROR) for path, code in expected)
+    if mutation == "password-userinfo":
+        assert all("synthetic-marker" not in item.message for item in diagnostics)
 
 
 def test_git_credential_context_duplicates_and_http_warnings_are_semantic() -> None:
@@ -213,15 +257,22 @@ def test_git_credential_context_duplicates_and_http_warnings_are_semantic() -> N
 
     diagnostics = _diagnostics(config)
 
-    assert [item.code for item in diagnostics] == [
-        "git_credential.insecure_http",
-        "git_credential.insecure_http",
-        "git_credential.duplicate_match",
-    ]
-    assert [item.severity for item in diagnostics] == [
-        DiagnosticSeverity.WARNING,
-        DiagnosticSeverity.WARNING,
-        DiagnosticSeverity.ERROR,
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("cdh", "git", "credentials", 0, "match"),
+            "git_credential.insecure_http",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("cdh", "git", "credentials", 1, "match"),
+            "git_credential.insecure_http",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("cdh", "git", "credentials", 1, "match"),
+            "git_credential.duplicate_match",
+            DiagnosticSeverity.ERROR,
+        ),
     ]
 
 

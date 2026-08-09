@@ -170,7 +170,6 @@ def render(
     """Render a context; Docker may be used when new uv resolution is needed."""
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
-    secret_session: HostSecretSession | None = None
     try:
         options = PlanningOptions(
             locked=locked,
@@ -191,47 +190,42 @@ def render(
             working_directory=Path.cwd(),
         )
         secret_session = HostSecretSession.from_configuration(validated)
-        with secret_session:
-            with _planning_providers(secret_session) as providers:
-                prepared = prepare_render_context(
-                    output_dir,
-                    configuration_result=validated,
-                    build_hook_source_root=build_hook_source_root,
-                    runtime_hooks_dir=runtime_hooks_dir,
-                    acquirer=providers.acquirer,
-                    local_acquirer=providers.local_acquirer,
-                    canonical_wheel=providers.canonical_wheel,
-                    tag_templates=validated.config.build.tags,
-                    output_mode=validated.config.build.output,
-                    options=options,
-                    overwrite=overwrite,
-                    working_directory=Path.cwd(),
+        try:
+            with secret_session:
+                with _planning_providers(secret_session) as providers:
+                    prepared = prepare_render_context(
+                        output_dir,
+                        configuration_result=validated,
+                        build_hook_source_root=build_hook_source_root,
+                        runtime_hooks_dir=runtime_hooks_dir,
+                        acquirer=providers.acquirer,
+                        local_acquirer=providers.local_acquirer,
+                        canonical_wheel=providers.canonical_wheel,
+                        tag_templates=validated.config.build.tags,
+                        output_mode=validated.config.build.output,
+                        options=options,
+                        overwrite=overwrite,
+                        working_directory=Path.cwd(),
+                    )
+                render_configuration_warnings(
+                    _format_config_files(config_files),
+                    secret_session.drain_warnings(),
                 )
+        finally:
             render_configuration_warnings(
                 _format_config_files(config_files), secret_session.drain_warnings()
-            )
-            render_configuration_warnings(
-                _format_config_files(config_files), prepared.warnings
             )
     except (
         CanonicalWheelError,
         ConfigurationServiceError,
         HostRenderServiceError,
     ) as error:
-        if secret_session is not None:
-            render_configuration_warnings(
-                _format_config_files(config_files), secret_session.drain_warnings()
-            )
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
     except HostSecretSessionError as error:
-        if secret_session is not None:
-            render_configuration_warnings(
-                _format_config_files(config_files), secret_session.drain_warnings()
-            )
         _render_secret_session_failure(config_files, error)
         raise typer.Exit(code=1) from error
 
@@ -381,7 +375,6 @@ def build(
     use_ssh = _prepare_build_ssh_input(requested=ssh, result=validated)
     effective_output = cli_output or validated.config.build.output
 
-    secret_session: HostSecretSession | None = None
     try:
         options = PlanningOptions(locked=locked, upgrade_lock=upgrade_lock)
         build_hook_source_root = admit_build_hook_source(
@@ -391,78 +384,79 @@ def build(
             working_directory=Path.cwd(),
         )
         secret_session = HostSecretSession.from_configuration(validated)
-        with secret_session:
-            with _planning_providers(secret_session) as providers:
-                prepared = prepare_render_context(
-                    context_dir,
-                    configuration_result=validated,
-                    build_hook_source_root=build_hook_source_root,
-                    runtime_hooks_dir=runtime_hooks_dir,
-                    acquirer=providers.acquirer,
-                    local_acquirer=providers.local_acquirer,
-                    canonical_wheel=providers.canonical_wheel,
-                    tag_templates=effective_tags,
-                    output_mode=effective_output,
-                    options=options,
-                    overwrite=True,
-                    working_directory=Path.cwd(),
+        try:
+            with secret_session:
+                with _planning_providers(secret_session) as providers:
+                    prepared = prepare_render_context(
+                        context_dir,
+                        configuration_result=validated,
+                        build_hook_source_root=build_hook_source_root,
+                        runtime_hooks_dir=runtime_hooks_dir,
+                        acquirer=providers.acquirer,
+                        local_acquirer=providers.local_acquirer,
+                        canonical_wheel=providers.canonical_wheel,
+                        tag_templates=effective_tags,
+                        output_mode=effective_output,
+                        options=options,
+                        overwrite=True,
+                        working_directory=Path.cwd(),
+                    )
+                render_configuration_warnings(
+                    _format_config_files(config_files),
+                    secret_session.drain_warnings(),
                 )
+                credential_bindings = tuple(
+                    FileSecretBinding(
+                        secret_id,
+                        secret_session.snapshot_git_credential(secret_id),
+                    )
+                    for secret_id in git_credential_secret_ids(
+                        prepared.plan.custom_nodes
+                    )
+                )
+                render_configuration_warnings(
+                    _format_config_files(config_files),
+                    secret_session.drain_warnings(),
+                )
+
+                known_hosts_bindings = (
+                    _collect_default_known_hosts_bindings() if use_ssh else ()
+                )
+
+                typer.echo(f"Build context: {context_dir}")
+                buildx_output = prepared.output_plan
+                if buildx_output is None:  # pragma: no cover
+                    raise RuntimeError("host build requires a Buildx output plan")
+                build_image_with_buildx(
+                    image_tags=buildx_output.tags,
+                    output=buildx_output.output,
+                    context_dir=context_dir,
+                    platforms=(prepared.plan.toolchain.platform,),
+                    cwd=Path.cwd(),
+                    log=typer.echo,
+                    forward_default_ssh=use_ssh,
+                    file_secret_bindings=(
+                        *credential_bindings,
+                        *known_hosts_bindings,
+                    ),
+                    cache_from=cache_from,
+                    cache_to=cache_to,
+                )
+        finally:
             render_configuration_warnings(
                 _format_config_files(config_files), secret_session.drain_warnings()
-            )
-            render_configuration_warnings(
-                _format_config_files(config_files), prepared.warnings
-            )
-            credential_bindings = tuple(
-                FileSecretBinding(
-                    secret_id,
-                    secret_session.snapshot_git_credential(secret_id),
-                )
-                for secret_id in git_credential_secret_ids(prepared.plan.custom_nodes)
-            )
-            render_configuration_warnings(
-                _format_config_files(config_files), secret_session.drain_warnings()
-            )
-
-            known_hosts_bindings = (
-                _collect_default_known_hosts_bindings() if use_ssh else ()
-            )
-
-            typer.echo(f"Build context: {context_dir}")
-            buildx_output = prepared.output_plan
-            if buildx_output is None:  # pragma: no cover - build always supplies one
-                raise RuntimeError("host build requires a Buildx output plan")
-            build_image_with_buildx(
-                image_tags=buildx_output.tags,
-                output=buildx_output.output,
-                context_dir=context_dir,
-                platforms=(prepared.plan.toolchain.platform,),
-                cwd=Path.cwd(),
-                log=typer.echo,
-                forward_default_ssh=use_ssh,
-                file_secret_bindings=(*credential_bindings, *known_hosts_bindings),
-                cache_from=cache_from,
-                cache_to=cache_to,
             )
     except (
         CanonicalWheelError,
         ConfigurationServiceError,
         HostRenderServiceError,
     ) as error:
-        if secret_session is not None:
-            render_configuration_warnings(
-                _format_config_files(config_files), secret_session.drain_warnings()
-            )
         render_configuration_diagnostics(
             _format_config_files(config_files),
             error.diagnostics,
         )
         raise typer.Exit(code=1) from error
     except HostSecretSessionError as error:
-        if secret_session is not None:
-            render_configuration_warnings(
-                _format_config_files(config_files), secret_session.drain_warnings()
-            )
         _render_secret_session_failure(config_files, error)
         raise typer.Exit(code=1) from error
 

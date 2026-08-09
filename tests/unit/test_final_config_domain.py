@@ -95,6 +95,56 @@ def test_secret_sources_and_git_credentials_use_typed_complete_values() -> None:
 
 
 @pytest.mark.parametrize(
+    "locator",
+    [
+        "token",
+        "tokens/private git token",
+        "./token",
+        "../token",
+        "tokens/../token",
+        "/run/secrets/token",
+    ],
+)
+def test_secret_file_locators_accept_posix_file_spellings(locator: str) -> None:
+    document = _credential_document()
+    document["secrets"]["private_git"] = {"file": locator}
+    config = validate_final_config_structure(document)
+
+    assert _diagnostics(config) == ()
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "",
+        "token\x00file",
+        "token\nfile",
+        "tokens\\private",
+        "tokens/",
+        "//server/token",
+        ".",
+        "..",
+        "tokens/.",
+        "tokens/..",
+    ],
+)
+def test_secret_file_locators_reject_non_file_spellings(locator: str) -> None:
+    document = _credential_document()
+    document["secrets"]["private_git"] = {"file": locator}
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("secrets", "private_git", "file"),
+            "secret.invalid_file",
+            DiagnosticSeverity.ERROR,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
     ("mutation", "code"),
     [
         ("invalid-secret-name", "secret.invalid_name"),

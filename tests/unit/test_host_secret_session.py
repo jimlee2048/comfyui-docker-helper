@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
 from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.host import git_credential_helper as helper_module
 from comfyui_docker_helper.host import secret_session as secret_session_module
@@ -431,6 +432,64 @@ def test_session_collects_warnings_and_cleans_up_for_every_exit(
     assert root is not None
     assert not root.exists()
     assert len(session.drain_warnings()) == 1
+
+
+def test_cleanup_failure_preserves_primary_and_records_content_free_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    session = HostSecretSession.from_configuration(result)
+    original_rmtree = secret_session_module.shutil.rmtree
+    root: Path | None = None
+    primary = RuntimeError("synthetic primary failure")
+
+    def fail_cleanup(path: Path) -> None:
+        raise OSError(f"synthetic cleanup failure at {path}")
+
+    monkeypatch.setattr(secret_session_module.shutil, "rmtree", fail_cleanup)
+    try:
+        with pytest.raises(RuntimeError) as raised, session:
+            root = session.root
+            raise primary
+
+        assert raised.value is primary
+        warnings = session.drain_warnings()
+        assert len(warnings) == 1
+        assert warnings[0].path == ("secrets",)
+        assert warnings[0].code == "secret.cleanup_failed"
+        assert warnings[0].severity is DiagnosticSeverity.WARNING
+        assert root is not None
+        assert os.fspath(root) not in warnings[0].message
+    finally:
+        if root is not None:
+            original_rmtree(root)
+
+
+def test_cleanup_failure_without_primary_remains_content_free_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    session = HostSecretSession.from_configuration(result)
+    original_rmtree = secret_session_module.shutil.rmtree
+    root: Path | None = None
+
+    def fail_cleanup(path: Path) -> None:
+        raise OSError(f"synthetic cleanup failure at {path}")
+
+    monkeypatch.setattr(secret_session_module.shutil, "rmtree", fail_cleanup)
+    try:
+        with pytest.raises(HostSecretSessionError) as raised, session:
+            root = session.root
+
+        assert raised.value.code == "cleanup_failed"
+        assert root is not None
+        assert os.fspath(root) not in str(raised.value)
+        assert session.drain_warnings() == ()
+    finally:
+        if root is not None:
+            original_rmtree(root)
 
 
 def test_unreferenced_missing_secret_is_inert_and_no_routes_need_no_binding(

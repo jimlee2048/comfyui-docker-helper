@@ -162,6 +162,14 @@ class HostSecretSession:
         except OSError:
             if _exc_type is None:
                 raise HostSecretSessionError("cleanup_failed") from None
+            self._pending_warnings.append(
+                Diagnostic(
+                    ("secrets",),
+                    "secret.cleanup_failed",
+                    "Host Secret session cleanup failed; temporary files may remain",
+                    DiagnosticSeverity.WARNING,
+                )
+            )
 
     @property
     def root(self) -> Path:
@@ -241,7 +249,7 @@ class HostSecretSession:
         raise HostSecretSessionError("unknown_credential_secret")
 
     def drain_warnings(self) -> tuple[Diagnostic, ...]:
-        """Return newly recorded content-free warnings in stable route-name order."""
+        """Return newly recorded content-free warnings in stable recording order."""
         self._collect_warning_markers()
         warnings = tuple(self._pending_warnings)
         self._pending_warnings.clear()

@@ -26,7 +26,7 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_digest,
 )
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
+from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
@@ -43,7 +43,6 @@ from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.secret_session import (
     GIT_CREDENTIAL_SESSION_ENV,
     HostSecretSession,
-    HostSecretSessionError,
 )
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
@@ -140,7 +139,6 @@ def _stub_planning_providers():
 
 def _prepared_build() -> SimpleNamespace:
     return SimpleNamespace(
-        warnings=(),
         plan=SimpleNamespace(
             toolchain=SimpleNamespace(platform="linux/amd64"),
             custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
@@ -756,7 +754,7 @@ def test_relative_build_hook_root_is_resolved_from_invocation_directory(
 
     def prepare(_output_dir, *, build_hook_source_root, **_kwargs):
         observed.append(build_hook_source_root)
-        return SimpleNamespace(warnings=())
+        return SimpleNamespace()
 
     monkeypatch.chdir(invocation)
     monkeypatch.setattr(
@@ -839,35 +837,21 @@ def test_http_credential_warning_precedes_provider_or_docker_initialization(
         assert isinstance(result.exception, BoundaryReached)
 
 
-def test_render_emits_secret_warning_before_cleanup_failure(
+def test_render_reports_primary_error_and_content_free_cleanup_warning(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    warning = Diagnostic(
-        ("secrets", "private_git", "file"),
-        "secret.permissive_file_mode",
-        "Secret file has group or world permission bits set",
-        DiagnosticSeverity.WARNING,
-    )
+    cleanup_root: Path | None = None
+    original_rmtree = secret_session_module.shutil.rmtree
 
-    class FailingCleanupSession:
-        drained = False
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            raise HostSecretSessionError("cleanup_failed")
-
-        def git_binding(self):
-            return None
-
-        def drain_warnings(self):
-            if self.drained:
-                return ()
-            self.drained = True
-            return (warning,)
+    def fail_session_cleanup(path, *args, **kwargs):
+        nonlocal cleanup_root
+        candidate = Path(path)
+        if candidate.name.startswith("cdh-secret-session-"):
+            cleanup_root = candidate
+            raise OSError(f"synthetic cleanup failure at {candidate}")
+        return original_rmtree(path, *args, **kwargs)
 
     @contextmanager
     def providers():
@@ -878,33 +862,43 @@ def test_render_emits_secret_warning_before_cleanup_failure(
         )
 
     def prepare(*_args, **_kwargs):
-        return SimpleNamespace(warnings=())
+        raise HostRenderServiceError(
+            (
+                Diagnostic(
+                    ("render",),
+                    "render.synthetic_primary_failure",
+                    "Synthetic primary render failure",
+                ),
+            )
+        )
 
-    monkeypatch.setattr(
-        host_cli.HostSecretSession,
-        "from_configuration",
-        lambda _result: FailingCleanupSession(),
-    )
+    monkeypatch.setattr(secret_session_module.shutil, "rmtree", fail_session_cleanup)
     monkeypatch.setattr(host_cli, "default_planning_providers", providers)
     monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
     config = tmp_path / "config.toml"
     _write_minimal_config(config)
 
-    result = cli_runner.invoke(
-        app,
-        [
-            "host",
-            "render",
-            "-f",
-            str(config),
-            "-o",
-            str(tmp_path / "context"),
-        ],
-    )
+    try:
+        result = cli_runner.invoke(
+            app,
+            [
+                "host",
+                "render",
+                "-f",
+                str(config),
+                "-o",
+                str(tmp_path / "context"),
+            ],
+        )
 
-    assert result.exit_code == 1
-    assert result.output.count("secret.permissive_file_mode") == 1
-    assert "secret.cleanup_failed" in result.output
+        assert result.exit_code == 1
+        assert result.output.count("render.synthetic_primary_failure") == 1
+        assert result.output.count("secret.cleanup_failed") == 1
+        assert cleanup_root is not None
+        assert str(cleanup_root) not in result.output
+    finally:
+        if cleanup_root is not None:
+            original_rmtree(cleanup_root)
 
 
 def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
@@ -1099,7 +1093,6 @@ def test_dry_run_renders_an_independent_buildx_output_section(
         del args
         assert tuple(kwargs["tag_templates"]) == tag_templates
         return SimpleNamespace(
-            warnings=(),
             plan=plan,
             lock_result=resolution,
             output_plan=output_plan,
@@ -1153,7 +1146,7 @@ def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         seen["configuration_result"] = kwargs["configuration_result"]
         seen["build_hook_source_root"] = kwargs["build_hook_source_root"]
-        return SimpleNamespace(warnings=())
+        return SimpleNamespace()
 
     def load(*args, **kwargs):
         result = original_load(*args, **kwargs)
@@ -1292,7 +1285,6 @@ platforms = ["linux/amd64"]
         seen["tag_templates"] = kwargs["tag_templates"]
         seen["output"] = kwargs["output_mode"]
         return SimpleNamespace(
-            warnings=(),
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
@@ -1442,7 +1434,7 @@ password = { secret = "team_token" }
         ]
         seen["tag_templates"] = tuple(kwargs["tag_templates"])
         seen["output_mode"] = kwargs["output_mode"]
-        return SimpleNamespace(warnings=(), plan=plan, output_plan=output_plan)
+        return SimpleNamespace(plan=plan, output_plan=output_plan)
 
     def buildx(**kwargs):
         seen["buildx_tags"] = kwargs["image_tags"]
@@ -1626,7 +1618,6 @@ password = { secret = "team_token" }
 
     def prepare(*_args, **_kwargs):
         return SimpleNamespace(
-            warnings=(),
             plan=plan,
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
         )
@@ -1717,14 +1708,6 @@ password = {{ secret = "team_token" }}
 
     def prepare(*_args, **_kwargs):
         return SimpleNamespace(
-            warnings=(
-                Diagnostic(
-                    ("render",),
-                    "render.synthetic_planning_warning",
-                    "Synthetic planning warning",
-                    DiagnosticSeverity.WARNING,
-                ),
-            ),
             plan=plan,
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
         )
@@ -1752,7 +1735,6 @@ password = {{ secret = "team_token" }}
     )
 
     assert result.exit_code == 1
-    assert result.output.count("render.synthetic_planning_warning") == 1
     assert "secret.source_unavailable" in result.output
     assert missing_locator not in result.output
     assert observed_root is not None and not observed_root.exists()
@@ -1869,7 +1851,6 @@ def test_build_cache_import_and_export_are_independent(
         assert kwargs["tag_templates"] == output_plan.tags
         assert kwargs["output_mode"] == output_plan.output
         return SimpleNamespace(
-            warnings=(),
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
@@ -2093,7 +2074,7 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
             output_dir,
             canonical_wheel=canonical_wheel(),
         )
-        return SimpleNamespace(warnings=(), plan=plan, output_plan=output_plan)
+        return SimpleNamespace(plan=plan, output_plan=output_plan)
 
     def buildx(**kwargs):
         seen.update(kwargs)
@@ -2167,7 +2148,6 @@ platforms = ["linux/amd64"]
         assert kwargs["output_mode"] == "load"
         output_plan = BuildxOutputPlan(tags=("cli:test",), output="load")
         return SimpleNamespace(
-            warnings=(),
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),

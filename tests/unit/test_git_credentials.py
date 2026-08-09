@@ -12,38 +12,33 @@ from comfyui_docker_helper.config.git_credentials import (
 
 
 @pytest.mark.parametrize(
-    ("value", "canonical", "username"),
+    ("value", "canonical"),
     [
-        ("HTTPS://Example.COM/team/", "https://example.com/team", None),
-        ("https://example.com:443/team", "https://example.com/team", None),
-        ("http://EXAMPLE.com:80/", "http://example.com/", None),
+        ("HTTPS://Example.COM/team/", "https://example.com/team"),
+        ("https://example.com:443/team", "https://example.com/team"),
+        ("http://EXAMPLE.com:80/", "http://example.com/"),
         (
             "https://example.com:8443/team",
             "https://example.com:8443/team",
-            None,
         ),
         (
             "https://alice@Example.com/team",
             "https://example.com/team",
-            "alice",
         ),
         (
             "https://[2001:DB8::1]:443/team",
             "https://[2001:db8::1]/team",
-            None,
         ),
     ],
 )
 def test_context_parsing_normalizes_only_authorized_url_components(
     value: str,
     canonical: str,
-    username: str | None,
 ) -> None:
     parsed = parse_git_credential_context(value)
 
     assert parsed.canonical_url == canonical
     assert canonicalize_git_credential_context(value) == canonical
-    assert parsed.username == username
 
 
 def test_context_parsing_preserves_escaped_dot_and_internal_empty_segments() -> None:
@@ -161,9 +156,7 @@ def test_route_selection_uses_scheme_host_port_boundary_and_longest_path() -> No
     )
 
 
-def test_route_selection_preserves_path_spelling_and_ignores_username_metadata() -> (
-    None
-):
+def test_route_selection_preserves_path_spelling_and_ignores_url_userinfo() -> None:
     route = parse_git_credential_context("https://alice@example.com/a//./%2F")
     same = parse_git_credential_context("https://bob@example.com/a//./%2F/repo")
     changed_escape = parse_git_credential_context(

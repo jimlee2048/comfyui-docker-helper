@@ -59,7 +59,6 @@ class GitCredentialContext:
     host: str
     port: int
     path_segments: tuple[str, ...]
-    username: str | None = None
 
     @property
     def canonical_url(self) -> str:
@@ -131,7 +130,6 @@ def parse_git_credential_context(value: str) -> GitCredentialContext:
         host=hostname.lower(),
         port=_DEFAULT_PORTS[scheme] if port is None else port,
         path_segments=_path_segments(parsed.path),
-        username=parsed.username,
     )
 
 

@@ -1,5 +1,6 @@
 """Layered validation for public configuration models."""
 
+import posixpath
 import re
 import stat
 from collections.abc import Callable, Iterable, Mapping
@@ -1123,6 +1124,27 @@ def _validate_secret_domains(
                     "environment variable names must match [A-Za-z_][A-Za-z0-9_]*",
                 )
             )
+        if source.file is not None and not _is_valid_secret_file_locator(source.file):
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "file"),
+                    "secret.invalid_file",
+                    "file locators must name a POSIX file path without control "
+                    "characters, backslashes, or a trailing separator",
+                )
+            )
+
+
+def _is_valid_secret_file_locator(value: str) -> bool:
+    """Return whether one locator can lexically name a POSIX file."""
+    return (
+        bool(value)
+        and not has_control_characters(value)
+        and "\\" not in value
+        and not value.endswith("/")
+        and value.rsplit("/", 1)[-1] not in {".", ".."}
+        and not posixpath.normpath(value).startswith("//")
+    )
 
 
 def _validate_git_credential_domains(

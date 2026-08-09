@@ -303,6 +303,8 @@ def _normalize_repository_name(name: str) -> str:
         domain = "docker.io"
     if domain == "docker.io" and len(path) == 1:
         path = ["library", *path]
+    # distribution/reference limits the normalized remote path, excluding the
+    # registry domain but including an inserted Docker Hub "library/" prefix.
     if len("/".join(path)) > 255:
         raise ValueError(
             "build.invalid_image_reference",

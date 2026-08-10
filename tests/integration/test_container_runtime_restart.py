@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import signal
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -11,6 +12,15 @@ import pytest
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_control import (
+    RuntimeAcceptedResponse,
+    RuntimeAckRequest,
+    RuntimeRestartRequest,
+    RuntimeTerminalResponse,
+    connect_runtime_control,
+    receive_runtime_control_response,
+    send_runtime_control_message,
+)
 from comfyui_docker_helper.container.runtime_controller import (
     RuntimeController,
     RuntimeRestartSubmission,
@@ -661,3 +671,96 @@ filename = "model.bin"
     assert events.index("new:terminate") < events.index("ticket:failed")
     assert events.index("new:reap") < events.index("ticket:failed")
     assert events.index("hook:reap") < events.index("ticket:failed")
+
+
+def test_successor_cleanup_precedes_real_terminal_delivery_and_ack(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    endpoint = tmp_path / "control" / "runtime.sock"
+    events: list[str] = []
+    children: list[_RestartChild] = []
+    client_errors: list[BaseException] = []
+    client_thread: threading.Thread | None = None
+
+    def runner(
+        _argv: Sequence[str],
+        **_kwargs: object,
+    ) -> _RestartChild:
+        name = "old" if not children else "successor"
+        child = _RestartChild(events, name)
+        children.append(child)
+        events.append(f"{name}:spawn")
+        return child
+
+    def failing_post_start(
+        _plan: RuntimeHookPlan,
+        phase: str,
+        **_kwargs: object,
+    ) -> tuple[RuntimeHookResult, ...]:
+        assert phase == "post-start"
+        events.append("successor:post-start-fail")
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "post-start", "20-fail.sh"),
+                    code="runtime_hook.execution_failed",
+                    message="synthetic successor failure",
+                ),
+            )
+        )
+
+    def restart_client() -> None:
+        peer = None
+        try:
+            peer = connect_runtime_control(endpoint)
+            send_runtime_control_message(peer, RuntimeRestartRequest())
+            accepted = receive_runtime_control_response(peer)
+            assert accepted == RuntimeAcceptedResponse(operation="op-1")
+            events.append("client:accepted")
+            terminal = receive_runtime_control_response(peer)
+            assert isinstance(terminal, RuntimeTerminalResponse)
+            assert terminal.operation == "op-1"
+            assert terminal.result == "failed"
+            assert terminal.message is not None
+            assert "synthetic successor failure" in terminal.message
+            events.append("client:terminal")
+            send_runtime_control_message(peer, RuntimeAckRequest(operation="op-1"))
+            events.append("client:ack")
+        except BaseException as error:
+            client_errors.append(error)
+        finally:
+            if peer is not None:
+                peer.close()
+
+    def generation_running(_controller: RuntimeController) -> None:
+        nonlocal client_thread
+        _write_hook(hooks, "post-start", "20-fail.sh")
+        client_thread = threading.Thread(target=restart_client)
+        client_thread.start()
+
+    with pytest.raises(EntrypointError, match="runtime hook failed"):
+        run_runtime_serve(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=hooks,
+            environ={"PATH": "/usr/bin"},
+            runner=runner,  # type: ignore[arg-type]
+            runtime_hook_runner=failing_post_start,  # type: ignore[arg-type]
+            readiness_waiter=lambda _port, *, child: None,
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=endpoint,
+            generation_running=generation_running,
+        )
+
+    assert client_thread is not None
+    client_thread.join(timeout=2.0)
+    assert not client_thread.is_alive()
+    assert client_errors == []
+    assert len(children) == 2
+    assert children[1].returncode == -int(signal.SIGTERM)
+    assert events.index("successor:terminate") < events.index("client:terminal")
+    assert events.index("successor:reap") < events.index("client:terminal")
+    assert events.index("client:terminal") < events.index("client:ack")

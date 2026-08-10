@@ -117,6 +117,70 @@ jobs:
           tests/integration/test_cli.py::test_build_ssh_on_windows_delegates_default_agent_to_buildkit
           tests/unit/test_uv_docker_executor.py::test_requirements_compile_uses_one_exact_owned_container
           tests/unit/test_uv_docker_executor.py::test_controlled_input_copy_failure_cleans_private_state_and_container
+      - name: Build Windows wheel
+        env:
+          DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          if (Test-Path -LiteralPath $env:DIST_DIR) {
+            throw "wheel output directory already exists"
+          }
+          uv build --wheel --no-sources --force-pep517 --no-create-gitignore --out-dir $env:DIST_DIR
+          $wheels = @(Get-ChildItem -LiteralPath $env:DIST_DIR -Filter *.whl -File)
+          if ($wheels.Count -ne 1) {
+            throw "wheel build did not produce exactly one wheel"
+          }
+      - name: Clean-install and exercise Windows wheel
+        env:
+          DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist
+          RUNTIME_REQUIREMENTS: ${{ runner.temp }}\runtime-requirements.txt
+          WHEEL_VENV: ${{ runner.temp }}\cdh-wheel-venv
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $wheels = @(Get-ChildItem -LiteralPath $env:DIST_DIR -Filter *.whl -File)
+          if ($wheels.Count -ne 1) {
+            throw "wheel set is not exactly one wheel"
+          }
+          uv export --locked --no-dev --no-emit-project --output-file $env:RUNTIME_REQUIREMENTS
+          uv venv --python "3.12" $env:WHEEL_VENV
+          $wheelPython = Join-Path $env:WHEEL_VENV "Scripts\python.exe"
+          $wheelCdh = Join-Path $env:WHEEL_VENV "Scripts\cdh.exe"
+          uv pip install --python $wheelPython --require-hashes --requirements $env:RUNTIME_REQUIREMENTS
+          uv pip install --python $wheelPython --no-deps $wheels[0].FullName
+          uv pip check --python $wheelPython
+          $expectedVersion = uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+          if ((& $wheelCdh --version) -ne "cdh $expectedVersion") {
+            throw "installed wheel version differs from project version"
+          }
+          & $wheelCdh --help | Out-Null
+          & $wheelCdh host --help | Out-Null
+          & $wheelCdh host validate -f examples/minimal.toml
+          & $wheelCdh container --help | Out-Null
+
+  windows_smoke:
+    name: Windows smoke / Python 3.14
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      UV_NO_DEV: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.32"
+          python-version: "3.14"
+      - name: Synchronize locked environment
+        run: uv sync --locked --no-dev
+      - name: Import package and host CLI
+        run: >-
+          uv run --locked python -c
+          "import comfyui_docker_helper; import comfyui_docker_helper.cli; import comfyui_docker_helper.host.cli"
       - name: Exercise root version
         run: uv run --locked cdh --version
       - name: Exercise root help
@@ -125,8 +189,6 @@ jobs:
         run: uv run --locked cdh host --help
       - name: Exercise host validation
         run: uv run --locked cdh host validate -f examples/minimal.toml
-      - name: Exercise container boundary help
-        run: uv run --locked cdh container --help
 
   package:
     name: Package
@@ -142,6 +204,8 @@ jobs:
     needs:
       - lint
       - test
+      - windows_host
+      - windows_smoke
       - package
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -151,8 +215,12 @@ jobs:
         env:
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          WINDOWS_HOST_RESULT: ${{ needs.windows_host.result }}
+          WINDOWS_SMOKE_RESULT: ${{ needs.windows_smoke.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           test "$LINT_RESULT" = "success"
           test "$TEST_RESULT" = "success"
+          test "$WINDOWS_HOST_RESULT" = "success"
+          test "$WINDOWS_SMOKE_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"

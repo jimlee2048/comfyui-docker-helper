@@ -13,6 +13,21 @@ See the [contribution guide](../docs/dev/contributing.md) for environment setup,
 
 Keep tests at the narrowest layer that owns the behavior. Test current public, security, and execution contracts; do not preserve removed behavior with absence guards. Temporary development-only tests must be identified in a code comment and removed before the related change is complete.
 
+## Platform coverage
+
+The complete default-offline suite runs on Linux for every supported Python minor. Required Windows validation is intentionally asymmetric: Python 3.12 runs the focused native host-platform contracts plus wheel build and isolated-install smoke, while Python 3.14 runs package/import/CLI/minimal-validation smoke. Together these jobs protect the oldest and newest supported Windows runtimes without claiming that every Linux container test runs natively on Windows. [The CI workflow](../.github/workflows/ci.yml) is the machine authority for the exact required selections.
+
+Place an operating-system-specific test at the narrowest unit or integration owner and guard it with a local `skipif` based on the native capability it requires. Operating-system selection is not an external-cost authorization, so do not add a Linux or Windows cost marker. Keep Linux-only container execution tests on Linux, and use native Windows tests for Win32 filesystem, DACL, descriptor-lock, Git-for-Windows, path, and process behavior. Mocked Docker and Buildx adapter tests prove only argument and error contracts; they do not prove Docker Desktop, named-pipe SSH forwarding, GPU use, or Windows-container execution.
+
+Run the affected selection on its native platform, for example:
+
+```bash
+uv run pytest tests/integration/test_windows_host_boundary.py
+uv run pytest tests/unit/test_file_admission.py tests/integration/test_windows_file_primitives.py
+```
+
+Do not add hostile source-directory mutation races, stress loops, timing/fairness assertions, or an operating-system/Python Cartesian matrix to strengthen the cooperative host source-read contract. Keep tests for independent container write, placement, and execution containment intact; those boundaries are not reduced by the host compatibility policy.
+
 ## Cost authorization
 
 Cost-sensitive tests use strict pytest markers and matching command-line authorization:

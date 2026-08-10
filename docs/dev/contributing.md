@@ -21,6 +21,14 @@ uv run cdh host validate -f examples/minimal.toml
 
 When using Python language features, keep them within the `requires-python` range declared in the project configuration.
 
+## Platform compatibility
+
+The package's root CLI, configuration, shared services, rendering, and `cdh host *` workflows support the declared Python minors on native Windows and Linux hosts. `cdh container *` executes only inside the project's Linux image, although its command group must remain importable and its help must remain usable on other hosts. Windows host support means a Windows operator can drive a Linux-container Docker endpoint; it does not add a Windows-container execution contract.
+
+Keep Linux-only container implementations outside the host import closure. Put platform-specific imports behind the narrow owner that needs them, and preserve equivalent behavior rather than assuming that POSIX descriptors, modes, signals, shell paths, or environment conventions exist on Windows. Host source reads follow the cooperative-input contract, while private state and container write/execute boundaries retain separate stronger ownership rules; read the [cross-module contracts](contracts.md#host-local-filesystem-boundaries) before changing either boundary.
+
+Filesystem, Git, Docker, and process behavior that branches by operating system needs focused native-platform coverage. Do not infer Windows behavior from a mocked POSIX test or infer Docker Desktop end-to-end support from adapter tests. The [testing handbook](../../tests/README.md#platform-coverage) owns platform test placement and the asymmetric required CI policy.
+
 ### Optional workflow diagnostics
 
 uv remains the sole authority for Python installation, environments, dependency management, and package execution. Maintainers changing GitHub workflow files may optionally install the lightweight workflow diagnostics declared in the root `mise.toml`:
@@ -67,6 +75,8 @@ Run focused tests while developing, then the complete offline suite:
 uv run pytest tests/unit
 uv run pytest
 ```
+
+Run platform-specific tests on the platform whose native behavior they claim. The exact required Windows selections live in [the CI workflow](../../.github/workflows/ci.yml); locally, select the affected files from that gate rather than attempting to make an unrelated Linux-only test surface pass on Windows.
 
 Validate affected examples and CLI paths directly. At minimum, configuration changes should keep the minimal example valid:
 

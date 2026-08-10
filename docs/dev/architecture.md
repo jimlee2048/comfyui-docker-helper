@@ -24,6 +24,14 @@ flowchart LR
 
 The host build boundary and the runtime boundary admit different inputs. Runtime configuration and mounted hooks can change deployment behavior, but they do not re-enter host planning or rewrite the image's final build observation.
 
+## Platform execution boundary
+
+The root CLI, configuration, shared services, rendering, and every `cdh host *` workflow support native Windows and Linux hosts on each Python minor declared by the project (`3.12`, `3.13`, and `3.14`). A Windows host normally drives Docker Desktop in Linux container mode. Other Docker endpoints remain Docker-owned compatibility surfaces and must provide equivalent Linux `amd64` Buildx behavior; automated Windows qualification does not exercise them. Host support does not imply support for Windows container images.
+
+`cdh container *` is an image-internal Linux execution surface. On a non-Linux host the package and root CLI remain importable, container help remains available, and attempting to execute a container helper returns the platform-boundary diagnostic without importing its Linux-only implementation closure.
+
+Host source admission observes user-selected local inputs under a cooperative-input contract rather than treating them as an adversarial filesystem namespace. It rejects unsafe path shapes and statically observed links, reparse points, and special files, then obtains type, byte bounds, bytes, and content identity from one opened leaf. It does not isolate those inputs from an untrusted local process modifying them concurrently. This boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
+
 ## Component responsibilities
 
 | Component | Responsibility |
@@ -82,7 +90,7 @@ The host render service admits local hook roots and any existing canonical lock,
 
 Canonical Git credential route metadata enters the request graph, image-configuration digest, and BuildPlan, while Secret source locators and resolved values remain host-only. A command-scoped host session supplies credentials when direct-Git work needs them; on `host build`, the accepted BuildPlan determines which session snapshots are bound to the real Buildx invocation. See the [Secret source and Git credential contract](contracts.md#secret-source-and-git-credential-boundary) for exact matching, transport, persistence, and cleanup boundaries.
 
-Materialization re-verifies supplied local and release bytes and projects the complete context in a host-owned private stage. The host service owns stage cleanup and context publication. Overwrite is portable but not crash-durable, while a no-write check compares the complete expected tree. See the [materialization contract](contracts.md#materialization-boundary) for the exact ownership and failure boundaries and [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
+Materialization re-verifies supplied local and release bytes and projects the complete context in a host-owned private stage. POSIX hosts retain deterministic context permission checks; Windows hosts compare filesystem shape and bytes, while the rendered Dockerfile applies the required Linux image modes to the plan, runtime configuration, and hooks. The host service owns stage cleanup and context publication. Overwrite is portable but not crash-durable, while a no-write check compares the complete expected tree. See the [materialization contract](contracts.md#materialization-boundary) for the exact ownership and failure boundaries and [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
 
 ### Build and observe the final image
 
@@ -90,7 +98,7 @@ Materialization re-verifies supplied local and release bytes and projects the co
 
 For a direct-Git plan with HTTP(S) credential routes, the host derives the complete grant set from the accepted BuildPlan and delivers it through required BuildKit Secret mounts. The image-side helper consumes only the admitted route projection, while root Git operations, recursive submodules, and trusted installers share the existing combined custom-node instruction. Git remains authoritative for URL rewrites and redirects; the cross-module contract defines the precise route and mount invariants.
 
-When `host build --ssh` is applicable to a direct-Git custom node, the host admits only a non-empty default-agent environment reference before provider work. After context preparation, it maps the default agent and whichever default user/system known-hosts paths exist directly into the Buildx invocation. These compatibility inputs bypass configuration, reconciliation, BuildPlan, and materialization; rendering remains a function of BuildPlan and declares only stable optional mount identities for a direct-Git plan.
+When `host build --ssh` is applicable to a direct-Git custom node, POSIX hosts require a non-empty `SSH_AUTH_SOCK`; native Windows instead delegates `default` agent selection to Docker and BuildKit because there is no POSIX socket-environment contract to validate. After context preparation, the host maps the default agent and existing known-hosts files directly into the Buildx invocation. POSIX discovers the defined user and system paths, while Windows discovers only user-profile paths. These compatibility inputs bypass configuration, reconciliation, BuildPlan, and materialization; rendering remains a function of BuildPlan and declares only stable optional mount identities for a direct-Git plan.
 
 After context preparation, the host forwards any selected external-cache import or export specification directly to Buildx. Cache selection belongs to host Docker execution rather than the BuildPlan or rendered context; see the [Docker transport contract](contracts.md#uv-release-backend-docker-transport-and-cdh-wheel) for the complete ownership boundary.
 

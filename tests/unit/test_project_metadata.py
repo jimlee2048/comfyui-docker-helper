@@ -83,7 +83,14 @@ def test_project_release_identity_matches_package_metadata() -> None:
         "text": INLINE_README,
         "content-type": "text/markdown",
     }
-    assert "Operating System :: OS Independent" not in project["classifiers"]
+    assert {
+        classifier
+        for classifier in project["classifiers"]
+        if classifier.startswith("Operating System ::")
+    } == {
+        "Operating System :: Microsoft :: Windows",
+        "Operating System :: POSIX :: Linux",
+    }
     assert (
         project["urls"]["Changelog"]
         == "https://github.com/jimlee2048/comfyui-docker-helper/releases"

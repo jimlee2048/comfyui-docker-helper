@@ -29,7 +29,12 @@
 使用 cdh 构建镜像的宿主机需要：
 
 - Python 3.12、3.13 或 3.14。
-- 可正常使用且支持 Buildx 的 Docker 环境。
+- 可正常使用、支持 Buildx 且配置为构建 Linux 容器的 Docker 环境。在 Windows 上，通常使用处于 Linux container mode 的 Docker Desktop；其他 endpoint 必须提供等效的 Linux `amd64` Buildx 支持。不支持 Windows 容器。
+- 解析 direct-Git 自定义节点时，需确保 `PATH` 中存在 Git；Windows 上请安装 Git for Windows。
+
+`cdh host *` 可以在 Windows 上原生运行。生成的 ComfyUI 镜像仍以 Linux `amd64` 为目标，`cdh container *` 在这些 Linux 镜像内运行，而不是在 Windows 宿主机上运行。下方标准的 `uv tool` 和 `pip` 命令会自动安装 Windows 所需的 Python 平台依赖。
+
+自动化测试覆盖了 Windows 原生宿主机行为，但不会运行 Docker Desktop 端到端构建，也不证明 Docker Desktop 的 SSH agent forwarding。平台和输入安全边界详见[构建与锁定](docs/user/build-and-lock.zh-CN.md#宿主机与目标平台)。
 
 ## 安装
 

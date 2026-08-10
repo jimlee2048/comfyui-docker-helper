@@ -29,7 +29,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
 )
 from comfyui_docker_helper.container.runtime_serve import (
     EntrypointError,
-    run_runtime_serve,
+    run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import (
     RuntimeSshService,
@@ -355,7 +355,7 @@ def test_default_inactive_ssh_does_not_call_starter_and_spawns(
         return FakeSshdProcess()
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -477,7 +477,7 @@ download_mode = "async"
         return FakeChild(0)
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             runtime_state_path=tmp_path / "state.json",
             baked_config_path=baked,
@@ -560,7 +560,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
         return FakeChild(0)
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=mounted,
@@ -666,7 +666,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
         return FakeSshdProcess()
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=baked,
             mounted_config_path=mounted,
@@ -737,7 +737,7 @@ def test_disabled_ssh_does_not_start_even_with_credentials(
         return FakeSshdProcess()
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=mounted,
@@ -768,7 +768,7 @@ enable = true
     events: list[str] = []
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=mounted,
@@ -829,7 +829,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
         return FakeChild(0)
 
     with pytest.raises(EntrypointError) as raised:
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=mounted,
@@ -864,7 +864,7 @@ password = "line1\\nline2"
     )
 
     with pytest.raises(EntrypointError) as raised:
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=mounted,
@@ -935,7 +935,7 @@ password = "secret"
     monkeypatch.setattr(ssh_service_module.sys, "stderr", stderr)
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=mounted,
@@ -1036,7 +1036,7 @@ filename = "async.bin"
         )
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             runtime_state_path=tmp_path / "state.json",
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),

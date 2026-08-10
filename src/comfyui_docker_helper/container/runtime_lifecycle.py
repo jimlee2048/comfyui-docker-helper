@@ -24,7 +24,8 @@ from comfyui_docker_helper.container.process_control import (
     request_force_process_group,
     send_direct_process_signal,
     start_direct_process,
-    terminate_direct_process,
+    terminate_direct_process_until,
+    terminate_process_group_until,
 )
 from comfyui_docker_helper.container.readiness import (
     ReadinessError,
@@ -143,6 +144,8 @@ def run_runtime_lifecycle(
     runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
     restart_acceptor: RuntimeRestartAcceptor | None = None,
+    runtime_started: Callable[[], object] = lambda: None,
+    external_shutdown_observer: Callable[[signal.Signals], object] = lambda _sig: None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
 ) -> RuntimeGenerationResult:
@@ -150,21 +153,9 @@ def run_runtime_lifecycle(
     startup_shutdown = _StartupShutdownState(
         shutdown_timeout=config.cdh.shutdown_timeout,
         monotonic=monotonic,
+        external_shutdown_observer=external_shutdown_observer,
     )
     with _startup_shutdown_signal_handlers(startup_shutdown):
-
-        def stop_startup_auxiliary_services() -> None:
-            previous_raise_on_signal = startup_shutdown.raise_on_signal
-            startup_shutdown.raise_on_signal = False
-            try:
-                downloads.stop(
-                    cancel_requested=startup_shutdown.repeated_signal_requested
-                )
-                ssh_service.stop(
-                    cancel_requested=startup_shutdown.repeated_signal_requested
-                )
-            finally:
-                startup_shutdown.raise_on_signal = previous_raise_on_signal
 
         def finish_startup_signal_shutdown(
             child: DirectProcess | None = None,
@@ -190,41 +181,122 @@ def run_runtime_lifecycle(
             finally:
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
 
+        def cleanup_startup_failure(child: DirectProcess | None = None) -> None:
+            previous_raise_on_signal = startup_shutdown.raise_on_signal
+            startup_shutdown.raise_on_signal = False
+            try:
+                timeline = startup_shutdown.timeline or _ShutdownTimeline.start(
+                    config.cdh.shutdown_timeout,
+                    now=monotonic(),
+                )
+
+                def component_timeout() -> float:
+                    if timeline.deadline is None:
+                        return AUXILIARY_SHUTDOWN_BOUND_SECONDS
+                    return min(
+                        AUXILIARY_SHUTDOWN_BOUND_SECONDS,
+                        max(0.0, timeline.deadline - monotonic()),
+                    )
+
+                downloads.stop(
+                    cancel_requested=startup_shutdown.repeated_signal_requested,
+                    timeout=component_timeout(),
+                    monotonic=monotonic,
+                    sleep=sleep,
+                )
+                ssh_service.stop(
+                    cancel_requested=startup_shutdown.repeated_signal_requested,
+                    timeout=component_timeout(),
+                    monotonic=monotonic,
+                    sleep=sleep,
+                )
+                auxiliary_deadline = monotonic() + component_timeout()
+                _wait_for_auxiliary_shutdown(
+                    downloads=downloads,
+                    ssh_service=ssh_service,
+                    deadline=timeline.deadline,
+                    auxiliary_deadline=auxiliary_deadline,
+                    hook_processes=(),
+                    force_requested=startup_shutdown.repeated_signal_requested,
+                    monotonic=monotonic,
+                    sleep=sleep,
+                )
+                if child is not None:
+                    child_deadline = monotonic() + component_timeout()
+                    child_deadline = min(
+                        child_deadline,
+                        monotonic() + CHILD_TERMINATION_REAP_GRACE_SECONDS * 2,
+                    )
+                    terminate_direct_process_until(
+                        child,
+                        deadline=child_deadline,
+                        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+                        force_requested=startup_shutdown.repeated_signal_requested,
+                        monotonic=monotonic,
+                        sleep=sleep,
+                    )
+                active_hook = startup_shutdown.active_hook_process
+                if active_hook is not None:
+                    hook_deadline = (
+                        monotonic() + AUXILIARY_SHUTDOWN_BOUND_SECONDS
+                        if timeline.deadline is None
+                        else timeline.deadline
+                    )
+                    terminate_process_group_until(
+                        active_hook,
+                        deadline=hook_deadline,
+                        poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
+                        force_requested=startup_shutdown.repeated_signal_requested,
+                        monotonic=monotonic,
+                        sleep=sleep,
+                    )
+            finally:
+                startup_shutdown.raise_on_signal = previous_raise_on_signal
+
         try:
             previous_raise_on_signal = startup_shutdown.raise_on_signal
             startup_shutdown.raise_on_signal = False
             try:
                 downloads.activate(cancel_requested=startup_shutdown)
             except RuntimeFilePlanError as error:
+                cleanup_startup_failure()
                 raise EntrypointError(
                     format_runtime_diagnostics(
                         "runtime file configuration is invalid", error.diagnostics
                     )
                 ) from error
             except RuntimeStateError as error:
+                cleanup_startup_failure()
                 raise EntrypointError(f"runtime state failed: {error}") from error
             except RuntimeFileDownloadError as error:
+                cleanup_startup_failure()
                 raise EntrypointError(
                     format_runtime_diagnostics(
                         "runtime download failed", error.diagnostics
                     )
                 ) from error
             except ApplicationError as error:
+                cleanup_startup_failure()
                 raise EntrypointError(f"runtime download failed: {error}") from error
             except RuntimeAsyncQueueStartupError as error:
+                cleanup_startup_failure()
                 raise EntrypointError(f"runtime download failed: {error}") from error
             finally:
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
 
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
-            _run_pre_start_hooks(
-                hook_plan,
-                runtime=runtime,
-                source_env=source_env,
-                runtime_hook_runner=runtime_hook_runner,
-                startup_shutdown=startup_shutdown,
-            )
+            try:
+                _run_pre_start_hooks(
+                    hook_plan,
+                    runtime=runtime,
+                    source_env=source_env,
+                    runtime_hook_runner=runtime_hook_runner,
+                    startup_shutdown=startup_shutdown,
+                )
+            except EntrypointError:
+                cleanup_startup_failure()
+                raise
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
             previous_raise_on_signal = startup_shutdown.raise_on_signal
@@ -232,6 +304,7 @@ def run_runtime_lifecycle(
             try:
                 ssh_service.start(cancel_requested=startup_shutdown)
             except RuntimeSshServiceError as error:
+                cleanup_startup_failure()
                 raise EntrypointError(str(error)) from error
             finally:
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
@@ -240,13 +313,14 @@ def run_runtime_lifecycle(
             try:
                 ssh_service.ensure_running_before_comfyui()
             except RuntimeSshServiceError as error:
+                cleanup_startup_failure()
                 raise EntrypointError(str(error)) from error
             try:
                 previous_raise_on_signal = startup_shutdown.raise_on_signal
                 startup_shutdown.raise_on_signal = False
                 downloads.start_async(cancel_requested=startup_shutdown)
             except RuntimeAsyncQueueStartupError as error:
-                stop_startup_auxiliary_services()
+                cleanup_startup_failure()
                 raise EntrypointError(
                     f"async runtime download queue failed to start: {error}"
                 ) from error
@@ -267,7 +341,7 @@ def run_runtime_lifecycle(
                 try:
                     ssh_service.ensure_running_before_comfyui()
                 except RuntimeSshServiceError as error:
-                    stop_startup_auxiliary_services()
+                    cleanup_startup_failure()
                     raise EntrypointError(str(error)) from error
                 argv = build_comfyui_argv(runtime=runtime, config=config)
                 if startup_shutdown.requested_signal is not None:
@@ -283,7 +357,7 @@ def run_runtime_lifecycle(
                 except ProcessStartError as error:
                     if startup_shutdown.requested_signal is not None:
                         return finish_startup_signal_shutdown()
-                    stop_startup_auxiliary_services()
+                    cleanup_startup_failure()
                     raise EntrypointError(str(error)) from error
                 if startup_shutdown.requested_signal is not None:
                     return finish_startup_signal_shutdown(completed)
@@ -309,10 +383,11 @@ def run_runtime_lifecycle(
                     startup_shutdown=startup_shutdown,
                 )
             except EntrypointError:
-                stop_startup_auxiliary_services()
+                cleanup_startup_failure(completed)
                 raise
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown(completed)
+            runtime_started()
         except _StartupShutdownRequested as request:
             del request
             if completed is None:
@@ -378,8 +453,8 @@ def _run_pre_start_hooks(
             cancel_requested=startup_shutdown,
         )
     except RuntimeHookError as error:
+        startup_shutdown.active_hook_process = error.active_process
         if startup_shutdown.requested_signal is not None:
-            startup_shutdown.active_hook_process = error.active_process
             raise _StartupShutdownRequested(
                 startup_shutdown.requested_signal
             ) from error
@@ -402,12 +477,6 @@ def _wait_for_readiness_if_required(
     try:
         readiness_waiter(config.comfyui.port, child=child)
     except ReadinessError as error:
-        terminate_direct_process(
-            child,
-            terminate_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-            kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-            poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
-        )
         raise EntrypointError(
             format_runtime_diagnostics("ComfyUI readiness failed", error.diagnostics)
         ) from error
@@ -435,17 +504,11 @@ def _run_post_start_hooks_if_required(
             cancel_requested=startup_shutdown,
         )
     except RuntimeHookError as error:
+        startup_shutdown.active_hook_process = error.active_process
         if startup_shutdown.requested_signal is not None:
-            startup_shutdown.active_hook_process = error.active_process
             raise _StartupShutdownRequested(
                 startup_shutdown.requested_signal
             ) from error
-        terminate_direct_process(
-            child,
-            terminate_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-            kill_timeout=CHILD_TERMINATION_REAP_GRACE_SECONDS,
-            poll_interval=CHILD_REAP_POLL_INTERVAL_SECONDS,
-        )
         raise EntrypointError(
             format_runtime_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
@@ -504,6 +567,9 @@ class _StartupShutdownState:
         *,
         shutdown_timeout: int | float,
         monotonic: Callable[[], float],
+        external_shutdown_observer: Callable[[signal.Signals], object] = (
+            lambda _sig: None
+        ),
     ) -> None:
         self._external_signal_state: tuple[signal.Signals | None, bool] = (
             None,
@@ -514,6 +580,7 @@ class _StartupShutdownState:
         self.timeline: _ShutdownTimeline | None = None
         self._shutdown_timeout = shutdown_timeout
         self._monotonic = monotonic
+        self._external_shutdown_observer = external_shutdown_observer
         self._cancel_event = threading.Event()
         self._repeated_event = threading.Event()
         self._signal_admission_enabled = True
@@ -521,6 +588,7 @@ class _StartupShutdownState:
     def request_shutdown(self, sig: signal.Signals) -> None:
         if not self._signal_admission_enabled:
             return
+        self._external_shutdown_observer(sig)
         requested_signal, _repeated_signal = self._external_signal_state
         if requested_signal is None:
             self._external_signal_state = (sig, False)

@@ -34,7 +34,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
 )
 from comfyui_docker_helper.container.runtime_serve import (
     EntrypointError,
-    run_runtime_serve,
+    run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import RuntimeSshService
 
@@ -328,7 +328,7 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         return ()
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             runtime_state_path=tmp_path / "state.json",
             baked_config_path=config,
@@ -1034,7 +1034,7 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         return FakeChild()
 
     with pytest.raises(EntrypointError) as error:
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             runtime_state_path=tmp_path / "state.json",
             baked_config_path=config,
@@ -1106,7 +1106,7 @@ filename = "model.bin"
         )
 
     with pytest.raises(EntrypointError) as raised:
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=config,
@@ -1283,7 +1283,7 @@ filename = "model.bin"
         pytest.fail(f"unexpected successful startup for {failure_point}")
 
     with pytest.raises(EntrypointError):
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=config,
@@ -1409,7 +1409,7 @@ filename = "model.bin"
         return async_queue
 
     with pytest.raises(EntrypointError, match="SSH runtime service exited"):
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=config,
@@ -1474,7 +1474,7 @@ def test_readiness_failure_after_spawn_prevents_post_start_and_is_startup_failur
         return ()
 
     with pytest.raises(EntrypointError) as error:
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -1541,7 +1541,7 @@ def test_post_start_failure_after_readiness_terminates_child_as_startup_failure(
         )
 
     with pytest.raises(EntrypointError) as error:
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -1614,7 +1614,7 @@ def test_startup_shutdown_during_pre_start_hook_prevents_spawn_and_stop_hooks(
         events.append(f"pre-start-cancelled:{sig.name}")
         return ()
 
-    assert run_runtime_serve(
+    assert run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
         mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -1680,7 +1680,7 @@ def test_startup_shutdown_during_readiness_runs_stop_hooks_before_forwarding(
         return ()
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -1744,7 +1744,7 @@ def test_startup_shutdown_during_readiness_kills_child_that_ignores_signal(
         raise AssertionError("shutdown handler should interrupt readiness")
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -1822,7 +1822,7 @@ def test_startup_shutdown_during_post_start_hook_runs_stop_hooks_before_forwardi
         events.append(f"post-start-cancelled:{sig.name}")
         return ()
 
-    assert run_runtime_serve(
+    assert run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
         mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -1920,7 +1920,7 @@ def test_repeated_shutdown_signal_forces_stop_hook_cancellation(
             )
         )
 
-    assert run_runtime_serve(
+    assert run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
         mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
@@ -2364,7 +2364,7 @@ def test_graceful_shutdown_runs_stop_hooks_before_forwarding_and_child_result_wi
         )
 
     assert (
-        run_runtime_serve(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
             mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),

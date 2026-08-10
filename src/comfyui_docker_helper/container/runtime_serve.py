@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
+from types import FrameType, MappingProxyType
 
 from comfyui_docker_helper.config import (
     BAKED_RUNTIME_CONFIG_PATH,
@@ -19,6 +22,11 @@ from comfyui_docker_helper.config import (
 from comfyui_docker_helper.container.process_control import DirectProcessStarter
 from comfyui_docker_helper.container.readiness import wait_for_comfyui_readiness
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_control import (
+    RUNTIME_CONTROL_SOCKET_PATH,
+    open_runtime_control_listener,
+)
+from comfyui_docker_helper.container.runtime_controller import RuntimeController
 from comfyui_docker_helper.container.runtime_diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
@@ -42,6 +50,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
 from comfyui_docker_helper.container.runtime_lifecycle import (
     EntrypointError,
     ReadinessWaiter,
+    RuntimeGenerationStopCause,
     RuntimeHookRunner,
     RuntimeStopHookRunner,
     run_runtime_lifecycle,
@@ -147,7 +156,7 @@ class RuntimeGenerationFactory:
         )
 
 
-def run_runtime_serve(
+def run_runtime_generation_once(
     *,
     runtime: ContainerRuntime | None = None,
     baked_config_path: str | Path = BAKED_RUNTIME_CONFIG_PATH,
@@ -165,8 +174,10 @@ def run_runtime_serve(
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
     runtime_ssh_starter: RuntimeSshStarter = start_sshd_if_enabled,
     runtime_state_path: str | Path = RUNTIME_STATE_PATH,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], object] = time.sleep,
 ) -> int:
-    """Compose the admitted runtime inputs and execute one lifecycle."""
+    """Compose and execute one generation through the injected test seam."""
     source_env = MappingProxyType(dict(os.environ if environ is None else environ))
     effective_runtime = (
         ContainerRuntime.from_env(source_env) if runtime is None else runtime
@@ -194,8 +205,173 @@ def run_runtime_serve(
         runtime_hook_runner=runtime_hook_runner,
         runtime_stop_hook_runner=runtime_stop_hook_runner,
         readiness_waiter=readiness_waiter,
+        monotonic=monotonic,
+        sleep=sleep,
     )
     return _normalize_exit_code(result.returncode)
+
+
+def run_runtime_serve(
+    *,
+    runtime: ContainerRuntime | None = None,
+    baked_config_path: str | Path = BAKED_RUNTIME_CONFIG_PATH,
+    mounted_config_path: str | Path = MOUNTED_RUNTIME_CONFIG_PATH,
+    baked_hooks_path: str | Path = BAKED_RUNTIME_HOOKS_PATH,
+    mounted_hooks_path: str | Path = MOUNTED_RUNTIME_HOOKS_PATH,
+    environ: Mapping[str, str] | None = None,
+    runner: DirectProcessStarter = subprocess.Popen,
+    runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
+    runtime_async_queue_starter: RuntimeAsyncQueueStarter = (
+        start_runtime_async_download_queue
+    ),
+    runtime_hook_runner: RuntimeHookRunner = run_runtime_startup_hooks,
+    runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
+    readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
+    runtime_ssh_starter: RuntimeSshStarter = start_sshd_if_enabled,
+    runtime_state_path: str | Path = RUNTIME_STATE_PATH,
+    control_socket_path: Path = RUNTIME_CONTROL_SOCKET_PATH,
+    generation_running: Callable[[RuntimeController], object] = lambda _controller: (
+        None
+    ),
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], object] = time.sleep,
+) -> int:
+    """Own the private endpoint and execute serial runtime generations."""
+    source_env = MappingProxyType(dict(os.environ if environ is None else environ))
+    effective_runtime = (
+        ContainerRuntime.from_env(source_env) if runtime is None else runtime
+    )
+    factory = RuntimeGenerationFactory(
+        runtime=effective_runtime,
+        baked_config_path=baked_config_path,
+        mounted_config_path=mounted_config_path,
+        baked_hooks_path=baked_hooks_path,
+        mounted_hooks_path=mounted_hooks_path,
+        environ=source_env,
+        runtime_downloader=runtime_downloader,
+        runtime_async_queue_starter=runtime_async_queue_starter,
+        runtime_ssh_starter=runtime_ssh_starter,
+        runtime_state_path=runtime_state_path,
+    )
+    controller = RuntimeController()
+    with (
+        open_runtime_control_listener(control_socket_path),
+        _runtime_controller_signal_handlers(controller),
+    ):
+        try:
+            controller.begin_initial_admission()
+            initial_generation = True
+
+            def publish_start_failure(error: EntrypointError) -> None:
+                if controller.snapshot().operation is None:
+                    controller.mark_generation_terminal(str(error))
+                else:
+                    controller.publish_restart_terminal(
+                        "failed",
+                        message=str(error),
+                    )
+
+            def external_failure_exit_code() -> int | None:
+                shutdown = controller.external_shutdown_snapshot()
+                if shutdown.signal is None:
+                    return None
+                controller.mark_external_shutdown()
+                return 128 + int(shutdown.signal)
+
+            while True:
+                try:
+                    generation = factory.create_generation()
+                except EntrypointError as error:
+                    external_exit_code = external_failure_exit_code()
+                    if external_exit_code is not None:
+                        return external_exit_code
+                    publish_start_failure(error)
+                    raise
+
+                def publish_running_checkpoint(
+                    *,
+                    is_initial: bool = initial_generation,
+                ) -> None:
+                    if is_initial:
+                        controller.mark_initial_generation_running()
+                    else:
+                        controller.publish_restart_terminal("succeeded")
+                        controller.release_successful_restart()
+                    generation_running(controller)
+
+                try:
+                    result = run_runtime_lifecycle(
+                        generation.config,
+                        generation.hook_plan,
+                        runtime=effective_runtime,
+                        source_env=generation.source_env,
+                        downloads=generation.downloads,
+                        ssh_service=generation.ssh_service,
+                        runner=runner,
+                        runtime_hook_runner=runtime_hook_runner,
+                        runtime_stop_hook_runner=runtime_stop_hook_runner,
+                        readiness_waiter=readiness_waiter,
+                        restart_acceptor=controller,
+                        runtime_started=publish_running_checkpoint,
+                        external_shutdown_observer=(controller.observe_external_signal),
+                        monotonic=monotonic,
+                        sleep=sleep,
+                    )
+                except EntrypointError as error:
+                    external_exit_code = external_failure_exit_code()
+                    if external_exit_code is not None:
+                        return external_exit_code
+                    publish_start_failure(error)
+                    raise
+
+                if result.cause is RuntimeGenerationStopCause.NATURAL_EXIT:
+                    controller.mark_generation_terminal("ComfyUI exited.")
+                    return _normalize_exit_code(result.returncode)
+                if result.cause is RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN:
+                    controller.mark_external_shutdown()
+                    return _normalize_exit_code(result.returncode)
+
+                successor = controller.allocate_restart_successor()
+                if successor is None:
+                    controller.mark_external_shutdown()
+                    shutdown = controller.external_shutdown_snapshot()
+                    assert shutdown.signal is not None
+                    return 128 + int(shutdown.signal)
+                initial_generation = False
+        except _RuntimeControllerShutdownRequested as request:
+            controller.mark_external_shutdown()
+            return 128 + int(request.signal)
+
+
+class _RuntimeControllerShutdownRequested(BaseException):
+    def __init__(self, sig: signal.Signals) -> None:
+        self.signal = sig
+        super().__init__(sig.name)
+
+
+@contextmanager
+def _runtime_controller_signal_handlers(controller: RuntimeController):
+    previous_handlers = {
+        sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
+    }
+
+    def observe(sig: signal.Signals, frame: FrameType | None) -> None:
+        del frame
+        admitted = signal.Signals(sig)
+        controller.observe_external_signal(admitted)
+        shutdown = controller.external_shutdown_snapshot()
+        if shutdown.repeated:
+            return
+        assert shutdown.signal is not None
+        raise _RuntimeControllerShutdownRequested(shutdown.signal)
+
+    try:
+        signal.signal(signal.SIGTERM, observe)
+        signal.signal(signal.SIGINT, observe)
+        yield
+    finally:
+        for sig, previous in previous_handlers.items():
+            signal.signal(sig, previous)
 
 
 def _normalize_exit_code(returncode: int) -> int:

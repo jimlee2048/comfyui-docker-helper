@@ -1,4 +1,4 @@
-"""Descriptor-relative admission for trusted regular-file inputs."""
+"""Platform-native admission for trusted regular-file inputs."""
 
 from __future__ import annotations
 
@@ -9,15 +9,17 @@ from pathlib import PurePosixPath
 
 _close_descriptor = os.close
 _descriptor_relative_open_available = os.open in os.supports_dir_fd
+_platform_name = os.name
 _READ_CHUNK_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class AdmittedRegularFile:
-    """Bytes and descriptor-observed mode for one admitted regular file."""
+    """Bytes and platform-observed permission evidence for one admitted file."""
 
     data: bytes
-    mode: int
+    mode: int | None
+    permissions_unverifiable: bool = False
 
 
 def read_regular_absolute_file(path: str | os.PathLike[str]) -> bytes:
@@ -39,7 +41,18 @@ def _read_regular_absolute_file(
 ) -> AdmittedRegularFile:
     value = os.fspath(path)
     if not isinstance(value, str):
-        raise ValueError("path must be one canonical absolute POSIX path")
+        raise ValueError("path must be one canonical absolute platform path")
+    if _platform_name == "nt":
+        from comfyui_docker_helper._windows_files import (
+            read_regular_absolute_file as read_windows_regular_absolute_file,
+        )
+
+        return AdmittedRegularFile(
+            read_windows_regular_absolute_file(value, max_bytes=max_bytes),
+            mode=None,
+            permissions_unverifiable=True,
+        )
+
     parsed = PurePosixPath(value)
     if (
         not value

@@ -89,7 +89,9 @@ def test_project_release_identity_matches_package_metadata() -> None:
         == "https://github.com/jimlee2048/comfyui-docker-helper/releases"
     )
     assert "build>=1,<2" in project["dependencies"]
+    assert "filelock>=3.32.2,<4" in project["dependencies"]
     assert "python-on-whales>=0.81.0" in project["dependencies"]
+    assert "pywin32==312; sys_platform == 'win32'" in project["dependencies"]
     assert "twine" in pyproject["dependency-groups"]["dev"]
     assert "twine" in {item["name"] for item in locked["dev-dependencies"]["dev"]}
     assert "twine" not in {item["name"] for item in locked["dependencies"]}

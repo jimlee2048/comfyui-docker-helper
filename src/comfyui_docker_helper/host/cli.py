@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     )
 
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
+_platform_name = os.name
 
 app = typer.Typer(
     name="host",
@@ -514,7 +515,9 @@ def _prepare_build_ssh_input(
             err=True,
         )
         return False
-    if not os.environ.get("SSH_AUTH_SOCK"):
+    # Native Windows has no POSIX socket environment contract. Keep BuildKit's
+    # default agent selection opaque and let Docker report unsupported setups.
+    if _platform_name != "nt" and not os.environ.get("SSH_AUTH_SOCK"):
         raise typer.BadParameter(
             "requires a non-empty SSH_AUTH_SOCK environment variable",
             param_hint="--ssh",
@@ -523,12 +526,14 @@ def _prepare_build_ssh_input(
 
 
 def _collect_default_known_hosts_bindings() -> tuple[FileSecretBinding, ...]:
+    # Windows has no project-owned system known-hosts discovery contract.
     return tuple(
         FileSecretBinding(
             secret_id=descriptor.secret_id,
             source=source,
         )
         for descriptor in KNOWN_HOSTS_MOUNTS
+        if _platform_name != "nt" or descriptor.scope == "user"
         if (source := Path(descriptor.default_source).expanduser()).exists()
     )
 

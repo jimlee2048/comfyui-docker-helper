@@ -111,7 +111,8 @@ class _FakeContainerApi:
 
     def copy(self, source: Path, destination: object) -> None:
         assert source.is_file()
-        assert source.stat().st_mode & 0o777 == 0o600
+        if os.name == "posix":
+            assert source.stat().st_mode & 0o777 == 0o600
         self.copy_calls.append((source, destination))
 
     def remove(self, container: object, *, force: bool) -> None:
@@ -166,7 +167,10 @@ def test_requirements_compile_uses_one_exact_owned_container(
     assert create["tty"] is False
     assert create["interactive"] is False
     assert len(client.container.copy_calls) == 1
-    assert client.container.copy_calls[0][1][1] == "/tmp/requirements.in"
+    copied_source, copied_destination = client.container.copy_calls[0]
+    assert copied_destination[1] == "/tmp/requirements.in"
+    assert copied_source.exists() is False
+    assert copied_source.parent.exists() is False
     assert result.stdout == b'{"result":"exact"}\n'
     assert result.stderr == b"diagnostic\n"
     assert len(client.container.remove_calls) == 1
@@ -220,6 +224,94 @@ def test_cache_miss_pulls_and_reinspects_exact_descriptor(
     resolver_argv = container.execute_calls[1][0]
     assert resolver_argv[2:5] == ("python", "list", "--only-downloads")
     assert resolver_argv[-1] == "3.12.13"
+
+
+def test_controlled_input_copy_failure_cleans_private_state_and_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeDockerClient()
+    _install_client(monkeypatch, client)
+    copied_sources: list[Path] = []
+
+    def fail_copy(source: Path, destination: object) -> None:
+        del destination
+        assert source.is_file()
+        copied_sources.append(source)
+        raise DockerException(["docker", "container", "cp"], 1)
+
+    client.container.copy = fail_copy  # type: ignore[method-assign]
+
+    with pytest.raises(UvDockerExecutorError, match="container operation failed"):
+        UvDockerExecutor().execute(
+            UvResolverDescriptor(_DIGEST),
+            RequirementsCompileOperation(
+                python_version="3.13.14",
+                index_url="https://pypi.org/simple",
+                requirements=b"requests>=2\n",
+            ),
+        )
+
+    assert len(copied_sources) == 1
+    assert copied_sources[0].exists() is False
+    assert copied_sources[0].parent.exists() is False
+    assert len(client.container.remove_calls) == 1
+
+
+def test_input_cancellation_outranks_cleanup_failures_and_attempts_every_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeDockerClient()
+    _install_client(monkeypatch, client)
+    root = Path("private-input-root")
+    cleanup_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.uv_docker_executor.create_private_directory",
+        lambda **_kwargs: root,
+    )
+    monkeypatch.setattr(
+        "comfyui_docker_helper.host.uv_docker_executor.create_private_file",
+        lambda _path: 91,
+    )
+
+    def cancel_fdopen(descriptor: int, mode: str) -> object:
+        del descriptor, mode
+        raise KeyboardInterrupt("cancelled while preparing resolver input")
+
+    monkeypatch.setattr(os, "fdopen", cancel_fdopen)
+
+    def fail_close(descriptor: int) -> None:
+        cleanup_calls.append(("close", descriptor))
+        raise OSError("close failed")
+
+    def fail_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        cleanup_calls.append(("unlink", (path, missing_ok)))
+        raise OSError("unlink failed")
+
+    def fail_rmdir(path: Path) -> None:
+        cleanup_calls.append(("rmdir", path))
+        raise OSError("rmdir failed")
+
+    monkeypatch.setattr(os, "close", fail_close)
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+    monkeypatch.setattr(Path, "rmdir", fail_rmdir)
+
+    with pytest.raises(KeyboardInterrupt, match="cancelled while preparing"):
+        UvDockerExecutor().execute(
+            UvResolverDescriptor(_DIGEST),
+            RequirementsCompileOperation(
+                python_version="3.13.14",
+                index_url="https://pypi.org/simple",
+                requirements=b"requests>=2\n",
+            ),
+        )
+
+    assert cleanup_calls == [
+        ("close", 91),
+        ("unlink", (root / "input", True)),
+        ("rmdir", root),
+    ]
+    assert len(client.container.remove_calls) == 1
 
 
 @pytest.mark.parametrize("cache_miss", [False, True])
@@ -471,10 +563,18 @@ def test_keyboard_interrupt_restores_handlers_and_cleans(
 ) -> None:
     client = _FakeDockerClient()
     _install_client(monkeypatch, client)
-    previous = {
-        selected: signal.getsignal(selected)
-        for selected in (signal.SIGINT, signal.SIGTERM)
-    }
+    selected_signals = (signal.SIGINT, signal.SIGTERM)
+    previous = {selected: object() for selected in selected_signals}
+    installed: dict[signal.Signals, object] = dict(previous)
+
+    monkeypatch.setattr(signal, "getsignal", lambda selected: installed[selected])
+
+    def install_handler(selected: signal.Signals, handler: object) -> object:
+        prior = installed[selected]
+        installed[selected] = handler
+        return prior
+
+    monkeypatch.setattr(signal, "signal", install_handler)
 
     original_create = client.container.create
 
@@ -485,7 +585,9 @@ def test_keyboard_interrupt_restores_handlers_and_cleans(
 
         def execute(argv: tuple[str, ...], **call_kwargs: object):
             del argv, call_kwargs
-            os.kill(os.getpid(), signal.SIGTERM)
+            handler = installed[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
             yield  # pragma: no cover
 
         container.execute = execute  # type: ignore[method-assign]
@@ -499,10 +601,7 @@ def test_keyboard_interrupt_restores_handlers_and_cleans(
             ManagedPythonCatalogOperation("3.13.14"),
         )
 
-    assert {
-        selected: signal.getsignal(selected)
-        for selected in (signal.SIGINT, signal.SIGTERM)
-    } == previous
+    assert installed == previous
     assert len(client.container.remove_calls) == 1
 
 

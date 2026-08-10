@@ -1758,7 +1758,7 @@ def test_build_ssh_does_not_replace_configuration_validation(
 
 
 @pytest.mark.parametrize("agent_socket", [None, ""])
-def test_build_ssh_requires_nonempty_agent_before_planning_providers(
+def test_build_ssh_on_posix_requires_nonempty_agent_before_planning_providers(
     agent_socket: str | None,
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -1771,6 +1771,7 @@ def test_build_ssh_requires_nonempty_agent_before_planning_providers(
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     else:
         monkeypatch.setenv("SSH_AUTH_SOCK", agent_socket)
+    monkeypatch.setattr(host_cli, "_platform_name", "posix")
     monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
     config = tmp_path / "config.toml"
     _write_direct_git_config(config)
@@ -1785,6 +1786,42 @@ def test_build_ssh_requires_nonempty_agent_before_planning_providers(
     assert "non-empty SSH_AUTH_SOCK" in _plain_output(result.output)
 
 
+def test_build_ssh_on_windows_delegates_default_agent_to_buildkit(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def buildx(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(host_cli, "_platform_name", "nt")
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(
+        host_cli, "prepare_render_context", lambda *args, **kwargs: _prepared_build()
+    )
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+    monkeypatch.setattr(
+        host_cli,
+        "_collect_default_known_hosts_bindings",
+        lambda: (),
+    )
+    config = tmp_path / "config.toml"
+    _write_direct_git_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        _build_ssh_args(config, context=tmp_path / "context"),
+    )
+
+    assert result.exit_code == 0
+    assert seen["forward_default_ssh"] is True
+
+
 @pytest.mark.parametrize("existing_indexes", [(0, 3), ()])
 def test_build_ssh_forwards_agent_and_only_existing_default_trust_after_context(
     existing_indexes: tuple[int, ...],
@@ -1797,6 +1834,7 @@ def test_build_ssh_forwards_agent_and_only_existing_default_trust_after_context(
     original_exists = Path.exists
 
     monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+    monkeypatch.setattr(host_cli, "_platform_name", "posix")
     agent_socket = tmp_path / "not-a-real-agent-socket"
     monkeypatch.setenv("SSH_AUTH_SOCK", str(agent_socket))
     default_sources = tuple(
@@ -1844,6 +1882,37 @@ def test_build_ssh_forwards_agent_and_only_existing_default_trust_after_context(
     )
     assert checked_sources == list(default_sources)
     assert agent_socket not in checked_sources
+
+
+def test_windows_known_hosts_collection_uses_only_user_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked_sources: list[Path] = []
+    host_home = tmp_path / "Windows User"
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setattr(host_cli, "_platform_name", "nt")
+    user_sources = tuple(
+        Path(descriptor.default_source).expanduser()
+        for descriptor in KNOWN_HOSTS_MOUNTS
+        if descriptor.scope == "user"
+    )
+
+    def source_exists(path: Path) -> bool:
+        checked_sources.append(path)
+        return path == user_sources[0]
+
+    monkeypatch.setattr(Path, "exists", source_exists)
+
+    bindings = host_cli._collect_default_known_hosts_bindings()
+
+    assert checked_sources == list(user_sources)
+    assert bindings == (
+        FileSecretBinding(
+            secret_id=KNOWN_HOSTS_MOUNTS[0].secret_id,
+            source=user_sources[0],
+        ),
+    )
 
 
 def test_build_ssh_host_sources_enter_only_buildx_bindings(

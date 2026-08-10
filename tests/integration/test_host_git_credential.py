@@ -6,11 +6,14 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from comfyui_docker_helper.config.service import load_validate_config_result
+from comfyui_docker_helper.host import private_state
+from comfyui_docker_helper.host import secret_session as secret_session_module
 from comfyui_docker_helper.host.secret_session import HostSecretSession
 
 
@@ -22,7 +25,16 @@ def test_cdh_helper_resets_ambient_helpers_and_selects_by_http_path(
     if git is None:
         pytest.skip("installed Git is required for credential plumbing integration")
 
-    config = tmp_path / "config.toml"
+    windows_path = tmp_path / "Git helper 测试"
+    windows_path.mkdir()
+    monkeypatch.setattr(
+        secret_session_module,
+        "create_private_directory",
+        lambda *, prefix: private_state.create_private_directory(
+            prefix=prefix, parent=windows_path
+        ),
+    )
+    config = windows_path / "config.toml"
     config.write_text(
         """
 [compute_platform]
@@ -51,14 +63,16 @@ username = "team-user"
 password = { secret = "team_token" }
 """
     )
-    ambient_marker = tmp_path / "ambient-helper-ran"
-    ambient_helper = tmp_path / "ambient-helper"
-    ambient_helper.write_text(
-        "#!/bin/sh\n"
-        f"printf invoked > {shlex.quote(os.fspath(ambient_marker))}\n"
-        "printf 'username=ambient\\npassword=ambient\\n'\n"
+    ambient_marker = windows_path / "ambient-helper-ran"
+    ambient_code = (
+        "from pathlib import Path; "
+        f"Path({os.fspath(ambient_marker)!r}).write_text('invoked'); "
+        "print('username=ambient\\npassword=ambient')"
     )
-    ambient_helper.chmod(0o700)
+    ambient_helper = (
+        f"!{shlex.quote(Path(sys.executable).as_posix())} "
+        f"-c {shlex.quote(ambient_code)}"
+    )
     monkeypatch.delenv("CDH_TEST_ROOT_TOKEN", raising=False)
     monkeypatch.setenv("CDH_TEST_TEAM_TOKEN", "team-secret")
     result = load_validate_config_result(config)
@@ -66,6 +80,9 @@ password = { secret = "team_token" }
     with HostSecretSession.from_configuration(result) as session:
         binding = session.git_binding()
         assert binding is not None
+        assert "Git helper 测试" in binding.environment["CDH_GIT_CREDENTIAL_SESSION"]
+        if os.name == "nt":
+            assert Path(binding.environment["CDH_GIT_CREDENTIAL_SESSION"]).drive
         environment = {
             **os.environ,
             **binding.environment,
@@ -80,7 +97,7 @@ password = { secret = "team_token" }
         command = (
             git,
             "-c",
-            f"credential.helper=!{ambient_helper}",
+            f"credential.helper={ambient_helper}",
             *binding.config_args,
             "credential",
             "fill",

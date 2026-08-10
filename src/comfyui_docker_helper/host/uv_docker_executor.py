@@ -7,7 +7,6 @@ import os
 import re
 import signal
 import stat
-import tempfile
 import threading
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
@@ -23,6 +22,10 @@ from python_on_whales.exceptions import DockerException, NoSuchContainer, NoSuch
 
 from comfyui_docker_helper.errors import ApplicationError
 from comfyui_docker_helper.exact_ledger import UV_IMAGE_REPOSITORY
+from comfyui_docker_helper.host.private_state import (
+    create_private_directory,
+    create_private_file,
+)
 
 _DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _VERSION_PATTERN = re.compile(
@@ -354,10 +357,14 @@ def _copy_controlled_input(
     destination: str,
     content: bytes,
 ) -> None:
-    descriptor, source = tempfile.mkstemp(prefix="cdh-uv-input-")
+    root = create_private_directory(prefix="cdh-uv-input-")
+    source = root / "input"
+    descriptor: int | None = None
+    primary: BaseException | None = None
     try:
-        os.fchmod(descriptor, 0o600)
+        descriptor = create_private_file(source)
         with os.fdopen(descriptor, "wb") as stream:
+            descriptor = None
             stream.write(content)
         mode = Path(source).lstat().st_mode
         if stat.S_ISREG(mode) is False or stat.S_ISLNK(mode):
@@ -365,8 +372,30 @@ def _copy_controlled_input(
                 "controlled resolver input is not a regular file"
             )
         client.container.copy(Path(source), (container, destination))
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        Path(source).unlink(missing_ok=True)
+        cleanup_error: OSError | None = None
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                cleanup_error = error
+        try:
+            source.unlink(missing_ok=True)
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        try:
+            root.rmdir()
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if primary is None and cleanup_error is not None:
+            raise UvDockerExecutorError(
+                "controlled resolver input cleanup failed"
+            ) from cleanup_error
 
 
 def _operation_input(operation: UvResolverOperation) -> tuple[str, bytes] | None:

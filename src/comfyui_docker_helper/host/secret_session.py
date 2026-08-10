@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import shlex
 import shutil
 import stat
 import sys
@@ -33,6 +32,7 @@ from comfyui_docker_helper.host.descriptor_lock import (
 )
 from comfyui_docker_helper.host.git_credential_process import (
     GitCredentialProcessBinding,
+    git_credential_helper_command,
 )
 from comfyui_docker_helper.host.private_state import (
     create_private_directory,
@@ -189,10 +189,7 @@ class HostSecretSession:
         if not self._routes:
             return None
         root = self._require_root()
-        helper = (
-            f"!exec {shlex.quote(sys.executable)} "
-            "-m comfyui_docker_helper.host.git_credential_helper"
-        )
+        helper = git_credential_helper_command(sys.executable)
         return GitCredentialProcessBinding(
             config_args=git_credential_config_args(helper),
             environment={GIT_CREDENTIAL_SESSION_ENV: os.fspath(root)},

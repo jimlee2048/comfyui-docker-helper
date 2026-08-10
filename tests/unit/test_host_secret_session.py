@@ -13,6 +13,7 @@ import pytest
 from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
 from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.host import git_credential_helper as helper_module
+from comfyui_docker_helper.host import git_credential_process as process_module
 from comfyui_docker_helper.host import secret_session as secret_session_module
 from comfyui_docker_helper.host.secret_session import (
     GIT_CREDENTIAL_SESSION_ENV,
@@ -122,7 +123,11 @@ def test_session_binding_and_snapshot_are_private_exact_and_reused(
             "-c",
             "credential.interactive=false",
         )
-        assert binding.config_args[3].startswith("credential.helper=!exec ")
+        assert binding.config_args[3].startswith("credential.helper=!")
+        assert (
+            " -m comfyui_docker_helper.host.git_credential_helper"
+            in (binding.config_args[3])
+        )
         assert binding.environment == {
             GIT_CREDENTIAL_SESSION_ENV: os.fspath(session.root)
         }
@@ -138,6 +143,28 @@ def test_session_binding_and_snapshot_are_private_exact_and_reused(
         assert stat.S_IMODE(first.stat().st_mode) == 0o600
         assert stat.S_IMODE((session.root / "lock-root_token").stat().st_mode) == 0o600
         assert reads == 1
+
+
+def test_windows_git_binding_quotes_unicode_python_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    monkeypatch.setattr(process_module, "_platform_name", "nt")
+    monkeypatch.setattr(
+        secret_session_module.sys,
+        "executable",
+        r"D:\Program Files\Python 测试\python.exe",
+    )
+
+    with HostSecretSession.from_configuration(result) as session:
+        binding = session.git_binding()
+
+    assert binding is not None
+    assert binding.config_args[3] == (
+        "credential.helper=!'D:/Program Files/Python 测试/python.exe' "
+        "-m comfyui_docker_helper.host.git_credential_helper"
+    )
 
 
 def test_windows_environment_secret_encodes_unicode_as_utf8(

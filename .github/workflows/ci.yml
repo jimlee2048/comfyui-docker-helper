@@ -99,6 +99,11 @@ jobs:
           tests/integration/test_windows_file_primitives.py
           tests/integration/test_windows_private_state.py
           tests/integration/test_descriptor_lock.py
+      - name: Verify Windows Secret and hook workflows
+        run: >-
+          uv run --locked pytest
+          tests/integration/test_windows_host_secret_session.py
+          tests/integration/test_windows_hook_inputs.py
       - name: Exercise root version
         run: uv run --locked cdh --version
       - name: Exercise root help

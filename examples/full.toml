@@ -82,14 +82,16 @@ default_downloader = "aria2"
 # Default: "sync". Supported: "sync", "async".
 # Per-file download_mode values override this default.
 default_download_mode = "sync"
-# Default: 3. Total backend invocations per file for each build or runtime start.
+# Default: 3. Total backend invocations per file for each build or admitted
+# runtime generation.
 download_max_attempts = 3
 # Runtime-only. An explicitly configured value is baked into the image; when
 # omitted, the runtime default is "continue". Build downloads are always
 # required and fail the build regardless of this setting.
 # Supported: "continue", "fail".
 download_failure_policy = "fail"
-# Default: 8. One signal-shutdown budget; -1 disables cdh outer/hook deadlines.
+# Default: 8. One complete old-generation shutdown budget for an external stop
+# or manual runtime restart; -1 disables cdh outer/hook deadlines.
 # A repeated SIGTERM/SIGINT immediately force-stops all managed runtime work.
 # A hook-started background service should have a paired stop hook that closes
 # and waits for it; cdh does not supervise the service after the start hook exits.

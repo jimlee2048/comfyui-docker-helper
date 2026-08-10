@@ -98,6 +98,17 @@ The Dockerfile installs the toolchain and application, processes configured node
 
 ### Run the container lifecycle
 
-Tini runs as image PID 1 and starts `cdh container runtime serve`. The runtime owner loads the effective runtime configuration, discovers baked and mounted hooks, and composes download, SSH, ComfyUI, readiness, hook, signal, and cleanup services under one lifecycle owner.
+Tini runs as image PID 1 and starts `cdh container runtime serve`. That same cdh process remains Tini's direct child and the only runtime controller until the container exits. [`runtime_serve.py`](../../src/comfyui_docker_helper/container/runtime_serve.py) is the composition root: [`runtime_controller.py`](../../src/comfyui_docker_helper/container/runtime_controller.py) arbitrates cross-generation state and restart requests, while [`runtime_lifecycle.py`](../../src/comfyui_docker_helper/container/runtime_lifecycle.py) owns the download, SSH, ComfyUI, readiness, hook, signal, and exact cleanup policy for one generation.
+
+Each initial or restarted generation freshly loads baked and mounted runtime configuration, discovers both hook sources, and constructs new download and SSH owners. Replacement is serial: the old generation's exact cdh-owned work must become quiescent and be reaped before the successor is admitted. The main lifecycle thread remains the only authority that accepts a restart or signal-driven shutdown and applies process policy; control-connection workers only submit requests and deliver controller-owned results. Natural ComfyUI exit or a failed replacement still ends cdh and the container, leaving Docker's restart policy as the automatic recovery authority.
+
+```text
+restart/status/follow client -> private runtime control -> cdh controller
+deployment inputs            -> generation admission   -> one-generation lifecycle
+runtime stdout/stderr         -> controller log broker  -> original container output
+                                                     +-> bounded live followers
+```
+
+The private control endpoint provides container-local restart and observation without transferring lifecycle ownership to the client. The controller-lifetime output broker preserves the original container stdout and stderr as primary logging authorities while fan-out supplies live-only followers across generation replacement.
 
 This runtime path consumes the generated runtime projection and deployment-time overrides rather than host configuration, the canonical lock, or reconciliation providers. See [Runtime and lifecycle](../user/runtime.md) for operational order and shutdown behavior, and [Cross-module contracts](contracts.md) for process-ownership and trust boundaries.

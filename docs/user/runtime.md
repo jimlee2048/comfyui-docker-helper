@@ -2,7 +2,7 @@
 
 English | [简体中文](runtime.zh-CN.md)
 
-This guide is for people running an image built by cdh. It explains which settings can change without rebuilding the image, when runtime downloads and hooks run, how optional SSH access is activated, and what happens when the container stops.
+This guide is for people running an image built by cdh. It explains which settings can change without rebuilding the image, how to control the running ComfyUI lifecycle from inside the container, when runtime downloads and hooks run, how optional SSH access is activated, and what happens when the container stops.
 
 For the complete annotated host configuration, see [`examples/full.toml`](../../examples/full.toml). The [configuration guide](configuration.md) explains host configuration and layering; the [build and lock guide](build-and-lock.md) explains how host choices become baked image inputs.
 
@@ -32,13 +32,35 @@ The supported environment overrides are:
 
 Environment overrides and mounted runtime inputs are deployment-time changes. They are outside the baked image's verified replay boundary.
 
+## Runtime control
+
+Run the following image-internal commands through `docker exec` or an SSH session in the container:
+
+```text
+cdh container runtime restart
+cdh container runtime status [--json]
+cdh container runtime follow
+```
+
+`restart` synchronously replaces the complete runtime generation; it does not start a second lifecycle beside the first one. cdh first cancels the old generation's downloads and SSH work, runs its stop hooks while ComfyUI remains available, stops and reaps the exact processes it owns, and only then admits a successor. The successor rereads baked and mounted runtime configuration, rediscovers baked and mounted hooks, creates fresh download and SSH owners, and reruns the startup order below. It continues to use the environment captured by the image entrypoint; environment values supplied only to the `restart` client do not become runtime overrides. Only one restart mutation is admitted at a time; another request fails busy rather than queuing or joining it.
+
+A restart succeeds after ComfyUI is spawned when there are no post-start hooks. When post-start hooks exist, it succeeds only after conditional readiness and all post-start hooks complete. Asynchronous downloads need only be accepted into their queue; restart does not wait for every asynchronous transfer to finish.
+
+If the server has not accepted a restart, interrupting its client withdraws the pending request. Once the server has accepted it—even if confirmation has not yet reached the client—interruption stops only the local wait and the restart continues in the container; use `status` when acceptance remains unconfirmed. After confirmed acceptance, `Ctrl-C` also reports the operation ID. Client interruption does not stop the container. A confirmed restart failure is reported to the waiting client. If an old stop hook fails, cdh cleans up the old owned processes, does not start a successor, and exits the container nonzero. If successor startup fails, cdh cleans up that successor without running its stop hooks and then exits nonzero. cdh does not provide runtime `start` or `stop` commands, and `restart` has no detached or no-wait mode. Natural ComfyUI exit still ends the container.
+
+`status` reads the controller's current lifecycle and restart state; `--json` emits its machine-readable form. This is in-memory control state, not configuration, health, image identity, or persistent history.
+
+`follow` writes live stdout and stderr received after connection and remains attached across manual runtime generations. It does not replay or persist older output; use Docker logs or the deployment logging backend for history. `Ctrl-C`, `SIGTERM`, `SIGHUP`, a broken connection, or a slow follower affects only that follower and never stops or backpressures ComfyUI.
+
+Runtime control is supported only for a client with the same effective UID as the running cdh owner. In particular, do not use `docker exec --user` to run these commands as a different UID.
+
 ## Files, downloads, and persistent state
 
-Host `[[files]]` declarations become baked runtime defaults. At container startup, baked and mounted file lists merge by normalized `dir` plus `filename`; `files = []` in a later layer clears the earlier list. Every target is relative to `COMFYUI_PATH`.
+Host `[[files]]` declarations become baked runtime defaults. For each admitted runtime generation, baked and mounted file lists merge by normalized `dir` plus `filename`; `files = []` in a later layer clears the earlier list. Every target is relative to `COMFYUI_PATH`.
 
 Synchronous downloads finish before pre-start hooks. Asynchronous downloads are accepted into one background queue before ComfyUI starts and may continue while it runs; they do not gate ComfyUI readiness.
 
-`download_max_attempts` is the total number of backend invocations allowed for each file during one container start, including the first attempt. `download_failure_policy` applies only at runtime:
+`download_max_attempts` is the total number of backend invocations allowed for each file during one admitted runtime generation, including the first attempt. `download_failure_policy` applies only at runtime:
 
 - for synchronous files, `fail` aborts startup after an ordinary terminal failure or exhausted attempt budget, while `continue` moves to later files;
 - for asynchronous files, `fail` stops the remaining queue without stopping ComfyUI, while `continue` moves to later queued files; and
@@ -106,6 +128,8 @@ synchronous downloads
 
 cdh waits for readiness only when at least one post-start hook exists. It probes the effective ComfyUI port on loopback at `/system_stats` and requires an HTTP 200 JSON object with `system` and `devices`. If ComfyUI exits before readiness or the bounded readiness wait expires, startup fails and post-start hooks do not run.
 
+This complete startup order runs for the initial generation and again for every manually restarted successor.
+
 This readiness gate means the ComfyUI API is serving after startup initialization. It is not a general container health check and does not prove that every custom node, workflow, model, GPU path, or production workload works.
 
 ## Background services started by hooks
@@ -125,10 +149,10 @@ On the first `SIGTERM` or `SIGINT`, cdh:
 3. forwards the original signal to ComfyUI; and
 4. waits for cdh-managed processes to exit and be reaped.
 
-`shutdown_timeout` is one total monotonic budget for this signal path. Its default is eight seconds, with the final two seconds reserved for signaling ComfyUI and reaping managed children. When the earlier hook portion expires, cdh terminates the active hook and skips later hooks. At the total deadline it force-stops managed work that is still alive.
+`shutdown_timeout` is one total monotonic budget for stopping the current generation, whether shutdown begins from an external signal or an accepted manual restart. Its default is eight seconds, with the final two seconds reserved for signaling ComfyUI and reaping managed children. When the earlier hook portion expires, cdh terminates the active hook and skips later hooks. At the total deadline it force-stops managed work that is still alive. A Docker shutdown accepted during restart takes precedence over the successor and cannot extend a deadline that is already running.
 
 A second `SIGTERM` or `SIGINT` skips the remaining grace period and enters force shutdown immediately. A force-killed ComfyUI normally makes the container exit with code 137. When ComfyUI exits naturally, cdh preserves its exit result, cleans up its auxiliary work, and does not run signal-only stop hooks.
 
 Docker or another orchestrator owns a separate external hard limit. Docker Engine uses a 10-second default for Linux containers when no container-specific timeout is configured, and Docker Compose defaults `stop_grace_period` to 10 seconds. cdh's eight-second default leaves only a best-effort scheduling margin. Configure Docker [`--stop-timeout`](https://docs.docker.com/reference/cli/docker/container/run/#options) or Compose [`stop_grace_period`](https://docs.docker.com/reference/compose-file/services/#stop_grace_period) to be greater than the cdh total when hooks need more time.
 
-Setting `shutdown_timeout = -1` disables only the cdh outer and hook deadlines. cdh-owned component operations remain bounded, and Docker's own timeout is independent. No cleanup can continue after an external `SIGKILL`.
+Setting `shutdown_timeout = -1` disables only the cdh outer and hook deadlines for external shutdown and manual restart. cdh-owned component operations remain bounded, and Docker's own timeout is independent. No cleanup can continue after an external `SIGKILL`.

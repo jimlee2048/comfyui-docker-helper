@@ -15,9 +15,14 @@ from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticPath,
     DiagnosticSeverity,
+    SourceReference,
 )
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
-from comfyui_docker_helper.config.merge import merge_toml_documents
+from comfyui_docker_helper.config.merge import (
+    MergePolicyRegistry,
+    SourceDocument,
+    merge_toml_documents,
+)
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime_file_validation import (
     normalize_runtime_file_path,
@@ -34,6 +39,7 @@ from comfyui_docker_helper.config.value_validation import is_argv_value
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
+_RUNTIME_CONFIG_MERGE_POLICIES = MergePolicyRegistry()
 
 type RuntimeConfigPath = str | Path
 type RuntimePath = tuple[str, ...]
@@ -145,7 +151,9 @@ def load_runtime_config(
 ) -> RuntimeConfigurationResult:
     """Load and merge code defaults, baked runtime config, and mounted config."""
     warnings: list[Diagnostic] = []
-    documents: list[dict[str, Any]] = [_runtime_defaults_document()]
+    documents: list[SourceDocument] = [
+        SourceDocument(SourceReference(0, "defaults"), _runtime_defaults_document())
+    ]
     file_documents: list[dict[str, Any]] = []
 
     for config_path in (
@@ -159,7 +167,12 @@ def load_runtime_config(
         document, document_warnings = _prepare_runtime_document(raw_document)
         warnings.extend(document_warnings)
         _validate_runtime_patch(document)
-        documents.append(_runtime_config_document(document))
+        documents.append(
+            SourceDocument(
+                SourceReference(len(documents), str(config_path)),
+                _runtime_config_document(document),
+            )
+        )
         if "files" in document:
             file_documents.append({"files": document["files"]})
 
@@ -168,10 +181,18 @@ def load_runtime_config(
     )
     if env_document:
         _validate_runtime_patch(env_document)
-        documents.append(env_document)
+        documents.append(
+            SourceDocument(
+                SourceReference(len(documents), "environment"),
+                env_document,
+            )
+        )
 
     files = _merge_runtime_file_items(file_documents)
-    merged = merge_toml_documents(documents)
+    merged = merge_toml_documents(
+        documents,
+        policies=_RUNTIME_CONFIG_MERGE_POLICIES,
+    ).document
     _normalize_merged_ssh_public_keys(merged)
     if env_pub_key is not None:
         ssh = merged.setdefault("system", {}).setdefault("ssh", {})

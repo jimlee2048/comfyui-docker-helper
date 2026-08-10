@@ -30,7 +30,7 @@ To build images with cdh, the host needs:
 
 - Python 3.12, 3.13, or 3.14.
 - A working Docker installation with Buildx configured to build Linux containers. On Windows, normally use Docker Desktop in Linux container mode; another endpoint must provide equivalent Linux `amd64` Buildx support. Windows containers are not supported.
-- Git on `PATH` when resolving direct-Git custom nodes. On Windows, install Git for Windows.
+- Git on `PATH` when cdh must resolve Git-backed sources, including ComfyUI selectors that query the repository and direct-Git custom nodes. On Windows, install Git for Windows.
 
 `cdh host *` runs natively on Windows. The generated ComfyUI images still target Linux `amd64`, and `cdh container *` runs inside those Linux images rather than on the Windows host. The standard `uv tool` and `pip` commands below install the required Windows-specific Python dependencies automatically.
 

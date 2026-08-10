@@ -30,7 +30,7 @@
 
 - Python 3.12、3.13 或 3.14。
 - 可正常使用、支持 Buildx 且配置为构建 Linux 容器的 Docker 环境。在 Windows 上，通常使用处于 Linux container mode 的 Docker Desktop；其他 endpoint 必须提供等效的 Linux `amd64` Buildx 支持。不支持 Windows 容器。
-- 解析 direct-Git 自定义节点时，需确保 `PATH` 中存在 Git；Windows 上请安装 Git for Windows。
+- 当 cdh 需要解析 Git-backed source 时，需确保 `PATH` 中存在 Git；这包括需要查询仓库的 ComfyUI selector 和 direct-Git 自定义节点。Windows 上请安装 Git for Windows。
 
 `cdh host *` 可以在 Windows 上原生运行。生成的 ComfyUI 镜像仍以 Linux `amd64` 为目标，`cdh container *` 在这些 Linux 镜像内运行，而不是在 Windows 宿主机上运行。下方标准的 `uv tool` 和 `pip` 命令会自动安装 Windows 所需的 Python 平台依赖。
 

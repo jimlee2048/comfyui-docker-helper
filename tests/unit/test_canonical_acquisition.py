@@ -39,13 +39,15 @@ from comfyui_docker_helper.host.canonical_acquisition import (
 )
 from comfyui_docker_helper.host.identity_providers import (
     LocalExecutableIdentity,
-    LocalExecutableIdentityRequest,
     ManagedPythonIdentity,
     OciIdentity,
 )
 from comfyui_docker_helper.host.uv_docker_executor import (
     UvDockerExecutorError,
     UvResolverResult,
+)
+from comfyui_docker_helper.local_executable import (
+    LocalExecutableIdentityRequest,
 )
 
 DIGEST_A = f"sha256:{'a' * 64}"

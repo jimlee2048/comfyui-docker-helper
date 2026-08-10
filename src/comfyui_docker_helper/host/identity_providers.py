@@ -39,7 +39,9 @@ from comfyui_docker_helper.file_admission import read_regular_absolute_file
 from comfyui_docker_helper.git_credential_policy import (
     noninteractive_git_environment,
 )
-from comfyui_docker_helper.host.secret_session import GitCredentialProcessBinding
+from comfyui_docker_helper.host.git_credential_process import (
+    GitCredentialProcessBinding,
+)
 from comfyui_docker_helper.host.uv_docker_executor import (
     ManagedPythonCatalogOperation,
     UvDockerExecutor,
@@ -48,6 +50,7 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     UvResolverDescriptor,
     uv_image_version_label,
 )
+from comfyui_docker_helper.local_executable import LocalExecutableIdentityRequest
 
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -233,18 +236,6 @@ class DirectGitIdentity:
 
 class DirectGitIdentityProvider(Protocol):
     def resolve(self, request: DirectGitIdentityRequest) -> DirectGitIdentity: ...
-
-
-@dataclass(frozen=True, slots=True)
-class LocalExecutableIdentityRequest:
-    root: Path
-    relative_path: PurePosixPath
-    identity_path: PurePosixPath | None = None
-    stability: SelectorStability = SelectorStability.MOVING
-
-    @property
-    def canonical_path(self) -> PurePosixPath:
-        return self.identity_path or self.relative_path
 
 
 @dataclass(frozen=True, slots=True)

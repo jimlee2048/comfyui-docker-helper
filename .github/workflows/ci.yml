@@ -87,12 +87,18 @@ jobs:
         run: uv sync --locked --all-groups
       - name: Import root CLI
         run: uv run --locked python -c "import comfyui_docker_helper.cli"
+      - name: Verify Windows platform boundary
+        run: >-
+          uv run --locked pytest
+          tests/integration/test_windows_host_boundary.py
       - name: Exercise root version
         run: uv run --locked cdh --version
       - name: Exercise root help
         run: uv run --locked cdh --help
       - name: Exercise host help
         run: uv run --locked cdh host --help
+      - name: Exercise host validation
+        run: uv run --locked cdh host validate -f examples/minimal.toml
       - name: Exercise container boundary help
         run: uv run --locked cdh container --help
 

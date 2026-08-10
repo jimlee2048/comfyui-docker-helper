@@ -44,6 +44,9 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
     ProviderIdentityAcquirer,
 )
+from comfyui_docker_helper.host.git_credential_process import (
+    GitCredentialProcessBinding,
+)
 from comfyui_docker_helper.host.identity_providers import (
     DockerEngineOciIdentityProvider,
     DockerManagedPythonIdentityProvider,
@@ -51,10 +54,9 @@ from comfyui_docker_helper.host.identity_providers import (
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
     HttpRegistryNodeIdentityProvider,
-    LocalExecutableIdentityRequest,
 )
 from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
-from comfyui_docker_helper.host.secret_session import GitCredentialProcessBinding
+from comfyui_docker_helper.local_executable import LocalExecutableIdentityRequest
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.version import package_version
 

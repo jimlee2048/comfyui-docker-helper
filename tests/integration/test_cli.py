@@ -277,6 +277,35 @@ def test_container_helper_help_exposes_build_plan_binding(
     assert "--build-plan-digest" in _plain_output(result.output)
 
 
+def test_container_group_remains_helpful_outside_linux(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the public boundary visible without loading Linux-only services."""
+    monkeypatch.setattr(container_cli.sys, "platform", "win32")
+
+    result = cli_runner.invoke(app, ["container", "--help"])
+
+    assert result.exit_code == 0
+    assert "entrypoint" in _plain_output(result.output)
+
+
+def test_container_execution_reports_linux_only_boundary(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct host users to the supported command surface on non-Linux hosts."""
+    monkeypatch.setattr(container_cli.sys, "platform", "win32")
+
+    result = cli_runner.invoke(app, ["container", "entrypoint"])
+
+    assert result.exit_code == 1
+    assert result.output == (
+        "Error: cdh container commands run only inside the project's Linux image; "
+        "use 'cdh host' on the host machine\n"
+    )
+
+
 def test_registry_helper_help_exposes_only_owned_inputs(
     cli_runner: CliRunner,
 ) -> None:

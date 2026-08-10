@@ -1,8 +1,10 @@
 """Host command group."""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
@@ -39,10 +41,12 @@ from comfyui_docker_helper.host.render_service import (
     admit_build_hook_source,
     prepare_render_context,
 )
-from comfyui_docker_helper.host.secret_session import (
-    HostSecretSession,
-    HostSecretSessionError,
-)
+
+if TYPE_CHECKING:
+    from comfyui_docker_helper.host.secret_session import (
+        HostSecretSession,
+        HostSecretSessionError,
+    )
 
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
 
@@ -168,6 +172,11 @@ def render(
     ] = False,
 ) -> None:
     """Render a context; Docker may be used when new uv resolution is needed."""
+    from comfyui_docker_helper.host.secret_session import (
+        HostSecretSession,
+        HostSecretSessionError,
+    )
+
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
     try:
@@ -348,6 +357,11 @@ def build(
     ] = False,
 ) -> None:
     """Render a build context and build it with Docker Buildx."""
+    from comfyui_docker_helper.host.secret_session import (
+        HostSecretSession,
+        HostSecretSessionError,
+    )
+
     config_files = _require_at_least_one(config_files, "--file/-f")
     cache_from = _admit_single_cache_spec(cache_from_specs or [], "--cache-from")
     cache_to = _admit_single_cache_spec(cache_to_specs or [], "--cache-to")

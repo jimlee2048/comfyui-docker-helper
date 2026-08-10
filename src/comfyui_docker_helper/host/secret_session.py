@@ -10,7 +10,6 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +27,9 @@ from comfyui_docker_helper.file_admission import (
 )
 from comfyui_docker_helper.git_credential_policy import git_credential_config_args
 from comfyui_docker_helper.git_credential_protocol import GitCredentialRuntimeRoute
+from comfyui_docker_helper.host.git_credential_process import (
+    GitCredentialProcessBinding,
+)
 
 __all__ = [
     "GIT_CREDENTIAL_SESSION_ENV",
@@ -43,14 +45,6 @@ _SNAPSHOT_PREFIX = "snapshot-"
 _LOCK_PREFIX = "lock-"
 _FAILURE_PREFIX = "failure-"
 _WARNING_PREFIX = "warning-permissive-mode-"
-
-
-@dataclass(frozen=True, slots=True)
-class GitCredentialProcessBinding:
-    """Safe Git configuration and environment for one private helper session."""
-
-    config_args: tuple[str, ...]
-    environment: Mapping[str, str]
 
 
 class HostSecretSessionError(ValueError):

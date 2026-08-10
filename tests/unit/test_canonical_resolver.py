@@ -38,7 +38,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
-from comfyui_docker_helper.host.identity_providers import (
+from comfyui_docker_helper.local_executable import (
     LocalExecutableIdentityRequest,
 )
 

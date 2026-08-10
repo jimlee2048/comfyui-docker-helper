@@ -16,7 +16,7 @@ from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_SUPPORTED_SUFFIXES,
     runtime_hook_phase_directory_list,
 )
-from comfyui_docker_helper.host.identity_providers import (
+from comfyui_docker_helper.local_executable import (
     LocalExecutableIdentityRequest,
 )
 

@@ -154,6 +154,18 @@ def test_windows_admission_accepts_one_canonical_drive_absolute_path() -> None:
     assert parsed.components == ("Users", "Example User", "密钥.txt")
 
 
+def test_windows_local_path_preflight_accepts_a_local_drive_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeWindowsApi()
+    monkeypatch.setattr(_windows_files, "_PyWin32Api", lambda: api)
+
+    _windows_files.validate_local_absolute_path("C:\\")
+
+    assert api.create_calls == []
+    assert api.attribute_calls == []
+
+
 def test_windows_attributes_adapter_rejects_the_failure_sentinel() -> None:
     api = _windows_files._PyWin32Api.__new__(_windows_files._PyWin32Api)
     api._error_type = OSError

@@ -140,6 +140,19 @@ def test_session_binding_and_snapshot_are_private_exact_and_reused(
         assert reads == 1
 
 
+def test_windows_environment_secret_encodes_unicode_as_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = "合成密钥-🔒"
+    monkeypatch.setattr(secret_session_module, "_platform_name", "nt")
+    monkeypatch.setenv("CDH_TEST_ROOT_TOKEN", value)
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+
+    with HostSecretSession.from_configuration(result) as session:
+        assert session.snapshot("root_token").read_bytes() == value.encode("utf-8")
+
+
 def test_empty_value_fails_at_first_use(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -318,6 +331,43 @@ def test_permissive_mode_warning_survives_invalid_file_value(
     assert len(warnings) == 1
     assert warnings[0].code == "secret.permissive_file_mode"
     assert os.fspath(token) not in warnings[0].message
+
+
+def test_unverifiable_file_permissions_emit_one_content_free_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "configuration" / "token"
+    token.parent.mkdir()
+    token.write_bytes(b"file-token")
+    result = _configuration(tmp_path, source='file = "token"')
+    original_reader = secret_session_module.read_bounded_regular_absolute_file
+
+    def read_without_permission_evidence(path: str, *, max_bytes: int):
+        admitted = original_reader(path, max_bytes=max_bytes)
+        return SimpleNamespace(
+            data=admitted.data,
+            mode=None,
+            permissions_unverifiable=True,
+        )
+
+    monkeypatch.setattr(
+        secret_session_module,
+        "read_bounded_regular_absolute_file",
+        read_without_permission_evidence,
+    )
+
+    with HostSecretSession.from_configuration(result) as session:
+        session.snapshot("root_token")
+        warnings = session.drain_warnings()
+        assert session.drain_warnings() == ()
+
+    assert len(warnings) == 1
+    assert warnings[0].path == ("secrets", "root_token", "file")
+    assert warnings[0].code == "secret.file_permissions_unverifiable"
+    assert warnings[0].severity is DiagnosticSeverity.WARNING
+    assert os.fspath(token) not in warnings[0].message
+    assert "file-token" not in warnings[0].message
 
 
 def test_private_session_files_are_exact_modes_under_restrictive_umask(
@@ -543,3 +593,131 @@ def test_session_creation_failure_is_content_free_and_cleans_partial_root(
     assert partial_root is not None
     assert not partial_root.exists()
     assert os.fspath(partial_root) not in str(raised.value)
+
+
+def test_lock_acquire_failure_closes_descriptor_and_is_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    marker = "synthetic-sensitive-acquire-marker"
+    closed_descriptors: list[int] = []
+    original_close = secret_session_module._close_lock_descriptor
+
+    def fail_acquire(_descriptor: int) -> bool:
+        raise OSError(marker)
+
+    def record_close(descriptor: int) -> None:
+        closed_descriptors.append(descriptor)
+        original_close(descriptor)
+
+    with HostSecretSession.from_configuration(result) as session:
+        monkeypatch.setattr(
+            secret_session_module, "acquire_descriptor_lock", fail_acquire
+        )
+        monkeypatch.setattr(
+            secret_session_module, "_close_lock_descriptor", record_close
+        )
+        with pytest.raises(HostSecretSessionError) as raised:
+            session.snapshot("root_token")
+
+    assert raised.value.code == "snapshot_failed"
+    assert marker not in str(raised.value)
+    assert len(closed_descriptors) == 1
+
+
+@pytest.mark.parametrize("failure", ["unlock", "close"])
+def test_lock_cleanup_failure_is_content_free_and_attempts_close(
+    failure: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    monkeypatch.setenv("CDH_TEST_ROOT_TOKEN", "valid-secret")
+    marker = f"synthetic-sensitive-{failure}-marker"
+    close_calls = 0
+    original_close = secret_session_module._close_lock_descriptor
+
+    def fail_unlock(_descriptor: int) -> None:
+        raise OSError(marker)
+
+    def close_descriptor(descriptor: int) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        original_close(descriptor)
+        if failure == "close":
+            raise OSError(marker)
+
+    with HostSecretSession.from_configuration(result) as session:
+        if failure == "unlock":
+            monkeypatch.setattr(
+                secret_session_module, "release_descriptor_lock", fail_unlock
+            )
+        monkeypatch.setattr(
+            secret_session_module, "_close_lock_descriptor", close_descriptor
+        )
+        with pytest.raises(HostSecretSessionError) as raised:
+            session.snapshot("root_token")
+        assert (session.root / "snapshot-root_token").read_bytes() == b"valid-secret"
+
+    assert raised.value.code == "snapshot_failed"
+    assert marker not in str(raised.value)
+    assert close_calls == 1
+
+
+def test_snapshot_body_failure_is_cached_and_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    monkeypatch.setenv("CDH_TEST_ROOT_TOKEN", "synthetic-secret-value")
+    marker = "synthetic-sensitive-body-marker"
+
+    def fail_snapshot_write(path: Path, data: bytes) -> None:
+        raise OSError(f"{marker}: {path}: {data!r}")
+
+    with HostSecretSession.from_configuration(result) as session:
+        monkeypatch.setattr(
+            secret_session_module, "_write_snapshot", fail_snapshot_write
+        )
+        with pytest.raises(HostSecretSessionError) as raised:
+            session.snapshot("root_token")
+        assert (session.root / "failure-root_token").read_bytes() == b"snapshot_failed"
+
+    assert raised.value.code == "snapshot_failed"
+    assert marker not in str(raised.value)
+    assert "synthetic-secret-value" not in str(raised.value)
+
+
+def test_snapshot_body_error_outranks_lock_cleanup_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    monkeypatch.setattr(
+        secret_session_module.os,
+        "environb",
+        {b"CDH_TEST_ROOT_TOKEN": b""},
+    )
+    cleanup_calls: list[str] = []
+    original_close = secret_session_module._close_lock_descriptor
+
+    def fail_unlock(_descriptor: int) -> None:
+        cleanup_calls.append("unlock")
+        raise OSError("synthetic-sensitive-unlock-marker")
+
+    def fail_close(descriptor: int) -> None:
+        cleanup_calls.append("close")
+        original_close(descriptor)
+        raise OSError("synthetic-sensitive-close-marker")
+
+    with HostSecretSession.from_configuration(result) as session:
+        monkeypatch.setattr(
+            secret_session_module, "release_descriptor_lock", fail_unlock
+        )
+        monkeypatch.setattr(secret_session_module, "_close_lock_descriptor", fail_close)
+        with pytest.raises(HostSecretSessionError) as raised:
+            session.snapshot("root_token")
+
+    assert raised.value.code == "invalid_value"
+    assert cleanup_calls == ["unlock", "close"]

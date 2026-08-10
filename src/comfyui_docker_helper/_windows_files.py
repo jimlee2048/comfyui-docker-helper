@@ -417,6 +417,13 @@ def read_regular_absolute_file(path: str, *, max_bytes: int | None) -> bytes:
     return _read_regular_absolute_file(path, max_bytes=max_bytes, api=_PyWin32Api())
 
 
+def validate_local_absolute_path(path: str) -> None:
+    """Reject unsupported Windows namespaces before filesystem traversal."""
+    parsed = _parse_windows_regular_file_path(path, allow_drive_root=True)
+    if _PyWin32Api().get_drive_type(parsed.drive_root) not in _LOCAL_DRIVE_TYPES:
+        raise OSError("path requires a verifiable local drive")
+
+
 def create_private_directory(parent: str, *, prefix: str) -> str:
     """Create and verify one private random directory below a canonical parent."""
     return _create_private_directory_windows(
@@ -680,7 +687,9 @@ def _suppress_close_windows_handles(api: _WindowsApi, handles: list[object]) -> 
         _close_windows_handles(api, handles)
 
 
-def _parse_windows_regular_file_path(path: str) -> _ParsedWindowsPath:
+def _parse_windows_regular_file_path(
+    path: str, *, allow_drive_root: bool = False
+) -> _ParsedWindowsPath:
     if not path or "/" in path or ntpath.normpath(path) != path:
         raise ValueError(_INVALID_PATH_MESSAGE)
     drive, tail = ntpath.splitdrive(path)
@@ -692,7 +701,11 @@ def _parse_windows_regular_file_path(path: str) -> _ParsedWindowsPath:
     ):
         raise ValueError(_INVALID_PATH_MESSAGE)
     components = tuple(tail.split("\\")[1:])
-    if not components or any(not _valid_component(part) for part in components):
+    if allow_drive_root and components == ("",):
+        components = ()
+    if (not components and not allow_drive_root) or any(
+        not _valid_component(part) for part in components
+    ):
         raise ValueError(_INVALID_PATH_MESSAGE)
     return _ParsedWindowsPath(f"{drive[0].upper()}:\\", components)
 

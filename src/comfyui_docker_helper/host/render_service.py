@@ -44,6 +44,10 @@ from comfyui_docker_helper.config.service import (
     ConfigurationResult,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
+from comfyui_docker_helper.host.hook_paths import (
+    lexical_hook_source_root,
+    observed_path_is_real_directory,
+)
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
     build_local_executable_requests,
@@ -466,6 +470,8 @@ def _validate_input_output_separation(
 ) -> None:
     if source is None:
         return
+    # Resolution here is only an overlap comparison. The lexical source path is
+    # retained for later admission so links are not hidden from that boundary.
     try:
         output_resolved = output.resolve(strict=False)
         source_resolved = source.resolve(strict=True)
@@ -502,16 +508,22 @@ def _build_hook_source_root(
             "hook.build_hooks_dir_required",
             "--build-hooks-dir is required when build hooks are configured",
         )
-    base = Path.cwd() if working_directory is None else Path(working_directory)
-    selected = Path(build_hooks_dir)
-    candidate = selected if selected.is_absolute() else base / selected
     try:
-        return candidate.resolve(strict=True)
-    except OSError as error:
+        root = lexical_hook_source_root(
+            build_hooks_dir, working_directory=working_directory
+        )
+        source_is_real_directory = observed_path_is_real_directory(root)
+    except (OSError, ValueError) as error:
         raise _render_error(
             "render.build_hook_source_unavailable",
-            "build hook source could not be resolved",
+            "build hook source could not be inspected",
         ) from error
+    if not source_is_real_directory:
+        raise _render_error(
+            "render.build_hook_source_unavailable",
+            "build hook source must be an existing real directory",
+        )
+    return root
 
 
 def _runtime_provenance(result: ConfigurationResult) -> RuntimePlanningProvenance:

@@ -25,6 +25,7 @@ def validate_hook_relative_path(value: str) -> str:
         not value
         or value.startswith("/")
         or "\\" in value
+        or ":" in value
         or has_control_characters(value)
         or path.as_posix() != value
         or any(part in {"", ".", ".."} for part in path.parts)

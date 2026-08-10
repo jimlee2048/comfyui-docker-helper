@@ -34,6 +34,7 @@ from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.rendering import final_materializer as materializer_module
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
     LocalMaterializationSource,
@@ -812,9 +813,52 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
         )
 
 
+def test_materializer_writes_the_same_admitted_bytes_it_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admitted = b"admitted hook bytes\n"
+    digest = f"sha256:{hashlib.sha256(admitted).hexdigest()}"
+    build_hooks = tmp_path / "build_hooks"
+    source = build_hooks / "hooks/pre.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"different on-disk bytes")
+    plan = build_plan(
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    output = tmp_path / "output"
+    output.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        materializer_module,
+        "read_regular_absolute_file",
+        lambda _path: admitted,
+    )
+
+    _materialize_private_stage(
+        plan,
+        output,
+        canonical_wheel=canonical_wheel(),
+        local_sources=(
+            LocalMaterializationSource(
+                PurePosixPath("build-hooks/hooks/pre.py"), source
+            ),
+        ),
+    )
+
+    assert (output / "build/hooks/hooks/pre.py").read_bytes() == admitted
+
+
 @pytest.mark.parametrize(
     "relative_path",
-    ["../escape.py", "/tmp/escape.py", "hooks\\pre.py", "", "hooks/./pre.py"],
+    [
+        "../escape.py",
+        "/tmp/escape.py",
+        "hooks\\pre.py",
+        "C:/escape.py",
+        "C:escape.py",
+        "",
+        "hooks/./pre.py",
+    ],
 )
 def test_parsed_build_plan_rejects_unsafe_hook_paths(
     tmp_path: Path,

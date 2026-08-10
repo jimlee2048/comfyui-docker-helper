@@ -6,7 +6,7 @@ import os
 import signal
 import socket
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from types import FrameType
 from typing import Never
@@ -80,10 +80,7 @@ def restart_runtime(
                         raise RuntimeControlClientError(
                             "The runtime controller sent an invalid response sequence."
                         )
-                    _send_message(
-                        peer,
-                        RuntimeAckRequest(operation=response.operation),
-                    )
+                    _send_terminal_ack_best_effort(peer, response.operation)
                     if response.result == "failed":
                         detail = response.message or "The successor did not start."
                         raise RuntimeControlClientError(
@@ -208,6 +205,14 @@ def _send_message(
         raise RuntimeControlClientError(
             "The connection to the runtime controller was lost."
         ) from error
+
+
+def _send_terminal_ack_best_effort(peer: socket.socket, operation: str) -> None:
+    with suppress(OSError, _RuntimeControlClientInterrupted):
+        send_runtime_control_message(
+            peer,
+            RuntimeAckRequest(operation=operation),
+        )
 
 
 @contextmanager

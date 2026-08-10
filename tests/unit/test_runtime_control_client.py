@@ -17,6 +17,7 @@ from comfyui_docker_helper.container.runtime_control import (
     RuntimeErrorResponse,
     RuntimeLogResponse,
     RuntimeStatusResponse,
+    RuntimeTerminalResponse,
 )
 from comfyui_docker_helper.container.runtime_control_client import (
     RuntimeControlClientError,
@@ -111,6 +112,88 @@ def test_send_failure_is_a_concise_client_error(
         else:
             read_runtime_status(Path("unused"))
 
+    assert peer.closed is True
+
+
+@pytest.mark.parametrize("result", ["succeeded", "failed"])
+def test_terminal_result_wins_when_best_effort_ack_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    result: str,
+) -> None:
+    peer = _FakePeer()
+    responses: Iterator[object] = iter(
+        (
+            RuntimeAcceptedResponse(operation="op-9"),
+            RuntimeTerminalResponse(
+                operation="op-9",
+                result=result,
+                message="synthetic successor failure" if result == "failed" else None,
+            ),
+        )
+    )
+    send_count = 0
+
+    monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
+    monkeypatch.setattr(
+        client_module,
+        "_receive_response",
+        lambda _peer: next(responses),
+    )
+
+    def send(_peer: object, _message: object) -> None:
+        nonlocal send_count
+        send_count += 1
+        if send_count == 2:
+            raise BrokenPipeError("synthetic ACK write failure")
+
+    monkeypatch.setattr(client_module, "send_runtime_control_message", send)
+
+    if result == "succeeded":
+        assert restart_runtime(Path("unused")) == "op-9"
+    else:
+        with pytest.raises(
+            RuntimeControlClientError,
+            match="synthetic successor failure",
+        ):
+            restart_runtime(Path("unused"))
+
+    assert send_count == 2
+    assert peer.closed is True
+
+
+def test_terminal_result_wins_when_best_effort_ack_is_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    peer = _FakePeer()
+    responses: Iterator[object] = iter(
+        (
+            RuntimeAcceptedResponse(operation="op-9"),
+            RuntimeTerminalResponse(
+                operation="op-9",
+                result="succeeded",
+                message=None,
+            ),
+        )
+    )
+    send_count = 0
+
+    monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
+    monkeypatch.setattr(
+        client_module,
+        "_receive_response",
+        lambda _peer: next(responses),
+    )
+
+    def send(_peer: object, _message: object) -> None:
+        nonlocal send_count
+        send_count += 1
+        if send_count == 2:
+            signal.raise_signal(signal.SIGINT)
+
+    monkeypatch.setattr(client_module, "send_runtime_control_message", send)
+
+    assert restart_runtime(Path("unused")) == "op-9"
+    assert send_count == 2
     assert peer.closed is True
 
 

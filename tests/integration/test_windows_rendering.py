@@ -63,7 +63,7 @@ def test_windows_open_output_handle_preserves_original_context(
         win32con.FILE_SHARE_READ,
         None,
         win32con.OPEN_EXISTING,
-        win32con.FILE_FLAG_BACKUP_SEMANTICS | win32con.FILE_FLAG_OPEN_REPARSE_POINT,
+        win32con.FILE_FLAG_BACKUP_SEMANTICS,
         None,
     )
     try:

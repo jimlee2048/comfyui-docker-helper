@@ -104,6 +104,10 @@ jobs:
           uv run --locked pytest
           tests/integration/test_windows_host_secret_session.py
           tests/integration/test_windows_hook_inputs.py
+      - name: Verify Windows rendering
+        run: >-
+          uv run --locked pytest
+          tests/integration/test_windows_rendering.py
       - name: Exercise root version
         run: uv run --locked cdh --version
       - name: Exercise root help

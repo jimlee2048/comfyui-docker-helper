@@ -6,15 +6,18 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from comfyui_docker_helper.errors import ApplicationError
 
 RUNTIME_LOG_READ_CHUNK_BYTES = 16 * 1024
 RUNTIME_LOG_CLOSE_JOIN_SECONDS = 0.5
+RUNTIME_LOG_FOLLOWER_QUEUE_BYTES = 256 * 1024
+RUNTIME_LOG_MAX_FOLLOWERS = 8
 _RUNTIME_LOG_DIAGNOSTIC_MAX_BYTES = 1024
 
 type RuntimeLogStream = Literal["stdout", "stderr"]
@@ -27,10 +30,85 @@ class RuntimeLoggingError(ApplicationError):
     """The controller cannot preserve its primary output path."""
 
 
+class RuntimeLoggingFollowerLimitError(RuntimeError):
+    """The fixed live follower capacity is already in use."""
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeLoggingFailure:
     stream: RuntimeLogStream
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeLogChunk:
+    stream: RuntimeLogStream
+    data: bytes
+
+
+type RuntimeLogFollowerCloseReason = Literal[
+    "broker_closed",
+    "client_closed",
+    "overflow",
+]
+
+
+class RuntimeLogFollower:
+    """One live-only bounded subscriber queue."""
+
+    def __init__(self, broker: RuntimeLoggingBroker) -> None:
+        self._broker = broker
+        self._condition = threading.Condition()
+        self._chunks: deque[RuntimeLogChunk] = deque()
+        self._queued_bytes = 0
+        self._close_reason: RuntimeLogFollowerCloseReason | None = None
+
+    def receive(self, timeout: float | None = None) -> RuntimeLogChunk | None:
+        with self._condition:
+            available = self._condition.wait_for(
+                lambda: bool(self._chunks) or self._close_reason is not None,
+                timeout=timeout,
+            )
+            if not available or not self._chunks:
+                return None
+            chunk = self._chunks.popleft()
+            self._queued_bytes -= len(chunk.data)
+            return chunk
+
+    def close(self) -> None:
+        self._broker._remove_follower(self, reason="client_closed")
+
+    def close_reason(self) -> RuntimeLogFollowerCloseReason | None:
+        with self._condition:
+            return self._close_reason
+
+    def _publish(self, chunk: RuntimeLogChunk) -> bool:
+        with self._condition:
+            if self._close_reason is not None:
+                return False
+            if self._queued_bytes + len(chunk.data) > RUNTIME_LOG_FOLLOWER_QUEUE_BYTES:
+                self._close_unlocked("overflow")
+                return False
+            self._chunks.append(chunk)
+            self._queued_bytes += len(chunk.data)
+            self._condition.notify()
+            return True
+
+    def _close(self, reason: RuntimeLogFollowerCloseReason) -> None:
+        with self._condition:
+            self._close_unlocked(reason)
+
+    def _close_unlocked(self, reason: RuntimeLogFollowerCloseReason) -> None:
+        if self._close_reason is not None:
+            return
+        self._close_reason = reason
+        self._chunks.clear()
+        self._queued_bytes = 0
+        self._condition.notify_all()
+
+
+class RuntimeLogFollowerSource(Protocol):
+    def follow(self) -> RuntimeLogFollower: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +135,8 @@ class RuntimeLoggingBroker:
         self._failure_event = threading.Event()
         self._failure_lock = threading.Lock()
         self._failure: RuntimeLoggingFailure | None = None
+        self._followers_lock = threading.Lock()
+        self._followers: set[RuntimeLogFollower] = set()
         self._pipes: tuple[_RuntimeLogPipe, ...] = ()
         self._threads: tuple[threading.Thread, ...] = ()
         self._started = False
@@ -145,6 +225,7 @@ class RuntimeLoggingBroker:
         if self._closed:
             return
         self._closed = True
+        self._close_followers()
         if not self._started:
             return
         self._closing.set()
@@ -168,6 +249,18 @@ class RuntimeLoggingBroker:
 
     def wait_for_failure(self, timeout: float | None = None) -> bool:
         return self._failure_event.wait(timeout)
+
+    def follow(self) -> RuntimeLogFollower:
+        with self._followers_lock:
+            if not self._started or self._closed:
+                raise RuntimeLoggingError("Runtime logging is not available.")
+            if len(self._followers) >= RUNTIME_LOG_MAX_FOLLOWERS:
+                raise RuntimeLoggingFollowerLimitError(
+                    "The runtime log follower limit has been reached."
+                )
+            follower = RuntimeLogFollower(self)
+            self._followers.add(follower)
+            return follower
 
     def __enter__(self) -> RuntimeLoggingBroker:
         self.start()
@@ -208,6 +301,8 @@ class RuntimeLoggingBroker:
                         pipe.stream,
                         f"Runtime {pipe.stream} primary output failed: {error}.",
                     )
+                    continue
+                self._publish(RuntimeLogChunk(stream=pipe.stream, data=chunk))
         finally:
             with suppress(OSError):
                 os.close(pipe.read_fd)
@@ -241,6 +336,30 @@ class RuntimeLoggingBroker:
             except OSError:
                 continue
             return
+
+    def _publish(self, chunk: RuntimeLogChunk) -> None:
+        with self._followers_lock:
+            followers = tuple(self._followers)
+        for follower in followers:
+            if not follower._publish(chunk):
+                self._remove_follower(follower, reason="overflow")
+
+    def _remove_follower(
+        self,
+        follower: RuntimeLogFollower,
+        *,
+        reason: RuntimeLogFollowerCloseReason,
+    ) -> None:
+        with self._followers_lock:
+            self._followers.discard(follower)
+        follower._close(reason)
+
+    def _close_followers(self) -> None:
+        with self._followers_lock:
+            followers = tuple(self._followers)
+            self._followers.clear()
+        for follower in followers:
+            follower._close("broker_closed")
 
 
 def open_runtime_logging_broker(

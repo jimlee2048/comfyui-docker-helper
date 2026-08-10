@@ -62,6 +62,7 @@ from comfyui_docker_helper.container.runtime_lifecycle import (
     run_runtime_lifecycle,
 )
 from comfyui_docker_helper.container.runtime_logging import (
+    RuntimeLoggingBroker,
     RuntimeLoggingFactory,
     open_runtime_logging_broker,
 )
@@ -251,9 +252,10 @@ def run_runtime_serve(
 ) -> int:
     """Own controller-lifetime output and execute serial runtime generations."""
     controller = RuntimeController()
-    with runtime_logging_factory(controller.observe_runtime_failure):
+    with runtime_logging_factory(controller.observe_runtime_failure) as logging_broker:
         return _run_runtime_serve(
             controller=controller,
+            logging_broker=logging_broker,
             runtime=runtime,
             baked_config_path=baked_config_path,
             mounted_config_path=mounted_config_path,
@@ -278,6 +280,7 @@ def run_runtime_serve(
 def _run_runtime_serve(
     *,
     controller: RuntimeController,
+    logging_broker: RuntimeLoggingBroker,
     runtime: ContainerRuntime | None,
     baked_config_path: str | Path,
     mounted_config_path: str | Path,
@@ -316,7 +319,7 @@ def _run_runtime_serve(
     )
     listener = open_runtime_control_listener(control_socket_path)
     with (
-        RuntimeControlServer(listener, controller),
+        RuntimeControlServer(listener, controller, logging_broker),
         _runtime_controller_signal_handlers(controller),
     ):
         try:

@@ -17,6 +17,7 @@ from comfyui_docker_helper.container.runtime_control import (
     RuntimeErrorResponse,
     RuntimeFollowRequest,
     RuntimeLastRestart,
+    RuntimeLogResponse,
     RuntimeRestartRequest,
     RuntimeStatusRequest,
     RuntimeStatusResponse,
@@ -29,9 +30,17 @@ from comfyui_docker_helper.container.runtime_controller import (
     RuntimeRestartTicket,
     RuntimeRestartTicketSnapshot,
 )
+from comfyui_docker_helper.container.runtime_logging import (
+    RuntimeLogFollower,
+    RuntimeLogFollowerSource,
+    RuntimeLoggingError,
+    RuntimeLoggingFollowerLimitError,
+)
 
 _ACCEPT_POLL_SECONDS = 0.1
 _TICKET_POLL_SECONDS = 0.05
+_FOLLOW_POLL_SECONDS = 0.1
+_FOLLOW_SEND_TIMEOUT_SECONDS = 0.1
 _WIRE_MESSAGE_MAX_CHARS = 4096
 
 
@@ -42,9 +51,11 @@ class RuntimeControlServer:
         self,
         listener: RuntimeControlListener,
         controller: RuntimeController,
+        logging_broker: RuntimeLogFollowerSource,
     ) -> None:
         self._listener = listener
         self._controller = controller
+        self._logging_broker = logging_broker
         self._stop = threading.Event()
         self._peers_lock = threading.Lock()
         self._peers: set[socket.socket] = set()
@@ -103,6 +114,7 @@ class RuntimeControlServer:
 
     def _handle_peer(self, peer: socket.socket) -> None:
         ticket: RuntimeRestartTicket | None = None
+        follower: RuntimeLogFollower | None = None
         try:
             try:
                 request = receive_runtime_control_request(peer)
@@ -130,7 +142,30 @@ class RuntimeControlServer:
                 assert ticket is not None
                 self._serve_restart(peer, ticket)
                 return
-            if isinstance(request, (RuntimeFollowRequest, RuntimeAckRequest)):
+            if isinstance(request, RuntimeFollowRequest):
+                try:
+                    follower = self._logging_broker.follow()
+                except RuntimeLoggingFollowerLimitError:
+                    send_runtime_control_message(
+                        peer,
+                        RuntimeErrorResponse(
+                            code="busy",
+                            message="The runtime log follower limit has been reached.",
+                        ),
+                    )
+                    return
+                except RuntimeLoggingError:
+                    send_runtime_control_message(
+                        peer,
+                        RuntimeErrorResponse(
+                            code="unavailable",
+                            message="Runtime logging is not available.",
+                        ),
+                    )
+                    return
+                self._serve_follow(peer, follower)
+                return
+            if isinstance(request, RuntimeAckRequest):
                 self._send_invalid_request(peer)
         except OSError:
             if ticket is not None:
@@ -138,9 +173,44 @@ class RuntimeControlServer:
         finally:
             if ticket is not None:
                 ticket.mark_delivery_complete()
+            if follower is not None:
+                follower.close()
             with self._peers_lock:
                 self._peers.discard(peer)
             peer.close()
+
+    def _serve_follow(
+        self,
+        peer: socket.socket,
+        follower: RuntimeLogFollower,
+    ) -> None:
+        peer.settimeout(_FOLLOW_SEND_TIMEOUT_SECONDS)
+        while not self._stop.is_set():
+            if self._peer_has_input_or_eof(peer):
+                return
+            chunk = follower.receive(timeout=_FOLLOW_POLL_SECONDS)
+            if chunk is not None:
+                send_runtime_control_message(
+                    peer,
+                    RuntimeLogResponse.from_bytes(chunk.stream, chunk.data),
+                )
+                continue
+            reason = follower.close_reason()
+            if reason == "overflow":
+                with suppress(OSError):
+                    send_runtime_control_message(
+                        peer,
+                        RuntimeErrorResponse(
+                            code="unavailable",
+                            message=(
+                                "The runtime log follower fell behind and was "
+                                "disconnected."
+                            ),
+                        ),
+                    )
+                return
+            if reason is not None:
+                return
 
     def _serve_restart(
         self,

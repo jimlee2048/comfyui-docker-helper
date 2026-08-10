@@ -188,6 +188,26 @@ broker.close()
 """
 
 
+_SLOW_FOLLOWER = r"""
+import os
+
+from comfyui_docker_helper.container.runtime_logging import RuntimeLoggingBroker
+
+
+broker = RuntimeLoggingBroker()
+broker.start()
+follower = broker.follow()
+payload = b"slow-follower-primary" * (32 * 1024)
+remaining = memoryview(payload)
+while remaining:
+    written = os.write(1, remaining)
+    remaining = remaining[written:]
+if follower.close_reason() != "overflow":
+    raise SystemExit(51)
+broker.close()
+"""
+
+
 def test_broker_preserves_raw_primary_output_and_descendant_inheritance() -> None:
     result = subprocess.run(
         [sys.executable, "-c", _REAL_FD_BROKER],
@@ -251,3 +271,17 @@ def test_broker_close_flushes_buffered_bytes_to_saved_primary_streams() -> None:
     assert result.returncode == 0
     assert result.stdout == b"buffered-stdout"
     assert result.stderr == b"buffered-stderr"
+
+
+def test_slow_follower_never_backpressures_saved_primary_output() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", _SLOW_FOLLOWER],
+        capture_output=True,
+        check=False,
+        timeout=10.0,
+    )
+
+    payload = b"slow-follower-primary" * (32 * 1024)
+    assert result.returncode == 0
+    assert result.stdout == payload
+    assert result.stderr == b""

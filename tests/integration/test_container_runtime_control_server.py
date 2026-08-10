@@ -16,8 +16,11 @@ import pytest
 from comfyui_docker_helper.container.runtime_control import (
     RuntimeAcceptedResponse,
     RuntimeAckRequest,
+    RuntimeControlListener,
     RuntimeControlResponse,
     RuntimeErrorResponse,
+    RuntimeFollowRequest,
+    RuntimeLogResponse,
     RuntimePeerCredentials,
     RuntimeRestartRequest,
     RuntimeStatusRequest,
@@ -37,6 +40,35 @@ from comfyui_docker_helper.container.runtime_control_server import (
     RuntimeControlServer,
 )
 from comfyui_docker_helper.container.runtime_controller import RuntimeController
+from comfyui_docker_helper.container.runtime_logging import (
+    RUNTIME_LOG_MAX_FOLLOWERS,
+    RuntimeLogChunk,
+    RuntimeLogFollower,
+    RuntimeLoggingBroker,
+    RuntimeLoggingError,
+)
+
+
+class _UnavailableLoggingBroker:
+    def follow(self) -> RuntimeLogFollower:
+        raise RuntimeLoggingError("not used by this test")
+
+
+def _server(
+    listener: RuntimeControlListener,
+    controller: RuntimeController,
+) -> RuntimeControlServer:
+    return RuntimeControlServer(
+        listener,
+        controller,
+        _UnavailableLoggingBroker(),
+    )
+
+
+def _active_logging_broker() -> RuntimeLoggingBroker:
+    broker = RuntimeLoggingBroker()
+    broker._started = True
+    return broker
 
 
 def _endpoint(tmp_path: Path) -> Path:
@@ -70,7 +102,7 @@ def test_status_observes_starting_then_running_snapshot(tmp_path: Path) -> None:
     controller = RuntimeController()
     listener = open_runtime_control_listener(endpoint)
 
-    with RuntimeControlServer(listener, controller):
+    with _server(listener, controller):
         starting = read_runtime_status(endpoint)
         controller.begin_initial_admission()
         controller.mark_initial_generation_running()
@@ -99,7 +131,7 @@ def test_restart_sends_accepted_before_terminal_and_drains_matching_ack(
     controller = _running_controller()
     listener = open_runtime_control_listener(endpoint)
 
-    with RuntimeControlServer(listener, controller):
+    with _server(listener, controller):
         client = connect_runtime_control(endpoint)
         try:
             send_runtime_control_message(client, RuntimeRestartRequest())
@@ -128,7 +160,7 @@ def test_preaccept_terminal_rejects_restart_without_invalid_request(
     controller = _running_controller()
     listener = open_runtime_control_listener(endpoint)
 
-    with RuntimeControlServer(listener, controller):
+    with _server(listener, controller):
         client = connect_runtime_control(endpoint)
         try:
             send_runtime_control_message(client, RuntimeRestartRequest())
@@ -150,7 +182,7 @@ def test_pending_disconnect_withdraws_but_accepted_disconnect_continues(
     controller = _running_controller()
     listener = open_runtime_control_listener(endpoint)
 
-    with RuntimeControlServer(listener, controller):
+    with _server(listener, controller):
         pending = connect_runtime_control(endpoint)
         send_runtime_control_message(pending, RuntimeRestartRequest())
         assert controller.wait(1.0) is True
@@ -188,7 +220,7 @@ def test_rejected_peer_and_malformed_frame_do_not_stop_accept_loop(
         endpoint,
         peer_credential_reader=admit_after_first,
     )
-    with RuntimeControlServer(listener, controller):
+    with _server(listener, controller):
         rejected = connect_runtime_control(endpoint)
         rejected.sendall(struct.pack(">I", 0))
         with suppress(ConnectionResetError):
@@ -221,7 +253,7 @@ def test_restart_client_reports_success_failure_and_busy(tmp_path: Path) -> None
         controller.publish_restart_terminal("succeeded")
         assert controller.release_successful_restart() is True
 
-    with RuntimeControlServer(listener, controller):
+    with _server(listener, controller):
         driver = threading.Thread(target=complete_success)
         driver.start()
         assert restart_runtime(endpoint) == "op-1"
@@ -248,7 +280,79 @@ def test_restart_client_reports_success_failure_and_busy(tmp_path: Path) -> None
     busy_controller = RuntimeController()
     busy_listener = open_runtime_control_listener(busy_endpoint)
     with (
-        RuntimeControlServer(busy_listener, busy_controller),
+        _server(busy_listener, busy_controller),
         pytest.raises(RuntimeControlClientError, match="mutation"),
     ):
         restart_runtime(busy_endpoint)
+
+
+def test_follow_streams_live_binary_frames_across_runtime_boundaries(
+    tmp_path: Path,
+) -> None:
+    endpoint = _endpoint(tmp_path)
+    controller = _running_controller()
+    broker = _active_logging_broker()
+    broker._publish(RuntimeLogChunk("stdout", b"before-subscription"))
+    listener = open_runtime_control_listener(endpoint)
+
+    with RuntimeControlServer(listener, controller, broker):
+        client = connect_runtime_control(endpoint)
+        try:
+            send_runtime_control_message(client, RuntimeFollowRequest())
+            _wait_until(lambda: len(broker._followers) == 1)
+            broker._publish(RuntimeLogChunk("stdout", b"old\x00\xff"))
+            assert _receive(client) == RuntimeLogResponse.from_bytes(
+                "stdout", b"old\x00\xff"
+            )
+
+            submission = controller.submit_restart(delivery_expected=False)
+            assert submission.disposition == "submitted"
+            assert controller.accept_if_requested(accepted_at=1.0) is True
+            assert controller.allocate_restart_successor() == "gen-2"
+            controller.publish_restart_terminal("succeeded")
+            assert controller.release_successful_restart() is True
+
+            broker._publish(RuntimeLogChunk("stderr", b"new-generation"))
+            assert _receive(client) == RuntimeLogResponse.from_bytes(
+                "stderr", b"new-generation"
+            )
+        finally:
+            client.close()
+
+
+def test_follow_limit_is_busy_and_disconnected_slot_is_reused(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    controller = _running_controller()
+    broker = _active_logging_broker()
+    listener = open_runtime_control_listener(endpoint)
+    followers: list[socket.socket] = []
+
+    with RuntimeControlServer(listener, controller, broker):
+        for _ in range(RUNTIME_LOG_MAX_FOLLOWERS):
+            client = connect_runtime_control(endpoint)
+            send_runtime_control_message(client, RuntimeFollowRequest())
+            followers.append(client)
+        _wait_until(lambda: len(broker._followers) == RUNTIME_LOG_MAX_FOLLOWERS)
+
+        excess = connect_runtime_control(endpoint)
+        send_runtime_control_message(excess, RuntimeFollowRequest())
+        assert _receive(excess) == RuntimeErrorResponse(
+            code="busy",
+            message="The runtime log follower limit has been reached.",
+        )
+        excess.close()
+
+        followers.pop().close()
+        _wait_until(lambda: len(broker._followers) == RUNTIME_LOG_MAX_FOLLOWERS - 1)
+        replacement = connect_runtime_control(endpoint)
+        send_runtime_control_message(replacement, RuntimeFollowRequest())
+        followers.append(replacement)
+        _wait_until(lambda: len(broker._followers) == RUNTIME_LOG_MAX_FOLLOWERS)
+
+        broker._publish(RuntimeLogChunk("stdout", b"replacement"))
+        assert _receive(replacement) == RuntimeLogResponse.from_bytes(
+            "stdout", b"replacement"
+        )
+
+    for follower in followers:
+        follower.close()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import socket
 from collections.abc import Callable
@@ -17,6 +18,8 @@ from comfyui_docker_helper.container.runtime_control import (
     RuntimeControlProtocolError,
     RuntimeControlResponse,
     RuntimeErrorResponse,
+    RuntimeFollowRequest,
+    RuntimeLogResponse,
     RuntimeRestartRequest,
     RuntimeStatusRequest,
     RuntimeStatusResponse,
@@ -119,6 +122,44 @@ def read_runtime_status(
     )
 
 
+def follow_runtime(
+    path: Path = RUNTIME_CONTROL_SOCKET_PATH,
+    *,
+    stdout_fd: int = 1,
+    stderr_fd: int = 2,
+) -> int:
+    """Follow live controller output without owning runtime lifecycle."""
+    peer: socket.socket | None = None
+    try:
+        with _runtime_client_signal_handlers(
+            lambda: None,
+            handled_signals=(signal.SIGINT, signal.SIGTERM, signal.SIGHUP),
+        ):
+            peer = connect_runtime_control(path)
+            _send_message(peer, RuntimeFollowRequest())
+            while True:
+                response = _receive_follow_response(peer)
+                if response is None:
+                    return 0
+                if isinstance(response, RuntimeLogResponse):
+                    target_fd = stdout_fd if response.stream == "stdout" else stderr_fd
+                    try:
+                        _write_all(target_fd, response.as_bytes())
+                    except OSError:
+                        return 1
+                    continue
+                if isinstance(response, RuntimeErrorResponse):
+                    raise RuntimeControlClientError(response.message)
+                raise RuntimeControlClientError(
+                    "The runtime controller sent an unexpected response."
+                )
+    except _RuntimeControlClientInterrupted as interrupted:
+        return 128 + int(interrupted.signal)
+    finally:
+        if peer is not None:
+            peer.close()
+
+
 def _receive_response(peer: socket.socket) -> RuntimeControlResponse:
     try:
         response = receive_runtime_control_response(peer)
@@ -137,9 +178,29 @@ def _receive_response(peer: socket.socket) -> RuntimeControlResponse:
     return response
 
 
+def _receive_follow_response(
+    peer: socket.socket,
+) -> RuntimeControlResponse | None:
+    try:
+        return receive_runtime_control_response(peer)
+    except RuntimeControlProtocolError as error:
+        raise RuntimeControlClientError(
+            "The runtime controller sent a malformed response."
+        ) from error
+    except OSError as error:
+        raise RuntimeControlClientError(
+            "The connection to the runtime controller was lost."
+        ) from error
+
+
 def _send_message(
     peer: socket.socket,
-    message: RuntimeRestartRequest | RuntimeStatusRequest | RuntimeAckRequest,
+    message: (
+        RuntimeRestartRequest
+        | RuntimeStatusRequest
+        | RuntimeFollowRequest
+        | RuntimeAckRequest
+    ),
 ) -> None:
     try:
         send_runtime_control_message(peer, message)
@@ -150,18 +211,20 @@ def _send_message(
 
 
 @contextmanager
-def _runtime_client_signal_handlers(operation: Callable[[], str | None]):
-    previous_handlers = {
-        sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)
-    }
+def _runtime_client_signal_handlers(
+    operation: Callable[[], str | None],
+    *,
+    handled_signals: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM),
+):
+    previous_handlers = {sig: signal.getsignal(sig) for sig in handled_signals}
 
     def interrupt(sig: signal.Signals, frame: FrameType | None) -> Never:
         del frame
         raise _RuntimeControlClientInterrupted(signal.Signals(sig), operation())
 
     try:
-        signal.signal(signal.SIGINT, interrupt)
-        signal.signal(signal.SIGTERM, interrupt)
+        for sig in handled_signals:
+            signal.signal(sig, interrupt)
         yield
     finally:
         for sig, previous in previous_handlers.items():
@@ -172,3 +235,20 @@ def _interruption_message(operation: str | None) -> str:
     if operation is None:
         return "Restart wait was interrupted before acceptance was confirmed."
     return f"Restart continues in the container: {operation}."
+
+
+def _write_all(
+    fd: int,
+    data: bytes,
+    *,
+    writer: Callable[[int, bytes | memoryview], int] = os.write,
+) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        try:
+            written = writer(fd, remaining)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("local output descriptor made no write progress")
+        remaining = remaining[written:]

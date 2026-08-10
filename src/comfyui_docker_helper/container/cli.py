@@ -20,6 +20,7 @@ from comfyui_docker_helper.container.runners import (
     ContainerRuntime,
 )
 from comfyui_docker_helper.container.runtime_control_client import (
+    follow_runtime,
     read_runtime_status,
     restart_runtime,
 )
@@ -180,6 +181,12 @@ def runtime_status_command(
             typer.echo(f"{key}: {value}")
     if last_restart is not None:
         typer.echo(f"last_restart: {last_restart.id} ({last_restart.result})")
+
+
+@runtime_app.command("follow", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_follow_command() -> None:
+    """Follow live runtime stdout and stderr."""
+    raise typer.Exit(code=follow_runtime())
 
 
 def _admission(digest: str) -> BuildPlanInputAdmission:

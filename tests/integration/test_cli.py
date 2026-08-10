@@ -230,6 +230,7 @@ def test_root_command_exposes_current_groups() -> None:
         "runtime",
     }
     assert set(command.commands["container"].commands["runtime"].commands) == {
+        "follow",
         "restart",
         "serve",
         "status",
@@ -263,6 +264,10 @@ def test_root_command_exposes_current_groups() -> None:
         (
             ["container", "runtime", "restart"],
             "Usage: cdh container runtime restart",
+        ),
+        (
+            ["container", "runtime", "follow"],
+            "Usage: cdh container runtime follow",
         ),
         (
             ["container", "runtime", "status"],
@@ -2018,6 +2023,32 @@ def test_container_runtime_restart_waits_without_detach_options(
     assert "--detach" not in _plain_output(help_result.output)
     assert "--no-wait" not in _plain_output(help_result.output)
     assert "-d" not in _plain_output(help_result.output)
+
+
+def test_container_runtime_follow_is_output_only(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_follow_runtime() -> int:
+        calls.append("follow")
+        return 129
+
+    monkeypatch.setattr(container_cli, "follow_runtime", fake_follow_runtime)
+
+    result = cli_runner.invoke(app, ["container", "runtime", "follow"])
+    help_result = cli_runner.invoke(
+        app,
+        ["container", "runtime", "follow", "--help"],
+    )
+
+    assert result.exit_code == 129
+    assert result.output == ""
+    assert calls == ["follow"]
+    plain_help = _plain_output(help_result.output)
+    assert "--detach" not in plain_help
+    assert "--no-wait" not in plain_help
 
 
 @pytest.mark.parametrize("json_output", [False, True])

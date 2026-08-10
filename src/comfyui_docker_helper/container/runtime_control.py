@@ -381,6 +381,9 @@ def connect_runtime_control(
         raise RuntimeControlEndpointError(
             "The container runtime controller is not available."
         ) from error
+    except BaseException:
+        peer.close()
+        raise
 
 
 def _prepare_control_directory(path: Path, *, owner_uid: int) -> None:

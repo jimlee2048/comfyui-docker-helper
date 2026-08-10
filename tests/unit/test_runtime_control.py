@@ -9,6 +9,7 @@ import threading
 
 import pytest
 
+from comfyui_docker_helper.container import runtime_control as control_module
 from comfyui_docker_helper.container.runtime_control import (
     RUNTIME_CONTROL_MAX_FRAME_BYTES,
     RUNTIME_CONTROL_MAX_PAYLOAD_BYTES,
@@ -23,6 +24,7 @@ from comfyui_docker_helper.container.runtime_control import (
     RuntimeStatusRequest,
     RuntimeStatusResponse,
     RuntimeTerminalResponse,
+    connect_runtime_control,
     encode_runtime_control_frame,
     receive_runtime_control_request,
     receive_runtime_control_response,
@@ -203,3 +205,28 @@ def test_oversize_header_is_rejected_without_reading_payload() -> None:
         receiver.close()
 
     assert raised.value.code == "frame_too_large"
+
+
+def test_connect_closes_its_socket_when_interrupted_by_base_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SyntheticInterrupt(BaseException):
+        pass
+
+    class InterruptedSocket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def connect(self, _path: str) -> None:
+            raise SyntheticInterrupt
+
+        def close(self) -> None:
+            self.closed = True
+
+    peer = InterruptedSocket()
+    monkeypatch.setattr(control_module.socket, "socket", lambda *_args: peer)
+
+    with pytest.raises(SyntheticInterrupt):
+        connect_runtime_control()
+
+    assert peer.closed is True

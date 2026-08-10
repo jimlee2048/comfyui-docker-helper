@@ -108,6 +108,15 @@ jobs:
         run: >-
           uv run --locked pytest
           tests/integration/test_windows_rendering.py
+      - name: Verify Windows external host integrations
+        run: >-
+          uv run --locked pytest
+          tests/integration/test_host_git_credential.py
+          tests/integration/test_windows_buildx_adapter.py
+          tests/unit/test_host_secret_session.py::test_windows_git_binding_quotes_unicode_python_path
+          tests/integration/test_cli.py::test_build_ssh_on_windows_delegates_default_agent_to_buildkit
+          tests/unit/test_uv_docker_executor.py::test_requirements_compile_uses_one_exact_owned_container
+          tests/unit/test_uv_docker_executor.py::test_controlled_input_copy_failure_cleans_private_state_and_container
       - name: Exercise root version
         run: uv run --locked cdh --version
       - name: Exercise root help

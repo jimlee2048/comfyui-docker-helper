@@ -788,7 +788,7 @@ def test_exact_registry_prerelease_remains_a_valid_published_selector() -> None:
     assert "custom_node.invalid_registry_version" not in _codes(config)
 
 
-def test_registry_duplicate_ids_use_normalized_project_identity() -> None:
+def test_registry_punctuation_variants_report_distribution_identity_collision() -> None:
     document = _document()
     document["comfyui"]["install_manager"] = True
     document["comfyui"]["custom_nodes"] = [
@@ -803,7 +803,7 @@ def test_registry_duplicate_ids_use_normalized_project_identity() -> None:
     assert [
         item.path
         for item in diagnostics
-        if item.code == "custom_node.duplicate_registry_id"
+        if item.code == "custom_node.registry_distribution_identity_collision"
     ] == [("comfyui", "custom_nodes", 1, "id")]
 
 
@@ -850,11 +850,13 @@ def test_package_ownership_is_normalized_across_groups() -> None:
     assert [
         item.path
         for item in diagnostics
+        if item.code == "python.conflicting_package_requirement"
+    ] == [("pytorch", "extra_packages", 0)]
+    assert [
+        item.path
+        for item in diagnostics
         if item.code == "python.duplicate_package_owner"
-    ] == [
-        ("pytorch", "extra_packages", 0),
-        ("pytorch", "extra_packages", 1),
-    ]
+    ] == [("pytorch", "extra_packages", 1)]
 
 
 @pytest.mark.parametrize(

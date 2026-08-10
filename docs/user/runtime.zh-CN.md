@@ -22,6 +22,10 @@ built-in defaults < baked config < mounted config < environment
 
 运行时配置包括 ComfyUI 的 `listen`、`port` 和 `extra_args`；cdh 下载设置；`system.ssh`；以及 `files`。运行时 TOML 文件中已知的仅限主机端字段会被忽略并产生警告。未知或其他不受支持的运行时字段会导致启动失败，而不会被静默接受。挂载的运行时文件无法安装软件包、更改选定的 ComfyUI 检出版本，也无法重新构建镜像。
 
+每个 TOML 来源会先完成解析和运行时适用性检查。剩余的受支持值随后与默认值及环境覆盖合并，最后由 cdh 校验生成的生效运行时文档。因此，靠后的局部条目可以从靠前层继承省略的字段，但无效的最终结果仍会带来源上下文使启动失败。
+
+普通运行时数组采用整列表替换：省略会继承靠前列表，靠后的非空列表会完整替换它，靠后的空列表会将其清空。这适用于 `comfyui.extra_args` 和 TOML 中的 `system.ssh.pub_keys`。`SSH_PUB_KEY` 是特意保留的例外：它会在其他层合并后追加一个规范化公钥；如果完全相同的规范化公钥已存在，则不做任何更改。
+
 支持的环境变量覆盖项如下：
 
 - `CDH_COMFYUI_LISTEN`、`CDH_COMFYUI_PORT` 和 `CDH_COMFYUI_EXTRA_ARGS`；
@@ -34,7 +38,7 @@ built-in defaults < baked config < mounted config < environment
 
 ## 文件、下载与持久状态
 
-主机端的 `[[files]]` 声明会成为固化到镜像中的运行时默认配置。容器启动时，固化和挂载的文件列表以规范化后的 `dir` 加 `filename` 为键进行合并；后续分层中的 `files = []` 会清空之前的列表。每个目标都相对于 `COMFYUI_PATH`。
+主机端的 `[[files]]` 声明会成为固化到镜像中的运行时默认配置。容器启动时，固化和挂载的文件列表以规范化后的 `dir` 加 `filename` 为键进行合并。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。生效条目必须包含 URL，重复或无效的生效目标会在合并后失败。每个目标都相对于 `COMFYUI_PATH`。
 
 同步下载会在 pre-start Hook 之前完成。异步下载会在 ComfyUI 启动前被接收到一个后台队列中，并且可以在 ComfyUI 运行期间继续；它们不会阻塞 ComfyUI readiness。
 

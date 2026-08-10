@@ -22,6 +22,10 @@ built-in defaults < baked config < mounted config < environment
 
 Runtime configuration covers ComfyUI `listen`, `port`, and `extra_args`; cdh download settings; `system.ssh`; and `files`. Known host-only fields in a runtime TOML file are ignored with a warning. Unknown or otherwise unsupported runtime fields fail startup instead of being silently accepted. A mounted runtime file cannot install packages, change the selected ComfyUI checkout, or rebuild the image.
 
+Each TOML source is first parsed and checked for runtime applicability. The remaining supported values are then merged with the defaults and environment overrides, and cdh validates the resulting effective runtime document. Consequently, a later partial item can inherit omitted fields from an earlier layer, but an invalid effective result still fails startup with source context.
+
+Ordinary runtime arrays use whole-list replacement: omission inherits the earlier list, a later non-empty list replaces it, and a later empty list clears it. This applies to `comfyui.extra_args` and TOML `system.ssh.pub_keys`. `SSH_PUB_KEY` is the deliberate exception: it appends one normalized public key after the other layers are merged, or does nothing if that exact normalized key is already present.
+
 The supported environment overrides are:
 
 - `CDH_COMFYUI_LISTEN`, `CDH_COMFYUI_PORT`, and `CDH_COMFYUI_EXTRA_ARGS`;
@@ -34,7 +38,7 @@ Environment overrides and mounted runtime inputs are deployment-time changes. Th
 
 ## Files, downloads, and persistent state
 
-Host `[[files]]` declarations become baked runtime defaults. At container startup, baked and mounted file lists merge by normalized `dir` plus `filename`; `files = []` in a later layer clears the earlier list. Every target is relative to `COMFYUI_PATH`.
+Host `[[files]]` declarations become baked runtime defaults. At container startup, baked and mounted file lists merge by normalized `dir` plus `filename`. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. The effective item must contain a URL, and duplicate or invalid effective targets fail after merging. Every target is relative to `COMFYUI_PATH`.
 
 Synchronous downloads finish before pre-start hooks. Asynchronous downloads are accepted into one background queue before ComfyUI starts and may continue while it runs; they do not gate ComfyUI readiness.
 

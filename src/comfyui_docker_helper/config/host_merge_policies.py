@@ -3,6 +3,10 @@
 from collections.abc import Mapping
 from typing import Any
 
+from comfyui_docker_helper.config.git_credentials import (
+    GitCredentialContextError,
+    canonicalize_git_credential_context,
+)
 from comfyui_docker_helper.config.merge import (
     ANY_PATH_PART,
     AtomicPolicy,
@@ -12,6 +16,34 @@ from comfyui_docker_helper.config.merge import (
     MergePolicyRegistry,
     PolicyRule,
 )
+from comfyui_docker_helper.config.os_packages import validate_apt_package_identity
+from comfyui_docker_helper.config.registry_identity import (
+    registry_resource_identity,
+)
+from comfyui_docker_helper.config.requirement_validation import (
+    DirectRequirementError,
+    parse_direct_requirement,
+)
+
+
+def _apt_package_key(item: Any) -> MergeKey | None:
+    if not isinstance(item, str):
+        return None
+    try:
+        identity = validate_apt_package_identity(item)
+    except ValueError:
+        return None
+    return ("apt", identity)
+
+
+def _direct_requirement_key(item: Any) -> MergeKey | None:
+    if not isinstance(item, str):
+        return None
+    try:
+        identity = parse_direct_requirement(item)
+    except DirectRequirementError:
+        return None
+    return ("python-requirement", identity.canonical_value)
 
 
 def _custom_node_key(item: Any) -> MergeKey | None:
@@ -20,7 +52,13 @@ def _custom_node_key(item: Any) -> MergeKey | None:
     node_type = item.get("type")
     if node_type == "registry":
         node_id = item.get("id")
-        return ("registry", node_id) if isinstance(node_id, str) else None
+        if not isinstance(node_id, str):
+            return None
+        try:
+            identity = registry_resource_identity(node_id)
+        except ValueError:
+            return None
+        return ("registry", identity)
     if node_type == "git":
         url = item.get("url")
         return ("git", url) if isinstance(url, str) else None
@@ -41,7 +79,13 @@ def _git_credential_key(item: Any) -> MergeKey | None:
     if not isinstance(item, Mapping):
         return None
     match = item.get("match")
-    return ("git-credential", match) if isinstance(match, str) else None
+    if not isinstance(match, str):
+        return None
+    try:
+        canonical = canonicalize_git_credential_context(match)
+    except GitCredentialContextError:
+        return None
+    return ("git-credential", canonical)
 
 
 HOST_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
@@ -49,6 +93,22 @@ HOST_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
         PolicyRule(
             ("secrets", ANY_PATH_PART),
             AtomicPolicy(),
+        ),
+        PolicyRule(
+            ("system", "extra_packages"),
+            KeyedSequencePolicy(_apt_package_key, KeyedItemMerge.ATOMIC),
+        ),
+        PolicyRule(
+            ("python", "extra_packages"),
+            KeyedSequencePolicy(_direct_requirement_key, KeyedItemMerge.ATOMIC),
+        ),
+        PolicyRule(
+            ("python", "uv_tools"),
+            KeyedSequencePolicy(_direct_requirement_key, KeyedItemMerge.ATOMIC),
+        ),
+        PolicyRule(
+            ("pytorch", "extra_packages"),
+            KeyedSequencePolicy(_direct_requirement_key, KeyedItemMerge.ATOMIC),
         ),
         PolicyRule(
             ("comfyui", "custom_nodes"),

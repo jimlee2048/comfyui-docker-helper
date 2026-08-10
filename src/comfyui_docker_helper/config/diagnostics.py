@@ -23,6 +23,25 @@ class SourceLocation:
     path: DiagnosticPath
 
 
+@dataclass(frozen=True, slots=True)
+class DiagnosticComparisonSite:
+    """One producer-ordered conflict participant with an approved safe value."""
+
+    location: SourceLocation
+    display_value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticComparison:
+    """Two symmetric authored sites ordered by the diagnostic producer."""
+
+    earlier: DiagnosticComparisonSite
+    later: DiagnosticComparisonSite
+
+
+type DiagnosticSourceContext = SourceLocation | DiagnosticComparison
+
+
 class DiagnosticSeverity(StrEnum):
     """User-facing diagnostic severity."""
 
@@ -38,6 +57,8 @@ class Diagnostic:
     code: str
     message: str
     severity: DiagnosticSeverity = DiagnosticSeverity.ERROR
+    source_context: DiagnosticSourceContext | None = None
+    hint: str | None = None
 
 
 class DiagnosticError(Exception):

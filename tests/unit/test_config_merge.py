@@ -35,23 +35,23 @@ def test_default_merge_recurses_mappings_and_replaces_scalars_and_sequences() ->
         "system": {
             "workspace": "/workspace",
             "env": {"BASE": "1", "SHARED": "base"},
-            "extra_packages": ["git", "curl"],
-        }
+        },
+        "build": {"tags": ["base"]},
     }
     override = {
         "system": {
             "workspace": "/data",
             "env": {"SHARED": "override", "LATER": "1"},
-            "extra_packages": ["jq"],
-        }
+        },
+        "build": {"tags": ["later"]},
     }
 
     assert _merge(base, override) == {
         "system": {
             "workspace": "/data",
             "env": {"BASE": "1", "SHARED": "override", "LATER": "1"},
-            "extra_packages": ["jq"],
-        }
+        },
+        "build": {"tags": ["later"]},
     }
 
 
@@ -527,3 +527,118 @@ def test_empty_mapping_keeps_an_authored_container_origin() -> None:
     assert system.authored_at is not None
     assert system.authored_at.path == ("system",)
     assert system.children == {}
+
+
+def test_apt_packages_compose_by_exact_admitted_identity() -> None:
+    merged = _merge_result(
+        {"system": {"extra_packages": ["git-lfs", "ffmpeg"]}},
+        {"system": {"extra_packages": ["ffmpeg", "libgl1"]}},
+    )
+
+    assert merged.document["system"]["extra_packages"] == [
+        "git-lfs",
+        "ffmpeg",
+        "libgl1",
+    ]
+    duplicate = merged.origins.exact_location(("system", "extra_packages", 1))
+    assert duplicate is not None and duplicate.source.layer_ordinal == 1
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("python", "extra_packages"),
+        ("python", "uv_tools"),
+        ("pytorch", "extra_packages"),
+    ],
+)
+def test_python_requirements_deduplicate_by_complete_canonical_identity(
+    path: tuple[str, str],
+) -> None:
+    group, field = path
+    merged = _merge_result(
+        {group: {field: ["retained==1", "Demo[B,A]>=1,<2"]}},
+        {group: {field: ["demo[a,b]<2,>=1", "appended==2"]}},
+    )
+
+    assert merged.document[group][field] == [
+        "retained==1",
+        "demo[a,b]<2,>=1",
+        "appended==2",
+    ]
+    location = merged.origins.exact_location((group, field, 1))
+    assert location is not None and location.source.layer_ordinal == 1
+
+
+def test_same_python_owner_with_different_requirement_remains_for_validation() -> None:
+    merged = _merge(
+        {"python": {"extra_packages": ["demo>=1,<2"]}},
+        {"python": {"extra_packages": ["Demo>=2,<3", "demo[gpu]>=1,<2"]}},
+    )
+
+    assert merged["python"]["extra_packages"] == [
+        "demo>=1,<2",
+        "Demo>=2,<3",
+        "demo[gpu]>=1,<2",
+    ]
+
+
+def test_registry_resource_identity_is_lowercase_only() -> None:
+    merged = _merge(
+        {
+            "comfyui": {
+                "custom_nodes": [
+                    {"type": "registry", "id": "Example_Node", "version": "1"},
+                    {"type": "registry", "id": "example.node", "version": "2"},
+                ]
+            }
+        },
+        {
+            "comfyui": {
+                "custom_nodes": [
+                    {"type": "registry", "id": "example_node", "version": "3"},
+                    {"type": "registry", "id": "example-node", "version": "4"},
+                ]
+            }
+        },
+    )
+
+    assert merged["comfyui"]["custom_nodes"] == [
+        {"type": "registry", "id": "example_node", "version": "3"},
+        {"type": "registry", "id": "example.node", "version": "2"},
+        {"type": "registry", "id": "example-node", "version": "4"},
+    ]
+
+
+def test_git_credentials_overlay_by_canonical_context_atomically() -> None:
+    merged = _merge(
+        {
+            "cdh": {
+                "git": {
+                    "credentials": [
+                        {
+                            "match": "https://GitHub.com:443/acme",
+                            "username": "base",
+                            "password": {"secret": "base"},
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "cdh": {
+                "git": {
+                    "credentials": [
+                        {
+                            "match": "https://github.com/acme/",
+                            "username": "later",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    assert merged["cdh"]["git"]["credentials"] == [
+        {"match": "https://github.com/acme/", "username": "later"}
+    ]

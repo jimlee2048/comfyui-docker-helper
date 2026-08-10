@@ -455,7 +455,7 @@ def build_canonical_request_graph(
         for item in config.files
     )
     return CanonicalRequestGraph(
-        image_config_digest=_image_config_digest(config),
+        image_config_digest=_image_config_digest(config, domains),
         target_platform=platform,
         backend=backend,
         release=release,
@@ -465,7 +465,10 @@ def build_canonical_request_graph(
         application=ApplicationRequest(
             workspace=workspace,
             comfyui_path=comfyui_path,
-            os_packages=(*DEFAULT_OS_PACKAGES, *config.system.extra_packages),
+            os_packages=(
+                *DEFAULT_OS_PACKAGES,
+                *(item.value for item in domains.apt_packages),
+            ),
             python_index_url=config.python.index_url,
             install_manager=config.comfyui.install_manager,
         ),
@@ -595,10 +598,13 @@ def _members(
     )
 
 
-def _image_config_digest(config: FinalConfig) -> str:
+def _image_config_digest(
+    config: FinalConfig,
+    domains: FinalConfigDomainResult,
+) -> str:
     canonical = (
         json.dumps(
-            _image_config_projection(config),
+            _image_config_projection(config, domains),
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -608,12 +614,34 @@ def _image_config_digest(config: FinalConfig) -> str:
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
 
-def _image_config_projection(config: FinalConfig) -> dict[str, object]:
+def _image_config_projection(
+    config: FinalConfig,
+    domains: FinalConfigDomainResult,
+) -> dict[str, object]:
     document: dict[str, object] = config.model_dump(mode="json")
     document.pop("secrets")
     build = cast(dict[str, object], document["build"])
     cdh = cast(dict[str, object], document["cdh"])
     git = cast(dict[str, object], cdh["git"])
+    system = cast(dict[str, object], document["system"])
+    python = cast(dict[str, object], document["python"])
+    pytorch = cast(dict[str, object], document["pytorch"])
+    system["extra_packages"] = [item.value for item in domains.apt_packages]
+    python["extra_packages"] = [
+        item.canonical_value
+        for item in domains.package_requirements
+        if item.path[:2] == ("python", "extra_packages")
+    ]
+    python["uv_tools"] = [
+        item.canonical_value
+        for item in domains.package_requirements
+        if item.path[:2] == ("python", "uv_tools")
+    ]
+    pytorch["extra_packages"] = [
+        item.canonical_value
+        for item in domains.package_requirements
+        if item.path[:2] == ("pytorch", "extra_packages")
+    ]
     git["credentials"] = [
         {
             "match": canonicalize_git_credential_context(route.match),

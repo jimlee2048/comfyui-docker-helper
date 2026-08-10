@@ -804,6 +804,67 @@ def test_host_validate_remains_offline_and_does_not_construct_providers(
     assert result.output == ""
 
 
+def test_host_validate_accepts_and_composes_repeated_config_files(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    _write_minimal_config(base)
+    with base.open("a") as config:
+        config.write('\n[system]\nextra_packages = ["git-lfs"]\n')
+    override.write_text('[system]\nextra_packages = ["ffmpeg"]\n')
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "validate",
+            "-f",
+            str(base),
+            "-f",
+            str(override),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    _write_minimal_config(base)
+    with base.open("a") as config:
+        config.write('\n[python]\nextra_packages = ["demo>=1,<2"]\n')
+    override.write_text('[python]\nextra_packages = ["Demo>=2,<3"]\n')
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "validate",
+            "-f",
+            str(base),
+            "-f",
+            str(override),
+        ],
+    )
+    output = _plain_output(result.output)
+
+    assert result.exit_code == 1
+    assert "python.conflicting_package_requirement" in output
+    assert "Earlier:" in output and "Later:" in output
+    assert output.count("File:") == 2
+    assert str(base) in output.replace("\n", "")
+    assert str(override) in output.replace("\n", "")
+    assert "Value: demo>=1,<2" in output
+    assert "Value: Demo>=2,<3" in output
+
+
 def test_host_validate_displays_http_credential_warning_offline(
     cli_runner: CliRunner,
     tmp_path: Path,

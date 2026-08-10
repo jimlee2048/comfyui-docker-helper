@@ -25,7 +25,9 @@ image_distro = "ubuntu24.04"
 workspace = "/workspace"
 # Default: workspace + "/ComfyUI". Must be absolute and must not equal workspace.
 comfyui_path = "/workspace/ComfyUI"
-# Extra apt packages installed after the default OS package set.
+# Extra apt packages installed after the default OS package set. Across layered
+# files, omission inherits; new package names append in first-occurrence order;
+# an exact repeated name is kept once; and a later [] resets the list.
 extra_packages = ["ffmpeg", "libgl1"]
 
 [system.env]
@@ -43,7 +45,8 @@ port = 22
 # Leave empty in image config. SSH_PASSWORD can set a runtime-only root password.
 password = ""
 # Public keys must be single OpenSSH authorized_keys lines. SSH_PUB_KEY can
-# append one runtime-only public key.
+# append one runtime-only public key. Across layered TOML files, omission
+# inherits this whole list, a later non-empty list replaces it, and [] clears it.
 pub_keys = []
 
 [python]
@@ -57,9 +60,14 @@ uv_version = "latest"
 # explicit PyTorch source instead.
 index_url = "https://pypi.org/simple"
 # Extra Python packages installed into the final virtualenv after PyTorch.
+# Across layered files, omission inherits; new canonical requirements append;
+# only a complete canonical requirement repeat is kept once; and [] resets.
+# Requirements for the same distribution with different extras or selectors
+# conflict instead of one silently replacing the other.
 extra_packages = ["numpy"]
 # Standalone CLI distributions installed into isolated uv tool environments.
 # Direct URL, VCS, local, editable, marker, and raw uv argument forms are rejected.
+# Layered composition and [] reset follow python.extra_packages semantics.
 uv_tools = ["ruff==0.15.18"]
 
 [pytorch]
@@ -73,6 +81,7 @@ index_base_url = "https://download.pytorch.org/whl"
 # protected requirements from the exact ComfyUI checkout as one exact group.
 # Every direct member uses the derived PyTorch source; generic transitive
 # dependencies use [python].index_url. Do not include "torch" here.
+# Layered composition and [] reset follow python.extra_packages semantics.
 extra_packages = []
 
 [cdh]
@@ -116,6 +125,8 @@ resume_download = true
 # Optional for render. Required by host build when no CLI -t/--tag is supplied.
 # Expressions use the accepted ComfyUI identity. release has no leading v;
 # commit.prefix(n) accepts 12 through 40 characters.
+# Across layered files, omission inherits this whole list, a later non-empty
+# list replaces it, and [] clears it.
 tags = [
     "registry.example.com/my-comfy:latest",
     "registry.example.com/my-comfy:v${{ comfyui.release }}",
@@ -124,6 +135,9 @@ tags = [
 # Default: "load". Supported: "load", "push".
 output = "load"
 # The current schema accepts exactly this ordered target list.
+# Across layered files, omission inherits this whole list and a later list
+# replaces it. [] clears the inherited value before effective validation, but
+# the current schema rejects an empty effective platform list.
 platforms = ["linux/amd64"]
 
 [comfyui]
@@ -145,13 +159,17 @@ port = 8188
 # Default: []. Additional ComfyUI CLI arguments appended after cdh-owned
 # startup flags. Do not include --listen, --port, --auto-launch, or
 # --disable-auto-launch here.
+# Across layered files, omission inherits this whole list, a later non-empty
+# list replaces it, and [] clears it.
 extra_args = []
 
 [[comfyui.custom_nodes]]
 # Registry custom node installed with ComfyUI-Manager.
 type = "registry"
-# Required for registry nodes. Registry IDs must be unique after normalized
-# Python project-name comparison.
+# Required for registry nodes. Lowercase-only ID comparison identifies the
+# Registry resource: case variants overlay, while punctuation variants remain
+# distinct resources. Distinct resources that collide as one normalized
+# installed Python distribution are rejected during effective validation.
 id = "comfyui-custom-scripts"
 # Default: unset. Use "latest", a registry-supported version selector, or
 # PEP 440-style constraints such as ">=1.0.0,<2.0.0" where applicable.
@@ -159,6 +177,8 @@ version = "latest"
 # Hook paths are relative to the explicit --build-hooks-dir, preserve any safe
 # user-defined subdirectory structure, must not contain "..", and must end in
 # .sh or .py. Shell hooks run with bash; Python hooks run with the venv Python.
+# Each hook list is replaced as a whole across layers: omission inherits, a
+# later non-empty list replaces, and [] clears it.
 pre_install_hooks = ["pre.sh"]
 post_install_hooks = []
 
@@ -174,6 +194,8 @@ ref = "main"
 # Default: inferred from the URL basename with a trailing .git stripped.
 # Must be a single safe directory name under ComfyUI/custom_nodes.
 target_dir = "ComfyUI-Custom-Scripts"
+# Each hook list is replaced as a whole across layers: omission inherits, a
+# later non-empty list replaces, and [] clears it.
 pre_install_hooks = []
 post_install_hooks = ["post.sh"]
 
@@ -187,6 +209,8 @@ post_install_hooks = ["post.sh"]
 # env = "CDH_GITHUB_PAT"
 #
 # [[cdh.git.credentials]]
+# Canonically equivalent match contexts identify one route. A later route
+# atomically replaces the complete earlier route; credentials = [] resets all.
 # match = "https://github.com/example-private/"
 # username = "x-access-token"
 # password = { secret = "github_pat" }
@@ -196,6 +220,8 @@ post_install_hooks = ["post.sh"]
 # url = "https://github.com/example-private/private-node.git"
 # ref = "main"
 # target_dir = "private-github-node"
+# Each hook list is replaced as a whole across layers: omission inherits, a
+# later non-empty list replaces, and [] clears it.
 # pre_install_hooks = []
 # post_install_hooks = []
 
@@ -207,6 +233,8 @@ post_install_hooks = ["post.sh"]
 # file = "secrets/gitlab-pat"
 #
 # [[cdh.git.credentials]]
+# Canonically equivalent match contexts identify one route. A later route
+# atomically replaces the complete earlier route; credentials = [] resets all.
 # match = "https://gitlab.example.com/example-private/"
 # username = "oauth2"
 # password = { secret = "gitlab_pat" }
@@ -216,6 +244,8 @@ post_install_hooks = ["post.sh"]
 # url = "https://gitlab.example.com/example-private/private-node.git"
 # ref = "main"
 # target_dir = "private-gitlab-node"
+# Each hook list is replaced as a whole across layers: omission inherits, a
+# later non-empty list replaces, and [] clears it.
 # pre_install_hooks = []
 # post_install_hooks = []
 

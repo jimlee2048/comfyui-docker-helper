@@ -24,13 +24,19 @@ cdh host validate \
 
 ## 对配置进行分层
 
-重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。有三个集合会按稳定标识合并：
+重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。以下组合型集合改为按各字段专属的标识合并：
 
-- `comfyui.custom_nodes` 使用 Registry ID 或直接 Git URL；以及
-- `files` 使用 `dir` 加 `filename`；以及
-- `cdh.git.credentials` 使用原样编写的精确 `match` 字符串。
+- `system.extra_packages` 使用允许的 Debian 包名；
+- `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras，以及 canonical selector 表示；
+- `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID，或精确的直接 Git URL；
+- `files` 使用 `dir` 加 `filename` 目标；
+- `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
-重复的 credential `match` 会在原位置原子替换完整的靠前 route；route 字段不会逐字段合并。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子 source 定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。使用不同原始字符串写出的规范等价 credential context 仍是不同的合并键，随后会因重复验证而失败。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
+对于包集合，新标识会按首次出现顺序追加。完全重复的 Debian 包只保留一次。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras 或 selector 不同，会继续保留，让生效配置校验报告冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
+
+Registry ID 的大小写变体表示同一资源，并在原位置覆盖，靠后编写的拼写最终生效。标点符号变体仍是不同的 Registry 资源；如果这些资源映射到同一个规范化的已安装 Python 分发包标识，生效配置校验会报告冲突，而不会擅自选择其中一个。
+
+即使原始 `match` 字符串不同，canonical 等价的 credential context 也表示同一路由。靠后的路由会在原位置原子替换完整的靠前路由；路由字段不会逐字段合并。同一层中存在歧义的重复 route 仍然无效。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子来源定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
 
 例如，将以下内容保存为 `local.toml`，以禁用 comfy-cli，并移除完整示例所选择的节点和文件：
 

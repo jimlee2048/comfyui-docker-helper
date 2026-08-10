@@ -91,6 +91,14 @@ jobs:
         run: >-
           uv run --locked pytest
           tests/integration/test_windows_host_boundary.py
+      - name: Verify Windows security primitives
+        run: >-
+          uv run --locked pytest
+          tests/unit/test_file_admission.py
+          tests/unit/test_private_state.py
+          tests/integration/test_windows_file_primitives.py
+          tests/integration/test_windows_private_state.py
+          tests/integration/test_descriptor_lock.py
       - name: Exercise root version
         run: uv run --locked cdh --version
       - name: Exercise root help

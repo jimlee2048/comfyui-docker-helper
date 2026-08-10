@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ntpath
 import os
-import re
 import secrets
 from collections.abc import Callable
 from contextlib import suppress
@@ -16,10 +15,12 @@ _GENERIC_WRITE = 0x40000000
 _READ_CONTROL = 0x00020000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
+_FILE_SHARE_DELETE = 0x00000004
 _CREATE_NEW = 1
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
@@ -29,8 +30,6 @@ _DRIVE_FIXED = 3
 _DRIVE_REMOTE = 4
 _DRIVE_CDROM = 5
 _DRIVE_RAMDISK = 6
-_VOLUME_NAME_GUID = 0x1
-_FILE_PERSISTENT_ACLS = 0x00000008
 _FILE_ALL_ACCESS = 0x001F01FF
 _OBJECT_INHERIT_ACE = 0x01
 _CONTAINER_INHERIT_ACE = 0x02
@@ -51,10 +50,6 @@ _LOCAL_DRIVE_TYPES = {
     _DRIVE_CDROM,
     _DRIVE_RAMDISK,
 }
-_VOLUME_GUID_ROOT = re.compile(
-    r"^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\$"
-)
 _INVALID_COMPONENT_CHARACTERS = frozenset('<>"|?*:')
 _RESERVED_BASENAMES = {
     "CON",
@@ -82,11 +77,11 @@ class _WindowsApi(Protocol):
 
     def get_drive_type(self, root: str) -> int: ...
 
+    def get_file_attributes(self, path: str) -> int: ...
+
     def get_file_type(self, handle: object) -> int: ...
 
     def get_file_information(self, handle: object) -> tuple[object, ...]: ...
-
-    def get_final_path_name(self, handle: object, flags: int) -> str: ...
 
     def read_file(self, handle: object, size: int) -> bytes: ...
 
@@ -94,8 +89,6 @@ class _WindowsApi(Protocol):
 
 
 class _PrivateWindowsApi(_WindowsApi, Protocol):
-    def get_volume_flags(self, root: str) -> int: ...
-
     def private_security_attributes(self, *, directory: bool) -> object: ...
 
     def create_directory(self, path: str, security_attributes: object) -> bool: ...
@@ -169,6 +162,16 @@ class _PyWin32Api:
             self._call("GetDriveType", lambda: self._win32file.GetDriveType(root))
         )
 
+    def get_file_attributes(self, path: str) -> int:
+        attributes = int(
+            self._call(
+                "GetFileAttributes", lambda: self._win32file.GetFileAttributes(path)
+            )
+        )
+        if attributes == _INVALID_FILE_ATTRIBUTES:
+            raise OSError("Win32 GetFileAttributes failed")
+        return attributes
+
     def get_file_type(self, handle: object) -> int:
         return int(
             self._call("GetFileType", lambda: self._win32file.GetFileType(handle))
@@ -179,14 +182,6 @@ class _PyWin32Api:
             self._call(
                 "GetFileInformationByHandle",
                 lambda: self._win32file.GetFileInformationByHandle(handle),
-            )
-        )
-
-    def get_final_path_name(self, handle: object, flags: int) -> str:
-        return str(
-            self._call(
-                "GetFinalPathNameByHandle",
-                lambda: self._win32file.GetFinalPathNameByHandle(handle, flags),
             )
         )
 
@@ -225,15 +220,6 @@ class _PyWin32PrivateApi(_PyWin32Api):
         self._win32api = win32api
         self._win32security = win32security
         self._private_principals: tuple[object, object, tuple[str, ...]] | None = None
-
-    def get_volume_flags(self, root: str) -> int:
-        information = self._call(
-            "GetVolumeInformation",
-            lambda: self._win32api.GetVolumeInformation(root),
-        )
-        if not isinstance(information, tuple) or len(information) != 5:
-            raise OSError("Win32 volume security information is unavailable")
-        return int(information[3])
 
     def private_security_attributes(self, *, directory: bool) -> object:
         return self._call(
@@ -423,9 +409,7 @@ class _ParsedWindowsPath:
 @dataclass(frozen=True, slots=True)
 class _HandleObservation:
     attributes: int
-    volume_serial: int
     size: int
-    file_id: int
 
 
 def read_regular_absolute_file(path: str, *, max_bytes: int | None) -> bytes:
@@ -434,7 +418,7 @@ def read_regular_absolute_file(path: str, *, max_bytes: int | None) -> bytes:
 
 
 def create_private_directory(parent: str, *, prefix: str) -> str:
-    """Create one private random directory below a verified local parent."""
+    """Create and verify one private random directory below a canonical parent."""
     return _create_private_directory_windows(
         parent,
         prefix=prefix,
@@ -468,76 +452,28 @@ def _read_regular_absolute_file(
     *,
     max_bytes: int | None,
     api: _WindowsApi,
-    after_directory_open: Callable[[str], None] | None = None,
 ) -> bytes:
     if max_bytes is not None and max_bytes < 0:
         raise ValueError("maximum byte count must not be negative")
     parsed = _parse_windows_regular_file_path(path)
     if api.get_drive_type(parsed.drive_root) not in _LOCAL_DRIVE_TYPES:
         raise OSError("regular-file admission requires a verifiable local drive")
+    _observe_windows_components(parsed, api=api)
 
-    handles: list[object] = []
+    leaf_handle: object | None = None
     primary_error = False
     try:
-        root_handle = api.create_file(
-            parsed.drive_root,
-            0,
-            _FILE_SHARE_READ,
-            _OPEN_EXISTING,
-            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-        )
-        handles.append(root_handle)
-        root = _observe_handle(api, root_handle)
-        _require_directory(api, root_handle, root)
-        volume_root = api.get_final_path_name(root_handle, _VOLUME_NAME_GUID)
-        if not _VOLUME_GUID_ROOT.fullmatch(volume_root):
-            raise OSError("local drive does not expose one stable volume root")
-
-        internal_parent = volume_root[:-1]
-        for component in parsed.components[:-1]:
-            candidate_path = f"{internal_parent}\\{component}"
-            directory_handle = api.create_file(
-                candidate_path,
-                0,
-                _FILE_SHARE_READ,
-                _OPEN_EXISTING,
-                _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-            handles.append(directory_handle)
-            directory = _observe_handle(api, directory_handle)
-            _require_directory(api, directory_handle, directory)
-            if directory.volume_serial != root.volume_serial:
-                raise OSError("admitted path crossed its stable local volume")
-            internal_parent = _require_direct_child_lineage(
-                api,
-                directory_handle,
-                internal_parent,
-                error_message="admitted path lineage cannot be verified",
-            )
-            if after_directory_open is not None:
-                after_directory_open(internal_parent)
-
-        internal_path = f"{internal_parent}\\{parsed.components[-1]}"
         leaf_handle = api.create_file(
-            internal_path,
+            path,
             _GENERIC_READ,
-            _FILE_SHARE_READ,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
             _OPEN_EXISTING,
             _FILE_FLAG_BACKUP_SEMANTICS
             | _FILE_FLAG_OPEN_REPARSE_POINT
             | _FILE_FLAG_SEQUENTIAL_SCAN,
         )
-        handles.append(leaf_handle)
         before = _observe_handle(api, leaf_handle)
         _require_regular_file(api, leaf_handle, before)
-        if before.volume_serial != root.volume_serial:
-            raise OSError("admitted file crossed its stable local volume")
-        _require_direct_child_lineage(
-            api,
-            leaf_handle,
-            internal_parent,
-            error_message="admitted path lineage cannot be verified",
-        )
         if max_bytes is not None and before.size > max_bytes:
             raise OSError("admitted input exceeds the maximum byte count")
 
@@ -557,27 +493,40 @@ def _read_regular_absolute_file(
 
         after = _observe_handle(api, leaf_handle)
         _require_regular_file(api, leaf_handle, after)
-        if (
-            before.volume_serial != after.volume_serial
-            or before.file_id != after.file_id
-            or before.size != after.size
-            or total_bytes != before.size
-        ):
+        if before.size != after.size or total_bytes != before.size:
             raise OSError("admitted input changed during its bounded read")
         return b"".join(chunks)
     except BaseException:
         primary_error = True
         raise
     finally:
-        close_error: OSError | None = None
-        for handle in reversed(handles):
+        if leaf_handle is not None:
             try:
-                api.close_handle(handle)
+                api.close_handle(leaf_handle)
             except OSError as error:
-                if close_error is None:
-                    close_error = error
-        if close_error is not None and not primary_error:
-            raise close_error
+                if not primary_error:
+                    raise error
+
+
+def _observe_windows_components(path: _ParsedWindowsPath, *, api: _WindowsApi) -> None:
+    """Reject reparse points and special nodes visible in one static path walk."""
+    candidate = path.drive_root.rstrip("\\")
+    for index, component in enumerate(path.components):
+        candidate = f"{candidate}\\{component}"
+        attributes = api.get_file_attributes(candidate)
+        leaf = index == len(path.components) - 1
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise OSError(
+                "admitted input must be a regular local file"
+                if leaf
+                else "admitted path ancestors must be real local directories"
+            )
+        directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+        if leaf:
+            if directory:
+                raise OSError("admitted input must be a regular local file")
+        elif not directory:
+            raise OSError("admitted path ancestors must be real local directories")
 
 
 def _create_private_directory_windows(
@@ -589,10 +538,11 @@ def _create_private_directory_windows(
 ) -> str:
     _require_private_prefix(prefix)
     parsed = _parse_windows_regular_file_path(parent)
+    if api.get_drive_type(parsed.drive_root) not in _LOCAL_DRIVE_TYPES:
+        raise OSError("private state requires a verifiable local drive")
     handles: list[object] = []
     created_path: str | None = None
     try:
-        parent_path, root = _hold_private_parent(parsed, api=api, handles=handles)
         security_attributes = api.private_security_attributes(directory=True)
         for _attempt in range(_PRIVATE_DIRECTORY_ATTEMPTS):
             candidate = f"{prefix}{candidate_suffix()}"
@@ -600,7 +550,7 @@ def _create_private_directory_windows(
                 raise ValueError(
                     "private directory candidate is not one safe component"
                 )
-            candidate_path = f"{parent_path}\\{candidate}"
+            candidate_path = ntpath.join(parent, candidate)
             if not api.create_directory(candidate_path, security_attributes):
                 continue
             created_path = candidate_path
@@ -614,9 +564,6 @@ def _create_private_directory_windows(
             handles.append(directory_handle)
             directory = _observe_handle(api, directory_handle)
             _require_directory(api, directory_handle, directory)
-            if directory.volume_serial != root.volume_serial:
-                raise OSError("private directory crossed its stable local volume")
-            _require_expected_lineage(api, directory_handle, candidate_path)
             api.verify_private_security(directory_handle, directory=True)
             _close_windows_handles(api, handles)
             created_path = None
@@ -640,18 +587,12 @@ def _open_private_file_windows(
     if exclusive == read_write:
         raise ValueError("private file mode is invalid")
     parsed = _parse_windows_regular_file_path(path)
+    if api.get_drive_type(parsed.drive_root) not in _LOCAL_DRIVE_TYPES:
+        raise OSError("private state requires a verifiable local drive")
     handles: list[object] = []
     created = False
-    internal_path: str | None = None
     descriptor: int | None = None
     try:
-        parent_path, root = _hold_private_parent_components(
-            parsed.drive_root,
-            parsed.components[:-1],
-            api=api,
-            handles=handles,
-        )
-        internal_path = f"{parent_path}\\{parsed.components[-1]}"
         security_attributes = api.private_security_attributes(directory=False)
         desired_access = _GENERIC_WRITE | _READ_CONTROL
         share_mode = _FILE_SHARE_READ
@@ -661,7 +602,7 @@ def _open_private_file_windows(
             share_mode |= _FILE_SHARE_WRITE
             descriptor_flags = os.O_RDWR | _O_BINARY
         leaf_handle = api.create_private_file(
-            internal_path,
+            path,
             desired_access,
             share_mode,
             _CREATE_NEW,
@@ -672,7 +613,7 @@ def _open_private_file_windows(
             if exclusive:
                 raise FileExistsError("private file already exists")
             leaf_handle = api.create_private_file(
-                internal_path,
+                path,
                 desired_access,
                 share_mode,
                 _OPEN_EXISTING,
@@ -686,9 +627,6 @@ def _open_private_file_windows(
         handles.append(leaf_handle)
         leaf = _observe_handle(api, leaf_handle)
         _require_regular_file(api, leaf_handle, leaf)
-        if leaf.volume_serial != root.volume_serial:
-            raise OSError("private file crossed its stable local volume")
-        _require_expected_lineage(api, leaf_handle, internal_path)
         api.verify_private_security(leaf_handle, directory=False)
 
         raw_handle = api.detach_handle(leaf_handle)
@@ -709,73 +647,10 @@ def _open_private_file_windows(
             with suppress(OSError):
                 api.close_fd(descriptor)
         _suppress_close_windows_handles(api, handles)
-        if created and internal_path is not None:
+        if created:
             with suppress(OSError):
-                api.delete_file(internal_path)
+                api.delete_file(path)
         raise
-
-
-def _hold_private_parent(
-    parsed: _ParsedWindowsPath,
-    *,
-    api: _PrivateWindowsApi,
-    handles: list[object],
-) -> tuple[str, _HandleObservation]:
-    return _hold_private_parent_components(
-        parsed.drive_root,
-        parsed.components,
-        api=api,
-        handles=handles,
-    )
-
-
-def _hold_private_parent_components(
-    drive_root: str,
-    components: tuple[str, ...],
-    *,
-    api: _PrivateWindowsApi,
-    handles: list[object],
-) -> tuple[str, _HandleObservation]:
-    if api.get_drive_type(drive_root) not in _LOCAL_DRIVE_TYPES:
-        raise OSError("private state requires a verifiable local drive")
-    root_handle = api.create_file(
-        drive_root,
-        0,
-        _FILE_SHARE_READ,
-        _OPEN_EXISTING,
-        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-    )
-    handles.append(root_handle)
-    root = _observe_handle(api, root_handle)
-    _require_directory(api, root_handle, root)
-    volume_root = api.get_final_path_name(root_handle, _VOLUME_NAME_GUID)
-    if not _VOLUME_GUID_ROOT.fullmatch(volume_root):
-        raise OSError("private state parent has no stable local volume root")
-    if not api.get_volume_flags(volume_root) & _FILE_PERSISTENT_ACLS:
-        raise OSError("private state requires persistent filesystem ACLs")
-
-    internal_path = volume_root[:-1]
-    for component in components:
-        candidate_path = f"{internal_path}\\{component}"
-        directory_handle = api.create_file(
-            candidate_path,
-            0,
-            _FILE_SHARE_READ,
-            _OPEN_EXISTING,
-            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-        )
-        handles.append(directory_handle)
-        directory = _observe_handle(api, directory_handle)
-        _require_directory(api, directory_handle, directory)
-        if directory.volume_serial != root.volume_serial:
-            raise OSError("private state parent crossed its stable local volume")
-        internal_path = _require_direct_child_lineage(
-            api,
-            directory_handle,
-            internal_path,
-            error_message="private state parent lineage cannot be verified",
-        )
-    return internal_path, root
 
 
 def _require_private_prefix(prefix: str) -> None:
@@ -838,17 +713,15 @@ def _valid_component(component: str) -> bool:
 def _observe_handle(api: _WindowsApi, handle: object) -> _HandleObservation:
     information = api.get_file_information(handle)
     if len(information) != 10:
-        raise OSError("Win32 file identity information is unavailable")
+        raise OSError("Win32 file metadata is unavailable")
     try:
         attributes = int(information[0])
-        volume_serial = int(information[4])
         size = (int(information[5]) << 32) | int(information[6])
-        file_id = (int(information[8]) << 32) | int(information[9])
     except (TypeError, ValueError):
-        raise OSError("Win32 file identity information is unavailable") from None
-    if size < 0 or file_id == 0:
-        raise OSError("Win32 file identity information is unavailable")
-    return _HandleObservation(attributes, volume_serial, size, file_id)
+        raise OSError("Win32 file metadata is unavailable") from None
+    if size < 0:
+        raise OSError("Win32 file metadata is unavailable")
+    return _HandleObservation(attributes, size)
 
 
 def _require_directory(
@@ -871,34 +744,3 @@ def _require_regular_file(
         or observation.attributes & _FILE_ATTRIBUTE_REPARSE_POINT
     ):
         raise OSError("admitted input must be a regular local file")
-
-
-def _require_expected_lineage(
-    api: _WindowsApi, handle: object, expected_path: str
-) -> None:
-    final_path = api.get_final_path_name(handle, _VOLUME_NAME_GUID)
-    if (
-        "/" in final_path
-        or ntpath.normpath(final_path) != final_path
-        or ntpath.normcase(final_path) != ntpath.normcase(expected_path)
-    ):
-        raise OSError("admitted path lineage cannot be verified")
-
-
-def _require_direct_child_lineage(
-    api: _WindowsApi,
-    handle: object,
-    expected_parent: str,
-    *,
-    error_message: str,
-) -> str:
-    final_path = api.get_final_path_name(handle, _VOLUME_NAME_GUID)
-    if (
-        "/" in final_path
-        or ntpath.normpath(final_path) != final_path
-        or ntpath.normcase(ntpath.dirname(final_path).rstrip("\\"))
-        != ntpath.normcase(expected_parent.rstrip("\\"))
-        or not _valid_component(ntpath.basename(final_path))
-    ):
-        raise OSError(error_message)
-    return final_path

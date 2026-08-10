@@ -644,7 +644,7 @@ def test_nondefault_shutdown_timeout_projects_to_plan_and_baked_runtime(
     assert runtime["cdh"]["shutdown_timeout"] == 55.5
 
 
-# Descriptor-relative BuildPlan admission rejects substituted inputs.
+# BuildPlan admission rejects statically visible links and special nodes.
 def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
     tmp_path: Path,
 ) -> None:
@@ -698,42 +698,30 @@ else:
     assert result.returncode == 0, result.stderr.decode()
 
 
-def test_file_admission_fails_closed_without_descriptor_relative_open(
+def test_file_admission_closes_the_leaf_and_preserves_primary_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "input.json"
     source.write_bytes(b"{}")
-    monkeypatch.setattr(file_admission, "_descriptor_relative_open_available", False)
-
-    with pytest.raises(OSError, match=r"descriptor-safe.*unavailable"):
-        file_admission.read_regular_absolute_file(source)
-
-
-def test_file_admission_attempts_every_close_and_preserves_primary_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fifo = tmp_path / "input.fifo"
-    os.mkfifo(fifo)
     real_close = os.close
     closed: list[int] = []
 
-    def close_then_report_first_error(descriptor: int) -> None:
+    def close_then_report_error(descriptor: int) -> None:
         real_close(descriptor)
         closed.append(descriptor)
-        if len(closed) == 1:
-            raise OSError("close sentinel")
+        raise OSError("close sentinel")
 
-    monkeypatch.setattr(
-        file_admission, "_close_descriptor", close_then_report_first_error
-    )
+    def fail_admission(_descriptor: int) -> os.stat_result:
+        raise OSError("admission sentinel")
 
-    with pytest.raises(OSError, match="admitted input must be a regular file"):
-        file_admission.read_regular_absolute_file(fifo)
+    monkeypatch.setattr(file_admission, "_close_descriptor", close_then_report_error)
+    monkeypatch.setattr(file_admission.os, "fstat", fail_admission)
 
-    assert len(closed) >= 3
-    assert len(closed) == len(set(closed))
+    with pytest.raises(OSError, match="admission sentinel"):
+        file_admission.read_regular_absolute_file(source)
+
+    assert len(closed) == 1
 
 
 def test_file_admission_reports_local_close_error_inside_outer_handler(
@@ -761,8 +749,7 @@ def test_file_admission_reports_local_close_error_inside_outer_handler(
         with pytest.raises(OSError, match="close sentinel"):
             file_admission.read_regular_absolute_file(source)
 
-    assert len(closed) >= 3
-    assert len(closed) == len(set(closed))
+    assert len(closed) == 1
 
 
 # Materialization accepts only exact locked hook identities and verified source bytes.
@@ -937,63 +924,6 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
                 ),
             ),
         )
-
-
-@pytest.mark.parametrize("substitution", ["leaf", "ancestor"])
-def test_materializer_rejects_source_substitution_during_descriptor_walk(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    substitution: str,
-) -> None:
-    content = b"hook"
-    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    build_hooks = tmp_path / "build_hooks"
-    source = build_hooks / "hooks/pre.py"
-    source.parent.mkdir(parents=True)
-    source.write_bytes(content)
-    plan = build_plan(
-        final_config(build_hooks_dir=build_hooks, with_hook=True),
-        accepted_resolution(hook_digest=digest),
-    )
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "pre.py").write_bytes(content)
-    real_open = os.open
-    substituted = False
-
-    def substitute_then_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal substituted
-        if not substituted and (
-            (substitution == "leaf" and path == "pre.py")
-            or (substitution == "ancestor" and path == "hooks")
-        ):
-            substituted = True
-            if substitution == "leaf":
-                source.unlink()
-                source.symlink_to(outside / "pre.py")
-            else:
-                real_parent = build_hooks / "real-hooks"
-                source.parent.rename(real_parent)
-                source.parent.symlink_to(real_parent, target_is_directory=True)
-        return real_open(path, flags, mode, dir_fd=dir_fd)
-
-    monkeypatch.setattr(file_admission.os, "open", substitute_then_open)
-    output = tmp_path / "output"
-    output.mkdir(mode=0o700)
-
-    with pytest.raises(FinalMaterializationError, match="regular file"):
-        _materialize_private_stage(
-            plan,
-            output,
-            canonical_wheel=canonical_wheel(),
-            local_sources=(
-                LocalMaterializationSource(
-                    PurePosixPath("build-hooks/hooks/pre.py"), source
-                ),
-            ),
-        )
-
-    assert substituted
 
 
 def _tree(root: Path) -> dict[str, bytes]:

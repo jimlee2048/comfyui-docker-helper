@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper import _windows_files, file_admission
+from comfyui_docker_helper import file_admission
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
@@ -64,38 +64,6 @@ def test_windows_admission_rejects_leaf_symlink_and_ancestor_junction(
             source.unlink()
         else:
             link.rmdir()
-
-
-def test_windows_held_ancestor_cannot_be_replaced_during_admission(
-    tmp_path: Path,
-) -> None:
-    guarded = tmp_path / "held-ancestor"
-    guarded.mkdir()
-    source = guarded / "secret.txt"
-    source.write_bytes(b"held bytes")
-    moved = tmp_path / "moved-ancestor"
-    attempted = False
-
-    def attempt_replacement(internal_path: str) -> None:
-        nonlocal attempted
-        if attempted or not internal_path.endswith("\\held-ancestor"):
-            return
-        attempted = True
-        with pytest.raises(OSError) as raised:
-            os.rename(guarded, moved)
-        assert raised.value.winerror in {5, 32}
-
-    data = _windows_files._read_regular_absolute_file(
-        os.fspath(source),
-        max_bytes=1024,
-        api=_windows_files._PyWin32Api(),
-        after_directory_open=attempt_replacement,
-    )
-
-    assert attempted is True
-    assert data == b"held bytes"
-    guarded.rename(moved)
-    moved.rename(guarded)
 
 
 def _create_junction(link: Path, target: Path) -> None:

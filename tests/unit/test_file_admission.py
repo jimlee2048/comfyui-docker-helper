@@ -3,6 +3,7 @@
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,6 +75,41 @@ def test_bounded_admission_observes_mode_and_bytes_through_the_same_leaf_descrip
     assert set(read_descriptors) == set(fstat_descriptors)
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="exercises the POSIX static admission backend"
+)
+def test_posix_admission_statically_observes_components_then_opens_only_the_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "secret"
+    source.write_bytes(b"secret")
+    real_lstat = os.lstat
+    real_open = os.open
+    observed_paths: list[str] = []
+    opened: list[tuple[str, int | None]] = []
+
+    def observe_lstat(path: str | os.PathLike[str]) -> os.stat_result:
+        observed_paths.append(os.fspath(path))
+        return real_lstat(path)
+
+    def observe_open(
+        path: str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        opened.append((path, dir_fd))
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(file_admission.os, "lstat", observe_lstat)
+    monkeypatch.setattr(file_admission.os, "open", observe_open)
+
+    assert file_admission.read_regular_absolute_file(source) == b"secret"
+    assert observed_paths[-1] == os.fspath(source)
+    assert opened == [(os.fspath(source), None)]
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -118,24 +154,33 @@ def test_windows_admission_accepts_one_canonical_drive_absolute_path() -> None:
     assert parsed.components == ("Users", "Example User", "密钥.txt")
 
 
+def test_windows_attributes_adapter_rejects_the_failure_sentinel() -> None:
+    api = _windows_files._PyWin32Api.__new__(_windows_files._PyWin32Api)
+    api._error_type = OSError
+    api._win32file = SimpleNamespace(
+        GetFileAttributes=lambda _path: _windows_files._INVALID_FILE_ATTRIBUTES
+    )
+
+    with pytest.raises(OSError, match="Win32 GetFileAttributes failed"):
+        api.get_file_attributes("C:\\safe\\secret.txt")
+
+
 class _FakeWindowsHandle:
-    def __init__(self, path: str, *, file_id: int) -> None:
+    def __init__(self, path: str) -> None:
         self.path = path
-        self.file_id = file_id
         self.offset = 0
 
 
 class _FakeWindowsApi:
-    volume_root = "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\"
-
     def __init__(self, content: bytes = b"secret bytes") -> None:
         self.content = content
         self.create_calls: list[tuple[str, int, int, int, int]] = []
+        self.attribute_calls: list[str] = []
+        self.attribute_overrides: dict[str, int] = {}
         self.information_handles: list[_FakeWindowsHandle] = []
         self.read_handles: list[_FakeWindowsHandle] = []
         self.closed_paths: list[str] = []
-        self.final_path_overrides: dict[str, str] = {}
-        self._next_file_id = 1
+        self.handle_attributes = 0
 
     def create_file(
         self,
@@ -154,13 +199,21 @@ class _FakeWindowsApi:
                 flags_and_attributes,
             )
         )
-        handle = _FakeWindowsHandle(path, file_id=self._next_file_id)
-        self._next_file_id += 1
-        return handle
+        return _FakeWindowsHandle(path)
 
     def get_drive_type(self, root: str) -> int:
         assert root == "C:\\"
         return _windows_files._DRIVE_FIXED
+
+    def get_file_attributes(self, path: str) -> int:
+        self.attribute_calls.append(path)
+        if path in self.attribute_overrides:
+            return self.attribute_overrides[path]
+        return (
+            0
+            if path.endswith(("secret.txt", "SECRET~1.TXT"))
+            else _windows_files._FILE_ATTRIBUTE_DIRECTORY
+        )
 
     def get_file_type(self, _handle: object) -> int:
         return _windows_files._FILE_TYPE_DISK
@@ -168,11 +221,9 @@ class _FakeWindowsApi:
     def get_file_information(self, handle: object) -> tuple[object, ...]:
         assert isinstance(handle, _FakeWindowsHandle)
         self.information_handles.append(handle)
-        is_leaf = handle.path.endswith(("secret.txt", "SECRET~1.TXT"))
-        attributes = 0 if is_leaf else _windows_files._FILE_ATTRIBUTE_DIRECTORY
-        size = len(self.content) if is_leaf else 0
+        size = len(self.content)
         return (
-            attributes,
+            self.handle_attributes,
             None,
             None,
             None,
@@ -180,16 +231,9 @@ class _FakeWindowsApi:
             size >> 32,
             size & 0xFFFFFFFF,
             1,
-            handle.file_id >> 32,
-            handle.file_id & 0xFFFFFFFF,
+            0,
+            1,
         )
-
-    def get_final_path_name(self, handle: object, flags: int) -> str:
-        assert isinstance(handle, _FakeWindowsHandle)
-        assert flags == _windows_files._VOLUME_NAME_GUID
-        if handle.path == "C:\\":
-            return self.volume_root
-        return self.final_path_overrides.get(handle.path, handle.path)
 
     def read_file(self, handle: object, size: int) -> bytes:
         assert isinstance(handle, _FakeWindowsHandle)
@@ -203,37 +247,35 @@ class _FakeWindowsApi:
         self.closed_paths.append(handle.path)
 
 
-def test_windows_admission_uses_a_stable_volume_and_one_held_handle_chain() -> None:
+def test_windows_admission_statically_observes_components_and_reads_one_handle() -> (
+    None
+):
     api = _FakeWindowsApi()
-    open_counts: list[int] = []
 
     data = _windows_files._read_regular_absolute_file(
         "C:\\safe\\nested\\secret.txt",
         max_bytes=_SECRET_LIMIT,
         api=api,
-        after_directory_open=lambda _path: open_counts.append(
-            len(api.create_calls) - len(api.closed_paths)
-        ),
     )
 
     assert data == b"secret bytes"
-    assert [call[0] for call in api.create_calls] == [
-        "C:\\",
-        f"{api.volume_root}safe",
-        f"{api.volume_root}safe\\nested",
-        f"{api.volume_root}safe\\nested\\secret.txt",
+    assert api.attribute_calls == [
+        "C:\\safe",
+        "C:\\safe\\nested",
+        "C:\\safe\\nested\\secret.txt",
     ]
-    assert all(call[2] == _windows_files._FILE_SHARE_READ for call in api.create_calls)
-    assert open_counts == [2, 3]
+    assert len(api.create_calls) == 1
+    assert api.create_calls[0][0] == "C:\\safe\\nested\\secret.txt"
+    assert api.create_calls[0][2] == (
+        _windows_files._FILE_SHARE_READ
+        | _windows_files._FILE_SHARE_WRITE
+        | _windows_files._FILE_SHARE_DELETE
+    )
+    assert api.create_calls[0][4] & _windows_files._FILE_FLAG_OPEN_REPARSE_POINT
     leaf = api.read_handles[0]
     assert set(api.read_handles) == {leaf}
     assert api.information_handles.count(leaf) == 2
-    assert api.closed_paths == [
-        f"{api.volume_root}safe\\nested\\secret.txt",
-        f"{api.volume_root}safe\\nested",
-        f"{api.volume_root}safe",
-        "C:\\",
-    ]
+    assert api.closed_paths == ["C:\\safe\\nested\\secret.txt"]
 
 
 def test_windows_admission_rejects_an_unverifiable_drive_before_opening() -> None:
@@ -248,59 +290,40 @@ def test_windows_admission_rejects_an_unverifiable_drive_before_opening() -> Non
     assert str(raised.value) == (
         "regular-file admission requires a verifiable local drive"
     )
+    assert api.attribute_calls == []
     assert api.create_calls == []
 
 
-def test_windows_admission_fails_closed_when_ancestor_lineage_differs() -> None:
+def test_windows_admission_rejects_a_statically_observed_ancestor_reparse() -> None:
     api = _FakeWindowsApi()
-    expected_ancestor = f"{api.volume_root}safe"
-    api.final_path_overrides[expected_ancestor] = f"{api.volume_root}other-parent\\safe"
-
-    with pytest.raises(OSError) as raised:
-        _windows_files._read_regular_absolute_file(
-            "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT, api=api
-        )
-
-    assert str(raised.value) == "admitted path lineage cannot be verified"
-    assert api.closed_paths == [expected_ancestor, "C:\\"]
-
-
-def test_windows_admission_fails_closed_when_leaf_lineage_differs() -> None:
-    api = _FakeWindowsApi()
-    expected_leaf = f"{api.volume_root}safe\\secret.txt"
-    api.final_path_overrides[expected_leaf] = f"{api.volume_root}other\\secret.txt"
-
-    with pytest.raises(OSError) as raised:
-        _windows_files._read_regular_absolute_file(
-            "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT, api=api
-        )
-
-    assert str(raised.value) == "admitted path lineage cannot be verified"
-    assert api.read_handles == []
-    assert api.closed_paths == [expected_leaf, f"{api.volume_root}safe", "C:\\"]
-
-
-def test_windows_admission_accepts_filesystem_normalized_short_names() -> None:
-    api = _FakeWindowsApi()
-    short_parent = f"{api.volume_root}RUNNER~1"
-    long_parent = f"{api.volume_root}Runner Admin"
-    short_leaf = f"{long_parent}\\SECRET~1.TXT"
-    long_leaf = f"{long_parent}\\secret value.txt"
-    api.final_path_overrides[short_parent] = long_parent
-    api.final_path_overrides[short_leaf] = long_leaf
-
-    data = _windows_files._read_regular_absolute_file(
-        "C:\\RUNNER~1\\SECRET~1.TXT",
-        max_bytes=_SECRET_LIMIT,
-        api=api,
+    api.attribute_overrides["C:\\safe"] = (
+        _windows_files._FILE_ATTRIBUTE_DIRECTORY
+        | _windows_files._FILE_ATTRIBUTE_REPARSE_POINT
     )
 
-    assert data == b"secret bytes"
-    assert [call[0] for call in api.create_calls] == [
-        "C:\\",
-        short_parent,
-        short_leaf,
-    ]
+    with pytest.raises(OSError) as raised:
+        _windows_files._read_regular_absolute_file(
+            "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT, api=api
+        )
+
+    assert str(raised.value) == (
+        "admitted path ancestors must be real local directories"
+    )
+    assert api.create_calls == []
+
+
+def test_windows_admission_rejects_leaf_reparse_from_the_opened_handle() -> None:
+    api = _FakeWindowsApi()
+    api.handle_attributes = _windows_files._FILE_ATTRIBUTE_REPARSE_POINT
+
+    with pytest.raises(OSError) as raised:
+        _windows_files._read_regular_absolute_file(
+            "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT, api=api
+        )
+
+    assert str(raised.value) == "admitted input must be a regular local file"
+    assert api.read_handles == []
+    assert api.closed_paths == ["C:\\safe\\secret.txt"]
 
 
 def test_windows_public_admission_marks_source_permissions_unverifiable(

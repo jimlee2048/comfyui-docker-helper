@@ -1,4 +1,4 @@
-"""Platform-native admission for trusted regular-file inputs."""
+"""Platform-native admission for cooperative local regular-file inputs."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 _close_descriptor = os.close
-_descriptor_relative_open_available = os.open in os.supports_dir_fd
 _platform_name = os.name
 _READ_CHUNK_BYTES = 1024 * 1024
 
@@ -23,7 +22,7 @@ class AdmittedRegularFile:
 
 
 def read_regular_absolute_file(path: str | os.PathLike[str]) -> bytes:
-    """Read one canonical absolute regular file without following symlinks."""
+    """Read one statically checked path without following its final symlink."""
     return _read_regular_absolute_file(path, max_bytes=None).data
 
 
@@ -65,28 +64,17 @@ def _read_regular_absolute_file(
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise ValueError("path must be one canonical absolute POSIX path")
-    if (
-        os.name != "posix"
-        or not _descriptor_relative_open_available
-        or any(
-            not hasattr(os, name)
-            for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK")
-        )
+    if os.name != "posix" or any(
+        not hasattr(os, name) for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK")
     ):
-        raise OSError("descriptor-safe regular-file admission is unavailable")
+        raise OSError("regular-file admission is unavailable")
 
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    _observe_posix_components(parsed)
     leaf_flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
-    directory_fds: list[int] = []
     leaf_fd: int | None = None
     primary_error = False
     try:
-        directory_fds.append(os.open("/", directory_flags))
-        for component in parsed.parts[1:-1]:
-            directory_fds.append(
-                os.open(component, directory_flags, dir_fd=directory_fds[-1])
-            )
-        leaf_fd = os.open(parsed.name, leaf_flags, dir_fd=directory_fds[-1])
+        leaf_fd = os.open(value, leaf_flags)
         mode = os.fstat(leaf_fd).st_mode
         if not stat.S_ISREG(mode):
             raise OSError("admitted input must be a regular file")
@@ -108,15 +96,29 @@ def _read_regular_absolute_file(
         primary_error = True
         raise
     finally:
-        close_error: OSError | None = None
-        for descriptor in (
-            *((leaf_fd,) if leaf_fd is not None else ()),
-            *reversed(directory_fds),
-        ):
+        if leaf_fd is not None:
             try:
-                _close_descriptor(descriptor)
+                _close_descriptor(leaf_fd)
             except OSError as error:
-                if close_error is None:
-                    close_error = error
-        if close_error is not None and not primary_error:
-            raise close_error
+                if not primary_error:
+                    raise error
+
+
+def _observe_posix_components(path: PurePosixPath) -> None:
+    """Reject links and special nodes visible during one static path walk."""
+    candidate = PurePosixPath("/")
+    for index, component in enumerate(path.parts[1:], start=1):
+        candidate /= component
+        mode = os.lstat(candidate).st_mode
+        leaf = index == len(path.parts) - 1
+        if stat.S_ISLNK(mode):
+            raise OSError(
+                "admitted input must be a regular file"
+                if leaf
+                else "admitted path ancestors must be real directories"
+            )
+        if leaf:
+            if not stat.S_ISREG(mode):
+                raise OSError("admitted input must be a regular file")
+        elif not stat.S_ISDIR(mode):
+            raise OSError("admitted path ancestors must be real directories")

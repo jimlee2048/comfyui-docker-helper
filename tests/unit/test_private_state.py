@@ -56,8 +56,6 @@ class _FakeHandle:
 
 
 class _FakePrivateWindowsApi:
-    volume_root = "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\"
-
     def __init__(self) -> None:
         self.directory_security = object()
         self.file_security = object()
@@ -73,6 +71,10 @@ class _FakePrivateWindowsApi:
         self.removed_directories: list[str] = []
         self.deleted_files: list[str] = []
         self.existing_private_file = False
+        self.directory_attributes = _windows_files._FILE_ATTRIBUTE_DIRECTORY
+        self.file_attributes = 0
+        self.security_error = False
+        self.drive_type = _windows_files._DRIVE_FIXED
         self._identity = 1
 
     def _handle(self, path: str) -> _FakeHandle:
@@ -101,7 +103,10 @@ class _FakePrivateWindowsApi:
 
     def get_drive_type(self, root: str) -> int:
         assert root == "C:\\"
-        return _windows_files._DRIVE_FIXED
+        return self.drive_type
+
+    def get_file_attributes(self, _path: str) -> int:
+        raise AssertionError("private-state creation does not stat source paths")
 
     def get_file_type(self, _handle: object) -> int:
         return _windows_files._FILE_TYPE_DISK
@@ -110,7 +115,7 @@ class _FakePrivateWindowsApi:
         assert isinstance(handle, _FakeHandle)
         is_file = handle.path.endswith(("\\secret", "\\lock"))
         return (
-            0 if is_file else _windows_files._FILE_ATTRIBUTE_DIRECTORY,
+            self.file_attributes if is_file else self.directory_attributes,
             None,
             None,
             None,
@@ -122,21 +127,12 @@ class _FakePrivateWindowsApi:
             handle.identity,
         )
 
-    def get_final_path_name(self, handle: object, flags: int) -> str:
-        assert isinstance(handle, _FakeHandle)
-        assert flags == _windows_files._VOLUME_NAME_GUID
-        return self.volume_root if handle.path == "C:\\" else handle.path
-
     def read_file(self, _handle: object, _size: int) -> bytes:
         raise AssertionError("private-state tests do not read through Win32")
 
     def close_handle(self, handle: object) -> None:
         assert isinstance(handle, _FakeHandle)
         self.closed_paths.append(handle.path)
-
-    def get_volume_flags(self, root: str) -> int:
-        assert root == self.volume_root
-        return _windows_files._FILE_PERSISTENT_ACLS
 
     def private_security_attributes(self, *, directory: bool) -> object:
         return self.directory_security if directory else self.file_security
@@ -174,6 +170,8 @@ class _FakePrivateWindowsApi:
     def verify_private_security(self, handle: object, *, directory: bool) -> None:
         assert isinstance(handle, _FakeHandle)
         self.security_verifications.append((handle.path, directory))
+        if self.security_error:
+            raise OSError("private security sentinel")
 
     def remove_directory(self, path: str) -> None:
         self.removed_directories.append(path)
@@ -209,11 +207,43 @@ def test_windows_private_directory_passes_protected_security_at_creation() -> No
         candidate_suffix=lambda: "token",
     )
 
-    candidate = f"{api.volume_root}Temp\\cdh-private-token"
+    candidate = "C:\\Temp\\cdh-private-token"
     assert result == "C:\\Temp\\cdh-private-token"
     assert api.create_directory_calls == [(candidate, api.directory_security)]
     assert api.security_verifications == [(candidate, True)]
-    assert api.closed_paths == [candidate, f"{api.volume_root}Temp", "C:\\"]
+    assert api.closed_paths == [candidate]
+
+
+def test_windows_private_directory_rejects_created_reparse_and_cleans_up() -> None:
+    api = _FakePrivateWindowsApi()
+    api.directory_attributes |= _windows_files._FILE_ATTRIBUTE_REPARSE_POINT
+
+    with pytest.raises(OSError, match="real local directories"):
+        _windows_files._create_private_directory_windows(
+            "C:\\Temp",
+            prefix="cdh-private-",
+            api=api,
+            candidate_suffix=lambda: "token",
+        )
+
+    candidate = "C:\\Temp\\cdh-private-token"
+    assert api.closed_paths == [candidate]
+    assert api.removed_directories == [candidate]
+
+
+def test_windows_private_state_rejects_a_remote_drive_before_creation() -> None:
+    api = _FakePrivateWindowsApi()
+    api.drive_type = _windows_files._DRIVE_REMOTE
+
+    with pytest.raises(OSError, match="verifiable local drive"):
+        _windows_files._create_private_directory_windows(
+            "C:\\Temp",
+            prefix="cdh-private-",
+            api=api,
+            candidate_suffix=lambda: "token",
+        )
+
+    assert api.create_directory_calls == []
 
 
 def test_windows_exclusive_private_file_transfers_handle_ownership_once() -> None:
@@ -226,7 +256,7 @@ def test_windows_exclusive_private_file_transfers_handle_ownership_once() -> Non
         api=api,
     )
 
-    internal_path = f"{api.volume_root}Temp\\secret"
+    internal_path = "C:\\Temp\\secret"
     assert descriptor == 700
     assert api.private_file_calls[0][0] == internal_path
     assert api.private_file_calls[0][3] == _windows_files._CREATE_NEW
@@ -236,7 +266,7 @@ def test_windows_exclusive_private_file_transfers_handle_ownership_once() -> Non
     assert internal_path not in api.closed_paths
     assert api.raw_closes == []
     assert api.inheritability == [(descriptor, False)]
-    assert api.closed_paths == [f"{api.volume_root}Temp", "C:\\"]
+    assert api.closed_paths == []
 
 
 def test_windows_existing_lock_is_opened_and_security_verified() -> None:
@@ -260,7 +290,24 @@ def test_windows_existing_lock_is_opened_and_security_verified() -> None:
         for call in api.private_file_calls
     )
     assert all(call[5] is api.file_security for call in api.private_file_calls)
-    assert api.security_verifications == [(f"{api.volume_root}Temp\\lock", False)]
+    assert api.security_verifications == [("C:\\Temp\\lock", False)]
+
+
+def test_windows_existing_lock_rejects_nonprivate_security_without_deleting() -> None:
+    api = _FakePrivateWindowsApi()
+    api.existing_private_file = True
+    api.security_error = True
+
+    with pytest.raises(OSError, match="private security sentinel"):
+        _windows_files._open_private_file_windows(
+            "C:\\Temp\\lock",
+            exclusive=False,
+            read_write=True,
+            api=api,
+        )
+
+    assert api.closed_paths == ["C:\\Temp\\lock"]
+    assert api.deleted_files == []
 
 
 def test_windows_fd_conversion_failure_closes_only_the_detached_handle() -> None:
@@ -279,7 +326,7 @@ def test_windows_fd_conversion_failure_closes_only_the_detached_handle() -> None
             api=api,
         )
 
-    internal_path = f"{api.volume_root}Temp\\secret"
+    internal_path = "C:\\Temp\\secret"
     assert len(api.raw_closes) == 1
     assert internal_path not in api.closed_paths
     assert api.closed_fds == []
@@ -302,7 +349,7 @@ def test_windows_inheritability_failure_closes_only_the_transferred_fd() -> None
             api=api,
         )
 
-    internal_path = f"{api.volume_root}Temp\\secret"
+    internal_path = "C:\\Temp\\secret"
     assert api.raw_closes == []
     assert api.closed_fds == [700]
     assert internal_path not in api.closed_paths

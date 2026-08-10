@@ -500,7 +500,7 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert (first / "build/hooks/hooks/pre.py").read_bytes() == content
     assert (first / "Dockerfile").read_text() == render_build_plan_dockerfile(plan)
     assert (
-        "COPY runtime/config.toml /opt/cdh/runtime/config.toml"
+        "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml"
         in (first / "Dockerfile").read_text()
     )
     runtime = load_runtime_config(
@@ -519,6 +519,10 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert str(source).encode() not in (first / "build-plan.json").read_bytes()
 
     dockerfile = (first / "Dockerfile").read_text()
+    assert (
+        "COPY --chmod=0644 build-plan.json /opt/cdh/build/build-plan.json" in dockerfile
+    )
+    assert "COPY --chmod=0755 build/hooks /opt/cdh/build/hooks" in dockerfile
     assert (
         f"--mount=type=bind,source=bootstrap/{wheel.filename},"
         f"target=/tmp/{wheel.filename},readonly" in dockerfile
@@ -546,6 +550,32 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
         plan.files,
         plan.application.paths.comfyui,
     )
+
+
+def test_materializer_avoids_posix_mode_calls_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    output = tmp_path / "output"
+    output.mkdir()
+
+    monkeypatch.setattr(materializer_module, "_platform_name", "nt")
+    monkeypatch.setattr(
+        materializer_module.os,
+        "fchmod",
+        lambda *_args: pytest.fail("Windows materialization called fchmod"),
+    )
+    monkeypatch.setattr(
+        Path,
+        "chmod",
+        lambda *_args, **_kwargs: pytest.fail("Windows materialization called chmod"),
+    )
+
+    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
+
+    assert (output / "build-plan.json").is_file()
+    assert (output / "runtime/config.toml").is_file()
 
 
 def _run_blocks(rendered: str) -> tuple[str, ...]:

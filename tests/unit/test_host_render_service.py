@@ -1088,8 +1088,11 @@ def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
     ]
     assert (output / "runtime/hooks/pre-start.d/10-pre.sh").read_text() == "pre\n"
     dockerfile = (output / "Dockerfile").read_text()
-    assert "COPY runtime/config.toml /opt/cdh/runtime/config.toml" in dockerfile
-    assert "COPY runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
+    assert (
+        "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml"
+        in dockerfile
+    )
+    assert "COPY --chmod=0755 runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
     discovered = discover_runtime_hooks(
         baked_hooks_path=output / "runtime/hooks",
         mounted_hooks_path=tmp_path / "missing-hooks",
@@ -1497,7 +1500,7 @@ def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
     )
 
 
-# Host owns private-stage creation, deterministic modes, and whole-stage cleanup.
+# Host owns private-stage creation, platform privacy, and whole-stage cleanup.
 def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1515,7 +1518,8 @@ def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
         assert stage.parent == output.parent
         assert stage != output
         assert stage not in observed_stages
-        assert stage.stat().st_mode & 0o777 == 0o700
+        if os.name == "posix":
+            assert stage.stat().st_mode & 0o777 == 0o700
         assert tuple(stage.iterdir()) == ()
         observed_stages.append(stage)
         observed_phases.add(phase)
@@ -1536,6 +1540,7 @@ def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
     assert observed_phases == {"normal", "check"}
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX rendered-mode contract")
 def test_host_context_modes_are_deterministic_under_restrictive_umask(
     tmp_path: Path,
 ) -> None:
@@ -1619,6 +1624,72 @@ def test_host_metadata_writes_are_exclusive_and_clean_failed_stage(
     assert all(not stage.exists() for stage in observed_stages)
 
 
+def test_windows_metadata_write_and_check_tree_do_not_use_posix_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = tmp_path / "expected"
+    observed = tmp_path / "observed"
+    expected.mkdir()
+    observed.mkdir()
+    (expected / "payload").write_bytes(b"same")
+    (observed / "payload").write_bytes(b"same")
+    (expected / "payload").chmod(0o600)
+    (observed / "payload").chmod(0o755)
+
+    monkeypatch.setattr(render_service_module, "_platform_name", "nt")
+    monkeypatch.setattr(
+        render_service_module.os,
+        "fchmod",
+        lambda *_args: pytest.fail("Windows metadata write called fchmod"),
+    )
+
+    render_service_module._write_private_stage_metadata(
+        expected, "metadata", b"metadata"
+    )
+    (observed / "metadata").write_bytes(b"metadata")
+
+    assert render_service_module._tree(expected) == render_service_module._tree(
+        observed
+    )
+
+
+def test_render_output_real_directory_check_rejects_observed_reparse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    monkeypatch.setattr(
+        render_service_module,
+        "observed_path_is_reparse",
+        lambda _observed: True,
+    )
+
+    assert render_service_module._is_real_directory(output) is False
+
+
+def test_check_tree_does_not_descend_into_an_observed_reparse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "root"
+    linked = root / "linked"
+    linked.mkdir(parents=True)
+    (linked / "outside-sentinel").write_text("outside")
+    monkeypatch.setattr(
+        render_service_module,
+        "observed_path_is_reparse",
+        lambda _observed: True,
+    )
+
+    tree = render_service_module._tree(root)
+
+    assert set(tree) == {"linked"}
+    assert tree["linked"][0] == "symlink"
+    assert tree["linked"][2] is None
+
+
 # Context replacement owns unique staging/backup paths and preserves foreign siblings.
 def test_overwrite_uses_unique_owned_backup_and_preserves_sibling(
     tmp_path: Path,
@@ -1631,7 +1702,7 @@ def test_overwrite_uses_unique_owned_backup_and_preserves_sibling(
     sibling.mkdir()
     sentinel = sibling / "sentinel"
     sentinel.write_text("keep")
-    backup_sibling = tmp_path / ".context.backup-user"
+    backup_sibling = tmp_path / f"{render_service_module._BACKUP_PREFIX}user"
     backup_sibling.mkdir()
     backup_sentinel = backup_sibling / "sentinel"
     backup_sentinel.write_text("also keep")
@@ -1640,7 +1711,9 @@ def test_overwrite_uses_unique_owned_backup_and_preserves_sibling(
 
     assert sentinel.read_text() == "keep"
     assert backup_sentinel.read_text() == "also keep"
-    assert list(tmp_path.glob(".context.backup-*")) == [backup_sibling]
+    assert list(tmp_path.glob(f"{render_service_module._BACKUP_PREFIX}*")) == [
+        backup_sibling
+    ]
 
 
 def test_stage_rename_failure_restores_existing_context_and_sibling(
@@ -1657,7 +1730,10 @@ def test_stage_rename_failure_restores_existing_context_and_sibling(
     original_rename = Path.rename
 
     def fail_stage(self: Path, target: Path):
-        if self.name.startswith(".context.stage-") and Path(target) == output:
+        if (
+            self.name.startswith(render_service_module._STAGE_PREFIX)
+            and Path(target) == output
+        ):
             raise OSError("stage rename denied")
         return original_rename(self, target)
 
@@ -1668,7 +1744,7 @@ def test_stage_rename_failure_restores_existing_context_and_sibling(
     assert raised.value.diagnostics[0].code == "render.context_write_failed"
     assert _tree(output) == before
     assert sibling.read_text() == "keep"
-    assert not list(tmp_path.glob(".context.backup-*"))
+    assert not list(tmp_path.glob(f"{render_service_module._BACKUP_PREFIX}*"))
 
 
 def test_owned_backup_cleanup_failure_never_touches_sibling(
@@ -1684,7 +1760,7 @@ def test_owned_backup_cleanup_failure_never_touches_sibling(
     original_rmtree = shutil.rmtree
 
     def fail_backup(path, *args, **kwargs):
-        if Path(path).name.startswith(".context.backup-"):
+        if Path(path).name.startswith(render_service_module._BACKUP_PREFIX):
             raise OSError("cleanup denied")
         return original_rmtree(path, *args, **kwargs)
 
@@ -1693,7 +1769,7 @@ def test_owned_backup_cleanup_failure_never_touches_sibling(
 
     assert sibling.read_text() == "keep"
     assert _valid_context(output)
-    assert len(list(tmp_path.glob(".context.backup-*"))) == 1
+    assert len(list(tmp_path.glob(f"{render_service_module._BACKUP_PREFIX}*"))) == 1
 
 
 def test_restore_rename_failure_retains_original_in_owned_backup(
@@ -1839,6 +1915,7 @@ def test_check_compares_complete_path_type_and_bytes_without_following(
     assert outside.read_text() == "outside sentinel"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX rendered-mode contract")
 def test_check_detects_materialized_hook_permission_drift(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())

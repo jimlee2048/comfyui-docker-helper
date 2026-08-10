@@ -12,18 +12,20 @@ _platform_name = os.name
 _temporary_parent = tempfile.gettempdir
 
 
-def create_private_directory(*, prefix: str) -> Path:
-    """Create a private random directory below the platform temp parent."""
+def create_private_directory(
+    *, prefix: str, parent: str | os.PathLike[str] | None = None
+) -> Path:
+    """Create a private random directory below one selected parent."""
     _require_private_prefix(prefix)
-    parent = _temporary_parent()
+    selected_parent = _temporary_parent() if parent is None else _path_string(parent)
     if _platform_name == "nt":
         from comfyui_docker_helper._windows_files import (
             create_private_directory as create_windows_private_directory,
         )
 
-        return Path(create_windows_private_directory(parent, prefix=prefix))
+        return Path(create_windows_private_directory(selected_parent, prefix=prefix))
     _require_posix_platform()
-    path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=selected_parent))
     try:
         os.chmod(path, 0o700, follow_symlinks=False)
         observed = os.stat(path, follow_symlinks=False)

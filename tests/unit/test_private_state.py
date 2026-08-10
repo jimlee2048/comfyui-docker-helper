@@ -43,6 +43,14 @@ def test_posix_private_state_preserves_modes_and_caller_owned_descriptors(
         os.close(second_lock_fd)
         os.close(first_lock_fd)
 
+    selected_parent = tmp_path / "selected-parent"
+    selected_parent.mkdir()
+    selected = private_state.create_private_directory(
+        prefix="cdh-selected-", parent=selected_parent
+    )
+    assert selected.parent == selected_parent
+    assert stat.S_IMODE(selected.stat().st_mode) == 0o700
+
     linked = root / "linked"
     linked.symlink_to(secret)
     with pytest.raises(OSError):
@@ -212,6 +220,22 @@ def test_windows_private_directory_passes_protected_security_at_creation() -> No
     assert api.create_directory_calls == [(candidate, api.directory_security)]
     assert api.security_verifications == [(candidate, True)]
     assert api.closed_paths == [candidate]
+
+
+def test_windows_private_directory_accepts_local_drive_root_parent() -> None:
+    api = _FakePrivateWindowsApi()
+
+    result = _windows_files._create_private_directory_windows(
+        "C:\\",
+        prefix="cdh-render-",
+        api=api,
+        candidate_suffix=lambda: "token",
+    )
+
+    candidate = "C:\\cdh-render-token"
+    assert result == candidate
+    assert api.create_directory_calls == [(candidate, api.directory_security)]
+    assert api.security_verifications == [(candidate, True)]
 
 
 def test_windows_private_directory_rejects_created_reparse_and_cleans_up() -> None:

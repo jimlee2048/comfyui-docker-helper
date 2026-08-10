@@ -544,7 +544,7 @@ def _create_private_directory_windows(
     candidate_suffix: Callable[[], str],
 ) -> str:
     _require_private_prefix(prefix)
-    parsed = _parse_windows_regular_file_path(parent)
+    parsed = _parse_windows_regular_file_path(parent, allow_drive_root=True)
     if api.get_drive_type(parsed.drive_root) not in _LOCAL_DRIVE_TYPES:
         raise OSError("private state requires a verifiable local drive")
     handles: list[object] = []

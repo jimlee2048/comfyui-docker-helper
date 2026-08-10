@@ -648,7 +648,13 @@ def test_required_build_hook_root_fails_before_planning_providers(
     )
 
     assert result.exit_code == 1
-    assert "hook.build_hooks_dir_required" in result.output
+    assert result.stdout == ""
+    assert "Error: Configuration is invalid" in result.stderr
+    assert "Field: build_hooks_dir" in result.stderr
+    assert "--build-hooks-dir is required when build hooks are configured" in (
+        result.stderr
+    )
+    assert "hook.build_hooks_dir_required" not in result.stderr
     assert not (tmp_path / "context").exists()
 
 
@@ -686,8 +692,11 @@ def test_overlapping_build_hook_root_fails_before_planning_providers(
     )
 
     assert result.exit_code == 1
-    assert "render.input_output_overlap" in result.output
-    assert "build hook source" in result.output
+    assert result.stdout == ""
+    assert "Error: Unable to render build context" in result.stderr
+    assert "Field: render" in result.stderr
+    assert "output and build hook source must not overlap" in result.stderr
+    assert "render.input_output_overlap" not in result.stderr
     assert hook.read_text() == "sentinel\n"
 
 
@@ -723,8 +732,11 @@ def test_invalid_build_hook_root_fails_before_planning_providers(
     )
 
     assert result.exit_code == 1
-    assert "Unable to process configuration" in result.output
-    assert "hook.build_hooks_dir_not_directory" in result.output
+    assert result.stdout == ""
+    assert "Error: Configuration is invalid" in result.stderr
+    assert "Field: build_hooks_dir" in result.stderr
+    assert "must be an existing regular directory" in result.stderr
+    assert "hook.build_hooks_dir_not_directory" not in result.stderr
     assert not context.exists()
 
 
@@ -754,7 +766,7 @@ def test_relative_build_hook_root_is_resolved_from_invocation_directory(
 
     def prepare(_output_dir, *, build_hook_source_root, **_kwargs):
         observed.append(build_hook_source_root)
-        return SimpleNamespace()
+        return SimpleNamespace(lock_result=accepted_resolution())
 
     monkeypatch.chdir(invocation)
     monkeypatch.setattr(
@@ -780,6 +792,8 @@ def test_relative_build_hook_root_is_resolved_from_invocation_directory(
     )
 
     assert result.exit_code == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
     assert observed == [(invocation / "build-hooks").resolve()]
 
 
@@ -801,7 +815,8 @@ def test_host_validate_remains_offline_and_does_not_construct_providers(
     )
 
     assert result.exit_code == 0
-    assert result.output == ""
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 def test_host_validate_accepts_and_composes_repeated_config_files(
@@ -828,7 +843,8 @@ def test_host_validate_accepts_and_composes_repeated_config_files(
     )
 
     assert result.exit_code == 0
-    assert result.output == ""
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
@@ -853,16 +869,21 @@ def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
             str(override),
         ],
     )
-    output = _plain_output(result.output)
+    output = _plain_output(result.stderr)
 
     assert result.exit_code == 1
-    assert "python.conflicting_package_requirement" in output
+    assert result.stdout == ""
+    assert "Error: Configuration is invalid" in output
+    assert "Field: python.extra_packages.1" in output
+    assert "package demo has conflicting requirements" in output
+    assert "python.conflicting_package_requirement" not in output
     assert "Earlier:" in output and "Later:" in output
     assert output.count("File:") == 2
     assert str(base) in output.replace("\n", "")
     assert str(override) in output.replace("\n", "")
     assert "Value: demo>=1,<2" in output
     assert "Value: Demo>=2,<3" in output
+    assert "\x1b" not in result.stderr
 
 
 def test_host_validate_warns_for_redundant_default_os_package(
@@ -878,10 +899,13 @@ def test_host_validate_warns_for_redundant_default_os_package(
         app,
         ["host", "validate", "-f", str(config)],
     )
-    output = _plain_output(result.output)
+    output = _plain_output(result.stderr)
 
     assert result.exit_code == 0
-    assert output.count("system.redundant_default_apt_package") == 1
+    assert result.stdout == ""
+    assert output.count("bash is already installed by cdh and is ignored") == 1
+    assert "Field: system.extra_packages.0" in output
+    assert "system.redundant_default_apt_package" not in output
     assert str(config) in output.replace("\n", "")
 
 
@@ -901,7 +925,15 @@ def test_host_validate_displays_http_credential_warning_offline(
     result = cli_runner.invoke(app, ["host", "validate", "-f", str(config)])
 
     assert result.exit_code == 0
-    assert result.output.count("git_credential.insecure_http") == 1
+    assert result.stdout == ""
+    assert (
+        result.stderr.count(
+            "credentials sent over HTTP lack TLS transport confidentiality"
+        )
+        == 1
+    )
+    assert "Field: cdh.git.credentials.0.match" in result.stderr
+    assert "git_credential.insecure_http" not in result.stderr
 
 
 def test_http_credential_warning_precedes_build_provider_initialization(
@@ -933,7 +965,14 @@ def test_http_credential_warning_precedes_build_provider_initialization(
         ],
     )
 
-    assert result.output.count("git_credential.insecure_http") == 1
+    assert result.stdout == ""
+    assert (
+        result.stderr.count(
+            "credentials sent over HTTP lack TLS transport confidentiality"
+        )
+        == 1
+    )
+    assert "git_credential.insecure_http" not in result.stderr
     assert isinstance(result.exception, BoundaryReached)
 
 
@@ -956,8 +995,11 @@ def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
     )
 
     assert result.exit_code == 1
-    assert "render.options_conflict" in result.output
-    assert "Traceback" not in result.output
+    assert result.stdout == ""
+    assert "Error: Unable to render build context" in result.stderr
+    assert "--locked and --upgrade-lock are mutually exclusive" in result.stderr
+    assert "render.options_conflict" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1015,40 +1057,47 @@ platforms = ["linux/amd64"]
     result = cli_runner.invoke(app, [*resolved_args, "-f", str(config)])
 
     assert result.exit_code == 1
-    assert "lock.resolve_failed" in result.output
-    assert "identity provider request failed" in result.output
-    assert "Traceback" not in result.output
+    assert result.stdout == ""
+    expected_title = (
+        "Error: Unable to render build context"
+        if command_args[1] == "render"
+        else "Error: Unable to prepare image build"
+    )
+    assert expected_title in result.stderr
+    assert "identity provider request failed" in result.stderr
+    assert "lock.resolve_failed" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.parametrize(
-    ("selector", "cli_tags", "expected_code"),
+    ("selector", "cli_tags", "expected_message"),
     [
         (
             "0.11.0",
             ["example/image:${{comfyui.commit}}"],
-            "build.invalid_tag_expression",
+            "must use a supported expression with canonical spacing",
         ),
         (
             "0.11.0",
             ["busybox:x", "docker.io/library/busybox:x"],
-            "build.duplicate_tag",
+            "must not duplicate another normalized publication target",
         ),
         (
             "nightly",
             ["example/image:v${{ comfyui.release }}"],
-            "build.release_unavailable",
+            "comfyui.release is unavailable for this ComfyUI selector",
         ),
         (
             "1111111111111111111111111111111111111111",
             ["example/image:v${{ comfyui.release }}"],
-            "build.release_unavailable",
+            "comfyui.release is unavailable for this ComfyUI selector",
         ),
     ],
 )
 def test_cli_tags_use_shared_static_validation_before_provider_construction(
     selector: str,
     cli_tags: list[str],
-    expected_code: str,
+    expected_message: str,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1069,7 +1118,10 @@ def test_cli_tags_use_shared_static_validation_before_provider_construction(
     result = cli_runner.invoke(app, args)
 
     assert result.exit_code == 2
-    assert expected_code in _plain_output(result.output)
+    assert result.stdout == ""
+    plain = _plain_output(result.stderr)
+    assert "Usage: cdh host build" in plain
+    assert expected_message in " ".join(plain.replace("│", " ").split())
 
 
 def test_cli_tag_override_does_not_hide_invalid_config_tags(
@@ -1092,7 +1144,11 @@ def test_cli_tag_override_does_not_hide_invalid_config_tags(
     )
 
     assert result.exit_code == 1
-    assert "build.invalid_image_reference" in result.output
+    assert result.stdout == ""
+    assert "Error: Configuration is invalid" in result.stderr
+    assert "Field: build.tags.0" in result.stderr
+    assert "repository path components must use lowercase" in result.stderr
+    assert "build.invalid_image_reference" not in result.stderr
 
 
 @pytest.mark.parametrize("with_tags", [False, True])
@@ -1151,8 +1207,9 @@ def test_dry_run_renders_an_independent_buildx_output_section(
         ],
     )
 
-    plain = _plain_output(result.output)
+    plain = _plain_output(result.stdout)
     assert result.exit_code == 0
+    assert result.stderr == ""
     assert plain.index("Custom nodes:") < plain.index("Buildx output")
     if output_plan is None:
         assert "Buildx output\n  None" in plain
@@ -1182,7 +1239,7 @@ def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         seen["configuration_result"] = kwargs["configuration_result"]
         seen["build_hook_source_root"] = kwargs["build_hook_source_root"]
-        return SimpleNamespace()
+        return SimpleNamespace(lock_result=accepted_resolution())
 
     def load(*args, **kwargs):
         result = original_load(*args, **kwargs)
@@ -1219,6 +1276,8 @@ def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
     )
 
     assert result.exit_code == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
     assert seen["runtime_hooks_dir"] == hooks
     assert len(loaded) == 1
     assert seen["configuration_result"] is loaded[0]
@@ -1271,9 +1330,12 @@ def test_render_materialization_error_is_short_and_has_no_traceback(
     )
 
     assert result.exit_code == 1
-    assert "Unable to process configuration" in result.output
-    assert "render.context_write_failed" in result.output
-    assert "Traceback" not in result.output
+    assert result.stdout == ""
+    assert "Error: Unable to render build context" in result.stderr
+    assert "Field: render" in result.stderr
+    assert "context could not be written" in result.stderr
+    assert "render.context_write_failed" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_build_overrides_flow_through_plan_and_buildx(
@@ -1329,6 +1391,7 @@ platforms = ["linux/amd64"]
         )
 
     def buildx(**kwargs):
+        kwargs["log"]("external-buildkit-\x1b[31msentinel\x1b[0m")
         seen["buildx_ssh"] = (
             kwargs["forward_default_ssh"],
             kwargs["file_secret_bindings"],
@@ -1377,6 +1440,17 @@ platforms = ["linux/amd64"]
     )
 
     assert result.exit_code == 0
+    assert result.stderr == ""
+    plain_stdout = _plain_output(result.stdout)
+    assert (
+        plain_stdout.index("Starting image build")
+        < plain_stdout.index("external-buildkit-sentinel")
+        < plain_stdout.index("Image build complete")
+    )
+    assert "external-buildkit-\x1b[31msentinel\x1b[0m" in result.stdout
+    before_external, _, after_external = result.stdout.partition("external-buildkit-")
+    _, _, after_external = after_external.partition("\x1b[0m")
+    assert "\x1b" not in before_external + after_external
     assert seen["runtime_hooks_dir"] == hooks
     configuration_build = seen["configuration_build"]
     assert configuration_build.tags == ["config:test"]
@@ -1475,6 +1549,7 @@ password = { secret = "team_token" }
         nonlocal captured_bindings
         captured_bindings = tuple(kwargs["file_secret_bindings"])
         assert all(binding.source.is_file() for binding in captured_bindings)
+        kwargs["log"]("external-buildkit-sentinel")
         if buildx_failure is not None:
             raise buildx_failure
 
@@ -1502,6 +1577,20 @@ password = { secret = "team_token" }
         else (0 if buildx_failure is None else 1)
     )
     assert result.exit_code == expected_exit_code
+    plain_stdout = _plain_output(result.stdout)
+    assert plain_stdout.index("Starting image build") < plain_stdout.index(
+        "external-buildkit-sentinel"
+    )
+    if buildx_failure is None:
+        assert result.stderr == ""
+        assert plain_stdout.index("external-buildkit-sentinel") < plain_stdout.index(
+            "Image build complete"
+        )
+    else:
+        assert "Image build complete" not in plain_stdout
+    if isinstance(buildx_failure, BuildxBuildError):
+        assert "Error: Image build failed" in result.stderr
+        assert "synthetic Buildx failure" in result.stderr
     assert [binding.secret_id for binding in captured_bindings] == [
         "cdh-git-credential-root_token",
         "cdh-git-credential-team_token",
@@ -1584,8 +1673,12 @@ password = {{ secret = "team_token" }}
     )
 
     assert result.exit_code == 1
-    assert "secret.source_unavailable" in result.output
-    assert missing_locator not in result.output
+    assert result.stdout == ""
+    assert "Error: Unable to access configured secrets" in result.stderr
+    assert "Field: secrets.root_token" in result.stderr
+    assert "the configured source is unavailable" in result.stderr
+    assert "secret.source_unavailable" not in result.stderr
+    assert missing_locator not in result.stderr
     assert observed_root is not None and not observed_root.exists()
 
 
@@ -1778,10 +1871,12 @@ def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
 
     warning = (
         "Warning: --ssh ignored because the effective configuration has no "
-        "direct-Git custom nodes."
+        "direct-Git custom nodes"
     )
     assert result.exit_code == 0
-    assert result.output.count(warning) == 1
+    assert result.stderr.count(warning) == 1
+    assert "Starting image build" in result.stdout
+    assert "Image build complete" in result.stdout
     assert seen["forward_default_ssh"] is False
     assert seen["file_secret_bindings"] == ()
 
@@ -1805,8 +1900,10 @@ def test_build_ssh_does_not_replace_configuration_validation(
     )
 
     assert result.exit_code == 1
-    assert "Unable to process configuration" in result.output
-    assert "SSH_AUTH_SOCK" not in result.output
+    assert result.stdout == ""
+    assert "Error: Configuration is invalid" in result.stderr
+    assert "Field: unknown" in result.stderr
+    assert "SSH_AUTH_SOCK" not in result.stderr
 
 
 @pytest.mark.parametrize("agent_socket", [None, ""])

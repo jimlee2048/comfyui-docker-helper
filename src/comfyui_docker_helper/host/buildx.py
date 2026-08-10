@@ -73,11 +73,6 @@ def build_image_with_buildx(
     resolved_context = resolved_context.resolve()
     tags = tuple(image_tags)
     target_platforms = tuple(platforms)
-    tag_summary = ", ".join(tags)
-    log(
-        "Running Docker Buildx "
-        f"({output}) for {tag_summary} on {', '.join(target_platforms)}"
-    )
     buildkit_inputs: dict[str, object] = {}
     if forward_default_ssh:
         buildkit_inputs["ssh"] = "default"
@@ -119,8 +114,3 @@ def build_image_with_buildx(
         raise BuildxBuildError(
             f"Docker Buildx failed with exit code {error.return_code}"
         ) from error
-
-    if output == "push":
-        log(f"Docker Buildx pushed image tags: {tag_summary}")
-    else:
-        log(f"Docker Buildx loaded image tags: {tag_summary}")

@@ -493,7 +493,8 @@ class LifecycleEvidence(_ManifestModel):
             "--",
             "/opt/uv/bin/cdh",
             "container",
-            "entrypoint",
+            "runtime",
+            "serve",
         ],
         ...,
     ]
@@ -507,7 +508,8 @@ class LifecycleEvidence(_ManifestModel):
             "--",
             "/opt/uv/bin/cdh",
             "container",
-            "entrypoint",
+            "runtime",
+            "serve",
         )
         if value != expected:
             raise ValueError("entrypoint does not match the image init contract")

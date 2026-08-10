@@ -225,10 +225,11 @@ def test_root_command_exposes_current_groups() -> None:
     assert set(command.commands["container"].commands) == {
         "download-files",
         "emit-final-manifest",
-        "entrypoint",
         "install-comfyui",
         "install-custom-nodes",
+        "runtime",
     }
+    assert set(command.commands["container"].commands["runtime"].commands) == {"serve"}
 
 
 @pytest.mark.parametrize(
@@ -250,7 +251,11 @@ def test_root_command_exposes_current_groups() -> None:
             ["container", "emit-final-manifest"],
             "Usage: cdh container emit-final-manifest",
         ),
-        (["container", "entrypoint"], "Usage: cdh container entrypoint"),
+        (["container", "runtime"], "Usage: cdh container runtime"),
+        (
+            ["container", "runtime", "serve"],
+            "Usage: cdh container runtime serve",
+        ),
     ],
 )
 @pytest.mark.parametrize("help_flag", ["--help", "-h"])
@@ -1956,7 +1961,7 @@ platforms = ["linux/amd64"]
     assert result.exit_code == 0
 
 
-def test_container_entrypoint_invokes_service_and_propagates_exit_code(
+def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1975,7 +1980,7 @@ def test_container_entrypoint_invokes_service_and_propagates_exit_code(
     monkeypatch.setenv("WORKSPACE", "/srv/work")
     monkeypatch.setenv("COMFYUI_PATH", "/opt/comfy")
 
-    result = cli_runner.invoke(app, ["container", "entrypoint"])
+    result = cli_runner.invoke(app, ["container", "runtime", "serve"])
 
     assert result.exit_code == 17
     assert seen == {

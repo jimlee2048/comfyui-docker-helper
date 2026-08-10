@@ -58,7 +58,7 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         (
             "STOPSIGNAL SIGTERM",
             'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/uv/bin/cdh", '
-            '"container", "entrypoint"]',
+            '"container", "runtime", "serve"]',
         )
     )
     return "\n".join(lines) + "\n"

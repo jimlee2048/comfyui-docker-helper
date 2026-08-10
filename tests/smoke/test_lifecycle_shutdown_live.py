@@ -94,7 +94,8 @@ def _expected_cdh_argv() -> list[str]:
         f"{environment}/bin/python",
         "/opt/uv/bin/cdh",
         "container",
-        "entrypoint",
+        "runtime",
+        "serve",
     ]
 
 
@@ -273,7 +274,7 @@ from pathlib import Path
 
 if (
     os.environ.get("CDH_LIFECYCLE_EXIT_BARRIER") == "1"
-    and sys.argv == ["/opt/uv/bin/cdh", "container", "entrypoint"]
+    and sys.argv == ["/opt/uv/bin/cdh", "container", "runtime", "serve"]
 ):
     def hold_cdh_exit():
         Path("/evidence/cdh-exit-hold").write_text(str(os.getpid()))
@@ -408,7 +409,7 @@ def test_image_declares_exact_stop_and_entrypoint_contract() -> None:
     dockerfile = (_formal_context() / "Dockerfile").read_text()
     expected = (
         'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/uv/bin/cdh", '
-        '"container", "entrypoint"]'
+        '"container", "runtime", "serve"]'
     )
     assert dockerfile.count("STOPSIGNAL SIGTERM") == 1
     assert dockerfile.count(expected) == 1
@@ -419,7 +420,8 @@ def test_image_declares_exact_stop_and_entrypoint_contract() -> None:
         "--",
         "/opt/uv/bin/cdh",
         "container",
-        "entrypoint",
+        "runtime",
+        "serve",
     ]
 
 

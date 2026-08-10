@@ -28,6 +28,15 @@ app = typer.Typer(
     context_settings=HELP_CONTEXT_SETTINGS,
 )
 
+runtime_app = typer.Typer(
+    name="runtime",
+    help="Control the container runtime.",
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings=HELP_CONTEXT_SETTINGS,
+)
+app.add_typer(runtime_app)
+
 
 @app.callback()
 def container() -> None:
@@ -121,9 +130,9 @@ def emit_final_manifest_command(
     emit_final_manifest(projection, runtime=ContainerRuntime.from_env())
 
 
-@app.command("entrypoint", context_settings=HELP_CONTEXT_SETTINGS)
-def entrypoint_command() -> None:
-    """Start ComfyUI through the cdh runtime entrypoint."""
+@runtime_app.command("serve", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_serve_command() -> None:
+    """Own and serve the ComfyUI container runtime."""
 
     runtime = ContainerRuntime.from_env()
     raise typer.Exit(code=run_entrypoint(runtime=runtime))

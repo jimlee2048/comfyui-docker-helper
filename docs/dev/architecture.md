@@ -17,7 +17,7 @@ flowchart LR
     Publication --> Buildx
     Buildx --> Helpers["cdh container build helpers"]
     Helpers --> Image["ComfyUI image and final manifest"]
-    Image --> Runtime["Tini → cdh container entrypoint"]
+    Image --> Runtime["Tini → cdh container runtime serve"]
     Deployment["Mounted runtime config, hooks, environment"] --> Runtime
     Runtime --> Services["ComfyUI, downloads, optional SSH and hooks"]
 ```
@@ -98,6 +98,6 @@ The Dockerfile installs the toolchain and application, processes configured node
 
 ### Run the container lifecycle
 
-Tini runs as image PID 1 and starts `cdh container entrypoint`. The entrypoint loads the effective runtime configuration, discovers baked and mounted hooks, and composes download, SSH, ComfyUI, readiness, hook, signal, and cleanup services under one lifecycle owner.
+Tini runs as image PID 1 and starts `cdh container runtime serve`. The runtime owner loads the effective runtime configuration, discovers baked and mounted hooks, and composes download, SSH, ComfyUI, readiness, hook, signal, and cleanup services under one lifecycle owner.
 
 This runtime path consumes the generated runtime projection and deployment-time overrides rather than host configuration, the canonical lock, or reconciliation providers. See [Runtime and lifecycle](../user/runtime.md) for operational order and shutdown behavior, and [Cross-module contracts](contracts.md) for process-ownership and trust boundaries.

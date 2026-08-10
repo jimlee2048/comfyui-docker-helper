@@ -246,7 +246,8 @@ def _manifest(plan: BuildPlan) -> FinalManifest:
                 "--",
                 "/opt/uv/bin/cdh",
                 "container",
-                "entrypoint",
+                "runtime",
+                "serve",
             ),
             shutdown_timeout=plan.runtime.shutdown_timeout,
         ),
@@ -686,7 +687,7 @@ def test_renderer_places_manifest_emission_after_every_build_mutation(
     assert lines[manifest_index + 1 :] == [
         "STOPSIGNAL SIGTERM",
         'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/uv/bin/cdh", '
-        '"container", "entrypoint"]',
+        '"container", "runtime", "serve"]',
     ]
 
 

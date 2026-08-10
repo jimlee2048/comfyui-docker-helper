@@ -19,7 +19,6 @@ from comfyui_docker_helper.container.download_files import (
     TransportRequest,
     TransportSuccess,
 )
-from comfyui_docker_helper.container.entrypoint import run_entrypoint
 from comfyui_docker_helper.container.process_control import DirectProcessStarter
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
@@ -41,6 +40,7 @@ from comfyui_docker_helper.container.runtime_lifecycle import (
     ReadinessWaiter,
     RuntimeHookRunner,
 )
+from comfyui_docker_helper.container.runtime_serve import run_runtime_serve
 from comfyui_docker_helper.container.runtime_state import (
     RuntimeState,
     RuntimeStateError,
@@ -221,7 +221,7 @@ def _run_with_real_async_queue(
         kwargs["runtime_hook_runner"] = runtime_hook_runner
     if readiness_waiter is not None:
         kwargs["readiness_waiter"] = readiness_waiter
-    return run_entrypoint(
+    return run_runtime_serve(
         runtime=runtime,
         baked_config_path=config,
         mounted_config_path=state_path.parent / "missing-mounted.toml",
@@ -425,7 +425,7 @@ filename = "model.bin"
         return ()
 
     assert (
-        run_entrypoint(
+        run_runtime_serve(
             runtime=runtime,
             baked_config_path=config,
             mounted_config_path=tmp_path / "missing-mounted.toml",
@@ -1089,7 +1089,7 @@ filename = "model.bin"
     started = time.monotonic()
     try:
         assert (
-            run_entrypoint(
+            run_runtime_serve(
                 runtime=runtime,
                 baked_config_path=config,
                 mounted_config_path=tmp_path / "missing-mounted.toml",

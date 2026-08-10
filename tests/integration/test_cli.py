@@ -1965,28 +1965,21 @@ def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep the CLI command wired to the runtime entrypoint service."""
-    seen: dict[str, Path] = {}
+    """Keep the serve command wired to the runtime entrypoint service."""
+    calls: list[str] = []
 
-    def fake_run_entrypoint(*, runtime) -> int:
-        seen["workspace"] = runtime.workspace
-        seen["comfyui_path"] = runtime.comfyui_path
+    def fake_run_runtime_serve() -> int:
+        calls.append("serve")
         return 17
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.container.cli.run_entrypoint",
-        fake_run_entrypoint,
+        "comfyui_docker_helper.container.cli.run_runtime_serve",
+        fake_run_runtime_serve,
     )
-    monkeypatch.setenv("WORKSPACE", "/srv/work")
-    monkeypatch.setenv("COMFYUI_PATH", "/opt/comfy")
-
     result = cli_runner.invoke(app, ["container", "runtime", "serve"])
 
     assert result.exit_code == 17
-    assert seen == {
-        "workspace": Path("/srv/work"),
-        "comfyui_path": Path("/opt/comfy"),
-    }
+    assert calls == ["serve"]
 
 
 # Usage and application failures remain nonzero without hiding unexpected exceptions.

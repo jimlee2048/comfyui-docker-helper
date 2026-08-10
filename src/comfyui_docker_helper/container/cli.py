@@ -13,12 +13,12 @@ from comfyui_docker_helper.container.build_plan_input import (
 from comfyui_docker_helper.container.comfyui_installer import install_comfyui
 from comfyui_docker_helper.container.custom_node_installer import install_custom_nodes
 from comfyui_docker_helper.container.download_files import download_files
-from comfyui_docker_helper.container.entrypoint import run_entrypoint
 from comfyui_docker_helper.container.final_manifest import emit_final_manifest
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
 )
+from comfyui_docker_helper.container.runtime_serve import run_runtime_serve
 
 app = typer.Typer(
     name="container",
@@ -134,8 +134,7 @@ def emit_final_manifest_command(
 def runtime_serve_command() -> None:
     """Own and serve the ComfyUI container runtime."""
 
-    runtime = ContainerRuntime.from_env()
-    raise typer.Exit(code=run_entrypoint(runtime=runtime))
+    raise typer.Exit(code=run_runtime_serve())
 
 
 def _admission(digest: str) -> BuildPlanInputAdmission:

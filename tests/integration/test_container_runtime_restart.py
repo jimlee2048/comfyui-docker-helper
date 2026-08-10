@@ -148,7 +148,7 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
             _write_hook(hooks, "pre-start", "10-new-pre.sh")
             _write_hook(hooks, "post-start", "20-new-post.sh")
             _write_hook(hooks, "stop", "30-new-stop.sh")
-            submission = controller.submit_restart()
+            submission = controller.submit_restart(delivery_expected=False)
             assert submission.disposition == "submitted"
             events.append("restart:submitted")
         else:
@@ -214,7 +214,7 @@ def test_successor_admission_failure_exits_without_starting_a_second_owner(
     def generation_running(controller: RuntimeController) -> None:
         nonlocal submission
         config.write_text("[comfyui\ninvalid", encoding="utf-8")
-        submission = controller.submit_restart()
+        submission = controller.submit_restart(delivery_expected=False)
 
     with pytest.raises(EntrypointError, match="runtime configuration is invalid"):
         run_runtime_serve(
@@ -257,7 +257,7 @@ def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(
 
     def generation_running(controller: RuntimeController) -> None:
         nonlocal submission
-        submission = controller.submit_restart()
+        submission = controller.submit_restart(delivery_expected=False)
 
     def failing_stop_hooks(
         _plan: RuntimeHookPlan,
@@ -349,7 +349,7 @@ def test_external_signal_in_generation_gap_suppresses_successor(
 
     def generation_running(controller: RuntimeController) -> None:
         nonlocal submission
-        submission = controller.submit_restart()
+        submission = controller.submit_restart(delivery_expected=False)
 
     assert (
         run_runtime_serve(
@@ -557,7 +557,7 @@ filename = "model.bin"
         )
         _write_hook(hooks, "post-start", "20-new-post.sh")
         _write_hook(hooks, "stop", "30-new-stop-must-not-run.sh")
-        submission = controller.submit_restart()
+        submission = controller.submit_restart(delivery_expected=False)
 
     with pytest.raises(EntrypointError, match="runtime hook failed"):
         run_runtime_serve(

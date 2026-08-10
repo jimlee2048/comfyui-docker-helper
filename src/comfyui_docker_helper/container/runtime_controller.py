@@ -43,6 +43,7 @@ class RuntimeRestartTicket:
     _state: RuntimeRestartTicketState = "pending"
     _operation: str | None = None
     _message: str | None = None
+    _delivery_complete: threading.Event = field(default_factory=threading.Event)
 
     def snapshot(self) -> RuntimeRestartTicketSnapshot:
         with self._condition:
@@ -56,6 +57,12 @@ class RuntimeRestartTicket:
         with self._condition:
             self._condition.wait_for(lambda: self._revision != revision, timeout)
             return self._snapshot_unlocked()
+
+    def mark_delivery_complete(self) -> None:
+        self._delivery_complete.set()
+
+    def wait_for_delivery(self, timeout: float) -> bool:
+        return self._delivery_complete.wait(timeout)
 
     def _publish(
         self,
@@ -140,7 +147,11 @@ class RuntimeController:
                 last_restart=self._last_restart,
             )
 
-    def submit_restart(self) -> RuntimeRestartSubmission:
+    def submit_restart(
+        self,
+        *,
+        delivery_expected: bool = True,
+    ) -> RuntimeRestartSubmission:
         """Publish at most one pending proposal without accepting it."""
         with self._lock:
             if (
@@ -154,6 +165,8 @@ class RuntimeController:
                     active_operation=self._operation,
                 )
             ticket = RuntimeRestartTicket()
+            if not delivery_expected:
+                ticket.mark_delivery_complete()
             self._pending_restart = ticket
             self._restart_wakeup.set()
             return RuntimeRestartSubmission(disposition="submitted", ticket=ticket)
@@ -322,6 +335,13 @@ class RuntimeController:
             signal=requested_signal,
             repeated=repeated,
         )
+
+    def wait_for_terminal_delivery(self, timeout: float) -> bool:
+        with self._lock:
+            ticket = self._active_restart
+            if ticket is None or self._active_terminal_result is None:
+                return True
+        return ticket.wait_for_delivery(timeout)
 
     def _publish_restart_terminal_unlocked(
         self,

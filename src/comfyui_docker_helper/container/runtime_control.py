@@ -29,6 +29,7 @@ RUNTIME_CONTROL_FRAME_HEADER_BYTES = 4
 RUNTIME_CONTROL_MAX_PAYLOAD_BYTES = (
     RUNTIME_CONTROL_MAX_FRAME_BYTES - RUNTIME_CONTROL_FRAME_HEADER_BYTES
 )
+RUNTIME_CONTROL_ACK_DRAIN_SECONDS = 0.5
 
 type RuntimeControllerState = Literal[
     "starting",
@@ -132,7 +133,7 @@ class RuntimeTerminalResponse(_RuntimeControlMessage):
 
 class RuntimeErrorResponse(_RuntimeControlMessage):
     type: Literal["error"] = "error"
-    code: Literal["invalid_request", "busy"]
+    code: Literal["invalid_request", "busy", "unavailable"]
     message: str
     operation: str | None = None
 

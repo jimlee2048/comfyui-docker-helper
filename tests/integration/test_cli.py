@@ -229,7 +229,11 @@ def test_root_command_exposes_current_groups() -> None:
         "install-custom-nodes",
         "runtime",
     }
-    assert set(command.commands["container"].commands["runtime"].commands) == {"serve"}
+    assert set(command.commands["container"].commands["runtime"].commands) == {
+        "restart",
+        "serve",
+        "status",
+    }
 
 
 @pytest.mark.parametrize(
@@ -255,6 +259,14 @@ def test_root_command_exposes_current_groups() -> None:
         (
             ["container", "runtime", "serve"],
             "Usage: cdh container runtime serve",
+        ),
+        (
+            ["container", "runtime", "restart"],
+            "Usage: cdh container runtime restart",
+        ),
+        (
+            ["container", "runtime", "status"],
+            "Usage: cdh container runtime status",
         ),
     ],
 )
@@ -1980,6 +1992,75 @@ def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
 
     assert result.exit_code == 17
     assert calls == ["serve"]
+
+
+def test_container_runtime_restart_waits_without_detach_options(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_restart_runtime() -> str:
+        calls.append("restart")
+        return "op-7"
+
+    monkeypatch.setattr(container_cli, "restart_runtime", fake_restart_runtime)
+
+    result = cli_runner.invoke(app, ["container", "runtime", "restart"])
+    help_result = cli_runner.invoke(
+        app,
+        ["container", "runtime", "restart", "--help"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "Runtime restart completed: op-7.\n"
+    assert calls == ["restart"]
+    assert "--detach" not in _plain_output(help_result.output)
+    assert "--no-wait" not in _plain_output(help_result.output)
+    assert "-d" not in _plain_output(help_result.output)
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_container_runtime_status_renders_minimal_conditional_schema(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    json_output: bool,
+) -> None:
+    from comfyui_docker_helper.container.runtime_control import (
+        RuntimeLastRestart,
+        RuntimeStatusResponse,
+    )
+
+    monkeypatch.setattr(
+        container_cli,
+        "read_runtime_status",
+        lambda: RuntimeStatusResponse(
+            state="running",
+            phase=None,
+            generation="gen-2",
+            operation=None,
+            last_restart=RuntimeLastRestart(id="op-1", result="succeeded"),
+        ),
+    )
+    args = ["container", "runtime", "status"]
+    if json_output:
+        args.append("--json")
+
+    result = cli_runner.invoke(app, args)
+
+    assert result.exit_code == 0
+    if json_output:
+        assert json.loads(result.output) == {
+            "state": "running",
+            "phase": None,
+            "generation": "gen-2",
+            "operation": None,
+            "last_restart": {"id": "op-1", "result": "succeeded"},
+        }
+    else:
+        assert result.output == (
+            "state: running\ngeneration: gen-2\nlast_restart: op-1 (succeeded)\n"
+        )
 
 
 # Usage and application failures remain nonzero without hiding unexpected exceptions.

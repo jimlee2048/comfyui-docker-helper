@@ -23,9 +23,11 @@ from comfyui_docker_helper.container.process_control import DirectProcessStarter
 from comfyui_docker_helper.container.readiness import wait_for_comfyui_readiness
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_control import (
+    RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
     RUNTIME_CONTROL_SOCKET_PATH,
     open_runtime_control_listener,
 )
+from comfyui_docker_helper.container.runtime_control_server import RuntimeControlServer
 from comfyui_docker_helper.container.runtime_controller import RuntimeController
 from comfyui_docker_helper.container.runtime_diagnostics import (
     format_runtime_diagnostics,
@@ -254,8 +256,9 @@ def run_runtime_serve(
         runtime_state_path=runtime_state_path,
     )
     controller = RuntimeController()
+    listener = open_runtime_control_listener(control_socket_path)
     with (
-        open_runtime_control_listener(control_socket_path),
+        RuntimeControlServer(listener, controller),
         _runtime_controller_signal_handlers(controller),
     ):
         try:
@@ -269,6 +272,9 @@ def run_runtime_serve(
                     controller.publish_restart_terminal(
                         "failed",
                         message=str(error),
+                    )
+                    controller.wait_for_terminal_delivery(
+                        RUNTIME_CONTROL_ACK_DRAIN_SECONDS
                     )
 
             def external_failure_exit_code() -> int | None:

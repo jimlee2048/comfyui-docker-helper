@@ -183,20 +183,19 @@ def run_runtime_serve(
         runtime_ssh_starter=runtime_ssh_starter,
         runtime_state_path=runtime_state_path,
     ).create_generation()
-    return _normalize_exit_code(
-        run_runtime_lifecycle(
-            generation.config,
-            generation.hook_plan,
-            runtime=effective_runtime,
-            source_env=generation.source_env,
-            downloads=generation.downloads,
-            ssh_service=generation.ssh_service,
-            runner=runner,
-            runtime_hook_runner=runtime_hook_runner,
-            runtime_stop_hook_runner=runtime_stop_hook_runner,
-            readiness_waiter=readiness_waiter,
-        )
+    result = run_runtime_lifecycle(
+        generation.config,
+        generation.hook_plan,
+        runtime=effective_runtime,
+        source_env=generation.source_env,
+        downloads=generation.downloads,
+        ssh_service=generation.ssh_service,
+        runner=runner,
+        runtime_hook_runner=runtime_hook_runner,
+        runtime_stop_hook_runner=runtime_stop_hook_runner,
+        readiness_waiter=readiness_waiter,
     )
+    return _normalize_exit_code(result.returncode)
 
 
 def _normalize_exit_code(returncode: int) -> int:

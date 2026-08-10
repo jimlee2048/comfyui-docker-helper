@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import Specifier
+from packaging.specifiers import InvalidSpecifier, Specifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
@@ -56,34 +56,7 @@ def parse_direct_requirement(value: str) -> DirectRequirementIdentity:
             "python.environment_marker_forbidden",
             "must not use an environment marker",
         )
-    if any(
-        spec.operator not in {"==", "!=", "<", "<=", ">", ">="} or "*" in spec.version
-        for spec in requirement.specifier
-    ):
-        raise DirectRequirementError(
-            "python.unsupported_requirement_selector",
-            "must use an exact version or bounded comparison selector",
-        )
-    if any(not is_stable_public_operand(item) for item in requirement.specifier):
-        raise DirectRequirementError(
-            "python.prerelease_selector_forbidden",
-            "selector operands must be stable public versions",
-        )
-    operators = {specifier.operator for specifier in requirement.specifier}
-    if operators == {"=="} and len(requirement.specifier) != 1:
-        raise DirectRequirementError(
-            "python.ambiguous_exact_requirement",
-            "must contain exactly one exact version selector",
-        )
-    if (
-        requirement.specifier
-        and operators != {"=="}
-        and (not operators & {">", ">="} or not operators & {"<", "<="})
-    ):
-        raise DirectRequirementError(
-            "python.unbounded_requirement_selector",
-            "comparison selectors must include lower and upper bounds",
-        )
+    validate_direct_specifier_set(requirement.specifier)
     return DirectRequirementIdentity(
         canonicalize_name(requirement.name),
         tuple(sorted({canonicalize_name(extra) for extra in requirement.extras})),
@@ -100,3 +73,45 @@ def is_stable_public_operand(specifier: Specifier) -> bool:
     return not (
         operand.is_prerelease or operand.is_devrelease or operand.local is not None
     )
+
+
+def validate_direct_specifier_set(specifiers: SpecifierSet) -> None:
+    """Validate supported selectors without solving general range intersections."""
+    items = tuple(specifiers)
+    if any(
+        item.operator not in {"==", "!=", "<", "<=", ">", ">=", "~="}
+        or "*" in item.version
+        for item in items
+    ):
+        raise DirectRequirementError(
+            "python.unsupported_requirement_selector",
+            "must use supported comparison or compatible-release selectors",
+        )
+    if any(not is_stable_public_operand(item) for item in items):
+        raise DirectRequirementError(
+            "python.prerelease_selector_forbidden",
+            "selector operands must be stable public versions",
+        )
+    exact = tuple(item for item in items if item.operator == "==")
+    if len(exact) > 1:
+        raise DirectRequirementError(
+            "python.ambiguous_exact_requirement",
+            "must contain at most one exact version selector",
+        )
+    if exact:
+        version = Version(exact[0].version)
+        if not specifiers.contains(version, prereleases=False):
+            raise DirectRequirementError(
+                "python.ambiguous_exact_requirement",
+                "exact version conflicts with another selector",
+            )
+
+
+def direct_selector_is_exact(value: str) -> bool:
+    """Return whether an admitted selector identifies one explicit version."""
+    try:
+        specifiers = SpecifierSet(value)
+        validate_direct_specifier_set(specifiers)
+    except (InvalidSpecifier, DirectRequirementError):
+        return False
+    return sum(item.operator == "==" for item in specifiers) == 1

@@ -145,7 +145,9 @@ class FinalConfigDomainResult:
     diagnostics: tuple[Diagnostic, ...]
     platforms: tuple[LocatedValue, ...]
     package_requirements: tuple[NormalizedRequirement, ...]
+    authored_apt_packages: tuple[LocatedValue, ...]
     apt_packages: tuple[LocatedValue, ...]
+    ssh_public_keys: tuple[str, ...]
     registry_ids: tuple[LocatedValue, ...]
     registry_nodes: tuple[DiagnosticPath, ...]
     git_urls: tuple[LocatedValue, ...]
@@ -193,7 +195,7 @@ def validate_final_config_domains(
     _validate_platform_domain(config, diagnostics)
     _validate_python_domain(config, package_requirements, diagnostics)
     _validate_pytorch_domain(config, package_requirements, diagnostics)
-    workspace, comfyui_path = _validate_system_domains(
+    workspace, comfyui_path, ssh_public_keys = _validate_system_domains(
         config, apt_packages, diagnostics
     )
     _validate_comfyui_domains(
@@ -218,7 +220,11 @@ def validate_final_config_domains(
             for index, platform in enumerate(config.build.platforms)
         ),
         package_requirements=tuple(package_requirements),
-        apt_packages=tuple(apt_packages),
+        authored_apt_packages=tuple(apt_packages),
+        apt_packages=tuple(
+            item for item in apt_packages if item.value not in DEFAULT_OS_PACKAGES
+        ),
+        ssh_public_keys=ssh_public_keys,
         registry_ids=tuple(registry_ids),
         registry_nodes=tuple(registry_nodes),
         git_urls=tuple(git_urls),
@@ -252,14 +258,10 @@ def validate_final_config_semantics(
         diagnostics,
         origins=origins,
     )
-    _duplicate_diagnostics(
-        domains.apt_packages,
-        "system.duplicate_apt_package",
-        "package names must be unique",
+    _apt_package_diagnostics(
+        domains.authored_apt_packages,
         diagnostics,
         origins=origins,
-        display_values=True,
-        initial_seen=frozenset(DEFAULT_OS_PACKAGES),
     )
     _duplicate_diagnostics(
         domains.registry_ids,
@@ -480,7 +482,7 @@ def _validate_system_domains(
     config: FinalConfig,
     apt_packages: list[LocatedValue],
     diagnostics: list[Diagnostic],
-) -> tuple[PurePosixPath | None, PurePosixPath | None]:
+) -> tuple[PurePosixPath | None, PurePosixPath | None, tuple[str, ...]]:
     workspace = _absolute_container_path(
         config.system.workspace, ("system", "workspace"), diagnostics
     )
@@ -527,12 +529,21 @@ def _validate_system_domains(
                     "must not contain control characters",
                 )
             )
-    _, key_diagnostics = normalize_ssh_public_keys(
+    key_normalization = normalize_ssh_public_keys(
         config.system.ssh.pub_keys,
         path=("system", "ssh", "pub_keys"),
         code="ssh.invalid_public_key",
     )
-    diagnostics.extend(key_diagnostics)
+    diagnostics.extend(key_normalization.diagnostics)
+    diagnostics.extend(
+        Diagnostic(
+            duplicate_path,
+            "ssh.redundant_public_key",
+            "duplicates an earlier SSH public key and is ignored",
+            DiagnosticSeverity.WARNING,
+        )
+        for duplicate_path in key_normalization.duplicate_paths
+    )
     min_split_size = config.cdh.downloader.aria2.min_split_size
     if not is_aria2_argument_value(min_split_size):
         diagnostics.append(
@@ -542,7 +553,7 @@ def _validate_system_domains(
                 "must be a non-empty control-free aria2 argument value",
             )
         )
-    return workspace, comfyui_path
+    return workspace, comfyui_path, key_normalization.values
 
 
 def _absolute_container_path(
@@ -1186,9 +1197,8 @@ def _duplicate_diagnostics(
     normalize: Callable[[str], str] | None = None,
     origins: OriginNode | None = None,
     display_values: bool = False,
-    initial_seen: frozenset[str] = frozenset(),
 ) -> None:
-    seen: dict[str, LocatedValue | None] = {value: None for value in initial_seen}
+    seen: dict[str, LocatedValue] = {}
     for item in values:
         value = item.value if normalize is None else normalize(item.value)
         if value in seen:
@@ -1198,21 +1208,58 @@ def _duplicate_diagnostics(
                     item.path,
                     code,
                     message,
-                    source_context=(
-                        _comparison(
-                            established.path,
-                            item.path,
-                            origins,
-                            earlier_value=established.value if display_values else None,
-                            later_value=item.value if display_values else None,
-                        )
-                        if established is not None
-                        else None
+                    source_context=_comparison(
+                        established.path,
+                        item.path,
+                        origins,
+                        earlier_value=established.value if display_values else None,
+                        later_value=item.value if display_values else None,
                     ),
                 )
             )
         else:
             seen[value] = item
+
+
+def _apt_package_diagnostics(
+    values: tuple[LocatedValue, ...],
+    diagnostics: list[Diagnostic],
+    *,
+    origins: OriginNode | None,
+) -> None:
+    counts: dict[str, int] = {}
+    for item in values:
+        counts[item.value] = counts.get(item.value, 0) + 1
+
+    established: dict[str, LocatedValue] = {}
+    for item in values:
+        earlier = established.get(item.value)
+        if earlier is None:
+            established[item.value] = item
+            if counts[item.value] == 1 and item.value in DEFAULT_OS_PACKAGES:
+                diagnostics.append(
+                    Diagnostic(
+                        item.path,
+                        "system.redundant_default_apt_package",
+                        f"{item.value} is already installed by cdh and is ignored",
+                        DiagnosticSeverity.WARNING,
+                    )
+                )
+            continue
+        diagnostics.append(
+            Diagnostic(
+                item.path,
+                "system.duplicate_apt_package",
+                "package names must be unique",
+                source_context=_comparison(
+                    earlier.path,
+                    item.path,
+                    origins,
+                    earlier_value=earlier.value,
+                    later_value=item.value,
+                ),
+            )
+        )
 
 
 def _registry_distribution_identity_diagnostics(

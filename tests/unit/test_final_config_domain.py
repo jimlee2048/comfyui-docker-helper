@@ -47,6 +47,11 @@ def _credential_document() -> dict[str, Any]:
 _PRIVATE_SECRET_PATH = ("secrets", "private_git")
 _CREDENTIAL_PATH = ("cdh", "git", "credentials", 0)
 _CREDENTIAL_SECRET_PATH = (*_CREDENTIAL_PATH, "password", "secret")
+_VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "first@example"
+)
 
 
 def _codes(config: FinalConfig, *, build_hooks_dir: Path | None = None) -> set[str]:
@@ -484,15 +489,38 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
 # Public OS-package diagnostics cover the effective default-plus-user set and
 # enforce canonical lowercase Debian identities before planning.
 @pytest.mark.parametrize("package", ["bash", "tini"])
-def test_system_extra_package_rejects_default_collision(package: str) -> None:
+def test_system_extra_package_warns_and_filters_default_overlap(package: str) -> None:
     document = _document()
     document["system"] = {"extra_packages": [package]}
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+    diagnostics = (
+        *domains.diagnostics,
+        *validate_final_config_semantics(config, domains),
+    )
+
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("system", "extra_packages", 0),
+            "system.redundant_default_apt_package",
+            DiagnosticSeverity.WARNING,
+        )
+    ]
+    assert domains.authored_apt_packages[0].value == package
+    assert domains.apt_packages == ()
+
+
+@pytest.mark.parametrize("package", ["bash", "libexample"])
+def test_system_extra_package_keeps_user_duplicate_as_error(package: str) -> None:
+    document = _document()
+    document["system"] = {"extra_packages": [package, package]}
     config = validate_final_config_structure(document)
 
     diagnostics = _diagnostics(config)
 
     assert [(item.path, item.code) for item in diagnostics] == [
-        (("system", "extra_packages", 0), "system.duplicate_apt_package")
+        (("system", "extra_packages", 1), "system.duplicate_apt_package")
     ]
 
 
@@ -515,6 +543,28 @@ def test_system_extra_package_accepts_lowercase_debian_punctuation() -> None:
     config = validate_final_config_structure(document)
 
     assert _diagnostics(config) == ()
+
+
+def test_host_ssh_public_keys_normalize_and_warn_by_key_identity() -> None:
+    duplicate = _VALID_SSH_KEY.rsplit(" ", 1)[0] + " second@example"
+    authored = ["  ", f"  {_VALID_SSH_KEY}  ", duplicate]
+    document = _document()
+    document["system"] = {"ssh": {"pub_keys": authored}}
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert [(item.path, item.code, item.severity) for item in domains.diagnostics] == [
+        (
+            ("system", "ssh", "pub_keys", 2),
+            "ssh.redundant_public_key",
+            DiagnosticSeverity.WARNING,
+        )
+    ]
+    assert domains.ssh_public_keys == (_VALID_SSH_KEY,)
+    assert config.system.ssh.pub_keys == authored
+    assert domains.diagnostics[0].source_context is None
+    assert _VALID_SSH_KEY not in domains.diagnostics[0].message
 
 
 # Structural and scalar domains reject coercion, ambiguity, and unsupported values.
@@ -898,10 +948,11 @@ def test_package_ownership_is_scoped_to_isolated_environment() -> None:
     ("requirement", "code"),
     [
         ("demo @ https://example.com/demo.whl", "python.direct_requirement_forbidden"),
-        ("demo>=1", "python.unbounded_requirement_selector"),
-        ("demo~=1.2", "python.unsupported_requirement_selector"),
         ("demo>=1rc1,<2", "python.prerelease_selector_forbidden"),
         ("demo==1,==2", "python.ambiguous_exact_requirement"),
+        ("demo==1,!=1", "python.ambiguous_exact_requirement"),
+        ("demo===1", "python.unsupported_requirement_selector"),
+        ("demo==1.*", "python.unsupported_requirement_selector"),
         (" demo==1", "python.invalid_requirement"),
     ],
 )
@@ -914,6 +965,35 @@ def test_python_requirement_domain_rejects_ambiguous_inputs(
     config = validate_final_config_structure(document)
 
     assert code in _codes(config)
+
+
+@pytest.mark.parametrize(
+    ("requirement", "specifier"),
+    [
+        ("demo", ""),
+        ("demo==1", "==1"),
+        ("demo!=1", "!=1"),
+        ("demo<2", "<2"),
+        ("demo<=2", "<=2"),
+        ("demo>1", ">1"),
+        ("demo>=1", ">=1"),
+        ("demo~=1.2", "~=1.2"),
+        ("demo==1,>=1", "==1,>=1"),
+        ("demo>=2,<1", "<1,>=2"),
+    ],
+)
+def test_python_requirement_domain_accepts_standard_direct_selectors(
+    requirement: str,
+    specifier: str,
+) -> None:
+    document = _document()
+    document["python"] = {"extra_packages": [requirement]}
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert domains.diagnostics == ()
+    assert domains.package_requirements[0].specifier == specifier
 
 
 @pytest.mark.parametrize("group", ["python", "pytorch"])

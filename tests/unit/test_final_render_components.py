@@ -31,6 +31,9 @@ from comfyui_docker_helper.config.build_plan import (
     parse_build_plan_json,
 )
 from comfyui_docker_helper.config.final_models import FinalConfig
+from comfyui_docker_helper.config.final_validation import (
+    validate_final_config_structure,
+)
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
@@ -41,6 +44,12 @@ from comfyui_docker_helper.rendering.final_materializer import (
 )
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
+)
+
+_VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "first@example"
 )
 
 
@@ -642,6 +651,26 @@ def test_nondefault_shutdown_timeout_projects_to_plan_and_baked_runtime(
     runtime = tomllib.loads((output / "runtime/config.toml").read_text())
     assert plan.runtime.shutdown_timeout == 55.5
     assert runtime["cdh"]["shutdown_timeout"] == 55.5
+
+
+def test_normalized_host_ssh_key_set_is_written_once_to_baked_runtime(
+    tmp_path: Path,
+) -> None:
+    document = final_config().model_dump(mode="json", exclude_none=True)
+    document["system"]["ssh"]["pub_keys"] = [
+        " ",
+        f"  {_VALID_SSH_KEY}  ",
+        _VALID_SSH_KEY.rsplit(" ", 1)[0] + " second@example",
+    ]
+    config = validate_final_config_structure(document)
+    plan = build_plan(config, accepted_resolution())
+    output = tmp_path / "output"
+    output.mkdir(mode=0o700)
+
+    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
+
+    runtime = tomllib.loads((output / "runtime/config.toml").read_text())
+    assert runtime["system"]["ssh"]["pub_keys"] == [_VALID_SSH_KEY]
 
 
 # Descriptor-relative BuildPlan admission rejects substituted inputs.

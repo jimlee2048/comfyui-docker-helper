@@ -3,6 +3,7 @@
 import base64
 import binascii
 import struct
+from dataclasses import dataclass
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticPath
 
@@ -23,16 +24,26 @@ _ECDSA_CURVES = {
 _AUTHORIZED_KEYS_FORBIDDEN_CHARACTERS = frozenset({"\n", "\r", "\x00"})
 
 
+@dataclass(frozen=True, slots=True)
+class SshPublicKeyNormalization:
+    """Normalized key set plus authored invalid and redundant locations."""
+
+    values: tuple[str, ...]
+    diagnostics: tuple[Diagnostic, ...]
+    duplicate_paths: tuple[DiagnosticPath, ...]
+
+
 def normalize_ssh_public_keys(
     values: list[str],
     *,
     path: DiagnosticPath,
     code: str,
-) -> tuple[tuple[str, ...], tuple[Diagnostic, ...]]:
+) -> SshPublicKeyNormalization:
     """Return trimmed non-empty public keys plus validation diagnostics."""
     keys: list[str] = []
     diagnostics: list[Diagnostic] = []
-    seen: set[str] = set()
+    duplicate_paths: list[DiagnosticPath] = []
+    seen: set[tuple[str, str]] = set()
     for index, value in enumerate(values):
         normalized = value.strip()
         if not normalized:
@@ -47,10 +58,18 @@ def normalize_ssh_public_keys(
                 )
             )
             continue
-        if normalized not in seen:
-            seen.add(normalized)
-            keys.append(normalized)
-    return tuple(keys), tuple(diagnostics)
+        parts = normalized.split(maxsplit=2)
+        identity = (parts[0], parts[1])
+        if identity in seen:
+            duplicate_paths.append((*path, index))
+            continue
+        seen.add(identity)
+        keys.append(normalized)
+    return SshPublicKeyNormalization(
+        tuple(keys),
+        tuple(diagnostics),
+        tuple(duplicate_paths),
+    )
 
 
 def normalize_ssh_public_key(

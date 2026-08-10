@@ -27,7 +27,9 @@ workspace = "/workspace"
 comfyui_path = "/workspace/ComfyUI"
 # Extra apt packages installed after the default OS package set. Across layered
 # files, omission inherits; new package names append in first-occurrence order;
-# an exact repeated name is kept once; and a later [] resets the list.
+# an exact name repeated across layers is kept once; and a later [] resets the
+# list. An item already installed by cdh warns and is omitted from the effective
+# install request; duplicates owned by one user-authored list remain invalid.
 extra_packages = ["ffmpeg", "libgl1"]
 
 [system.env]
@@ -47,6 +49,9 @@ password = ""
 # Public keys must be single OpenSSH authorized_keys lines. SSH_PUB_KEY can
 # append one runtime-only public key. Across layered TOML files, omission
 # inherits this whole list, a later non-empty list replaces it, and [] clears it.
+# The winning host list is trimmed, empty entries are dropped, and duplicate
+# type-plus-base64 identities retain the first complete line and optional
+# comment. Each later non-empty duplicate warns without printing key material.
 pub_keys = []
 
 [python]
@@ -59,6 +64,11 @@ uv_version = "latest"
 # resolution and installation. Direct PyTorch-group members use their derived
 # explicit PyTorch source instead.
 index_url = "https://pypi.org/simple"
+# python.extra_packages, python.uv_tools, and pytorch.extra_packages accept a
+# bare distribution or ==, !=, <, <=, >, >=, and ~= with stable public operands.
+# Direct/VCS/local/editable inputs, markers, wildcards, ===, unstable operands,
+# multiple exact selectors, or one exact selector that contradicts another
+# selector are rejected; cdh does not infer general range algebra.
 # Extra Python packages installed into the final virtualenv after PyTorch.
 # Across layered files, omission inherits; new canonical requirements append;
 # only a complete canonical requirement repeat is kept once; and [] resets.

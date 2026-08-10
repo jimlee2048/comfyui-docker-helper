@@ -280,3 +280,46 @@ def test_moving_and_exact_stability_remain_group_scoped() -> None:
 
     assert request_stability(exact) is SelectorStability.EXACT
     assert request_stability(moving) is SelectorStability.MOVING
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    [
+        ("==1", SelectorStability.EXACT),
+        ("==1,>=1", SelectorStability.EXACT),
+        ("", SelectorStability.MOVING),
+        (">=1", SelectorStability.MOVING),
+        ("!=1", SelectorStability.MOVING),
+        ("~=1.2", SelectorStability.MOVING),
+    ],
+)
+def test_direct_python_stability_uses_admitted_exact_selector_semantics(
+    selector: str,
+    expected: SelectorStability,
+) -> None:
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST,
+        members=(
+            DirectPythonRequestMember(
+                package="demo",
+                extras=(),
+                selector=selector,
+            ),
+        ),
+    )
+
+    assert request_stability(request) is expected
+
+
+@pytest.mark.parametrize("selector", ["==1,==2", "!=1,==1", "==1,<1"])
+def test_direct_python_request_rejects_conflicting_exact_selectors(
+    selector: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        DirectPythonRequestMember(package="demo", extras=(), selector=selector)

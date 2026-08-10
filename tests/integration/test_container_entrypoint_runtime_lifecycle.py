@@ -165,6 +165,150 @@ class PendingRestart:
         return self._event.wait(timeout)
 
 
+class FailedRuntimeHealth:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def runtime_failure_message(self) -> str | None:
+        return self.message
+
+    def wait(self, timeout: float) -> bool:
+        del timeout
+        return True
+
+
+class ControllableRuntimeHealth:
+    def __init__(self) -> None:
+        self.message: str | None = None
+        self.event = threading.Event()
+
+    def fail(self, message: str) -> None:
+        self.message = message
+        self.event.set()
+
+    def runtime_failure_message(self) -> str | None:
+        return self.message
+
+    def wait(self, timeout: float) -> bool:
+        return self.event.wait(timeout)
+
+
+def test_startup_hook_observes_logging_failure_and_is_reaped_before_error(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "pre-start", "10-long.sh")
+    events: list[str] = []
+    health = ControllableRuntimeHealth()
+
+    class CompletedHook(FakeChild):
+        pid = 4321
+
+    active_hook = CompletedHook(0, events=events, wait_event="hook:reap")
+    active_hook.returncode = 0
+
+    def startup_hooks(
+        _plan: RuntimeHookPlan,
+        phase: str,
+        **kwargs: object,
+    ) -> tuple[RuntimeHookResult, ...]:
+        assert phase == "pre-start"
+        cancel_requested = kwargs["cancel_requested"]
+        assert callable(cancel_requested)
+        health.fail("stdout failed during startup hook")
+        assert cancel_requested() is True
+        events.append("hook:cancelled")
+        raise RuntimeHookError(
+            (
+                Diagnostic(
+                    path=("hooks", "mounted", "pre-start", "10-long.sh"),
+                    code="runtime_hook.cancelled",
+                    message="hook cancelled by runtime logging failure",
+                ),
+            ),
+            active_process=active_hook,
+        )
+
+    with pytest.raises(EntrypointError, match="runtime logging failed"):
+        run_runtime_generation_once(
+            runtime=runtime,
+            baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
+            mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
+            baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+            mounted_hooks_path=hooks,
+            environ={"PATH": "/usr/bin"},
+            runner=lambda *_args, **_kwargs: pytest.fail("ComfyUI must not start"),
+            runtime_hook_runner=startup_hooks,  # type: ignore[arg-type]
+            runtime_health=health,
+        )
+
+    assert events == ["hook:cancelled", "hook:reap"]
+
+
+def test_controller_failure_wins_before_restart_and_cleans_running_generation(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    _write_hook(hooks, "stop", "10-stop.sh")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+        mounted_hooks_path=hooks,
+    )
+    events: list[str] = []
+    child = FakeChild(-int(signal.SIGTERM), events=events, wait_event="child:wait")
+    restart = PendingRestart(events)
+
+    class StoppedOwner:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.stopped = False
+
+        def request_stop(self, *, deadline: float | None = None) -> None:
+            del deadline
+            events.append(f"{self.name}:request")
+            self.stopped = True
+
+        def is_stopped(self) -> bool:
+            return self.stopped
+
+    def stop_hooks(*_args: object, **_kwargs: object) -> tuple[RuntimeHookResult, ...]:
+        events.append("hooks:stop")
+        return ()
+
+    startup_shutdown = lifecycle_module._StartupShutdownState(
+        shutdown_timeout=8,
+        monotonic=time.monotonic,
+    )
+    with lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown):
+        result = lifecycle_module._wait_with_existing_signal_state(
+            child,
+            hook_plan=plan,
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+            downloads=StoppedOwner("downloads"),  # type: ignore[arg-type]
+            ssh_service=StoppedOwner("ssh"),  # type: ignore[arg-type]
+            startup_shutdown=startup_shutdown,
+            restart_acceptor=restart,
+            runtime_health=FailedRuntimeHealth("stdout failed"),
+        )
+
+    assert result == lifecycle_module.RuntimeGenerationResult(
+        cause=lifecycle_module.RuntimeGenerationStopCause.CONTROLLER_FAILURE,
+        returncode=-int(signal.SIGTERM),
+    )
+    assert restart.accepted is False
+    assert events == [
+        "downloads:request",
+        "ssh:request",
+        "hooks:stop",
+        "forward:SIGTERM",
+        "child:wait",
+    ]
+
+
 def _runtime(tmp_path: Path) -> ContainerRuntime:
     runtime = ContainerRuntime(
         workspace=tmp_path / "workspace",

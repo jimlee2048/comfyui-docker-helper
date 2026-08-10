@@ -28,7 +28,10 @@ from comfyui_docker_helper.container.runtime_control import (
     open_runtime_control_listener,
 )
 from comfyui_docker_helper.container.runtime_control_server import RuntimeControlServer
-from comfyui_docker_helper.container.runtime_controller import RuntimeController
+from comfyui_docker_helper.container.runtime_controller import (
+    RuntimeController,
+    RuntimeControllerError,
+)
 from comfyui_docker_helper.container.runtime_diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
@@ -53,9 +56,14 @@ from comfyui_docker_helper.container.runtime_lifecycle import (
     EntrypointError,
     ReadinessWaiter,
     RuntimeGenerationStopCause,
+    RuntimeHealthObserver,
     RuntimeHookRunner,
     RuntimeStopHookRunner,
     run_runtime_lifecycle,
+)
+from comfyui_docker_helper.container.runtime_logging import (
+    RuntimeLoggingFactory,
+    open_runtime_logging_broker,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import (
     RuntimeSshService,
@@ -176,6 +184,7 @@ def run_runtime_generation_once(
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
     runtime_ssh_starter: RuntimeSshStarter = start_sshd_if_enabled,
     runtime_state_path: str | Path = RUNTIME_STATE_PATH,
+    runtime_health: RuntimeHealthObserver | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
 ) -> int:
@@ -207,6 +216,7 @@ def run_runtime_generation_once(
         runtime_hook_runner=runtime_hook_runner,
         runtime_stop_hook_runner=runtime_stop_hook_runner,
         readiness_waiter=readiness_waiter,
+        runtime_health=runtime_health,
         monotonic=monotonic,
         sleep=sleep,
     )
@@ -235,8 +245,57 @@ def run_runtime_serve(
     generation_running: Callable[[RuntimeController], object] = lambda _controller: (
         None
     ),
+    runtime_logging_factory: RuntimeLoggingFactory = open_runtime_logging_broker,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
+) -> int:
+    """Own controller-lifetime output and execute serial runtime generations."""
+    controller = RuntimeController()
+    with runtime_logging_factory(controller.observe_runtime_failure):
+        return _run_runtime_serve(
+            controller=controller,
+            runtime=runtime,
+            baked_config_path=baked_config_path,
+            mounted_config_path=mounted_config_path,
+            baked_hooks_path=baked_hooks_path,
+            mounted_hooks_path=mounted_hooks_path,
+            environ=environ,
+            runner=runner,
+            runtime_downloader=runtime_downloader,
+            runtime_async_queue_starter=runtime_async_queue_starter,
+            runtime_hook_runner=runtime_hook_runner,
+            runtime_stop_hook_runner=runtime_stop_hook_runner,
+            readiness_waiter=readiness_waiter,
+            runtime_ssh_starter=runtime_ssh_starter,
+            runtime_state_path=runtime_state_path,
+            control_socket_path=control_socket_path,
+            generation_running=generation_running,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+
+
+def _run_runtime_serve(
+    *,
+    controller: RuntimeController,
+    runtime: ContainerRuntime | None,
+    baked_config_path: str | Path,
+    mounted_config_path: str | Path,
+    baked_hooks_path: str | Path,
+    mounted_hooks_path: str | Path,
+    environ: Mapping[str, str] | None,
+    runner: DirectProcessStarter,
+    runtime_downloader: RuntimeDownloadRunner,
+    runtime_async_queue_starter: RuntimeAsyncQueueStarter,
+    runtime_hook_runner: RuntimeHookRunner,
+    runtime_stop_hook_runner: RuntimeStopHookRunner,
+    readiness_waiter: ReadinessWaiter,
+    runtime_ssh_starter: RuntimeSshStarter,
+    runtime_state_path: str | Path,
+    control_socket_path: Path,
+    generation_running: Callable[[RuntimeController], object],
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], object],
 ) -> int:
     """Own the private endpoint and execute serial runtime generations."""
     source_env = MappingProxyType(dict(os.environ if environ is None else environ))
@@ -255,19 +314,32 @@ def run_runtime_serve(
         runtime_ssh_starter=runtime_ssh_starter,
         runtime_state_path=runtime_state_path,
     )
-    controller = RuntimeController()
     listener = open_runtime_control_listener(control_socket_path)
     with (
         RuntimeControlServer(listener, controller),
         _runtime_controller_signal_handlers(controller),
     ):
         try:
-            controller.begin_initial_admission()
+            try:
+                controller.begin_initial_admission()
+            except RuntimeControllerError as error:
+                failure = controller.runtime_failure_message()
+                if failure is None:
+                    raise
+                raise EntrypointError(f"runtime logging failed: {failure}") from error
             initial_generation = True
 
             def publish_start_failure(error: EntrypointError) -> None:
-                if controller.snapshot().operation is None:
+                snapshot = controller.snapshot()
+                if snapshot.operation is None:
                     controller.mark_generation_terminal(str(error))
+                elif (
+                    snapshot.last_restart is not None
+                    and snapshot.last_restart.id == snapshot.operation
+                ):
+                    controller.wait_for_terminal_delivery(
+                        RUNTIME_CONTROL_ACK_DRAIN_SECONDS
+                    )
                 else:
                     controller.publish_restart_terminal(
                         "failed",
@@ -285,6 +357,11 @@ def run_runtime_serve(
                 return 128 + int(shutdown.signal)
 
             while True:
+                failure = controller.runtime_failure_message()
+                if failure is not None:
+                    error = EntrypointError(f"runtime logging failed: {failure}")
+                    publish_start_failure(error)
+                    raise error
                 try:
                     generation = factory.create_generation()
                 except EntrypointError as error:
@@ -298,11 +375,22 @@ def run_runtime_serve(
                     *,
                     is_initial: bool = initial_generation,
                 ) -> None:
-                    if is_initial:
-                        controller.mark_initial_generation_running()
-                    else:
-                        controller.publish_restart_terminal("succeeded")
-                        controller.release_successful_restart()
+                    failure = controller.runtime_failure_message()
+                    if failure is not None:
+                        raise EntrypointError(f"runtime logging failed: {failure}")
+                    try:
+                        if is_initial:
+                            controller.mark_initial_generation_running()
+                        else:
+                            controller.publish_restart_terminal("succeeded")
+                            controller.release_successful_restart()
+                    except RuntimeControllerError as transition_error:
+                        failure = controller.runtime_failure_message()
+                        if failure is None:
+                            raise
+                        raise EntrypointError(
+                            f"runtime logging failed: {failure}"
+                        ) from transition_error
                     generation_running(controller)
 
                 try:
@@ -318,6 +406,7 @@ def run_runtime_serve(
                         runtime_stop_hook_runner=runtime_stop_hook_runner,
                         readiness_waiter=readiness_waiter,
                         restart_acceptor=controller,
+                        runtime_health=controller,
                         runtime_started=publish_running_checkpoint,
                         external_shutdown_observer=(controller.observe_external_signal),
                         monotonic=monotonic,
@@ -331,14 +420,31 @@ def run_runtime_serve(
                     raise
 
                 if result.cause is RuntimeGenerationStopCause.NATURAL_EXIT:
+                    failure = controller.runtime_failure_message()
+                    if failure is not None:
+                        error = EntrypointError(f"runtime logging failed: {failure}")
+                        publish_start_failure(error)
+                        raise error
                     controller.mark_generation_terminal("ComfyUI exited.")
                     return _normalize_exit_code(result.returncode)
                 if result.cause is RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN:
                     controller.mark_external_shutdown()
                     return _normalize_exit_code(result.returncode)
+                if result.cause is RuntimeGenerationStopCause.CONTROLLER_FAILURE:
+                    failure = controller.runtime_failure_message()
+                    assert failure is not None
+                    error = EntrypointError(f"runtime logging failed: {failure}")
+                    publish_start_failure(error)
+                    raise error
 
                 successor = controller.allocate_restart_successor()
                 if successor is None:
+                    failure = controller.runtime_failure_message()
+                    if failure is not None:
+                        controller.wait_for_terminal_delivery(
+                            RUNTIME_CONTROL_ACK_DRAIN_SECONDS
+                        )
+                        raise EntrypointError(f"runtime logging failed: {failure}")
                     controller.mark_external_shutdown()
                     shutdown = controller.external_shutdown_snapshot()
                     assert shutdown.signal is not None

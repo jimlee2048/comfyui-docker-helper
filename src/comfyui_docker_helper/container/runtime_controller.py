@@ -136,6 +136,7 @@ class RuntimeController:
             None,
             False,
         )
+        self._runtime_failure: str | None = None
 
     def snapshot(self) -> RuntimeControllerSnapshot:
         with self._lock:
@@ -159,6 +160,7 @@ class RuntimeController:
                 or self._pending_restart is not None
                 or self._active_restart is not None
                 or self._external_signal_state[0] is not None
+                or self._runtime_failure is not None
             ):
                 return RuntimeRestartSubmission(
                     disposition="busy",
@@ -190,9 +192,15 @@ class RuntimeController:
                 ticket is None
                 or self._state != "running"
                 or self._external_signal_state[0] is not None
+                or self._runtime_failure is not None
             ):
-                if ticket is not None and self._external_signal_state[0] is not None:
-                    self._reject_pending_unlocked("Container shutdown was requested.")
+                if ticket is not None:
+                    if self._external_signal_state[0] is not None:
+                        self._reject_pending_unlocked(
+                            "Container shutdown was requested."
+                        )
+                    elif self._runtime_failure is not None:
+                        self._reject_pending_unlocked(self._runtime_failure)
                 return False
             self._operation_counter += 1
             operation = f"op-{self._operation_counter}"
@@ -215,6 +223,8 @@ class RuntimeController:
                 raise RuntimeControllerError("Initial admission already began.")
             if self._external_signal_state[0] is not None:
                 raise RuntimeControllerError("External shutdown is already admitted.")
+            if self._runtime_failure is not None:
+                raise RuntimeControllerError("Runtime controller failure is admitted.")
             self._generation_counter = 1
             self._generation = "gen-1"
             return self._generation
@@ -229,6 +239,8 @@ class RuntimeController:
                 raise RuntimeControllerError("Initial generation is not admitting.")
             if self._external_signal_state[0] is not None:
                 raise RuntimeControllerError("External shutdown is already admitted.")
+            if self._runtime_failure is not None:
+                raise RuntimeControllerError("Runtime controller failure is admitted.")
             self._state = "running"
             self._phase = None
 
@@ -247,6 +259,12 @@ class RuntimeController:
                 self._publish_restart_terminal_unlocked(
                     "failed",
                     message="Container shutdown interrupted restart.",
+                )
+                return None
+            if self._runtime_failure is not None:
+                self._publish_restart_terminal_unlocked(
+                    "failed",
+                    message=self._runtime_failure,
                 )
                 return None
             self._generation_counter += 1
@@ -268,6 +286,10 @@ class RuntimeController:
             if self._active_terminal_result != "succeeded":
                 raise RuntimeControllerError("No successful restart may be released.")
             if self._external_signal_state[0] is not None or self._state == "stopping":
+                self._state = "stopping"
+                self._phase = "finalizing"
+                return False
+            if self._runtime_failure is not None:
                 self._state = "stopping"
                 self._phase = "finalizing"
                 return False
@@ -336,6 +358,18 @@ class RuntimeController:
             repeated=repeated,
         )
 
+    def observe_runtime_failure(self, message: str) -> None:
+        """Latch the first controller-fatal runtime failure and wake the owner."""
+        with self._lock:
+            if self._runtime_failure is not None:
+                return
+            self._runtime_failure = message
+            self._restart_wakeup.set()
+
+    def runtime_failure_message(self) -> str | None:
+        with self._lock:
+            return self._runtime_failure
+
     def wait_for_terminal_delivery(self, timeout: float) -> bool:
         with self._lock:
             ticket = self._active_restart
@@ -349,6 +383,9 @@ class RuntimeController:
         *,
         message: str | None,
     ) -> None:
+        if result == "succeeded" and self._runtime_failure is not None:
+            result = "failed"
+            message = self._runtime_failure
         ticket = self._active_restart
         operation = self._operation
         if (

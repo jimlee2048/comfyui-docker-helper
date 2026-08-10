@@ -251,3 +251,52 @@ def test_invalid_transition_fails_without_mutating_state() -> None:
         controller.allocate_restart_successor()
 
     assert controller.snapshot().state == "starting"
+
+
+def test_runtime_failure_wakes_owner_and_rejects_restart_admission() -> None:
+    controller = _running_controller()
+    pending = controller.submit_restart(delivery_expected=False)
+    assert pending.ticket is not None
+
+    controller.observe_runtime_failure("stdout failed")
+    controller.observe_runtime_failure("stderr failed later")
+
+    assert controller.runtime_failure_message() == "stdout failed"
+    assert controller.wait(0) is True
+    assert controller.accept_if_requested(accepted_at=0.0) is False
+    assert pending.ticket.snapshot().state == "rejected"
+    assert pending.ticket.snapshot().message == "stdout failed"
+    assert controller.submit_restart().disposition == "busy"
+
+
+def test_runtime_failure_after_restart_cleanup_blocks_successor() -> None:
+    controller = _running_controller()
+    submission = controller.submit_restart(delivery_expected=False)
+    assert submission.ticket is not None
+    assert controller.accept_if_requested(accepted_at=0.0) is True
+
+    controller.observe_runtime_failure("stderr failed")
+
+    assert controller.allocate_restart_successor() is None
+    assert submission.ticket.snapshot().state == "failed"
+    assert submission.ticket.snapshot().message == "stderr failed"
+    assert controller.snapshot().last_restart is not None
+    assert controller.snapshot().last_restart.result == "failed"
+
+
+def test_runtime_failure_before_success_checkpoint_publishes_failure() -> None:
+    controller = _running_controller()
+    submission = controller.submit_restart(delivery_expected=False)
+    assert submission.ticket is not None
+    assert controller.accept_if_requested(accepted_at=0.0) is True
+    assert controller.allocate_restart_successor() == "gen-2"
+
+    controller.observe_runtime_failure("stdout failed at checkpoint")
+    controller.publish_restart_terminal("succeeded")
+
+    assert submission.ticket.snapshot().state == "failed"
+    assert submission.ticket.snapshot().message == "stdout failed at checkpoint"
+    assert controller.snapshot().last_restart is not None
+    assert controller.snapshot().last_restart.result == "failed"
+    with pytest.raises(RuntimeControllerError, match="No successful restart"):
+        controller.release_successful_restart()

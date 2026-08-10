@@ -89,6 +89,74 @@ def _hook_names(plan: RuntimeHookPlan, phase: str) -> list[str]:
     return [hook.filename for hook in plan.for_phase(phase)]
 
 
+def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = tmp_path / "runtime.toml"
+    hooks = tmp_path / "hooks"
+    _write_config(config, "only")
+    _write_hook(hooks, "stop", "10-stop.sh")
+    events: list[str] = []
+    child = _RestartChild(events, "only")
+    failure_observer: list[Callable[[str], object]] = []
+
+    class InjectedLogging:
+        def __enter__(self) -> InjectedLogging:
+            events.append("logging:start")
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            events.append("logging:close")
+
+    def logging_factory(observer: Callable[[str], object]) -> InjectedLogging:
+        failure_observer.append(observer)
+        return InjectedLogging()
+
+    def runner(*_args: object, **_kwargs: object) -> _RestartChild:
+        events.append("only:spawn")
+        return child
+
+    def stop_hooks(
+        _plan: RuntimeHookPlan,
+        **_kwargs: object,
+    ) -> tuple[RuntimeHookResult, ...]:
+        events.append("hooks:stop")
+        return ()
+
+    def generation_running(_controller: RuntimeController) -> None:
+        assert len(failure_observer) == 1
+        failure_observer[0]("Runtime stdout primary output failed.")
+        events.append("logging:failed")
+
+    with pytest.raises(EntrypointError, match="runtime logging failed"):
+        run_runtime_serve(
+            runtime=runtime,
+            mounted_config_path=config,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_hooks_path=hooks,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            environ={"PATH": "/usr/bin"},
+            runner=runner,  # type: ignore[arg-type]
+            runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+            generation_running=generation_running,
+            runtime_logging_factory=logging_factory,  # type: ignore[arg-type]
+        )
+
+    assert child.signals == [signal.SIGTERM]
+    assert events == [
+        "logging:start",
+        "only:spawn",
+        "logging:failed",
+        "hooks:stop",
+        "only:signal:SIGTERM",
+        "only:reap",
+        "logging:close",
+    ]
+
+
 def test_restart_replaces_the_complete_generation_without_owner_overlap(
     tmp_path: Path,
 ) -> None:

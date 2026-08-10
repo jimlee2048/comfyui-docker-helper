@@ -71,6 +71,7 @@ class RuntimeGenerationStopCause(StrEnum):
     NATURAL_EXIT = "natural_exit"
     EXTERNAL_SHUTDOWN = "external_shutdown"
     OPERATOR_RESTART = "operator_restart"
+    CONTROLLER_FAILURE = "controller_failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,18 @@ class RuntimeRestartAcceptor(Protocol):
     def accept_if_requested(self, *, accepted_at: float) -> bool: ...
 
     def wait(self, timeout: float) -> bool: ...
+
+
+class RuntimeHealthObserver(Protocol):
+    """Expose one controller-fatal runtime failure without owning cleanup."""
+
+    def runtime_failure_message(self) -> str | None: ...
+
+    def wait(self, timeout: float) -> bool: ...
+
+
+def _runtime_failure_message(observer: RuntimeHealthObserver | None) -> str | None:
+    return None if observer is None else observer.runtime_failure_message()
 
 
 class EntrypointError(ApplicationError):
@@ -144,6 +157,7 @@ def run_runtime_lifecycle(
     runtime_stop_hook_runner: RuntimeStopHookRunner = run_runtime_stop_hooks,
     readiness_waiter: ReadinessWaiter = wait_for_comfyui_readiness,
     restart_acceptor: RuntimeRestartAcceptor | None = None,
+    runtime_health: RuntimeHealthObserver | None = None,
     runtime_started: Callable[[], object] = lambda: None,
     external_shutdown_observer: Callable[[signal.Signals], object] = lambda _sig: None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -154,6 +168,10 @@ def run_runtime_lifecycle(
         shutdown_timeout=config.cdh.shutdown_timeout,
         monotonic=monotonic,
         external_shutdown_observer=external_shutdown_observer,
+    )
+    startup_cancellation = _RuntimeStartupCancellation(
+        state=startup_shutdown,
+        runtime_health=runtime_health,
     )
     with _startup_shutdown_signal_handlers(startup_shutdown):
 
@@ -253,12 +271,33 @@ def run_runtime_lifecycle(
             finally:
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
 
+        def ensure_runtime_health(child: DirectProcess | None = None) -> None:
+            failure = _runtime_failure_message(runtime_health)
+            if failure is None:
+                return
+            startup_shutdown.admit_runtime_failure()
+            cleanup_startup_failure(child)
+            raise EntrypointError(f"runtime logging failed: {failure}")
+
+        def prioritize_runtime_health(
+            error: BaseException,
+            child: DirectProcess | None = None,
+        ) -> None:
+            failure = _runtime_failure_message(runtime_health)
+            if failure is None:
+                return
+            startup_shutdown.admit_runtime_failure()
+            cleanup_startup_failure(child)
+            raise EntrypointError(f"runtime logging failed: {failure}") from error
+
         try:
+            ensure_runtime_health()
             previous_raise_on_signal = startup_shutdown.raise_on_signal
             startup_shutdown.raise_on_signal = False
             try:
-                downloads.activate(cancel_requested=startup_shutdown)
+                downloads.activate(cancel_requested=startup_cancellation)
             except RuntimeFilePlanError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise EntrypointError(
                     format_runtime_diagnostics(
@@ -266,9 +305,11 @@ def run_runtime_lifecycle(
                     )
                 ) from error
             except RuntimeStateError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise EntrypointError(f"runtime state failed: {error}") from error
             except RuntimeFileDownloadError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise EntrypointError(
                     format_runtime_diagnostics(
@@ -276,9 +317,11 @@ def run_runtime_lifecycle(
                     )
                 ) from error
             except ApplicationError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise EntrypointError(f"runtime download failed: {error}") from error
             except RuntimeAsyncQueueStartupError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise EntrypointError(f"runtime download failed: {error}") from error
             finally:
@@ -286,6 +329,7 @@ def run_runtime_lifecycle(
 
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
+            ensure_runtime_health()
             try:
                 _run_pre_start_hooks(
                     hook_plan,
@@ -293,33 +337,40 @@ def run_runtime_lifecycle(
                     source_env=source_env,
                     runtime_hook_runner=runtime_hook_runner,
                     startup_shutdown=startup_shutdown,
+                    startup_cancellation=startup_cancellation,
                 )
-            except EntrypointError:
+            except EntrypointError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
+            ensure_runtime_health()
             previous_raise_on_signal = startup_shutdown.raise_on_signal
             startup_shutdown.raise_on_signal = False
             try:
-                ssh_service.start(cancel_requested=startup_shutdown)
+                ssh_service.start(cancel_requested=startup_cancellation)
             except RuntimeSshServiceError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise EntrypointError(str(error)) from error
             finally:
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
+            ensure_runtime_health()
             try:
                 ssh_service.ensure_running_before_comfyui()
             except RuntimeSshServiceError as error:
                 cleanup_startup_failure()
                 raise EntrypointError(str(error)) from error
+            ensure_runtime_health()
             try:
                 previous_raise_on_signal = startup_shutdown.raise_on_signal
                 startup_shutdown.raise_on_signal = False
-                downloads.start_async(cancel_requested=startup_shutdown)
+                downloads.start_async(cancel_requested=startup_cancellation)
             except RuntimeAsyncQueueStartupError as error:
+                prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise EntrypointError(
                     f"async runtime download queue failed to start: {error}"
@@ -328,6 +379,7 @@ def run_runtime_lifecycle(
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown()
+            ensure_runtime_health()
         except _StartupShutdownRequested as request:
             del request
             return finish_startup_signal_shutdown()
@@ -346,6 +398,7 @@ def run_runtime_lifecycle(
                 argv = build_comfyui_argv(runtime=runtime, config=config)
                 if startup_shutdown.requested_signal is not None:
                     return finish_startup_signal_shutdown()
+                ensure_runtime_health()
                 try:
                     completed = start_direct_process(
                         argv,
@@ -367,6 +420,7 @@ def run_runtime_lifecycle(
 
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown(completed)
+            ensure_runtime_health(completed)
             try:
                 _wait_for_readiness_if_required(
                     hook_plan,
@@ -381,13 +435,20 @@ def run_runtime_lifecycle(
                     child=completed,
                     runtime_hook_runner=runtime_hook_runner,
                     startup_shutdown=startup_shutdown,
+                    startup_cancellation=startup_cancellation,
                 )
-            except EntrypointError:
+            except EntrypointError as error:
+                prioritize_runtime_health(error, completed)
                 cleanup_startup_failure(completed)
                 raise
             if startup_shutdown.requested_signal is not None:
                 return finish_startup_signal_shutdown(completed)
-            runtime_started()
+            ensure_runtime_health(completed)
+            try:
+                runtime_started()
+            except EntrypointError:
+                cleanup_startup_failure(completed)
+                raise
         except _StartupShutdownRequested as request:
             del request
             if completed is None:
@@ -406,6 +467,7 @@ def run_runtime_lifecycle(
                 ssh_service=ssh_service,
                 startup_shutdown=startup_shutdown,
                 restart_acceptor=restart_acceptor,
+                runtime_health=runtime_health,
                 monotonic=monotonic,
                 sleep=sleep,
             )
@@ -439,6 +501,7 @@ def _run_pre_start_hooks(
     source_env: Mapping[str, str],
     runtime_hook_runner: RuntimeHookRunner,
     startup_shutdown: _StartupShutdownState,
+    startup_cancellation: _RuntimeStartupCancellation,
 ) -> None:
     if not hook_plan.for_phase("pre-start"):
         return
@@ -450,7 +513,7 @@ def _run_pre_start_hooks(
             runtime=runtime,
             env=source_env,
             log=print,
-            cancel_requested=startup_shutdown,
+            cancel_requested=startup_cancellation,
         )
     except RuntimeHookError as error:
         startup_shutdown.active_hook_process = error.active_process
@@ -490,6 +553,7 @@ def _run_post_start_hooks_if_required(
     child: DirectProcess,
     runtime_hook_runner: RuntimeHookRunner,
     startup_shutdown: _StartupShutdownState,
+    startup_cancellation: _RuntimeStartupCancellation,
 ) -> None:
     if not hook_plan.for_phase("post-start"):
         return
@@ -501,7 +565,7 @@ def _run_post_start_hooks_if_required(
             runtime=runtime,
             env=source_env,
             log=print,
-            cancel_requested=startup_shutdown,
+            cancel_requested=startup_cancellation,
         )
     except RuntimeHookError as error:
         startup_shutdown.active_hook_process = error.active_process
@@ -606,6 +670,13 @@ class _StartupShutdownState:
     def cancel_requested(self) -> bool:
         return self.requested_signal is not None
 
+    def admit_runtime_failure(self) -> None:
+        if self.timeline is None:
+            self.timeline = _ShutdownTimeline.start(
+                self._shutdown_timeout,
+                now=self._monotonic(),
+            )
+
     @property
     def requested_signal(self) -> signal.Signals | None:
         return self._external_signal_state[0]
@@ -653,6 +724,31 @@ class _StartupShutdownState:
     def disable_signal_admission(self) -> None:
         """Ignore signals once the managed child has exited naturally."""
         self._signal_admission_enabled = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeStartupCancellation:
+    state: _StartupShutdownState
+    runtime_health: RuntimeHealthObserver | None
+
+    def __call__(self) -> bool:
+        if self.state.cancel_requested():
+            return True
+        return _runtime_failure_message(self.runtime_health) is not None
+
+    def wait(self, timeout: float) -> bool:
+        if self.runtime_health is None:
+            return self.state.wait(timeout)
+        return self.runtime_health.wait(timeout)
+
+    def force_requested(self) -> bool:
+        return self.state.force_requested()
+
+    def wait_for_force(self, timeout: float) -> bool:
+        return self.state.wait_for_force(timeout)
+
+    def shutdown_deadline(self) -> float | None:
+        return self.state.shutdown_deadline()
 
 
 @dataclass(frozen=True, slots=True)
@@ -743,6 +839,7 @@ def _wait_with_existing_signal_state(
     ssh_service: RuntimeSshService,
     startup_shutdown: _StartupShutdownState,
     restart_acceptor: RuntimeRestartAcceptor | None = None,
+    runtime_health: RuntimeHealthObserver | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
 ) -> RuntimeGenerationResult:
@@ -750,7 +847,7 @@ def _wait_with_existing_signal_state(
     startup_shutdown.raise_on_signal = True
     try:
         try:
-            if restart_acceptor is None:
+            if restart_acceptor is None and runtime_health is None:
                 exit_code = child.wait()
             else:
                 while True:
@@ -761,6 +858,24 @@ def _wait_with_existing_signal_state(
                     requested_signal = startup_shutdown.requested_signal
                     if requested_signal is not None:
                         raise _StartupShutdownRequested(requested_signal)
+                    failure = _runtime_failure_message(runtime_health)
+                    if failure is not None:
+                        return _finish_controller_failure(
+                            child,
+                            hook_plan=hook_plan,
+                            runtime=runtime,
+                            source_env=source_env,
+                            runtime_stop_hook_runner=runtime_stop_hook_runner,
+                            downloads=downloads,
+                            ssh_service=ssh_service,
+                            startup_shutdown=startup_shutdown,
+                            timeline=_ShutdownTimeline.start(
+                                startup_shutdown.shutdown_timeout,
+                                now=monotonic(),
+                            ),
+                            monotonic=monotonic,
+                            sleep=sleep,
+                        )
 
                     startup_shutdown.raise_on_signal = False
                     try:
@@ -771,9 +886,29 @@ def _wait_with_existing_signal_state(
                         requested_signal = startup_shutdown.requested_signal
                         if requested_signal is not None:
                             raise _StartupShutdownRequested(requested_signal)
+                        failure = _runtime_failure_message(runtime_health)
+                        if failure is not None:
+                            return _finish_controller_failure(
+                                child,
+                                hook_plan=hook_plan,
+                                runtime=runtime,
+                                source_env=source_env,
+                                runtime_stop_hook_runner=runtime_stop_hook_runner,
+                                downloads=downloads,
+                                ssh_service=ssh_service,
+                                startup_shutdown=startup_shutdown,
+                                timeline=_ShutdownTimeline.start(
+                                    startup_shutdown.shutdown_timeout,
+                                    now=monotonic(),
+                                ),
+                                monotonic=monotonic,
+                                sleep=sleep,
+                            )
                         accepted_at = monotonic()
-                        if restart_acceptor.accept_if_requested(
-                            accepted_at=accepted_at
+                        if restart_acceptor is not None and (
+                            restart_acceptor.accept_if_requested(
+                                accepted_at=accepted_at
+                            )
                         ):
                             return _finish_operator_restart(
                                 child,
@@ -793,7 +928,10 @@ def _wait_with_existing_signal_state(
                             )
                     finally:
                         startup_shutdown.raise_on_signal = True
-                    restart_acceptor.wait(CHILD_REAP_POLL_INTERVAL_SECONDS)
+                    if restart_acceptor is None:
+                        sleep(CHILD_REAP_POLL_INTERVAL_SECONDS)
+                    else:
+                        restart_acceptor.wait(CHILD_REAP_POLL_INTERVAL_SECONDS)
         except _StartupShutdownRequested:
             if child.poll() is None:
                 startup_shutdown.raise_on_signal = False
@@ -867,6 +1005,49 @@ def _finish_operator_restart(
         raise shutdown.stop_hook_attempt.failure
     return RuntimeGenerationResult(
         cause=RuntimeGenerationStopCause.OPERATOR_RESTART,
+        returncode=shutdown.returncode,
+    )
+
+
+def _finish_controller_failure(
+    child: DirectProcess,
+    *,
+    hook_plan: RuntimeHookPlan,
+    runtime: ContainerRuntime,
+    source_env: Mapping[str, str],
+    runtime_stop_hook_runner: RuntimeStopHookRunner,
+    downloads: RuntimeDownloads,
+    ssh_service: RuntimeSshService,
+    startup_shutdown: _StartupShutdownState,
+    timeline: _ShutdownTimeline,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], object],
+) -> RuntimeGenerationResult:
+    startup_shutdown.raise_on_signal = False
+    shutdown = _finish_signal_shutdown(
+        signal.SIGTERM,
+        timeline=timeline,
+        child=child,
+        hook_plan=hook_plan,
+        runtime=runtime,
+        source_env=source_env,
+        runtime_stop_hook_runner=runtime_stop_hook_runner,
+        stop_hooks_cancelled=startup_shutdown.repeated_cancellation(),
+        force_requested=startup_shutdown.repeated_signal_requested,
+        hook_processes=(),
+        downloads=downloads,
+        ssh_service=ssh_service,
+        monotonic=monotonic,
+        sleep=sleep,
+        ordinary_signal_decider=startup_shutdown.ordinary_signal_decision,
+    )
+    if startup_shutdown.requested_signal is not None:
+        return RuntimeGenerationResult(
+            cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+            returncode=shutdown.returncode,
+        )
+    return RuntimeGenerationResult(
+        cause=RuntimeGenerationStopCause.CONTROLLER_FAILURE,
         returncode=shutdown.returncode,
     )
 

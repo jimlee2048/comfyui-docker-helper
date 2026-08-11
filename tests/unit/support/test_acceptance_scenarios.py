@@ -29,6 +29,7 @@ _FIXTURE_ROOT = FIXTURES_ROOT / "comfyui-build"
 _CONFIG_ROOT = _FIXTURE_ROOT / "configs"
 _BUILD_HOOK_ROOT = _FIXTURE_ROOT / "build-hooks"
 _PROJECT_ROOT = PROJECT_ROOT
+_PYTEST_PROBE_TIMEOUT_SECONDS = 30
 
 
 def _document(scenario: AcceptanceScenario) -> dict[str, object]:
@@ -156,6 +157,7 @@ def test_unknown_release_scenario_reports_concise_usage_error() -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_PYTEST_PROBE_TIMEOUT_SECONDS,
     )
 
     assert completed.returncode == pytest.ExitCode.USAGE_ERROR
@@ -191,6 +193,7 @@ def test_selected_release_reports_cost_before_missing_artifact_inputs() -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_PYTEST_PROBE_TIMEOUT_SECONDS,
     )
 
     diagnostic = (
@@ -240,6 +243,7 @@ def test_selected_release_scenario_requires_all_artifact_inputs(
         check=False,
         capture_output=True,
         text=True,
+        timeout=_PYTEST_PROBE_TIMEOUT_SECONDS,
     )
 
     assert completed.returncode != 0
@@ -297,6 +301,7 @@ def test_selected_release_collection_matches_required_probes(
         check=False,
         capture_output=True,
         text=True,
+        timeout=_PYTEST_PROBE_TIMEOUT_SECONDS,
     )
 
     expected_status = 0 if expected_fragment is None else 4

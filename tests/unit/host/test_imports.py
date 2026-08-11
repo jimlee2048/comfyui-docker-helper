@@ -9,6 +9,7 @@ from tests.import_support import package_module_names
 
 _CONTAINER_PREFIX = "comfyui_docker_helper.container."
 _HOST_CONTAINER_MODULES = frozenset({"comfyui_docker_helper.container.cli"})
+_INTERPRETER_PROBE_TIMEOUT_SECONDS = 30
 
 
 def host_module_names() -> tuple[str, ...]:
@@ -33,6 +34,7 @@ def test_import_has_no_observable_side_effects(module_name: str) -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_INTERPRETER_PROBE_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0

@@ -32,6 +32,7 @@ from tests.build_plan_support import accepted_resolution, build_plan, final_conf
 
 _REQUIREMENTS = b"torch\ntorchvision\ntorchaudio\nnumpy>=1.25\n"
 _MANAGER_REQUIREMENTS = b"comfyui_manager==4.0.5\n"
+_LOCAL_GIT_TIMEOUT_SECONDS = 30
 
 
 @pytest.fixture(autouse=True)
@@ -145,6 +146,7 @@ def test_checkout_is_detached_exact_and_retains_git_metadata(
         ["git", "symbolic-ref", "-q", "HEAD"],
         cwd=runtime.comfyui_path,
         check=False,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     )
     assert symbolic.returncode != 0
 
@@ -1245,6 +1247,11 @@ def test_cm_cli_accepts_exact_application_shebang_and_owner(tmp_path: Path) -> N
 
 def _git(*argv: str, cwd: Path) -> str:
     completed = subprocess.run(
-        ["git", *argv], cwd=cwd, check=True, capture_output=True, text=True
+        ["git", *argv],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     )
     return completed.stdout.strip()

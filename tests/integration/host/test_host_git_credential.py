@@ -16,6 +16,8 @@ from comfyui_docker_helper.host import private_state
 from comfyui_docker_helper.host import secret_session as secret_session_module
 from comfyui_docker_helper.host.secret_session import HostSecretSession
 
+_GIT_CREDENTIAL_TIMEOUT_SECONDS = 30
+
 
 def test_cdh_helper_resets_ambient_helpers_and_selects_by_http_path(
     tmp_path: Path,
@@ -109,6 +111,7 @@ password = { secret = "team_token" }
             capture_output=True,
             check=False,
             env=environment,
+            timeout=_GIT_CREDENTIAL_TIMEOUT_SECONDS,
         )
         unmatched = subprocess.run(
             command,
@@ -116,6 +119,7 @@ password = { secret = "team_token" }
             capture_output=True,
             check=False,
             env=environment,
+            timeout=_GIT_CREDENTIAL_TIMEOUT_SECONDS,
         )
         mismatched = subprocess.run(
             command,
@@ -126,6 +130,7 @@ password = { secret = "team_token" }
             capture_output=True,
             check=False,
             env=environment,
+            timeout=_GIT_CREDENTIAL_TIMEOUT_SECONDS,
         )
 
     assert selected.returncode == 0

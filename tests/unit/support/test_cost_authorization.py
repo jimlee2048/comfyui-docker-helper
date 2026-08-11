@@ -13,6 +13,7 @@ from tests.acceptance_scenarios import RELEASE_SCENARIOS
 from tests.project_paths import PROJECT_ROOT
 
 _PROJECT_ROOT = PROJECT_ROOT
+_PYTEST_PROBE_TIMEOUT_SECONDS = 30
 
 
 def _run_probe(
@@ -39,6 +40,7 @@ def _run_probe(
         check=False,
         capture_output=True,
         text=True,
+        timeout=_PYTEST_PROBE_TIMEOUT_SECONDS,
     )
 
 

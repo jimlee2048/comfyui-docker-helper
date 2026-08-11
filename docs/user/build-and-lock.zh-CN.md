@@ -4,6 +4,16 @@
 
 本指南介绍本地验证、canonical lock 协调、渲染构建上下文以及 Docker 镜像构建。请先阅读[配置指南](configuration.zh-CN.md)，以选择和分层配置文件。以下命令假定你的配置名为 `cdh.toml`，并从其所在目录运行。
 
+多行命令使用 POSIX shell 的续行语法。在 Windows 上，请将命令写在一行，或者把每行末尾的 `\` 换成 PowerShell 的反引号续行符。
+
+## 宿主机与目标平台
+
+所有 `cdh host *` 工作流都能在受支持的 Windows 和 Linux 宿主机上原生运行。请使用项目 README 中常规的 [`uv tool` 或 `pip` 命令](../../README.zh-CN.md#安装)来安装 cdh；安装程序会选择所需的平台依赖。Docker 构建始终以 Linux `amd64` 为目标。Windows 宿主机通常使用运行 Linux 容器并支持 Buildx 的 Docker Desktop；其他 endpoint 必须提供等效的 Linux `amd64` Buildx 行为。cdh 不构建或运行 Windows 容器。`cdh container *` 用于在生成的 Linux 镜像内执行。
+
+Windows 自动化验证覆盖原生 CLI、文件系统、Git、渲染、打包以及 Docker/Buildx 适配器行为，但不会运行真实的 Docker Desktop 构建，也不证明 Docker Desktop 的 SSH agent forwarding。因此，Docker Desktop、builder 或 agent 集成失败会保留其底层 Docker/BuildKit 诊断。
+
+读取本地 Secret 和 Hook 输入时，cdh 会验证当时观测到的文件类型和词法路径形状，并拒绝已观测到的符号链接、Windows junction 或其他 reparse point，以及特殊文件。Secret 文件还会执行 65,525 字节上限；Hook 文件会把身份规划时读取的字节绑定到 digest，并在 materialization 前复验该 digest。这并不隔离其他本地进程：不要允许不受信任的进程在 cdh 运行期间并发修改选中的输入文件或其目录。
+
 ## 验证、渲染和构建
 
 在解析或构建任何内容之前验证配置：
@@ -73,6 +83,8 @@ cdh host build \
 
 Secret 会在命令范围内惰性处理。cdh 会让 source locator 和解析后的值避开持久构建工件及其自身诊断，并在命令通过受支持的成功、错误或中断路径退出时尝试清理。普通清理失败会被报告，但进程或宿主机突然终止时无法保证完成清理。这是结构性非持久化边界，而不是沙箱：受信任的自定义节点 Hook 和安装程序仍可以读取、输出或复制其合并构建步骤可用的凭据。`http://` credential route 可以使用，但会因缺少 TLS 传输保密性而发出 warning。
 
+在 POSIX 上，环境变量 Secret 会保留环境值的原始字节；在 Windows 上，cdh 会将 Unicode 环境值编码为 UTF-8。文件 Secret 仍必须是常规文件，且上限为 65,525 字节。当 POSIX 的 group 或 world 权限位已设置时，cdh 会发出 warning。在 Windows 上，请自行限制源文件的 ACL，因为 cdh 不实现通用的 Windows access audit。由 cdh 管理的临时 Secret 快照仍会通过 POSIX mode 或受保护的 Windows DACL 保持私有。
+
 BuildKit 不会把 Secret 内容纳入 `RUN` 指令的 cache key；只有 Secret ID 和 mount 属性参与。轮换 token 后，已经完成的自定义节点层仍可能被复用，而不访问当前 credential source。直接构建渲染上下文时，如需重新检查鉴权，请使用 Buildx `--no-cache` 或其他常规 BuildKit cache 控制。cdh 刻意不会把 token hash 作为 cachebuster。
 
 ### 直接构建渲染后的 HTTPS 上下文
@@ -103,9 +115,9 @@ cdh host build \
   --ssh
 ```
 
-该选项要求 `SSH_AUTH_SOCK` 非空。cdh 使用默认 agent 以及现有的默认用户和系统 known-hosts 文件；它不会检查 agent、添加主机密钥、复制私钥或读取 `~/.ssh/config`。对于自托管服务或非默认端口，请使用 `ssh://git@example.test:2222/group/node.git` 之类的显式 locator，并将对应的主机及端口条目加入默认 known-hosts 文件。该选项不支持 SSH alias、`ProxyJump`、自定义密钥或信任文件 selector 以及原始密钥文件。`--ssh` 不会提供 HTTPS token；请通过 `cdh.git.credentials` 配置它们。
+在 POSIX 上，该选项要求 `SSH_AUTH_SOCK` 非空；cdh 会转发该默认 agent，以及现有的默认用户和系统 known-hosts 文件。在 Windows 上，`SSH_AUTH_SOCK` 不是 cdh 的前置条件：cdh 会请求 BuildKit 的 `--ssh default`，由 Docker/BuildKit 选择并验证 agent，同时只自动提供现有的用户级 `~/.ssh/known_hosts` 和 `~/.ssh/known_hosts2` 文件。Windows 不支持自动发现系统级 known-hosts。无论在哪个平台，cdh 都不会检查 agent、添加主机密钥、复制私钥或读取 `~/.ssh/config`。对于自托管服务或非默认端口，请使用 `ssh://git@example.test:2222/group/node.git` 之类的显式 locator，并将对应的主机及端口条目加入受支持的默认 known-hosts 文件。该选项不支持 SSH alias、`ProxyJump`、自定义密钥或信任文件 selector 以及原始密钥文件。`--ssh` 不会提供 HTTPS token；请通过 `cdh.git.credentials` 配置它们。
 
-如果生效配置没有 direct-Git 节点，`--ssh` 会输出一次 warning，并在不转发任何内容的情况下继续。否则，缺少 agent 会在解析源码前失败；主机密钥、鉴权以及 Git/submodule 的失败则会保留其底层诊断。
+如果生效配置没有 direct-Git 节点，`--ssh` 会输出一次 warning，并在不转发任何内容的情况下继续。否则，POSIX 上缺少 agent 会在解析源码前失败。在 Windows 上，默认 agent forwarding 不可用时由 Docker/BuildKit 报告；主机密钥、鉴权以及 Git/submodule 的失败同样会保留其底层诊断。
 
 请将配置的自定义节点 Hook 和安装程序视为受信任代码：在安装自定义节点期间，它们能够使用转发的 agent 并读取提供的信任文件。私钥字节仍由 agent 持有，cdh 不会自动将 agent 或信任文件放入渲染上下文或镜像。缓存的自定义节点层也可能在不联系当前 agent 或不重新检查已更新信任的情况下被复用；需要重新验证鉴权时，请绕过相应的 BuildKit 缓存。
 
@@ -147,7 +159,7 @@ cdh host render \
   --overwrite
 ```
 
-运行时 Hook 目录只能包含直接位于 `pre-start.d/`、`post-start.d/` 和 `stop.d/` 下的受支持 Hook 文件。省略该选项时不会烘焙运行时 Hook 目录树。挂载的运行时 Hook 是独立的部署时输入；参见[运行时指南](runtime.zh-CN.md)和[运行时 Hook 示例](../../examples/runtime-hooks/)。
+只有直接位于 `pre-start.d/`、`post-start.d/` 和 `stop.d/` 下的普通 `.sh` 和 `.py` 文件会被选择并固化。其他普通文件和目录会在不递归遍历的情况下被忽略并产生聚合警告；不安全的文件系统条目以及来源检查/读取失败仍是错误。省略该选项时不会烘焙运行时 Hook 目录树。挂载的运行时 Hook 是独立的部署时输入；参见[运行时指南](runtime.zh-CN.md)和[运行时 Hook 示例](../../examples/runtime-hooks/)。
 
 ## 从生效配置到上下文
 

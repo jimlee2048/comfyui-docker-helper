@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
-import shlex
+import secrets
 import shutil
 import stat
 import sys
-import tempfile
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +26,19 @@ from comfyui_docker_helper.file_admission import (
 )
 from comfyui_docker_helper.git_credential_policy import git_credential_config_args
 from comfyui_docker_helper.git_credential_protocol import GitCredentialRuntimeRoute
+from comfyui_docker_helper.host.descriptor_lock import (
+    acquire_descriptor_lock,
+    release_descriptor_lock,
+)
+from comfyui_docker_helper.host.git_credential_process import (
+    GitCredentialProcessBinding,
+    git_credential_helper_command,
+)
+from comfyui_docker_helper.host.private_state import (
+    create_private_directory,
+    create_private_file,
+    open_private_lock_file,
+)
 
 __all__ = [
     "GIT_CREDENTIAL_SESSION_ENV",
@@ -43,14 +54,11 @@ _SNAPSHOT_PREFIX = "snapshot-"
 _LOCK_PREFIX = "lock-"
 _FAILURE_PREFIX = "failure-"
 _WARNING_PREFIX = "warning-permissive-mode-"
+_PRIVATE_FILE_ATTEMPTS = 128
 
-
-@dataclass(frozen=True, slots=True)
-class GitCredentialProcessBinding:
-    """Safe Git configuration and environment for one private helper session."""
-
-    config_args: tuple[str, ...]
-    environment: Mapping[str, str]
+_close_descriptor = os.close
+_close_lock_descriptor = os.close
+_platform_name = os.name
 
 
 class HostSecretSessionError(ValueError):
@@ -86,7 +94,7 @@ class HostSecretSession:
     _routes: tuple[_CredentialRoute, ...]
     _root: Path | None = None
     _owns_root: bool = True
-    _known_warning_names: set[str] = field(default_factory=set)
+    _known_warning_markers: set[str] = field(default_factory=set)
     _pending_warnings: list[Diagnostic] = field(default_factory=list)
 
     @classmethod
@@ -134,11 +142,10 @@ class HostSecretSession:
         if self._root is not None:
             raise HostSecretSessionError("invalid_lifecycle")
         try:
-            root = Path(tempfile.mkdtemp(prefix="cdh-secret-session-"))
-        except OSError:
+            root = create_private_directory(prefix="cdh-secret-session-")
+        except (OSError, ValueError):
             raise HostSecretSessionError("session_create_failed") from None
         try:
-            root.chmod(0o700)
             self._root = root
             _write_private_file(root / _METADATA_FILE, self._metadata_bytes())
         except (OSError, ValueError):
@@ -181,10 +188,7 @@ class HostSecretSession:
         if not self._routes:
             return None
         root = self._require_root()
-        helper = (
-            f"!exec {shlex.quote(sys.executable)} "
-            "-m comfyui_docker_helper.host.git_credential_helper"
-        )
+        helper = git_credential_helper_command(sys.executable)
         return GitCredentialProcessBinding(
             config_args=git_credential_config_args(helper),
             environment={GIT_CREDENTIAL_SESSION_ENV: os.fspath(root)},
@@ -199,47 +203,31 @@ class HostSecretSession:
         snapshot = root / f"{_SNAPSHOT_PREFIX}{name}"
         lock_path = root / f"{_LOCK_PREFIX}{name}"
         failure_path = root / f"{_FAILURE_PREFIX}{name}"
-        lock_fd = -1
-        try:
-            lock_fd = os.open(
-                lock_path,
-                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-                0o600,
-            )
-            os.fchmod(lock_fd, 0o600)
-        except OSError:
-            if lock_fd >= 0:
-                with suppress(OSError):
-                    os.close(lock_fd)
-            raise HostSecretSessionError("snapshot_failed", name) from None
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            if snapshot.exists():
-                return snapshot
-            cached_failure = _read_cached_failure(failure_path, name)
-            if cached_failure is not None:
-                raise cached_failure
+        with _snapshot_lock(lock_path, name):
             try:
-                data, mode = self._read_source(name, source)
-                if mode is not None and stat.S_IMODE(mode) & 0o077:
-                    self._record_mode_warning(name)
-                _validate_git_password(data, name)
-                _write_snapshot(snapshot, data)
-                return snapshot
-            except HostSecretSessionError as error:
-                _record_cached_failure(failure_path, error)
+                if snapshot.exists():
+                    return snapshot
+                cached_failure = _read_cached_failure(failure_path, name)
+                if cached_failure is not None:
+                    raise cached_failure
+                try:
+                    data, mode = self._read_source(name, source)
+                    if mode is not None and stat.S_IMODE(mode) & 0o077:
+                        self._record_mode_warning(name)
+                    _validate_git_password(data, name)
+                    _write_snapshot(snapshot, data)
+                    return snapshot
+                except HostSecretSessionError as error:
+                    _record_cached_failure(failure_path, error)
+                    raise
+                except Exception:
+                    error = HostSecretSessionError("snapshot_failed", name)
+                    _record_cached_failure(failure_path, error)
+                    raise error from None
+            except HostSecretSessionError:
                 raise
-            except OSError:
-                error = HostSecretSessionError("snapshot_failed", name)
-                _record_cached_failure(failure_path, error)
-                raise error from None
-        except OSError:
-            raise HostSecretSessionError("snapshot_failed", name) from None
-        finally:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(lock_fd)
+            except Exception:
+                raise HostSecretSessionError("snapshot_failed", name) from None
 
     def snapshot_git_credential(self, secret_id: str) -> Path:
         """Resolve one accepted BuildPlan credential ID through this session."""
@@ -293,13 +281,7 @@ class HostSecretSession:
         self, name: str, source: _SecretSource
     ) -> tuple[bytes, int | None]:
         if source.kind == "env":
-            try:
-                data = os.environb.get(source.locator.encode("ascii"))
-            except (AttributeError, UnicodeEncodeError):
-                raise HostSecretSessionError("environment_unavailable", name) from None
-            if data is None:
-                raise HostSecretSessionError("source_unavailable", name)
-            return data, None
+            return _read_environment_source(source.locator, name), None
         if source.kind == "file":
             try:
                 admitted = read_bounded_regular_absolute_file(
@@ -320,7 +302,7 @@ class HostSecretSession:
             _write_private_file(marker, b"")
         except FileExistsError:
             pass
-        except OSError:
+        except (OSError, ValueError):
             raise HostSecretSessionError("warning_record_failed", name) from None
 
     def _collect_warning_markers(self) -> None:
@@ -328,19 +310,27 @@ class HostSecretSession:
         if root is None:
             return
         for name in self._sources:
-            if name in self._known_warning_names:
-                continue
-            if not (root / f"{_WARNING_PREFIX}{name}").is_file():
-                continue
-            self._known_warning_names.add(name)
-            self._pending_warnings.append(
-                Diagnostic(
-                    ("secrets", name, "file"),
+            for marker_prefix, code, message in (
+                (
+                    _WARNING_PREFIX,
                     "secret.permissive_file_mode",
                     "Secret file has group or world permission bits set",
-                    DiagnosticSeverity.WARNING,
+                ),
+            ):
+                marker = f"{marker_prefix}{name}"
+                if marker in self._known_warning_markers:
+                    continue
+                if not (root / marker).is_file():
+                    continue
+                self._known_warning_markers.add(marker)
+                self._pending_warnings.append(
+                    Diagnostic(
+                        ("secrets", name, "file"),
+                        code,
+                        message,
+                        DiagnosticSeverity.WARNING,
+                    )
                 )
-            )
 
     def _require_root(self) -> Path:
         if self._root is None:
@@ -362,6 +352,69 @@ def _validate_git_password(value: bytes, name: str) -> None:
         or any(character in value for character in b"\0\r\n")
     ):
         raise HostSecretSessionError("invalid_value", name)
+
+
+def _read_environment_source(locator: str, name: str) -> bytes:
+    if _platform_name == "posix":
+        environment = getattr(os, "environb", None)
+        try:
+            data = (
+                None
+                if environment is None
+                else environment.get(locator.encode("ascii"))
+            )
+        except (AttributeError, OSError, UnicodeEncodeError):
+            raise HostSecretSessionError("environment_unavailable", name) from None
+    elif _platform_name == "nt":
+        try:
+            value = os.environ.get(locator)
+            data = None if value is None else value.encode("utf-8")
+        except (AttributeError, OSError, UnicodeEncodeError):
+            raise HostSecretSessionError("environment_unavailable", name) from None
+    else:
+        raise HostSecretSessionError("environment_unavailable", name)
+    if data is None:
+        raise HostSecretSessionError("source_unavailable", name)
+    return data
+
+
+@contextmanager
+def _snapshot_lock(path: Path, name: str) -> Iterator[None]:
+    descriptor = -1
+    try:
+        descriptor = open_private_lock_file(path)
+        if not acquire_descriptor_lock(descriptor):
+            raise OSError("private descriptor lock was not acquired")
+    except BaseException as error:
+        if descriptor >= 0:
+            with suppress(BaseException):
+                _close_lock_descriptor(descriptor)
+        if isinstance(error, Exception):
+            raise HostSecretSessionError("snapshot_failed", name) from None
+        raise
+
+    body_failed = False
+    try:
+        yield
+    except BaseException:
+        body_failed = True
+        raise
+    finally:
+        cleanup_error: BaseException | None = None
+        try:
+            release_descriptor_lock(descriptor)
+        except BaseException as error:
+            cleanup_error = error
+        try:
+            _close_lock_descriptor(descriptor)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        # Body/acquire errors outrank unlock errors, which outrank close errors.
+        if cleanup_error is not None and not body_failed:
+            if isinstance(cleanup_error, Exception):
+                raise HostSecretSessionError("snapshot_failed", name) from None
+            raise cleanup_error
 
 
 def _read_cached_failure(path: Path, name: str) -> HostSecretSessionError | None:
@@ -388,38 +441,46 @@ def _record_cached_failure(path: Path, error: HostSecretSessionError) -> None:
 
 
 def _write_snapshot(path: Path, data: bytes) -> None:
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    temporary: Path | None = None
+    for _attempt in range(_PRIVATE_FILE_ATTEMPTS):
+        candidate = path.parent / f".private-{secrets.token_hex(16)}"
+        try:
+            _write_private_file(candidate, data)
+        except FileExistsError:
+            continue
+        temporary = candidate
+        break
+    if temporary is None:
+        raise FileExistsError("private file candidate space is unavailable")
     try:
-        os.fchmod(descriptor, 0o600)
-        view = memoryview(data)
-        while view:
-            written = os.write(descriptor, view)
-            if written == 0:
-                raise OSError("private write failed")
-            view = view[written:]
-        os.close(descriptor)
-        descriptor = -1
         os.replace(temporary, path)
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        with suppress(FileNotFoundError):
+        with suppress(OSError):
             os.unlink(temporary)
 
 
 def _write_private_file(path: Path, data: bytes) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-        0o600,
-    )
+    descriptor = create_private_file(path)
     try:
-        os.fchmod(descriptor, 0o600)
-        view = memoryview(data)
-        while view:
-            written = os.write(descriptor, view)
-            if written == 0:
-                raise OSError("private write failed")
-            view = view[written:]
-    finally:
-        os.close(descriptor)
+        _write_descriptor(descriptor, data)
+    except BaseException:
+        with suppress(BaseException):
+            _close_descriptor(descriptor)
+        with suppress(OSError):
+            os.unlink(path)
+        raise
+    try:
+        _close_descriptor(descriptor)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(path)
+        raise
+
+
+def _write_descriptor(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written == 0:
+            raise OSError("private write failed")
+        view = view[written:]

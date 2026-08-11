@@ -1,0 +1,384 @@
+"""Linux image-helper final-manifest execution contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import stat
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from comfyui_docker_helper.config.build_plan import (
+    BuildPlan,
+    build_plan_digest,
+    dump_build_plan_json,
+    manifest_binding,
+)
+from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
+from comfyui_docker_helper.config.final_manifest import (
+    dump_final_manifest,
+    final_build_check_ids,
+)
+from comfyui_docker_helper.container import final_manifest as final_manifest_service
+from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
+from comfyui_docker_helper.container.final_manifest import FinalManifestError
+from comfyui_docker_helper.container.final_manifest_writer import (
+    FinalManifestWriteError,
+)
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
+from tests.final_manifest_support import manifest_for_plan
+
+
+# Final comfy-cli evidence executes the tool interpreter and proves its isolation.
+def test_comfy_cli_evidence_observes_exact_interpreter_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    tool = projection.toolchain.tool_store.comfy_cli
+    assert tool is not None
+    python = Path("/opt/uv/tools/comfy-cli/bin/python")
+    managed = projection.toolchain.python
+    expected_base = (
+        Path("/opt/python")
+        / managed.catalog_key
+        / "bin"
+        / f"python{'.'.join(managed.version.split('.')[:2])}"
+    )
+    calls: list[tuple[tuple[Path | str, ...], Path, str]] = []
+
+    def capture(argv, *, cwd, description):
+        calls.append((argv, cwd, description))
+        return json.dumps(
+            {
+                "base_executable": str(expected_base),
+                "prefix": "/opt/uv/tools/comfy-cli",
+            }
+        )
+
+    monkeypatch.setattr(final_manifest_service, "_capture", capture)
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_environment_inventory",
+        lambda _python: (("comfy-cli", tool.version),),
+    )
+    monkeypatch.setattr(
+        final_manifest_service, "_dependency_check", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _path: SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0),
+    )
+    monkeypatch.setattr(
+        Path,
+        "resolve",
+        lambda path, *, strict: Path("/opt/uv/tools/comfy-cli/bin") / path.name,
+    )
+
+    evidence = final_manifest_service._comfy_cli_evidence(projection)
+
+    assert evidence is not None
+    assert evidence.direct.observed == tool.version
+    assert calls[0][0][:3] == (python, "-I", "-c")
+    assert calls[0][1:] == (
+        Path("/opt/cdh/build"),
+        "comfy-cli interpreter identity observation",
+    )
+
+
+@pytest.mark.parametrize(
+    ("identity", "message"),
+    [
+        (
+            {
+                "base_executable": "/opt/python/expected/bin/python3.12",
+                "prefix": "/tmp/forged-comfy-cli",
+            },
+            "environment does not match BuildPlan",
+        ),
+        (
+            {
+                "base_executable": "/tmp/forged-python",
+                "prefix": "/opt/uv/tools/comfy-cli",
+            },
+            "base interpreter does not match BuildPlan",
+        ),
+    ],
+)
+def test_comfy_cli_evidence_rejects_pyvenv_or_base_interpreter_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    identity: dict[str, str],
+    message: str,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(identity),
+    )
+
+    with pytest.raises(FinalManifestError, match=message):
+        final_manifest_service._comfy_cli_evidence(projection)
+
+
+# Final admission authenticates the plan once and exposes only the final projection.
+def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    path = tmp_path / "build-plan.json"
+    path.write_bytes(dump_build_plan_json(plan))
+
+    projection = BuildPlanInputAdmission.from_path(
+        path,
+        expected_build_plan_digest=build_plan_digest(plan),
+    ).final_manifest()
+
+    assert projection.binding == manifest_binding(plan)
+    assert projection.toolchain == plan.toolchain
+    assert projection.application == plan.application
+    assert projection.custom_nodes == plan.custom_nodes
+    assert tuple(
+        (item.url, item.target, item.checksum) for item in projection.files
+    ) == tuple((item.url, item.target, item.checksum) for item in plan.files.files)
+    assert (
+        tuple(
+            (item.domain, item.relative_path, item.digest)
+            for item in projection.materialized_hooks
+        )
+        == ()
+    )
+    assert projection.final_probe.workspace == plan.application.paths.comfyui
+    assert projection.final_probe.checks == final_build_check_ids(
+        tuple(package.name for package in plan.application.pytorch.packages),
+        manager_enabled=plan.application.comfyui.manager is not None,
+    )
+    assert projection.shutdown_timeout == plan.runtime.shutdown_timeout
+
+
+def test_final_manifest_observes_build_hook_domain_and_retained_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"echo retained build hook\n"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    build_hooks = tmp_path / "build-hooks"
+    hook_path = build_hooks / "hooks/pre.py"
+    hook_path.parent.mkdir(parents=True)
+    hook_path.write_bytes(content)
+    plan = build_plan(
+        final_config(build_hooks_dir=build_hooks, with_hook=True),
+        accepted_resolution(hook_digest=digest),
+    )
+    path = tmp_path / "build-plan.json"
+    path.write_bytes(dump_build_plan_json(plan))
+    projection = BuildPlanInputAdmission.from_path(
+        path,
+        expected_build_plan_digest=build_plan_digest(plan),
+    ).final_manifest()
+    observed: list[Path] = []
+
+    def read(path: Path) -> bytes:
+        observed.append(path)
+        return content
+
+    monkeypatch.setattr(final_manifest_service, "read_regular_absolute_file", read)
+
+    evidence = final_manifest_service._hook_evidence(projection)
+
+    assert tuple(item.domain for item in projection.materialized_hooks) == ("build",)
+    assert tuple(item.domain for item in evidence) == ("build",)
+    assert observed == [Path("/opt/cdh/build/hooks/hooks/pre.py")]
+
+
+def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    document["toolchain"]["tool_store"]["uv_tools"] = (
+        {
+            "name": "z-tool",
+            "extras": (),
+            "version": "2.0.0",
+            "environment": "uv-tool:z-tool",
+        },
+        {
+            "name": "a-tool",
+            "extras": (),
+            "version": "1.0.0",
+            "environment": "uv-tool:a-tool",
+        },
+    )
+    projection = BuildPlanInputAdmission(
+        BuildPlan.model_validate(document)
+    ).final_manifest()
+
+    assert tuple(tool.name for tool in projection.toolchain.tool_store.uv_tools) == (
+        "a-tool",
+        "z-tool",
+    )
+
+
+# Manifest emission observes first, writes canonical bytes, and projects writer errors.
+def test_manifest_service_publishes_only_after_successful_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    expected = manifest_for_plan(plan)
+    published: list[tuple[Path, bytes]] = []
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_observe_final_manifest",
+        lambda *_args, **_kwargs: expected,
+    )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "write_final_manifest_file",
+        lambda path, content: published.append((path, content)),
+    )
+
+    assert (
+        final_manifest_service.emit_final_manifest(
+            projection,
+            runtime=object(),
+        )
+        == expected
+    )
+    assert published == [
+        (final_manifest_service._MANIFEST_PATH, dump_final_manifest(expected))
+    ]
+
+    published.clear()
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_observe_final_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            FinalManifestError("observation failed")
+        ),
+    )
+    with pytest.raises(FinalManifestError, match="observation failed"):
+        final_manifest_service.emit_final_manifest(projection, runtime=object())
+    assert published == []
+
+
+def test_manifest_service_projects_writer_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    expected = manifest_for_plan(plan)
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_observe_final_manifest",
+        lambda *_args, **_kwargs: expected,
+    )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "write_final_manifest_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            FinalManifestWriteError("final manifest target already exists")
+        ),
+    )
+
+    with pytest.raises(FinalManifestError) as error:
+        final_manifest_service.emit_final_manifest(projection, runtime=object())
+    assert str(error.value) == "final manifest target already exists"
+
+
+# Final probes use authenticated inputs and reject untruthful success evidence.
+def test_final_probe_runner_uses_the_exact_application_python_and_typed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    probe = BuildPlanInputAdmission(plan).final_manifest().final_probe
+    runtime = SimpleNamespace(python=Path("/opt/venv/bin/python"))
+    calls: list[tuple[tuple[Path | str, ...], Path, str]] = []
+
+    def capture(argv, *, cwd, description):
+        calls.append((argv, cwd, description))
+        return json.dumps(
+            {"checks": probe.checks, "result": "passed", "stage": "final-build"}
+        )
+
+    monkeypatch.setattr(final_manifest_service, "_capture", capture)
+
+    evidence = final_manifest_service._run_final_core_probe(probe, runtime)
+
+    assert evidence.checks == probe.checks
+    argv, cwd, description = calls[0]
+    assert argv[:3] == (
+        Path("/opt/venv/bin/python"),
+        "-I",
+        final_manifest_service._FINAL_CORE_PROBE_PATH,
+    )
+    assert json.loads(argv[3]) == {
+        "checks": list(probe.checks),
+        "workspace": plan.application.paths.comfyui,
+    }
+    assert cwd == Path("/opt/cdh/build")
+    assert description == "final core application probe"
+
+
+def test_final_probe_runner_rejects_untruthful_success_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    probe = BuildPlanInputAdmission(plan).final_manifest().final_probe
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "checks": probe.checks[:-1],
+                "result": "passed",
+                "stage": "final-build",
+            }
+        ),
+    )
+
+    with pytest.raises(FinalManifestError, match="do not match BuildPlan"):
+        final_manifest_service._run_final_core_probe(
+            probe,
+            SimpleNamespace(python=Path("/opt/venv/bin/python")),
+        )
+
+
+# Final observation delegates to the existing local custom-node identity authority.
+def test_final_observation_uses_live_custom_node_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    expected = custom_node_inventory(plan.custom_nodes.nodes)
+    runtime = SimpleNamespace(comfyui_path=Path("/workspace/ComfyUI"))
+    calls = []
+    monkeypatch.setattr(
+        final_manifest_service,
+        "observe_custom_node_state",
+        lambda custom_nodes, **kwargs: calls.append((custom_nodes, kwargs)) or expected,
+    )
+
+    assert final_manifest_service._custom_node_evidence(projection, runtime) == expected
+    assert calls == [(plan.custom_nodes, {"runtime": runtime})]
+
+
+def test_final_observation_reports_custom_node_proof_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    monkeypatch.setattr(
+        final_manifest_service,
+        "observe_custom_node_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            final_manifest_service.CustomNodeInstallError("identity drift")
+        ),
+    )
+
+    with pytest.raises(FinalManifestError, match="final custom-node observation"):
+        final_manifest_service._custom_node_evidence(
+            projection,
+            SimpleNamespace(comfyui_path=Path("/workspace/ComfyUI")),
+        )

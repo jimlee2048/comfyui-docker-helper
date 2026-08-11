@@ -24,13 +24,25 @@ cdh host validate \
 
 ## 对配置进行分层
 
-重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。有三个集合会按稳定标识合并：
+重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。以下组合型集合改为按各字段专属的标识合并：
 
-- `comfyui.custom_nodes` 使用 Registry ID 或直接 Git URL；以及
-- `files` 使用 `dir` 加 `filename`；以及
-- `cdh.git.credentials` 使用原样编写的精确 `match` 字符串。
+- `system.extra_packages` 使用允许的 Debian 包名；
+- `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras，以及 canonical selector 表示；
+- `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID，或精确的直接 Git URL；
+- `files` 使用规范化后的 `dir` 加 `filename` 目标；
+- `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
-重复的 credential `match` 会在原位置原子替换完整的靠前 route；route 字段不会逐字段合并。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子 source 定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。使用不同原始字符串写出的规范等价 credential context 仍是不同的合并键，随后会因重复验证而失败。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
+对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras 或 selector 不同，会继续保留，让生效配置校验报告冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
+
+`system.ssh.pub_keys` 在 TOML 层之间仍采用普通的整列表替换：省略会继承，靠后的非空列表会替换，`[]` 会清空。选出最终生效列表后，cdh 会裁剪每行首尾空白、丢弃空值，并按声明的密钥类型加 base64 密钥 blob 进行稳定去重。它会保留第一条规范化后的完整行及其可选注释。之后每个非空重复项都会产生带来源的警告，且警告不会打印密钥内容。
+
+请从标准 OpenSSH 工具生成的 `.pub` 输出中复制普通公钥行作为公钥值，不要包含 `authorized_keys` options 前缀。支持由认证器托管的 Ed25519 和 ECDSA P-256 密钥（`sk-ssh-ed25519@openssh.com` 和 `sk-ecdsa-sha2-nistp256@openssh.com`）。OpenSSH 证书以及 `restrict`、`from=`、`command=` 等 options 不属于可接受的配置语法。
+
+Registry ID 的大小写变体表示同一资源，并在原位置覆盖，靠后编写的拼写最终生效。标点符号变体仍是不同的 Registry 资源；如果这些资源映射到同一个规范化的已安装 Python 分发包标识，生效配置校验会报告冲突，而不会擅自选择其中一个。
+
+即使原始 `match` 字符串不同，canonical 等价的 credential context 也表示同一路由。靠后的路由会在原位置原子替换完整的靠前路由；路由字段不会逐字段合并。同一层中存在歧义的重复 route 仍然无效。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子来源定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
+
+对于 `[[files]]`，cdh 会将多余的 `/`、`.` 路径段和末尾 `/` 视为同一目录的等价写法。例如，`models//checkpoints/` 会规范化为 `models/checkpoints`。使用 `dir = "."` 或 `dir = "./"` 可将文件直接放在 ComfyUI 根目录。空目录、绝对目录、控制字符以及任何明确写出的 `..` 路径段仍然无效。
 
 例如，将以下内容保存为 `local.toml`，以禁用 comfy-cli，并移除完整示例所选择的节点和文件：
 
@@ -65,6 +77,8 @@ Manager 和 comfy-cli 是分别独立控制的可选功能。省略其开关时�
 
 `python.uv_tools` 中的条目用于请求额外的隔离命令行工具。这些工具不会把软件包安装到 ComfyUI 应用环境中。有关软件包来源、解析和工具环境的行为，请参阅[构建与锁定指南](build-and-lock.zh-CN.md)。
 
+`python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 中的直接 requirement 可以只写分发包名，也可以使用 `==`、`!=`、`<`、`<=`、`>`、`>=` 和 `~=` selector，包括单边约束和 compatible-release 约束。直接 URL、VCS、本地或 editable requirement、环境 marker、通配符 selector、任意相等 `===`，以及 prerelease、development 或 local-version 操作数都会被拒绝。一个 requirement 最多只能包含一个精确 `==` selector，且该精确版本必须满足同一 requirement 中的所有其他 selector。cdh 会规范化受支持的语法，但不会求解或推断一般意义上的版本范围代数。
+
 ## 选择自定义节点和构建 Hook
 
 自定义节点可以使用 Registry 标识，也可以使用直接 Git URL。Registry 节点需要 Manager；直接 Git 节点不需要。混合声明会保留它们在生效配置中的顺序。在靠后的层中设置 `custom_nodes = []` 可移除继承的节点。
@@ -92,7 +106,7 @@ password = { secret = "github_pat" }
 
 Secret 名称和引用必须匹配 `[a-z][a-z0-9_-]{0,63}`。`env` locator 必须是有效的环境变量名。`password` 始终是结构化的完整值 Secret 引用；它不接受内联 token 或字符串插值。
 
-环境变量和文件 source 仅在需要它们的命令中惰性解析。仅语法验证绝不会读取它们，匹配且已接受的 lock 也可能避免 provider 阶段的读取。相对文件 locator 统一以第一个 `-f` 文件的真实父目录为基准；允许绝对路径和规范化后的父目录跳转。Secret 文件必须是常规文件而非符号链接，值不能超过 65,525 字节；设置了 group 或 world 权限位时，cdh 会发出 warning。Git 密码还必须非空，且不能包含 NUL、回车或换行；创建 token 文件时不要留下末尾换行。
+环境变量和文件 source 仅在需要它们的命令中惰性解析。仅语法验证绝不会读取它们，匹配且已接受的 lock 也可能避免 provider 阶段的读取。相对文件 locator 统一以第一个 `-f` 文件的真实父目录为基准；允许绝对路径和规范化后的父目录跳转。Secret 文件必须是常规文件而非符号链接，且值不能超过 65,525 字节。在 POSIX 上，设置了 group 或 world 权限位时，cdh 会发出 warning。在 Windows 上，请自行限制源文件的 ACL；cdh 不实现通用的 Windows access audit。Git 密码还必须非空，且不能包含 NUL、回车或换行；创建 token 文件时不要留下末尾换行。
 
 Credential route 是通用 HTTP(S) 用户名/密码 context，而不是特定 provider 对象。GitHub 或 GitLab personal access token 应放在所引用的 `password` 中。用户名必须非空；如果不想记录个人用户名，GitHub 可便利地使用 `x-access-token`，GitLab 支持使用 `oauth2`。其他凭据类型可能要求 provider 指定的用户名。建议使用只读、仅限单个仓库且会过期的 token。
 

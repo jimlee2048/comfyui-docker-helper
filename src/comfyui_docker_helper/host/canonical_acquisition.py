@@ -66,7 +66,6 @@ from comfyui_docker_helper.host.identity_providers import (
     DirectGitIdentityRequest,
     IdentityProviderError,
     LocalExecutableIdentityProvider,
-    LocalExecutableIdentityRequest,
     ManagedPythonIdentityProvider,
     ManagedPythonIdentityRequest,
     OciIdentityProvider,
@@ -85,6 +84,7 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     UvDockerExecutorError,
     UvResolverDescriptor,
 )
+from comfyui_docker_helper.local_executable import LocalExecutableIdentityRequest
 from comfyui_docker_helper.pytorch_resolution import (
     pytorch_resolution_manifest_bytes,
 )

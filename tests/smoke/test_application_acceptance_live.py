@@ -413,7 +413,9 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
     assert dockerfile.count(
         f"--build-plan-digest {binding.build_plan_digest}"
     ) == 3 + bool(plan.files.files)
-    assert ("COPY build/hooks /opt/cdh/build/hooks" in dockerfile) is scenario.hooks
+    assert (
+        "COPY --chmod=0755 build/hooks /opt/cdh/build/hooks" in dockerfile
+    ) is scenario.hooks
     assert "comfy node" not in dockerfile
     assert "comfy install" not in dockerfile
 
@@ -459,7 +461,18 @@ def observe_inventory(python_prefix):
     return dict(items)
 
 build = pathlib.Path("/opt/cdh/build")
-plan = json.loads(build.joinpath("build-plan.json").read_text())
+plan_path = build.joinpath("build-plan.json")
+assert stat.S_IMODE(plan_path.lstat().st_mode) == 0o644
+runtime_config_path = pathlib.Path("/opt/cdh/runtime/config.toml")
+assert stat.S_IMODE(runtime_config_path.lstat().st_mode) == 0o644
+plan = json.loads(plan_path.read_text())
+for node in plan["custom_nodes"]["nodes"]:
+    for hook in (*node["pre_install_hooks"], *node["post_install_hooks"]):
+        hook_path = build.joinpath("hooks", hook["relative_path"])
+        assert stat.S_IMODE(hook_path.lstat().st_mode) == 0o755
+for hook in plan["runtime"]["hooks"]:
+    hook_path = pathlib.Path("/opt/cdh/runtime/hooks", hook["relative_path"])
+    assert stat.S_IMODE(hook_path.lstat().st_mode) == 0o755
 manifest_path = build.joinpath("manifest.json")
 manifest_metadata = manifest_path.lstat()
 assert stat.S_ISREG(manifest_metadata.st_mode)

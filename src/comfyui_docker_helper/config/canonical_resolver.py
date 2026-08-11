@@ -46,7 +46,7 @@ from comfyui_docker_helper.config.canonical_request import (
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
-from comfyui_docker_helper.host.identity_providers import (
+from comfyui_docker_helper.local_executable import (
     LocalExecutableIdentityRequest,
 )
 

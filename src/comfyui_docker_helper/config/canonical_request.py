@@ -48,6 +48,9 @@ from comfyui_docker_helper.config.git_credentials import (
     canonicalize_git_credential_context,
 )
 from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
+from comfyui_docker_helper.config.requirement_validation import (
+    direct_selector_is_exact,
+)
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
@@ -446,16 +449,16 @@ def build_canonical_request_graph(
     files = tuple(
         FileRequest(
             url=item.url,
-            target=str(PurePosixPath(comfyui_path) / item.dir / item.filename),
+            target=str(PurePosixPath(comfyui_path) / normalized.relative_target),
             overwrite=item.overwrite,
             checksum=item.checksum,
             downloader=item.downloader or downloader.default,
             download_mode=item.download_mode or downloader.default_download_mode,
         )
-        for item in config.files
+        for item, normalized in zip(config.files, domains.files, strict=True)
     )
     return CanonicalRequestGraph(
-        image_config_digest=_image_config_digest(config),
+        image_config_digest=_image_config_digest(config, domains),
         target_platform=platform,
         backend=backend,
         release=release,
@@ -465,7 +468,10 @@ def build_canonical_request_graph(
         application=ApplicationRequest(
             workspace=workspace,
             comfyui_path=comfyui_path,
-            os_packages=(*DEFAULT_OS_PACKAGES, *config.system.extra_packages),
+            os_packages=(
+                *DEFAULT_OS_PACKAGES,
+                *(item.value for item in domains.apt_packages),
+            ),
             python_index_url=config.python.index_url,
             install_manager=config.comfyui.install_manager,
         ),
@@ -486,7 +492,7 @@ def build_canonical_request_graph(
                 config.system.ssh.enable,
                 config.system.ssh.port,
                 config.system.ssh.password,
-                tuple(config.system.ssh.pub_keys),
+                domains.ssh_public_keys,
             ),
             shutdown_timeout=config.cdh.shutdown_timeout,
             launch_command=(
@@ -567,7 +573,7 @@ def request_stability(request: ResolverRequestIdentity) -> SelectorStability:
         )
     return (
         SelectorStability.EXACT
-        if all(member.selector.startswith("==") for member in request.members)
+        if all(direct_selector_is_exact(member.selector) for member in request.members)
         else SelectorStability.MOVING
     )
 
@@ -595,10 +601,13 @@ def _members(
     )
 
 
-def _image_config_digest(config: FinalConfig) -> str:
+def _image_config_digest(
+    config: FinalConfig,
+    domains: FinalConfigDomainResult,
+) -> str:
     canonical = (
         json.dumps(
-            _image_config_projection(config),
+            _image_config_projection(config, domains),
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -608,12 +617,43 @@ def _image_config_digest(config: FinalConfig) -> str:
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
 
-def _image_config_projection(config: FinalConfig) -> dict[str, object]:
+def _image_config_projection(
+    config: FinalConfig,
+    domains: FinalConfigDomainResult,
+) -> dict[str, object]:
     document: dict[str, object] = config.model_dump(mode="json")
     document.pop("secrets")
     build = cast(dict[str, object], document["build"])
     cdh = cast(dict[str, object], document["cdh"])
     git = cast(dict[str, object], cdh["git"])
+    system = cast(dict[str, object], document["system"])
+    python = cast(dict[str, object], document["python"])
+    pytorch = cast(dict[str, object], document["pytorch"])
+    document["files"] = [
+        {
+            **item.model_dump(mode="json"),
+            "dir": normalized.directory.as_posix(),
+        }
+        for item, normalized in zip(config.files, domains.files, strict=True)
+    ]
+    system["extra_packages"] = [item.value for item in domains.apt_packages]
+    ssh = cast(dict[str, object], system["ssh"])
+    ssh["pub_keys"] = list(domains.ssh_public_keys)
+    python["extra_packages"] = [
+        item.canonical_value
+        for item in domains.package_requirements
+        if item.path[:2] == ("python", "extra_packages")
+    ]
+    python["uv_tools"] = [
+        item.canonical_value
+        for item in domains.package_requirements
+        if item.path[:2] == ("python", "uv_tools")
+    ]
+    pytorch["extra_packages"] = [
+        item.canonical_value
+        for item in domains.package_requirements
+        if item.path[:2] == ("pytorch", "extra_packages")
+    ]
     git["credentials"] = [
         {
             "match": canonicalize_git_credential_context(route.match),

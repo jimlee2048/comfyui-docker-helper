@@ -146,6 +146,7 @@ class RuntimeGenerationFactory:
                     error.diagnostics,
                 )
             ) from error
+        render_runtime_diagnostics("Runtime hook warnings:", hook_plan.warnings)
 
         return RuntimeGeneration(
             config=result.config,

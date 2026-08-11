@@ -24,13 +24,25 @@ Use `cdh host validate --help` for the current command options.
 
 ## Layer configuration
 
-Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recursively; a later scalar or ordinary array replaces the earlier value. Three collections merge by stable identity:
+Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recursively; a later scalar or ordinary array replaces the earlier value. The following composed collections instead merge by a field-specific identity:
 
-- `comfyui.custom_nodes` uses the Registry ID or direct-Git URL; and
-- `files` uses `dir` plus `filename`; and
-- `cdh.git.credentials` uses the exact authored `match` string.
+- `system.extra_packages` uses the admitted Debian package name;
+- `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, and canonical selector representation;
+- `comfyui.custom_nodes` uses a lowercase-only Registry resource ID or the exact direct-Git URL;
+- `files` uses the normalized `dir` plus `filename` target; and
+- `cdh.git.credentials` uses the canonical credential context represented by `match`.
 
-A repeated credential `match` atomically replaces the complete earlier route at its original position; route fields never merge individually. A later `credentials = []`, `custom_nodes = []`, or `files = []` resets that collection. Each `[secrets.<name>]` table is also an atomic source definition, so a later layer can replace `env` with `file` without retaining the old field. Canonically equivalent credential contexts written with different raw strings remain distinct merge keys and then fail duplicate validation. Strict structure, uniqueness, and cross-field rules are checked after all layers have produced the effective configuration.
+For package collections, a new identity appends in first-occurrence order. An exact Debian package repeated across uniquely keyed layers is kept once. If an effective `system.extra_packages` item is already in cdh's default OS package set, cdh warns at its source and omits the redundant item from the effective installation request. Duplicates authored together in one user-owned list remain errors. A Python requirement is deduplicated across layers only when the complete canonical requirement is equal; cdh does not infer general range equivalence. Requirements for the same normalized distribution that differ in extras or selectors remain visible so effective validation can report the conflict. Duplicates authored in one layer likewise remain visible for validation. A later empty list resets the corresponding collection.
+
+`system.ssh.pub_keys` remains an ordinary whole-list replacement across TOML layers: omission inherits, a later non-empty list replaces, and `[]` clears it. After the winning list is selected, cdh trims each line, drops empty values, and stably deduplicates by declared key type plus base64 key blob. It retains the first normalized complete line, including its optional comment. Each later non-empty duplicate produces a source-aware warning that does not print key material.
+
+Copy public-key values from the ordinary public-key line in `.pub` output produced by standard OpenSSH tools. Do not include an `authorized_keys` options prefix. Authenticator-hosted Ed25519 and ECDSA P-256 keys (`sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`) are supported. OpenSSH certificates and options such as `restrict`, `from=`, and `command=` are not accepted configuration syntax.
+
+Registry ID case variants identify the same resource and overlay at the original position, with the later authored spelling becoming effective. Punctuation variants remain different Registry resources. If such resources map to the same normalized installed Python distribution identity, effective validation reports that collision instead of choosing one.
+
+Canonically equivalent credential contexts identify the same route even when their raw `match` strings differ. A later route atomically replaces the complete earlier route at its original position; route fields never merge individually. Ambiguous duplicates authored in one layer remain invalid. A later `credentials = []`, `custom_nodes = []`, or `files = []` resets that collection. Each `[secrets.<name>]` table is also an atomic source definition, so a later layer can replace `env` with `file` without retaining the old field. Strict structure, uniqueness, and cross-field rules are checked after all layers have produced the effective configuration.
+
+For `[[files]]`, cdh treats redundant `/`, `.` path segments, and a trailing `/` as alternate spellings of the same directory. For example, `models//checkpoints/` is canonicalized to `models/checkpoints`. Use `dir = "."` or `dir = "./"` to place a file directly in the ComfyUI root. Empty and absolute directories, control characters, and every authored `..` segment remain invalid.
 
 For example, save this as `local.toml` to disable comfy-cli and remove the nodes and files selected by the full example:
 
@@ -65,6 +77,8 @@ Manager and comfy-cli are independently controlled optional capabilities. Both a
 
 Entries in `python.uv_tools` request additional isolated command-line tools. They do not install packages into the ComfyUI application environment. See the [build and lock guide](build-and-lock.md) for package-source, resolution, and tool-environment behavior.
 
+Direct requirements in `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` may be a bare distribution name or use `==`, `!=`, `<`, `<=`, `>`, `>=`, and `~=` selectors, including one-sided and compatible-release constraints. Direct URLs, VCS, local or editable requirements, environment markers, wildcard selectors, arbitrary equality `===`, and prerelease, development, or local-version operands are rejected. A requirement may contain at most one exact `==` selector, and that exact version must satisfy every other selector in the requirement. cdh canonicalizes supported syntax but does not solve or infer general range algebra.
+
 ## Choose custom nodes and build hooks
 
 Custom nodes may use either a Registry identity or a direct-Git URL. Registry nodes require Manager; direct-Git nodes do not. Mixed declarations retain their effective configuration order. Set `custom_nodes = []` in a later layer to remove inherited nodes.
@@ -92,7 +106,7 @@ password = { secret = "github_pat" }
 
 Secret names and references must match `[a-z][a-z0-9_-]{0,63}`. An `env` locator must be a valid environment-variable name. `password` is always a structured whole-value Secret reference; it does not accept an inline token or a string interpolation.
 
-Environment and file sources are resolved lazily within the command that needs them. Syntax-only validation never reads them, and a matching accepted lock can avoid a provider-time read. Relative file locators use the real parent of the first `-f` file as their common base; absolute and normalized parent-traversal paths are allowed. Secret files must be regular files rather than symlinks, values are limited to 65,525 bytes, and cdh warns about group or world permission bits. Git passwords must also be non-empty and contain no NUL, carriage return, or newline; create token files without a trailing newline.
+Environment and file sources are resolved lazily within the command that needs them. Syntax-only validation never reads them, and a matching accepted lock can avoid a provider-time read. Relative file locators use the real parent of the first `-f` file as their common base; absolute and normalized parent-traversal paths are allowed. Secret files must be regular files rather than symlinks, and values are limited to 65,525 bytes. On POSIX, cdh warns about group or world permission bits. On Windows, restrict the source file's ACL yourself; cdh does not implement a general Windows access audit. Git passwords must also be non-empty and contain no NUL, carriage return, or newline; create token files without a trailing newline.
 
 Credential routes are generic HTTP(S) username/password contexts, not provider-specific objects. A GitHub or GitLab personal access token goes in the referenced `password`. The username must be non-empty; `x-access-token` is a convenient GitHub placeholder and `oauth2` is a GitLab-supported placeholder when you do not want to record a personal username. Other credential types may require a provider-prescribed username. Prefer read-only, repository-limited, expiring tokens.
 

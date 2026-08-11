@@ -21,6 +21,14 @@ uv run cdh host validate -f examples/minimal.toml
 
 When using Python language features, keep them within the `requires-python` range declared in the project configuration.
 
+## Platform compatibility
+
+The package's root CLI, configuration, shared services, rendering, and `cdh host *` workflows support the declared Python minors on native Windows and Linux hosts. `cdh container *` executes only inside the project's Linux image, although its command group must remain importable and its help must remain usable on other hosts. Windows host support means a Windows operator can drive a Linux-container Docker endpoint; it does not add a Windows-container execution contract.
+
+Keep Linux-only container implementations outside the host import closure. Put platform-specific imports behind the narrow owner that needs them, and preserve equivalent behavior rather than assuming that POSIX descriptors, modes, signals, shell paths, or environment conventions exist on Windows. Host source reads follow the cooperative-input contract, while private state and container write/execute boundaries retain separate stronger ownership rules; read the [cross-module contracts](contracts.md#host-local-filesystem-boundaries) before changing either boundary.
+
+Filesystem, Git, Docker, and process behavior that branches by operating system needs focused native-platform coverage. Do not infer Windows behavior from a mocked POSIX test or infer Docker Desktop end-to-end support from adapter tests. The [testing handbook](../../tests/README.md#platform-coverage) owns platform test placement and the uniform supported-minor Windows host matrix.
+
 ### Optional workflow diagnostics
 
 uv remains the sole authority for Python installation, environments, dependency management, and package execution. Maintainers changing GitHub workflow files may optionally install the lightweight workflow diagnostics declared in the root `mise.toml`:
@@ -43,7 +51,7 @@ The project uses a `src` layout:
 - `src/comfyui_docker_helper/rendering/` materializes Docker build contexts.
 - `src/comfyui_docker_helper/container/` owns build-container and runtime helpers.
 - `src/comfyui_docker_helper/resources/` contains package-owned implementation inputs.
-- `tests/` contains unit, integration, smoke, acceptance support, and fixtures.
+- `tests/` contains unit and integration tests subdivided by host, Linux-container, distribution, and test-support ownership, plus smoke tests, shared support, and fixtures.
 - `tools/ci/` contains directly runnable, read-only package-build validators.
 - `examples/` contains the minimal and comprehensive public configurations.
 - `docs/user/` and `docs/dev/` contain user and developer documentation.
@@ -67,6 +75,14 @@ Run focused tests while developing, then the complete offline suite:
 uv run pytest tests/unit
 uv run pytest
 ```
+
+Run platform-specific tests on the platform whose native behavior they claim. Every supported Windows Python minor runs the same host/shared selection:
+
+```bash
+uv run pytest tests/unit/host tests/integration/host
+```
+
+The exact required matrix lives in [the CI workflow](../../.github/workflows/ci.yml). Linux remains authoritative for the complete default-offline suite, Linux-image container helpers, and canonical distribution qualification; do not collect those owners on Windows merely to skip them.
 
 Validate affected examples and CLI paths directly. At minimum, configuration changes should keep the minimal example valid:
 
@@ -97,10 +113,21 @@ The required validation depth depends on the changed risk. Do not treat a high-c
 - Use strict, precisely typed Pydantic models at structured configuration, validation, and serialization boundaries. Prefer precise field types, `Literal`, and discriminated or explicit unions over broad `dict`, `object`, or `Any`.
 - Use explicit typed fields for parent control flow instead of probing child objects with arbitrary `getattr(..., default)` calls.
 - Pass only the narrow data a module owns; avoid broad context objects unless the callee owns that responsibility.
-- Keep CLI errors, warnings, and information short, user-readable, and actionable; remove noisy or misleading messages instead of adding logging.
 - Remove dead fallbacks, migration paths, unused options, debug prints, and unreachable code when a newer authority replaces them.
 
 Comments should explain intent or a non-obvious constraint, not restate the code. Tests should protect the current behavior contract; follow the [testing handbook](../../tests/README.md) when placing or removing coverage.
+
+### CLI presentation
+
+`cdh host validate`, `cdh host render`, and `cdh host build` share a host-owned operator presenter. Determine interactivity independently for the actual stdout and stderr destinations. Stdout carries successful command results, explicit plan output, and cdh-owned framing around a build; stderr carries warnings and expected failures. Ordinary successful validate and render commands remain silent when their result stream is non-interactive unless the command explicitly owns output, with the exit status remaining authoritative.
+
+An interactive destination may use Rich styling and terminal-aware layout. cdh-owned output to a non-interactive destination must be plain and free of ANSI controls. `NO_COLOR` disables cdh-owned color without changing semantic content or stream ownership. Exact colors, glyphs, wrapping, and complete wording are presentation details rather than durable contracts.
+
+Keep human diagnostics concise, actionable, and appropriate to the command that failed. Stable diagnostic codes remain structured internal data and are omitted from default human output. Render untrusted paths, labels, fields, messages, hints, and producer-approved values as literal, control-safe text. Do not recover display data from raw configuration or arbitrary exception chains, and never expose resolved Secret values, Secret source locators, or other unapproved sensitive content.
+
+Typer owns help, usage, option parsing, and parameter-error presentation. When a host command explicitly exposes an operator-facing live external stream, that stream remains unparsed, unstyled, and unprefixed on its established channel; the current example is BuildKit's unified stdout. cdh may frame such a stream but does not rewrite it, so cdh's ANSI-free and `NO_COLOR` guarantees do not extend to controls emitted by the external process itself. Captured provider or protocol output remains owned by its adapter and may be bounded, parsed, and converted into controlled diagnostics instead of being forwarded. Image-internal `cdh container` commands retain their simple plain execution and logging protocols rather than using the host operator presenter; output from their child processes remains owned by the corresponding execution path.
+
+Test these rules through semantic content, stream ownership, terminal capability, and safety boundaries. Avoid snapshots or assertions that freeze exact decoration, spacing, line wrapping, colors, glyphs, or complete messages.
 
 ## Documentation
 

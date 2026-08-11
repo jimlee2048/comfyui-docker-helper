@@ -4,7 +4,7 @@ import os
 import shlex
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
@@ -13,14 +13,28 @@ from pydantic import Field, ValidationError, field_validator
 
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
+    DiagnosticComparison,
+    DiagnosticComparisonSite,
     DiagnosticPath,
     DiagnosticSeverity,
+    DiagnosticSourceContext,
+    SourceLocation,
+    SourceReference,
 )
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
-from comfyui_docker_helper.config.merge import merge_toml_documents
+from comfyui_docker_helper.config.merge import (
+    KeyedItemMerge,
+    KeyedSequencePolicy,
+    MergePolicyRegistry,
+    OriginNode,
+    PolicyRule,
+    SourceDocument,
+    merge_toml_documents,
+)
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime_file_validation import (
     normalize_runtime_file_path,
+    runtime_file_target_identity,
     validate_runtime_file_url,
 )
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
@@ -34,6 +48,17 @@ from comfyui_docker_helper.config.value_validation import is_argv_value
 
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
+_RUNTIME_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
+    (
+        PolicyRule(
+            ("files",),
+            KeyedSequencePolicy(
+                runtime_file_target_identity,
+                KeyedItemMerge.RECURSIVE,
+            ),
+        ),
+    )
+)
 
 type RuntimeConfigPath = str | Path
 type RuntimePath = tuple[str, ...]
@@ -145,8 +170,9 @@ def load_runtime_config(
 ) -> RuntimeConfigurationResult:
     """Load and merge code defaults, baked runtime config, and mounted config."""
     warnings: list[Diagnostic] = []
-    documents: list[dict[str, Any]] = [_runtime_defaults_document()]
-    file_documents: list[dict[str, Any]] = []
+    documents: list[SourceDocument] = [
+        SourceDocument(SourceReference(0, "defaults"), _runtime_defaults_document())
+    ]
 
     for config_path in (
         Path(baked_config_path),
@@ -155,33 +181,45 @@ def load_runtime_config(
         if not config_path.exists():
             continue
 
-        raw_document = _read_runtime_toml(config_path)
-        document, document_warnings = _prepare_runtime_document(raw_document)
+        source = SourceReference(len(documents), str(config_path))
+        raw_document = _read_runtime_toml(config_path, source)
+        document, document_warnings = _prepare_runtime_document(
+            raw_document,
+            source,
+        )
         warnings.extend(document_warnings)
-        _validate_runtime_patch(document)
-        documents.append(_runtime_config_document(document))
-        if "files" in document:
-            file_documents.append({"files": document["files"]})
+        documents.append(SourceDocument(source, document))
 
-    env_document, env_pub_key = _runtime_env_document(
-        os.environ if environ is None else environ
-    )
+    environment_source = SourceReference(len(documents), "environment")
+    try:
+        env_document, env_pub_key = _runtime_env_document(
+            os.environ if environ is None else environ
+        )
+    except RuntimeConfigurationError as error:
+        raise RuntimeConfigurationError(
+            _attach_explicit_source(error.diagnostics, environment_source)
+        ) from error
     if env_document:
-        _validate_runtime_patch(env_document)
-        documents.append(env_document)
+        documents.append(SourceDocument(environment_source, env_document))
 
-    files = _merge_runtime_file_items(file_documents)
-    merged = merge_toml_documents(documents)
-    _normalize_merged_ssh_public_keys(merged)
+    merged = merge_toml_documents(
+        documents,
+        policies=_RUNTIME_CONFIG_MERGE_POLICIES,
+    )
+    effective = _validate_effective_runtime_document(merged.document, merged.origins)
+    config = _runtime_config_from_effective(effective)
+    _validate_runtime_ssh(config, merged.origins)
     if env_pub_key is not None:
-        ssh = merged.setdefault("system", {}).setdefault("ssh", {})
-        pub_keys = ssh.setdefault("pub_keys", [])
-        if env_pub_key not in pub_keys:
-            pub_keys.append(env_pub_key)
-    config = _validate_effective_runtime_config(merged)
-    _validate_runtime_ssh(config)
-    _validate_runtime_downloader(config)
-    _validate_runtime_extra_args(config)
+        config.system.ssh.pub_keys.append(env_pub_key)
+        env_normalization = normalize_ssh_public_keys(
+            config.system.ssh.pub_keys,
+            path=("system", "ssh", "pub_keys"),
+            code="ssh.invalid_public_key",
+        )
+        config.system.ssh.pub_keys[:] = list(env_normalization.values)
+    _validate_runtime_downloader(config, merged.origins)
+    _validate_runtime_extra_args(config, merged.origins)
+    files = _validate_effective_runtime_files(effective.files, merged.origins)
     return RuntimeConfigurationResult(
         config=config,
         files=files,
@@ -191,10 +229,6 @@ def load_runtime_config(
 
 def _runtime_defaults_document() -> dict[str, Any]:
     return RuntimeConfig().model_dump(mode="json")
-
-
-def _runtime_config_document(document: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in document.items() if key != "files"}
 
 
 def _runtime_env_document(
@@ -395,7 +429,10 @@ def _parse_env_extra_args(value: str) -> list[str]:
         ) from error
 
 
-def _read_runtime_toml(config_path: Path) -> dict[str, Any]:
+def _read_runtime_toml(
+    config_path: Path,
+    source: SourceReference,
+) -> dict[str, Any]:
     try:
         with config_path.open("rb") as config_file:
             return tomllib.load(config_file)
@@ -406,6 +443,7 @@ def _read_runtime_toml(config_path: Path) -> dict[str, Any]:
                     path=(),
                     code="toml.invalid_document",
                     message=str(error),
+                    source_context=SourceLocation(source, ()),
                 ),
             )
         ) from error
@@ -416,6 +454,7 @@ def _read_runtime_toml(config_path: Path) -> dict[str, Any]:
                     path=(),
                     code="toml.invalid_encoding",
                     message="runtime configuration file must be valid UTF-8",
+                    source_context=SourceLocation(source, ()),
                 ),
             )
         ) from error
@@ -429,25 +468,33 @@ def _read_runtime_toml(config_path: Path) -> dict[str, Any]:
             code = "runtime_config.permission_denied"
             message = "runtime configuration file cannot be read: permission denied"
         raise RuntimeConfigurationError(
-            (Diagnostic(path=(), code=code, message=message),)
+            (
+                Diagnostic(
+                    path=(),
+                    code=code,
+                    message=message,
+                    source_context=SourceLocation(source, ()),
+                ),
+            )
         ) from error
 
 
 def _prepare_runtime_document(
     document: Mapping[str, Any],
+    source: SourceReference,
 ) -> tuple[dict[str, Any], tuple[Diagnostic, ...]]:
     diagnostics: list[Diagnostic] = []
     prepared: dict[str, Any] = {}
 
     for key, value in document.items():
         if key in _HOST_ONLY_ROOT_SECTIONS:
-            diagnostics.append(_host_only_warning((key,)))
+            diagnostics.append(_host_only_warning((key,), source))
             continue
         if key == "system" and isinstance(value, Mapping):
-            prepared[key] = _prepare_system_document(value, diagnostics)
+            prepared[key] = _prepare_system_document(value, diagnostics, source)
             continue
         if key == "comfyui" and isinstance(value, Mapping):
-            prepared[key] = _prepare_comfyui_document(value, diagnostics)
+            prepared[key] = _prepare_comfyui_document(value, diagnostics, source)
             continue
         prepared[key] = value
 
@@ -457,11 +504,12 @@ def _prepare_runtime_document(
 def _prepare_system_document(
     document: Mapping[str, Any],
     diagnostics: list[Diagnostic],
+    source: SourceReference,
 ) -> dict[str, Any]:
     prepared: dict[str, Any] = {}
     for key, value in document.items():
         if key in _HOST_ONLY_SYSTEM_FIELDS:
-            diagnostics.append(_host_only_warning(("system", key)))
+            diagnostics.append(_host_only_warning(("system", key), source))
             continue
         prepared[key] = value
     return prepared
@@ -470,131 +518,121 @@ def _prepare_system_document(
 def _prepare_comfyui_document(
     document: Mapping[str, Any],
     diagnostics: list[Diagnostic],
+    source: SourceReference,
 ) -> dict[str, Any]:
     prepared: dict[str, Any] = {}
     for key, value in document.items():
         if key in _HOST_ONLY_COMFYUI_FIELDS:
-            diagnostics.append(_host_only_warning(("comfyui", key)))
+            diagnostics.append(_host_only_warning(("comfyui", key), source))
             continue
         prepared[key] = value
     return prepared
 
 
-def _host_only_warning(path: RuntimePath) -> Diagnostic:
+def _host_only_warning(path: RuntimePath, source: SourceReference) -> Diagnostic:
     return Diagnostic(
         path=path,
         code="runtime.host_only_ignored",
         message="host-only configuration is ignored by the container runtime",
         severity=DiagnosticSeverity.WARNING,
+        source_context=SourceLocation(source, path),
     )
 
 
-def _validate_runtime_patch(document: Mapping[str, Any]) -> None:
+def _validate_effective_runtime_document(
+    document: Mapping[str, Any],
+    origins: OriginNode,
+) -> _RuntimeConfigPatch:
     try:
-        _RuntimeConfigPatch.model_validate(document)
+        return _RuntimeConfigPatch.model_validate(document)
+    except ValidationError as error:
+        diagnostics = _enrich_runtime_diagnostics(
+            _diagnostics_from_validation_error(error),
+            origins,
+        )
+        raise RuntimeConfigurationError(diagnostics) from error
+
+
+def _runtime_config_from_effective(document: _RuntimeConfigPatch) -> RuntimeConfig:
+    try:
+        return RuntimeConfig.model_validate(
+            document.model_dump(
+                mode="json",
+                exclude={"files"},
+                exclude_none=True,
+            )
+        )
     except ValidationError as error:
         diagnostics = _diagnostics_from_validation_error(error)
         raise RuntimeConfigurationError(diagnostics) from error
 
 
-def _validate_effective_runtime_config(document: Mapping[str, Any]) -> RuntimeConfig:
-    try:
-        return RuntimeConfig.model_validate(document)
-    except ValidationError as error:
-        diagnostics = _diagnostics_from_validation_error(error)
-        raise RuntimeConfigurationError(diagnostics) from error
-
-
-def _normalize_merged_ssh_public_keys(document: dict[str, Any]) -> None:
-    system = document.get("system")
-    if not isinstance(system, dict):
-        return
-    ssh = system.get("ssh")
-    if not isinstance(ssh, dict) or "pub_keys" not in ssh:
-        return
-    pub_keys = ssh["pub_keys"]
-    if not isinstance(pub_keys, list) or not all(
-        isinstance(item, str) for item in pub_keys
-    ):
-        return
-    normalized, diagnostics = normalize_ssh_public_keys(
-        pub_keys,
-        path=("system", "ssh", "pub_keys"),
-        code="ssh.invalid_public_key",
-    )
-    if diagnostics:
-        raise RuntimeConfigurationError(diagnostics)
-    ssh["pub_keys"] = list(normalized)
-
-
-def _validate_runtime_ssh(config: RuntimeConfig) -> None:
-    normalized, diagnostics = normalize_ssh_public_keys(
+def _validate_runtime_ssh(config: RuntimeConfig, origins: OriginNode) -> None:
+    normalization = normalize_ssh_public_keys(
         config.system.ssh.pub_keys,
         path=("system", "ssh", "pub_keys"),
         code="ssh.invalid_public_key",
     )
-    if diagnostics:
-        raise RuntimeConfigurationError(diagnostics)
-    config.system.ssh.pub_keys[:] = list(normalized)
+    if normalization.diagnostics:
+        raise RuntimeConfigurationError(
+            _enrich_runtime_diagnostics(normalization.diagnostics, origins)
+        )
+    config.system.ssh.pub_keys[:] = list(normalization.values)
 
 
-def _merge_runtime_file_items(
-    documents: list[dict[str, Any]],
+def _validate_effective_runtime_files(
+    items: list[_RuntimeFilePatch] | None,
+    origins: OriginNode,
 ) -> tuple[dict[str, Any], ...]:
-    merged: list[dict[str, Any]] = []
-    indexes: dict[str, int] = {}
     diagnostics: list[Diagnostic] = []
-
-    for document in documents:
-        try:
-            parsed = _RuntimeConfigPatch.model_validate(document)
-        except ValidationError as error:
-            diagnostics.extend(_diagnostics_from_validation_error(error))
-            continue
-
-        if parsed.files is None:
-            continue
-        if not parsed.files:
-            merged.clear()
-            indexes.clear()
-            continue
-
-        for source_index, item in enumerate(parsed.files):
-            path: RuntimeFilePath = ("files", source_index)
-            item_document = item.model_dump(mode="json", exclude_none=True)
-            has_valid_url = validate_runtime_file_url(
-                item.url,
-                (*path, "url"),
-                diagnostics,
+    documents: list[dict[str, Any]] = []
+    established: dict[str, RuntimeFilePath] = {}
+    for index, item in enumerate(items or ()):
+        path: RuntimeFilePath = ("files", index)
+        if item.url is None:
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "url"),
+                    "schema.missing",
+                    "Field required",
+                )
             )
-            key = _runtime_file_merge_key(item, path, diagnostics)
-            if key is None or not has_valid_url:
-                continue
-            if key in indexes:
-                merged[indexes[key]] = {**merged[indexes[key]], **item_document}
+        else:
+            validate_runtime_file_url(item.url, (*path, "url"), diagnostics)
+        normalized = normalize_runtime_file_path(
+            item.dir,
+            item.filename,
+            path,
+            diagnostics,
+        )
+        if normalized is not None:
+            target = normalized[1]
+            earlier_path = established.get(target)
+            if earlier_path is None:
+                established[target] = path
             else:
-                indexes[key] = len(merged)
-                merged.append(item_document)
+                diagnostics.append(
+                    Diagnostic(
+                        (*path, "filename"),
+                        "runtime_file.duplicate_target",
+                        "runtime file targets must be unique",
+                        source_context=_runtime_comparison(
+                            (*earlier_path, "filename"),
+                            (*path, "filename"),
+                            origins,
+                        ),
+                    )
+                )
+        document = item.model_dump(mode="json", exclude_none=True)
+        if normalized is not None:
+            document["dir"] = normalized[0].as_posix()
+        documents.append(document)
 
     if diagnostics:
-        raise RuntimeConfigurationError(tuple(diagnostics))
-    return tuple(merged)
-
-
-def _runtime_file_merge_key(
-    item: _RuntimeFilePatch,
-    path: RuntimeFilePath,
-    diagnostics: list[Diagnostic],
-) -> str | None:
-    normalized = normalize_runtime_file_path(
-        item.dir,
-        item.filename,
-        path,
-        diagnostics,
-    )
-    if normalized is None:
-        return None
-    return normalized[1]
+        raise RuntimeConfigurationError(
+            _enrich_runtime_diagnostics(tuple(diagnostics), origins)
+        )
+    return tuple(documents)
 
 
 def _diagnostics_from_validation_error(
@@ -610,7 +648,60 @@ def _diagnostics_from_validation_error(
     )
 
 
-def _validate_runtime_downloader(config: RuntimeConfig) -> None:
+def _attach_explicit_source(
+    diagnostics: tuple[Diagnostic, ...],
+    source: SourceReference,
+) -> tuple[Diagnostic, ...]:
+    return tuple(
+        diagnostic
+        if diagnostic.source_context is not None
+        else replace(
+            diagnostic,
+            source_context=SourceLocation(source, diagnostic.path),
+        )
+        for diagnostic in diagnostics
+    )
+
+
+def _enrich_runtime_diagnostics(
+    diagnostics: tuple[Diagnostic, ...],
+    origins: OriginNode,
+) -> tuple[Diagnostic, ...]:
+    enriched: list[Diagnostic] = []
+    for diagnostic in diagnostics:
+        if diagnostic.source_context is not None:
+            enriched.append(diagnostic)
+            continue
+        location = origins.exact_location(diagnostic.path)
+        if location is None and diagnostic.code == "schema.missing":
+            location = origins.missing_field_location(diagnostic.path)
+        enriched.append(
+            diagnostic
+            if location is None
+            else replace(diagnostic, source_context=location)
+        )
+    return tuple(enriched)
+
+
+def _runtime_comparison(
+    earlier_path: RuntimeFilePath,
+    later_path: RuntimeFilePath,
+    origins: OriginNode,
+) -> DiagnosticSourceContext | None:
+    earlier = origins.exact_location(earlier_path)
+    later = origins.exact_location(later_path)
+    if earlier is None or later is None:
+        return later or earlier
+    return DiagnosticComparison(
+        earlier=DiagnosticComparisonSite(earlier),
+        later=DiagnosticComparisonSite(later),
+    )
+
+
+def _validate_runtime_downloader(
+    config: RuntimeConfig,
+    origins: OriginNode,
+) -> None:
     diagnostics: list[Diagnostic] = []
     aria2 = config.cdh.downloader.aria2
     httpx = config.cdh.downloader.httpx
@@ -649,10 +740,15 @@ def _validate_runtime_downloader(config: RuntimeConfig) -> None:
         )
 
     if diagnostics:
-        raise RuntimeConfigurationError(tuple(diagnostics))
+        raise RuntimeConfigurationError(
+            _enrich_runtime_diagnostics(tuple(diagnostics), origins)
+        )
 
 
-def _validate_runtime_extra_args(config: RuntimeConfig) -> None:
+def _validate_runtime_extra_args(
+    config: RuntimeConfig,
+    origins: OriginNode,
+) -> None:
     diagnostics: list[Diagnostic] = []
     if not is_argv_value(config.comfyui.listen):
         diagnostics.append(
@@ -686,7 +782,9 @@ def _validate_runtime_extra_args(config: RuntimeConfig) -> None:
                 )
             )
     if diagnostics:
-        raise RuntimeConfigurationError(tuple(diagnostics))
+        raise RuntimeConfigurationError(
+            _enrich_runtime_diagnostics(tuple(diagnostics), origins)
+        )
 
 
 def _normalize_pydantic_location(location: tuple[Any, ...]) -> DiagnosticPath:

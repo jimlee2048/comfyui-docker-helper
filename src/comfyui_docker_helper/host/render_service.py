@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import stat
-import tempfile
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -44,6 +43,11 @@ from comfyui_docker_helper.config.service import (
     ConfigurationResult,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
+from comfyui_docker_helper.host.hook_paths import (
+    lexical_hook_source_root,
+    observed_path_is_real_directory,
+    observed_path_is_reparse,
+)
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
     build_local_executable_requests,
@@ -52,6 +56,7 @@ from comfyui_docker_helper.host.planning_authority import (
     stable_comfyui_requirements_entry,
     uv_catalog_descriptor_digest,
 )
+from comfyui_docker_helper.host.private_state import create_private_directory
 from comfyui_docker_helper.host.runtime_hook_inputs import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
@@ -66,6 +71,10 @@ from comfyui_docker_helper.rendering.final_materializer import (
 _LOCK_FILE = "config.lock.toml"
 _MARKER_FILE = ".cdh-rendered"
 _MARKER = {"tool": "comfyui-docker-helper", "kind": "build-context", "version": 1}
+_STAGE_PREFIX = "cdh-render-stage-"
+_BACKUP_PREFIX = "cdh-render-backup-"
+_CHECK_PREFIX = "cdh-render-check-"
+_platform_name = os.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +122,7 @@ class PreparedContext:
     plan: BuildPlan
     lock_result: AcceptedCanonicalLock
     output_plan: BuildxOutputPlan | None = None
+    warnings: tuple[Diagnostic, ...] = ()
 
 
 class HostRenderServiceError(ValueError):
@@ -224,6 +234,7 @@ def prepare_render_context(
         plan=plan,
         lock_result=accepted,
         output_plan=output_plan,
+        warnings=runtime_hooks.warnings,
     )
 
 
@@ -288,26 +299,23 @@ def _write_context(
 ) -> None:
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise _render_error("render.context_write_failed", str(error)) from error
     if output.exists() or output.is_symlink():
         if not overwrite:
             raise _render_error(
                 "render.output_exists", "output exists; use --overwrite"
             )
-        if output.is_symlink() or not output.is_dir() or not _valid_marker(output):
+        if not _is_real_directory(output) or not _valid_marker(output):
             raise _render_error(
                 "render.output_invalid", "existing output is not a cdh context"
             )
     try:
-        stage = Path(
-            tempfile.mkdtemp(prefix=f".{output.name}.stage-", dir=output.parent)
-        )
+        stage = _create_private_render_directory(output.parent, prefix=_STAGE_PREFIX)
     except OSError as error:
         raise _render_error("render.context_write_failed", str(error)) from error
     backup_root: Path | None = None
     try:
-        stage.chmod(0o700)
         _materialize_private_stage(
             plan,
             stage,
@@ -323,8 +331,8 @@ def _write_context(
             (json.dumps(_MARKER, sort_keys=True) + "\n").encode("utf-8"),
         )
         if output.exists():
-            backup_root = Path(
-                tempfile.mkdtemp(prefix=f".{output.name}.backup-", dir=output.parent)
+            backup_root = _create_private_render_directory(
+                output.parent, prefix=_BACKUP_PREFIX
             )
             previous = backup_root / "previous"
             output.rename(previous)
@@ -367,16 +375,13 @@ def _check_context(
     canonical_wheel: CanonicalWheel,
     sources: tuple[LocalMaterializationSource, ...],
 ) -> None:
-    if not output.is_dir() or not _valid_marker(output):
+    if not _is_real_directory(output) or not _valid_marker(output):
         raise _render_error(
             "render.context_missing", "--check requires a rendered context"
         )
     try:
-        with tempfile.TemporaryDirectory(
-            prefix=".cdh-check-", dir=output.parent
-        ) as raw:
-            expected = Path(raw)
-            expected.chmod(0o700)
+        expected = _create_private_render_directory(output.parent, prefix=_CHECK_PREFIX)
+        try:
             _materialize_private_stage(
                 plan,
                 expected,
@@ -395,29 +400,40 @@ def _check_context(
                 raise _render_error(
                     "render.context_changed", "rendered context is out of date"
                 )
+        finally:
+            shutil.rmtree(expected)
     except HostRenderServiceError:
         raise
     except (FinalMaterializationError, OSError) as error:
         raise _render_error("render.context_check_failed", str(error)) from error
 
 
+def _create_private_render_directory(parent: Path, *, prefix: str) -> Path:
+    try:
+        return create_private_directory(prefix=prefix, parent=parent)
+    except ValueError as error:
+        raise OSError(str(error)) from error
+
+
 def _write_private_stage_metadata(stage: Path, name: str, content: bytes) -> None:
     with (stage / name).open("xb") as output:
         output.write(content)
-        os.fchmod(output.fileno(), 0o644)
+        if _platform_name == "posix":
+            os.fchmod(output.fileno(), 0o644)
 
 
-def _tree(root: Path) -> dict[str, tuple[str, int, bytes | None]]:
-    entries: dict[str, tuple[str, int, bytes | None]] = {}
+def _tree(root: Path) -> dict[str, tuple[str, int | None, bytes | None]]:
+    entries: dict[str, tuple[str, int | None, bytes | None]] = {}
     pending = [root]
     while pending:
         directory = pending.pop()
         children = tuple(sorted(directory.iterdir(), key=lambda item: item.name))
         for path in children:
             relative = path.relative_to(root).as_posix()
-            mode = path.lstat().st_mode
-            permissions = stat.S_IMODE(mode)
-            if stat.S_ISLNK(mode):
+            observed = path.lstat()
+            mode = observed.st_mode
+            permissions = stat.S_IMODE(mode) if _platform_name == "posix" else None
+            if observed_path_is_reparse(observed):
                 entries[relative] = ("symlink", permissions, None)
             elif stat.S_ISDIR(mode):
                 entries[relative] = ("directory", permissions, None)
@@ -451,13 +467,31 @@ def _valid_marker(output: Path) -> bool:
         return False
 
 
+def _is_real_directory(path: Path) -> bool:
+    try:
+        observed = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(observed.st_mode) and not observed_path_is_reparse(observed)
+
+
 def _output_path(output: str | Path, working_directory: str | Path | None) -> Path:
     base = Path.cwd() if working_directory is None else Path(working_directory)
     candidate = Path(output)
     if not candidate.is_absolute():
         candidate = base / candidate
-    if candidate.is_symlink():
-        raise _render_error("render.output_symlink", "output must not be a symlink")
+    try:
+        observed = candidate.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        observed = None
+    except OSError as error:
+        raise _render_error(
+            "render.output_inspect_failed", "output could not be inspected"
+        ) from error
+    if observed is not None and observed_path_is_reparse(observed):
+        raise _render_error(
+            "render.output_symlink", "output must not be a link or reparse point"
+        )
     return candidate.absolute()
 
 
@@ -466,6 +500,8 @@ def _validate_input_output_separation(
 ) -> None:
     if source is None:
         return
+    # Resolution here is only an overlap comparison. The lexical source path is
+    # retained for later admission so links are not hidden from that boundary.
     try:
         output_resolved = output.resolve(strict=False)
         source_resolved = source.resolve(strict=True)
@@ -502,16 +538,22 @@ def _build_hook_source_root(
             "hook.build_hooks_dir_required",
             "--build-hooks-dir is required when build hooks are configured",
         )
-    base = Path.cwd() if working_directory is None else Path(working_directory)
-    selected = Path(build_hooks_dir)
-    candidate = selected if selected.is_absolute() else base / selected
     try:
-        return candidate.resolve(strict=True)
-    except OSError as error:
+        root = lexical_hook_source_root(
+            build_hooks_dir, working_directory=working_directory
+        )
+        source_is_real_directory = observed_path_is_real_directory(root)
+    except (OSError, ValueError) as error:
         raise _render_error(
             "render.build_hook_source_unavailable",
-            "build hook source could not be resolved",
+            "build hook source could not be inspected",
         ) from error
+    if not source_is_real_directory:
+        raise _render_error(
+            "render.build_hook_source_unavailable",
+            "build hook source must be an existing real directory",
+        )
+    return root
 
 
 def _runtime_provenance(result: ConfigurationResult) -> RuntimePlanningProvenance:

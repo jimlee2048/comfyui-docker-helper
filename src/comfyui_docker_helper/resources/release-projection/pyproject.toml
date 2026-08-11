@@ -32,6 +32,8 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
@@ -44,11 +46,14 @@ classifiers = [
 dependencies = [
     "aria2p",
     "build>=1,<2",
+    "cryptography>=49",
     "docker>=7.2,<8",
+    "filelock>=3.32.2,<4",
     "httpx",
     "packaging>=26.2",
     "pydantic>=2,<3",
     "python-on-whales>=0.81.0",
+    "pywin32==312; sys_platform == 'win32'",
     "rich",
     "tomli-w",
     "typer",
@@ -64,7 +69,7 @@ Issues = "https://github.com/jimlee2048/comfyui-docker-helper/issues"
 Changelog = "https://github.com/jimlee2048/comfyui-docker-helper/releases"
 
 [build-system]
-requires = ["uv_build==0.12.0"]
+requires = ["uv_build==0.12.3"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

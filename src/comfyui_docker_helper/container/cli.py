@@ -1,30 +1,50 @@
 """Container helper command group."""
 
+from __future__ import annotations
+
 import json
+import sys
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
-from comfyui_docker_helper.container.build_plan_input import (
-    MATERIALIZED_BUILD_PLAN_PATH,
-    BuildPlanInputAdmission,
+from comfyui_docker_helper.errors import ApplicationError
+
+if TYPE_CHECKING:
+    from comfyui_docker_helper.container.build_plan_input import (
+        BuildPlanInputAdmission,
+    )
+
+if sys.platform == "linux":
+    from comfyui_docker_helper.container.build_plan_input import (
+        MATERIALIZED_BUILD_PLAN_PATH,
+        BuildPlanInputAdmission,
+    )
+    from comfyui_docker_helper.container.comfyui_installer import install_comfyui
+    from comfyui_docker_helper.container.custom_node_installer import (
+        install_custom_nodes,
+    )
+    from comfyui_docker_helper.container.download_files import download_files
+    from comfyui_docker_helper.container.final_manifest import emit_final_manifest
+    from comfyui_docker_helper.container.runners import (
+        ContainerCommandError,
+        ContainerRuntime,
+    )
+    from comfyui_docker_helper.container.runtime_control_client import (
+        follow_runtime,
+        read_runtime_status,
+        restart_runtime,
+    )
+    from comfyui_docker_helper.container.runtime_serve import run_runtime_serve
+else:
+    MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
+
+_CONTAINER_PLATFORM_ERROR = (
+    "cdh container commands run only inside the project's Linux image; "
+    "use 'cdh host' on the host machine"
 )
-from comfyui_docker_helper.container.comfyui_installer import install_comfyui
-from comfyui_docker_helper.container.custom_node_installer import install_custom_nodes
-from comfyui_docker_helper.container.download_files import download_files
-from comfyui_docker_helper.container.final_manifest import emit_final_manifest
-from comfyui_docker_helper.container.runners import (
-    ContainerCommandError,
-    ContainerRuntime,
-)
-from comfyui_docker_helper.container.runtime_control_client import (
-    follow_runtime,
-    read_runtime_status,
-    restart_runtime,
-)
-from comfyui_docker_helper.container.runtime_serve import run_runtime_serve
 
 app = typer.Typer(
     name="container",
@@ -45,8 +65,14 @@ app.add_typer(runtime_app)
 
 
 @app.callback()
-def container() -> None:
+def container(ctx: typer.Context) -> None:
     """Run container-side helper commands."""
+    if (
+        sys.platform != "linux"
+        and ctx.invoked_subcommand is not None
+        and ctx.invoked_subcommand != "runtime"
+    ):
+        _require_linux_container()
 
 
 @app.command("download-files", context_settings=HELP_CONTEXT_SETTINGS)
@@ -139,13 +165,14 @@ def emit_final_manifest_command(
 @runtime_app.command("serve", context_settings=HELP_CONTEXT_SETTINGS)
 def runtime_serve_command() -> None:
     """Own and serve the ComfyUI container runtime."""
-
+    _require_linux_container()
     raise typer.Exit(code=run_runtime_serve())
 
 
 @runtime_app.command("restart", context_settings=HELP_CONTEXT_SETTINGS)
 def runtime_restart_command() -> None:
     """Restart the complete ComfyUI runtime generation."""
+    _require_linux_container()
     operation = restart_runtime()
     typer.echo(f"Runtime restart completed: {operation}.")
 
@@ -158,6 +185,7 @@ def runtime_status_command(
     ] = False,
 ) -> None:
     """Show the runtime controller lifecycle status."""
+    _require_linux_container()
     status = read_runtime_status()
     last_restart = status.last_restart
     values = {
@@ -186,7 +214,13 @@ def runtime_status_command(
 @runtime_app.command("follow", context_settings=HELP_CONTEXT_SETTINGS)
 def runtime_follow_command() -> None:
     """Follow live runtime stdout and stderr."""
+    _require_linux_container()
     raise typer.Exit(code=follow_runtime())
+
+
+def _require_linux_container() -> None:
+    if sys.platform != "linux":
+        raise ApplicationError(_CONTAINER_PLATFORM_ERROR)
 
 
 def _admission(digest: str) -> BuildPlanInputAdmission:

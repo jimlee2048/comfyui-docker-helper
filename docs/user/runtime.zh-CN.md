@@ -94,7 +94,7 @@ post-start.d/
 stop.d/
 ```
 
-阶段目录中的 Hook 条目必须是常规 `.sh` 或 `.py` 文件。Shell Hook 使用 `bash` 运行；Python Hook 使用托管的应用程序 Python。Hook 会接收容器运行时环境，并以 `COMFYUI_PATH` 作为工作目录。
+只有直接位于阶段目录中的普通 `.sh` 或 `.py` 文件会被选为 Hook。其他后缀的普通文件和普通目录会在不递归遍历的情况下被忽略，并按来源和阶段产生聚合后的简明警告。symlink、特殊文件、检查/读取失败和无效的已知阶段路径仍会导致启动失败。Shell Hook 使用 `bash` 运行；Python Hook 使用托管的应用程序 Python。Hook 会接收容器运行时环境，并以 `COMFYUI_PATH` 作为工作目录。
 
 固化的 Hook 是位于 `/opt/cdh/runtime/hooks` 下经过选择和内容验证的镜像输入。你还可以在 `/etc/cdh/runtime/hooks` 挂载部署 Hook；挂载的 Hook 仍是外部运行时输入，不属于镜像 lock。固化的 Hook 先于挂载的 Hook 运行；在每个来源和阶段内，文件名按字典序运行。
 

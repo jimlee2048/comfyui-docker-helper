@@ -6,14 +6,19 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticError,
+    DiagnosticSeverity,
+)
 from comfyui_docker_helper.config.hook_validation import (
     hook_lock_identity,
     validate_hook_relative_path,
 )
 from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
-    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+    RuntimeHookEntryKind,
+    classify_runtime_hook_entry,
     runtime_hook_phase_directory_list,
 )
 from comfyui_docker_helper.host.identity_providers import (
@@ -25,6 +30,7 @@ from comfyui_docker_helper.host.identity_providers import (
 class RuntimeHookInputs:
     source_root: Path | None
     requests: tuple[LocalExecutableIdentityRequest, ...]
+    warnings: tuple[Diagnostic, ...] = ()
 
 
 class RuntimeHookInputError(DiagnosticError):
@@ -43,6 +49,7 @@ def discover_runtime_hook_inputs(
     selected = Path(runtime_hooks_dir)
     candidate = selected if selected.is_absolute() else base / selected
     diagnostics: list[Diagnostic] = []
+    warnings: list[Diagnostic] = []
     try:
         mode = candidate.lstat().st_mode
     except FileNotFoundError as error:
@@ -84,17 +91,19 @@ def discover_runtime_hook_inputs(
         ) from error
 
     relative_files: list[PurePosixPath] = []
+    ignored_top_level = 0
     for child in children:
         child_path = ("runtime_hooks_dir", child.name)
         child_mode = _mode(child, child_path, diagnostics)
         if child_mode is None:
             continue
-        if stat.S_ISLNK(child_mode):
+        child_kind = classify_runtime_hook_entry(child_mode, child.suffix)
+        if child_kind == RuntimeHookEntryKind.SYMLINK:
             diagnostics.append(
                 _diagnostic(child_path, "symlink", "must not contain symlinks")
             )
             continue
-        if not stat.S_ISDIR(child_mode) and not stat.S_ISREG(child_mode):
+        if child_kind == RuntimeHookEntryKind.SPECIAL:
             diagnostics.append(
                 _diagnostic(
                     child_path, "special_file", "must not contain special files"
@@ -102,16 +111,9 @@ def discover_runtime_hook_inputs(
             )
             continue
         if child.name not in RUNTIME_HOOK_PHASE_DIRECTORY_NAMES:
-            diagnostics.append(
-                Diagnostic(
-                    child_path,
-                    "runtime_hooks.unknown_top_level",
-                    "runtime hook source may only contain "
-                    f"{runtime_hook_phase_directory_list()} directories",
-                )
-            )
+            ignored_top_level += 1
             continue
-        if not stat.S_ISDIR(child_mode):
+        if child_kind != RuntimeHookEntryKind.DIRECTORY:
             diagnostics.append(
                 Diagnostic(
                     child_path,
@@ -120,7 +122,20 @@ def discover_runtime_hook_inputs(
                 )
             )
             continue
-        relative_files.extend(_phase_files(root, child, child_path, diagnostics))
+        relative_files.extend(
+            _phase_files(root, child, child_path, diagnostics, warnings)
+        )
+    if ignored_top_level:
+        warnings.append(
+            Diagnostic(
+                ("runtime_hooks_dir",),
+                "runtime_hooks.ignored_top_level",
+                f"ignored {ignored_top_level} ordinary top-level "
+                "runtime hook entries outside "
+                f"{runtime_hook_phase_directory_list()}",
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
     if diagnostics:
         raise RuntimeHookInputError(tuple(diagnostics))
     requests = tuple(
@@ -131,7 +146,7 @@ def discover_runtime_hook_inputs(
         )
         for relative in sorted(relative_files, key=PurePosixPath.as_posix)
     )
-    return RuntimeHookInputs(root, requests)
+    return RuntimeHookInputs(root, requests, tuple(warnings))
 
 
 def _phase_files(
@@ -139,6 +154,7 @@ def _phase_files(
     phase: Path,
     path: tuple[str, ...],
     diagnostics: list[Diagnostic],
+    warnings: list[Diagnostic],
 ) -> list[PurePosixPath]:
     try:
         children = tuple(sorted(phase.iterdir(), key=lambda item: item.name))
@@ -152,37 +168,40 @@ def _phase_files(
         )
         return []
     files: list[PurePosixPath] = []
+    ignored = 0
     for child in children:
         child_path = (*path, child.name)
         child_mode = _mode(child, child_path, diagnostics)
         if child_mode is None:
             continue
-        if stat.S_ISLNK(child_mode):
+        child_kind = classify_runtime_hook_entry(child_mode, child.suffix)
+        if child_kind == RuntimeHookEntryKind.SYMLINK:
             diagnostics.append(
                 _diagnostic(child_path, "symlink", "must not contain symlinks")
             )
-        elif stat.S_ISDIR(child_mode):
-            diagnostics.append(
-                _diagnostic(
-                    child_path, "entry_not_file", "phase entries must be regular files"
-                )
-            )
-        elif not stat.S_ISREG(child_mode):
+        elif child_kind in {
+            RuntimeHookEntryKind.DIRECTORY,
+            RuntimeHookEntryKind.OTHER_REGULAR_FILE,
+        }:
+            ignored += 1
+        elif child_kind == RuntimeHookEntryKind.SPECIAL:
             diagnostics.append(
                 _diagnostic(
                     child_path, "special_file", "must not contain special files"
                 )
             )
-        elif child.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
-            diagnostics.append(
-                Diagnostic(
-                    child_path,
-                    "runtime_hooks.unsupported_extension",
-                    "runtime hook files must end in .sh or .py",
-                )
-            )
-        else:
+        elif child_kind == RuntimeHookEntryKind.SELECTABLE_FILE:
             files.append(PurePosixPath(child.relative_to(root).as_posix()))
+    if ignored:
+        warnings.append(
+            Diagnostic(
+                path,
+                "runtime_hooks.ignored_phase_entries",
+                f"ignored {ignored} ordinary non-hook phase entries; only direct "
+                "regular .sh and .py files are selected",
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
     return files
 
 

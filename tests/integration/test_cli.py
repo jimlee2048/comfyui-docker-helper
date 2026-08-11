@@ -26,7 +26,7 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_digest,
 )
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
-from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
@@ -145,6 +145,7 @@ def _prepared_build() -> SimpleNamespace:
             custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
         ),
         output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+        warnings=(),
     )
 
 
@@ -764,7 +765,7 @@ def test_relative_build_hook_root_is_resolved_from_invocation_directory(
 
     def prepare(_output_dir, *, build_hook_source_root, **_kwargs):
         observed.append(build_hook_source_root)
-        return SimpleNamespace(lock_result=accepted_resolution())
+        return SimpleNamespace(lock_result=accepted_resolution(), warnings=())
 
     monkeypatch.chdir(invocation)
     monkeypatch.setattr(
@@ -1179,6 +1180,7 @@ def test_dry_run_renders_an_independent_buildx_output_section(
             plan=plan,
             lock_result=resolution,
             output_plan=output_plan,
+            warnings=(),
         )
 
     monkeypatch.setattr(
@@ -1209,7 +1211,8 @@ def test_dry_run_renders_an_independent_buildx_output_section(
         assert plain.index(output_plan.tags[0]) < plain.index(output_plan.tags[1])
 
 
-def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
+# Host render preserves input ownership while presenting planning warnings on stderr.
+def test_render_passes_runtime_hook_inputs_and_presents_planning_warnings(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1230,7 +1233,17 @@ def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         seen["configuration_result"] = kwargs["configuration_result"]
         seen["build_hook_source_root"] = kwargs["build_hook_source_root"]
-        return SimpleNamespace(lock_result=accepted_resolution())
+        return SimpleNamespace(
+            lock_result=accepted_resolution(),
+            warnings=(
+                Diagnostic(
+                    ("runtime_hooks_dir",),
+                    "runtime_hooks.ignored_top_level",
+                    "ignored 1 ordinary top-level runtime hook entry",
+                    DiagnosticSeverity.WARNING,
+                ),
+            ),
+        )
 
     def load(*args, **kwargs):
         result = original_load(*args, **kwargs)
@@ -1268,7 +1281,8 @@ def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
 
     assert result.exit_code == 0
     assert result.stdout == ""
-    assert result.stderr == ""
+    assert "ignored 1 ordinary top-level runtime hook entry" in result.stderr
+    assert "runtime_hooks.ignored_top_level" not in result.stderr
     assert seen["runtime_hooks_dir"] == hooks
     assert len(loaded) == 1
     assert seen["configuration_result"] is loaded[0]
@@ -1377,6 +1391,7 @@ platforms = ["linux/amd64"]
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
             ),
             output_plan=output_plan,
+            warnings=(),
         )
 
     def buildx(**kwargs):
@@ -1530,6 +1545,7 @@ password = { secret = "team_token" }
         return SimpleNamespace(
             plan=plan,
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+            warnings=(),
         )
 
     # Buildx receives every effective route Secret because recursive submodule
@@ -1637,6 +1653,7 @@ password = {{ secret = "team_token" }}
         return SimpleNamespace(
             plan=plan,
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+            warnings=(),
         )
 
     monkeypatch.setattr(host_cli, "default_planning_providers", providers)
@@ -1828,6 +1845,7 @@ def test_build_cache_import_and_export_are_independent(
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
             ),
             output_plan=output_plan,
+            warnings=(),
         )
 
     def buildx(**kwargs):
@@ -2050,7 +2068,7 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
             output_dir,
             canonical_wheel=canonical_wheel(),
         )
-        return SimpleNamespace(plan=plan, output_plan=output_plan)
+        return SimpleNamespace(plan=plan, output_plan=output_plan, warnings=())
 
     def buildx(**kwargs):
         seen.update(kwargs)
@@ -2129,6 +2147,7 @@ platforms = ["linux/amd64"]
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
             ),
             output_plan=output_plan,
+            warnings=(),
         )
 
     def buildx(**kwargs):

@@ -94,7 +94,7 @@ post-start.d/
 stop.d/
 ```
 
-Hook entries in a phase directory must be regular `.sh` or `.py` files. Shell hooks run with `bash`; Python hooks run with the managed application Python. Hooks receive the container runtime environment and run with `COMFYUI_PATH` as their working directory.
+Only direct regular `.sh` or `.py` files in a phase directory are selected as hooks. Ordinary files with other suffixes and ordinary directories are ignored without recursion, with concise warnings aggregated by source and phase. Symlinks, special files, inspection/read failures, and invalid known phase paths remain startup errors. Shell hooks run with `bash`; Python hooks run with the managed application Python. Hooks receive the container runtime environment and run with `COMFYUI_PATH` as their working directory.
 
 Baked hooks are selected, content-verified image inputs under `/opt/cdh/runtime/hooks`. You can also mount deployment hooks at `/etc/cdh/runtime/hooks`; mounted hooks remain external runtime inputs and are not part of the image lock. Baked hooks run before mounted hooks, and filenames run in lexical order within each source and phase.
 

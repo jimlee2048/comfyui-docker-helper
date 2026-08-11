@@ -147,7 +147,7 @@ cdh host render \
   --overwrite
 ```
 
-运行时 Hook 目录只能包含直接位于 `pre-start.d/`、`post-start.d/` 和 `stop.d/` 下的受支持 Hook 文件。省略该选项时不会烘焙运行时 Hook 目录树。挂载的运行时 Hook 是独立的部署时输入；参见[运行时指南](runtime.zh-CN.md)和[运行时 Hook 示例](../../examples/runtime-hooks/)。
+只有直接位于 `pre-start.d/`、`post-start.d/` 和 `stop.d/` 下的普通 `.sh` 和 `.py` 文件会被选择并固化。其他普通文件和目录会在不递归遍历的情况下被忽略并产生聚合警告；不安全的文件系统条目以及来源检查/读取失败仍是错误。省略该选项时不会烘焙运行时 Hook 目录树。挂载的运行时 Hook 是独立的部署时输入；参见[运行时指南](runtime.zh-CN.md)和[运行时 Hook 示例](../../examples/runtime-hooks/)。
 
 ## 从生效配置到上下文
 

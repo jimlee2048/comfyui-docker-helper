@@ -51,11 +51,6 @@ from comfyui_docker_helper.config.canonical_resolver import (
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.config.service import load_validate_config_result
-from comfyui_docker_helper.container.runtime_files import (
-    build_runtime_file_plan,
-    runtime_downloader_settings,
-)
-from comfyui_docker_helper.container.runtime_hooks import discover_runtime_hooks
 from comfyui_docker_helper.host import render_service as render_service_module
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
 from comfyui_docker_helper.host.canonical_acquisition import (
@@ -1062,7 +1057,7 @@ def test_invalid_locked_requirements_content_uses_lock_invalid_diagnostic(
 
 
 # Runtime hooks/files preserve locked projection, precedence, and source containment.
-def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
+def test_runtime_hooks_are_locked_planned_and_materialized(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "config.toml"
@@ -1087,21 +1082,16 @@ def test_runtime_hooks_are_locked_planned_materialized_and_consumed(
         "stop.d/30-stop.sh",
     ]
     assert (output / "runtime/hooks/pre-start.d/10-pre.sh").read_text() == "pre\n"
+    assert (
+        output / "runtime/hooks/post-start.d/20-post.py"
+    ).read_text() == "print('post')\n"
+    assert (output / "runtime/hooks/stop.d/30-stop.sh").read_text() == "stop\n"
     dockerfile = (output / "Dockerfile").read_text()
     assert (
         "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml"
         in dockerfile
     )
     assert "COPY --chmod=0755 runtime/hooks /opt/cdh/runtime/hooks" in dockerfile
-    discovered = discover_runtime_hooks(
-        baked_hooks_path=output / "runtime/hooks",
-        mounted_hooks_path=tmp_path / "missing-hooks",
-    )
-    assert [hook.filename for hook in discovered.hooks] == [
-        "10-pre.sh",
-        "20-post.py",
-        "30-stop.sh",
-    ]
 
 
 def test_runtime_file_projection_preserves_global_and_item_precedence(
@@ -1158,19 +1148,8 @@ download_mode = "async"
             "CDH_DEFAULT_DOWNLOAD_MODE": "sync",
         },
     )
-    comfyui = tmp_path / "ComfyUI"
-    comfyui.mkdir()
-    runtime_plan = build_runtime_file_plan(
-        runtime.files,
-        comfyui_path=comfyui,
-        default_download_mode=runtime.config.cdh.default_download_mode,
-    )
-
-    assert runtime_downloader_settings(runtime.config).default == "aria2"
-    assert runtime_plan.items[0].downloader is None
-    assert runtime_plan.items[0].download_mode == "sync"
-    assert runtime_plan.items[1].downloader == "httpx"
-    assert runtime_plan.items[1].download_mode == "async"
+    assert runtime.config.cdh.default_downloader == "aria2"
+    assert runtime.config.cdh.default_download_mode == "sync"
 
 
 @pytest.mark.parametrize("source_kind", ["build", "runtime"])

@@ -28,6 +28,8 @@ The complete default-offline suite runs on Linux for every supported Python mino
 
 Place an operating-system-specific test at the narrowest unit or integration owner and guard it with a local `skipif` based on the native capability it requires. Operating-system selection is not an external-cost authorization, so do not add a Linux or Windows cost marker. Keep Linux-only container execution tests on Linux, and use native Windows tests for Win32 filesystem, DACL, descriptor-lock, Git-for-Windows, path, and process behavior. Mocked Docker and Buildx adapter tests prove only argument and error contracts; they do not prove Docker Desktop, named-pipe SSH forwarding, GPU use, or Windows-container execution.
 
+Do not add a custom platform marker as a second platform inventory. Cross-platform host tests carry no platform label and run on every supported host. A file wholly dependent on one native platform may use a module-level built-in `skipif`; a mixed file guards only the narrow test that needs the unavailable capability, preferring capability detection over an operating-system name when practical. Custom markers classify tests or authorize external cost; they do not skip tests by themselves or prevent a module import during collection. Owner-directory selection remains the authority that keeps unsupported implementations outside a platform's import closure.
+
 Run the affected selection on its native platform, for example:
 
 ```bash

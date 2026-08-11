@@ -26,6 +26,7 @@ from comfyui_docker_helper.container.runtime_files import (
     download_runtime_files,
     process_runtime_file_downloads,
     reconcile_runtime_file_plan,
+    runtime_downloader_settings,
     runtime_file_identity_digest,
     runtime_file_staging_target,
     runtime_file_state_identity_digest,
@@ -275,6 +276,24 @@ def test_runtime_plan_supports_a_file_in_the_comfyui_root(tmp_path: Path) -> Non
     assert planned.directory == "."
     assert planned.relative_target == "root.bin"
     assert planned.target == root / "root.bin"
+
+
+def test_runtime_plan_preserves_default_and_item_downloader_precedence(
+    tmp_path: Path,
+) -> None:
+    config = _config(default="aria2")
+    root = tmp_path / "ComfyUI"
+    plan = _plan(
+        root,
+        _file("implicit.bin"),
+        _file("explicit.bin", downloader="httpx", mode="async"),
+    )
+
+    assert runtime_downloader_settings(config).default == "aria2"
+    assert plan.items[0].downloader is None
+    assert plan.items[0].download_mode == "sync"
+    assert plan.items[1].downloader == "httpx"
+    assert plan.items[1].download_mode == "async"
 
 
 # Transfer identity follows the requested bytes and destination, while execution

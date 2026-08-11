@@ -6,8 +6,6 @@ import hashlib
 import json
 import os
 import shlex
-import subprocess
-import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
@@ -29,7 +27,6 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
-from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering import final_materializer as materializer_module
 from comfyui_docker_helper.rendering.final_materializer import (
@@ -544,21 +541,7 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert "UV_CONSTRAINT" not in dockerfile
     assert "PIP_CONSTRAINT" not in dockerfile
 
-    expected = build_plan_digest(plan)
-    admission = BuildPlanInputAdmission.from_path(
-        first / "build-plan.json",
-        expected_build_plan_digest=expected,
-    )
-    assert admission.comfyui_install() == (plan.application, plan.toolchain)
-    assert admission.custom_node_install() == (
-        plan.custom_nodes,
-        plan.application,
-    )
-    assert admission.git_credential_routes() == plan.custom_nodes.git_credentials
-    assert admission.file_downloads() == (
-        plan.files,
-        plan.application.paths.comfyui,
-    )
+    assert parse_build_plan_json((first / "build-plan.json").read_bytes()) == plan
 
 
 def test_materializer_avoids_posix_mode_calls_on_windows(
@@ -647,25 +630,6 @@ def test_materializer_rejects_invalid_private_stage_entry(
         assert sentinel.read_text() == "keep"
 
 
-# Canonical plan bytes bound to the Dockerfile literal authorize each installer input.
-def test_build_plan_admission_rejects_changed_plan_under_literal_digest(
-    tmp_path: Path,
-) -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    output = tmp_path / "output"
-    output.mkdir(mode=0o700)
-    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
-    document = json.loads((output / "build-plan.json").read_bytes())
-    document["runtime"]["environment"][0]["value"] = "changed"
-    (output / "build-plan.json").write_text(json.dumps(document))
-
-    with pytest.raises(ValueError, match="expected digest"):
-        BuildPlanInputAdmission.from_path(
-            output / "build-plan.json",
-            expected_build_plan_digest=build_plan_digest(plan),
-        )
-
-
 # The configured shutdown budget remains exact through planning and baked runtime copy.
 def test_nondefault_shutdown_timeout_projects_to_plan_and_baked_runtime(
     tmp_path: Path,
@@ -724,61 +688,6 @@ def test_comfyui_root_file_is_materialized_and_reloaded_canonically(
     )
     assert baked_document["files"][0]["dir"] == "."
     assert runtime.files[0]["dir"] == "."
-
-
-# BuildPlan admission rejects statically visible links and special nodes.
-def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
-    tmp_path: Path,
-) -> None:
-    plan = build_plan(final_config(), accepted_resolution())
-    context = tmp_path / "context"
-    context.mkdir(mode=0o700)
-    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
-    digest = build_plan_digest(plan)
-
-    leaf_link = tmp_path / "build-plan-link.json"
-    leaf_link.symlink_to(context / "build-plan.json")
-    with pytest.raises(ValueError, match="could not read canonical BuildPlan"):
-        BuildPlanInputAdmission.from_path(
-            leaf_link,
-            expected_build_plan_digest=digest,
-        )
-
-    ancestor_link = tmp_path / "context-link"
-    ancestor_link.symlink_to(context, target_is_directory=True)
-    with pytest.raises(ValueError, match="could not read canonical BuildPlan"):
-        BuildPlanInputAdmission.from_path(
-            ancestor_link / "build-plan.json",
-            expected_build_plan_digest=digest,
-        )
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX FIFO")
-def test_build_plan_admission_rejects_fifo_without_blocking(tmp_path: Path) -> None:
-    fifo = tmp_path / "build-plan.fifo"
-    os.mkfifo(fifo)
-    script = """
-import sys
-from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
-
-try:
-    BuildPlanInputAdmission.from_path(
-        sys.argv[1], expected_build_plan_digest="sha256:" + "a" * 64
-    )
-except ValueError as error:
-    assert str(error) == "could not read canonical BuildPlan"
-else:
-    raise AssertionError("FIFO was admitted")
-"""
-
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(fifo)],
-        check=False,
-        capture_output=True,
-        timeout=3,
-    )
-
-    assert result.returncode == 0, result.stderr.decode()
 
 
 def test_file_admission_closes_the_leaf_and_preserves_primary_error(

@@ -97,6 +97,7 @@ def test_project_release_identity_matches_package_metadata() -> None:
     )
     assert "build>=1,<2" in project["dependencies"]
     assert "filelock>=3.32.2,<4" in project["dependencies"]
+    assert "cryptography>=49" in project["dependencies"]
     assert "python-on-whales>=0.81.0" in project["dependencies"]
     assert "pywin32==312; sys_platform == 'win32'" in project["dependencies"]
     assert "twine" in pyproject["dependency-groups"]["dev"]

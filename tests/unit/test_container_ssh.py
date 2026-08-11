@@ -149,7 +149,8 @@ def _prepare_public_keys(root_home: Path) -> RootSshCredentialPreparationStatus:
     )
 
 
-# Credential tests protect no-op paths, side effects, and secret redaction.
+# Credential tests protect no-op paths, safe mode admission and warning delivery,
+# side effects, and secret redaction.
 def test_no_credentials_prepare_no_files_or_commands(tmp_path: Path) -> None:
     runner = RecordingRunner()
     ownership = OwnershipRecorder()
@@ -227,6 +228,49 @@ def test_enabled_ssh_without_credentials_reports_no_credentials_no_side_effects(
     assert ownership.chown_calls == []
     assert ownership.chmod_calls == []
     assert not (tmp_path / "root").exists()
+
+
+def test_start_sshd_logs_credential_path_mode_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = "WARNING: existing root SSH directory mode is nonstandard"
+
+    def prepare_with_warning(
+        _config: RuntimeSystemSshConfig,
+        **_kwargs: object,
+    ) -> RootSshCredentialPreparationStatus:
+        return RootSshCredentialPreparationStatus(
+            ssh_enabled=True,
+            public_key_count=1,
+            password_configured=False,
+            authorized_keys_path=tmp_path / "root" / ".ssh" / "authorized_keys",
+            warnings=(warning,),
+        )
+
+    monkeypatch.setattr(
+        ssh_module,
+        "prepare_root_ssh_credentials",
+        prepare_with_warning,
+    )
+    command_runner = RecordingCommandRunner()
+    process_starter = RecordingProcessStarter()
+    messages: list[str] = []
+
+    result = start_sshd_if_enabled(
+        RuntimeConfig.model_validate(
+            {"system": {"ssh": {"enable": True, "pub_keys": [VALID_SSH_KEY]}}}
+        ),
+        runtime=ContainerRuntime(),
+        runtime_dir=tmp_path / "run" / "sshd",
+        command_runner=command_runner,
+        process_starter=process_starter,
+        log=messages.append,
+    )
+
+    assert result is process_starter.process
+    assert messages == [warning]
+    assert VALID_SSH_KEY not in "\n".join(messages)
 
 
 def test_public_keys_prepare_authorized_keys_permissions_and_ownership(
@@ -412,7 +456,14 @@ def test_password_command_failure_does_not_leak_credential_material(
 
 @pytest.mark.parametrize(
     "state",
-    ["absent", "symlink", "dangling", "file", "fifo", "unsafe_mode"],
+    [
+        "absent",
+        "symlink",
+        "dangling",
+        "file",
+        "fifo",
+        "unsafe_mode",
+    ],
 )
 def test_root_home_rejects_unsafe_static_states_without_key_disclosure(
     tmp_path: Path,
@@ -479,13 +530,13 @@ def test_ssh_directory_rejects_unsafe_static_states(
         os.mkfifo(ssh_dir)
     else:
         ssh_dir.mkdir(mode=0o700)
-        ssh_dir.chmod(0o755)
+        ssh_dir.chmod(0o777)
 
     with pytest.raises(SshCredentialPreparationError) as raised:
         _prepare_public_keys(root_home)
 
     assert str(raised.value) == (
-        "root SSH directory must be a root-owned directory with mode 0700"
+        "root SSH directory must be root-owned and not writable by group or other"
     )
     assert VALID_SSH_KEY not in str(raised.value)
 
@@ -506,6 +557,28 @@ def test_ssh_directory_rejects_wrong_ownership_via_owner_seam(
         )
 
     assert "root SSH directory" in str(raised.value)
+
+
+def test_ssh_directory_security_classification_uses_write_exposure(
+    tmp_path: Path,
+) -> None:
+    ssh_dir = _create_root_home(tmp_path) / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    ssh_dir.chmod(0o500)
+    ownership = OwnershipRecorder()
+
+    created, warning = ssh_module._ensure_root_ssh_directory(
+        ssh_dir,
+        chown=ownership.chown,
+        chmod=ownership.chmod,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
+
+    assert created is False
+    assert warning is not None
+    assert ownership.chown_calls == []
+    assert ownership.chmod_calls == []
 
 
 @pytest.mark.parametrize(
@@ -532,13 +605,14 @@ def test_authorized_keys_rejects_unsafe_static_states_and_preserves_redirect(
         os.mkfifo(target)
     else:
         target.write_text("old\n", encoding="utf-8")
-        target.chmod(0o644)
+        target.chmod(0o664)
 
     with pytest.raises(SshCredentialPreparationError) as raised:
         _prepare_public_keys(root_home)
 
     assert str(raised.value) == (
-        "root SSH authorized keys must be a root-owned regular file with mode 0600"
+        "root SSH authorized keys must be a root-owned regular file that is not "
+        "writable by group or other"
     )
     assert redirected.read_text(encoding="utf-8") == "victim\n"
     assert VALID_SSH_KEY not in str(raised.value)
@@ -559,6 +633,46 @@ def test_authorized_keys_rejects_wrong_ownership_via_owner_seam(
         )
 
     assert "root SSH authorized keys" in str(raised.value)
+
+
+def test_safe_noncanonical_ssh_modes_warn_and_are_not_rejected(
+    tmp_path: Path,
+) -> None:
+    root_home = _create_root_home(tmp_path)
+    ssh_dir = root_home / ".ssh"
+    ssh_dir.mkdir(mode=0o755)
+    target = ssh_dir / "authorized_keys"
+    target.write_text("old key material\n", encoding="utf-8")
+    target.chmod(0o644)
+    old_inode = target.stat().st_ino
+    root_home.chmod(0o500)
+    ownership = OwnershipRecorder()
+
+    status = prepare_root_ssh_credentials(
+        RuntimeSystemSshConfig(enable=True, pub_keys=[VALID_SSH_KEY]),
+        root_home=root_home,
+        chown=ownership.chown,
+        chmod=ownership.chmod,
+        fchown=ownership.fchown,
+        fchmod=ownership.fchmod,
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
+
+    assert status.warnings == (
+        "WARNING: existing root SSH directory mode is nonstandard; preserving "
+        "it because it is not writable by group or other",
+        "WARNING: existing root SSH authorized keys mode is nonstandard; "
+        "replacing it atomically with mode 0600",
+    )
+    assert stat.S_IMODE(ssh_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert target.stat().st_ino != old_inode
+    assert target.read_text(encoding="utf-8") == f"{VALID_SSH_KEY}\n"
+    assert ownership.chown_calls == []
+    assert ownership.chmod_calls == []
+    assert ownership.fchown_calls == [(os.getuid(), os.getgid())]
+    assert ownership.fchmod_calls == [0o600]
 
 
 def test_interrupted_temporary_write_preserves_old_target_and_cleans_owned_file(

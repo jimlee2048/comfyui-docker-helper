@@ -122,6 +122,7 @@ class PreparedContext:
     plan: BuildPlan
     lock_result: AcceptedCanonicalLock
     output_plan: BuildxOutputPlan | None = None
+    warnings: tuple[Diagnostic, ...] = ()
 
 
 class HostRenderServiceError(ValueError):
@@ -233,6 +234,7 @@ def prepare_render_context(
         plan=plan,
         lock_result=accepted,
         output_plan=output_plan,
+        warnings=runtime_hooks.warnings,
     )
 
 

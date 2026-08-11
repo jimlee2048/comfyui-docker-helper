@@ -4,10 +4,20 @@ from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.config.diagnostics import (
+    DiagnosticComparison,
+    SourceLocation,
+)
 from comfyui_docker_helper.config.service import (
     ConfigurationServiceError,
     load_validate_config,
     load_validate_config_result,
+)
+
+_VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "first@example"
 )
 
 
@@ -88,6 +98,110 @@ def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None
 
     assert config.system.workspace == "/data"
     assert config.pytorch.version == "2.12.1"
+
+
+def test_layered_service_exposes_effective_leaf_origins(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config())
+    override.write_text('[system]\nworkspace = "/data"\n')
+
+    result = load_validate_config_result([base, override])
+
+    retained = result.origins.exact_location(("pytorch", "version"))
+    replaced = result.origins.exact_location(("system", "workspace"))
+    assert retained is not None
+    assert replaced is not None
+    assert retained.source.layer_ordinal == 0
+    assert retained.source.label == str(base)
+    assert replaced.source.layer_ordinal == 1
+    assert replaced.source.label == str(override)
+
+
+def test_same_physical_config_path_remains_two_distinct_source_layers(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config())
+
+    single = load_validate_config_result(path)
+    repeated = load_validate_config_result([path, path])
+
+    assert repeated.config == single.config
+    assert repeated.raw_document == single.raw_document
+    assert repeated.secret_file_base == single.secret_file_base
+    location = repeated.origins.exact_location(("build", "platforms"))
+    assert location is not None
+    assert location.source.layer_ordinal == 1
+    assert location.source.label == str(path)
+
+
+def test_service_tracks_keyed_file_overlay_and_append_origins(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config()
+        + """
+
+[[files]]
+url = "https://example.com/base.bin"
+dir = "models"
+filename = "model.bin"
+overwrite = false
+"""
+    )
+    override.write_text(
+        """
+[[files]]
+dir = "models"
+filename = "model.bin"
+overwrite = true
+
+[[files]]
+url = "https://example.com/new.bin"
+dir = "models"
+filename = "new.bin"
+"""
+    )
+
+    result = load_validate_config_result([base, override])
+
+    assert [(item.filename, item.overwrite) for item in result.config.files] == [
+        ("model.bin", True),
+        ("new.bin", False),
+    ]
+    base_url = result.origins.exact_location(("files", 0, "url"))
+    later_overwrite = result.origins.exact_location(("files", 0, "overwrite"))
+    appended = result.origins.exact_location(("files", 1))
+    assert base_url is not None and base_url.source.layer_ordinal == 0
+    assert later_overwrite is not None and later_overwrite.source.layer_ordinal == 1
+    assert later_overwrite.path == ("files", 0, "overwrite")
+    assert appended is not None and appended.source.layer_ordinal == 1
+    assert appended.path == ("files", 1)
+
+
+def test_service_tracks_an_empty_keyed_sequence_reset(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    reset = tmp_path / "reset.toml"
+    base.write_text(
+        _config()
+        + """
+
+[[files]]
+url = "https://example.com/base.bin"
+dir = "models"
+filename = "model.bin"
+"""
+    )
+    reset.write_text("files = []\n")
+
+    result = load_validate_config_result([base, reset])
+
+    assert result.config.files == []
+    location = result.origins.exact_location(("files",))
+    assert location is not None
+    assert location.source.layer_ordinal == 1
+    assert location.source.label == str(reset)
 
 
 def test_secret_and_git_credential_layers_compose_by_logical_keys(
@@ -285,21 +399,54 @@ file = "never-read-token"
 
 
 @pytest.mark.parametrize("package", ["bash", "tini"])
-def test_layered_documents_report_default_os_package_collision(
+def test_layered_default_os_package_overlap_warns_once_from_effective_source(
     tmp_path: Path,
     package: str,
 ) -> None:
     base = tmp_path / "base.toml"
     override = tmp_path / "override.toml"
-    base.write_text(_config())
+    base.write_text(_config() + f'\n[system]\nextra_packages = ["{package}"]\n')
     override.write_text(f'[system]\nextra_packages = ["{package}"]\n')
 
-    with pytest.raises(ConfigurationServiceError) as raised:
-        load_validate_config([base, override])
+    result = load_validate_config_result([base, override])
 
-    assert [(item.path, item.code) for item in raised.value.diagnostics] == [
-        (("system", "extra_packages", 0), "system.duplicate_apt_package")
+    assert [(item.path, item.code) for item in result.warnings] == [
+        (
+            ("system", "extra_packages", 0),
+            "system.redundant_default_apt_package",
+        )
     ]
+    context = result.warnings[0].source_context
+    assert isinstance(context, SourceLocation)
+    assert context.source.label == str(override)
+    assert result.domains.authored_apt_packages[0].value == package
+    assert result.domains.apt_packages == ()
+
+
+def test_host_ssh_duplicate_warning_uses_winning_list_source_without_key_value(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config() + f'\n[system.ssh]\npub_keys = ["{_VALID_SSH_KEY}", "not-a-key"]\n'
+    )
+    duplicate = _VALID_SSH_KEY.rsplit(" ", 1)[0] + " second@example"
+    override.write_text(
+        f'[system.ssh]\npub_keys = ["  {_VALID_SSH_KEY}  ", "{duplicate}"]\n'
+    )
+
+    result = load_validate_config_result([base, override])
+
+    assert [(item.path, item.code) for item in result.warnings] == [
+        (("system", "ssh", "pub_keys", 1), "ssh.redundant_public_key")
+    ]
+    warning = result.warnings[0]
+    assert isinstance(warning.source_context, SourceLocation)
+    assert warning.source_context.source.label == str(override)
+    assert warning.source_context.path == ("system", "ssh", "pub_keys", 1)
+    assert _VALID_SSH_KEY not in warning.message
+    assert result.domains.ssh_public_keys == (_VALID_SSH_KEY,)
 
 
 # Isolated-tool requirements survive the public service boundary.
@@ -308,6 +455,340 @@ def test_public_service_accepts_active_uv_tools(tmp_path: Path) -> None:
     config.write_text(_config() + '\n[python]\nuv_tools = ["ruff>=0.15,<0.16"]\n')
 
     assert load_validate_config(config).python.uv_tools == ["ruff>=0.15,<0.16"]
+
+
+def test_layered_package_fields_compose_in_stable_order(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config().replace(
+            '[pytorch]\nversion = "2.12.1"',
+            '[pytorch]\nversion = "2.12.1"\nextra_packages = ["xformers==0.0.30"]',
+        )
+        + """
+
+[system]
+extra_packages = ["git-lfs"]
+
+[python]
+extra_packages = ["demo==1"]
+uv_tools = ["ruff==0.15.0"]
+"""
+    )
+    override.write_text(
+        """
+[system]
+extra_packages = ["ffmpeg"]
+
+[python]
+extra_packages = ["other==2"]
+uv_tools = ["mypy==1.15.0"]
+
+[pytorch]
+extra_packages = ["triton==3.3.0"]
+"""
+    )
+
+    config = load_validate_config([base, override])
+
+    assert config.system.extra_packages == ["git-lfs", "ffmpeg"]
+    assert config.python.extra_packages == ["demo==1", "other==2"]
+    assert config.python.uv_tools == ["ruff==0.15.0", "mypy==1.15.0"]
+    assert config.pytorch.extra_packages == [
+        "xformers==0.0.30",
+        "triton==3.3.0",
+    ]
+
+
+def test_layered_canonical_requirement_dedup_retains_later_spelling(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config() + '\n[python]\nextra_packages = ["Demo[B,A]>=1,<2"]\n')
+    override.write_text('[python]\nextra_packages = ["demo[a,b]<2,>=1", "other==2"]\n')
+
+    result = load_validate_config_result([base, override])
+
+    assert result.config.python.extra_packages == [
+        "demo[a,b]<2,>=1",
+        "other==2",
+    ]
+    location = result.origins.exact_location(("python", "extra_packages", 0))
+    assert location is not None and location.source.layer_ordinal == 1
+
+
+@pytest.mark.parametrize(
+    ("base_requirement", "later_requirement", "canonical"),
+    [
+        ("Demo~=1.2", "demo ~= 1.2", "demo~=1.2"),
+        ("Demo>=1,!=2", "demo!=2,>=1", "demo!=2,>=1"),
+    ],
+)
+def test_layered_new_selector_forms_use_existing_canonical_dedup(
+    tmp_path: Path,
+    base_requirement: str,
+    later_requirement: str,
+    canonical: str,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config() + f'\n[python]\nextra_packages = ["{base_requirement}"]\n'
+    )
+    override.write_text(f'[python]\nextra_packages = ["{later_requirement}"]\n')
+
+    result = load_validate_config_result([base, override])
+
+    assert result.config.python.extra_packages == [later_requirement]
+    assert result.domains.package_requirements[0].canonical_value == canonical
+
+
+def test_compatible_and_expanded_range_remain_distinct_requirements(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config() + '\n[python]\nextra_packages = ["demo~=1.2"]\n')
+    override.write_text('[python]\nextra_packages = ["Demo>=1.2,<2"]\n')
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result([base, override])
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "python.conflicting_package_requirement"
+    assert isinstance(diagnostic.source_context, DiagnosticComparison)
+    assert diagnostic.source_context.earlier.display_value == "demo~=1.2"
+    assert diagnostic.source_context.later.display_value == "Demo>=1.2,<2"
+
+
+def test_layered_requirement_conflict_reports_symmetric_sources(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config() + '\n[python]\nextra_packages = ["demo>=1,<2"]\n')
+    override.write_text('[python]\nextra_packages = ["Demo>=2,<3"]\n')
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result([base, override])
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "python.conflicting_package_requirement"
+    assert diagnostic.hint == "Use one requirement for this package."
+    assert isinstance(diagnostic.source_context, DiagnosticComparison)
+    assert diagnostic.source_context.earlier.location.source.label == str(base)
+    assert diagnostic.source_context.earlier.display_value == "demo>=1,<2"
+    assert diagnostic.source_context.later.location.source.label == str(override)
+    assert diagnostic.source_context.later.display_value == "Demo>=2,<3"
+
+
+def test_registry_case_variant_overlays_and_retains_later_spelling(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config().replace("install_manager = false", "install_manager = true")
+        + """
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "Example_Node"
+version = "1.0.0"
+"""
+    )
+    override.write_text(
+        """
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example_node"
+version = "2.0.0"
+"""
+    )
+
+    result = load_validate_config_result([base, override])
+
+    node = result.config.comfyui.custom_nodes[0]
+    assert node.id == "example_node"
+    assert node.version == "2.0.0"
+    location = result.origins.exact_location(("comfyui", "custom_nodes", 0, "id"))
+    assert location is not None and location.source.label == str(override)
+
+
+def test_registry_punctuation_collision_reports_both_resources(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config().replace("install_manager = false", "install_manager = true")
+        + """
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example_node"
+version = "1.0.0"
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example.node"
+version = "2.0.0"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result(config)
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "custom_node.registry_distribution_identity_collision"
+    assert isinstance(diagnostic.source_context, DiagnosticComparison)
+    assert diagnostic.source_context.earlier.display_value == "example_node"
+    assert diagnostic.source_context.later.display_value == "example.node"
+
+
+def test_same_layer_registry_case_duplicate_is_a_resource_conflict(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config().replace("install_manager = false", "install_manager = true")
+        + """
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "Example_Node"
+version = "1.0.0"
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example_node"
+version = "2.0.0"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result(config)
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "custom_node.duplicate_registry_id"
+    assert isinstance(diagnostic.source_context, DiagnosticComparison)
+    assert diagnostic.source_context.earlier.display_value == "Example_Node"
+    assert diagnostic.source_context.later.display_value == "example_node"
+
+
+def test_three_registry_distribution_collisions_compare_first_with_each_later(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config().replace("install_manager = false", "install_manager = true")
+        + """
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example_node"
+version = "1.0.0"
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example.node"
+version = "2.0.0"
+
+[[comfyui.custom_nodes]]
+type = "registry"
+id = "example-node"
+version = "3.0.0"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result(config)
+
+    diagnostics = raised.value.diagnostics
+    assert [diagnostic.code for diagnostic in diagnostics] == [
+        "custom_node.registry_distribution_identity_collision",
+        "custom_node.registry_distribution_identity_collision",
+    ]
+    contexts = [diagnostic.source_context for diagnostic in diagnostics]
+    assert all(isinstance(context, DiagnosticComparison) for context in contexts)
+    assert [
+        (
+            context.earlier.display_value,
+            context.later.display_value,
+        )
+        for context in contexts
+        if isinstance(context, DiagnosticComparison)
+    ] == [
+        ("example_node", "example.node"),
+        ("example_node", "example-node"),
+    ]
+
+
+def test_canonical_credential_overlay_missing_field_uses_later_item_source(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config()
+        + """
+
+[secrets.base]
+env = "BASE_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://GitHub.com:443/acme"
+username = "base"
+password = { secret = "base" }
+"""
+    )
+    override.write_text(
+        """
+[[cdh.git.credentials]]
+match = "https://github.com/acme/"
+username = "later"
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result([base, override])
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "schema.missing"
+    assert diagnostic.path == ("cdh", "git", "credentials", 0, "password")
+    assert diagnostic.source_context is not None
+    assert not isinstance(diagnostic.source_context, DiagnosticComparison)
+    assert diagnostic.source_context.source.label == str(override)
+    assert diagnostic.source_context.path == ("cdh", "git", "credentials", 0)
+
+
+def test_same_layer_canonical_credential_duplicate_omits_display_values(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + """
+
+[secrets.private]
+env = "PRIVATE_TOKEN"
+
+[[cdh.git.credentials]]
+match = "https://GitHub.com:443/acme"
+username = "first"
+password = { secret = "private" }
+
+[[cdh.git.credentials]]
+match = "https://github.com/acme/"
+username = "second"
+password = { secret = "private" }
+"""
+    )
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result(config)
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "git_credential.duplicate_match"
+    assert isinstance(diagnostic.source_context, DiagnosticComparison)
+    assert diagnostic.source_context.earlier.display_value is None
+    assert diagnostic.source_context.later.display_value is None
 
 
 # Stable diagnostic ordering lets CLI adapters report all authored failures once.
@@ -339,8 +820,15 @@ def test_invalid_toml_and_missing_file_use_short_diagnostics(tmp_path: Path) -> 
     invalid.write_text("[broken\n")
     with pytest.raises(ConfigurationServiceError) as raised:
         load_validate_config(invalid)
-    assert raised.value.diagnostics[0].code == "toml.invalid_document"
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "toml.invalid_document"
+    assert isinstance(diagnostic.source_context, SourceLocation)
+    assert diagnostic.source_context.source.label == str(invalid)
 
+    missing = tmp_path / "missing.toml"
     with pytest.raises(ConfigurationServiceError) as raised:
-        load_validate_config(tmp_path / "missing.toml")
-    assert raised.value.diagnostics[0].code == "config.file_not_found"
+        load_validate_config(missing)
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "config.file_not_found"
+    assert isinstance(diagnostic.source_context, SourceLocation)
+    assert diagnostic.source_context.source.label == str(missing)

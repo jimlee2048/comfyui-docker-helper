@@ -739,6 +739,58 @@ def test_registry_catalog_accepts_direct_list_response_and_sorts_versions() -> N
     assert [identity.version for identity in identities] == ["1.0.0", "2.0.0"]
 
 
+def test_registry_catalog_accepts_case_variant_response_and_keeps_request_id() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/nodes/Example_Node/versions"
+        return httpx.Response(
+            200,
+            request=request,
+            json={"versions": [{"node_id": "example_node", "version": "1.0.0"}]},
+        )
+
+    with _client(handler) as client:
+        identities = HttpRegistryNodeIdentityProvider(client).list_versions(
+            "Example_Node"
+        )
+
+    assert [(item.node_id, item.version) for item in identities] == [
+        ("Example_Node", "1.0.0")
+    ]
+
+
+@pytest.mark.parametrize("response_id", ["example.node", "example-node", 1, "bad/id"])
+def test_registry_catalog_rejects_non_resource_equivalent_response_id(
+    response_id: object,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={"versions": [{"node_id": response_id, "version": "1.0.0"}]},
+        )
+
+    with (
+        _client(handler) as client,
+        pytest.raises(IdentityProviderError) as raised,
+    ):
+        HttpRegistryNodeIdentityProvider(client).list_versions("example_node")
+
+    assert raised.value.kind is ProviderFailureKind.INVALID_RESPONSE
+
+
+def test_registry_catalog_rejects_invalid_request_id_before_http() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected HTTP request: {request.url}")
+
+    with (
+        _client(handler) as client,
+        pytest.raises(IdentityProviderError) as raised,
+    ):
+        HttpRegistryNodeIdentityProvider(client).list_versions("invalid/name")
+
+    assert raised.value.kind is ProviderFailureKind.INVALID_REQUEST
+
+
 def test_registry_preserves_normalized_semver_prerelease_identity() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

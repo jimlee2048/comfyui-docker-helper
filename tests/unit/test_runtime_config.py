@@ -9,6 +9,10 @@ from comfyui_docker_helper.config import (
     RuntimeConfigurationError,
     load_runtime_config,
 )
+from comfyui_docker_helper.config.diagnostics import (
+    DiagnosticComparison,
+    SourceLocation,
+)
 
 VALID_SSH_KEY = (
     "ssh-ed25519 "
@@ -208,6 +212,50 @@ download_failure_policy = "fail"
     assert result.config.cdh.download_failure_policy == "continue"
 
 
+def test_runtime_generic_merge_preserves_nested_siblings_and_sequence_resets(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        f"""
+[comfyui]
+extra_args = ["--cpu"]
+
+[cdh.downloader.aria2]
+split = 4
+min_split_size = "2M"
+
+[system.ssh]
+pub_keys = ["{VALID_SSH_KEY}"]
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[comfyui]
+extra_args = []
+
+[cdh.downloader.aria2]
+rpc_port = 6801
+
+[system.ssh]
+pub_keys = []
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+        environ={},
+    )
+
+    assert result.config.cdh.downloader.aria2.split == 4
+    assert result.config.cdh.downloader.aria2.min_split_size == "2M"
+    assert result.config.cdh.downloader.aria2.rpc_port == 6801
+    assert result.config.comfyui.extra_args == []
+    assert result.config.system.ssh.pub_keys == []
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -319,21 +367,25 @@ pub_keys = []
     assert result.config.system.ssh.pub_keys == [VALID_SSH_KEY]
 
 
-def test_ssh_pub_key_env_empty_appends_none_and_exact_duplicate_is_deduped(
+def test_ssh_pub_key_env_empty_or_same_identity_is_a_quiet_noop(
     tmp_path: Path,
 ) -> None:
     baked = _write(
         tmp_path / "baked.toml",
         f"""
 [system.ssh]
-pub_keys = ["", "{VALID_SSH_KEY}"]
+pub_keys = [
+  "",
+  "{VALID_SSH_KEY}",
+  "{VALID_SSH_KEY.rsplit(" ", 1)[0]} baked-other@example",
+]
 """,
     )
 
     duplicate = load_runtime_config(
         baked_config_path=baked,
         mounted_config_path=tmp_path / "missing-mounted.toml",
-        environ={"SSH_PUB_KEY": VALID_SSH_KEY},
+        environ={"SSH_PUB_KEY": VALID_SSH_KEY.rsplit(" ", 1)[0] + " other@example"},
     )
     empty = load_runtime_config(
         baked_config_path=baked,
@@ -461,6 +513,41 @@ def test_invalid_ssh_pub_key_env_fails_without_leaking_password(tmp_path: Path) 
         (("env", "SSH_PUB_KEY"), "env.invalid_ssh_pub_key")
     ]
     assert "env-super-secret" not in payload
+
+
+@pytest.mark.parametrize(
+    ("document", "path", "code"),
+    [
+        ('system = "invalid"\n', ("system",), "schema.model_type"),
+        ("[system]\nssh = []\n", ("system", "ssh"), "schema.model_type"),
+        (
+            "[system.ssh]\npub_keys = 1\n",
+            ("system", "ssh", "pub_keys"),
+            "schema.list_type",
+        ),
+    ],
+)
+def test_ssh_pub_key_env_does_not_bypass_effective_structure_validation(
+    tmp_path: Path,
+    document: str,
+    path: tuple[str, ...],
+    code: str,
+) -> None:
+    mounted = _write(tmp_path / "mounted.toml", document)
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={"SSH_PUB_KEY": VALID_SSH_KEY},
+        )
+
+    assert _identities(raised.value) == [(path, code)]
+    diagnostic = raised.value.diagnostics[0]
+    assert isinstance(diagnostic.source_context, SourceLocation)
+    assert diagnostic.source_context.source.label == str(mounted)
+    payload = f"{diagnostic.path} {diagnostic.code} {diagnostic.message}"
+    assert VALID_SSH_KEY not in payload
 
 
 @pytest.mark.parametrize(
@@ -714,6 +801,44 @@ filename = "model.bin"
     )
 
 
+def test_runtime_file_merge_uses_canonical_target_and_returns_canonical_dir(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/base.bin"
+dir = "models//checkpoints/"
+filename = "model.bin"
+overwrite = false
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+dir = "./models/checkpoints"
+filename = "model.bin"
+overwrite = true
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+    )
+
+    assert result.files == (
+        {
+            "url": "https://example.com/base.bin",
+            "dir": "models/checkpoints",
+            "filename": "model.bin",
+            "overwrite": True,
+        },
+    )
+
+
 def test_runtime_file_url_accepts_valid_userinfo(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
@@ -818,7 +943,7 @@ filename = ".cdh-staging"
     ]
 
 
-def test_invalid_mounted_runtime_file_after_baked_reports_authored_index(
+def test_invalid_mounted_runtime_file_after_baked_reports_effective_and_source_paths(
     tmp_path: Path,
 ) -> None:
     baked = _write(
@@ -844,8 +969,12 @@ filename = "mounted.bin"
         load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
 
     assert _identities(error.value) == [
-        (("files", 0, "url"), "runtime_file.invalid_url")
+        (("files", 1, "url"), "runtime_file.invalid_url")
     ]
+    context = error.value.diagnostics[0].source_context
+    assert isinstance(context, SourceLocation)
+    assert context.source.label == str(mounted)
+    assert context.path == ("files", 0, "url")
 
 
 def test_multiple_invalid_runtime_file_items_keep_authored_indexes(
@@ -1036,7 +1165,6 @@ downloader = "aria2"
         tmp_path / "override-mounted.toml",
         """
 [[files]]
-url = "https://example.com/mounted.bin"
 dir = "models"
 filename = "model.bin"
 overwrite = true
@@ -1050,7 +1178,7 @@ overwrite = true
 
     assert overridden.files == (
         {
-            "url": "https://example.com/mounted.bin",
+            "url": "https://example.com/baked.bin",
             "dir": "models",
             "filename": "model.bin",
             "overwrite": True,
@@ -1075,6 +1203,263 @@ filename = "baked.bin"
     )
 
     assert reset.files == ()
+
+
+def test_invalid_runtime_values_may_be_replaced_before_effective_validation(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[comfyui]
+port = 70000
+extra_args = [1]
+
+[cdh]
+default_downloader = "invalid"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[comfyui]
+port = 8288
+extra_args = []
+
+[cdh]
+default_downloader = "httpx"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+    )
+
+    assert result.config.comfyui.port == 8288
+    assert result.config.comfyui.extra_args == []
+    assert result.config.cdh.default_downloader == "httpx"
+
+
+def test_runtime_file_invalid_fields_may_be_repaired_by_later_layer(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "ftp://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+checksum = "invalid"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/model.bin"
+dir = "models"
+filename = "model.bin"
+checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+    )
+
+    assert result.files == (
+        {
+            "url": "https://example.com/model.bin",
+            "dir": "models",
+            "filename": "model.bin",
+            "checksum": (
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+        },
+    )
+
+
+def test_invalid_runtime_files_may_be_reset_before_effective_validation(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "ftp://example.com/model.bin"
+dir = "/models"
+filename = "nested/model.bin"
+""",
+    )
+    mounted = _write(tmp_path / "mounted.toml", "files = []\n")
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+    )
+
+    assert result.files == ()
+
+
+def test_runtime_file_missing_effective_url_is_attributed_to_authored_item(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [(("files", 0, "url"), "schema.missing")]
+    context = error.value.diagnostics[0].source_context
+    assert isinstance(context, SourceLocation)
+    assert context.source.label == str(mounted)
+    assert context.path == ("files", 0)
+
+
+def test_runtime_file_duplicate_targets_report_pairwise_sources(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/one.bin"
+dir = "models"
+filename = "model.bin"
+
+[[files]]
+url = "https://example.com/two.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 1, "filename"), "runtime_file.duplicate_target")
+    ]
+    context = error.value.diagnostics[0].source_context
+    assert isinstance(context, DiagnosticComparison)
+    assert context.earlier.location.path == ("files", 0, "filename")
+    assert context.later.location.path == ("files", 1, "filename")
+    assert context.earlier.display_value is None
+    assert context.later.display_value is None
+
+
+def test_three_runtime_file_duplicates_compare_first_with_each_later_item(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/one.bin"
+dir = "models"
+filename = "model.bin"
+
+[[files]]
+url = "https://example.com/two.bin"
+dir = "models"
+filename = "model.bin"
+
+[[files]]
+url = "https://example.com/three.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert [diagnostic.path for diagnostic in error.value.diagnostics] == [
+        ("files", 1, "filename"),
+        ("files", 2, "filename"),
+    ]
+    contexts = [diagnostic.source_context for diagnostic in error.value.diagnostics]
+    assert all(isinstance(context, DiagnosticComparison) for context in contexts)
+    assert [
+        (
+            context.earlier.location.path,
+            context.later.location.path,
+        )
+        for context in contexts
+        if isinstance(context, DiagnosticComparison)
+    ] == [
+        (("files", 0, "filename"), ("files", 1, "filename")),
+        (("files", 0, "filename"), ("files", 2, "filename")),
+    ]
+
+
+def test_cross_layer_runtime_file_ambiguity_preserves_authored_sources(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/base.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+url = "https://example.com/later-one.bin"
+dir = "models"
+filename = "model.bin"
+
+[[files]]
+url = "https://example.com/later-two.bin"
+dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
+
+    assert [diagnostic.path for diagnostic in error.value.diagnostics] == [
+        ("files", 1, "filename"),
+        ("files", 2, "filename"),
+    ]
+    contexts = [diagnostic.source_context for diagnostic in error.value.diagnostics]
+    assert [
+        (
+            context.earlier.location.source.label,
+            context.earlier.location.path,
+            context.later.location.source.label,
+            context.later.location.path,
+        )
+        for context in contexts
+        if isinstance(context, DiagnosticComparison)
+    ] == [
+        (str(baked), ("files", 0, "filename"), str(mounted), ("files", 0, "filename")),
+        (str(baked), ("files", 0, "filename"), str(mounted), ("files", 1, "filename")),
+    ]
 
 
 # Downloader validation keeps runtime-only backend tuning strict at load time.

@@ -46,6 +46,7 @@ classifiers = [
 dependencies = [
     "aria2p",
     "build>=1,<2",
+    "cryptography>=49",
     "docker>=7.2,<8",
     "filelock>=3.32.2,<4",
     "httpx",

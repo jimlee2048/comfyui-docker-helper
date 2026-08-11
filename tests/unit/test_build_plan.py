@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
+import tomli_w
 from pydantic import ValidationError
 from tests.build_plan_support import (
     COMMIT_B,
@@ -40,6 +42,7 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
+    DirectPythonRequestIdentity,
     UvToolLockEntry,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
@@ -49,10 +52,17 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_semantics,
     validate_final_config_structure,
 )
+from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )
 from comfyui_docker_helper.version import package_version
+
+_VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "first@example"
+)
 
 
 # BuildPlan projection binds every execution input to admitted immutable authorities.
@@ -414,6 +424,148 @@ def test_plan_bytes_digest_and_lock_order_are_deterministic() -> None:
     assert first == second
     assert dump_build_plan_json(first) == dump_build_plan_json(second)
     assert build_plan_digest(first) == build_plan_digest(second)
+
+
+@pytest.mark.parametrize(
+    ("base_requirement", "later_requirement", "expected_selector"),
+    [
+        ("NumPy>=2,<3", "numpy<3,>=2", "<3,>=2"),
+        ("NumPy", "numpy", ""),
+        ("NumPy~=2.0", "numpy~=2.0", "~=2.0"),
+    ],
+)
+def test_canonical_requirement_spelling_is_stable_from_layered_config_to_plan(
+    tmp_path: Path,
+    base_requirement: str,
+    later_requirement: str,
+    expected_selector: str,
+) -> None:
+    def load_layered(
+        stem: str,
+        base_requirement: str,
+        later_requirement: str,
+    ):
+        document = final_config().model_dump(mode="json", exclude_none=True)
+        document["python"]["extra_packages"] = [base_requirement]
+        base = tmp_path / f"{stem}-base.toml"
+        later = tmp_path / f"{stem}-later.toml"
+        base.write_text(tomli_w.dumps(document))
+        later.write_text(f'[python]\nextra_packages = ["{later_requirement}"]\n')
+        return load_validate_config_result([base, later])
+
+    first = load_layered("first", base_requirement, later_requirement)
+    second = load_layered("second", later_requirement, base_requirement)
+
+    assert first.config.python.extra_packages == [later_requirement]
+    assert second.config.python.extra_packages == [base_requirement]
+
+    resolution = accepted_resolution()
+    first_graph = request_graph(first.config, resolution)
+    second_graph = request_graph(second.config, resolution)
+    first_desired = next(
+        desired
+        for desired in first_graph.desired
+        if isinstance(desired.request, DirectPythonRequestIdentity)
+        and desired.request.group == "application-extra"
+    )
+    second_desired = next(
+        desired
+        for desired in second_graph.desired
+        if isinstance(desired.request, DirectPythonRequestIdentity)
+        and desired.request.group == "application-extra"
+    )
+    first_request = first_desired.request
+    second_request = second_desired.request
+
+    assert first_request == second_request
+    assert first_request.members[0].model_dump(mode="python") == {
+        "package": "numpy",
+        "extras": (),
+        "selector": expected_selector,
+    }
+    assert first_graph.image_config_digest == second_graph.image_config_digest
+
+    lock_document = resolution.lock.model_dump(mode="python")
+    lock_document["python"]["package_groups"]["application_extras"][
+        "request_digest"
+    ] = first_desired.request_digest
+    matching_resolution = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(lock_document),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+    first_plan = build_plan(first.config, matching_resolution)
+    second_plan = build_plan(second.config, matching_resolution)
+
+    assert first_plan == second_plan
+    assert first_plan.image_config_digest == first_graph.image_config_digest
+
+
+def test_runtime_file_directory_spelling_is_canonical_from_request_to_plan() -> None:
+    first_document = final_config().model_dump(mode="json", exclude_none=True)
+    second_document = deepcopy(first_document)
+    first_document["files"][0]["dir"] = "./models//checkpoints/"
+    second_document["files"][0]["dir"] = "models/checkpoints"
+    first_config = validate_final_config_structure(first_document)
+    second_config = validate_final_config_structure(second_document)
+    resolution = accepted_resolution()
+
+    first_graph = request_graph(first_config, resolution)
+    second_graph = request_graph(second_config, resolution)
+    first_plan = build_plan(first_config, resolution)
+    second_plan = build_plan(second_config, resolution)
+
+    assert first_graph.files == second_graph.files
+    assert first_graph.files[0].target == (
+        "/workspace/ComfyUI/models/checkpoints/model.safetensors"
+    )
+    assert first_graph.image_config_digest == second_graph.image_config_digest
+    assert first_plan == second_plan
+
+
+def test_redundant_default_package_and_ssh_key_spelling_do_not_change_plan(
+    tmp_path: Path,
+) -> None:
+    baseline_document = final_config().model_dump(mode="json", exclude_none=True)
+    baseline_document["system"]["extra_packages"] = []
+    baseline_document["system"]["ssh"]["pub_keys"] = [_VALID_SSH_KEY]
+    redundant_document = deepcopy(baseline_document)
+    redundant_document["system"]["extra_packages"] = ["bash"]
+    redundant_document["system"]["ssh"]["pub_keys"] = [
+        " ",
+        f"  {_VALID_SSH_KEY}  ",
+        _VALID_SSH_KEY.rsplit(" ", 1)[0] + " second@example",
+    ]
+    baseline_path = tmp_path / "baseline.toml"
+    redundant_path = tmp_path / "redundant.toml"
+    baseline_path.write_text(tomli_w.dumps(baseline_document))
+    redundant_path.write_text(tomli_w.dumps(redundant_document))
+
+    baseline = load_validate_config_result(baseline_path)
+    redundant = load_validate_config_result(redundant_path)
+
+    assert [item.code for item in redundant.warnings] == [
+        "ssh.redundant_public_key",
+        "system.redundant_default_apt_package",
+    ]
+    assert redundant.config.system.extra_packages == ["bash"]
+    assert len(redundant.config.system.ssh.pub_keys) == 3
+    assert redundant.domains.apt_packages == baseline.domains.apt_packages == ()
+    assert redundant.domains.ssh_public_keys == baseline.domains.ssh_public_keys
+
+    resolution = accepted_resolution()
+    baseline_graph = request_graph(baseline.config, resolution)
+    redundant_graph = request_graph(redundant.config, resolution)
+    assert redundant_graph == baseline_graph
+    assert redundant_graph.application.os_packages.count("bash") == 1
+    assert redundant_graph.runtime.ssh.pub_keys == (_VALID_SSH_KEY,)
+
+    baseline_plan = build_plan(baseline.config, resolution)
+    redundant_plan = build_plan(redundant.config, resolution)
+    assert redundant_plan == baseline_plan
+    assert redundant_plan.runtime.ssh.pub_keys == (_VALID_SSH_KEY,)
 
 
 def test_plan_round_trip_is_strict_and_immutable() -> None:
@@ -1097,6 +1249,7 @@ def test_build_plan_parser_rejects_execution_sensitive_scalar_forgery(
         ("aria2-option", "canonical aria2 argument"),
         ("ssh-password-control", "must not contain control"),
         ("ssh-public-key", "canonical and unique"),
+        ("ssh-public-key-duplicate", "canonical and unique"),
         ("launch-whitespace", "canonical argv values"),
     ],
 )
@@ -1161,6 +1314,11 @@ def test_build_plan_rejects_syntactic_but_semantic_authority_forgery(
         document["runtime"]["ssh"]["password"] = "secret\ncommand"
     elif mutation == "ssh-public-key":
         document["runtime"]["ssh"]["pub_keys"] = ("ssh-ed25519 AAAA invalid",)
+    elif mutation == "ssh-public-key-duplicate":
+        document["runtime"]["ssh"]["pub_keys"] = (
+            _VALID_SSH_KEY,
+            _VALID_SSH_KEY.rsplit(" ", 1)[0] + " second@example",
+        )
     else:
         command = document["runtime"]["launch_command"]
         document["runtime"]["launch_command"] = (*command, "   ")

@@ -159,7 +159,7 @@ cdh host render \
   --overwrite
 ```
 
-The runtime hook directory may contain only supported hook files directly under `pre-start.d/`, `post-start.d/`, and `stop.d/`. Omitting the option bakes no runtime hook tree. Mounted runtime hooks are separate deployment-time inputs; see the [runtime guide](runtime.md) and [runtime-hook examples](../../examples/runtime-hooks/).
+Only direct regular `.sh` and `.py` files under `pre-start.d/`, `post-start.d/`, and `stop.d/` are selected and baked. Other ordinary files and directories are ignored without recursion and produce aggregated warnings; unsafe filesystem entries and source inspection/read failures remain errors. Omitting the option bakes no runtime hook tree. Mounted runtime hooks are separate deployment-time inputs; see the [runtime guide](runtime.md) and [runtime-hook examples](../../examples/runtime-hooks/).
 
 ## From effective configuration to a context
 

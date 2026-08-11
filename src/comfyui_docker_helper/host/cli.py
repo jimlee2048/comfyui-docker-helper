@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -13,6 +14,9 @@ from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.config.build_plan import git_credential_secret_ids
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
+from comfyui_docker_helper.config.git_credentials import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
+)
 from comfyui_docker_helper.config.publication_tags import (
     static_release_availability,
     validate_publication_tags,
@@ -24,14 +28,14 @@ from comfyui_docker_helper.config.service import (
 )
 from comfyui_docker_helper.config.value_validation import is_argv_value
 from comfyui_docker_helper.host.buildx import (
+    BuildxBuildError,
     BuildxOutput,
     FileSecretBinding,
     build_image_with_buildx,
 )
 from comfyui_docker_helper.host.diagnostics import (
-    render_configuration_diagnostics,
-    render_configuration_warnings,
-    render_plan_preview,
+    HostPresenter,
+    default_host_presenter,
 )
 from comfyui_docker_helper.host.planning_authority import default_planning_providers
 from comfyui_docker_helper.host.release_wheel import CanonicalWheelError
@@ -87,17 +91,16 @@ def validate(
 ) -> None:
     """Validate configuration locally without network access, Docker, or writes."""
     config_files = _require_at_least_one(config_files, "--file/-f")
+    presenter = default_host_presenter()
     try:
         result = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
         )
     except ConfigurationServiceError as error:
-        render_configuration_diagnostics(
-            _format_config_files(config_files),
-            error.diagnostics,
-        )
+        presenter.diagnostics("Configuration is invalid", error.diagnostics)
         raise typer.Exit(code=1) from error
-    render_configuration_warnings(_format_config_files(config_files), result.warnings)
+    presenter.warnings(result.warnings)
+    presenter.validate_success(config_files)
 
 
 @app.command("render", context_settings=HELP_CONTEXT_SETTINGS)
@@ -180,6 +183,7 @@ def render(
 
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
+    presenter = default_host_presenter()
     try:
         options = PlanningOptions(
             locked=locked,
@@ -190,9 +194,7 @@ def render(
         validated = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
         )
-        render_configuration_warnings(
-            _format_config_files(config_files), validated.warnings
-        )
+        presenter.warnings(validated.warnings)
         build_hook_source_root = admit_build_hook_source(
             validated,
             build_hooks_dir,
@@ -217,36 +219,33 @@ def render(
                         overwrite=overwrite,
                         working_directory=Path.cwd(),
                     )
-                render_configuration_warnings(
-                    _format_config_files(config_files),
-                    secret_session.drain_warnings(),
-                )
+                presenter.warnings(prepared.warnings)
+                presenter.warnings(secret_session.drain_warnings())
         finally:
-            render_configuration_warnings(
-                _format_config_files(config_files), secret_session.drain_warnings()
-            )
-    except (
-        CanonicalWheelError,
-        ConfigurationServiceError,
-        HostRenderServiceError,
-    ) as error:
-        render_configuration_diagnostics(
-            _format_config_files(config_files),
-            error.diagnostics,
-        )
+            presenter.warnings(secret_session.drain_warnings())
+    except ConfigurationServiceError as error:
+        presenter.diagnostics("Configuration is invalid", error.diagnostics)
+        raise typer.Exit(code=1) from error
+    except (CanonicalWheelError, HostRenderServiceError) as error:
+        presenter.diagnostics("Unable to render build context", error.diagnostics)
         raise typer.Exit(code=1) from error
     except HostSecretSessionError as error:
-        _render_secret_session_failure(config_files, error)
+        _render_secret_session_failure(presenter, error)
         raise typer.Exit(code=1) from error
 
     if dry_run:
-        render_plan_preview(
+        presenter.plan_preview(
             prepared.plan,
             lock_result=prepared.lock_result,
             options=options,
             output_plan=prepared.output_plan,
         )
         return
+    presenter.render_success(
+        output_dir,
+        options=options,
+        lock_changed=prepared.lock_result.changed,
+    )
 
 
 @app.command("build", context_settings=HELP_CONTEXT_SETTINGS)
@@ -368,26 +367,26 @@ def build(
     cache_to = _admit_single_cache_spec(cache_to_specs or [], "--cache-to")
     cli_tags = image_tags or []
     cli_output = _resolve_cli_build_output(load=load, push=push)
+    presenter = default_host_presenter()
 
     try:
         validated = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
         )
     except ConfigurationServiceError as error:
-        render_configuration_diagnostics(
-            _format_config_files(config_files),
-            error.diagnostics,
-        )
+        presenter.diagnostics("Configuration is invalid", error.diagnostics)
         raise typer.Exit(code=1) from error
-    render_configuration_warnings(
-        _format_config_files(config_files), validated.warnings
-    )
+    presenter.warnings(validated.warnings)
     effective_tags = _resolve_effective_image_tags(
         cli_tags=cli_tags,
         config_tags=validated.config.build.tags,
         comfyui_selector=validated.config.comfyui.version,
     )
-    use_ssh = _prepare_build_ssh_input(requested=ssh, result=validated)
+    use_ssh = _prepare_build_ssh_input(
+        requested=ssh,
+        result=validated,
+        presenter=presenter,
+    )
     effective_output = cli_output or validated.config.build.output
 
     try:
@@ -416,10 +415,8 @@ def build(
                         overwrite=True,
                         working_directory=Path.cwd(),
                     )
-                render_configuration_warnings(
-                    _format_config_files(config_files),
-                    secret_session.drain_warnings(),
-                )
+                presenter.warnings(prepared.warnings)
+                presenter.warnings(secret_session.drain_warnings())
                 credential_bindings = tuple(
                     FileSecretBinding(
                         secret_id,
@@ -429,26 +426,28 @@ def build(
                         prepared.plan.custom_nodes
                     )
                 )
-                render_configuration_warnings(
-                    _format_config_files(config_files),
-                    secret_session.drain_warnings(),
-                )
+                presenter.warnings(secret_session.drain_warnings())
 
                 known_hosts_bindings = (
                     _collect_default_known_hosts_bindings() if use_ssh else ()
                 )
 
-                typer.echo(f"Build context: {context_dir}")
                 buildx_output = prepared.output_plan
                 if buildx_output is None:  # pragma: no cover
                     raise RuntimeError("host build requires a Buildx output plan")
+                platforms = (prepared.plan.toolchain.platform,)
+                presenter.build_start(
+                    context_dir,
+                    output_plan=buildx_output,
+                    platforms=platforms,
+                )
                 build_image_with_buildx(
                     image_tags=buildx_output.tags,
                     output=buildx_output.output,
                     context_dir=context_dir,
-                    platforms=(prepared.plan.toolchain.platform,),
+                    platforms=platforms,
                     cwd=Path.cwd(),
-                    log=typer.echo,
+                    log=_write_external_build_line,
                     forward_default_ssh=use_ssh,
                     file_secret_bindings=(
                         *credential_bindings,
@@ -457,23 +456,21 @@ def build(
                     cache_from=cache_from,
                     cache_to=cache_to,
                 )
+                presenter.build_complete(output_plan=buildx_output)
         finally:
-            render_configuration_warnings(
-                _format_config_files(config_files), secret_session.drain_warnings()
-            )
-    except (
-        CanonicalWheelError,
-        ConfigurationServiceError,
-        HostRenderServiceError,
-    ) as error:
-        render_configuration_diagnostics(
-            _format_config_files(config_files),
-            error.diagnostics,
-        )
+            presenter.warnings(secret_session.drain_warnings())
+    except ConfigurationServiceError as error:
+        presenter.diagnostics("Configuration is invalid", error.diagnostics)
+        raise typer.Exit(code=1) from error
+    except (CanonicalWheelError, HostRenderServiceError) as error:
+        presenter.diagnostics("Unable to prepare image build", error.diagnostics)
         raise typer.Exit(code=1) from error
     except HostSecretSessionError as error:
-        _render_secret_session_failure(config_files, error)
+        _render_secret_session_failure(presenter, error)
         raise typer.Exit(code=1) from error
+    except BuildxBuildError as error:
+        presenter.failure("Image build failed", str(error))
+        raise typer.Exit(code=error.exit_code) from error
 
 
 def _planning_providers(secret_session: HostSecretSession):
@@ -483,16 +480,36 @@ def _planning_providers(secret_session: HostSecretSession):
     return default_planning_providers(git_credential_binding=binding)
 
 
+def _write_external_build_line(message: str) -> None:
+    """Forward one library-yielded BuildKit line without presentation filtering."""
+    sys.stdout.write(f"{message}\n")
+    sys.stdout.flush()
+
+
 def _render_secret_session_failure(
-    config_files: list[Path], error: HostSecretSessionError
+    presenter: HostPresenter,
+    error: HostSecretSessionError,
 ) -> None:
-    render_configuration_diagnostics(
-        _format_config_files(config_files),
+    messages = {
+        "environment_unavailable": "the configured environment source is unavailable",
+        "source_unavailable": "the configured source is unavailable",
+        "invalid_value": (
+            "the configured Git credential value must be non-empty, no more than "
+            f"{GIT_CREDENTIAL_VALUE_MAX_BYTES:,} bytes, and contain no NUL, carriage "
+            "return, or newline characters"
+        ),
+        "session_create_failed": "the private Secret session could not be created",
+        "snapshot_failed": "the configured Secret could not be prepared",
+        "cleanup_failed": "the private Secret session could not be cleaned up",
+    }
+    path = ("secrets",) if error.secret_name is None else ("secrets", error.secret_name)
+    presenter.diagnostics(
+        "Unable to access configured secrets",
         (
             Diagnostic(
-                ("secrets",),
+                path,
                 f"secret.{error.code}",
-                str(error),
+                messages.get(error.code, "the private Secret session failed"),
             ),
         ),
     )
@@ -502,6 +519,7 @@ def _prepare_build_ssh_input(
     *,
     requested: bool,
     result: ConfigurationResult,
+    presenter: HostPresenter,
 ) -> bool:
     if not requested:
         return False
@@ -509,10 +527,9 @@ def _prepare_build_ssh_input(
         isinstance(node, FinalGitCustomNodeConfig)
         for node in result.config.comfyui.custom_nodes
     ):
-        typer.echo(
-            "Warning: --ssh ignored because the effective configuration has no "
-            "direct-Git custom nodes.",
-            err=True,
+        presenter.warning(
+            "--ssh ignored because the effective configuration has no direct-Git "
+            "custom nodes"
         )
         return False
     # Native Windows has no POSIX socket environment contract. Keep BuildKit's
@@ -610,12 +627,6 @@ def _validate_cli_image_tags(tags: list[str], *, comfyui_selector: str) -> None:
     if issues:
         first = issues[0]
         raise typer.BadParameter(
-            f"tag {first.index + 1}: {first.message} ({first.code})",
+            f"tag {first.index + 1}: {first.message}",
             param_hint="--tag/-t",
         )
-
-
-def _format_config_files(config_files: list[Path]) -> str | Path:
-    if len(config_files) == 1:
-        return config_files[0]
-    return ", ".join(str(path) for path in config_files)

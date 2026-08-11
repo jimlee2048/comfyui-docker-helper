@@ -22,6 +22,10 @@ built-in defaults < baked config < mounted config < environment
 
 运行时配置包括 ComfyUI 的 `listen`、`port` 和 `extra_args`；cdh 下载设置；`system.ssh`；以及 `files`。运行时 TOML 文件中已知的仅限主机端字段会被忽略并产生警告。未知或其他不受支持的运行时字段会导致启动失败，而不会被静默接受。挂载的运行时文件无法安装软件包、更改选定的 ComfyUI 检出版本，也无法重新构建镜像。
 
+每个 TOML 来源会先完成解析和运行时适用性检查。剩余的受支持值随后与默认值及环境覆盖合并，最后由 cdh 校验生成的生效运行时文档。因此，靠后的局部条目可以从靠前层继承省略的字段，但无效的最终结果仍会带来源上下文使启动失败。
+
+普通运行时数组采用整列表替换：省略会继承靠前列表，靠后的非空列表会完整替换它，靠后的空列表会将其清空。这适用于 `comfyui.extra_args` 和 TOML 中的 `system.ssh.pub_keys`。`SSH_PUB_KEY` 是特意保留的追加例外。其他层合并后，cdh 会按声明的密钥类型与 base64 密钥 blob 对生效公钥进行稳定去重，并保留先出现的完整规范化行及其可选注释。因此，当 `SSH_PUB_KEY` 的密钥身份已存在时，即使注释不同也会静默地不做任何更改；否则 cdh 会追加其规范化行。
+
 支持的环境变量覆盖项如下：
 
 - `CDH_COMFYUI_LISTEN`、`CDH_COMFYUI_PORT` 和 `CDH_COMFYUI_EXTRA_ARGS`；
@@ -34,7 +38,7 @@ built-in defaults < baked config < mounted config < environment
 
 ## 文件、下载与持久状态
 
-主机端的 `[[files]]` 声明会成为固化到镜像中的运行时默认配置。容器启动时，固化和挂载的文件列表以规范化后的 `dir` 加 `filename` 为键进行合并；后续分层中的 `files = []` 会清空之前的列表。每个目标都相对于 `COMFYUI_PATH`。
+主机端的 `[[files]]` 声明会成为固化到镜像中的运行时默认配置。容器启动时，固化和挂载的文件列表以规范化后的 `dir` 加 `filename` 为键进行合并。在比较 identity 前，多余的 `/`、`.` 路径段和末尾 `/` 会被规范化；`.` 与 `./` 表示 `COMFYUI_PATH` 根目录本身。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。生效条目必须包含 URL，重复或无效的生效目标会在合并后失败。每个目标都相对于 `COMFYUI_PATH`，绝对路径和任何明确写出的 `..` 路径段仍然无效。
 
 同步下载会在 pre-start Hook 之前完成。异步下载会在 ComfyUI 启动前被接收到一个后台队列中，并且可以在 ComfyUI 运行期间继续；它们不会阻塞 ComfyUI readiness。
 
@@ -70,7 +74,13 @@ SSH 提供选择性启用的 root 访问，默认处于禁用状态。可在运�
 
 应优先在容器启动时提供 `SSH_PUB_KEY` 或 `SSH_PASSWORD`，而不是将凭据固化到镜像中。`SSH_PUB_KEY` 会向配置的密钥集合追加一个规范化后的公钥。启用 SSH 时，容器会在启动期间生成自己的主机密钥；由 cdh 构建的镜像不会共享软件包生成的主机密钥。
 
+运行时公钥采用[配置指南](configuration.zh-CN.md#对配置进行分层)所述的相同普通行语法和受支持安全密钥算法。不接受 `authorized_keys` options 前缀。
+
 cdh 以前台方式启动 sshd，并负责其启动、监控和关闭。如果 sshd 在 ComfyUI 启动后意外退出，cdh 会发出警告，但不会停止 ComfyUI。配置的 SSH 端口是容器内部的端口；主机端口发布和网络暴露由 Docker 或部署平台负责。
+
+cdh 创建 `/root/.ssh` 和 `authorized_keys` 时会分别使用 `0700` 和 `0600`。现有 `.ssh` 目录在由 root 拥有且同组用户和其他用户均不可写时可被接受；安全但不是 `0700` 的权限会原样保留并产生警告。该目录仍须实际允许 cdh 创建临时文件并执行原子替换；只读挂载、访问控制或 Linux capability 限制以及其他 I/O 失败仍会导致启动失败。现有由 root 拥有的普通 `authorized_keys` 文件在同组用户和其他用户均不可写时可被替换；安全但不是 `0600` 的权限会产生警告，而原子替换后的新文件仍为 `0600`。所有者不正确、同组用户或其他用户可写、符号链接和特殊文件也仍会导致启动失败。
+
+原子替换会改变 `authorized_keys` inode。直接绑定挂载（bind mount）该文件的部署可能拒绝替换；应以安全权限挂载父 `.ssh` 目录，或改为通过运行时配置提供密钥。cdh 不会回退为原地写入凭据。
 
 root SSH 会扩大容器的攻击面。应相应地保护配置、环境变量值、渲染上下文、镜像产物、注册表、日志和运行时访问。cdh 会避免打印明确提供的 SSH 密码，并将自己的临时凭据保持在内部，但它不会猜测任意 TOML 值、URL、参数或环境变量是否属于秘密。
 
@@ -86,7 +96,7 @@ post-start.d/
 stop.d/
 ```
 
-阶段目录中的 Hook 条目必须是常规 `.sh` 或 `.py` 文件。Shell Hook 使用 `bash` 运行；Python Hook 使用托管的应用程序 Python。Hook 会接收容器运行时环境，并以 `COMFYUI_PATH` 作为工作目录。
+只有直接位于阶段目录中的普通 `.sh` 或 `.py` 文件会被选为 Hook。其他后缀的普通文件和普通目录会在不递归遍历的情况下被忽略，并按来源和阶段产生聚合后的简明警告。symlink、特殊文件、检查/读取失败和无效的已知阶段路径仍会导致启动失败。Shell Hook 使用 `bash` 运行；Python Hook 使用托管的应用程序 Python。Hook 会接收容器运行时环境，并以 `COMFYUI_PATH` 作为工作目录。
 
 固化的 Hook 是位于 `/opt/cdh/runtime/hooks` 下经过选择和内容验证的镜像输入。你还可以在 `/etc/cdh/runtime/hooks` 挂载部署 Hook；挂载的 Hook 仍是外部运行时输入，不属于镜像 lock。固化的 Hook 先于挂载的 Hook 运行；在每个来源和阶段内，文件名按字典序运行。
 

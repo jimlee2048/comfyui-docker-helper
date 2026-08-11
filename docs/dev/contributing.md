@@ -107,10 +107,21 @@ The required validation depth depends on the changed risk. Do not treat a high-c
 - Use strict, precisely typed Pydantic models at structured configuration, validation, and serialization boundaries. Prefer precise field types, `Literal`, and discriminated or explicit unions over broad `dict`, `object`, or `Any`.
 - Use explicit typed fields for parent control flow instead of probing child objects with arbitrary `getattr(..., default)` calls.
 - Pass only the narrow data a module owns; avoid broad context objects unless the callee owns that responsibility.
-- Keep CLI errors, warnings, and information short, user-readable, and actionable; remove noisy or misleading messages instead of adding logging.
 - Remove dead fallbacks, migration paths, unused options, debug prints, and unreachable code when a newer authority replaces them.
 
 Comments should explain intent or a non-obvious constraint, not restate the code. Tests should protect the current behavior contract; follow the [testing handbook](../../tests/README.md) when placing or removing coverage.
+
+### CLI presentation
+
+`cdh host validate`, `cdh host render`, and `cdh host build` share a host-owned operator presenter. Determine interactivity independently for the actual stdout and stderr destinations. Stdout carries successful command results, explicit plan output, and cdh-owned framing around a build; stderr carries warnings and expected failures. Ordinary successful validate and render commands remain silent when their result stream is non-interactive unless the command explicitly owns output, with the exit status remaining authoritative.
+
+An interactive destination may use Rich styling and terminal-aware layout. cdh-owned output to a non-interactive destination must be plain and free of ANSI controls. `NO_COLOR` disables cdh-owned color without changing semantic content or stream ownership. Exact colors, glyphs, wrapping, and complete wording are presentation details rather than durable contracts.
+
+Keep human diagnostics concise, actionable, and appropriate to the command that failed. Stable diagnostic codes remain structured internal data and are omitted from default human output. Render untrusted paths, labels, fields, messages, hints, and producer-approved values as literal, control-safe text. Do not recover display data from raw configuration or arbitrary exception chains, and never expose resolved Secret values, Secret source locators, or other unapproved sensitive content.
+
+Typer owns help, usage, option parsing, and parameter-error presentation. When a host command explicitly exposes an operator-facing live external stream, that stream remains unparsed, unstyled, and unprefixed on its established channel; the current example is BuildKit's unified stdout. cdh may frame such a stream but does not rewrite it, so cdh's ANSI-free and `NO_COLOR` guarantees do not extend to controls emitted by the external process itself. Captured provider or protocol output remains owned by its adapter and may be bounded, parsed, and converted into controlled diagnostics instead of being forwarded. Image-internal `cdh container` commands retain their simple plain execution and logging protocols rather than using the host operator presenter; output from their child processes remains owned by the corresponding execution path.
+
+Test these rules through semantic content, stream ownership, terminal capability, and safety boundaries. Avoid snapshots or assertions that freeze exact decoration, spacing, line wrapping, colors, glyphs, or complete messages.
 
 ## Documentation
 

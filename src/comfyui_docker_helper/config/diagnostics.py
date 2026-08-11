@@ -1,10 +1,45 @@
 """Stable diagnostics shared by configuration validation stages."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 type DiagnosticPathPart = str | int
 type DiagnosticPath = tuple[DiagnosticPathPart, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceReference:
+    """One ordered configuration input with a user-supplied display label."""
+
+    layer_ordinal: int
+    label: str = field(compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class SourceLocation:
+    """An authored semantic path within one configuration input."""
+
+    source: SourceReference
+    path: DiagnosticPath
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticComparisonSite:
+    """One producer-ordered conflict participant with an approved safe value."""
+
+    location: SourceLocation
+    display_value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticComparison:
+    """Two symmetric authored sites ordered by the diagnostic producer."""
+
+    earlier: DiagnosticComparisonSite
+    later: DiagnosticComparisonSite
+
+
+type DiagnosticSourceContext = SourceLocation | DiagnosticComparison
 
 
 class DiagnosticSeverity(StrEnum):
@@ -22,6 +57,8 @@ class Diagnostic:
     code: str
     message: str
     severity: DiagnosticSeverity = DiagnosticSeverity.ERROR
+    source_context: DiagnosticSourceContext | None = None
+    hint: str | None = None
 
 
 class DiagnosticError(Exception):

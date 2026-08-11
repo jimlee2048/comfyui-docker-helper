@@ -1,6 +1,8 @@
 """Shared runtime file validation helpers."""
 
+from collections.abc import Mapping
 from pathlib import PurePosixPath
+from typing import Any
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.url_validation import (
@@ -10,6 +12,26 @@ from comfyui_docker_helper.config.url_validation import (
 )
 
 type RuntimeFilePath = tuple[str | int, ...]
+
+
+def runtime_file_target_identity(item: Any) -> tuple[str, ...] | None:
+    """Return a pure merge key for one currently valid raw runtime file target."""
+    if not isinstance(item, Mapping):
+        return None
+    directory = item.get("dir")
+    filename = item.get("filename")
+    if not isinstance(directory, str) or not isinstance(filename, str):
+        return None
+    diagnostics: list[Diagnostic] = []
+    normalized = normalize_runtime_file_path(
+        directory,
+        filename,
+        ("files", 0),
+        diagnostics,
+    )
+    if normalized is None:
+        return None
+    return ("runtime-file", normalized[1])
 
 
 def validate_runtime_file_url(

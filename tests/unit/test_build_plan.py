@@ -503,6 +503,28 @@ def test_canonical_requirement_spelling_is_stable_from_layered_config_to_plan(
     assert first_plan.image_config_digest == first_graph.image_config_digest
 
 
+def test_runtime_file_directory_spelling_is_canonical_from_request_to_plan() -> None:
+    first_document = final_config().model_dump(mode="json", exclude_none=True)
+    second_document = deepcopy(first_document)
+    first_document["files"][0]["dir"] = "./models//checkpoints/"
+    second_document["files"][0]["dir"] = "models/checkpoints"
+    first_config = validate_final_config_structure(first_document)
+    second_config = validate_final_config_structure(second_document)
+    resolution = accepted_resolution()
+
+    first_graph = request_graph(first_config, resolution)
+    second_graph = request_graph(second_config, resolution)
+    first_plan = build_plan(first_config, resolution)
+    second_plan = build_plan(second_config, resolution)
+
+    assert first_graph.files == second_graph.files
+    assert first_graph.files[0].target == (
+        "/workspace/ComfyUI/models/checkpoints/model.safetensors"
+    )
+    assert first_graph.image_config_digest == second_graph.image_config_digest
+    assert first_plan == second_plan
+
+
 def test_redundant_default_package_and_ssh_key_spelling_do_not_change_plan(
     tmp_path: Path,
 ) -> None:

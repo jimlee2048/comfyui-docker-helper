@@ -265,6 +265,18 @@ def test_runtime_plan_projects_order_targets_modes_and_checksum(tmp_path: Path) 
     assert plan.items[0].target == root / "models" / "a.bin"
 
 
+def test_runtime_plan_supports_a_file_in_the_comfyui_root(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    item = _file("root.bin")
+    item["dir"] = "./"
+
+    planned = _plan(root, item).items[0]
+
+    assert planned.directory == "."
+    assert planned.relative_target == "root.bin"
+    assert planned.target == root / "root.bin"
+
+
 # Transfer identity follows the requested bytes and destination, while execution
 # policies remain outside the resumable staging identity.
 def test_runtime_transfer_identity_tracks_source_target_and_checksum_only(

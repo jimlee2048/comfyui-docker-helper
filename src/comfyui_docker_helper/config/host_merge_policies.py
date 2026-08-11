@@ -24,6 +24,9 @@ from comfyui_docker_helper.config.requirement_validation import (
     DirectRequirementError,
     parse_direct_requirement,
 )
+from comfyui_docker_helper.config.runtime_file_validation import (
+    runtime_file_target_identity,
+)
 
 
 def _apt_package_key(item: Any) -> MergeKey | None:
@@ -66,13 +69,7 @@ def _custom_node_key(item: Any) -> MergeKey | None:
 
 
 def _file_key(item: Any) -> MergeKey | None:
-    if not isinstance(item, Mapping):
-        return None
-    directory = item.get("dir")
-    filename = item.get("filename")
-    if isinstance(directory, str) and isinstance(filename, str):
-        return ("file", directory, filename)
-    return None
+    return runtime_file_target_identity(item)
 
 
 def _git_credential_key(item: Any) -> MergeKey | None:

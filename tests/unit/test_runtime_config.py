@@ -801,6 +801,44 @@ filename = "model.bin"
     )
 
 
+def test_runtime_file_merge_uses_canonical_target_and_returns_canonical_dir(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        """
+[[files]]
+url = "https://example.com/base.bin"
+dir = "models//checkpoints/"
+filename = "model.bin"
+overwrite = false
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+dir = "./models/checkpoints"
+filename = "model.bin"
+overwrite = true
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+    )
+
+    assert result.files == (
+        {
+            "url": "https://example.com/base.bin",
+            "dir": "models/checkpoints",
+            "filename": "model.bin",
+            "overwrite": True,
+        },
+    )
+
+
 def test_runtime_file_url_accepts_valid_userinfo(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",

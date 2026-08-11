@@ -22,9 +22,6 @@ class RelativeDirectoryValidationResult:
     code: (
         Literal[
             "absolute_directory",
-            "trailing_slash",
-            "empty_directory_segment",
-            "current_directory_segment",
             "parent_directory_segment",
             "empty_directory",
             "control_character",
@@ -90,25 +87,12 @@ def validate_relative_file_directory(value: str) -> RelativeDirectoryValidationR
             "absolute_directory",
             "must be relative",
         )
-    if value.endswith("/"):
-        return RelativeDirectoryValidationResult(
-            None,
-            "trailing_slash",
-            "must not end with a slash",
-        )
-
     parts = value.split("/")
-    if not value or any(part == "" for part in parts):
+    if not value:
         return RelativeDirectoryValidationResult(
             None,
-            "empty_directory_segment",
-            "must not contain empty path segments",
-        )
-    if any(part == "." for part in parts):
-        return RelativeDirectoryValidationResult(
-            None,
-            "current_directory_segment",
-            "must not contain '.'",
+            "empty_directory",
+            "must not be empty",
         )
     if any(part == ".." for part in parts):
         return RelativeDirectoryValidationResult(
@@ -118,12 +102,6 @@ def validate_relative_file_directory(value: str) -> RelativeDirectoryValidationR
         )
 
     normalized = PurePosixPath(posixpath.normpath(value))
-    if normalized == PurePosixPath("."):
-        return RelativeDirectoryValidationResult(
-            None,
-            "empty_directory",
-            "must not be empty",
-        )
     return RelativeDirectoryValidationResult(normalized, None)
 
 

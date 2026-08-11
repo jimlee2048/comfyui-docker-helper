@@ -623,7 +623,10 @@ def _validate_effective_runtime_files(
                         ),
                     )
                 )
-        documents.append(item.model_dump(mode="json", exclude_none=True))
+        document = item.model_dump(mode="json", exclude_none=True)
+        if normalized is not None:
+            document["dir"] = normalized[0].as_posix()
+        documents.append(document)
 
     if diagnostics:
         raise RuntimeConfigurationError(

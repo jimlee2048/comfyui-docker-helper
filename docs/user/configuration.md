@@ -29,7 +29,7 @@ Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recur
 - `system.extra_packages` uses the admitted Debian package name;
 - `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, and canonical selector representation;
 - `comfyui.custom_nodes` uses a lowercase-only Registry resource ID or the exact direct-Git URL;
-- `files` uses the `dir` plus `filename` target; and
+- `files` uses the normalized `dir` plus `filename` target; and
 - `cdh.git.credentials` uses the canonical credential context represented by `match`.
 
 For package collections, a new identity appends in first-occurrence order. An exact Debian package repeated across uniquely keyed layers is kept once. If an effective `system.extra_packages` item is already in cdh's default OS package set, cdh warns at its source and omits the redundant item from the effective installation request. Duplicates authored together in one user-owned list remain errors. A Python requirement is deduplicated across layers only when the complete canonical requirement is equal; cdh does not infer general range equivalence. Requirements for the same normalized distribution that differ in extras or selectors remain visible so effective validation can report the conflict. Duplicates authored in one layer likewise remain visible for validation. A later empty list resets the corresponding collection.
@@ -39,6 +39,8 @@ For package collections, a new identity appends in first-occurrence order. An ex
 Registry ID case variants identify the same resource and overlay at the original position, with the later authored spelling becoming effective. Punctuation variants remain different Registry resources. If such resources map to the same normalized installed Python distribution identity, effective validation reports that collision instead of choosing one.
 
 Canonically equivalent credential contexts identify the same route even when their raw `match` strings differ. A later route atomically replaces the complete earlier route at its original position; route fields never merge individually. Ambiguous duplicates authored in one layer remain invalid. A later `credentials = []`, `custom_nodes = []`, or `files = []` resets that collection. Each `[secrets.<name>]` table is also an atomic source definition, so a later layer can replace `env` with `file` without retaining the old field. Strict structure, uniqueness, and cross-field rules are checked after all layers have produced the effective configuration.
+
+For `[[files]]`, cdh treats redundant `/`, `.` path segments, and a trailing `/` as alternate spellings of the same directory. For example, `models//checkpoints/` is canonicalized to `models/checkpoints`. Use `dir = "."` or `dir = "./"` to place a file directly in the ComfyUI root. Empty and absolute directories, control characters, and every authored `..` segment remain invalid.
 
 For example, save this as `local.toml` to disable comfy-cli and remove the nodes and files selected by the full example:
 

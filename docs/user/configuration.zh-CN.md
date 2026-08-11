@@ -36,6 +36,8 @@ cdh host validate \
 
 `system.ssh.pub_keys` 在 TOML 层之间仍采用普通的整列表替换：省略会继承，靠后的非空列表会替换，`[]` 会清空。选出最终生效列表后，cdh 会裁剪每行首尾空白、丢弃空值，并按声明的密钥类型加 base64 密钥 blob 进行稳定去重。它会保留第一条规范化后的完整行及其可选注释。之后每个非空重复项都会产生带来源的警告，且警告不会打印密钥内容。
 
+请从标准 OpenSSH 工具生成的 `.pub` 输出中复制普通公钥行作为公钥值，不要包含 `authorized_keys` options 前缀。支持由认证器托管的 Ed25519 和 ECDSA P-256 密钥（`sk-ssh-ed25519@openssh.com` 和 `sk-ecdsa-sha2-nistp256@openssh.com`）。OpenSSH 证书以及 `restrict`、`from=`、`command=` 等 options 不属于可接受的配置语法。
+
 Registry ID 的大小写变体表示同一资源，并在原位置覆盖，靠后编写的拼写最终生效。标点符号变体仍是不同的 Registry 资源；如果这些资源映射到同一个规范化的已安装 Python 分发包标识，生效配置校验会报告冲突，而不会擅自选择其中一个。
 
 即使原始 `match` 字符串不同，canonical 等价的 credential context 也表示同一路由。靠后的路由会在原位置原子替换完整的靠前路由；路由字段不会逐字段合并。同一层中存在歧义的重复 route 仍然无效。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子来源定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。

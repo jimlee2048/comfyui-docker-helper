@@ -10,17 +10,6 @@ from pathlib import Path
 import pytest
 import tomli_w
 from pydantic import ValidationError
-from tests.build_plan_support import (
-    COMMIT_B,
-    DIGEST_A,
-    DIGEST_B,
-    DIGEST_C,
-    accepted_resolution,
-    build_plan,
-    canonical_wheel,
-    final_config,
-    request_graph,
-)
 
 from comfyui_docker_helper.config import canonical_request as canonical_request_module
 from comfyui_docker_helper.config.build_plan import (
@@ -57,6 +46,17 @@ from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )
 from comfyui_docker_helper.version import package_version
+from tests.build_plan_support import (
+    COMMIT_B,
+    DIGEST_A,
+    DIGEST_B,
+    DIGEST_C,
+    accepted_resolution,
+    build_plan,
+    canonical_wheel,
+    final_config,
+    request_graph,
+)
 
 _VALID_SSH_KEY = (
     "ssh-ed25519 "

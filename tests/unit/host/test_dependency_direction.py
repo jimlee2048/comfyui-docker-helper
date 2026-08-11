@@ -3,8 +3,10 @@
 import ast
 from pathlib import Path
 
+from tests.project_paths import PROJECT_ROOT
+
 PACKAGE_NAME = "comfyui_docker_helper"
-SOURCE_ROOT = Path(__file__).parents[2] / "src" / "comfyui_docker_helper"
+SOURCE_ROOT = PROJECT_ROOT / "src" / "comfyui_docker_helper"
 FORBIDDEN_COMPONENTS = {
     "config": frozenset({"host", "rendering", "container"}),
     "rendering": frozenset({"host", "container"}),

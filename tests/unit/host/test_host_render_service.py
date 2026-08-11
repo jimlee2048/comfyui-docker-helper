@@ -1412,6 +1412,7 @@ def test_runtime_hook_change_add_delete_obey_all_no_write_modes(tmp_path: Path) 
     assert not (output / "runtime/hooks/pre-start.d/11-added.py").exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX FIFO")
 def test_runtime_hook_tree_rejects_symlinks_and_special_files(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
@@ -1909,7 +1910,20 @@ def test_context_parent_filesystem_failure_is_stable_render_diagnostic(
 
 
 # Check mode compares the complete path, content, and executable-mode result.
-@pytest.mark.parametrize("mutation", ["extra-dir", "missing-dir", "symlink", "special"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "extra-dir",
+        "missing-dir",
+        "symlink",
+        pytest.param(
+            "special",
+            marks=pytest.mark.skipif(
+                os.name != "posix", reason="requires a POSIX FIFO"
+            ),
+        ),
+    ],
+)
 def test_check_compares_complete_path_type_and_bytes_without_following(
     tmp_path: Path,
     mutation: str,

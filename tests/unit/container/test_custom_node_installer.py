@@ -9,13 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
-from comfyui_docker_helper.comfyui_requirements import ParsedComfyUIRequirements
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     CustomNodePlan,
-    CustomNodesPhase,
     GitCredentialRoutePlan,
     GitNodePlan,
     HookPlan,
@@ -30,6 +27,15 @@ from comfyui_docker_helper.container.custom_node_installer import (
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
+)
+from tests.container_installer_support import (
+    application as _application,
+)
+from tests.container_installer_support import (
+    custom_nodes_phase as _phase,
+)
+from tests.container_installer_support import (
+    patch_phases as _patch_phases,
 )
 
 
@@ -90,23 +96,6 @@ def _hook_digest(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
-def _application(tmp_path: Path) -> tuple[ApplicationPhase, ContainerRuntime]:
-    plan = build_plan(final_config(), accepted_resolution())
-    workspace = tmp_path / "workspace"
-    comfyui = workspace / "ComfyUI"
-    comfyui.joinpath("custom_nodes").mkdir(parents=True)
-    document = plan.application.model_dump(mode="python")
-    document["paths"]["workspace"] = str(workspace)
-    document["paths"]["comfyui"] = str(comfyui)
-    application = ApplicationPhase.model_validate(document)
-    runtime = ContainerRuntime(
-        workspace=workspace,
-        comfyui_path=comfyui,
-        virtual_env=Path(application.paths.venv),
-    )
-    return application, runtime
-
-
 def _local_manager_application(
     tmp_path: Path,
 ) -> tuple[ApplicationPhase, ContainerRuntime, Path]:
@@ -139,62 +128,6 @@ def _local_manager_application(
     )
     anchor.parent.mkdir(parents=True)
     return application, runtime, anchor
-
-
-def _phase(
-    runtime: ContainerRuntime,
-    nodes: tuple[CustomNodePlan, ...],
-    *,
-    install_manager: bool = True,
-    git_credentials: tuple[GitCredentialRoutePlan, ...] = (),
-) -> CustomNodesPhase:
-    return CustomNodesPhase(
-        install_manager=install_manager,
-        user_directory=str(runtime.comfyui_path / "user"),
-        nodes=nodes,
-        git_credentials=git_credentials,
-    )
-
-
-def _patch_phases(
-    monkeypatch: pytest.MonkeyPatch,
-    application: ApplicationPhase,
-    custom_nodes: CustomNodesPhase,
-) -> None:
-    monkeypatch.setattr(
-        custom_node_installer,
-        "capture_application_requirements",
-        lambda *_args: ParsedComfyUIRequirements(
-            digest=f"sha256:{'a' * 64}",
-            protected=(),
-            ordinary=("requests>=2",),
-        ),
-    )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "capture_manager_authority",
-        lambda *_args: object(),
-    )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "verify_manager_authority",
-        lambda *_args: None,
-    )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "observe_manager_capability",
-        lambda *_args: None,
-    )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "observe_manager_absence",
-        lambda *_args: None,
-    )
-    monkeypatch.setattr(
-        custom_node_installer,
-        "observe_application_state",
-        lambda *_args, **_kwargs: None,
-    )
 
 
 # Mixed custom-node installation preserves exact authority at every mutation boundary.

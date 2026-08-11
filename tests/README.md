@@ -11,22 +11,31 @@ See the [contribution guide](../docs/dev/contributing.md) for environment setup,
 - `tests/smoke/` contains opt-in live provider and image checks.
 - `tests/fixtures/` contains public configuration and local input fixtures.
 
+Unit and integration tests are subdivided by execution owner:
+
+- `host/` owns the supported native-host closure: package and root CLI, configuration, shared models and protocols, rendering, host orchestration, filesystem, Git, and Docker/Buildx adapters.
+- `container/` owns helpers that execute only inside the project's Linux image.
+- `distribution/` owns the canonical Linux sdist, archive, verifier, and byte-identity authority. Host-side wheel construction and ordinary package metadata/import behavior remain under `host/`.
+- `support/` owns pytest authorization, the acceptance catalog, and other test-framework contracts.
+
+Classify a test by the behavior it executes, not by every production module it imports or by Linux paths represented as data. Split a file only when it exercises more than one execution owner. Test helpers shared across owners live directly under `tests/` so imports and repository-root discovery do not depend on a test file's directory depth.
+
 Keep tests at the narrowest layer that owns the behavior. Test current public, security, and execution contracts; do not preserve removed behavior with absence guards. Temporary development-only tests must be identified in a code comment and removed before the related change is complete.
 
 ## Platform coverage
 
-The complete default-offline suite runs on Linux for every supported Python minor. Required Windows validation is intentionally asymmetric: Python 3.12 runs the focused native host-platform contracts plus wheel build and isolated-install smoke, while Python 3.14 runs package/import/CLI/minimal-validation smoke. Together these jobs protect the oldest and newest supported Windows runtimes without claiming that every Linux container test runs natively on Windows. [The CI workflow](../.github/workflows/ci.yml) is the machine authority for the exact required selections.
+The complete default-offline suite runs on Linux for every supported Python minor. Required Windows validation runs the same `tests/unit/host` and `tests/integration/host` contract on Python 3.12, 3.13, and 3.14, followed by a wheel build and isolated-install smoke in every matrix cell. Windows selects those owner directories before collection, so Linux-only container and canonical distribution modules are not imported merely to be skipped. [The CI workflow](../.github/workflows/ci.yml) is the machine authority for the exact required matrix.
 
 Place an operating-system-specific test at the narrowest unit or integration owner and guard it with a local `skipif` based on the native capability it requires. Operating-system selection is not an external-cost authorization, so do not add a Linux or Windows cost marker. Keep Linux-only container execution tests on Linux, and use native Windows tests for Win32 filesystem, DACL, descriptor-lock, Git-for-Windows, path, and process behavior. Mocked Docker and Buildx adapter tests prove only argument and error contracts; they do not prove Docker Desktop, named-pipe SSH forwarding, GPU use, or Windows-container execution.
 
 Run the affected selection on its native platform, for example:
 
 ```bash
-uv run pytest tests/integration/test_windows_host_boundary.py
-uv run pytest tests/unit/test_file_admission.py tests/integration/test_windows_file_primitives.py
+uv run pytest tests/integration/host/test_windows_host_boundary.py
+uv run pytest tests/unit/host tests/integration/host
 ```
 
-Do not add hostile source-directory mutation races, stress loops, timing/fairness assertions, or an operating-system/Python Cartesian matrix to strengthen the cooperative host source-read contract. Keep tests for independent container write, placement, and execution containment intact; those boundaries are not reduced by the host compatibility policy.
+Do not add hostile source-directory mutation races, stress loops, timing/fairness assertions, or extra platform combinations to strengthen the cooperative host source-read contract. Keep tests for independent container write, placement, and execution containment intact; those boundaries are not reduced by the host compatibility policy.
 
 ## Cost authorization
 

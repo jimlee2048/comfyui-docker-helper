@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.comfyui_requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
@@ -29,6 +28,7 @@ from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
 )
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 _REQUIREMENTS = b"torch\ntorchvision\ntorchaudio\nnumpy>=1.25\n"
 _MANAGER_REQUIREMENTS = b"comfyui_manager==4.0.5\n"

@@ -68,11 +68,18 @@ jobs:
         run: uv run --locked pytest
 
   windows_host:
-    name: Windows host / Python 3.12
+    name: Windows host / Python ${{ matrix.python-version }}
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+          - "3.13"
+          - "3.14"
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,41 +89,11 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: "0.11.32"
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Synchronize locked environment
         run: uv sync --locked --all-groups
-      - name: Import root CLI
-        run: uv run --locked python -c "import comfyui_docker_helper.cli"
-      - name: Verify Windows platform boundary
-        run: >-
-          uv run --locked pytest
-          tests/integration/test_windows_host_boundary.py
-      - name: Verify Windows security primitives
-        run: >-
-          uv run --locked pytest
-          tests/unit/test_file_admission.py
-          tests/unit/test_private_state.py
-          tests/integration/test_windows_file_primitives.py
-          tests/integration/test_windows_private_state.py
-          tests/integration/test_descriptor_lock.py
-      - name: Verify Windows Secret and hook workflows
-        run: >-
-          uv run --locked pytest
-          tests/integration/test_windows_host_secret_session.py
-          tests/integration/test_windows_hook_inputs.py
-      - name: Verify Windows rendering
-        run: >-
-          uv run --locked pytest
-          tests/integration/test_windows_rendering.py
-      - name: Verify Windows external host integrations
-        run: >-
-          uv run --locked pytest
-          tests/integration/test_host_git_credential.py
-          tests/integration/test_windows_buildx_adapter.py
-          tests/unit/test_host_secret_session.py::test_windows_git_binding_quotes_unicode_python_path
-          tests/integration/test_cli.py::test_build_ssh_on_windows_delegates_default_agent_to_buildkit
-          tests/unit/test_uv_docker_executor.py::test_requirements_compile_uses_one_exact_owned_container
-          tests/unit/test_uv_docker_executor.py::test_controlled_input_copy_failure_cleans_private_state_and_container
+      - name: Run Windows host and shared contracts
+        run: uv run --locked pytest tests/unit/host tests/integration/host
       - name: Build Windows wheel
         env:
           DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist
@@ -142,7 +119,7 @@ jobs:
             throw "wheel set is not exactly one wheel"
           }
           uv export --locked --no-dev --no-emit-project --output-file $env:RUNTIME_REQUIREMENTS
-          uv venv --python "3.12" $env:WHEEL_VENV
+          uv venv --python "${{ matrix.python-version }}" $env:WHEEL_VENV
           $wheelPython = Join-Path $env:WHEEL_VENV "Scripts\python.exe"
           $wheelCdh = Join-Path $env:WHEEL_VENV "Scripts\cdh.exe"
           uv pip install --python $wheelPython --require-hashes --requirements $env:RUNTIME_REQUIREMENTS
@@ -156,39 +133,6 @@ jobs:
           & $wheelCdh host --help | Out-Null
           & $wheelCdh host validate -f examples/minimal.toml
           & $wheelCdh container --help | Out-Null
-
-  windows_smoke:
-    name: Windows smoke / Python 3.14
-    runs-on: windows-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    env:
-      UV_NO_DEV: "1"
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "0.11.32"
-          python-version: "3.14"
-      - name: Synchronize locked environment
-        run: uv sync --locked --no-dev
-      - name: Import package and host CLI
-        run: >-
-          uv run --locked python -c
-          "import comfyui_docker_helper; import comfyui_docker_helper.cli; import comfyui_docker_helper.host.cli"
-      - name: Exercise root version
-        run: uv run --locked cdh --version
-      - name: Exercise root help
-        run: uv run --locked cdh --help
-      - name: Exercise host help
-        run: uv run --locked cdh host --help
-      - name: Exercise host validation
-        run: uv run --locked cdh host validate -f examples/minimal.toml
 
   package:
     name: Package
@@ -205,7 +149,6 @@ jobs:
       - lint
       - test
       - windows_host
-      - windows_smoke
       - package
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -216,11 +159,9 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
           WINDOWS_HOST_RESULT: ${{ needs.windows_host.result }}
-          WINDOWS_SMOKE_RESULT: ${{ needs.windows_smoke.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           test "$LINT_RESULT" = "success"
           test "$TEST_RESULT" = "success"
           test "$WINDOWS_HOST_RESULT" = "success"
-          test "$WINDOWS_SMOKE_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"

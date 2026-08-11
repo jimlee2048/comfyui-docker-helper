@@ -8,9 +8,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.acceptance_scenarios import RELEASE_SCENARIOS
 
-_PROJECT_ROOT = Path(__file__).parents[2]
+from tests.acceptance_scenarios import RELEASE_SCENARIOS
+from tests.project_paths import PROJECT_ROOT
+
+_PROJECT_ROOT = PROJECT_ROOT
 
 
 def _run_probe(

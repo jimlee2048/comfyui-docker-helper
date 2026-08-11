@@ -8,8 +8,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
-from tests.unit.test_custom_node_installer import _application, _patch_phases, _phase
 
 from comfyui_docker_helper.config.build_plan import (
     GitNodePlan,
@@ -33,6 +31,16 @@ from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,
     _install_git_node,
     _verify_git_provenance,
+)
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
+from tests.container_installer_support import (
+    application as _application,
+)
+from tests.container_installer_support import (
+    custom_nodes_phase as _phase,
+)
+from tests.container_installer_support import (
+    patch_phases as _patch_phases,
 )
 
 

@@ -27,7 +27,7 @@ The package's root CLI, configuration, shared services, rendering, and `cdh host
 
 Keep Linux-only container implementations outside the host import closure. Put platform-specific imports behind the narrow owner that needs them, and preserve equivalent behavior rather than assuming that POSIX descriptors, modes, signals, shell paths, or environment conventions exist on Windows. Host source reads follow the cooperative-input contract, while private state and container write/execute boundaries retain separate stronger ownership rules; read the [cross-module contracts](contracts.md#host-local-filesystem-boundaries) before changing either boundary.
 
-Filesystem, Git, Docker, and process behavior that branches by operating system needs focused native-platform coverage. Do not infer Windows behavior from a mocked POSIX test or infer Docker Desktop end-to-end support from adapter tests. The [testing handbook](../../tests/README.md#platform-coverage) owns platform test placement and the asymmetric required CI policy.
+Filesystem, Git, Docker, and process behavior that branches by operating system needs focused native-platform coverage. Do not infer Windows behavior from a mocked POSIX test or infer Docker Desktop end-to-end support from adapter tests. The [testing handbook](../../tests/README.md#platform-coverage) owns platform test placement and the uniform supported-minor Windows host matrix.
 
 ### Optional workflow diagnostics
 
@@ -51,7 +51,7 @@ The project uses a `src` layout:
 - `src/comfyui_docker_helper/rendering/` materializes Docker build contexts.
 - `src/comfyui_docker_helper/container/` owns build-container and runtime helpers.
 - `src/comfyui_docker_helper/resources/` contains package-owned implementation inputs.
-- `tests/` contains unit, integration, smoke, acceptance support, and fixtures.
+- `tests/` contains unit and integration tests subdivided by host, Linux-container, distribution, and test-support ownership, plus smoke tests, shared support, and fixtures.
 - `tools/ci/` contains directly runnable, read-only package-build validators.
 - `examples/` contains the minimal and comprehensive public configurations.
 - `docs/user/` and `docs/dev/` contain user and developer documentation.
@@ -76,7 +76,13 @@ uv run pytest tests/unit
 uv run pytest
 ```
 
-Run platform-specific tests on the platform whose native behavior they claim. The exact required Windows selections live in [the CI workflow](../../.github/workflows/ci.yml); locally, select the affected files from that gate rather than attempting to make an unrelated Linux-only test surface pass on Windows.
+Run platform-specific tests on the platform whose native behavior they claim. Every supported Windows Python minor runs the same host/shared selection:
+
+```bash
+uv run pytest tests/unit/host tests/integration/host
+```
+
+The exact required matrix lives in [the CI workflow](../../.github/workflows/ci.yml). Linux remains authoritative for the complete default-offline suite, Linux-image container helpers, and canonical distribution qualification; do not collect those owners on Windows merely to skip them.
 
 Validate affected examples and CLI paths directly. At minimum, configuration changes should keep the minimal example valid:
 

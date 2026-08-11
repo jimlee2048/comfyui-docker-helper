@@ -13,12 +13,6 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import ValidationError
-from tests.build_plan_support import (
-    accepted_resolution,
-    build_plan,
-    canonical_wheel,
-    final_config,
-)
 
 from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
@@ -45,6 +39,12 @@ from comfyui_docker_helper.rendering.final_materializer import (
 )
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
+)
+from tests.build_plan_support import (
+    accepted_resolution,
+    build_plan,
+    canonical_wheel,
+    final_config,
 )
 
 _VALID_SSH_KEY = (
@@ -753,6 +753,7 @@ def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
         )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX FIFO")
 def test_build_plan_admission_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     fifo = tmp_path / "build-plan.fifo"
     os.mkfifo(fifo)
@@ -1021,6 +1022,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
         )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX FIFO")
 def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
     content = b"hook"
     digest = f"sha256:{hashlib.sha256(content).hexdigest()}"

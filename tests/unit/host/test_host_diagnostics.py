@@ -6,7 +6,6 @@ from io import StringIO
 
 import pytest
 from rich.console import Console
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
@@ -20,6 +19,7 @@ from comfyui_docker_helper.host import diagnostics as diagnostics_module
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.diagnostics import HostPresenter
 from comfyui_docker_helper.host.render_service import PlanningOptions
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _console(

@@ -7,10 +7,11 @@ import subprocess
 import sys
 import tomllib
 from collections import Counter
-from pathlib import Path
 
 import pytest
 from packaging.version import Version
+
+from comfyui_docker_helper.config import load_validate_config_result
 from tests.acceptance_scenarios import (
     ACCEPTANCE_SCENARIOS,
     RELEASE_PYTHON_PROFILES,
@@ -22,13 +23,12 @@ from tests.acceptance_scenarios import (
     ScenarioClass,
     required_release_probes,
 )
+from tests.project_paths import FIXTURES_ROOT, PROJECT_ROOT
 
-from comfyui_docker_helper.config import load_validate_config_result
-
-_FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "comfyui-build"
+_FIXTURE_ROOT = FIXTURES_ROOT / "comfyui-build"
 _CONFIG_ROOT = _FIXTURE_ROOT / "configs"
 _BUILD_HOOK_ROOT = _FIXTURE_ROOT / "build-hooks"
-_PROJECT_ROOT = Path(__file__).parents[2]
+_PROJECT_ROOT = PROJECT_ROOT
 
 
 def _document(scenario: AcceptanceScenario) -> dict[str, object]:

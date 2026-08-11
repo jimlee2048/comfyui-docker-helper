@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tomllib
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
@@ -17,8 +17,8 @@ from comfyui_docker_helper.release_artifacts import (
     release_projection_files,
 )
 from comfyui_docker_helper.version import package_version
+from tests.project_paths import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).parents[2]
 INLINE_README = """\
 `comfyui-docker-helper` (`cdh`) is an independent, unofficial command-line
 helper for using ComfyUI with Docker. It is not affiliated with or endorsed by

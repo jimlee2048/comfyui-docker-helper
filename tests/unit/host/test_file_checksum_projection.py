@@ -7,19 +7,19 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from tests.build_plan_support import (
-    accepted_resolution,
-    build_plan,
-    canonical_wheel,
-    final_config,
-    request_graph,
-)
 
 from comfyui_docker_helper.config.build_plan import BuildPlan, dump_build_plan_json
 from comfyui_docker_helper.config.canonical_lock import dump_canonical_lock_toml
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
+)
+from tests.build_plan_support import (
+    accepted_resolution,
+    build_plan,
+    canonical_wheel,
+    final_config,
+    request_graph,
 )
 
 UPPER_CHECKSUM = f"sha256:{'AB' * 32}"

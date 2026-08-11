@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
@@ -52,6 +51,7 @@ from comfyui_docker_helper.container.final_manifest_writer import (
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _inventory(

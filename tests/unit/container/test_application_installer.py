@@ -8,7 +8,6 @@ import stat
 from pathlib import Path
 
 import pytest
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
@@ -33,6 +32,7 @@ from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.pytorch_resolution import (
     pytorch_resolution_manifest_bytes,
 )
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _write_phases(tmp_path: Path):

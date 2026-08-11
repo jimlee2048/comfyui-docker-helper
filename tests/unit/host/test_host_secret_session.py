@@ -33,6 +33,10 @@ version = "0.11.0"
 install_manager = false
 """
 
+_POSIX_SECRET_SOURCE = pytest.mark.skipif(
+    os.name != "posix", reason="requires POSIX environment bytes or mode evidence"
+)
+
 
 def _configuration(
     tmp_path: Path,
@@ -90,6 +94,7 @@ def _helper(
         return helper_module.main(), output.getvalue()
 
 
+@_POSIX_SECRET_SOURCE
 def test_session_binding_and_snapshot_are_private_exact_and_reused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,6 +185,7 @@ def test_windows_environment_secret_encodes_unicode_as_utf8(
         assert session.snapshot("root_token").read_bytes() == value.encode("utf-8")
 
 
+@_POSIX_SECRET_SOURCE
 def test_empty_value_fails_at_first_use(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -200,6 +206,7 @@ def test_empty_value_fails_at_first_use(
     assert raised.value.code == "invalid_value"
 
 
+@_POSIX_SECRET_SOURCE
 @pytest.mark.parametrize(
     "value",
     [
@@ -233,6 +240,7 @@ def test_invalid_value_failures_do_not_echo_input(
     assert marker not in str(raised.value)
 
 
+@_POSIX_SECRET_SOURCE
 def test_value_at_protocol_limit_is_accepted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -249,6 +257,7 @@ def test_value_at_protocol_limit_is_accepted(
         assert session.snapshot("root_token").stat().st_size == len(value)
 
 
+@_POSIX_SECRET_SOURCE
 def test_failed_source_outcome_is_cached_without_a_second_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -318,6 +327,7 @@ def test_file_source_is_no_follow_and_error_omits_locator(
     assert "synthetic-token" not in str(raised.value)
 
 
+@_POSIX_SECRET_SOURCE
 def test_permissive_mode_warning_is_content_free(
     tmp_path: Path,
 ) -> None:
@@ -340,6 +350,7 @@ def test_permissive_mode_warning_is_content_free(
     assert "file-token" not in warnings[0].message
 
 
+@_POSIX_SECRET_SOURCE
 def test_permissive_mode_warning_survives_invalid_file_value(
     tmp_path: Path,
 ) -> None:
@@ -391,6 +402,7 @@ def test_file_source_without_posix_mode_emits_no_permission_warning(
     assert warnings == ()
 
 
+@_POSIX_SECRET_SOURCE
 def test_private_session_files_are_exact_modes_under_restrictive_umask(
     tmp_path: Path,
 ) -> None:
@@ -487,6 +499,7 @@ def test_helper_selected_missing_source_fails_without_output(
         assert not (session.root / "snapshot-root_token").exists()
 
 
+@_POSIX_SECRET_SOURCE
 @pytest.mark.parametrize("raised", [None, RuntimeError, KeyboardInterrupt])
 def test_session_collects_warnings_and_cleans_up_for_every_exit(
     raised: type[BaseException] | None,
@@ -710,6 +723,7 @@ def test_snapshot_body_failure_is_cached_and_content_free(
     assert "synthetic-secret-value" not in str(raised.value)
 
 
+@_POSIX_SECRET_SOURCE
 def test_snapshot_body_error_outranks_lock_cleanup_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

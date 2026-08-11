@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).parents[2]
+from tests.project_paths import PROJECT_ROOT
+
 ADMISSION_TOOL = PROJECT_ROOT / "tools/ci/admit_package_build.py"
 DISTRIBUTION_TOOL = PROJECT_ROOT / "tools/ci/verify_distributions.py"
 

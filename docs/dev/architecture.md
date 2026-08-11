@@ -35,6 +35,8 @@ The host build boundary and the runtime boundary admit different inputs. Runtime
 
 Package-level modules provide shared bounded helpers such as ComfyUI requirements parsing, PyTorch resolution rules, release artifacts, and exact project-owned identities. They support the four main components without creating another orchestration layer.
 
+The operator-facing `cdh host validate`, `render`, and `build` commands use a host-owned presentation boundary. Root help, usage, and parameter errors remain owned by Typer; image-internal `cdh container` commands retain simple plain execution and logging protocols. An explicitly exposed operator-facing live stream, currently BuildKit's unified stdout, remains outside host presentation, while captured provider and protocol output stays owned by its adapter. See the [CLI presentation rules](contributing.md#cli-presentation) for coding and testing guidance.
+
 ## Dependency direction
 
 Host orchestration is the outer build-time composition root. It calls shared configuration and planning code, supplies concrete acquisition providers, and hands an accepted BuildPlan to rendering. Rendering depends on config-owned types and release inputs; it does not call provider orchestration or container services.

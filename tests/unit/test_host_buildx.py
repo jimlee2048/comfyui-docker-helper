@@ -63,11 +63,8 @@ def test_buildx_maps_domain_values_and_fully_drains_live_logs(
         }
     ]
     assert logs == [
-        "Running Docker Buildx (load) for example/comfy:dev, "
-        "example/comfy:latest on linux/amd64",
         "first line",
         "second line",
-        "Docker Buildx loaded image tags: example/comfy:dev, example/comfy:latest",
     ]
 
 
@@ -173,17 +170,16 @@ def test_buildx_maps_opaque_cache_specs_without_logging_them(
 
 
 @pytest.mark.parametrize(
-    ("output", "load", "push", "completed"),
+    ("output", "load", "push"),
     [
-        ("load", True, False, "Docker Buildx loaded image tags: image:tag"),
-        ("push", False, True, "Docker Buildx pushed image tags: image:tag"),
+        ("load", True, False),
+        ("push", False, True),
     ],
 )
 def test_buildx_selects_one_output_mode(
     output: str,
     load: bool,
     push: bool,
-    completed: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -208,7 +204,7 @@ def test_buildx_selects_one_output_mode(
 
     assert calls[0]["load"] is load
     assert calls[0]["push"] is push
-    assert logs[-1] == completed
+    assert logs == ["progress"]
 
 
 # The failure block keeps transport errors user-facing while preserving caller
@@ -235,7 +231,7 @@ def test_buildx_translates_public_api_failure(
             log=logs.append,
         )
 
-    assert logs[-1] == "underlying Docker diagnostic"
+    assert logs == ["underlying Docker diagnostic"]
 
 
 @pytest.mark.parametrize(

@@ -84,6 +84,52 @@ class FakeChild:
         self.returncode = -int(signal.SIGKILL)
 
 
+# Entrypoint discovery keeps ordinary non-hook content nonfatal and reports only
+# bounded aggregate warnings before lifecycle startup.
+def test_entrypoint_warns_and_ignores_ordinary_runtime_hook_content(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _runtime(tmp_path)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "README.md").write_text("ordinary deployment notes\n")
+    phase = hooks / "pre-start.d"
+    phase.mkdir()
+    (phase / "notes.txt").write_text("not a hook\n")
+
+    def runner(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        shell: bool,
+    ) -> FakeChild:
+        del argv, cwd, env, shell
+        return FakeChild(0)
+
+    assert (
+        run_entrypoint(
+            runtime=runtime,
+            runtime_state_path=tmp_path / "state.json",
+            baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
+            mounted_config_path=_missing_path(tmp_path, "mounted-config.toml"),
+            baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+            mounted_hooks_path=hooks,
+            environ={"PATH": "/usr/bin"},
+            runner=runner,
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "Runtime hook warnings:" in captured.err
+    assert "ignored 1 ordinary top-level runtime hook" in captured.err
+    assert "ignored 1 ordinary non-hook phase" in captured.err
+    assert "README.md" not in captured.err
+    assert "notes.txt" not in captured.err
+
+
 class SignalOnFirstWaitChild(FakeChild):
     """Child that receives a graceful shutdown signal during normal wait."""
 

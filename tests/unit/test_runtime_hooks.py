@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -69,8 +69,8 @@ class FakeHookProcess:
         return self.returncode
 
 
-# Discovery and validation define the allowed runtime hook tree shape, diagnostic
-# locations, and baked-before-mounted execution order.
+# Discovery protects the selected/ignored boundary, bounded warning aggregation,
+# hard filesystem failures, and baked-before-mounted execution order.
 def test_discovery_order_is_baked_then_mounted_lexical_and_allows_duplicates(
     tmp_path: Path,
 ) -> None:
@@ -106,7 +106,9 @@ def test_missing_roots_have_no_hooks(tmp_path: Path) -> None:
     assert plan.for_phase("pre-start") == ()
 
 
-def test_unknown_root_entries_and_phase_dirs_are_ignored(tmp_path: Path) -> None:
+def test_unknown_root_entries_are_ignored_with_an_aggregated_warning(
+    tmp_path: Path,
+) -> None:
     baked = tmp_path / "baked"
     baked.mkdir()
     (baked / "README.md").write_text("ignored\n", encoding="utf-8")
@@ -122,25 +124,77 @@ def test_unknown_root_entries_and_phase_dirs_are_ignored(tmp_path: Path) -> None
     assert [(hook.source, hook.phase, hook.filename) for hook in plan.hooks] == [
         ("baked", "pre-start", "10-pre.sh")
     ]
+    assert len(plan.warnings) == 1
+    warnings = {(warning.path, warning.code): warning for warning in plan.warnings}
+    warning = warnings[("hooks", "baked"), "runtime_hook.ignored_top_level"]
+    assert "ignored 2 ordinary top-level" in warning.message
 
 
-def test_strict_validation_checks_all_known_phase_dirs(tmp_path: Path) -> None:
+def test_ordinary_unselected_phase_entries_warn_without_recursion(
+    tmp_path: Path,
+) -> None:
     baked = tmp_path / "baked"
     mounted = tmp_path / "mounted"
     _write_hook(baked, "pre-start.d", "10-pre.sh")
     _write_hook(mounted, "pre-start.d", "10-pre.sh")
     _write_hook(mounted, "post-start.d", "notes.txt")
-    (mounted / "stop.d" / "nested").mkdir(parents=True)
+    nested = mounted / "stop.d" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "20-not-discovered.sh").write_text("ignored\n")
+
+    plan = discover_runtime_hooks(baked_hooks_path=baked, mounted_hooks_path=mounted)
+
+    assert [(hook.source, hook.phase, hook.filename) for hook in plan.hooks] == [
+        ("baked", "pre-start", "10-pre.sh"),
+        ("mounted", "pre-start", "10-pre.sh"),
+    ]
+    assert len(plan.warnings) == 2
+    warnings = {(warning.path, warning.code): warning for warning in plan.warnings}
+    assert set(warnings) == {
+        (
+            ("hooks", "mounted", "post-start"),
+            "runtime_hook.ignored_phase_entries",
+        ),
+        (
+            ("hooks", "mounted", "stop"),
+            "runtime_hook.ignored_phase_entries",
+        ),
+    }
+
+
+def test_unknown_top_level_symlink_remains_invalid(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported on this platform")
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    (mounted / "README-link").symlink_to(tmp_path / "outside")
 
     with pytest.raises(RuntimeHookError) as error:
-        discover_runtime_hooks(baked_hooks_path=baked, mounted_hooks_path=mounted)
+        discover_runtime_hooks(
+            baked_hooks_path=tmp_path / "missing-baked",
+            mounted_hooks_path=mounted,
+        )
 
     assert locations_and_codes(error.value) == [
-        (
-            ("hooks", "mounted", "post-start", "notes.txt"),
-            "runtime_hook.unsupported_extension",
-        ),
-        (("hooks", "mounted", "stop", "nested"), "runtime_hook.directory"),
+        (("hooks", "mounted", "README-link"), "runtime_hook.symlink")
+    ]
+
+
+def test_unknown_top_level_special_file_remains_invalid(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("fifo special files are not supported on this platform")
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    os.mkfifo(mounted / "ordinary-looking-entry")
+
+    with pytest.raises(RuntimeHookError) as error:
+        discover_runtime_hooks(
+            baked_hooks_path=tmp_path / "missing-baked",
+            mounted_hooks_path=mounted,
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted", "ordinary-looking-entry"), "runtime_hook.special_file")
     ]
 
 
@@ -190,6 +244,33 @@ def test_discovery_wraps_root_inspection_permission_error(
         (("hooks", "mounted"), "runtime_hook.root_inspect_failed")
     ]
     assert "inspect denied" in error.value.diagnostics[0].message
+
+
+def test_discovery_wraps_root_read_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    original_iterdir = Path.iterdir
+
+    def fail_iterdir(self: Path) -> Iterator[Path]:
+        if self == mounted:
+            raise PermissionError("read denied")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fail_iterdir)
+
+    with pytest.raises(RuntimeHookError) as error:
+        discover_runtime_hooks(
+            baked_hooks_path=tmp_path / "missing-baked",
+            mounted_hooks_path=mounted,
+        )
+
+    assert locations_and_codes(error.value) == [
+        (("hooks", "mounted"), "runtime_hook.root_read_failed")
+    ]
+    assert "read denied" in error.value.diagnostics[0].message
 
 
 def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:

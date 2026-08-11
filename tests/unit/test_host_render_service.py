@@ -1443,39 +1443,66 @@ def test_runtime_hooks_require_an_explicit_source(tmp_path: Path) -> None:
     assert not (tmp_path / "context/runtime/hooks").exists()
 
 
-@pytest.mark.parametrize(
-    ("mutation", "code"),
-    [
-        ("missing", "runtime_hooks.source_not_directory"),
-        ("unknown", "runtime_hooks.unknown_top_level"),
-        ("extension", "runtime_hooks.unsupported_extension"),
-    ],
-)
-def test_runtime_hook_tree_reports_closed_validation_contract(
-    tmp_path: Path,
-    mutation: str,
-    code: str,
-) -> None:
+def test_runtime_hook_tree_requires_existing_source(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(_config())
     hooks = tmp_path / "hooks"
-    if mutation != "missing":
-        hooks.mkdir()
-    if mutation == "unknown":
-        (hooks / "README.md").write_text("unknown")
-    elif mutation == "extension":
-        phase = hooks / "pre-start.d"
-        phase.mkdir()
-        path = phase / "10-hook.txt"
-        path.write_text("hook")
-        path.chmod(0o755)
     fake = FakeAcquirer()
 
     with pytest.raises(HostRenderServiceError) as raised:
         _prepare(config, tmp_path / "context", fake, runtime_hooks_dir=hooks)
 
-    assert raised.value.diagnostics[0].code == code
+    assert raised.value.diagnostics[0].code == "runtime_hooks.source_not_directory"
     assert fake.calls == []
+
+
+# Ordinary non-hook content stays outside image identity and materialization while
+# the host retains one bounded warning for each affected tree location.
+def test_runtime_hook_tree_ignores_unselected_content_with_aggregated_warnings(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "README.md").write_text("notes")
+    (hooks / "examples").mkdir()
+    phase = hooks / "pre-start.d"
+    phase.mkdir()
+    selected = phase / "10-hook.sh"
+    selected.write_text("selected\n")
+    (phase / "notes.txt").write_text("ignored")
+    nested = phase / "nested"
+    nested.mkdir()
+    (nested / "20-not-discovered.sh").write_text("ignored")
+
+    prepared = _prepare(
+        config,
+        tmp_path / "context",
+        FakeAcquirer(),
+        runtime_hooks_dir=hooks,
+    )
+
+    assert [hook.relative_path for hook in prepared.plan.runtime.hooks] == [
+        "pre-start.d/10-hook.sh"
+    ]
+    assert len(prepared.warnings) == 2
+    warnings = {(warning.path, warning.code): warning for warning in prepared.warnings}
+    phase_warning = warnings[
+        ("runtime_hooks_dir", "pre-start.d"),
+        "runtime_hooks.ignored_phase_entries",
+    ]
+    root_warning = warnings[
+        ("runtime_hooks_dir",),
+        "runtime_hooks.ignored_top_level",
+    ]
+    assert "ignored 2 ordinary non-hook phase entries" in phase_warning.message
+    assert "ignored 2 ordinary top-level" in root_warning.message
+    context_hooks = tmp_path / "context" / "runtime" / "hooks"
+    assert (context_hooks / "pre-start.d" / "10-hook.sh").is_file()
+    assert not (context_hooks / "README.md").exists()
+    assert not (context_hooks / "pre-start.d" / "notes.txt").exists()
+    assert not (context_hooks / "pre-start.d" / "nested").exists()
 
 
 def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:

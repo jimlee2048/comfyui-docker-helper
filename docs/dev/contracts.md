@@ -204,6 +204,8 @@ Baked runtime hooks cross [`runtime_hook_inputs.py`](../../src/comfyui_docker_he
 
 [`runtime_hooks.py`](../../src/comfyui_docker_helper/container/runtime_hooks.py) discovers the two sources without turning them into an override overlay: baked hooks run first, followed by mounted hooks, with lexical ordering inside each source and phase. Both sources are trusted executable code. Content identity for baked bytes does not sandbox their effects or make their filesystem, network, package, or process behavior reproducible.
 
+Host baking and container discovery select only direct regular `.sh` and `.py` files inside known phase directories. Ordinary unselected files and directories are ignored without recursion and reported through bounded source/phase warnings; symlinks, special files, inspection/read failures, invalid phase paths, and selected-hook failures remain hard boundaries.
+
 ### Readiness gates post-start hooks only
 
 [`readiness.py`](../../src/comfyui_docker_helper/container/readiness.py) and the lifecycle owner invoke the loopback ComfyUI probe only when post-start hooks exist. A successful probe admits those hooks; process exit or timeout fails that startup path. It is not continuous monitoring, a container health check, or evidence that nodes, models, workflows, GPUs, or production workloads function correctly.

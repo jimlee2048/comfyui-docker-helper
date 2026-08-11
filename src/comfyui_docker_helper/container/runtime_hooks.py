@@ -11,10 +11,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
-from comfyui_docker_helper.config import Diagnostic
+from comfyui_docker_helper.config import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE,
-    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
+    RUNTIME_HOOK_PHASES_BY_DIRECTORY,
+    RuntimeHookEntryKind,
+    classify_runtime_hook_entry,
 )
 from comfyui_docker_helper.container.process_control import (
     ProcessGroupSignaler,
@@ -126,6 +128,7 @@ class RuntimeHookPlan:
     """Ordered hooks grouped by lifecycle phase."""
 
     hooks: tuple[RuntimeHook, ...]
+    warnings: tuple[Diagnostic, ...] = ()
 
     def for_phase(self, phase: RuntimeHookPhase) -> tuple[RuntimeHook, ...]:
         """Return hooks for one lifecycle phase in execution order."""
@@ -152,6 +155,7 @@ def discover_runtime_hooks(
         RuntimeHookRoot("mounted", Path(mounted_hooks_path)),
     )
     diagnostics: list[Diagnostic] = []
+    warnings: list[Diagnostic] = []
     hooks: list[RuntimeHook] = []
 
     for hook_root in roots:
@@ -161,13 +165,61 @@ def discover_runtime_hooks(
         if root_error is not None:
             diagnostics.append(root_error)
             continue
-        for phase, dirname in RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE.items():
-            phase_dir = hook_root.root / dirname
-            if not _root_exists(phase_dir):
+        try:
+            root_entries = tuple(
+                sorted(hook_root.root.iterdir(), key=lambda item: item.name)
+            )
+        except OSError as error:
+            diagnostics.append(
+                Diagnostic(
+                    path=("hooks", hook_root.source),
+                    code="runtime_hook.root_read_failed",
+                    message=f"runtime hook root could not be read: {error}",
+                )
+            )
+            continue
+        ignored_top_level = 0
+        phase_entries: dict[RuntimeHookPhase, Path] = {}
+        for entry in root_entries:
+            entry_mode = _root_entry_mode(hook_root, entry, diagnostics)
+            if entry_mode is None:
                 continue
-            phase_error = _validate_phase_dir(hook_root, phase, phase_dir)
-            if phase_error is not None:
-                diagnostics.append(phase_error)
+            entry_kind = classify_runtime_hook_entry(entry_mode, entry.suffix)
+            if entry_kind == RuntimeHookEntryKind.SYMLINK:
+                diagnostics.append(
+                    Diagnostic(
+                        path=("hooks", hook_root.source, entry.name),
+                        code="runtime_hook.symlink",
+                        message="runtime hook entries must not be symlinks",
+                    )
+                )
+                continue
+            phase = RUNTIME_HOOK_PHASES_BY_DIRECTORY.get(entry.name)
+            if phase is None:
+                if entry_kind != RuntimeHookEntryKind.SPECIAL:
+                    ignored_top_level += 1
+                else:
+                    diagnostics.append(
+                        Diagnostic(
+                            path=("hooks", hook_root.source, entry.name),
+                            code="runtime_hook.special_file",
+                            message="runtime hook roots must not contain special files",
+                        )
+                    )
+                continue
+            if entry_kind != RuntimeHookEntryKind.DIRECTORY:
+                diagnostics.append(
+                    Diagnostic(
+                        path=("hooks", hook_root.source, phase),
+                        code="runtime_hook.phase_not_directory",
+                        message="runtime hook phase path must be a directory",
+                    )
+                )
+                continue
+            phase_entries[phase] = entry
+        for phase in RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE:
+            phase_dir = phase_entries.get(phase)
+            if phase_dir is None:
                 continue
             hooks.extend(
                 _discover_phase_hooks(
@@ -175,12 +227,25 @@ def discover_runtime_hooks(
                     phase,
                     phase_dir,
                     diagnostics,
+                    warnings,
+                )
+            )
+        if ignored_top_level:
+            warnings.append(
+                Diagnostic(
+                    path=("hooks", hook_root.source),
+                    code="runtime_hook.ignored_top_level",
+                    message=(
+                        f"ignored {ignored_top_level} ordinary top-level runtime "
+                        "hook entries outside the known phase directories"
+                    ),
+                    severity=DiagnosticSeverity.WARNING,
                 )
             )
 
     if diagnostics:
         raise RuntimeHookError(tuple(diagnostics))
-    return RuntimeHookPlan(hooks=tuple(hooks))
+    return RuntimeHookPlan(hooks=tuple(hooks), warnings=tuple(warnings))
 
 
 def run_runtime_startup_hooks(
@@ -365,6 +430,7 @@ def _discover_phase_hooks(
     phase: RuntimeHookPhase,
     phase_dir: Path,
     diagnostics: list[Diagnostic],
+    warnings: list[Diagnostic],
 ) -> tuple[RuntimeHook, ...]:
     hooks: list[RuntimeHook] = []
     try:
@@ -379,10 +445,21 @@ def _discover_phase_hooks(
         )
         return ()
 
+    ignored = 0
     for entry in entries:
-        entry_error = _validate_hook_file(hook_root, phase, entry)
-        if entry_error is not None:
-            diagnostics.append(entry_error)
+        entry_kind = _inspect_hook_file(hook_root, phase, entry, diagnostics)
+        if entry_kind is None:
+            continue
+        if entry_kind in {
+            RuntimeHookEntryKind.DIRECTORY,
+            RuntimeHookEntryKind.OTHER_REGULAR_FILE,
+        }:
+            ignored += 1
+            continue
+        if entry_kind in {
+            RuntimeHookEntryKind.SYMLINK,
+            RuntimeHookEntryKind.SPECIAL,
+        }:
             continue
         hooks.append(
             RuntimeHook(
@@ -393,7 +470,37 @@ def _discover_phase_hooks(
                 filename=entry.name,
             )
         )
+    if ignored:
+        warnings.append(
+            Diagnostic(
+                path=("hooks", hook_root.source, phase),
+                code="runtime_hook.ignored_phase_entries",
+                message=(
+                    f"ignored {ignored} ordinary non-hook phase entries; only "
+                    "direct regular .sh and .py files are selected"
+                ),
+                severity=DiagnosticSeverity.WARNING,
+            )
+        )
     return tuple(hooks)
+
+
+def _root_entry_mode(
+    hook_root: RuntimeHookRoot,
+    path: Path,
+    diagnostics: list[Diagnostic],
+) -> int | None:
+    try:
+        return path.lstat().st_mode
+    except OSError as error:
+        diagnostics.append(
+            Diagnostic(
+                path=("hooks", hook_root.source, path.name),
+                code="runtime_hook.inspect_failed",
+                message=f"runtime hook entry could not be inspected: {error}",
+            )
+        )
+        return None
 
 
 def _validate_root(hook_root: RuntimeHookRoot) -> Diagnostic | None:
@@ -414,67 +521,42 @@ def _validate_root(hook_root: RuntimeHookRoot) -> Diagnostic | None:
     return None
 
 
-def _validate_phase_dir(
-    hook_root: RuntimeHookRoot,
-    phase: RuntimeHookPhase,
-    phase_dir: Path,
-) -> Diagnostic | None:
-    try:
-        mode = phase_dir.lstat().st_mode
-    except OSError as error:
-        return Diagnostic(
-            path=("hooks", hook_root.source, phase),
-            code="runtime_hook.phase_inspect_failed",
-            message=f"runtime hook phase directory could not be inspected: {error}",
-        )
-    if not stat.S_ISDIR(mode):
-        return Diagnostic(
-            path=("hooks", hook_root.source, phase),
-            code="runtime_hook.phase_not_directory",
-            message="runtime hook phase path must be a directory",
-        )
-    return None
-
-
-def _validate_hook_file(
+def _inspect_hook_file(
     hook_root: RuntimeHookRoot,
     phase: RuntimeHookPhase,
     path: Path,
-) -> Diagnostic | None:
+    diagnostics: list[Diagnostic],
+) -> RuntimeHookEntryKind | None:
     diagnostic_path = ("hooks", hook_root.source, phase, path.name)
     try:
         mode = path.lstat().st_mode
     except OSError as error:
-        return Diagnostic(
-            path=diagnostic_path,
-            code="runtime_hook.inspect_failed",
-            message=f"runtime hook file could not be inspected: {error}",
+        diagnostics.append(
+            Diagnostic(
+                path=diagnostic_path,
+                code="runtime_hook.inspect_failed",
+                message=f"runtime hook file could not be inspected: {error}",
+            )
         )
-    if stat.S_ISLNK(mode):
-        return Diagnostic(
-            path=diagnostic_path,
-            code="runtime_hook.symlink",
-            message="runtime hook files must not be symlinks",
+        return None
+    entry_kind = classify_runtime_hook_entry(mode, path.suffix)
+    if entry_kind == RuntimeHookEntryKind.SYMLINK:
+        diagnostics.append(
+            Diagnostic(
+                path=diagnostic_path,
+                code="runtime_hook.symlink",
+                message="runtime hook files must not be symlinks",
+            )
         )
-    if stat.S_ISDIR(mode):
-        return Diagnostic(
-            path=diagnostic_path,
-            code="runtime_hook.directory",
-            message="runtime hook phase entries must be regular files",
+    elif entry_kind == RuntimeHookEntryKind.SPECIAL:
+        diagnostics.append(
+            Diagnostic(
+                path=diagnostic_path,
+                code="runtime_hook.special_file",
+                message="runtime hook phase entries must be regular files",
+            )
         )
-    if not stat.S_ISREG(mode):
-        return Diagnostic(
-            path=diagnostic_path,
-            code="runtime_hook.special_file",
-            message="runtime hook phase entries must be regular files",
-        )
-    if path.suffix not in RUNTIME_HOOK_SUPPORTED_SUFFIXES:
-        return Diagnostic(
-            path=diagnostic_path,
-            code="runtime_hook.unsupported_extension",
-            message="runtime hook files must end in .sh or .py",
-        )
-    return None
+    return entry_kind
 
 
 def _validate_hook_process_bounds(

@@ -209,6 +209,7 @@ def render(
                         overwrite=overwrite,
                         working_directory=Path.cwd(),
                     )
+                presenter.warnings(prepared.warnings)
                 presenter.warnings(secret_session.drain_warnings())
         finally:
             presenter.warnings(secret_session.drain_warnings())
@@ -399,6 +400,7 @@ def build(
                         overwrite=True,
                         working_directory=Path.cwd(),
                     )
+                presenter.warnings(prepared.warnings)
                 presenter.warnings(secret_session.drain_warnings())
                 credential_bindings = tuple(
                     FileSecretBinding(

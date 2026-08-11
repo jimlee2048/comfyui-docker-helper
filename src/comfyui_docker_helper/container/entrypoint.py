@@ -98,6 +98,7 @@ def run_entrypoint(
                 error.diagnostics,
             )
         ) from error
+    render_runtime_diagnostics("Runtime hook warnings:", hook_plan.warnings)
 
     downloads = RuntimeDownloads(
         result.config,

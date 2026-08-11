@@ -1,10 +1,26 @@
 """Stable diagnostics shared by configuration validation stages."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 type DiagnosticPathPart = str | int
 type DiagnosticPath = tuple[DiagnosticPathPart, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceReference:
+    """One ordered configuration input with a user-supplied display label."""
+
+    layer_ordinal: int
+    label: str = field(compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class SourceLocation:
+    """An authored semantic path within one configuration input."""
+
+    source: SourceReference
+    path: DiagnosticPath
 
 
 class DiagnosticSeverity(StrEnum):

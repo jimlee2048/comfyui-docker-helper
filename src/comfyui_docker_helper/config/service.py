@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticSeverity,
+    SourceReference,
+)
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.final_validation import (
     FinalConfigDomainResult,
@@ -15,7 +19,14 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_semantics,
     validate_final_config_structure,
 )
-from comfyui_docker_helper.config.merge import merge_toml_documents
+from comfyui_docker_helper.config.host_merge_policies import (
+    HOST_CONFIG_MERGE_POLICIES,
+)
+from comfyui_docker_helper.config.merge import (
+    OriginNode,
+    SourceDocument,
+    merge_toml_documents,
+)
 
 type ConfigPath = str | Path
 
@@ -27,6 +38,7 @@ class ConfigurationResult:
     config: FinalConfig
     domains: FinalConfigDomainResult
     raw_document: dict[str, Any]
+    origins: OriginNode
     secret_file_base: Path
     warnings: tuple[Diagnostic, ...] = ()
 
@@ -57,8 +69,18 @@ def load_validate_config_result(
     """Load and validate locally without providers, Docker, lock I/O, or planning."""
     paths = _coerce_config_paths(config_path)
     include_source = len(paths) > 1
-    documents = tuple(_read_toml(path, include_source=include_source) for path in paths)
-    document = merge_toml_documents(documents)
+    documents = tuple(
+        SourceDocument(
+            SourceReference(layer_ordinal, str(path)),
+            _read_toml(path, include_source=include_source),
+        )
+        for layer_ordinal, path in enumerate(paths)
+    )
+    merged = merge_toml_documents(
+        documents,
+        policies=HOST_CONFIG_MERGE_POLICIES,
+    )
+    document = merged.document
     secret_file_base = _resolve_first_config_parent(
         paths[0], include_source=include_source
     )
@@ -79,7 +101,14 @@ def load_validate_config_result(
     )
     if errors:
         raise ConfigurationServiceError(errors)
-    return ConfigurationResult(config, domains, document, secret_file_base, warnings)
+    return ConfigurationResult(
+        config=config,
+        domains=domains,
+        raw_document=document,
+        origins=merged.origins,
+        secret_file_base=secret_file_base,
+        warnings=warnings,
+    )
 
 
 def _coerce_config_paths(

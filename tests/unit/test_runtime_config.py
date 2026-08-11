@@ -208,6 +208,50 @@ download_failure_policy = "fail"
     assert result.config.cdh.download_failure_policy == "continue"
 
 
+def test_runtime_generic_merge_preserves_nested_siblings_and_sequence_resets(
+    tmp_path: Path,
+) -> None:
+    baked = _write(
+        tmp_path / "baked.toml",
+        f"""
+[comfyui]
+extra_args = ["--cpu"]
+
+[cdh.downloader.aria2]
+split = 4
+min_split_size = "2M"
+
+[system.ssh]
+pub_keys = ["{VALID_SSH_KEY}"]
+""",
+    )
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[comfyui]
+extra_args = []
+
+[cdh.downloader.aria2]
+rpc_port = 6801
+
+[system.ssh]
+pub_keys = []
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=baked,
+        mounted_config_path=mounted,
+        environ={},
+    )
+
+    assert result.config.cdh.downloader.aria2.split == 4
+    assert result.config.cdh.downloader.aria2.min_split_size == "2M"
+    assert result.config.cdh.downloader.aria2.rpc_port == 6801
+    assert result.config.comfyui.extra_args == []
+    assert result.config.system.ssh.pub_keys == []
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

@@ -90,6 +90,110 @@ def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None
     assert config.pytorch.version == "2.12.1"
 
 
+def test_layered_service_exposes_effective_leaf_origins(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config())
+    override.write_text('[system]\nworkspace = "/data"\n')
+
+    result = load_validate_config_result([base, override])
+
+    retained = result.origins.exact_location(("pytorch", "version"))
+    replaced = result.origins.exact_location(("system", "workspace"))
+    assert retained is not None
+    assert replaced is not None
+    assert retained.source.layer_ordinal == 0
+    assert retained.source.label == str(base)
+    assert replaced.source.layer_ordinal == 1
+    assert replaced.source.label == str(override)
+
+
+def test_same_physical_config_path_remains_two_distinct_source_layers(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(_config())
+
+    single = load_validate_config_result(path)
+    repeated = load_validate_config_result([path, path])
+
+    assert repeated.config == single.config
+    assert repeated.raw_document == single.raw_document
+    assert repeated.secret_file_base == single.secret_file_base
+    location = repeated.origins.exact_location(("build", "platforms"))
+    assert location is not None
+    assert location.source.layer_ordinal == 1
+    assert location.source.label == str(path)
+
+
+def test_service_tracks_keyed_file_overlay_and_append_origins(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config()
+        + """
+
+[[files]]
+url = "https://example.com/base.bin"
+dir = "models"
+filename = "model.bin"
+overwrite = false
+"""
+    )
+    override.write_text(
+        """
+[[files]]
+dir = "models"
+filename = "model.bin"
+overwrite = true
+
+[[files]]
+url = "https://example.com/new.bin"
+dir = "models"
+filename = "new.bin"
+"""
+    )
+
+    result = load_validate_config_result([base, override])
+
+    assert [(item.filename, item.overwrite) for item in result.config.files] == [
+        ("model.bin", True),
+        ("new.bin", False),
+    ]
+    base_url = result.origins.exact_location(("files", 0, "url"))
+    later_overwrite = result.origins.exact_location(("files", 0, "overwrite"))
+    appended = result.origins.exact_location(("files", 1))
+    assert base_url is not None and base_url.source.layer_ordinal == 0
+    assert later_overwrite is not None and later_overwrite.source.layer_ordinal == 1
+    assert later_overwrite.path == ("files", 0, "overwrite")
+    assert appended is not None and appended.source.layer_ordinal == 1
+    assert appended.path == ("files", 1)
+
+
+def test_service_tracks_an_empty_keyed_sequence_reset(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    reset = tmp_path / "reset.toml"
+    base.write_text(
+        _config()
+        + """
+
+[[files]]
+url = "https://example.com/base.bin"
+dir = "models"
+filename = "model.bin"
+"""
+    )
+    reset.write_text("files = []\n")
+
+    result = load_validate_config_result([base, reset])
+
+    assert result.config.files == []
+    location = result.origins.exact_location(("files",))
+    assert location is not None
+    assert location.source.layer_ordinal == 1
+    assert location.source.label == str(reset)
+
+
 def test_secret_and_git_credential_layers_compose_by_logical_keys(
     tmp_path: Path,
 ) -> None:

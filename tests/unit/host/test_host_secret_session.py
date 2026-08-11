@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 import stat
 from pathlib import Path
@@ -299,8 +298,8 @@ def test_file_sources_use_lexical_base_and_allow_absolute_or_parent_paths(
     token = config_dir / "token" if spelling == "token" else tmp_path / "token"
     token.parent.mkdir(exist_ok=True)
     token.write_bytes(b"file-token")
-    authored = os.fspath(token) if spelling == "{absolute}" else spelling
-    result = _configuration(tmp_path, source=f"file = {json.dumps(authored)}")
+    authored = token.as_posix() if spelling == "{absolute}" else spelling
+    result = _configuration(tmp_path, source=f'file = "{authored}"')
 
     with HostSecretSession.from_configuration(result) as session:
         assert session.snapshot("root_token").read_bytes() == b"file-token"

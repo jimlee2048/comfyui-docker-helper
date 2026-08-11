@@ -44,6 +44,10 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
     ProviderIdentityAcquirer,
 )
+from comfyui_docker_helper.host.git_credential_process import (
+    GitCredentialProcessBinding,
+)
+from comfyui_docker_helper.host.hook_paths import lexical_hook_source_root
 from comfyui_docker_helper.host.identity_providers import (
     DockerEngineOciIdentityProvider,
     DockerManagedPythonIdentityProvider,
@@ -51,10 +55,9 @@ from comfyui_docker_helper.host.identity_providers import (
     GitDirectIdentityProvider,
     GitOfficialComfyUIIdentityProvider,
     HttpRegistryNodeIdentityProvider,
-    LocalExecutableIdentityRequest,
 )
 from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
-from comfyui_docker_helper.host.secret_session import GitCredentialProcessBinding
+from comfyui_docker_helper.local_executable import LocalExecutableIdentityRequest
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.version import package_version
 
@@ -160,7 +163,11 @@ def build_local_executable_requests(
     )
     if relative_hooks and build_hooks_dir is None:
         raise ValueError("build-hook requests require an admitted source root")
-    root = Path(build_hooks_dir).resolve() if build_hooks_dir is not None else None
+    root = (
+        lexical_hook_source_root(build_hooks_dir, working_directory=None)
+        if build_hooks_dir is not None
+        else None
+    )
     return (
         tuple(
             LocalExecutableIdentityRequest(

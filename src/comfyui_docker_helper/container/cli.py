@@ -1,23 +1,43 @@
 """Container helper command group."""
 
+from __future__ import annotations
+
+import sys
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
-from comfyui_docker_helper.container.build_plan_input import (
-    MATERIALIZED_BUILD_PLAN_PATH,
-    BuildPlanInputAdmission,
-)
-from comfyui_docker_helper.container.comfyui_installer import install_comfyui
-from comfyui_docker_helper.container.custom_node_installer import install_custom_nodes
-from comfyui_docker_helper.container.download_files import download_files
-from comfyui_docker_helper.container.entrypoint import run_entrypoint
-from comfyui_docker_helper.container.final_manifest import emit_final_manifest
-from comfyui_docker_helper.container.runners import (
-    ContainerCommandError,
-    ContainerRuntime,
+from comfyui_docker_helper.errors import ApplicationError
+
+if TYPE_CHECKING:
+    from comfyui_docker_helper.container.build_plan_input import (
+        BuildPlanInputAdmission,
+    )
+
+if sys.platform == "linux":
+    from comfyui_docker_helper.container.build_plan_input import (
+        MATERIALIZED_BUILD_PLAN_PATH,
+        BuildPlanInputAdmission,
+    )
+    from comfyui_docker_helper.container.comfyui_installer import install_comfyui
+    from comfyui_docker_helper.container.custom_node_installer import (
+        install_custom_nodes,
+    )
+    from comfyui_docker_helper.container.download_files import download_files
+    from comfyui_docker_helper.container.entrypoint import run_entrypoint
+    from comfyui_docker_helper.container.final_manifest import emit_final_manifest
+    from comfyui_docker_helper.container.runners import (
+        ContainerCommandError,
+        ContainerRuntime,
+    )
+else:
+    MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
+
+_CONTAINER_PLATFORM_ERROR = (
+    "cdh container commands run only inside the project's Linux image; "
+    "use 'cdh host' on the host machine"
 )
 
 app = typer.Typer(
@@ -30,8 +50,10 @@ app = typer.Typer(
 
 
 @app.callback()
-def container() -> None:
+def container(ctx: typer.Context) -> None:
     """Run container-side helper commands."""
+    if sys.platform != "linux" and ctx.invoked_subcommand is not None:
+        raise ApplicationError(_CONTAINER_PLATFORM_ERROR)
 
 
 @app.command("download-files", context_settings=HELP_CONTEXT_SETTINGS)
@@ -124,7 +146,6 @@ def emit_final_manifest_command(
 @app.command("entrypoint", context_settings=HELP_CONTEXT_SETTINGS)
 def entrypoint_command() -> None:
     """Start ComfyUI through the cdh runtime entrypoint."""
-
     runtime = ContainerRuntime.from_env()
     raise typer.Exit(code=run_entrypoint(runtime=runtime))
 

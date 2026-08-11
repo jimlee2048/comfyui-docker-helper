@@ -1,9 +1,11 @@
 """Host command group."""
 
+from __future__ import annotations
+
 import os
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
@@ -43,12 +45,15 @@ from comfyui_docker_helper.host.render_service import (
     admit_build_hook_source,
     prepare_render_context,
 )
-from comfyui_docker_helper.host.secret_session import (
-    HostSecretSession,
-    HostSecretSessionError,
-)
+
+if TYPE_CHECKING:
+    from comfyui_docker_helper.host.secret_session import (
+        HostSecretSession,
+        HostSecretSessionError,
+    )
 
 _DEFAULT_CONTEXT_DIR = Path(".cdh/build/current")
+_platform_name = os.name
 
 app = typer.Typer(
     name="host",
@@ -171,6 +176,11 @@ def render(
     ] = False,
 ) -> None:
     """Render a context; Docker may be used when new uv resolution is needed."""
+    from comfyui_docker_helper.host.secret_session import (
+        HostSecretSession,
+        HostSecretSessionError,
+    )
+
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
     presenter = default_host_presenter()
@@ -347,6 +357,11 @@ def build(
     ] = False,
 ) -> None:
     """Render a build context and build it with Docker Buildx."""
+    from comfyui_docker_helper.host.secret_session import (
+        HostSecretSession,
+        HostSecretSessionError,
+    )
+
     config_files = _require_at_least_one(config_files, "--file/-f")
     cache_from = _admit_single_cache_spec(cache_from_specs or [], "--cache-from")
     cache_to = _admit_single_cache_spec(cache_to_specs or [], "--cache-to")
@@ -517,7 +532,9 @@ def _prepare_build_ssh_input(
             "custom nodes"
         )
         return False
-    if not os.environ.get("SSH_AUTH_SOCK"):
+    # Native Windows has no POSIX socket environment contract. Keep BuildKit's
+    # default agent selection opaque and let Docker report unsupported setups.
+    if _platform_name != "nt" and not os.environ.get("SSH_AUTH_SOCK"):
         raise typer.BadParameter(
             "requires a non-empty SSH_AUTH_SOCK environment variable",
             param_hint="--ssh",
@@ -526,12 +543,14 @@ def _prepare_build_ssh_input(
 
 
 def _collect_default_known_hosts_bindings() -> tuple[FileSecretBinding, ...]:
+    # Windows has no project-owned system known-hosts discovery contract.
     return tuple(
         FileSecretBinding(
             secret_id=descriptor.secret_id,
             source=source,
         )
         for descriptor in KNOWN_HOSTS_MOUNTS
+        if _platform_name != "nt" or descriptor.scope == "user"
         if (source := Path(descriptor.default_source).expanduser()).exists()
     )
 

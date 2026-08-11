@@ -26,6 +26,8 @@ from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
 
+_platform_name = os.name
+
 
 class FinalMaterializationError(RuntimeError):
     """The BuildPlan context could not be materialized safely."""
@@ -225,7 +227,8 @@ def _write(
         for part in relative_path.parts[:-1]:
             parent /= part
             parent.mkdir(mode=0o755, exist_ok=True)
-            parent.chmod(0o755)
+            if _platform_name == "posix":
+                parent.chmod(0o755)
     except OSError as error:
         raise FinalMaterializationError(
             "materialized parent could not be created"
@@ -234,7 +237,8 @@ def _write(
     try:
         with path.open("xb") as output:
             output.write(content)
-            os.fchmod(output.fileno(), 0o755 if executable else 0o644)
+            if _platform_name == "posix":
+                os.fchmod(output.fileno(), 0o755 if executable else 0o644)
     except OSError as error:
         raise FinalMaterializationError(
             "materialized target could not be written"

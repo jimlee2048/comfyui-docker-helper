@@ -25,6 +25,21 @@ _COST_AUTHORIZATIONS = {
 
 _VALIDATED_RELEASE_SCENARIOS = pytest.StashKey[dict[str, AcceptanceScenario]]()
 
+_MAX_NODE_ID_CHARACTERS = 4096
+
+
+def _validate_node_id_lengths(items: list[pytest.Item]) -> None:
+    oversized = [
+        len(item.nodeid) for item in items if len(item.nodeid) > _MAX_NODE_ID_CHARACTERS
+    ]
+    if not oversized:
+        return
+    raise pytest.UsageError(
+        f"{len(oversized)} collected test node ID(s) exceed the "
+        f"{_MAX_NODE_ID_CHARACTERS}-character limit; longest is "
+        f"{max(oversized)} characters. Use concise explicit parametrization IDs."
+    )
+
 
 def _selected_release_ids(config: pytest.Config) -> set[str]:
     return set(config.getoption("--acceptance-scenario"))
@@ -133,6 +148,7 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
+    _validate_node_id_lengths(items)
     for item in items:
         missing = [
             option

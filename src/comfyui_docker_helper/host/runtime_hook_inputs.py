@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import stat
+import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -21,7 +21,12 @@ from comfyui_docker_helper.config.runtime_hooks import (
     classify_runtime_hook_entry,
     runtime_hook_phase_directory_list,
 )
-from comfyui_docker_helper.host.identity_providers import (
+from comfyui_docker_helper.host.hook_paths import (
+    lexical_hook_source_root,
+    observed_path_is_real_directory,
+    observed_path_is_reparse,
+)
+from comfyui_docker_helper.local_executable import (
     LocalExecutableIdentityRequest,
 )
 
@@ -45,13 +50,13 @@ def discover_runtime_hook_inputs(
     """Validate and enumerate every baked runtime hook in canonical order."""
     if runtime_hooks_dir is None:
         return RuntimeHookInputs(None, ())
-    base = Path.cwd() if working_directory is None else Path(working_directory)
-    selected = Path(runtime_hooks_dir)
-    candidate = selected if selected.is_absolute() else base / selected
     diagnostics: list[Diagnostic] = []
     warnings: list[Diagnostic] = []
     try:
-        mode = candidate.lstat().st_mode
+        root = lexical_hook_source_root(
+            runtime_hooks_dir, working_directory=working_directory
+        )
+        source_is_real_directory = observed_path_is_real_directory(root)
     except FileNotFoundError as error:
         raise RuntimeHookInputError(
             (
@@ -69,7 +74,17 @@ def discover_runtime_hook_inputs(
             "runtime hook source could not be inspected",
             error,
         ) from error
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+    except ValueError as error:
+        raise RuntimeHookInputError(
+            (
+                Diagnostic(
+                    ("runtime_hooks_dir",),
+                    "runtime_hooks.source_not_directory",
+                    "runtime hook source must be an existing real directory",
+                ),
+            )
+        ) from error
+    if not source_is_real_directory:
         raise RuntimeHookInputError(
             (
                 Diagnostic(
@@ -80,7 +95,6 @@ def discover_runtime_hook_inputs(
             )
         )
     try:
-        root = candidate.resolve(strict=True)
         children = tuple(sorted(root.iterdir(), key=lambda item: item.name))
     except OSError as error:
         raise _error(
@@ -94,13 +108,18 @@ def discover_runtime_hook_inputs(
     ignored_top_level = 0
     for child in children:
         child_path = ("runtime_hooks_dir", child.name)
-        child_mode = _mode(child, child_path, diagnostics)
-        if child_mode is None:
+        child_stat = _entry_stat(child, child_path, diagnostics)
+        if child_stat is None:
             continue
+        child_mode = child_stat.st_mode
         child_kind = classify_runtime_hook_entry(child_mode, child.suffix)
-        if child_kind == RuntimeHookEntryKind.SYMLINK:
+        if observed_path_is_reparse(child_stat):
             diagnostics.append(
-                _diagnostic(child_path, "symlink", "must not contain symlinks")
+                _diagnostic(
+                    child_path,
+                    "symlink",
+                    "must not contain links or reparse points",
+                )
             )
             continue
         if child_kind == RuntimeHookEntryKind.SPECIAL:
@@ -171,13 +190,18 @@ def _phase_files(
     ignored = 0
     for child in children:
         child_path = (*path, child.name)
-        child_mode = _mode(child, child_path, diagnostics)
-        if child_mode is None:
+        child_stat = _entry_stat(child, child_path, diagnostics)
+        if child_stat is None:
             continue
+        child_mode = child_stat.st_mode
         child_kind = classify_runtime_hook_entry(child_mode, child.suffix)
-        if child_kind == RuntimeHookEntryKind.SYMLINK:
+        if observed_path_is_reparse(child_stat):
             diagnostics.append(
-                _diagnostic(child_path, "symlink", "must not contain symlinks")
+                _diagnostic(
+                    child_path,
+                    "symlink",
+                    "must not contain links or reparse points",
+                )
             )
         elif child_kind in {
             RuntimeHookEntryKind.DIRECTORY,
@@ -205,13 +229,13 @@ def _phase_files(
     return files
 
 
-def _mode(
+def _entry_stat(
     path: Path,
     diagnostic_path: tuple[str, ...],
     diagnostics: list[Diagnostic],
-) -> int | None:
+) -> os.stat_result | None:
     try:
-        return path.lstat().st_mode
+        return path.lstat()
     except OSError as error:
         diagnostics.append(
             Diagnostic(

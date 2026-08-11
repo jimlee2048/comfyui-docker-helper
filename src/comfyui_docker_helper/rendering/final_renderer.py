@@ -28,16 +28,16 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         f"FROM --platform={plan.toolchain.platform} "
         f"{plan.toolchain.cuda_image.reference}",
         "COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/",
-        "COPY build-plan.json /opt/cdh/build/build-plan.json",
-        "COPY runtime/config.toml /opt/cdh/runtime/config.toml",
+        "COPY --chmod=0644 build-plan.json /opt/cdh/build/build-plan.json",
+        "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml",
     ]
     if any(
         node.pre_install_hooks or node.post_install_hooks
         for node in plan.custom_nodes.nodes
     ):
-        lines.append("COPY build/hooks /opt/cdh/build/hooks")
+        lines.append("COPY --chmod=0755 build/hooks /opt/cdh/build/hooks")
     if plan.runtime.hooks:
-        lines.append("COPY runtime/hooks /opt/cdh/runtime/hooks")
+        lines.append("COPY --chmod=0755 runtime/hooks /opt/cdh/runtime/hooks")
     lines.extend(
         (
             f"ENV VIRTUAL_ENV={_docker_word(runtime_venv.as_posix())}",

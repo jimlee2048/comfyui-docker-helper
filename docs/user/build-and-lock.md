@@ -4,6 +4,16 @@ English | [简体中文](build-and-lock.zh-CN.md)
 
 This guide covers local validation, canonical-lock reconciliation, rendered build contexts, and Docker image builds. Start with the [configuration guide](configuration.md) to choose and layer configuration files. The commands below assume your configuration is named `cdh.toml` and run from its directory.
 
+Multi-line commands use POSIX shell continuation syntax. On Windows, enter them on one line or replace each trailing `\` with PowerShell's backtick continuation character.
+
+## Host and target platforms
+
+All `cdh host *` workflows run natively on supported Windows and Linux hosts. Install cdh with the ordinary [`uv tool` or `pip` command](../../README.md#install); the installer selects the required platform dependencies. Docker builds always target Linux `amd64`. A Windows host normally uses Docker Desktop running Linux containers with Buildx; another endpoint must provide equivalent Linux `amd64` Buildx behavior. cdh does not build or run Windows containers. `cdh container *` is for execution inside the generated Linux image.
+
+Automated Windows validation covers native CLI, filesystem, Git, rendering, packaging, and Docker/Buildx adapter behavior. It does not run a real Docker Desktop build or prove Docker Desktop SSH-agent forwarding. Docker Desktop, builder, or agent-integration failures therefore retain the underlying Docker/BuildKit diagnostic.
+
+cdh validates the file type and lexical path shape it observes while reading local Secret and hook inputs, and rejects observed symbolic links, Windows junctions or other reparse points, and special files. Secret files additionally enforce the 65,525-byte limit. Hook files bind the bytes read during identity planning to a digest and revalidate that digest before materialization. This is not isolation from another local process: do not allow an untrusted process to modify a selected input file or its directory concurrently with cdh.
+
 ## Validate, render, and build
 
 Validate configuration before resolving or building anything:
@@ -73,6 +83,8 @@ Configure Secret sources and `[[cdh.git.credentials]]` routes as described in [S
 
 Secret handling is lazy and scoped to the command. cdh keeps source locators and resolved values out of durable build artifacts and its own diagnostics, and attempts cleanup when the command exits through supported success, error, or interruption paths. An ordinary cleanup failure is reported, but abrupt process or host termination cannot guarantee cleanup. This is a structural non-persistence boundary, not a sandbox: trusted custom-node hooks and installers can still read, print, or copy credentials available to their combined build step. An `http://` credential route is allowed but warns because it lacks TLS transport confidentiality.
 
+On POSIX, an environment Secret preserves the environment value's raw bytes; on Windows, cdh encodes the Unicode environment value as UTF-8. File Secrets remain regular-file inputs with a 65,525-byte limit. cdh warns when POSIX group or world permission bits are present. On Windows, restrict the source file's ACL yourself because cdh does not implement a general Windows access audit. cdh-owned temporary Secret snapshots remain private through POSIX modes or a protected Windows DACL.
+
 BuildKit does not include Secret contents in a `RUN` instruction's cache key; only the Secret ID and mount properties participate. Rotating a token can therefore reuse an already completed custom-node layer without contacting the current credential source. When building a rendered context directly, use Buildx `--no-cache`, or use other ordinary BuildKit cache controls, when a fresh authentication check is required. cdh deliberately does not hash a token into a cachebuster.
 
 ### Build a rendered HTTPS context directly
@@ -103,9 +115,9 @@ cdh host build \
   --ssh
 ```
 
-The option requires a non-empty `SSH_AUTH_SOCK`. cdh uses the default agent together with existing default user and system known-hosts files; it does not inspect the agent, add host keys, copy private keys, or read `~/.ssh/config`. For a self-hosted service or non-default port, use an explicit locator such as `ssh://git@example.test:2222/group/node.git` and add the corresponding host-and-port entry to a default known-hosts file. SSH aliases, `ProxyJump`, custom key/trust-file selectors, and raw key files are not supported. `--ssh` does not supply HTTPS tokens; configure those with `cdh.git.credentials`.
+On POSIX, the option requires a non-empty `SSH_AUTH_SOCK`; cdh forwards that default agent and existing default user and system known-hosts files. On Windows, `SSH_AUTH_SOCK` is not a cdh prerequisite: cdh requests BuildKit's `--ssh default` and lets Docker/BuildKit select and validate the agent, while automatically supplying only existing user-level `~/.ssh/known_hosts` and `~/.ssh/known_hosts2` files. Windows system known-hosts discovery is not supported. cdh does not inspect the agent, add host keys, copy private keys, or read `~/.ssh/config` on either platform. For a self-hosted service or non-default port, use an explicit locator such as `ssh://git@example.test:2222/group/node.git` and add the corresponding host-and-port entry to a supported default known-hosts file. SSH aliases, `ProxyJump`, custom key/trust-file selectors, and raw key files are not supported. `--ssh` does not supply HTTPS tokens; configure those with `cdh.git.credentials`.
 
-If the effective configuration has no direct-Git node, `--ssh` prints one warning and continues without forwarding anything. Otherwise, a missing agent fails before source resolution, while host-key, authentication, and Git/submodule failures keep their underlying diagnostics.
+If the effective configuration has no direct-Git node, `--ssh` prints one warning and continues without forwarding anything. Otherwise, a missing POSIX agent fails before source resolution. On Windows, unavailable default-agent forwarding is reported by Docker/BuildKit; host-key, authentication, and Git/submodule failures also keep their underlying diagnostics.
 
 Treat configured custom-node hooks and installers as trusted code: during custom-node installation they can use the forwarded agent and read the supplied trust files. Private key bytes remain in the agent, and cdh does not automatically place the agent or trust files in the rendered context or image. A cached custom-node layer may also be reused without contacting the current agent or rechecking updated trust; bypass the relevant BuildKit cache when a fresh authentication check is required.
 

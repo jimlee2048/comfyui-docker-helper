@@ -367,21 +367,25 @@ pub_keys = []
     assert result.config.system.ssh.pub_keys == [VALID_SSH_KEY]
 
 
-def test_ssh_pub_key_env_empty_appends_none_and_exact_duplicate_is_deduped(
+def test_ssh_pub_key_env_empty_or_same_identity_is_a_quiet_noop(
     tmp_path: Path,
 ) -> None:
     baked = _write(
         tmp_path / "baked.toml",
         f"""
 [system.ssh]
-pub_keys = ["", "{VALID_SSH_KEY}"]
+pub_keys = [
+  "",
+  "{VALID_SSH_KEY}",
+  "{VALID_SSH_KEY.rsplit(" ", 1)[0]} baked-other@example",
+]
 """,
     )
 
     duplicate = load_runtime_config(
         baked_config_path=baked,
         mounted_config_path=tmp_path / "missing-mounted.toml",
-        environ={"SSH_PUB_KEY": VALID_SSH_KEY},
+        environ={"SSH_PUB_KEY": VALID_SSH_KEY.rsplit(" ", 1)[0] + " other@example"},
     )
     empty = load_runtime_config(
         baked_config_path=baked,

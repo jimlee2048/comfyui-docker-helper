@@ -865,6 +865,26 @@ def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
     assert "Value: Demo>=2,<3" in output
 
 
+def test_host_validate_warns_for_redundant_default_os_package(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    with config.open("a") as stream:
+        stream.write('\n[system]\nextra_packages = ["bash"]\n')
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "validate", "-f", str(config)],
+    )
+    output = _plain_output(result.output)
+
+    assert result.exit_code == 0
+    assert output.count("system.redundant_default_apt_package") == 1
+    assert str(config) in output.replace("\n", "")
+
+
 def test_host_validate_displays_http_credential_warning_offline(
     cli_runner: CliRunner,
     tmp_path: Path,

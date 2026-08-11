@@ -48,6 +48,9 @@ from comfyui_docker_helper.config.git_credentials import (
     canonicalize_git_credential_context,
 )
 from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
+from comfyui_docker_helper.config.requirement_validation import (
+    direct_selector_is_exact,
+)
 from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
@@ -489,7 +492,7 @@ def build_canonical_request_graph(
                 config.system.ssh.enable,
                 config.system.ssh.port,
                 config.system.ssh.password,
-                tuple(config.system.ssh.pub_keys),
+                domains.ssh_public_keys,
             ),
             shutdown_timeout=config.cdh.shutdown_timeout,
             launch_command=(
@@ -570,7 +573,7 @@ def request_stability(request: ResolverRequestIdentity) -> SelectorStability:
         )
     return (
         SelectorStability.EXACT
-        if all(member.selector.startswith("==") for member in request.members)
+        if all(direct_selector_is_exact(member.selector) for member in request.members)
         else SelectorStability.MOVING
     )
 
@@ -627,6 +630,8 @@ def _image_config_projection(
     python = cast(dict[str, object], document["python"])
     pytorch = cast(dict[str, object], document["pytorch"])
     system["extra_packages"] = [item.value for item in domains.apt_packages]
+    ssh = cast(dict[str, object], system["ssh"])
+    ssh["pub_keys"] = list(domains.ssh_public_keys)
     python["extra_packages"] = [
         item.canonical_value
         for item in domains.package_requirements

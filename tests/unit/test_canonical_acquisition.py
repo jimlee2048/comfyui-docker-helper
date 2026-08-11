@@ -338,6 +338,44 @@ def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests()
 
 
 @pytest.mark.parametrize(
+    ("selector", "expected"),
+    [
+        ("", b"demo\n"),
+        (">=1", b"demo>=1\n"),
+        ("~=1.2", b"demo~=1.2\n"),
+    ],
+)
+def test_direct_python_resolver_preserves_newly_admitted_requirement_text(
+    selector: str,
+    expected: bytes,
+) -> None:
+    executor = _UvExecutor(b"demo==1.5.0\n")
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(
+                package="demo",
+                extras=(),
+                selector=selector,
+            ),
+        ),
+    )
+
+    result = DockerPythonGroupResolver(executor).resolve(request)
+
+    assert [(item.package, item.version) for item in result.members] == [
+        ("demo", "1.5.0")
+    ]
+    assert executor.calls[0][1].requirements == expected
+
+
+@pytest.mark.parametrize(
     ("environment", "group", "package", "selector"),
     [
         ("application", "application-extra", "packaging", "==26.2"),

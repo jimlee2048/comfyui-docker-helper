@@ -903,12 +903,12 @@ class SshPlan(_PlanModel):
     @field_validator("pub_keys")
     @classmethod
     def _validate_pub_keys(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        normalized, diagnostics = normalize_ssh_public_keys(
+        normalization = normalize_ssh_public_keys(
             list(value),
             path=("runtime", "ssh", "pub_keys"),
             code="ssh.invalid_public_key",
         )
-        if diagnostics or normalized != value:
+        if normalization.diagnostics or normalization.values != value:
             raise ValueError("SSH public keys must be canonical and unique")
         return value
 

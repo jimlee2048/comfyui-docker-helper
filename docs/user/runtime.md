@@ -24,7 +24,7 @@ Runtime configuration covers ComfyUI `listen`, `port`, and `extra_args`; cdh dow
 
 Each TOML source is first parsed and checked for runtime applicability. The remaining supported values are then merged with the defaults and environment overrides, and cdh validates the resulting effective runtime document. Consequently, a later partial item can inherit omitted fields from an earlier layer, but an invalid effective result still fails startup with source context.
 
-Ordinary runtime arrays use whole-list replacement: omission inherits the earlier list, a later non-empty list replaces it, and a later empty list clears it. This applies to `comfyui.extra_args` and TOML `system.ssh.pub_keys`. `SSH_PUB_KEY` is the deliberate exception: it appends one normalized public key after the other layers are merged, or does nothing if that exact normalized key is already present.
+Ordinary runtime arrays use whole-list replacement: omission inherits the earlier list, a later non-empty list replaces it, and a later empty list clears it. This applies to `comfyui.extra_args` and TOML `system.ssh.pub_keys`. `SSH_PUB_KEY` is the deliberate append exception. After the other layers are merged, cdh stably deduplicates the effective public keys by declared key type plus base64 key blob and retains the first normalized complete line and its optional comment. An `SSH_PUB_KEY` with an existing key identity is therefore a quiet no-op even when its comment differs; otherwise cdh appends its normalized line.
 
 The supported environment overrides are:
 

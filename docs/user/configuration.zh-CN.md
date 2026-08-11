@@ -32,7 +32,9 @@ cdh host validate \
 - `files` 使用 `dir` 加 `filename` 目标；
 - `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
-对于包集合，新标识会按首次出现顺序追加。完全重复的 Debian 包只保留一次。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras 或 selector 不同，会继续保留，让生效配置校验报告冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
+对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras 或 selector 不同，会继续保留，让生效配置校验报告冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
+
+`system.ssh.pub_keys` 在 TOML 层之间仍采用普通的整列表替换：省略会继承，靠后的非空列表会替换，`[]` 会清空。选出最终生效列表后，cdh 会裁剪每行首尾空白、丢弃空值，并按声明的密钥类型加 base64 密钥 blob 进行稳定去重。它会保留第一条规范化后的完整行及其可选注释。之后每个非空重复项都会产生带来源的警告，且警告不会打印密钥内容。
 
 Registry ID 的大小写变体表示同一资源，并在原位置覆盖，靠后编写的拼写最终生效。标点符号变体仍是不同的 Registry 资源；如果这些资源映射到同一个规范化的已安装 Python 分发包标识，生效配置校验会报告冲突，而不会擅自选择其中一个。
 
@@ -70,6 +72,8 @@ Manager 和 comfy-cli 是分别独立控制的可选功能。省略其开关时�
 - `comfyui.install_cli` 控制单独解析的、面向用户的 comfy-cli 工具。cdh 不使用 comfy-cli 构建镜像或安装 Registry 节点。
 
 `python.uv_tools` 中的条目用于请求额外的隔离命令行工具。这些工具不会把软件包安装到 ComfyUI 应用环境中。有关软件包来源、解析和工具环境的行为，请参阅[构建与锁定指南](build-and-lock.zh-CN.md)。
+
+`python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 中的直接 requirement 可以只写分发包名，也可以使用 `==`、`!=`、`<`、`<=`、`>`、`>=` 和 `~=` selector，包括单边约束和 compatible-release 约束。直接 URL、VCS、本地或 editable requirement、环境 marker、通配符 selector、任意相等 `===`，以及 prerelease、development 或 local-version 操作数都会被拒绝。一个 requirement 最多只能包含一个精确 `==` selector，且该精确版本必须满足同一 requirement 中的所有其他 selector。cdh 会规范化受支持的语法，但不会求解或推断一般意义上的版本范围代数。
 
 ## 选择自定义节点和构建 Hook
 

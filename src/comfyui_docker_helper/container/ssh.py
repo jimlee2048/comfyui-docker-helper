@@ -535,14 +535,14 @@ def _sync_directory(path: Path) -> None:
 
 
 def _normalize_runtime_public_keys(values: list[str]) -> tuple[str, ...]:
-    public_keys, diagnostics = normalize_ssh_public_keys(
+    normalization = normalize_ssh_public_keys(
         values,
         path=("system", "ssh", "pub_keys"),
         code="ssh.invalid_public_key",
     )
-    if diagnostics:
-        raise SshCredentialPreparationError(diagnostics[0].message)
-    return public_keys
+    if normalization.diagnostics:
+        raise SshCredentialPreparationError(normalization.diagnostics[0].message)
+    return normalization.values
 
 
 def _set_root_password(password: str, runner: SensitiveCommandRunner) -> None:

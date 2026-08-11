@@ -209,8 +209,14 @@ def load_runtime_config(
     effective = _validate_effective_runtime_document(merged.document, merged.origins)
     config = _runtime_config_from_effective(effective)
     _validate_runtime_ssh(config, merged.origins)
-    if env_pub_key is not None and env_pub_key not in config.system.ssh.pub_keys:
+    if env_pub_key is not None:
         config.system.ssh.pub_keys.append(env_pub_key)
+        env_normalization = normalize_ssh_public_keys(
+            config.system.ssh.pub_keys,
+            path=("system", "ssh", "pub_keys"),
+            code="ssh.invalid_public_key",
+        )
+        config.system.ssh.pub_keys[:] = list(env_normalization.values)
     _validate_runtime_downloader(config, merged.origins)
     _validate_runtime_extra_args(config, merged.origins)
     files = _validate_effective_runtime_files(effective.files, merged.origins)
@@ -562,16 +568,16 @@ def _runtime_config_from_effective(document: _RuntimeConfigPatch) -> RuntimeConf
 
 
 def _validate_runtime_ssh(config: RuntimeConfig, origins: OriginNode) -> None:
-    normalized, diagnostics = normalize_ssh_public_keys(
+    normalization = normalize_ssh_public_keys(
         config.system.ssh.pub_keys,
         path=("system", "ssh", "pub_keys"),
         code="ssh.invalid_public_key",
     )
-    if diagnostics:
+    if normalization.diagnostics:
         raise RuntimeConfigurationError(
-            _enrich_runtime_diagnostics(diagnostics, origins)
+            _enrich_runtime_diagnostics(normalization.diagnostics, origins)
         )
-    config.system.ssh.pub_keys[:] = list(normalized)
+    config.system.ssh.pub_keys[:] = list(normalization.values)
 
 
 def _validate_effective_runtime_files(

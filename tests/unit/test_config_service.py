@@ -14,6 +14,12 @@ from comfyui_docker_helper.config.service import (
     load_validate_config_result,
 )
 
+_VALID_SSH_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
+    "first@example"
+)
+
 
 def _config() -> str:
     return """
@@ -393,21 +399,54 @@ file = "never-read-token"
 
 
 @pytest.mark.parametrize("package", ["bash", "tini"])
-def test_layered_documents_report_default_os_package_collision(
+def test_layered_default_os_package_overlap_warns_once_from_effective_source(
     tmp_path: Path,
     package: str,
 ) -> None:
     base = tmp_path / "base.toml"
     override = tmp_path / "override.toml"
-    base.write_text(_config())
+    base.write_text(_config() + f'\n[system]\nextra_packages = ["{package}"]\n')
     override.write_text(f'[system]\nextra_packages = ["{package}"]\n')
 
-    with pytest.raises(ConfigurationServiceError) as raised:
-        load_validate_config([base, override])
+    result = load_validate_config_result([base, override])
 
-    assert [(item.path, item.code) for item in raised.value.diagnostics] == [
-        (("system", "extra_packages", 0), "system.duplicate_apt_package")
+    assert [(item.path, item.code) for item in result.warnings] == [
+        (
+            ("system", "extra_packages", 0),
+            "system.redundant_default_apt_package",
+        )
     ]
+    context = result.warnings[0].source_context
+    assert isinstance(context, SourceLocation)
+    assert context.source.label == str(override)
+    assert result.domains.authored_apt_packages[0].value == package
+    assert result.domains.apt_packages == ()
+
+
+def test_host_ssh_duplicate_warning_uses_winning_list_source_without_key_value(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config() + f'\n[system.ssh]\npub_keys = ["{_VALID_SSH_KEY}", "not-a-key"]\n'
+    )
+    duplicate = _VALID_SSH_KEY.rsplit(" ", 1)[0] + " second@example"
+    override.write_text(
+        f'[system.ssh]\npub_keys = ["  {_VALID_SSH_KEY}  ", "{duplicate}"]\n'
+    )
+
+    result = load_validate_config_result([base, override])
+
+    assert [(item.path, item.code) for item in result.warnings] == [
+        (("system", "ssh", "pub_keys", 1), "ssh.redundant_public_key")
+    ]
+    warning = result.warnings[0]
+    assert isinstance(warning.source_context, SourceLocation)
+    assert warning.source_context.source.label == str(override)
+    assert warning.source_context.path == ("system", "ssh", "pub_keys", 1)
+    assert _VALID_SSH_KEY not in warning.message
+    assert result.domains.ssh_public_keys == (_VALID_SSH_KEY,)
 
 
 # Isolated-tool requirements survive the public service boundary.
@@ -477,6 +516,50 @@ def test_layered_canonical_requirement_dedup_retains_later_spelling(
     ]
     location = result.origins.exact_location(("python", "extra_packages", 0))
     assert location is not None and location.source.layer_ordinal == 1
+
+
+@pytest.mark.parametrize(
+    ("base_requirement", "later_requirement", "canonical"),
+    [
+        ("Demo~=1.2", "demo ~= 1.2", "demo~=1.2"),
+        ("Demo>=1,!=2", "demo!=2,>=1", "demo!=2,>=1"),
+    ],
+)
+def test_layered_new_selector_forms_use_existing_canonical_dedup(
+    tmp_path: Path,
+    base_requirement: str,
+    later_requirement: str,
+    canonical: str,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config() + f'\n[python]\nextra_packages = ["{base_requirement}"]\n'
+    )
+    override.write_text(f'[python]\nextra_packages = ["{later_requirement}"]\n')
+
+    result = load_validate_config_result([base, override])
+
+    assert result.config.python.extra_packages == [later_requirement]
+    assert result.domains.package_requirements[0].canonical_value == canonical
+
+
+def test_compatible_and_expanded_range_remain_distinct_requirements(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config() + '\n[python]\nextra_packages = ["demo~=1.2"]\n')
+    override.write_text('[python]\nextra_packages = ["Demo>=1.2,<2"]\n')
+
+    with pytest.raises(ConfigurationServiceError) as raised:
+        load_validate_config_result([base, override])
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "python.conflicting_package_requirement"
+    assert isinstance(diagnostic.source_context, DiagnosticComparison)
+    assert diagnostic.source_context.earlier.display_value == "demo~=1.2"
+    assert diagnostic.source_context.later.display_value == "Demo>=1.2,<2"
 
 
 def test_layered_requirement_conflict_reports_symmetric_sources(tmp_path: Path) -> None:

@@ -26,6 +26,10 @@ from comfyui_docker_helper.config.registry_identity import (
 from comfyui_docker_helper.config.registry_identity import (
     validate_registry_id as validate_registry_resource_id,
 )
+from comfyui_docker_helper.config.requirement_validation import (
+    DirectRequirementError,
+    validate_direct_specifier_set,
+)
 from comfyui_docker_helper.config.selector_validation import (
     normalize_comfyui_version,
     normalize_registry_version,
@@ -1257,31 +1261,11 @@ def _require_direct_package_selector(value: str) -> str:
         raise ValueError("selector must be a supported package selector") from error
     if str(specifiers) != value:
         raise ValueError("selector must be one canonical package selector")
-    items = tuple(specifiers)
-    if any(
-        item.operator not in {"==", "!=", "<", "<=", ">", ">=", "~="}
-        or "*" in item.version
-        for item in items
-    ):
-        raise ValueError("selector must be a supported package selector")
-    if any(not _is_stable_public_operand(item.version) for item in items):
-        raise ValueError("selector operands must be stable public versions")
-    operators = {item.operator for item in items}
-    if operators == {"=="}:
-        if len(items) != 1:
-            raise ValueError("exact selectors must contain one version")
-        return value
-    return value
-
-
-def _is_stable_public_operand(value: str) -> bool:
     try:
-        parsed = Version(value)
-    except InvalidVersion:
-        return False
-    return not (
-        parsed.is_prerelease or parsed.is_devrelease or parsed.local is not None
-    )
+        validate_direct_specifier_set(specifiers)
+    except DirectRequirementError as error:
+        raise ValueError(str(error)) from error
+    return value
 
 
 def _require_oci_repository(value: str) -> str:

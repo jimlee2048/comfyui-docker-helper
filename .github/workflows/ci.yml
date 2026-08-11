@@ -77,15 +77,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - slice: imports
+          - slice: unit-00-07
             python-version: "3.12"
-            pytest-args: tests/unit/host/test_imports.py
-          - slice: unit-rest
+            skip: 0
+          - slice: unit-08-15
             python-version: "3.12"
-            pytest-args: --ignore=tests/unit/host/test_imports.py tests/unit/host
-          - slice: integration
+            skip: 8
+          - slice: unit-16-23
             python-version: "3.12"
-            pytest-args: tests/integration/host
+            skip: 16
+          - slice: unit-24-29
+            python-version: "3.12"
+            skip: 24
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,14 +104,26 @@ jobs:
       - name: Run Windows host and shared contracts
         env:
           PYTHONUNBUFFERED: "1"
-        run: >-
-          uv run --locked pytest
-          -vv
-          --tb=short
-          --durations=50
-          -o faulthandler_timeout=120
-          -o faulthandler_exit_on_timeout=true
-          ${{ matrix.pytest-args }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $testFiles = @(
+            Get-ChildItem -LiteralPath tests/unit/host -Filter "test_*.py" -File |
+              Where-Object { $_.Name -ne "test_imports.py" } |
+              Sort-Object -Property Name
+          )
+          $selectedFiles = @($testFiles | Select-Object -Skip ${{ matrix.skip }} -First 8)
+          if ($selectedFiles.Count -eq 0) {
+            throw "diagnostic slice selected no test files"
+          }
+          $pytestArgs = @(
+            "-vv",
+            "--tb=short",
+            "--durations=50",
+            "-o", "faulthandler_timeout=120",
+            "-o", "faulthandler_exit_on_timeout=true"
+          )
+          $pytestArgs += $selectedFiles.FullName
+          uv run --locked pytest @pytestArgs
       - name: Build Windows wheel
         if: ${{ matrix.slice == 'unit-rest' }}
         env:

@@ -388,7 +388,14 @@ def test_runtime_config_with_password_and_keys_prepares_both_credentials(
     assert runner.calls[0].input_data == b"root:super-secret\n"
 
 
-@pytest.mark.parametrize("password", ["line\nbreak", "carriage\rreturn", "nul\x00byte"])
+@pytest.mark.parametrize(
+    "password",
+    [
+        pytest.param("line\nbreak", id="line-feed"),
+        pytest.param("carriage\rreturn", id="carriage-return"),
+        pytest.param("nul\x00byte", id="nul-byte"),
+    ],
+)
 def test_unsafe_password_content_is_rejected_without_runner_or_leak(
     tmp_path: Path,
     password: str,
@@ -1115,8 +1122,16 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
 @pytest.mark.parametrize(
     ("public_key", "leaked_fragment"),
     [
-        (f"{VALID_SSH_KEY}\nssh-ed25519 injected", "injected"),
-        (f"{VALID_SSH_KEY}\x00comment", "comment"),
+        pytest.param(
+            f"{VALID_SSH_KEY}\nssh-ed25519 injected",
+            "injected",
+            id="embedded-line-feed",
+        ),
+        pytest.param(
+            f"{VALID_SSH_KEY}\x00comment",
+            "comment",
+            id="embedded-nul",
+        ),
     ],
 )
 def test_prepare_root_ssh_credentials_rejects_control_public_key_before_write(

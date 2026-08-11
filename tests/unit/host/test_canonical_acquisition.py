@@ -201,18 +201,23 @@ def test_requirements_provider_returns_exact_source_snapshot() -> None:
 
 
 @pytest.mark.parametrize(
-    "content",
+    ("content", "oversized_size"),
     [
-        pytest.param(b"\xff", id="invalid-utf8"),
+        pytest.param(b"\xff", None, id="invalid-utf8"),
         pytest.param(
-            b"x" * (MAX_COMFYUI_REQUIREMENTS_BYTES + 1),
+            None,
+            MAX_COMFYUI_REQUIREMENTS_BYTES + 1,
             id="oversized",
         ),
     ],
 )
 def test_requirements_provider_rejects_invalid_source_as_acquisition_failure(
-    content: bytes,
+    content: bytes | None,
+    oversized_size: int | None,
 ) -> None:
+    if oversized_size is not None:
+        content = b"x" * oversized_size
+    assert content is not None
     request = ComfyUIRequirementsRequestIdentity(
         type="comfyui-requirements",
         repository="https://github.com/Comfy-Org/ComfyUI.git",

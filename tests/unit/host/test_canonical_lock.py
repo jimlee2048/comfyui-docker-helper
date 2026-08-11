@@ -140,13 +140,13 @@ def test_complete_grouped_lock_round_trips_with_deterministic_bytes() -> None:
 @pytest.mark.parametrize(
     "content",
     [
-        "",
-        "torch\n",
-        "torch\r\n",
-        "torch  \n\t# note\n",
+        pytest.param("", id="empty"),
+        pytest.param("torch\n", id="lf"),
+        pytest.param("torch\r\n", id="crlf"),
+        pytest.param("torch  \n\t# note\n", id="whitespace-comment"),
         "torch",
-        "\ufefftorch\n",
-        "torch\t>=2\n",
+        pytest.param("\ufefftorch\n", id="utf8-bom"),
+        pytest.param("torch\t>=2\n", id="tab-specifier"),
     ],
 )
 def test_requirements_source_bytes_survive_canonical_toml_round_trip(

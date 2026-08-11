@@ -126,9 +126,9 @@ def test_secret_file_locators_accept_posix_file_spellings(locator: str) -> None:
 @pytest.mark.parametrize(
     "locator",
     [
-        "",
-        "token\x00file",
-        "token\nfile",
+        pytest.param("", id="empty"),
+        pytest.param("token\x00file", id="embedded-nul"),
+        pytest.param("token\nfile", id="embedded-newline"),
         "tokens\\private",
         "tokens/",
         "//server/token",
@@ -681,7 +681,15 @@ def test_planning_execution_strings_have_consumer_aligned_domains(
     assert code in {item.code for item in domains.diagnostics}
 
 
-@pytest.mark.parametrize("value", ["", " ", "1M\nprobe", "-1M"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param(" ", id="single-space"),
+        pytest.param("1M\nprobe", id="embedded-newline"),
+        "-1M",
+    ],
+)
 def test_aria2_min_split_size_rejects_ambiguous_argv_values(value: str) -> None:
     document = _document()
     document["cdh"] = {"downloader": {"aria2": {"min_split_size": value}}}

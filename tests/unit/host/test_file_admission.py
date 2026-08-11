@@ -128,7 +128,7 @@ def test_posix_admission_statically_observes_components_then_opens_only_the_leaf
         "C:\\safe\\CLOCK$",
         "C:\\safe\\COM1",
         "C:\\safe\\bad?.txt",
-        "C:\\safe\\bad\x00.txt",
+        pytest.param("C:\\safe\\bad\x00.txt", id="embedded-nul"),
         "\u0131:\\secret",
         "\u017f:\\secret",
     ],

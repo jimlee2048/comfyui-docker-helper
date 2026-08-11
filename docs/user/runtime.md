@@ -38,13 +38,15 @@ Environment overrides and mounted runtime inputs are deployment-time changes. Th
 
 ## Runtime control
 
-Run the following image-internal commands through `docker exec` or an SSH session in the container:
+Run the following image-internal commands through `docker exec`:
 
 ```text
 cdh container runtime restart
 cdh container runtime status [--json]
 cdh container runtime follow
 ```
+
+In an SSH session, use the installed absolute path `/opt/uv/bin/cdh` in place of `cdh`; the SSH login environment does not guarantee that the image entrypoint's tool path is present.
 
 `restart` synchronously replaces the complete runtime generation; it does not start a second lifecycle beside the first one. cdh first cancels the old generation's downloads and SSH work, runs its stop hooks while ComfyUI remains available, stops and reaps the exact processes it owns, and only then admits a successor. The successor rereads baked and mounted runtime configuration, rediscovers baked and mounted hooks, creates fresh download and SSH owners, and reruns the startup order below. It continues to use the environment captured by the image entrypoint; environment values supplied only to the `restart` client do not become runtime overrides. Only one restart mutation is admitted at a time; another request fails busy rather than queuing or joining it.
 

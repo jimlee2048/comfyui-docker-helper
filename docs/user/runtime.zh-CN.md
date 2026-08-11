@@ -38,13 +38,15 @@ built-in defaults < baked config < mounted config < environment
 
 ## 运行时控制
 
-请通过 `docker exec` 或容器内的 SSH 会话运行以下镜像内部命令：
+请通过 `docker exec` 运行以下镜像内部命令：
 
 ```text
 cdh container runtime restart
 cdh container runtime status [--json]
 cdh container runtime follow
 ```
+
+在 SSH 会话中，请使用已安装的绝对路径 `/opt/uv/bin/cdh` 代替 `cdh`；SSH 登录环境不保证包含镜像 entrypoint 的工具路径。
 
 `restart` 会同步替换完整的 runtime generation；它不会在原有生命周期旁再启动第二个生命周期。cdh 会先取消旧 generation 的下载和 SSH 工作，在 ComfyUI 仍可用时运行其 stop Hook，停止并回收自己精确拥有的进程，然后才接纳 successor。successor 会重新读取固化和挂载的运行时配置、重新发现固化和挂载的 Hook、创建全新的下载与 SSH owner，并重新执行下文的启动顺序。它仍使用镜像 entrypoint 捕获的环境；仅提供给 `restart` 客户端的环境变量不会成为运行时覆盖项。同一时间只会接纳一个 restart mutation；其他请求会立即返回 busy，而不会排队或加入该操作。
 

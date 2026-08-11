@@ -46,9 +46,12 @@ enable = false
 port = 22
 # Leave empty in image config. SSH_PASSWORD can set a runtime-only root password.
 password = ""
-# Public keys must be single OpenSSH authorized_keys lines. SSH_PUB_KEY can
-# append one runtime-only public key. Across layered TOML files, omission
-# inherits this whole list, a later non-empty list replaces it, and [] clears it.
+# Copy plain, non-certificate public-key lines from OpenSSH-generated .pub
+# output without authorized_keys options. FIDO Ed25519 and ECDSA P-256 keys
+# are supported.
+# SSH_PUB_KEY can append one runtime-only public key. Across layered TOML files,
+# omission inherits this whole list, a later non-empty list replaces it, and []
+# clears it.
 # The winning host list is trimmed, empty entries are dropped, and duplicate
 # type-plus-base64 identities retain the first complete line and optional
 # comment. Each later non-empty duplicate warns without printing key material.

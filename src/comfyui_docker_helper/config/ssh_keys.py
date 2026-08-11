@@ -5,6 +5,10 @@ import binascii
 import struct
 from dataclasses import dataclass
 
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import load_ssh_public_key
+
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticPath
 
 _OPENSSH_PUBLIC_KEY_TYPES = frozenset(
@@ -14,12 +18,13 @@ _OPENSSH_PUBLIC_KEY_TYPES = frozenset(
         "ecdsa-sha2-nistp256",
         "ecdsa-sha2-nistp384",
         "ecdsa-sha2-nistp521",
+        "sk-ssh-ed25519@openssh.com",
+        "sk-ecdsa-sha2-nistp256@openssh.com",
     }
 )
-_ECDSA_CURVES = {
-    "ecdsa-sha2-nistp256": b"nistp256",
-    "ecdsa-sha2-nistp384": b"nistp384",
-    "ecdsa-sha2-nistp521": b"nistp521",
+_SECURITY_KEY_APPLICATION_FIELD_COUNTS = {
+    "sk-ssh-ed25519@openssh.com": 3,
+    "sk-ecdsa-sha2-nistp256@openssh.com": 4,
 }
 _AUTHORIZED_KEYS_FORBIDDEN_CHARACTERS = frozenset({"\n", "\r", "\x00"})
 
@@ -107,65 +112,39 @@ def _validate_ssh_public_key(value: str) -> str | None:
     except (UnicodeEncodeError, binascii.Error):
         return "must contain a valid base64 public key blob"
 
-    parsed = _read_ssh_string(decoded, 0)
-    if parsed is None:
-        return "must contain a complete OpenSSH public key blob"
-    embedded_key_type, offset = parsed
-    if _decode_ascii(embedded_key_type) != key_type:
-        return "public key blob type must match the declared key type"
-    if key_type == "ssh-ed25519":
-        return _validate_ed25519_blob(decoded, offset)
-    if key_type == "ssh-rsa":
-        return _validate_rsa_blob(decoded, offset)
-    if key_type in _ECDSA_CURVES:
-        return _validate_ecdsa_blob(key_type, decoded, offset)
+    if base64.b64encode(decoded).decode("ascii") != blob:
+        return "must contain a canonical base64 public key blob"
+
+    application = _security_key_application(key_type, decoded)
+    if application is not None:
+        if not application.startswith(b"ssh:"):
+            return "security-key application must start with ssh:"
+        if b"\x00" in application[:-1]:
+            return "security-key application must not contain embedded NUL"
+
+    try:
+        public_key = load_ssh_public_key(f"{key_type} {blob}".encode("ascii"))
+    except (ValueError, UnsupportedAlgorithm, NotImplementedError):
+        return "must contain a valid supported OpenSSH public key"
+
+    if isinstance(public_key, rsa.RSAPublicKey) and public_key.key_size < 1024:
+        return "ssh-rsa public key must be at least 1024 bits"
     return None
 
 
-def _validate_ed25519_blob(value: bytes, offset: int) -> str | None:
-    parsed = _read_ssh_string(value, offset)
-    if parsed is None:
-        return "ssh-ed25519 key must include a complete 32-byte public key"
-    public_key, offset = parsed
-    if len(public_key) != 32:
-        return "ssh-ed25519 public key must be exactly 32 bytes"
-    if offset != len(value):
-        return "public key blob must not contain trailing data"
-    return None
+def _security_key_application(key_type: str, value: bytes) -> bytes | None:
+    field_count = _SECURITY_KEY_APPLICATION_FIELD_COUNTS.get(key_type)
+    if field_count is None:
+        return None
 
-
-def _validate_rsa_blob(value: bytes, offset: int) -> str | None:
-    parsed = _read_ssh_string(value, offset)
-    if parsed is None:
-        return "ssh-rsa key must include a complete exponent"
-    exponent, offset = parsed
-    parsed = _read_ssh_string(value, offset)
-    if parsed is None:
-        return "ssh-rsa key must include a complete modulus"
-    modulus, offset = parsed
-    if not exponent or not modulus:
-        return "ssh-rsa exponent and modulus must be non-empty"
-    if offset != len(value):
-        return "public key blob must not contain trailing data"
-    return None
-
-
-def _validate_ecdsa_blob(key_type: str, value: bytes, offset: int) -> str | None:
-    parsed = _read_ssh_string(value, offset)
-    if parsed is None:
-        return "ECDSA key must include a complete curve name"
-    curve, offset = parsed
-    if curve != _ECDSA_CURVES[key_type]:
-        return "ECDSA curve name must match the declared key type"
-    parsed = _read_ssh_string(value, offset)
-    if parsed is None:
-        return "ECDSA key must include a complete public point"
-    public_point, offset = parsed
-    if not public_point:
-        return "ECDSA public point must be non-empty"
-    if offset != len(value):
-        return "public key blob must not contain trailing data"
-    return None
+    field = b""
+    offset = 0
+    for _ in range(field_count):
+        parsed = _read_ssh_string(value, offset)
+        if parsed is None:
+            return b""
+        field, offset = parsed
+    return field
 
 
 def _read_ssh_string(value: bytes, offset: int) -> tuple[bytes, int] | None:
@@ -177,10 +156,3 @@ def _read_ssh_string(value: bytes, offset: int) -> tuple[bytes, int] | None:
     if end > len(value):
         return None
     return value[start:end], end
-
-
-def _decode_ascii(value: bytes) -> str | None:
-    try:
-        return value.decode("ascii")
-    except UnicodeDecodeError:
-        return None

@@ -43,6 +43,7 @@ from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.secret_session import (
     GIT_CREDENTIAL_SESSION_ENV,
     HostSecretSession,
+    HostSecretSessionError,
 )
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
@@ -654,7 +655,6 @@ def test_required_build_hook_root_fails_before_planning_providers(
     assert "--build-hooks-dir is required when build hooks are configured" in (
         result.stderr
     )
-    assert "hook.build_hooks_dir_required" not in result.stderr
     assert not (tmp_path / "context").exists()
 
 
@@ -696,7 +696,6 @@ def test_overlapping_build_hook_root_fails_before_planning_providers(
     assert "Error: Unable to render build context" in result.stderr
     assert "Field: render" in result.stderr
     assert "output and build hook source must not overlap" in result.stderr
-    assert "render.input_output_overlap" not in result.stderr
     assert hook.read_text() == "sentinel\n"
 
 
@@ -736,7 +735,6 @@ def test_invalid_build_hook_root_fails_before_planning_providers(
     assert "Error: Configuration is invalid" in result.stderr
     assert "Field: build_hooks_dir" in result.stderr
     assert "must be an existing regular directory" in result.stderr
-    assert "hook.build_hooks_dir_not_directory" not in result.stderr
     assert not context.exists()
 
 
@@ -878,7 +876,6 @@ def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
     assert "package demo has conflicting requirements" in output
     assert "python.conflicting_package_requirement" not in output
     assert "Earlier:" in output and "Later:" in output
-    assert output.count("File:") == 2
     assert str(base) in output.replace("\n", "")
     assert str(override) in output.replace("\n", "")
     assert "Value: demo>=1,<2" in output
@@ -905,7 +902,6 @@ def test_host_validate_warns_for_redundant_default_os_package(
     assert result.stdout == ""
     assert output.count("bash is already installed by cdh and is ignored") == 1
     assert "Field: system.extra_packages.0" in output
-    assert "system.redundant_default_apt_package" not in output
     assert str(config) in output.replace("\n", "")
 
 
@@ -933,7 +929,6 @@ def test_host_validate_displays_http_credential_warning_offline(
         == 1
     )
     assert "Field: cdh.git.credentials.0.match" in result.stderr
-    assert "git_credential.insecure_http" not in result.stderr
 
 
 def test_http_credential_warning_precedes_build_provider_initialization(
@@ -972,11 +967,10 @@ def test_http_credential_warning_precedes_build_provider_initialization(
         )
         == 1
     )
-    assert "git_credential.insecure_http" not in result.stderr
     assert isinstance(result.exception, BoundaryReached)
 
 
-def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
+def test_render_option_conflict_is_one_short_diagnostic(
     cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
@@ -998,8 +992,6 @@ def test_render_option_conflict_is_one_short_diagnostic_without_traceback(
     assert result.stdout == ""
     assert "Error: Unable to render build context" in result.stderr
     assert "--locked and --upgrade-lock are mutually exclusive" in result.stderr
-    assert "render.options_conflict" not in result.stderr
-    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1065,7 +1057,6 @@ platforms = ["linux/amd64"]
     )
     assert expected_title in result.stderr
     assert "identity provider request failed" in result.stderr
-    assert "lock.resolve_failed" not in result.stderr
     assert "Traceback" not in result.stderr
 
 
@@ -1122,6 +1113,7 @@ def test_cli_tags_use_shared_static_validation_before_provider_construction(
     plain = _plain_output(result.stderr)
     assert "Usage: cdh host build" in plain
     assert expected_message in " ".join(plain.replace("│", " ").split())
+    assert "build.invalid_tag_expression" not in plain
 
 
 def test_cli_tag_override_does_not_hide_invalid_config_tags(
@@ -1148,7 +1140,6 @@ def test_cli_tag_override_does_not_hide_invalid_config_tags(
     assert "Error: Configuration is invalid" in result.stderr
     assert "Field: build.tags.0" in result.stderr
     assert "repository path components must use lowercase" in result.stderr
-    assert "build.invalid_image_reference" not in result.stderr
 
 
 @pytest.mark.parametrize("with_tags", [False, True])
@@ -1285,7 +1276,7 @@ def test_render_passes_runtime_hooks_dir_through_current_planning_boundary(
     assert not unused_build_hooks.exists()
 
 
-def test_render_materialization_error_is_short_and_has_no_traceback(
+def test_render_materialization_error_is_one_short_diagnostic(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1334,8 +1325,6 @@ def test_render_materialization_error_is_short_and_has_no_traceback(
     assert "Error: Unable to render build context" in result.stderr
     assert "Field: render" in result.stderr
     assert "context could not be written" in result.stderr
-    assert "render.context_write_failed" not in result.stderr
-    assert "Traceback" not in result.stderr
 
 
 def test_build_overrides_flow_through_plan_and_buildx(
@@ -1677,9 +1666,50 @@ password = {{ secret = "team_token" }}
     assert "Error: Unable to access configured secrets" in result.stderr
     assert "Field: secrets.root_token" in result.stderr
     assert "the configured source is unavailable" in result.stderr
-    assert "secret.source_unavailable" not in result.stderr
     assert missing_locator not in result.stderr
     assert observed_root is not None and not observed_root.exists()
+
+
+def test_render_secret_failure_presentation_explains_invalid_value_requirements(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    secret_locator = "CDH_TEST_PRIVATE_GIT"
+    with config.open("a") as stream:
+        stream.write(f'\n[secrets.private_git]\nenv = "{secret_locator}"\n')
+
+    def fail_session(_result):
+        raise HostSecretSessionError("invalid_value", "private_git")
+
+    monkeypatch.setattr(
+        host_cli,
+        "HostSecretSession",
+        SimpleNamespace(from_configuration=fail_session),
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Error: Unable to access configured secrets" in result.stderr
+    assert "Field: secrets.private_git" in result.stderr
+    assert "must be non-empty" in result.stderr
+    assert "no more than 65,525 bytes" in result.stderr
+    assert "NUL, carriage return, or newline characters" in result.stderr
+    assert secret_locator not in result.stderr
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,9 @@ from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
 from comfyui_docker_helper.config.build_plan import git_credential_secret_ids
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
+from comfyui_docker_helper.config.git_credentials import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
+)
 from comfyui_docker_helper.config.publication_tags import (
     static_release_availability,
     validate_publication_tags,
@@ -473,6 +476,11 @@ def _render_secret_session_failure(
     messages = {
         "environment_unavailable": "the configured environment source is unavailable",
         "source_unavailable": "the configured source is unavailable",
+        "invalid_value": (
+            "the configured Git credential value must be non-empty, no more than "
+            f"{GIT_CREDENTIAL_VALUE_MAX_BYTES:,} bytes, and contain no NUL, carriage "
+            "return, or newline characters"
+        ),
         "session_create_failed": "the private Secret session could not be created",
         "snapshot_failed": "the configured Secret could not be prepared",
         "cleanup_failed": "the private Secret session could not be cleaned up",

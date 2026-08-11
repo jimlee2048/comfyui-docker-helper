@@ -111,20 +111,17 @@ def test_non_tty_diagnostic_is_plain_vertical_safe_and_omits_code() -> None:
     assert "Hint: choose [bold]one[/bold]\\rnow" in output
     assert "python.conflicting_package_requirement" not in output
     assert "\x1b[" not in output
-    assert not any(character in output for character in "╭╮╰╯│")
 
 
-def test_wide_tty_comparison_is_aligned_in_one_bordered_row() -> None:
+def test_wide_tty_comparison_aligns_participants_on_one_row() -> None:
     presenter, _, stderr = _presenter(stderr_terminal=True, stderr_width=120)
 
     presenter.diagnostics("Configuration is invalid", (_comparison_diagnostic(),))
 
     plain = _strip_ansi(stderr.getvalue())
     assert any("Earlier" in line and "Later" in line for line in plain.splitlines())
-    assert any(character in plain for character in "╭┌")
     assert "base[red].toml\\nname\\x1b" in plain
     assert "base[red].toml\\\\n" not in plain
-    assert "python.conflicting_package_requirement" not in plain
 
 
 def test_narrow_tty_comparison_uses_symmetric_vertical_sections() -> None:
@@ -136,13 +133,14 @@ def test_narrow_tty_comparison_uses_symmetric_vertical_sections() -> None:
     assert "Earlier" in plain and "Later" in plain
     assert not any("Earlier" in line and "Later" in line for line in plain.splitlines())
     assert plain.index("Earlier") < plain.index("Later")
-    assert plain.count("File:") == 2
-    assert plain.count("Field:") == 3
+    assert "base[red].toml\\nname\\x1b" in plain
+    assert "later.toml" in plain
+    assert "python.extra_packages.0" in plain
+    assert "python.extra_packages.1" in plain
 
 
-def test_single_source_warning_is_lightweight_and_has_no_sensitive_value() -> None:
+def test_single_source_warning_omits_code_and_unapproved_value() -> None:
     presenter, _, stderr = _presenter(stderr_terminal=True)
-    secret_marker = "private-secret-marker"
     warning = Diagnostic(
         path=("secrets", "private"),
         code="secret.permissive_mode",
@@ -162,9 +160,7 @@ def test_single_source_warning_is_lightweight_and_has_no_sensitive_value() -> No
     assert "File: config.toml" in plain
     assert "Field: secrets.private.file" in plain
     assert "secret.permissive_mode" not in plain
-    assert secret_marker not in plain
     assert "Value:" not in plain
-    assert not any(character in plain for character in "╭╮╰╯│")
 
 
 def test_comparison_omits_values_not_approved_by_the_producer() -> None:

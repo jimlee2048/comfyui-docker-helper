@@ -10,13 +10,16 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container.entrypoint import EntrypointError, run_entrypoint
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
     RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
+)
+from comfyui_docker_helper.container.runtime_serve import (
+    EntrypointError,
+    run_runtime_generation_once,
 )
 
 
@@ -124,7 +127,7 @@ def test_entrypoint_starts_with_defaults_without_runtime_config(
     calls: list[SpawnCall] = []
     state_path = tmp_path / "state" / "state.json"
 
-    exit_code = run_entrypoint(
+    exit_code = run_runtime_generation_once(
         runtime=runtime,
         runtime_state_path=state_path,
         baked_config_path=_missing_baked_config(tmp_path),
@@ -165,7 +168,7 @@ def test_empty_file_plan_rejects_invalid_existing_runtime_state(
         EntrypointError,
         match=r"runtime state failed: runtime state is invalid; remove .* and restart",
     ):
-        run_entrypoint(
+        run_runtime_generation_once(
             runtime=runtime,
             runtime_state_path=state_path,
             baked_config_path=_missing_baked_config(tmp_path),
@@ -193,7 +196,7 @@ extra_args = ["--cpu", "--lowvram"]
     runtime = _runtime(tmp_path)
     calls: list[SpawnCall] = []
 
-    exit_code = run_entrypoint(
+    exit_code = run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=baked,
         mounted_config_path=_missing_mounted_config(tmp_path),
@@ -236,7 +239,7 @@ extra_args = ["--preview-method", "auto"]
     runtime = _runtime(tmp_path)
     calls: list[SpawnCall] = []
 
-    exit_code = run_entrypoint(
+    exit_code = run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=baked,
         mounted_config_path=mounted,
@@ -329,7 +332,7 @@ extra_args = ["--preview-method", "auto"]
         downloader_configs.append(config)
         return ()
 
-    exit_code = run_entrypoint(
+    exit_code = run_runtime_generation_once(
         runtime=runtime,
         runtime_state_path=tmp_path / "state.json",
         baked_config_path=baked,
@@ -394,7 +397,7 @@ listen = "127.0.0.40"
     runtime = _runtime(tmp_path)
     calls: list[SpawnCall] = []
 
-    exit_code = run_entrypoint(
+    exit_code = run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=_missing_baked_config(tmp_path),
         mounted_config_path=mounted,
@@ -428,7 +431,7 @@ port = 0
     calls: list[SpawnCall] = []
 
     with pytest.raises(EntrypointError) as error:
-        run_entrypoint(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_baked_config(tmp_path),
             mounted_config_path=mounted,
@@ -465,7 +468,7 @@ def test_invalid_env_runtime_config_fails_before_spawn(
     calls: list[SpawnCall] = []
 
     with pytest.raises(EntrypointError) as error:
-        run_entrypoint(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_baked_config(tmp_path),
             mounted_config_path=_missing_mounted_config(tmp_path),
@@ -492,7 +495,7 @@ enabled = true
     calls: list[SpawnCall] = []
 
     with pytest.raises(EntrypointError) as error:
-        run_entrypoint(
+        run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_baked_config(tmp_path),
             mounted_config_path=mounted,

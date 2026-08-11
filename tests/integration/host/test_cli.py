@@ -226,9 +226,15 @@ def test_root_command_exposes_current_groups() -> None:
     assert set(command.commands["container"].commands) == {
         "download-files",
         "emit-final-manifest",
-        "entrypoint",
         "install-comfyui",
         "install-custom-nodes",
+        "runtime",
+    }
+    assert set(command.commands["container"].commands["runtime"].commands) == {
+        "follow",
+        "restart",
+        "serve",
+        "status",
     }
 
 
@@ -267,7 +273,31 @@ def test_container_group_remains_helpful_outside_linux(
     result = cli_runner.invoke(app, ["container", "--help"])
 
     assert result.exit_code == 0
-    assert "entrypoint" in _plain_output(result.output)
+    assert "runtime" in _plain_output(result.output)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["container", "runtime", "--help"],
+        ["container", "runtime", "serve", "--help"],
+        ["container", "runtime", "restart", "--help"],
+        ["container", "runtime", "status", "--help"],
+        ["container", "runtime", "follow", "--help"],
+    ],
+)
+def test_runtime_help_remains_available_outside_linux(
+    args: list[str],
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose the image-internal command tree without loading its services."""
+    monkeypatch.setattr(container_cli.sys, "platform", "win32")
+
+    result = cli_runner.invoke(app, args)
+
+    assert result.exit_code == 0
+    assert "Usage: cdh container runtime" in _plain_output(result.output)
 
 
 def test_container_execution_reports_linux_only_boundary(
@@ -277,7 +307,7 @@ def test_container_execution_reports_linux_only_boundary(
     """Direct host users to the supported command surface on non-Linux hosts."""
     monkeypatch.setattr(container_cli.sys, "platform", "win32")
 
-    result = cli_runner.invoke(app, ["container", "entrypoint"])
+    result = cli_runner.invoke(app, ["container", "runtime", "serve"])
 
     assert result.exit_code == 1
     assert result.output == (

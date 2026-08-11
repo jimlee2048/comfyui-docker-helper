@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -26,12 +27,17 @@ if sys.platform == "linux":
         install_custom_nodes,
     )
     from comfyui_docker_helper.container.download_files import download_files
-    from comfyui_docker_helper.container.entrypoint import run_entrypoint
     from comfyui_docker_helper.container.final_manifest import emit_final_manifest
     from comfyui_docker_helper.container.runners import (
         ContainerCommandError,
         ContainerRuntime,
     )
+    from comfyui_docker_helper.container.runtime_control_client import (
+        follow_runtime,
+        read_runtime_status,
+        restart_runtime,
+    )
+    from comfyui_docker_helper.container.runtime_serve import run_runtime_serve
 else:
     MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
 
@@ -48,12 +54,25 @@ app = typer.Typer(
     context_settings=HELP_CONTEXT_SETTINGS,
 )
 
+runtime_app = typer.Typer(
+    name="runtime",
+    help="Control the container runtime.",
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings=HELP_CONTEXT_SETTINGS,
+)
+app.add_typer(runtime_app)
+
 
 @app.callback()
 def container(ctx: typer.Context) -> None:
     """Run container-side helper commands."""
-    if sys.platform != "linux" and ctx.invoked_subcommand is not None:
-        raise ApplicationError(_CONTAINER_PLATFORM_ERROR)
+    if (
+        sys.platform != "linux"
+        and ctx.invoked_subcommand is not None
+        and ctx.invoked_subcommand != "runtime"
+    ):
+        _require_linux_container()
 
 
 @app.command("download-files", context_settings=HELP_CONTEXT_SETTINGS)
@@ -143,11 +162,65 @@ def emit_final_manifest_command(
     emit_final_manifest(projection, runtime=ContainerRuntime.from_env())
 
 
-@app.command("entrypoint", context_settings=HELP_CONTEXT_SETTINGS)
-def entrypoint_command() -> None:
-    """Start ComfyUI through the cdh runtime entrypoint."""
-    runtime = ContainerRuntime.from_env()
-    raise typer.Exit(code=run_entrypoint(runtime=runtime))
+@runtime_app.command("serve", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_serve_command() -> None:
+    """Own and serve the ComfyUI container runtime."""
+    _require_linux_container()
+    raise typer.Exit(code=run_runtime_serve())
+
+
+@runtime_app.command("restart", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_restart_command() -> None:
+    """Restart the complete ComfyUI runtime generation."""
+    _require_linux_container()
+    operation = restart_runtime()
+    typer.echo(f"Runtime restart completed: {operation}.")
+
+
+@runtime_app.command("status", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_status_command(
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit the fixed machine-readable status schema."),
+    ] = False,
+) -> None:
+    """Show the runtime controller lifecycle status."""
+    _require_linux_container()
+    status = read_runtime_status()
+    last_restart = status.last_restart
+    values = {
+        "state": status.state,
+        "phase": status.phase,
+        "generation": status.generation,
+        "operation": status.operation,
+        "last_restart": (
+            None
+            if last_restart is None
+            else {"id": last_restart.id, "result": last_restart.result}
+        ),
+    }
+    if json_output:
+        typer.echo(json.dumps(values, separators=(",", ":")))
+        return
+    typer.echo(f"state: {status.state}")
+    for key in ("phase", "generation", "operation"):
+        value = values[key]
+        if value is not None:
+            typer.echo(f"{key}: {value}")
+    if last_restart is not None:
+        typer.echo(f"last_restart: {last_restart.id} ({last_restart.result})")
+
+
+@runtime_app.command("follow", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_follow_command() -> None:
+    """Follow live runtime stdout and stderr."""
+    _require_linux_container()
+    raise typer.Exit(code=follow_runtime())
+
+
+def _require_linux_container() -> None:
+    if sys.platform != "linux":
+        raise ApplicationError(_CONTAINER_PLATFORM_ERROR)
 
 
 def _admission(digest: str) -> BuildPlanInputAdmission:

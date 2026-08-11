@@ -35,7 +35,11 @@ def _plain_output(output: str) -> str:
         (["install-comfyui"], "Usage: cdh container install-comfyui"),
         (["install-custom-nodes"], "Usage: cdh container install-custom-nodes"),
         (["emit-final-manifest"], "Usage: cdh container emit-final-manifest"),
-        (["entrypoint"], "Usage: cdh container entrypoint"),
+        (["runtime"], "Usage: cdh container runtime"),
+        (["runtime", "serve"], "Usage: cdh container runtime serve"),
+        (["runtime", "restart"], "Usage: cdh container runtime restart"),
+        (["runtime", "follow"], "Usage: cdh container runtime follow"),
+        (["runtime", "status"], "Usage: cdh container runtime status"),
     ],
 )
 @pytest.mark.parametrize("help_flag", ["--help", "-h"])
@@ -311,29 +315,118 @@ def test_container_cli_rejects_registry_without_manager(
     assert result.output == "Error: canonical BuildPlan is invalid\n"
 
 
-def test_container_entrypoint_invokes_service_and_propagates_exit_code(
+def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep the CLI command wired to the runtime entrypoint service."""
-    seen: dict[str, Path] = {}
+    """Keep the serve command wired to the runtime lifecycle service."""
+    calls: list[str] = []
 
-    def fake_run_entrypoint(*, runtime) -> int:
-        seen["workspace"] = runtime.workspace
-        seen["comfyui_path"] = runtime.comfyui_path
+    def fake_run_runtime_serve() -> int:
+        calls.append("serve")
         return 17
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.container.cli.run_entrypoint",
-        fake_run_entrypoint,
+        container_cli,
+        "run_runtime_serve",
+        fake_run_runtime_serve,
     )
-    monkeypatch.setenv("WORKSPACE", "/srv/work")
-    monkeypatch.setenv("COMFYUI_PATH", "/opt/comfy")
-
-    result = cli_runner.invoke(app, ["container", "entrypoint"])
+    result = cli_runner.invoke(app, ["container", "runtime", "serve"])
 
     assert result.exit_code == 17
-    assert seen == {
-        "workspace": Path("/srv/work"),
-        "comfyui_path": Path("/opt/comfy"),
-    }
+    assert calls == ["serve"]
+
+
+def test_container_runtime_restart_waits_without_detach_options(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_restart_runtime() -> str:
+        calls.append("restart")
+        return "op-7"
+
+    monkeypatch.setattr(container_cli, "restart_runtime", fake_restart_runtime)
+
+    result = cli_runner.invoke(app, ["container", "runtime", "restart"])
+    help_result = cli_runner.invoke(
+        app,
+        ["container", "runtime", "restart", "--help"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "Runtime restart completed: op-7.\n"
+    assert calls == ["restart"]
+    assert "--detach" not in _plain_output(help_result.output)
+    assert "--no-wait" not in _plain_output(help_result.output)
+    assert "-d" not in _plain_output(help_result.output)
+
+
+def test_container_runtime_follow_is_output_only(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_follow_runtime() -> int:
+        calls.append("follow")
+        return 129
+
+    monkeypatch.setattr(container_cli, "follow_runtime", fake_follow_runtime)
+
+    result = cli_runner.invoke(app, ["container", "runtime", "follow"])
+    help_result = cli_runner.invoke(
+        app,
+        ["container", "runtime", "follow", "--help"],
+    )
+
+    assert result.exit_code == 129
+    assert result.output == ""
+    assert calls == ["follow"]
+    plain_help = _plain_output(help_result.output)
+    assert "--detach" not in plain_help
+    assert "--no-wait" not in plain_help
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_container_runtime_status_renders_minimal_conditional_schema(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    json_output: bool,
+) -> None:
+    from comfyui_docker_helper.container.runtime_control import (
+        RuntimeLastRestart,
+        RuntimeStatusResponse,
+    )
+
+    monkeypatch.setattr(
+        container_cli,
+        "read_runtime_status",
+        lambda: RuntimeStatusResponse(
+            state="running",
+            phase=None,
+            generation="gen-2",
+            operation=None,
+            last_restart=RuntimeLastRestart(id="op-1", result="succeeded"),
+        ),
+    )
+    args = ["container", "runtime", "status"]
+    if json_output:
+        args.append("--json")
+
+    result = cli_runner.invoke(app, args)
+
+    assert result.exit_code == 0
+    if json_output:
+        assert json.loads(result.output) == {
+            "state": "running",
+            "phase": None,
+            "generation": "gen-2",
+            "operation": None,
+            "last_restart": {"id": "op-1", "result": "succeeded"},
+        }
+    else:
+        assert result.output == (
+            "state: running\ngeneration: gen-2\nlast_restart: op-1 (succeeded)\n"
+        )

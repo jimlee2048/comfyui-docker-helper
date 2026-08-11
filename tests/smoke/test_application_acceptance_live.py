@@ -1168,7 +1168,8 @@ def test_default_entrypoint_has_tini_cdh_topology_and_completes_sigterm_shutdown
             "--",
             "/opt/uv/bin/cdh",
             "container",
-            "entrypoint",
+            "runtime",
+            "serve",
         ]
         pid1 = subprocess.run(
             ["docker", "exec", name, "cat", "/proc/1/comm"],
@@ -1189,7 +1190,8 @@ def test_default_entrypoint_has_tini_cdh_topology_and_completes_sigterm_shutdown
             f"{plan.toolchain.tool_store.cdh.environment}/bin/python",
             "/opt/uv/bin/cdh",
             "container",
-            "entrypoint",
+            "runtime",
+            "serve",
         ]
         expected_cmdline = [item.encode() for item in expected_argv]
         cdh_children = []

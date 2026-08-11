@@ -2,7 +2,7 @@
 
 [English](runtime.md) | 简体中文
 
-本指南面向运行由 cdh 构建的镜像的用户。它说明了哪些设置无需重新构建镜像即可更改、运行时下载与 Hook 何时运行、如何启用可选的 SSH 访问，以及容器停止时会发生什么。
+本指南面向运行由 cdh 构建的镜像的用户。它说明了哪些设置无需重新构建镜像即可更改、如何从容器内控制正在运行的 ComfyUI 生命周期、运行时下载与 Hook 何时运行、如何启用可选的 SSH 访问，以及容器停止时会发生什么。
 
 如需查看带完整注释的主机配置，请参阅 [`examples/full.toml`](../../examples/full.toml)。[配置指南](configuration.zh-CN.md)说明主机配置和分层；[构建与锁定指南](build-and-lock.zh-CN.md)说明主机端的选择如何成为固化到镜像中的输入。
 
@@ -36,13 +36,37 @@ built-in defaults < baked config < mounted config < environment
 
 环境变量覆盖和挂载的运行时输入属于部署时变更。它们不在固化镜像经过验证的重放边界之内。
 
+## 运行时控制
+
+请通过 `docker exec` 运行以下镜像内部命令：
+
+```text
+cdh container runtime restart
+cdh container runtime status [--json]
+cdh container runtime follow
+```
+
+在 SSH 会话中，请使用已安装的绝对路径 `/opt/uv/bin/cdh` 代替 `cdh`；SSH 登录环境不保证包含镜像 entrypoint 的工具路径。
+
+`restart` 会同步替换完整的 runtime generation；它不会在原有生命周期旁再启动第二个生命周期。cdh 会先取消旧 generation 的下载和 SSH 工作，在 ComfyUI 仍可用时运行其 stop Hook，停止并回收自己精确拥有的进程，然后才接纳 successor。successor 会重新读取固化和挂载的运行时配置、重新发现固化和挂载的 Hook、创建全新的下载与 SSH owner，并重新执行下文的启动顺序。它仍使用镜像 entrypoint 捕获的环境；仅提供给 `restart` 客户端的环境变量不会成为运行时覆盖项。同一时间只会接纳一个 restart mutation；其他请求会立即返回 busy，而不会排队或加入该操作。
+
+没有 post-start Hook 时，ComfyUI 成功启动进程即表示 restart 成功。存在 post-start Hook 时，只有在条件式 readiness 成功且所有 post-start Hook 执行完成后，restart 才成功。异步下载只需被接收到队列中；restart 不会等待所有异步传输完成。
+
+如果服务端尚未接纳 restart，中断其客户端会撤回 pending 请求。一旦服务端已经接纳请求，即使确认响应尚未到达客户端，中断也只会停止本地等待，restart 仍会继续在容器内运行；如果接纳状态尚未确认，请使用 `status` 检查。确认接纳后按 `Ctrl-C` 还会显示 operation ID。中断客户端不会停止容器。等待中的客户端会收到已确认的 restart 失败。如果旧 stop Hook 失败，cdh 会清理旧 generation 中自己拥有的进程、不启动 successor，并以非零状态退出容器。如果 successor 启动失败，cdh 会在不运行其 stop Hook 的情况下清理该 successor，然后以非零状态退出。cdh 不提供 runtime `start` 或 `stop` 命令，`restart` 也没有 detach 或 no-wait 模式。ComfyUI 自然退出仍会结束容器。
+
+`status` 读取 controller 当前的生命周期和 restart 状态；`--json` 输出其机器可读形式。这是内存中的控制状态，不是配置、健康状态、镜像身份或持久历史。
+
+`follow` 输出建立连接后收到的实时 stdout 和 stderr，并在手动切换 runtime generation 时保持连接。它不会回放或持久化较早的输出；如需历史记录，请使用 Docker logs 或部署环境的日志后端。`Ctrl-C`、`SIGTERM`、`SIGHUP`、连接中断或读取过慢都只影响该 follower，绝不会停止或反向阻塞 ComfyUI。
+
+只有与正在运行的 cdh owner 具有相同 effective UID 的客户端才支持使用运行时控制。尤其不要通过 `docker exec --user` 以不同 UID 运行这些命令。
+
 ## 文件、下载与持久状态
 
-主机端的 `[[files]]` 声明会成为固化到镜像中的运行时默认配置。容器启动时，固化和挂载的文件列表以规范化后的 `dir` 加 `filename` 为键进行合并。在比较 identity 前，多余的 `/`、`.` 路径段和末尾 `/` 会被规范化；`.` 与 `./` 表示 `COMFYUI_PATH` 根目录本身。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。生效条目必须包含 URL，重复或无效的生效目标会在合并后失败。每个目标都相对于 `COMFYUI_PATH`，绝对路径和任何明确写出的 `..` 路径段仍然无效。
+主机端的 `[[files]]` 声明会成为固化到镜像中的运行时默认配置。每次接纳 runtime generation 时，固化和挂载的文件列表会以规范化后的 `dir` 加 `filename` 为键进行合并。在比较 identity 前，多余的 `/`、`.` 路径段和末尾 `/` 会被规范化；`.` 与 `./` 表示 `COMFYUI_PATH` 根目录本身。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。生效条目必须包含 URL，重复或无效的生效目标会在合并后失败。每个目标都相对于 `COMFYUI_PATH`，绝对路径和任何明确写出的 `..` 路径段仍然无效。
 
 同步下载会在 pre-start Hook 之前完成。异步下载会在 ComfyUI 启动前被接收到一个后台队列中，并且可以在 ComfyUI 运行期间继续；它们不会阻塞 ComfyUI readiness。
 
-`download_max_attempts` 是每个文件在一次容器启动期间允许调用下载后端的总次数，其中包括第一次尝试。`download_failure_policy` 只在运行时适用：
+`download_max_attempts` 是每个文件在一次已接纳的 runtime generation 中允许调用下载后端的总次数，其中包括第一次尝试。`download_failure_policy` 只在运行时适用：
 
 - 对于同步文件，`fail` 会在出现常规最终失败或尝试预算耗尽后中止启动，而 `continue` 会继续处理后续文件；
 - 对于异步文件，`fail` 会停止队列中的剩余任务，但不会停止 ComfyUI，而 `continue` 会继续处理后续排队文件；以及
@@ -116,6 +140,8 @@ synchronous downloads
 
 只有在至少存在一个 post-start Hook 时，cdh 才会等待 readiness。它通过回环地址探测有效 ComfyUI 端口上的 `/system_stats`，并要求响应是包含 `system` 和 `devices` 的 HTTP 200 JSON 对象。如果 ComfyUI 在达到 readiness 前退出，或者有界的 readiness 等待超时，则启动失败，且 post-start Hook 不会运行。
 
+这套完整的启动顺序会用于初始 generation，并在每个手动 restart 的 successor 中重新执行。
+
 此 readiness 检查表示 ComfyUI API 在启动初始化后正在提供服务。它不是通用的容器健康检查，也不能证明每个自定义节点、工作流、模型、GPU 路径或生产工作负载都能正常工作。
 
 ## 由 Hook 启动的后台服务
@@ -135,10 +161,10 @@ synchronous downloads
 3. 将原始信号转发给 ComfyUI；以及
 4. 等待由 cdh 管理的进程退出并被回收。
 
-`shutdown_timeout` 是此信号路径基于单调时钟计算的一份总时间预算。默认值为八秒，其中最后两秒预留给向 ComfyUI 发送信号和回收受管理的子进程。前段的 Hook 预算耗尽时，cdh 会终止当前活动的 Hook 并跳过后续 Hook。到达总截止时间时，它会强制停止仍在运行的受管理工作。
+`shutdown_timeout` 是停止当前 generation 时基于单调时钟计算的一份总时间预算，无论关闭由外部信号还是已接纳的手动 restart 发起。默认值为八秒，其中最后两秒预留给向 ComfyUI 发送信号和回收受管理的子进程。前段的 Hook 预算耗尽时，cdh 会终止当前活动的 Hook 并跳过后续 Hook。到达总截止时间时，它会强制停止仍在运行的受管理工作。在 restart 期间接纳的 Docker shutdown 会优先于 successor，且不能延长已经开始计时的截止时间。
 
 第二个 `SIGTERM` 或 `SIGINT` 会跳过剩余的宽限期并立即进入强制关闭。被强制终止的 ComfyUI 通常会使容器以代码 137 退出。当 ComfyUI 自然退出时，cdh 会保留其退出结果、清理辅助工作，并且不会运行仅限信号路径的 stop Hook。
 
 Docker 或其他编排器拥有独立的外部硬性时间限制。未配置容器专用超时时，Docker Engine 对 Linux 容器使用 10 秒的默认值，而 Docker Compose 的 `stop_grace_period` 默认为 10 秒。cdh 的八秒默认值只留下尽力而为的调度余量。当 Hook 需要更多时间时，请将 Docker [`--stop-timeout`](https://docs.docker.com/reference/cli/docker/container/run/#options) 或 Compose [`stop_grace_period`](https://docs.docker.com/reference/compose-file/services/#stop_grace_period) 配置为大于 cdh 总时间。
 
-设置 `shutdown_timeout = -1` 只会禁用 cdh 外层和 Hook 的截止时间。由 cdh 管理的组件操作仍然有界，而 Docker 自身的超时与之独立。外部 `SIGKILL` 后无法继续执行任何清理。
+设置 `shutdown_timeout = -1` 只会禁用外部关闭和手动 restart 所使用的 cdh 外层与 Hook 截止时间。由 cdh 管理的组件操作仍然有界，而 Docker 自身的超时与之独立。外部 `SIGKILL` 后无法继续执行任何清理。

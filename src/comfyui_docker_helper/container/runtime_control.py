@@ -267,6 +267,7 @@ class RuntimePeerCredentials:
 
 
 type RuntimePeerCredentialReader = Callable[[socket.socket], RuntimePeerCredentials]
+type RuntimeControlEndpointIdentity = tuple[int, int, int]
 
 
 def read_runtime_peer_credentials(peer: socket.socket) -> RuntimePeerCredentials:
@@ -279,12 +280,12 @@ def read_runtime_peer_credentials(peer: socket.socket) -> RuntimePeerCredentials
 
 @dataclass(slots=True)
 class RuntimeControlListener:
-    """An inode-owned private Unix-domain listener."""
+    """An identity-owned private Unix-domain listener."""
 
     socket: socket.socket
     path: Path
     owner_uid: int
-    endpoint_identity: tuple[int, int]
+    endpoint_identity: RuntimeControlEndpointIdentity
     peer_credential_reader: RuntimePeerCredentialReader = read_runtime_peer_credentials
 
     def accept(self) -> socket.socket:
@@ -325,7 +326,7 @@ def open_runtime_control_listener(
     owner_uid = os.geteuid()
     _prepare_control_directory(path.parent, owner_uid=owner_uid)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    endpoint_identity: tuple[int, int] | None = None
+    endpoint_identity: RuntimeControlEndpointIdentity | None = None
     try:
         try:
             listener.bind(os.fspath(path))
@@ -347,8 +348,13 @@ def open_runtime_control_listener(
                 raise RuntimeControlEndpointError(
                     "The runtime control endpoint disappeared after bind."
                 )
-            endpoint_identity = (endpoint.st_dev, endpoint.st_ino)
             path.chmod(0o600)
+            endpoint = _admit_stale_candidate(path, owner_uid=owner_uid)
+            if endpoint is None:
+                raise RuntimeControlEndpointError(
+                    "The runtime control endpoint disappeared while being secured."
+                )
+            endpoint_identity = _endpoint_identity(endpoint)
             listener.listen()
         except OSError as error:
             raise RuntimeControlEndpointError(
@@ -434,7 +440,7 @@ def _recover_stale_socket(path: Path, *, owner_uid: int) -> None:
     confirmed = _admit_stale_candidate(path, owner_uid=owner_uid)
     if confirmed is None:
         return
-    if (confirmed.st_dev, confirmed.st_ino) != (candidate.st_dev, candidate.st_ino):
+    if _endpoint_identity(confirmed) != _endpoint_identity(candidate):
         raise RuntimeControlEndpointError(
             "The runtime control endpoint changed during stale recovery."
         )
@@ -464,11 +470,18 @@ def _admit_stale_candidate(
     return candidate
 
 
-def _unlink_matching_endpoint(path: Path, identity: tuple[int, int]) -> None:
+def _endpoint_identity(endpoint: os.stat_result) -> RuntimeControlEndpointIdentity:
+    return (endpoint.st_dev, endpoint.st_ino, endpoint.st_ctime_ns)
+
+
+def _unlink_matching_endpoint(
+    path: Path,
+    identity: RuntimeControlEndpointIdentity,
+) -> None:
     try:
         endpoint = path.lstat()
     except OSError:
         return
-    if (endpoint.st_dev, endpoint.st_ino) == identity:
+    if _endpoint_identity(endpoint) == identity:
         with suppress(OSError):
             path.unlink()

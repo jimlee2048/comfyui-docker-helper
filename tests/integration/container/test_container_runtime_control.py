@@ -75,14 +75,16 @@ def test_same_uid_refused_stale_socket_is_replaced_once(tmp_path: Path) -> None:
     endpoint.parent.mkdir(mode=0o700)
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stale.bind(os.fspath(endpoint))
-    stale_identity = endpoint.lstat().st_ino
     stale.close()
 
     listener = open_runtime_control_listener(endpoint)
+    client = connect_runtime_control(endpoint)
     try:
-        assert endpoint.lstat().st_ino != stale_identity
         assert stat.S_ISSOCK(endpoint.lstat().st_mode)
+        peer = listener.accept()
+        peer.close()
     finally:
+        client.close()
         listener.close()
 
 
@@ -227,6 +229,36 @@ def test_listener_close_preserves_path_replacement(tmp_path: Path) -> None:
     listener.close()
 
     assert endpoint.read_text(encoding="utf-8") == "replacement"
+
+
+def test_listener_records_identity_after_securing_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = _endpoint(tmp_path)
+    original_chmod = Path.chmod
+
+    def chmod_and_change_timestamp(path: Path, mode: int) -> None:
+        original_chmod(path, mode)
+        if path == endpoint:
+            secured = path.lstat()
+            os.utime(
+                path,
+                ns=(secured.st_atime_ns, secured.st_mtime_ns + 1_000_000_000),
+                follow_symlinks=False,
+            )
+
+    monkeypatch.setattr(Path, "chmod", chmod_and_change_timestamp)
+
+    listener = open_runtime_control_listener(endpoint)
+    try:
+        assert listener.endpoint_identity == control_module._endpoint_identity(
+            endpoint.lstat()
+        )
+    finally:
+        listener.close()
+
+    assert not endpoint.exists()
 
 
 def test_listener_close_does_not_raise_when_cleanup_inspection_fails(

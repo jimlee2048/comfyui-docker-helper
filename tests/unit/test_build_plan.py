@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
+import tomli_w
 from pydantic import ValidationError
 from tests.build_plan_support import (
     COMMIT_B,
@@ -40,6 +42,7 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
+    DirectPythonRequestIdentity,
     UvToolLockEntry,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
@@ -49,6 +52,7 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_semantics,
     validate_final_config_structure,
 )
+from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )
@@ -414,6 +418,59 @@ def test_plan_bytes_digest_and_lock_order_are_deterministic() -> None:
     assert first == second
     assert dump_build_plan_json(first) == dump_build_plan_json(second)
     assert build_plan_digest(first) == build_plan_digest(second)
+
+
+def test_canonical_requirement_spelling_is_stable_from_layered_config_to_plan(
+    tmp_path: Path,
+) -> None:
+    def load_layered(
+        stem: str,
+        base_requirement: str,
+        later_requirement: str,
+    ):
+        document = final_config().model_dump(mode="json", exclude_none=True)
+        document["python"]["extra_packages"] = [base_requirement]
+        base = tmp_path / f"{stem}-base.toml"
+        later = tmp_path / f"{stem}-later.toml"
+        base.write_text(tomli_w.dumps(document))
+        later.write_text(f'[python]\nextra_packages = ["{later_requirement}"]\n')
+        return load_validate_config_result([base, later])
+
+    first = load_layered("first", "NumPy>=2,<3", "numpy<3,>=2")
+    second = load_layered("second", "numpy<3,>=2", "NumPy>=2,<3")
+
+    assert first.config.python.extra_packages == ["numpy<3,>=2"]
+    assert second.config.python.extra_packages == ["NumPy>=2,<3"]
+
+    resolution = accepted_resolution()
+    first_graph = request_graph(first.config, resolution)
+    second_graph = request_graph(second.config, resolution)
+    first_request = next(
+        desired.request
+        for desired in first_graph.desired
+        if isinstance(desired.request, DirectPythonRequestIdentity)
+        and desired.request.group == "application-extra"
+    )
+    second_request = next(
+        desired.request
+        for desired in second_graph.desired
+        if isinstance(desired.request, DirectPythonRequestIdentity)
+        and desired.request.group == "application-extra"
+    )
+
+    assert first_request == second_request
+    assert first_request.members[0].model_dump(mode="python") == {
+        "package": "numpy",
+        "extras": (),
+        "selector": "<3,>=2",
+    }
+    assert first_graph.image_config_digest == second_graph.image_config_digest
+
+    first_plan = build_plan(first.config, resolution)
+    second_plan = build_plan(second.config, resolution)
+
+    assert first_plan == second_plan
+    assert first_plan.image_config_digest == first_graph.image_config_digest
 
 
 def test_plan_round_trip_is_strict_and_immutable() -> None:

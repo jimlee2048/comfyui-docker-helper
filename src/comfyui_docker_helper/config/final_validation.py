@@ -10,14 +10,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
-from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import Specifier, SpecifierSet
-from packaging.utils import InvalidName, canonicalize_name
+from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
+    DiagnosticComparison,
+    DiagnosticComparisonSite,
     DiagnosticError,
     DiagnosticPath,
     DiagnosticSeverity,
@@ -35,6 +35,7 @@ from comfyui_docker_helper.config.git_credentials import (
     parse_git_credential_context,
 )
 from comfyui_docker_helper.config.hook_validation import validate_hook_relative_path
+from comfyui_docker_helper.config.merge import OriginNode
 from comfyui_docker_helper.config.os_packages import (
     DEFAULT_OS_PACKAGES,
     validate_apt_package_identity,
@@ -42,6 +43,17 @@ from comfyui_docker_helper.config.os_packages import (
 from comfyui_docker_helper.config.publication_tags import (
     static_release_availability,
     validate_publication_tags,
+)
+from comfyui_docker_helper.config.registry_identity import (
+    registry_distribution_identity,
+    registry_resource_identity,
+    validate_registry_id,
+)
+from comfyui_docker_helper.config.requirement_validation import (
+    DirectRequirementError,
+    DirectRequirementIdentity,
+    is_stable_public_operand,
+    parse_direct_requirement,
 )
 from comfyui_docker_helper.config.selector_validation import (
     normalize_comfyui_version,
@@ -106,9 +118,24 @@ class NormalizedRequirement:
     """Resolution-relevant identity of one validated direct requirement."""
 
     path: DiagnosticPath
-    name: str
-    extras: tuple[str, ...]
-    specifier: str
+    value: str
+    identity: DirectRequirementIdentity
+
+    @property
+    def name(self) -> str:
+        return self.identity.name
+
+    @property
+    def extras(self) -> tuple[str, ...]:
+        return self.identity.extras
+
+    @property
+    def specifier(self) -> str:
+        return self.identity.specifier
+
+    @property
+    def canonical_value(self) -> str:
+        return self.identity.canonical_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +234,8 @@ def validate_final_config_domains(
 def validate_final_config_semantics(
     config: FinalConfig,
     domains: FinalConfigDomainResult,
+    *,
+    origins: OriginNode | None = None,
 ) -> tuple[Diagnostic, ...]:
     """Enforce normalized duplicates and cross-field relationships once."""
     diagnostics: list[Diagnostic] = []
@@ -215,33 +244,50 @@ def validate_final_config_semantics(
         "build.duplicate_platform",
         "platforms must not contain duplicates",
         diagnostics,
+        origins=origins,
+        display_values=True,
     )
-    _package_owner_diagnostics(domains.package_requirements, diagnostics)
+    _package_owner_diagnostics(
+        domains.package_requirements,
+        diagnostics,
+        origins=origins,
+    )
     _duplicate_diagnostics(
         domains.apt_packages,
         "system.duplicate_apt_package",
         "package names must be unique",
         diagnostics,
+        origins=origins,
+        display_values=True,
         initial_seen=frozenset(DEFAULT_OS_PACKAGES),
     )
     _duplicate_diagnostics(
         domains.registry_ids,
         "custom_node.duplicate_registry_id",
-        "registry IDs must be unique",
+        "Registry resource IDs must be unique ignoring case",
         diagnostics,
-        normalize=lambda value: canonicalize_name(value, validate=True),
+        normalize=registry_resource_identity,
+        origins=origins,
+        display_values=True,
+    )
+    _registry_distribution_identity_diagnostics(
+        domains.registry_ids,
+        diagnostics,
+        origins=origins,
     )
     _duplicate_diagnostics(
         domains.git_urls,
         "custom_node.duplicate_git_url",
         "Git URLs must be unique",
         diagnostics,
+        origins=origins,
     )
     _duplicate_diagnostics(
         domains.git_credential_contexts,
         "git_credential.duplicate_match",
         "credential match contexts must be unique after normalization",
         diagnostics,
+        origins=origins,
     )
     _secret_reference_diagnostics(config, diagnostics)
     _duplicate_diagnostics(
@@ -249,12 +295,14 @@ def validate_final_config_semantics(
         "custom_node.duplicate_git_target_dir",
         "Git target directories must be unique",
         diagnostics,
+        origins=origins,
     )
     _duplicate_diagnostics(
         domains.file_targets,
         "file.duplicate_target",
         "file targets must be unique",
         diagnostics,
+        origins=origins,
     )
     if domains.workspace is not None and domains.comfyui_path == domains.workspace:
         diagnostics.append(
@@ -420,105 +468,12 @@ def validate_direct_requirement(
     path: DiagnosticPath,
     diagnostics: list[Diagnostic],
 ) -> NormalizedRequirement | None:
-    if not value.strip() or value != value.strip() or has_control_characters(value):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "python.invalid_requirement",
-                "must be a non-empty unambiguous PEP 508 requirement",
-            )
-        )
-        return None
     try:
-        requirement = Requirement(value)
-    except InvalidRequirement:
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "python.invalid_requirement",
-                "must be a supported PEP 508 package requirement",
-            )
-        )
+        identity = parse_direct_requirement(value)
+    except DirectRequirementError as error:
+        diagnostics.append(Diagnostic(path, error.code, str(error)))
         return None
-    if requirement.url is not None:
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "python.direct_requirement_forbidden",
-                "must not use a URL, VCS, local, or editable requirement",
-            )
-        )
-        return None
-    if requirement.marker is not None:
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "python.environment_marker_forbidden",
-                "must not use an environment marker",
-            )
-        )
-        return None
-    if any(
-        spec.operator not in {"==", "!=", "<", "<=", ">", ">="} or "*" in spec.version
-        for spec in requirement.specifier
-    ):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "python.unsupported_requirement_selector",
-                "must use an exact version or bounded comparison selector",
-            )
-        )
-        return None
-    for specifier in requirement.specifier:
-        if not _is_stable_public_operand(specifier):
-            diagnostics.append(
-                Diagnostic(
-                    path,
-                    "python.prerelease_selector_forbidden",
-                    "selector operands must be stable public versions",
-                )
-            )
-            return None
-    operators = {specifier.operator for specifier in requirement.specifier}
-    if operators == {"=="} and len(requirement.specifier) != 1:
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "python.ambiguous_exact_requirement",
-                "must contain exactly one exact version selector",
-            )
-        )
-        return None
-    if (
-        requirement.specifier
-        and operators != {"=="}
-        and (not operators & {">", ">="} or not operators & {"<", "<="})
-    ):
-        diagnostics.append(
-            Diagnostic(
-                path,
-                "python.unbounded_requirement_selector",
-                "comparison selectors must include lower and upper bounds",
-            )
-        )
-        return None
-    return NormalizedRequirement(
-        path,
-        canonicalize_name(requirement.name),
-        tuple(sorted({canonicalize_name(extra) for extra in requirement.extras})),
-        str(requirement.specifier),
-    )
-
-
-def _is_stable_public_operand(specifier: Specifier) -> bool:
-    try:
-        operand = Version(specifier.version)
-    except InvalidVersion:
-        return False
-    return not (
-        operand.is_prerelease or operand.is_devrelease or operand.local is not None
-    )
+    return NormalizedRequirement(path, value, identity)
 
 
 def _validate_system_domains(
@@ -695,7 +650,7 @@ def _validate_comfyui_selector(value: str, diagnostics: list[Diagnostic]) -> Non
             )
         return
     specifiers = SpecifierSet(normalized)
-    if any(not _is_stable_public_operand(item) for item in specifiers):
+    if any(not is_stable_public_operand(item) for item in specifiers):
         diagnostics.append(
             Diagnostic(
                 path,
@@ -804,7 +759,7 @@ def _validate_published_selector(
         return
     if any(character in normalized for character in "<>=!"):
         operands = SpecifierSet(normalized)
-        invalid = any(not _is_stable_public_operand(item) for item in operands)
+        invalid = any(not is_stable_public_operand(item) for item in operands)
     else:
         # Exact published Registry versions may be prereleases; its domain
         # normalizer already rejects malformed/local identities.
@@ -823,13 +778,9 @@ def _validate_registry_node(
     diagnostics: list[Diagnostic],
 ) -> None:
     registry_nodes.append((*path, "type"))
-    id_valid = is_argv_value(node.id) and not node.id.startswith("-")
-    if id_valid:
-        try:
-            canonicalize_name(node.id, validate=True)
-        except InvalidName:
-            id_valid = False
-    if not id_valid:
+    try:
+        validate_registry_id(node.id)
+    except ValueError:
         diagnostics.append(
             Diagnostic(
                 (*path, "id"),
@@ -1233,19 +1184,77 @@ def _duplicate_diagnostics(
     diagnostics: list[Diagnostic],
     *,
     normalize: Callable[[str], str] | None = None,
+    origins: OriginNode | None = None,
+    display_values: bool = False,
     initial_seen: frozenset[str] = frozenset(),
 ) -> None:
-    seen = set(initial_seen)
+    seen: dict[str, LocatedValue | None] = {value: None for value in initial_seen}
     for item in values:
         value = item.value if normalize is None else normalize(item.value)
         if value in seen:
-            diagnostics.append(Diagnostic(item.path, code, message))
-        seen.add(value)
+            established = seen[value]
+            diagnostics.append(
+                Diagnostic(
+                    item.path,
+                    code,
+                    message,
+                    source_context=(
+                        _comparison(
+                            established.path,
+                            item.path,
+                            origins,
+                            earlier_value=established.value if display_values else None,
+                            later_value=item.value if display_values else None,
+                        )
+                        if established is not None
+                        else None
+                    ),
+                )
+            )
+        else:
+            seen[value] = item
+
+
+def _registry_distribution_identity_diagnostics(
+    values: tuple[LocatedValue, ...],
+    diagnostics: list[Diagnostic],
+    *,
+    origins: OriginNode | None,
+) -> None:
+    established: dict[str, LocatedValue] = {}
+    for item in values:
+        distribution = registry_distribution_identity(item.value)
+        earlier = established.get(distribution)
+        if earlier is None:
+            established[distribution] = item
+            continue
+        if registry_resource_identity(earlier.value) == registry_resource_identity(
+            item.value
+        ):
+            continue
+        diagnostics.append(
+            Diagnostic(
+                item.path,
+                "custom_node.registry_distribution_identity_collision",
+                "distinct Registry IDs map to the same installed Python "
+                "distribution identity",
+                source_context=_comparison(
+                    earlier.path,
+                    item.path,
+                    origins,
+                    earlier_value=earlier.value,
+                    later_value=item.value,
+                ),
+                hint="Keep only one of these Registry nodes.",
+            )
+        )
 
 
 def _package_owner_diagnostics(
     requirements: tuple[NormalizedRequirement, ...],
     diagnostics: list[Diagnostic],
+    *,
+    origins: OriginNode | None,
 ) -> None:
     application_owners: dict[str, DiagnosticPath] = {
         "torch": ("pytorch", "version"),
@@ -1273,21 +1282,29 @@ def _package_owner_diagnostics(
             ("comfyui", "install_cli"),
         }
     )
+    authored_application_owners: dict[str, NormalizedRequirement] = {}
+    authored_tool_owners: dict[str, NormalizedRequirement] = {}
     for requirement in requirements:
         owners = (
             tool_owners
             if requirement.path[:2] == ("python", "uv_tools")
             else application_owners
         )
-        existing = (
+        authored_owners = (
+            authored_tool_owners
+            if requirement.path[:2] == ("python", "uv_tools")
+            else authored_application_owners
+        )
+        reserved = (
             python_extra_reserved.get(requirement.name)
             if requirement.path[:2] == ("python", "extra_packages")
             else None
         ) or owners.get(requirement.name)
-        if existing is not None:
+        existing = authored_owners.get(requirement.name)
+        if reserved is not None:
             owner_text = (
                 "reserved by"
-                if existing in reserved_owner_paths
+                if reserved in reserved_owner_paths
                 else "already owned at"
             )
             diagnostics.append(
@@ -1295,11 +1312,47 @@ def _package_owner_diagnostics(
                     requirement.path,
                     "python.duplicate_package_owner",
                     f"package {requirement.name} is {owner_text} "
-                    f"{_format_path(existing)}",
+                    f"{_format_path(reserved)}",
+                )
+            )
+        elif existing is not None:
+            diagnostics.append(
+                Diagnostic(
+                    requirement.path,
+                    "python.conflicting_package_requirement",
+                    f"package {requirement.name} has conflicting requirements",
+                    source_context=_comparison(
+                        existing.path,
+                        requirement.path,
+                        origins,
+                        earlier_value=existing.value,
+                        later_value=requirement.value,
+                    ),
+                    hint="Use one requirement for this package.",
                 )
             )
         else:
-            owners[requirement.name] = requirement.path
+            authored_owners[requirement.name] = requirement
+
+
+def _comparison(
+    earlier_path: DiagnosticPath,
+    later_path: DiagnosticPath,
+    origins: OriginNode | None,
+    *,
+    earlier_value: str | None = None,
+    later_value: str | None = None,
+) -> DiagnosticComparison | None:
+    if origins is None:
+        return None
+    earlier = origins.exact_location(earlier_path)
+    later = origins.exact_location(later_path)
+    if earlier is None or later is None:
+        return None
+    return DiagnosticComparison(
+        DiagnosticComparisonSite(earlier, earlier_value),
+        DiagnosticComparisonSite(later, later_value),
+    )
 
 
 def _format_path(path: DiagnosticPath) -> str:

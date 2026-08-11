@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 
 import tomli_w
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
-from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,6 +19,12 @@ from comfyui_docker_helper.config.final_validation import (
     is_git_ref,
     is_git_source_url,
     is_oci_tag,
+)
+from comfyui_docker_helper.config.registry_identity import (
+    registry_distribution_identity,
+)
+from comfyui_docker_helper.config.registry_identity import (
+    validate_registry_id as validate_registry_resource_id,
 )
 from comfyui_docker_helper.config.selector_validation import (
     normalize_comfyui_version,
@@ -1111,12 +1116,12 @@ def validate_environment(value: str) -> str:
 
 
 def validate_registry_id(value: str) -> str:
-    return _require_registry_id(value)
+    return validate_registry_resource_id(value)
 
 
 def normalized_registry_id(value: str) -> str:
-    """Return the shared normalized identity for one valid Registry ID."""
-    return canonicalize_name(validate_registry_id(value), validate=True)
+    """Return the PyPA installed-distribution identity for one Registry ID."""
+    return registry_distribution_identity(value)
 
 
 def validate_exact_registry_version(value: str) -> str:
@@ -1242,14 +1247,7 @@ def _require_token(value: str, field: str) -> str:
 
 
 def _require_registry_id(value: str) -> str:
-    value = _require_token(value, "id")
-    if value.startswith("-"):
-        raise ValueError("id must be one argv-safe Registry ID")
-    try:
-        canonicalize_name(value, validate=True)
-    except InvalidName as error:
-        raise ValueError("id must be one valid Registry project name") from error
-    return value
+    return validate_registry_resource_id(value)
 
 
 def _require_direct_package_selector(value: str) -> str:

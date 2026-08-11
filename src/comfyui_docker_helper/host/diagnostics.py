@@ -7,7 +7,14 @@ from rich.text import Text
 
 from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticComparison,
+    DiagnosticComparisonSite,
+    DiagnosticPath,
+    DiagnosticSeverity,
+    SourceLocation,
+)
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.render_service import PlanningOptions
 
@@ -27,12 +34,18 @@ def render_configuration_diagnostics(
     )
     if errors:
         output.print(
-            Text(f"Unable to process configuration: {config_path}", style="bold red")
+            Text(
+                f"Unable to process configuration: {_safe_text(str(config_path))}",
+                style="bold red",
+            )
         )
         _render_items(errors, output)
     if warnings:
         output.print(
-            Text(f"Configuration has warnings: {config_path}", style="bold yellow")
+            Text(
+                f"Configuration has warnings: {_safe_text(str(config_path))}",
+                style="bold yellow",
+            )
         )
         _render_items(warnings, output)
 
@@ -96,7 +109,63 @@ def render_plan_preview(
 
 def _render_items(diagnostics: tuple[Diagnostic, ...], output: Console) -> None:
     for diagnostic in diagnostics:
-        path = ".".join(str(part) for part in diagnostic.path) or "config"
         output.print()
-        output.print(Text(f"[{path}]", style="bold yellow"))
-        output.print(Text(f"  {diagnostic.message} ({diagnostic.code})"))
+        output.print(Text(f"[{_format_path(diagnostic.path)}]", style="bold yellow"))
+        output.print(
+            Text(f"  {_safe_text(diagnostic.message)} ({_safe_text(diagnostic.code)})")
+        )
+        context = diagnostic.source_context
+        if isinstance(context, SourceLocation):
+            _render_site(
+                "Source",
+                DiagnosticComparisonSite(location=context),
+                output,
+            )
+        elif isinstance(context, DiagnosticComparison):
+            _render_site("Earlier", context.earlier, output)
+            _render_site("Later", context.later, output)
+        if diagnostic.hint is not None:
+            output.print(Text(f"  Hint: {_safe_text(diagnostic.hint)}"))
+
+
+def _render_site(
+    label: str,
+    site: DiagnosticComparisonSite,
+    output: Console,
+) -> None:
+    output.print(Text(f"  {label}:"))
+    output.print(Text(f"    File: {_safe_text(site.location.source.label)}"))
+    output.print(Text(f"    Field: {_format_path(site.location.path)}"))
+    if site.display_value is not None:
+        output.print(Text(f"    Value: {_safe_text(site.display_value)}"))
+
+
+def _format_path(path: DiagnosticPath) -> str:
+    if not path:
+        return "config"
+    return ".".join(_safe_text(str(part)) for part in path)
+
+
+def _safe_text(value: str) -> str:
+    escaped: list[str] = []
+    for character in value:
+        if character == "\\":
+            escaped.append("\\\\")
+            continue
+        if character.isprintable():
+            escaped.append(character)
+            continue
+        codepoint = ord(character)
+        if character == "\n":
+            escaped.append("\\n")
+        elif character == "\r":
+            escaped.append("\\r")
+        elif character == "\t":
+            escaped.append("\\t")
+        elif codepoint <= 0xFF:
+            escaped.append(f"\\x{codepoint:02x}")
+        elif codepoint <= 0xFFFF:
+            escaped.append(f"\\u{codepoint:04x}")
+        else:
+            escaped.append(f"\\U{codepoint:08x}")
+    return "".join(escaped)

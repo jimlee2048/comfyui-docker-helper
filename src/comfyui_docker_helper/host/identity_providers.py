@@ -29,6 +29,9 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_oci_tag,
 )
 from comfyui_docker_helper.config.canonical_request import SelectorStability
+from comfyui_docker_helper.config.registry_identity import (
+    registry_resource_identity,
+)
 from comfyui_docker_helper.config.selector_validation import normalize_registry_version
 from comfyui_docker_helper.config.value_validation import (
     is_argv_value,
@@ -509,6 +512,12 @@ class HttpRegistryNodeIdentityProvider:
 
     def list_versions(self, node_id: str) -> tuple[RegistryNodeIdentity, ...]:
         source = "Comfy Registry"
+        try:
+            request_identity = registry_resource_identity(node_id)
+        except ValueError as error:
+            raise IdentityProviderError(
+                source, ProviderFailureKind.INVALID_REQUEST
+            ) from error
         response = _http_get(
             self.client,
             f"{self.base_url}/nodes/{quote(node_id, safe='')}/versions",
@@ -524,7 +533,18 @@ class HttpRegistryNodeIdentityProvider:
                 raise IdentityProviderError(
                     source, ProviderFailureKind.INVALID_RESPONSE
                 )
-            if row.get("node_id", node_id) != node_id:
+            response_node_id = row.get("node_id", node_id)
+            if not isinstance(response_node_id, str):
+                raise IdentityProviderError(
+                    source, ProviderFailureKind.INVALID_RESPONSE
+                )
+            try:
+                response_identity = registry_resource_identity(response_node_id)
+            except ValueError as error:
+                raise IdentityProviderError(
+                    source, ProviderFailureKind.INVALID_RESPONSE
+                ) from error
+            if response_identity != request_identity:
                 raise IdentityProviderError(
                     source, ProviderFailureKind.INVALID_RESPONSE
                 )

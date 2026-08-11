@@ -2,13 +2,15 @@
 
 import tomllib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticSeverity,
+    DiagnosticSourceContext,
+    SourceLocation,
     SourceReference,
 )
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -68,31 +70,33 @@ def load_validate_config_result(
 ) -> ConfigurationResult:
     """Load and validate locally without providers, Docker, lock I/O, or planning."""
     paths = _coerce_config_paths(config_path)
-    include_source = len(paths) > 1
-    documents = tuple(
-        SourceDocument(
-            SourceReference(layer_ordinal, str(path)),
-            _read_toml(path, include_source=include_source),
+    documents: list[SourceDocument] = []
+    for layer_ordinal, path in enumerate(paths):
+        source = SourceReference(layer_ordinal, str(path))
+        documents.append(
+            SourceDocument(
+                source,
+                _read_toml(path, source=source),
+            )
         )
-        for layer_ordinal, path in enumerate(paths)
-    )
     merged = merge_toml_documents(
         documents,
         policies=HOST_CONFIG_MERGE_POLICIES,
     )
     document = merged.document
-    secret_file_base = _resolve_first_config_parent(
-        paths[0], include_source=include_source
-    )
+    secret_file_base = _resolve_config_parent(paths[0], source=documents[0].source)
     try:
         config = validate_final_config_structure(document)
     except FinalConfigError as error:
-        raise ConfigurationServiceError(error.diagnostics) from error
+        raise ConfigurationServiceError(
+            _enrich_diagnostics(error.diagnostics, merged.origins)
+        ) from error
     domains = validate_final_config_domains(config, build_hooks_dir=build_hooks_dir)
     diagnostics = (
         *domains.diagnostics,
-        *validate_final_config_semantics(config, domains),
+        *validate_final_config_semantics(config, domains, origins=merged.origins),
     )
+    diagnostics = _enrich_diagnostics(diagnostics, merged.origins)
     errors = tuple(
         item for item in diagnostics if item.severity == DiagnosticSeverity.ERROR
     )
@@ -124,23 +128,42 @@ def _coerce_config_paths(
     return paths
 
 
+def _enrich_diagnostics(
+    diagnostics: tuple[Diagnostic, ...],
+    origins: OriginNode,
+) -> tuple[Diagnostic, ...]:
+    return tuple(_enrich_diagnostic(item, origins) for item in diagnostics)
+
+
+def _enrich_diagnostic(diagnostic: Diagnostic, origins: OriginNode) -> Diagnostic:
+    if diagnostic.source_context is not None:
+        return diagnostic
+    source_context: DiagnosticSourceContext | None = origins.exact_location(
+        diagnostic.path
+    )
+    if source_context is None and diagnostic.code == "schema.missing":
+        source_context = origins.missing_field_location(diagnostic.path)
+    if source_context is None:
+        return diagnostic
+    return replace(diagnostic, source_context=source_context)
+
+
 def _read_toml(
-    config_path: ConfigPath, *, include_source: bool = False
+    config_path: ConfigPath,
+    *,
+    source: SourceReference,
 ) -> dict[str, Any]:
     path = Path(config_path)
     try:
         with path.open("rb") as config_file:
             return tomllib.load(config_file)
     except tomllib.TOMLDecodeError as error:
-        raise _read_error(
-            "toml.invalid_document", str(error), path, include_source
-        ) from error
+        raise _read_error("toml.invalid_document", str(error), source) from error
     except UnicodeDecodeError as error:
         raise _read_error(
             "toml.invalid_encoding",
             "configuration file must be valid UTF-8",
-            path,
-            include_source,
+            source,
         ) from error
     except OSError as error:
         if isinstance(error, FileNotFoundError):
@@ -154,13 +177,13 @@ def _read_toml(
             )
         else:
             code, message = "config.read_failed", "configuration file could not be read"
-        raise _read_error(code, message, path, include_source) from error
+        raise _read_error(code, message, source) from error
 
 
-def _resolve_first_config_parent(
+def _resolve_config_parent(
     config_path: ConfigPath,
     *,
-    include_source: bool,
+    source: SourceReference,
 ) -> Path:
     path = Path(config_path)
     try:
@@ -169,16 +192,22 @@ def _resolve_first_config_parent(
         raise _read_error(
             "config.read_failed",
             "configuration file parent could not be resolved",
-            path,
-            include_source,
+            source,
         ) from error
 
 
 def _read_error(
     code: str,
     message: str,
-    path: Path,
-    include_source: bool,
+    source: SourceReference,
 ) -> ConfigurationServiceError:
-    rendered = f"{path}: {message}" if include_source else message
-    return ConfigurationServiceError((Diagnostic((), code, rendered),))
+    return ConfigurationServiceError(
+        (
+            Diagnostic(
+                (),
+                code,
+                message,
+                source_context=SourceLocation(source, ()),
+            ),
+        )
+    )

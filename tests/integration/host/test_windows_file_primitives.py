@@ -15,6 +15,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
     reason="requires native Win32 handles and reparse points",
 )
+_NATIVE_WINDOWS_COMMAND_TIMEOUT_SECONDS = 30
 
 
 def test_windows_regular_file_uses_handle_bytes_without_posix_mode(
@@ -71,5 +72,6 @@ def _create_junction(link: Path, target: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_NATIVE_WINDOWS_COMMAND_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr

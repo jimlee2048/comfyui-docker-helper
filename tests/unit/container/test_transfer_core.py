@@ -39,6 +39,8 @@ from comfyui_docker_helper.container.transfer_core import (
     verify_required_final,
 )
 
+_LOCAL_COPY_TIMEOUT_SECONDS = 30
+
 
 class BytesBackend:
     """Write controlled bytes only to the staging path supplied by the core."""
@@ -1310,6 +1312,7 @@ def test_external_transport_path_uses_held_parent_descriptor(tmp_path: Path) -> 
                     f"{transport.sink.aria2_directory}/{transport.sink.aria2_name}",
                 ],
                 check=True,
+                timeout=_LOCAL_COPY_TIMEOUT_SECONDS,
             )
             return TransportSuccess(
                 length=transport.sink.current_length(),

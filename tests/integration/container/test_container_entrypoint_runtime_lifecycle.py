@@ -35,6 +35,8 @@ from comfyui_docker_helper.container.runtime_hooks import (
 )
 from comfyui_docker_helper.container.runtime_ssh_service import RuntimeSshService
 
+_WORKER_CLEANUP_TIMEOUT_SECONDS = 10
+
 
 class FakeChild:
     """Minimal child process with controllable wait and termination behavior."""
@@ -1535,7 +1537,9 @@ def test_repeated_signal_force_stops_downloads_ssh_and_comfyui(
 
 # Force completion is fail-closed: an exhausted caller deadline cannot turn an
 # exact owner that still reports live into a successful lifecycle return.
-def test_force_shutdown_waits_for_every_exact_owner_after_deadline() -> None:
+def test_force_shutdown_waits_for_every_exact_owner_after_deadline(
+    request: pytest.FixtureRequest,
+) -> None:
     class ReleasedOwner:
         def __init__(self) -> None:
             self.forced = threading.Event()
@@ -1563,8 +1567,19 @@ def test_force_shutdown_waits_for_every_exact_owner_after_deadline() -> None:
                 monotonic=time.monotonic,
                 sleep=time.sleep,
             )
-        )
+        ),
+        daemon=True,
     )
+
+    def cleanup_worker() -> None:
+        downloads.stopped.set()
+        ssh.stopped.set()
+        if worker.ident is not None:
+            worker.join(timeout=_WORKER_CLEANUP_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            pytest.fail("test-owned fail-closed worker did not stop during cleanup")
+
+    request.addfinalizer(cleanup_worker)
     worker.start()
 
     assert downloads.forced.wait(timeout=1)

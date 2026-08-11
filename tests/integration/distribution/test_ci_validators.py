@@ -14,6 +14,8 @@ from tests.project_paths import PROJECT_ROOT
 
 ADMISSION_TOOL = PROJECT_ROOT / "tools/ci/admit_package_build.py"
 DISTRIBUTION_TOOL = PROJECT_ROOT / "tools/ci/verify_distributions.py"
+_LOCAL_GIT_TIMEOUT_SECONDS = 30
+_VALIDATOR_TIMEOUT_SECONDS = 30
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -23,6 +25,7 @@ def _git(repository: Path, *arguments: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     ).stdout.strip()
 
 
@@ -66,6 +69,7 @@ def _run_admission(
         check=False,
         capture_output=True,
         text=True,
+        timeout=_VALIDATOR_TIMEOUT_SECONDS,
     )
 
 
@@ -149,6 +153,7 @@ def test_distribution_verifier_cli_accepts_valid_pair(tmp_path: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_VALIDATOR_TIMEOUT_SECONDS,
     )
 
     assert completed.returncode == 0, completed.stderr

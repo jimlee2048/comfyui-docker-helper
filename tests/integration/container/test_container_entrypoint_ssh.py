@@ -7,7 +7,8 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -44,6 +45,37 @@ SECOND_SSH_KEY = (
     "AAAAC3NzaC1lZDI1NTE5AAAAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg "
     "second@example"
 )
+
+_PREPARATION_PROCESS_TIMEOUT_SECONDS = 10
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 10
+
+
+@pytest.fixture
+def owned_preparation_processes() -> Iterator[list[subprocess.Popen[bytes]]]:
+    processes: list[subprocess.Popen[bytes]] = []
+    yield processes
+
+    cleanup_failures = 0
+    for process in processes:
+        if process.poll() is not None:
+            continue
+        with suppress(OSError):
+            process.terminate()
+        try:
+            process.wait(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            with suppress(OSError):
+                process.kill()
+            try:
+                process.wait(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                cleanup_failures += 1
+
+    if cleanup_failures:
+        pytest.fail(
+            "test-owned SSH preparation process cleanup did not complete",
+            pytrace=False,
+        )
 
 
 class FakeChild:
@@ -1068,6 +1100,7 @@ filename = "async.bin"
 # cancellation terminates and reaps it before startup can return.
 def test_ssh_startup_operation_cancels_and_reaps_published_process(
     tmp_path: Path,
+    owned_preparation_processes: list[subprocess.Popen[bytes]],
 ) -> None:
     runtime = _runtime(tmp_path)
     config = RuntimeConfig.model_validate(
@@ -1088,9 +1121,10 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"]
         )
+        owned_preparation_processes.append(process)
         preparation_process_observer(process)
         published.set()
-        process.wait()
+        process.wait(timeout=_PREPARATION_PROCESS_TIMEOUT_SECONDS)
         preparation_process_observer(None)
         return None
 

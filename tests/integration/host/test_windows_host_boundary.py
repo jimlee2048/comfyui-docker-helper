@@ -11,6 +11,7 @@ pytestmark = pytest.mark.skipif(
     reason="requires native Windows import and CLI behavior",
 )
 
+_NATIVE_WINDOWS_PROBE_TIMEOUT_SECONDS = 30
 _LINUX_IMPLEMENTATION_MODULES = frozenset(
     {
         "comfyui_docker_helper.container.build_plan_input",
@@ -39,6 +40,7 @@ def test_root_cli_does_not_load_platform_implementations() -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_NATIVE_WINDOWS_PROBE_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr

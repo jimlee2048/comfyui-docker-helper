@@ -27,6 +27,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
     reason="requires native Windows paths and junctions",
 )
+_NATIVE_WINDOWS_COMMAND_TIMEOUT_SECONDS = 30
 
 
 def test_windows_runtime_hook_discovery_and_identity_use_lexical_unicode_root(
@@ -101,5 +102,6 @@ def _create_junction(link: Path, target: Path) -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_NATIVE_WINDOWS_COMMAND_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr

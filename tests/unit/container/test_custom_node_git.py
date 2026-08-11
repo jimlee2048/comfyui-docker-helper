@@ -43,12 +43,15 @@ from tests.container_installer_support import (
     patch_phases as _patch_phases,
 )
 
+_LOCAL_GIT_TIMEOUT_SECONDS = 30
+
 
 def _git(repository: Path, *arguments: str) -> bytes:
     return subprocess.run(
         ("git", "-C", repository, *arguments),
         check=True,
         capture_output=True,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     ).stdout
 
 
@@ -107,6 +110,7 @@ def _materialized_nested_checkout(tmp_path: Path) -> tuple[Path, GitNodePlan, st
         ("git", "clone", "--no-checkout", "--", str(root_source), str(target)),
         check=True,
         capture_output=True,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     )
     _git(target, "checkout", "--detach", root_commit, "--")
     _git(
@@ -221,6 +225,7 @@ def test_external_submodule_git_directory_is_rejected(tmp_path: Path) -> None:
         ("git", "clone", "--bare", "--", source_repository, external_git_directory),
         check=True,
         capture_output=True,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     )
     subprocess.run(
         (
@@ -233,6 +238,7 @@ def test_external_submodule_git_directory_is_rejected(tmp_path: Path) -> None:
         ),
         check=True,
         capture_output=True,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     )
     git_file.write_text(f"gitdir: {external_git_directory}\n")
 
@@ -344,6 +350,7 @@ def test_direct_git_install_clones_into_final_target_and_retains_repository_meta
         ("git", "-C", target, "symbolic-ref", "-q", "HEAD"),
         check=False,
         capture_output=True,
+        timeout=_LOCAL_GIT_TIMEOUT_SECONDS,
     )
     assert symbolic.returncode == 1
     assert target.joinpath(".git").exists()

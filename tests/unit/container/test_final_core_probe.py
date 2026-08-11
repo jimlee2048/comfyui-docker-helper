@@ -13,6 +13,7 @@ import pytest
 from comfyui_docker_helper.container import final_manifest
 
 _PROBE = final_manifest._FINAL_CORE_PROBE_PATH
+_INTERPRETER_PROBE_TIMEOUT_SECONDS = 30
 _BASE_CHECKS = (
     "torch-import",
     "torch-cpu-tensor",
@@ -104,6 +105,7 @@ def _run(
         capture_output=True,
         text=True,
         encoding="utf-8",
+        timeout=_INTERPRETER_PROBE_TIMEOUT_SECONDS,
     )
 
 

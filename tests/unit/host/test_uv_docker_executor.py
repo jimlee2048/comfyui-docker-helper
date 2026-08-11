@@ -23,6 +23,7 @@ from comfyui_docker_helper.host.uv_docker_executor import (
 )
 
 _DIGEST = f"sha256:{'1' * 64}"
+_WORKER_JOIN_TIMEOUT_SECONDS = 10
 
 
 class _FakeImage:
@@ -744,9 +745,11 @@ def test_worker_thread_rejects_before_docker_authority(
         except BaseException as error:
             failures.append(error)
 
-    worker = threading.Thread(target=invoke)
+    worker = threading.Thread(target=invoke, daemon=True)
     worker.start()
-    worker.join()
+    worker.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        pytest.fail("uv Docker executor worker did not stop within timeout")
 
     assert len(failures) == 1
     assert isinstance(failures[0], UvDockerExecutorError)

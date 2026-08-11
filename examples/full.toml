@@ -262,7 +262,9 @@ post_install_hooks = ["post.sh"]
 [[files]]
 # Required. Must be an HTTP(S) URL with a host.
 url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
-# Required. Relative to COMFYUI_PATH; absolute paths and ".." are rejected.
+# Required. Relative to COMFYUI_PATH. Redundant "/", "." segments, and a
+# trailing slash are normalized. Use "." or "./" for the ComfyUI root.
+# Absolute paths, empty values, control characters, and ".." are rejected.
 dir = "models/example-docs"
 # Required. Must be a single filename component.
 filename = "comfyui-readme-aria2.md"

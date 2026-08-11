@@ -673,6 +673,28 @@ def test_normalized_host_ssh_key_set_is_written_once_to_baked_runtime(
     assert runtime["system"]["ssh"]["pub_keys"] == [_VALID_SSH_KEY]
 
 
+def test_comfyui_root_file_is_materialized_and_reloaded_canonically(
+    tmp_path: Path,
+) -> None:
+    document = final_config().model_dump(mode="json", exclude_none=True)
+    document["files"][0]["dir"] = "./"
+    config = validate_final_config_structure(document)
+    plan = build_plan(config, accepted_resolution())
+    output = tmp_path / "output"
+    output.mkdir(mode=0o700)
+
+    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
+
+    baked_document = tomllib.loads((output / "runtime/config.toml").read_text())
+    runtime = load_runtime_config(
+        baked_config_path=output / "runtime/config.toml",
+        mounted_config_path=tmp_path / "missing.toml",
+        environ={},
+    )
+    assert baked_document["files"][0]["dir"] == "."
+    assert runtime.files[0]["dir"] == "."
+
+
 # Descriptor-relative BuildPlan admission rejects substituted inputs.
 def test_build_plan_admission_rejects_leaf_and_ancestor_symlinks(
     tmp_path: Path,

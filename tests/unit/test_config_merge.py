@@ -400,6 +400,43 @@ def test_keyed_origins_keep_authored_indexes_separate_from_effective_indexes() -
     ]
 
 
+def test_file_overlay_uses_the_normalized_runtime_target_identity() -> None:
+    merged = _merge_result(
+        {
+            "files": [
+                {
+                    "url": "https://example.com/base.bin",
+                    "dir": "models//checkpoints/",
+                    "filename": "model.bin",
+                    "overwrite": False,
+                }
+            ]
+        },
+        {
+            "files": [
+                {
+                    "dir": "./models/checkpoints",
+                    "filename": "model.bin",
+                    "overwrite": True,
+                }
+            ]
+        },
+    )
+
+    assert merged.document["files"] == [
+        {
+            "url": "https://example.com/base.bin",
+            "dir": "./models/checkpoints",
+            "filename": "model.bin",
+            "overwrite": True,
+        }
+    ]
+    location = merged.origins.exact_location(("files", 0, "dir"))
+    assert location is not None
+    assert location.source.layer_ordinal == 1
+    assert location.path == ("files", 0, "dir")
+
+
 def test_reset_and_atomic_replacement_own_missing_field_attribution() -> None:
     base = {"files": [{"dir": "models", "filename": "model.bin"}]}
     reset = _merge_result(base, {"files": []})

@@ -449,13 +449,13 @@ def build_canonical_request_graph(
     files = tuple(
         FileRequest(
             url=item.url,
-            target=str(PurePosixPath(comfyui_path) / item.dir / item.filename),
+            target=str(PurePosixPath(comfyui_path) / normalized.relative_target),
             overwrite=item.overwrite,
             checksum=item.checksum,
             downloader=item.downloader or downloader.default,
             download_mode=item.download_mode or downloader.default_download_mode,
         )
-        for item in config.files
+        for item, normalized in zip(config.files, domains.files, strict=True)
     )
     return CanonicalRequestGraph(
         image_config_digest=_image_config_digest(config, domains),
@@ -629,6 +629,13 @@ def _image_config_projection(
     system = cast(dict[str, object], document["system"])
     python = cast(dict[str, object], document["python"])
     pytorch = cast(dict[str, object], document["pytorch"])
+    document["files"] = [
+        {
+            **item.model_dump(mode="json"),
+            "dir": normalized.directory.as_posix(),
+        }
+        for item, normalized in zip(config.files, domains.files, strict=True)
+    ]
     system["extra_packages"] = [item.value for item in domains.apt_packages]
     ssh = cast(dict[str, object], system["ssh"])
     ssh["pub_keys"] = list(domains.ssh_public_keys)

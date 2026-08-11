@@ -1055,7 +1055,11 @@ def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     document = _document()
     document["files"] = [
         {"url": "https://example.com/a", "dir": "models/x", "filename": "a.bin"},
-        {"url": "https://example.com/b", "dir": "models/x", "filename": "a.bin"},
+        {
+            "url": "https://example.com/b",
+            "dir": "models//x/./",
+            "filename": "a.bin",
+        },
     ]
     config = validate_final_config_structure(document)
 
@@ -1064,6 +1068,25 @@ def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     assert [
         item.path for item in diagnostics if item.code == "file.duplicate_target"
     ] == [("files", 1, "filename")]
+
+
+def test_file_directory_normalization_supports_the_comfyui_root() -> None:
+    document = _document()
+    document["files"] = [
+        {
+            "url": "https://example.com/root",
+            "dir": "./",
+            "filename": "root.bin",
+        }
+    ]
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert domains.diagnostics == ()
+    assert [item.directory.as_posix() for item in domains.files] == ["."]
+    assert [item.relative_target for item in domains.files] == ["root.bin"]
+    assert config.files[0].dir == "./"
 
 
 def test_file_target_rejects_only_the_exact_internal_staging_leaf() -> None:

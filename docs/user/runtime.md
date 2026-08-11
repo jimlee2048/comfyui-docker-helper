@@ -38,7 +38,7 @@ Environment overrides and mounted runtime inputs are deployment-time changes. Th
 
 ## Files, downloads, and persistent state
 
-Host `[[files]]` declarations become baked runtime defaults. At container startup, baked and mounted file lists merge by normalized `dir` plus `filename`. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. The effective item must contain a URL, and duplicate or invalid effective targets fail after merging. Every target is relative to `COMFYUI_PATH`.
+Host `[[files]]` declarations become baked runtime defaults. At container startup, baked and mounted file lists merge by normalized `dir` plus `filename`. Redundant `/`, `.` segments, and a trailing `/` are canonicalized before identity comparison; `.` and `./` select the `COMFYUI_PATH` root itself. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. The effective item must contain a URL, and duplicate or invalid effective targets fail after merging. Every target is relative to `COMFYUI_PATH`, and absolute paths or any authored `..` segment remain invalid.
 
 Synchronous downloads finish before pre-start hooks. Asynchronous downloads are accepted into one background queue before ComfyUI starts and may continue while it runs; they do not gate ComfyUI readiness.
 

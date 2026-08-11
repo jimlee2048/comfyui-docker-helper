@@ -114,6 +114,14 @@ class LocatedValue:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalizedFile:
+    """Canonical target information for one admitted runtime file."""
+
+    directory: PurePosixPath
+    relative_target: str
+
+
+@dataclass(frozen=True, slots=True)
 class NormalizedRequirement:
     """Resolution-relevant identity of one validated direct requirement."""
 
@@ -153,6 +161,7 @@ class FinalConfigDomainResult:
     git_urls: tuple[LocatedValue, ...]
     git_targets: tuple[LocatedValue, ...]
     file_targets: tuple[LocatedValue, ...]
+    files: tuple[NormalizedFile, ...]
     controlled_extra_args: tuple[LocatedValue, ...]
     git_credential_contexts: tuple[LocatedValue, ...]
     workspace: PurePosixPath | None
@@ -189,6 +198,7 @@ def validate_final_config_domains(
     git_urls: list[LocatedValue] = []
     git_targets: list[LocatedValue] = []
     file_targets: list[LocatedValue] = []
+    files: list[NormalizedFile] = []
     controlled_extra_args: list[LocatedValue] = []
     git_credential_contexts: list[LocatedValue] = []
 
@@ -208,7 +218,7 @@ def validate_final_config_domains(
         controlled_extra_args,
         diagnostics,
     )
-    _validate_file_domains(config, file_targets, diagnostics)
+    _validate_file_domains(config, file_targets, files, diagnostics)
     _validate_build_domains(config, diagnostics)
     _validate_secret_domains(config, diagnostics)
     _validate_git_credential_domains(config, git_credential_contexts, diagnostics)
@@ -230,6 +240,7 @@ def validate_final_config_domains(
         git_urls=tuple(git_urls),
         git_targets=tuple(git_targets),
         file_targets=tuple(file_targets),
+        files=tuple(files),
         controlled_extra_args=tuple(controlled_extra_args),
         git_credential_contexts=tuple(git_credential_contexts),
         workspace=workspace,
@@ -1001,6 +1012,7 @@ def _validate_hook(
 def _validate_file_domains(
     config: FinalConfig,
     file_targets: list[LocatedValue],
+    files: list[NormalizedFile],
     diagnostics: list[Diagnostic],
 ) -> None:
     for index, item in enumerate(config.files):
@@ -1032,8 +1044,9 @@ def _validate_file_domains(
                 )
             )
         if directory.path is not None and filename.filename is not None:
-            target = f"{directory.path.as_posix()}/{filename.filename}"
+            target = (directory.path / filename.filename).as_posix()
             file_targets.append(LocatedValue((*base, "filename"), target))
+            files.append(NormalizedFile(directory.path, target))
 
 
 def _validate_build_domains(

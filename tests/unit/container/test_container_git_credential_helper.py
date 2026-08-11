@@ -113,7 +113,11 @@ def test_unmatched_context_does_not_read_a_secret_mount(
 
 @pytest.mark.parametrize(
     "content",
-    [None, b"invalid\npassword", b"x" * 65_526],
+    [
+        pytest.param(None, id="missing"),
+        pytest.param(b"invalid\npassword", id="newline"),
+        pytest.param(b"x" * 65_526, id="oversized"),
+    ],
 )
 def test_expected_mount_failures_are_silent_at_the_process_adapter(
     tmp_path: Path,

@@ -22,7 +22,7 @@ Classify a test by the behavior it executes, not by every production module it i
 
 Keep tests at the narrowest layer that owns the behavior. Test current public, security, and execution contracts; do not preserve removed behavior with absence guards. Temporary development-only tests must be identified in a code comment and removed before the related change is complete.
 
-Give parameterized cases concise, stable IDs when their values are large, binary, control-bearing, or otherwise unsuitable for display. Pytest exposes node IDs through process state and CI logs, so retain the full payload as test data without allowing it to become the generated case name. This keeps platform limits and diagnostic output independent from the boundary value being tested.
+Give parameterized cases concise, stable IDs when their values are large, binary, control-bearing, or otherwise unsuitable for display. Pytest exposes node IDs through process state and CI logs, so retain the full payload as test data without allowing it to become the generated case name. This keeps platform limits and diagnostic output independent from the boundary value being tested. The shared collection policy rejects a complete node ID longer than 4,096 characters before test execution and reports only the count and observed lengths, never the node ID content.
 
 ## Platform coverage
 

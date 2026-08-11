@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,41 @@ from tests.project_paths import PROJECT_ROOT
 
 def _item(node_id: str) -> pytest.Item:
     return cast(pytest.Item, SimpleNamespace(nodeid=node_id))
+
+
+def _safe_probe_evidence(completed: subprocess.CompletedProcess[str]) -> str:
+    output = completed.stdout + completed.stderr
+    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    return (
+        "probe=oversized-node-id; "
+        f"returncode={completed.returncode}; "
+        f"stdout_chars={len(completed.stdout)}; "
+        f"stderr_chars={len(completed.stderr)}; "
+        f"combined_sha256={digest}"
+    )
+
+
+def test_safe_probe_evidence_omits_raw_output_and_reports_bounded_facts() -> None:
+    marker = "synthetic-sensitive-marker"
+    stdout = f"private stdout containing {marker}"
+    stderr = "private synthetic stderr body"
+    completed = subprocess.CompletedProcess(
+        args=("pytest",),
+        returncode=7,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    evidence = _safe_probe_evidence(completed)
+
+    if marker in evidence or stdout in evidence or stderr in evidence:
+        pytest.fail("safe probe evidence exposed raw process output", pytrace=False)
+    digest = hashlib.sha256((stdout + stderr).encode("utf-8")).hexdigest()
+    assert evidence == (
+        "probe=oversized-node-id; returncode=7; "
+        f"stdout_chars={len(stdout)}; stderr_chars={len(stderr)}; "
+        f"combined_sha256={digest}"
+    )
 
 
 def test_node_id_at_collection_limit_is_accepted() -> None:
@@ -70,7 +106,12 @@ def test_pytest_rejects_oversized_generated_node_id_before_execution(
     )
 
     output = completed.stdout + completed.stderr
-    assert completed.returncode == pytest.ExitCode.USAGE_ERROR, output
-    assert "1 collected test node ID(s)" in output
-    assert "Use concise explicit parametrization IDs" in output
-    assert marker not in output
+    evidence = _safe_probe_evidence(completed)
+    if completed.returncode != pytest.ExitCode.USAGE_ERROR:
+        pytest.fail(f"probe returned an unexpected status; {evidence}", pytrace=False)
+    if "1 collected test node ID(s)" not in output:
+        pytest.fail(f"probe omitted the oversized count; {evidence}", pytrace=False)
+    if "Use concise explicit parametrization IDs" not in output:
+        pytest.fail(f"probe omitted the remediation hint; {evidence}", pytrace=False)
+    if marker in output:
+        pytest.fail(f"probe exposed the sensitive marker; {evidence}", pytrace=False)

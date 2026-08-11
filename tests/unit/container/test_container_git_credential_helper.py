@@ -112,18 +112,25 @@ def test_unmatched_context_does_not_read_a_secret_mount(
 
 
 @pytest.mark.parametrize(
-    "content",
+    ("content", "oversized_size"),
     [
-        pytest.param(None, id="missing"),
-        pytest.param(b"invalid\npassword", id="newline"),
-        pytest.param(b"x" * 65_526, id="oversized"),
+        pytest.param(None, None, id="missing"),
+        pytest.param(b"invalid\npassword", None, id="newline"),
+        pytest.param(
+            None,
+            git_credential_helper.GIT_CREDENTIAL_VALUE_MAX_BYTES + 1,
+            id="oversized",
+        ),
     ],
 )
 def test_expected_mount_failures_are_silent_at_the_process_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     content: bytes | None,
+    oversized_size: int | None,
 ) -> None:
+    if oversized_size is not None:
+        content = b"x" * oversized_size
     plan_path = tmp_path / "build-plan.json"
     plan = _credential_plan(plan_path)
     secret = tmp_path / "mounted-secret"

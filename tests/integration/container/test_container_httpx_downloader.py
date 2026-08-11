@@ -208,20 +208,32 @@ def test_httpx_normalizes_delta_and_http_date_retry_after(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "headers",
+    ("headers", "oversized_value_size"),
     [
-        [(b"Retry-After", b"-1")],
-        [(b"Retry-After", b"1.5")],
-        [(b"Retry-After", b"not-a-date")],
-        [(b"Retry-After", b"9" * 10_000)],
-        [(b"Retry-After", b"10"), (b"Retry-After", b"20")],
-        [(b"Retry-After", b"Wed, 01 Jan 2020 00:00:00 GMT")],
+        pytest.param([(b"Retry-After", b"-1")], None, id="negative-delta"),
+        pytest.param([(b"Retry-After", b"1.5")], None, id="fractional-delta"),
+        pytest.param([(b"Retry-After", b"not-a-date")], None, id="invalid-date"),
+        pytest.param(None, 10_000, id="oversized"),
+        pytest.param(
+            [(b"Retry-After", b"10"), (b"Retry-After", b"20")],
+            None,
+            id="duplicate",
+        ),
+        pytest.param(
+            [(b"Retry-After", b"Wed, 01 Jan 2020 00:00:00 GMT")],
+            None,
+            id="past-date",
+        ),
     ],
 )
 def test_httpx_ignores_invalid_ambiguous_or_past_retry_after(
     tmp_path: Path,
-    headers: list[tuple[bytes, bytes]],
+    headers: list[tuple[bytes, bytes]] | None,
+    oversized_value_size: int | None,
 ) -> None:
+    if oversized_value_size is not None:
+        headers = [(b"Retry-After", b"9" * oversized_value_size)]
+    assert headers is not None
     now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     downloader = _downloader(
         httpx.MockTransport(lambda _: httpx.Response(503, headers=headers)),

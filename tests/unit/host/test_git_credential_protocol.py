@@ -56,12 +56,16 @@ def test_username_mismatch_does_not_fall_back_to_a_shorter_route() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        b"host=example.com\n",
-        b"protocol=https\n",
-        b"protocol=ftp\nhost=example.com\n",
-        b"protocol=https\nhost=\xff.example.com\n",
-        b"protocol=https\nhost=example.com\r\n",
-        b"protocol=https\nhost=other.example.com\n",
+        pytest.param(b"host=example.com\n", id="missing-protocol"),
+        pytest.param(b"protocol=https\n", id="missing-host"),
+        pytest.param(b"protocol=ftp\nhost=example.com\n", id="unsupported-protocol"),
+        pytest.param(
+            b"protocol=https\nhost=\xff.example.com\n", id="invalid-host-encoding"
+        ),
+        pytest.param(
+            b"protocol=https\nhost=example.com\r\n", id="carriage-return-line-ending"
+        ),
+        pytest.param(b"protocol=https\nhost=other.example.com\n", id="unmatched-host"),
     ],
 )
 def test_missing_invalid_and_unmatched_contexts_return_no_decision(
@@ -110,17 +114,30 @@ def test_repeated_known_scalars_fail_without_echoing_content(key: bytes) -> None
     [
         pytest.param(b"malformed\n", "invalid_line", id="missing-equals"),
         pytest.param(b"unknown=before\0after\n", "nul_byte", id="nul-byte"),
-        pytest.param(
-            b"x=" + b"a" * 65_533 + b"\n",
-            "line_too_long",
-            id="line-too-long",
-        ),
     ],
 )
 def test_malformed_binary_frames_fail_content_free(
     payload: bytes,
     code: str,
 ) -> None:
+    with pytest.raises(GitCredentialProtocolError) as raised:
+        evaluate_git_credential_request("get", payload, ())
+
+    assert raised.value.code == code
+    assert payload[:16].decode("ascii", errors="ignore") not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("frame_size", "code"),
+    [pytest.param(65_536, "line_too_long", id="line-too-long")],
+)
+def test_oversized_input_frame_fails_content_free(
+    frame_size: int,
+    code: str,
+) -> None:
+    payload = b"x=" + b"a" * (frame_size - len(b"x=\n")) + b"\n"
+    assert len(payload) == frame_size
+
     with pytest.raises(GitCredentialProtocolError) as raised:
         evaluate_git_credential_request("get", payload, ())
 
@@ -179,14 +196,38 @@ def test_response_value_limit_accepts_65525_bytes() -> None:
         pytest.param(b"user\0name", b"password", id="username-nul"),
         pytest.param(b"user", b"pass\rword", id="password-carriage-return"),
         pytest.param(b"user\nname", b"password", id="username-newline"),
-        pytest.param(b"u" * 65_526, b"password", id="username-too-long"),
-        pytest.param(b"user", b"p" * 65_526, id="password-too-long"),
     ],
 )
 def test_response_rejects_invalid_values_without_echoing_them(
     username: bytes,
     password: bytes,
 ) -> None:
+    with pytest.raises(GitCredentialProtocolError) as raised:
+        render_git_credential_response(
+            GitCredentialDecision(route_index=0, username=username), password
+        )
+
+    assert raised.value.code == "invalid_response_value"
+    for value in (username, password):
+        sample = value[:16].decode("ascii", errors="ignore")
+        if sample:
+            assert sample not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "size"),
+    [
+        pytest.param("username", 65_526, id="username-too-long"),
+        pytest.param("password", 65_526, id="password-too-long"),
+    ],
+)
+def test_response_rejects_oversized_values_without_echoing_them(
+    field: str,
+    size: int,
+) -> None:
+    username = b"u" * size if field == "username" else b"user"
+    password = b"p" * size if field == "password" else b"password"
+
     with pytest.raises(GitCredentialProtocolError) as raised:
         render_git_credential_response(
             GitCredentialDecision(route_index=0, username=username), password

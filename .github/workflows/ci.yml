@@ -68,18 +68,24 @@ jobs:
         run: uv run --locked pytest
 
   windows_host:
-    name: Windows host / Python ${{ matrix.python-version }}
+    name: Windows diagnostic / ${{ matrix.slice }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 12
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - "3.12"
-          - "3.13"
-          - "3.14"
+        include:
+          - slice: imports
+            python-version: "3.12"
+            pytest-args: tests/unit/host/test_imports.py
+          - slice: unit-rest
+            python-version: "3.12"
+            pytest-args: --ignore=tests/unit/host/test_imports.py tests/unit/host
+          - slice: integration
+            python-version: "3.12"
+            pytest-args: tests/integration/host
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,9 +108,9 @@ jobs:
           --durations=50
           -o faulthandler_timeout=120
           -o faulthandler_exit_on_timeout=true
-          tests/unit/host
-          tests/integration/host
+          ${{ matrix.pytest-args }}
       - name: Build Windows wheel
+        if: ${{ matrix.slice == 'unit-rest' }}
         env:
           DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist
         run: |
@@ -118,6 +124,7 @@ jobs:
             throw "wheel build did not produce exactly one wheel"
           }
       - name: Clean-install and exercise Windows wheel
+        if: ${{ matrix.slice == 'unit-rest' }}
         env:
           DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist
           RUNTIME_REQUIREMENTS: ${{ runner.temp }}\runtime-requirements.txt

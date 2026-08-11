@@ -23,6 +23,14 @@ from comfyui_docker_helper.errors import ApplicationError
 
 _ROOT_UID = 0
 _ROOT_GID = 0
+_SSH_DIRECTORY_MODE_WARNING = (
+    "WARNING: existing root SSH directory mode is nonstandard; preserving it "
+    "because it is not writable by group or other"
+)
+_AUTHORIZED_KEYS_MODE_WARNING = (
+    "WARNING: existing root SSH authorized keys mode is nonstandard; replacing "
+    "it atomically with mode 0600"
+)
 type Chown = Callable[
     [str | bytes | os.PathLike[str] | os.PathLike[bytes], int, int],
     None,
@@ -92,6 +100,7 @@ class RootSshCredentialPreparationStatus:
     authorized_keys_path: Path | None = None
     root_password_set: bool = False
     root_unlocked: bool = False
+    warnings: tuple[str, ...] = ()
 
     @property
     def has_credentials(self) -> bool:
@@ -138,6 +147,9 @@ def start_sshd_if_enabled(
         )
     except SshCredentialPreparationError as error:
         raise SshdStartupError(f"SSH credential preparation failed: {error}") from error
+
+    for warning in status.warnings:
+        log(warning)
 
     if not status.has_credentials:
         log("WARNING: SSH is enabled but no root SSH credentials are configured")
@@ -231,8 +243,9 @@ def prepare_root_ssh_credentials(
 
     public_keys = _normalize_runtime_public_keys(ssh.pub_keys)
     authorized_keys_path = None
+    warnings: tuple[str, ...] = ()
     if public_keys:
-        authorized_keys_path = _write_authorized_keys(
+        authorized_keys_path, warnings = _write_authorized_keys(
             public_keys,
             root_home=root_home,
             chown=chown_func,
@@ -258,6 +271,7 @@ def prepare_root_ssh_credentials(
         authorized_keys_path=authorized_keys_path,
         root_password_set=root_password_set,
         root_unlocked=root_unlocked,
+        warnings=warnings,
     )
 
 
@@ -377,19 +391,19 @@ def _write_authorized_keys(
     fchmod: Fchmod,
     owner_uid: int,
     owner_gid: int,
-) -> Path:
+) -> tuple[Path, tuple[str, ...]]:
     ssh_dir = root_home / ".ssh"
     authorized_keys = ssh_dir / "authorized_keys"
     try:
         _validate_root_home(root_home, owner_uid=owner_uid, owner_gid=owner_gid)
-        ssh_directory_created = _ensure_root_ssh_directory(
+        ssh_directory_created, directory_warning = _ensure_root_ssh_directory(
             ssh_dir,
             chown=chown,
             chmod=chmod,
             owner_uid=owner_uid,
             owner_gid=owner_gid,
         )
-        _validate_authorized_keys_target(
+        target_warning = _validate_authorized_keys_target(
             authorized_keys,
             owner_uid=owner_uid,
             owner_gid=owner_gid,
@@ -409,7 +423,11 @@ def _write_authorized_keys(
         raise SshCredentialPreparationError(
             "failed to prepare root SSH authorized keys"
         ) from error
-    return authorized_keys
+    return authorized_keys, tuple(
+        warning
+        for warning in (directory_warning, target_warning)
+        if warning is not None
+    )
 
 
 def _validate_root_home(path: Path, *, owner_uid: int, owner_gid: int) -> None:
@@ -438,7 +456,7 @@ def _ensure_root_ssh_directory(
     chmod: Chmod,
     owner_uid: int,
     owner_gid: int,
-) -> bool:
+) -> tuple[bool, str | None]:
     created = False
     try:
         metadata = path.lstat()
@@ -448,16 +466,18 @@ def _ensure_root_ssh_directory(
         chown(path, owner_uid, owner_gid)
         chmod(path, 0o700)
         metadata = path.lstat()
+    mode = stat.S_IMODE(metadata.st_mode)
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != owner_uid
         or metadata.st_gid != owner_gid
-        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or mode & 0o022
     ):
         raise SshCredentialPreparationError(
-            "root SSH directory must be a root-owned directory with mode 0700"
+            "root SSH directory must be root-owned and not writable by group or other"
         )
-    return created
+    warning = None if mode == 0o700 else _SSH_DIRECTORY_MODE_WARNING
+    return created, warning
 
 
 def _validate_authorized_keys_target(
@@ -465,20 +485,23 @@ def _validate_authorized_keys_target(
     *,
     owner_uid: int,
     owner_gid: int,
-) -> None:
+) -> str | None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        return
+        return None
+    mode = stat.S_IMODE(metadata.st_mode)
     if (
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_uid != owner_uid
         or metadata.st_gid != owner_gid
-        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or mode & 0o022
     ):
         raise SshCredentialPreparationError(
-            "root SSH authorized keys must be a root-owned regular file with mode 0600"
+            "root SSH authorized keys must be a root-owned regular file that is "
+            "not writable by group or other"
         )
+    return None if mode == 0o600 else _AUTHORIZED_KEYS_MODE_WARNING
 
 
 def _atomic_replace_authorized_keys(

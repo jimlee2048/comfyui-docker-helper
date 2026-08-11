@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
 from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.host.secret_session import HostSecretSession
 
@@ -70,7 +68,7 @@ def test_windows_unicode_environment_snapshot_is_private_reused_and_cleaned(
     assert not root.exists()
 
 
-def test_windows_file_snapshot_reports_permissions_once_without_content(
+def test_windows_file_snapshot_preserves_bytes_without_permission_warning(
     tmp_path: Path,
 ) -> None:
     token = tmp_path / "configuration" / "token"
@@ -80,12 +78,4 @@ def test_windows_file_snapshot_reports_permissions_once_without_content(
 
     with HostSecretSession.from_configuration(result) as session:
         assert session.snapshot("root_token").read_bytes() == b"windows-file-secret"
-        warnings = session.drain_warnings()
         assert session.drain_warnings() == ()
-
-    assert len(warnings) == 1
-    assert warnings[0].path == ("secrets", "root_token", "file")
-    assert warnings[0].code == "secret.file_permissions_unverifiable"
-    assert warnings[0].severity is DiagnosticSeverity.WARNING
-    assert os.fspath(token) not in warnings[0].message
-    assert "windows-file-secret" not in warnings[0].message

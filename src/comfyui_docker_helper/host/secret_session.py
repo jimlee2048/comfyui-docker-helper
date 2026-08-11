@@ -54,7 +54,6 @@ _SNAPSHOT_PREFIX = "snapshot-"
 _LOCK_PREFIX = "lock-"
 _FAILURE_PREFIX = "failure-"
 _WARNING_PREFIX = "warning-permissive-mode-"
-_UNVERIFIABLE_WARNING_PREFIX = "warning-permissions-unverifiable-"
 _PRIVATE_FILE_ATTEMPTS = 128
 
 _close_descriptor = os.close
@@ -212,13 +211,9 @@ class HostSecretSession:
                 if cached_failure is not None:
                     raise cached_failure
                 try:
-                    data, mode, permissions_unverifiable = self._read_source(
-                        name, source
-                    )
+                    data, mode = self._read_source(name, source)
                     if mode is not None and stat.S_IMODE(mode) & 0o077:
                         self._record_mode_warning(name)
-                    if permissions_unverifiable:
-                        self._record_permissions_unverifiable_warning(name)
                     _validate_git_password(data, name)
                     _write_snapshot(snapshot, data)
                     return snapshot
@@ -284,9 +279,9 @@ class HostSecretSession:
 
     def _read_source(
         self, name: str, source: _SecretSource
-    ) -> tuple[bytes, int | None, bool]:
+    ) -> tuple[bytes, int | None]:
         if source.kind == "env":
-            return _read_environment_source(source.locator, name), None, False
+            return _read_environment_source(source.locator, name), None
         if source.kind == "file":
             try:
                 admitted = read_bounded_regular_absolute_file(
@@ -295,28 +290,12 @@ class HostSecretSession:
                 )
             except (OSError, ValueError):
                 raise HostSecretSessionError("source_unavailable", name) from None
-            return (
-                admitted.data,
-                admitted.mode,
-                admitted.permissions_unverifiable,
-            )
+            return admitted.data, admitted.mode
         raise HostSecretSessionError("invalid_metadata", name)
 
     def _record_mode_warning(self, name: str) -> None:
         root = self._require_root()
         marker = root / f"{_WARNING_PREFIX}{name}"
-        if marker.exists():
-            return
-        try:
-            _write_private_file(marker, b"")
-        except FileExistsError:
-            pass
-        except (OSError, ValueError):
-            raise HostSecretSessionError("warning_record_failed", name) from None
-
-    def _record_permissions_unverifiable_warning(self, name: str) -> None:
-        root = self._require_root()
-        marker = root / f"{_UNVERIFIABLE_WARNING_PREFIX}{name}"
         if marker.exists():
             return
         try:
@@ -336,11 +315,6 @@ class HostSecretSession:
                     _WARNING_PREFIX,
                     "secret.permissive_file_mode",
                     "Secret file has group or world permission bits set",
-                ),
-                (
-                    _UNVERIFIABLE_WARNING_PREFIX,
-                    "secret.file_permissions_unverifiable",
-                    "Secret file permissions could not be verified on this platform",
                 ),
             ):
                 marker = f"{marker_prefix}{name}"

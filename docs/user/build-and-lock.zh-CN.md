@@ -83,7 +83,7 @@ cdh host build \
 
 Secret 会在命令范围内惰性处理。cdh 会让 source locator 和解析后的值避开持久构建工件及其自身诊断，并在命令通过受支持的成功、错误或中断路径退出时尝试清理。普通清理失败会被报告，但进程或宿主机突然终止时无法保证完成清理。这是结构性非持久化边界，而不是沙箱：受信任的自定义节点 Hook 和安装程序仍可以读取、输出或复制其合并构建步骤可用的凭据。`http://` credential route 可以使用，但会因缺少 TLS 传输保密性而发出 warning。
 
-在 POSIX 上，环境变量 Secret 会保留环境值的原始字节；在 Windows 上，cdh 会将 Unicode 环境值编码为 UTF-8。文件 Secret 仍必须是常规文件，且上限为 65,525 字节。当 POSIX 的 group 或 world 权限位已设置时，cdh 会发出 warning。Windows 源文件 ACL 不能简化为这项 POSIX 检查，因此 cdh 会警告无法验证源文件权限；请自行限制源文件的 Windows ACL。由 cdh 管理的临时 Secret 快照仍会通过 POSIX mode 或受保护的 Windows DACL 保持私有。
+在 POSIX 上，环境变量 Secret 会保留环境值的原始字节；在 Windows 上，cdh 会将 Unicode 环境值编码为 UTF-8。文件 Secret 仍必须是常规文件，且上限为 65,525 字节。当 POSIX 的 group 或 world 权限位已设置时，cdh 会发出 warning。在 Windows 上，请自行限制源文件的 ACL，因为 cdh 不实现通用的 Windows access audit。由 cdh 管理的临时 Secret 快照仍会通过 POSIX mode 或受保护的 Windows DACL 保持私有。
 
 BuildKit 不会把 Secret 内容纳入 `RUN` 指令的 cache key；只有 Secret ID 和 mount 属性参与。轮换 token 后，已经完成的自定义节点层仍可能被复用，而不访问当前 credential source。直接构建渲染上下文时，如需重新检查鉴权，请使用 Buildx `--no-cache` 或其他常规 BuildKit cache 控制。cdh 刻意不会把 token hash 作为 cachebuster。
 

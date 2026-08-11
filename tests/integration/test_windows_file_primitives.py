@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_windows_regular_file_uses_handle_bytes_and_unverifiable_permissions(
+def test_windows_regular_file_uses_handle_bytes_without_posix_mode(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source with spaces 密钥.txt"
@@ -29,7 +29,6 @@ def test_windows_regular_file_uses_handle_bytes_and_unverifiable_permissions(
 
     assert admitted.data == b"secret bytes"
     assert admitted.mode is None
-    assert admitted.permissions_unverifiable is True
     with pytest.raises(OSError) as raised:
         file_admission.read_bounded_regular_absolute_file(
             source, max_bytes=len(b"secret bytes") - 1

@@ -14,11 +14,10 @@ _READ_CHUNK_BYTES = 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class AdmittedRegularFile:
-    """Bytes and platform-observed permission evidence for one admitted file."""
+    """Bytes and any reliable platform-observed mode for one admitted file."""
 
     data: bytes
     mode: int | None
-    permissions_unverifiable: bool = False
 
 
 def read_regular_absolute_file(path: str | os.PathLike[str]) -> bytes:
@@ -49,7 +48,6 @@ def _read_regular_absolute_file(
         return AdmittedRegularFile(
             read_windows_regular_absolute_file(value, max_bytes=max_bytes),
             mode=None,
-            permissions_unverifiable=True,
         )
 
     parsed = PurePosixPath(value)

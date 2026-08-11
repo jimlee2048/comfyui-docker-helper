@@ -106,7 +106,7 @@ password = { secret = "github_pat" }
 
 Secret 名称和引用必须匹配 `[a-z][a-z0-9_-]{0,63}`。`env` locator 必须是有效的环境变量名。`password` 始终是结构化的完整值 Secret 引用；它不接受内联 token 或字符串插值。
 
-环境变量和文件 source 仅在需要它们的命令中惰性解析。仅语法验证绝不会读取它们，匹配且已接受的 lock 也可能避免 provider 阶段的读取。相对文件 locator 统一以第一个 `-f` 文件的真实父目录为基准；允许绝对路径和规范化后的父目录跳转。Secret 文件必须是常规文件而非符号链接，且值不能超过 65,525 字节。在 POSIX 上，设置了 group 或 world 权限位时，cdh 会发出 warning；在 Windows 上，cdh 不会使用 POSIX mode bit 近似 ACL access，而会警告无法验证源文件权限。Git 密码还必须非空，且不能包含 NUL、回车或换行；创建 token 文件时不要留下末尾换行。
+环境变量和文件 source 仅在需要它们的命令中惰性解析。仅语法验证绝不会读取它们，匹配且已接受的 lock 也可能避免 provider 阶段的读取。相对文件 locator 统一以第一个 `-f` 文件的真实父目录为基准；允许绝对路径和规范化后的父目录跳转。Secret 文件必须是常规文件而非符号链接，且值不能超过 65,525 字节。在 POSIX 上，设置了 group 或 world 权限位时，cdh 会发出 warning。在 Windows 上，请自行限制源文件的 ACL；cdh 不实现通用的 Windows access audit。Git 密码还必须非空，且不能包含 NUL、回车或换行；创建 token 文件时不要留下末尾换行。
 
 Credential route 是通用 HTTP(S) 用户名/密码 context，而不是特定 provider 对象。GitHub 或 GitLab personal access token 应放在所引用的 `password` 中。用户名必须非空；如果不想记录个人用户名，GitHub 可便利地使用 `x-access-token`，GitLab 支持使用 `oauth2`。其他凭据类型可能要求 provider 指定的用户名。建议使用只读、仅限单个仓库且会过期的 token。
 

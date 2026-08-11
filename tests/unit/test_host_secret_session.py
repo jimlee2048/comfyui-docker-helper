@@ -360,7 +360,7 @@ def test_permissive_mode_warning_survives_invalid_file_value(
     assert os.fspath(token) not in warnings[0].message
 
 
-def test_unverifiable_file_permissions_emit_one_content_free_warning(
+def test_file_source_without_posix_mode_emits_no_permission_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,7 +375,6 @@ def test_unverifiable_file_permissions_emit_one_content_free_warning(
         return SimpleNamespace(
             data=admitted.data,
             mode=None,
-            permissions_unverifiable=True,
         )
 
     monkeypatch.setattr(
@@ -389,12 +388,7 @@ def test_unverifiable_file_permissions_emit_one_content_free_warning(
         warnings = session.drain_warnings()
         assert session.drain_warnings() == ()
 
-    assert len(warnings) == 1
-    assert warnings[0].path == ("secrets", "root_token", "file")
-    assert warnings[0].code == "secret.file_permissions_unverifiable"
-    assert warnings[0].severity is DiagnosticSeverity.WARNING
-    assert os.fspath(token) not in warnings[0].message
-    assert "file-token" not in warnings[0].message
+    assert warnings == ()
 
 
 def test_private_session_files_are_exact_modes_under_restrictive_umask(

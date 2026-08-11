@@ -67,7 +67,6 @@ def test_bounded_admission_observes_mode_and_bytes_through_the_same_leaf_descrip
     assert admitted.data == b"secret bytes"
     assert admitted.mode is not None
     assert stat.S_IMODE(admitted.mode) == 0o640
-    assert admitted.permissions_unverifiable is False
     # Mode and bytes share one admitted descriptor so a path replacement cannot
     # split the validation result from the content that is consumed.
     assert fstat_descriptors
@@ -338,7 +337,7 @@ def test_windows_admission_rejects_leaf_reparse_from_the_opened_handle() -> None
     assert api.closed_paths == ["C:\\safe\\secret.txt"]
 
 
-def test_windows_public_admission_marks_source_permissions_unverifiable(
+def test_windows_public_admission_returns_bytes_without_posix_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(file_admission, "_platform_name", "nt")
@@ -354,4 +353,3 @@ def test_windows_public_admission_marks_source_permissions_unverifiable(
 
     assert admitted.data == b"secret"
     assert admitted.mode is None
-    assert admitted.permissions_unverifiable is True

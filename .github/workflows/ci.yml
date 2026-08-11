@@ -93,7 +93,17 @@ jobs:
       - name: Synchronize locked environment
         run: uv sync --locked --all-groups
       - name: Run Windows host and shared contracts
-        run: uv run --locked pytest tests/unit/host tests/integration/host
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: >-
+          uv run --locked pytest
+          -vv
+          --tb=short
+          --durations=50
+          -o faulthandler_timeout=120
+          -o faulthandler_exit_on_timeout=true
+          tests/unit/host
+          tests/integration/host
       - name: Build Windows wheel
         env:
           DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist

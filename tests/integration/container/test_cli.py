@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
@@ -21,6 +22,58 @@ from tests.build_plan_support import (
     canonical_wheel,
     final_config,
 )
+
+
+def _plain_output(output: str) -> str:
+    return Text.from_ansi(output).plain
+
+
+@pytest.mark.parametrize(
+    ("args", "usage"),
+    [
+        (["download-files"], "Usage: cdh container download-files"),
+        (["install-comfyui"], "Usage: cdh container install-comfyui"),
+        (["install-custom-nodes"], "Usage: cdh container install-custom-nodes"),
+        (["emit-final-manifest"], "Usage: cdh container emit-final-manifest"),
+        (["entrypoint"], "Usage: cdh container entrypoint"),
+    ],
+)
+@pytest.mark.parametrize("help_flag", ["--help", "-h"])
+def test_container_helper_help_succeeds(
+    cli_runner: CliRunner,
+    args: list[str],
+    usage: str,
+    help_flag: str,
+) -> None:
+    result = cli_runner.invoke(app, ["container", *args, help_flag])
+
+    assert result.exit_code == 0
+    assert usage in _plain_output(result.output)
+
+
+def test_container_helper_help_exposes_build_plan_binding(
+    cli_runner: CliRunner,
+) -> None:
+    """Container build helpers require the Dockerfile-bound plan digest."""
+    result = cli_runner.invoke(app, ["container", "download-files", "--help"])
+
+    assert result.exit_code == 0
+    assert "--build-plan-digest" in _plain_output(result.output)
+
+
+def test_registry_helper_help_exposes_only_owned_inputs(
+    cli_runner: CliRunner,
+) -> None:
+    result = cli_runner.invoke(
+        app,
+        ["container", "install-custom-nodes", "--help"],
+    )
+
+    assert result.exit_code == 0
+    output = _plain_output(result.output)
+    assert "--build-plan-digest" in output
+    assert "--constraints" in output
+    assert "--build-hooks-directory" in output
 
 
 @pytest.mark.parametrize(

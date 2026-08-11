@@ -108,9 +108,13 @@ def test_repeated_known_scalars_fail_without_echoing_content(key: bytes) -> None
 @pytest.mark.parametrize(
     ("payload", "code"),
     [
-        (b"malformed\n", "invalid_line"),
-        (b"unknown=before\0after\n", "nul_byte"),
-        (b"x=" + b"a" * 65_533 + b"\n", "line_too_long"),
+        pytest.param(b"malformed\n", "invalid_line", id="missing-equals"),
+        pytest.param(b"unknown=before\0after\n", "nul_byte", id="nul-byte"),
+        pytest.param(
+            b"x=" + b"a" * 65_533 + b"\n",
+            "line_too_long",
+            id="line-too-long",
+        ),
     ],
 )
 def test_malformed_binary_frames_fail_content_free(
@@ -170,13 +174,13 @@ def test_response_value_limit_accepts_65525_bytes() -> None:
 @pytest.mark.parametrize(
     ("username", "password"),
     [
-        (b"", b"password"),
-        (b"user", b""),
-        (b"user\0name", b"password"),
-        (b"user", b"pass\rword"),
-        (b"user\nname", b"password"),
-        (b"u" * 65_526, b"password"),
-        (b"user", b"p" * 65_526),
+        pytest.param(b"", b"password", id="empty-username"),
+        pytest.param(b"user", b"", id="empty-password"),
+        pytest.param(b"user\0name", b"password", id="username-nul"),
+        pytest.param(b"user", b"pass\rword", id="password-carriage-return"),
+        pytest.param(b"user\nname", b"password", id="username-newline"),
+        pytest.param(b"u" * 65_526, b"password", id="username-too-long"),
+        pytest.param(b"user", b"p" * 65_526, id="password-too-long"),
     ],
 )
 def test_response_rejects_invalid_values_without_echoing_them(

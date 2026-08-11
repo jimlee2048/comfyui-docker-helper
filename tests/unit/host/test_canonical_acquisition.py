@@ -202,7 +202,13 @@ def test_requirements_provider_returns_exact_source_snapshot() -> None:
 
 @pytest.mark.parametrize(
     "content",
-    [b"\xff", b"x" * (MAX_COMFYUI_REQUIREMENTS_BYTES + 1)],
+    [
+        pytest.param(b"\xff", id="invalid-utf8"),
+        pytest.param(
+            b"x" * (MAX_COMFYUI_REQUIREMENTS_BYTES + 1),
+            id="oversized",
+        ),
+    ],
 )
 def test_requirements_provider_rejects_invalid_source_as_acquisition_failure(
     content: bytes,

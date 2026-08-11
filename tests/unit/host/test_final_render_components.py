@@ -557,6 +557,7 @@ def test_materializer_avoids_posix_mode_calls_on_windows(
         materializer_module.os,
         "fchmod",
         lambda *_args: pytest.fail("Windows materialization called fchmod"),
+        raising=False,
     )
     monkeypatch.setattr(
         Path,
@@ -622,7 +623,7 @@ def test_materializer_rejects_invalid_private_stage_entry(
     elif entry == "symlink":
         assert real_stage is not None
         assert stage.is_symlink()
-        assert stage.readlink() == real_stage
+        assert stage.readlink().samefile(real_stage)
         assert tuple(real_stage.iterdir()) == ()
     else:
         assert sentinel is not None
@@ -690,6 +691,9 @@ def test_comfyui_root_file_is_materialized_and_reloaded_canonically(
     assert runtime.files[0]["dir"] == "."
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="exercises the POSIX descriptor admission backend"
+)
 def test_file_admission_closes_the_leaf_and_preserves_primary_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -716,6 +720,9 @@ def test_file_admission_closes_the_leaf_and_preserves_primary_error(
     assert len(closed) == 1
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="exercises the POSIX descriptor admission backend"
+)
 def test_file_admission_reports_local_close_error_inside_outer_handler(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

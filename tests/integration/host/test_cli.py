@@ -49,6 +49,10 @@ def _plain_output(output: str) -> str:
     return Text.from_ansi(output).plain
 
 
+def _diagnostic_path(path: Path) -> str:
+    return str(path).replace("\\", "\\\\")
+
+
 def _write_minimal_config(path: Path) -> None:
     path.write_text(
         """
@@ -237,17 +241,6 @@ def test_root_command_exposes_current_groups() -> None:
         (["host", "render"], "Usage: cdh host render"),
         (["host", "build"], "Usage: cdh host build"),
         (["container"], "Usage: cdh container"),
-        (["container", "download-files"], "Usage: cdh container download-files"),
-        (["container", "install-comfyui"], "Usage: cdh container install-comfyui"),
-        (
-            ["container", "install-custom-nodes"],
-            "Usage: cdh container install-custom-nodes",
-        ),
-        (
-            ["container", "emit-final-manifest"],
-            "Usage: cdh container emit-final-manifest",
-        ),
-        (["container", "entrypoint"], "Usage: cdh container entrypoint"),
     ],
 )
 @pytest.mark.parametrize("help_flag", ["--help", "-h"])
@@ -262,16 +255,6 @@ def test_help_succeeds(
 
     assert result.exit_code == 0
     assert usage in _plain_output(result.output)
-
-
-def test_container_helper_help_exposes_build_plan_binding(
-    cli_runner: CliRunner,
-) -> None:
-    """Container build helpers require the Dockerfile-bound plan digest."""
-    result = cli_runner.invoke(app, ["container", "download-files", "--help"])
-
-    assert result.exit_code == 0
-    assert "--build-plan-digest" in _plain_output(result.output)
 
 
 def test_container_group_remains_helpful_outside_linux(
@@ -301,21 +284,6 @@ def test_container_execution_reports_linux_only_boundary(
         "Error: cdh container commands run only inside the project's Linux image; "
         "use 'cdh host' on the host machine\n"
     )
-
-
-def test_registry_helper_help_exposes_only_owned_inputs(
-    cli_runner: CliRunner,
-) -> None:
-    result = cli_runner.invoke(
-        app,
-        ["container", "install-custom-nodes", "--help"],
-    )
-
-    assert result.exit_code == 0
-    output = _plain_output(result.output)
-    assert "--build-plan-digest" in output
-    assert "--constraints" in output
-    assert "--build-hooks-directory" in output
 
 
 # CLI admission reports canonical-plan failures without disclosing plan values.
@@ -668,8 +636,8 @@ def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
     assert "package demo has conflicting requirements" in output
     assert "python.conflicting_package_requirement" not in output
     assert "Earlier:" in output and "Later:" in output
-    assert str(base) in output.replace("\n", "")
-    assert str(override) in output.replace("\n", "")
+    assert _diagnostic_path(base) in output.replace("\n", "")
+    assert _diagnostic_path(override) in output.replace("\n", "")
     assert "Value: demo>=1,<2" in output
     assert "Value: Demo>=2,<3" in output
     assert "\x1b" not in result.stderr
@@ -694,7 +662,7 @@ def test_host_validate_warns_for_redundant_default_os_package(
     assert result.stdout == ""
     assert output.count("bash is already installed by cdh and is ignored") == 1
     assert "Field: system.extra_packages.0" in output
-    assert str(config) in output.replace("\n", "")
+    assert _diagnostic_path(config) in output.replace("\n", "")
 
 
 def test_host_validate_displays_http_credential_warning_offline(
@@ -1299,20 +1267,22 @@ password = { secret = "team_token" }
 """
         )
     values = {
-        b"CDH_TEST_ROOT_TOKEN": b"root-secret-marker",
-        b"CDH_TEST_TEAM_TOKEN": b"team-secret-marker",
+        "CDH_TEST_ROOT_TOKEN": "root-secret-marker",
+        "CDH_TEST_TEAM_TOKEN": "team-secret-marker",
     }
-    reads: list[bytes] = []
+    reads: list[str] = []
+    for locator, value in values.items():
+        monkeypatch.setenv(locator, value)
+    read_environment_source = secret_session_module._read_environment_source
 
-    class CountingEnvironment(dict[bytes, bytes]):
-        def get(self, key: bytes, default=None):
-            reads.append(key)
-            return super().get(key, default)
+    def counting_environment_source(locator: str, name: str) -> bytes:
+        reads.append(locator)
+        return read_environment_source(locator, name)
 
     monkeypatch.setattr(
-        secret_session_module.os,
-        "environb",
-        CountingEnvironment(values),
+        secret_session_module,
+        "_read_environment_source",
+        counting_environment_source,
     )
     plan = _credential_build_plan()
     observed_root: Path | None = None
@@ -1391,7 +1361,7 @@ password = { secret = "team_token" }
         "cdh-git-credential-root_token",
         "cdh-git-credential-team_token",
     ]
-    assert reads == [b"CDH_TEST_ROOT_TOKEN", b"CDH_TEST_TEAM_TOKEN"]
+    assert reads == ["CDH_TEST_ROOT_TOKEN", "CDH_TEST_TEAM_TOKEN"]
     assert observed_root is not None and not observed_root.exists()
     assert "CDH_TEST_ROOT_TOKEN" not in result.output
     assert "CDH_TEST_TEAM_TOKEN" not in result.output
@@ -1934,6 +1904,7 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
         seen.update(kwargs)
 
     monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setenv("USERPROFILE", str(host_home))
     monkeypatch.setenv("SSH_AUTH_SOCK", str(agent_socket))
     monkeypatch.setattr(
         host_cli, "default_planning_providers", _stub_planning_providers

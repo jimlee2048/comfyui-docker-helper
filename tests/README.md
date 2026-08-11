@@ -22,6 +22,8 @@ Classify a test by the behavior it executes, not by every production module it i
 
 Keep tests at the narrowest layer that owns the behavior. Test current public, security, and execution contracts; do not preserve removed behavior with absence guards. Temporary development-only tests must be identified in a code comment and removed before the related change is complete.
 
+Give parameterized cases concise, stable IDs when their values are large, binary, control-bearing, or otherwise unsuitable for display. Pytest exposes node IDs through process state and CI logs, so retain the full payload as test data without allowing it to become the generated case name. This keeps platform limits and diagnostic output independent from the boundary value being tested.
+
 ## Platform coverage
 
 The complete default-offline suite runs on Linux for every supported Python minor. Required Windows validation runs the same `tests/unit/host` and `tests/integration/host` contract on Python 3.12, 3.13, and 3.14, followed by a wheel build and isolated-install smoke in every matrix cell. Windows selects those owner directories before collection, so Linux-only container and canonical distribution modules are not imported merely to be skipped. [The CI workflow](../.github/workflows/ci.yml) is the machine authority for the exact required matrix.

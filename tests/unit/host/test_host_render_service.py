@@ -1649,6 +1649,7 @@ def test_windows_metadata_write_and_check_tree_do_not_use_posix_modes(
         render_service_module.os,
         "fchmod",
         lambda *_args: pytest.fail("Windows metadata write called fchmod"),
+        raising=False,
     )
 
     render_service_module._write_private_stage_metadata(

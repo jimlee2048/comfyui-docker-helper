@@ -14,6 +14,10 @@ from comfyui_docker_helper.host.buildx import (
     build_image_with_buildx,
 )
 
+_PRIVATE_SECRET_SOURCE = Path("/session/snapshot-private")
+_KNOWN_HOSTS_SOURCE = Path('/trust/known,"hosts')
+_QUOTED_KNOWN_HOSTS_SOURCE = str(_KNOWN_HOSTS_SOURCE).replace('"', '""')
+
 
 def test_buildx_output_plan_requires_an_image_tag() -> None:
     with pytest.raises(ValueError, match="requires at least one image tag"):
@@ -77,16 +81,17 @@ def test_buildx_maps_domain_values_and_fully_drains_live_logs(
             (
                 FileSecretBinding(
                     secret_id="cdh-git-credential-private",
-                    source=Path("/session/snapshot-private"),
+                    source=_PRIVATE_SECRET_SOURCE,
                 ),
                 FileSecretBinding(
                     secret_id="cdh-ssh-known-hosts-user",
-                    source=Path('/trust/known,"hosts'),
+                    source=_KNOWN_HOSTS_SOURCE,
                 ),
             ),
             [
-                "type=file,id=cdh-git-credential-private,src=/session/snapshot-private",
-                'type=file,id=cdh-ssh-known-hosts-user,"src=/trust/known,""hosts"',
+                f"type=file,id=cdh-git-credential-private,src={_PRIVATE_SECRET_SOURCE}",
+                "type=file,id=cdh-ssh-known-hosts-user,"
+                f'"src={_QUOTED_KNOWN_HOSTS_SOURCE}"',
             ],
         ),
     ],
@@ -161,7 +166,7 @@ def test_buildx_maps_opaque_cache_specs_without_logging_them(
     )
 
     assert calls[0]["ssh"] == "default"
-    assert calls[0]["secrets"] == ["type=file,id=known-hosts,src=/trust/known_hosts"]
+    assert calls[0]["secrets"] == [f"type=file,id=known-hosts,src={binding.source}"]
     assert calls[0]["cache_from"] == cache_from
     assert calls[0]["cache_to"] == cache_to
     assert all(

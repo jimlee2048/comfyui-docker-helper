@@ -51,6 +51,7 @@ from comfyui_docker_helper.config.registry_identity import (
 )
 from comfyui_docker_helper.config.requirement_validation import (
     DirectRequirementError,
+    DirectRequirementIdentity,
     is_stable_public_operand,
     parse_direct_requirement,
 )
@@ -118,14 +119,23 @@ class NormalizedRequirement:
 
     path: DiagnosticPath
     value: str
-    name: str
-    extras: tuple[str, ...]
-    specifier: str
+    identity: DirectRequirementIdentity
+
+    @property
+    def name(self) -> str:
+        return self.identity.name
+
+    @property
+    def extras(self) -> tuple[str, ...]:
+        return self.identity.extras
+
+    @property
+    def specifier(self) -> str:
+        return self.identity.specifier
 
     @property
     def canonical_value(self) -> str:
-        extras = f"[{','.join(self.extras)}]" if self.extras else ""
-        return f"{self.name}{extras}{self.specifier}"
+        return self.identity.canonical_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,13 +473,7 @@ def validate_direct_requirement(
     except DirectRequirementError as error:
         diagnostics.append(Diagnostic(path, error.code, str(error)))
         return None
-    return NormalizedRequirement(
-        path,
-        value,
-        identity.name,
-        identity.extras,
-        identity.specifier,
-    )
+    return NormalizedRequirement(path, value, identity)
 
 
 def _validate_system_domains(

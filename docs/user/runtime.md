@@ -76,6 +76,10 @@ Prefer `SSH_PUB_KEY` or `SSH_PASSWORD` at container startup instead of baking cr
 
 cdh starts sshd in the foreground and owns its startup, monitoring, and shutdown. If sshd exits unexpectedly after ComfyUI starts, cdh warns but does not stop ComfyUI. The configured SSH port is the port inside the container; Docker or the deployment platform owns host port publication and network exposure.
 
+When cdh creates `/root/.ssh` and `authorized_keys`, it uses modes `0700` and `0600`. An existing root-owned `.ssh` directory is admitted when it is not writable by group or other; a safe non-`0700` mode is preserved with a warning. The directory must still allow the temporary-file and atomic replacement operations that cdh attempts. Read-only mounts, access-control or capability restrictions, and other I/O failures remain fatal. An existing root-owned regular `authorized_keys` file is eligible for replacement when it is not writable by group or other; a safe non-`0600` mode warns, and the atomically replaced file is still `0600`. Wrong ownership, writable group/other bits, symlinks, and special files also remain fatal.
+
+Atomic replacement changes the `authorized_keys` inode. A deployment that directly bind-mounts that file may reject replacement; mount the parent `.ssh` directory with a safe mode or supply keys through runtime configuration instead. cdh does not fall back to an in-place credential write.
+
 Root SSH expands the container's attack surface. Protect configuration, environment values, rendered contexts, image artifacts, registries, logs, and runtime access accordingly. cdh avoids printing the explicit SSH password and keeps its own temporary credentials internal, but it does not guess that arbitrary TOML values, URLs, arguments, or environment variables are secrets.
 
 ## Runtime hooks and startup readiness

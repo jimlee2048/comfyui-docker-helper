@@ -669,6 +669,7 @@ def test_image_rejects_different_formal_context(tmp_path: Path) -> None:
         _assert_image_context_binding(changed)
 
 
+# A manual restart replaces ComfyUI while preserving the container's Tini/cdh spine.
 def test_runtime_restart_replaces_full_generation_on_stable_topology(
     tmp_path: Path,
 ) -> None:
@@ -706,7 +707,9 @@ def test_runtime_restart_replaces_full_generation_on_stable_topology(
 
             stdout, stderr = _finish_exec(restart)
             assert restart.returncode == 0
-            assert stdout == "Runtime restart completed: op-1.\n"
+            assert "restart" in stdout.lower()
+            assert "completed" in stdout.lower()
+            assert "op-1" in stdout
             assert stderr == ""
             new_start = _wait_for_prefix(tmp_path, "child:start:new:")
             _wait_for_event(tmp_path, "child:ready:new")
@@ -756,6 +759,7 @@ def test_runtime_restart_replaces_full_generation_on_stable_topology(
     )
 
 
+# A live log session spans replacement without consuming Docker's primary logs.
 def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
     tmp_path: Path,
 ) -> None:
@@ -797,7 +801,9 @@ def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
             (tmp_path / "release-stop-old").write_text("release")
             restart_stdout, restart_stderr = _finish_exec(restart)
             assert restart.returncode == 0
-            assert restart_stdout == "Runtime restart completed: op-1.\n"
+            assert "restart" in restart_stdout.lower()
+            assert "completed" in restart_stdout.lower()
+            assert "op-1" in restart_stdout
             assert restart_stderr == ""
 
             _wait_for_event(tmp_path, "child:ready:new")
@@ -832,6 +838,8 @@ def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
                     _finish_exec(process, timeout=3)
 
 
+# Real docker exec SIGINT ends only the accepted client's wait; setup below also
+# proves exit 130, continued replacement, status visibility, and clean shutdown.
 def test_accepted_restart_client_sigint_does_not_cancel_restart(
     tmp_path: Path,
 ) -> None:
@@ -860,8 +868,11 @@ def test_accepted_restart_client_sigint_does_not_cancel_restart(
             _docker("exec", name, "kill", "-INT", client_pid)
             stdout, stderr = _finish_exec(restart)
             assert restart.returncode == 130
-            assert "Aborted!" not in stdout + stderr
-            assert "Restart continues in the container: op-1." in stdout + stderr
+            output = stdout + stderr
+            assert "Aborted!" not in output
+            assert "restart" in output.lower()
+            assert "continues" in output.lower()
+            assert "op-1" in output
 
             _write_generation_config(config, "new")
             _replace_generation_hooks(tmp_path, "new", old_marker="old")

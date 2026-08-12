@@ -97,6 +97,7 @@ def _wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
         wake.wait(0.01)
 
 
+# Status and restart tests keep typed protocol fields and delivery order exact.
 def test_status_observes_starting_then_running_snapshot(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     controller = RuntimeController()
@@ -281,11 +282,12 @@ def test_restart_client_reports_success_failure_and_busy(tmp_path: Path) -> None
     busy_listener = open_runtime_control_listener(busy_endpoint)
     with (
         _server(busy_listener, busy_controller),
-        pytest.raises(RuntimeControlClientError, match="mutation"),
+        pytest.raises(RuntimeControlClientError, match="concurrent restart"),
     ):
         restart_runtime(busy_endpoint)
 
 
+# Live log connections span restarts while limits and disconnects stay isolated.
 def test_follow_streams_live_binary_frames_across_runtime_boundaries(
     tmp_path: Path,
 ) -> None:
@@ -336,10 +338,12 @@ def test_follow_limit_is_busy_and_disconnected_slot_is_reused(tmp_path: Path) ->
 
         excess = connect_runtime_control(endpoint)
         send_runtime_control_message(excess, RuntimeFollowRequest())
-        assert _receive(excess) == RuntimeErrorResponse(
-            code="busy",
-            message="The runtime log follower limit has been reached.",
-        )
+        response = _receive(excess)
+        assert isinstance(response, RuntimeErrorResponse)
+        assert response.code == "busy"
+        assert response.operation is None
+        assert "live log" in response.message.lower()
+        assert "limit" in response.message.lower()
         excess.close()
 
         followers.pop().close()

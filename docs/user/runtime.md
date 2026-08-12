@@ -38,35 +38,36 @@ Environment overrides and mounted runtime inputs are deployment-time changes. Th
 
 ## Runtime control
 
-Run the following image-internal commands through `docker exec`:
+Run the following commands against the container you want to control:
 
-```text
-cdh container runtime restart
-cdh container runtime status [--json]
-cdh container runtime follow
+```bash
+docker exec CONTAINER cdh container runtime restart
+docker exec CONTAINER cdh container runtime status
+docker exec CONTAINER cdh container runtime status --json
+docker exec CONTAINER cdh container runtime follow
 ```
 
 In an SSH session, use the installed absolute path `/opt/uv/bin/cdh` in place of `cdh`; the SSH login environment does not guarantee that the image entrypoint's tool path is present.
 
-`restart` synchronously replaces the complete runtime generation; it does not start a second lifecycle beside the first one. cdh first cancels the old generation's downloads and SSH work, runs its stop hooks while ComfyUI remains available, stops and reaps the exact processes it owns, and only then admits a successor. The successor rereads baked and mounted runtime configuration, rediscovers baked and mounted hooks, creates fresh download and SSH owners, and reruns the startup order below. It continues to use the environment captured by the image entrypoint; environment values supplied only to the `restart` client do not become runtime overrides. Only one restart mutation is admitted at a time; another request fails busy rather than queuing or joining it.
+`restart` waits while cdh stops the current ComfyUI instance and starts its replacement. The replacement rereads baked and mounted runtime configuration and hooks, then runs the normal startup sequence below. It continues to use the container's startup environment; environment values supplied only to the `docker exec` command do not become runtime overrides. Only one restart can run at a time, so a concurrent request exits with a busy error.
 
 A restart succeeds after ComfyUI is spawned when there are no post-start hooks. When post-start hooks exist, it succeeds only after conditional readiness and all post-start hooks complete. Asynchronous downloads need only be accepted into their queue; restart does not wait for every asynchronous transfer to finish.
 
-If the server has not accepted a restart, interrupting its client withdraws the pending request. Once the server has accepted it—even if confirmation has not yet reached the client—interruption stops only the local wait and the restart continues in the container; use `status` when acceptance remains unconfirmed. After confirmed acceptance, `Ctrl-C` also reports the operation ID. Client interruption does not stop the container. A confirmed restart failure is reported to the waiting client. If an old stop hook fails, cdh cleans up the old owned processes, does not start a successor, and exits the container nonzero. If successor startup fails, cdh cleans up that successor without running its stop hooks and then exits nonzero. cdh does not provide runtime `start` or `stop` commands, and `restart` has no detached or no-wait mode. Natural ComfyUI exit still ends the container.
+Interrupting a restart before cdh accepts it cancels that request. After acceptance, interruption stops only the local wait; the restart continues in the container, and `status` shows its current state. When the client knows the accepted operation ID, `Ctrl-C` reports it. A restart failure is reported to the waiting client and makes the container exit nonzero after cleanup. cdh does not provide runtime `start` or `stop` commands, and `restart` has no detached or no-wait mode. Natural ComfyUI exit still ends the container.
 
-`status` reads the controller's current lifecycle and restart state; `--json` emits its machine-readable form. This is in-memory control state, not configuration, health, image identity, or persistent history.
+`status` shows the current instance and any restart in progress; `--json` emits the stable machine-readable status. This is current in-memory state, not a health check or persistent history.
 
-`follow` writes live stdout and stderr received after connection and remains attached across manual runtime generations. It does not replay or persist older output; use Docker logs or the deployment logging backend for history. `Ctrl-C`, `SIGTERM`, `SIGHUP`, a broken connection, or a slow follower affects only that follower and never stops or backpressures ComfyUI.
+`follow` streams stdout and stderr produced after connection and stays attached across a manual restart. It does not replay or persist older output; use Docker logs or the deployment logging backend for history. Stopping the command or a connection that cannot keep up affects only that live log session and never stops or slows ComfyUI.
 
-Runtime control is supported only for a client with the same effective UID as the running cdh owner. In particular, do not use `docker exec --user` to run these commands as a different UID.
+Run these commands with the container's default user. A different UID, including one selected with `docker exec --user`, cannot access runtime control.
 
 ## Files, downloads, and persistent state
 
-Host `[[files]]` declarations become baked runtime defaults. For each admitted runtime generation, baked and mounted file lists merge by normalized `dir` plus `filename`. Redundant `/`, `.` segments, and a trailing `/` are canonicalized before identity comparison; `.` and `./` select the `COMFYUI_PATH` root itself. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. The effective item must contain a URL, and duplicate or invalid effective targets fail after merging. Every target is relative to `COMFYUI_PATH`, and absolute paths or any authored `..` segment remain invalid.
+Host `[[files]]` declarations become baked runtime defaults. On each container start or accepted restart, baked and mounted file lists merge by normalized `dir` plus `filename`. Redundant `/`, `.` segments, and a trailing `/` are canonicalized before identity comparison; `.` and `./` select the `COMFYUI_PATH` root itself. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. The effective item must contain a URL, and duplicate or invalid effective targets fail after merging. Every target is relative to `COMFYUI_PATH`, and absolute paths or any authored `..` segment remain invalid.
 
 Synchronous downloads finish before pre-start hooks. Asynchronous downloads are accepted into one background queue before ComfyUI starts and may continue while it runs; they do not gate ComfyUI readiness.
 
-`download_max_attempts` is the total number of backend invocations allowed for each file during one admitted runtime generation, including the first attempt. `download_failure_policy` applies only at runtime:
+`download_max_attempts` is the total number of backend invocations allowed for each file during one container start or accepted restart, including the first attempt. `download_failure_policy` applies only at runtime:
 
 - for synchronous files, `fail` aborts startup after an ordinary terminal failure or exhausted attempt budget, while `continue` moves to later files;
 - for asynchronous files, `fail` stops the remaining queue without stopping ComfyUI, while `continue` moves to later queued files; and
@@ -140,7 +141,7 @@ synchronous downloads
 
 cdh waits for readiness only when at least one post-start hook exists. It probes the effective ComfyUI port on loopback at `/system_stats` and requires an HTTP 200 JSON object with `system` and `devices`. If ComfyUI exits before readiness or the bounded readiness wait expires, startup fails and post-start hooks do not run.
 
-This complete startup order runs for the initial generation and again for every manually restarted successor.
+This complete startup order runs at initial container startup and for every manually requested replacement instance.
 
 This readiness gate means the ComfyUI API is serving after startup initialization. It is not a general container health check and does not prove that every custom node, workflow, model, GPU path, or production workload works.
 
@@ -161,7 +162,7 @@ On the first `SIGTERM` or `SIGINT`, cdh:
 3. forwards the original signal to ComfyUI; and
 4. waits for cdh-managed processes to exit and be reaped.
 
-`shutdown_timeout` is one total monotonic budget for stopping the current generation, whether shutdown begins from an external signal or an accepted manual restart. Its default is eight seconds, with the final two seconds reserved for signaling ComfyUI and reaping managed children. When the earlier hook portion expires, cdh terminates the active hook and skips later hooks. At the total deadline it force-stops managed work that is still alive. A Docker shutdown accepted during restart takes precedence over the successor and cannot extend a deadline that is already running.
+`shutdown_timeout` is one total monotonic budget for stopping the current instance, whether shutdown begins from an external signal or an accepted manual restart. Its default is eight seconds, with the final two seconds reserved for signaling ComfyUI and reaping managed children. When the earlier hook portion expires, cdh terminates the active hook and skips later hooks. At the total deadline it force-stops managed work that is still alive. A Docker shutdown accepted during restart takes precedence over the replacement instance and cannot extend a deadline that is already running.
 
 A second `SIGTERM` or `SIGINT` skips the remaining grace period and enters force shutdown immediately. A force-killed ComfyUI normally makes the container exit with code 137. When ComfyUI exits naturally, cdh preserves its exit result, cleans up its auxiliary work, and does not run signal-only stop hooks.
 

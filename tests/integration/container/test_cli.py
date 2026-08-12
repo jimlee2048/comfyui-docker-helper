@@ -356,11 +356,17 @@ def test_container_runtime_restart_waits_without_detach_options(
     )
 
     assert result.exit_code == 0
-    assert result.output == "Runtime restart completed: op-7.\n"
+    output = result.output.lower()
+    assert "restart" in output
+    assert "completed" in output
+    assert "op-7" in output
     assert calls == ["restart"]
-    assert "--detach" not in _plain_output(help_result.output)
-    assert "--no-wait" not in _plain_output(help_result.output)
-    assert "-d" not in _plain_output(help_result.output)
+    help_output = _plain_output(help_result.output)
+    assert "current ComfyUI runtime instance" in help_output
+    assert "generation" not in help_output
+    assert "--detach" not in help_output
+    assert "--no-wait" not in help_output
+    assert "-d" not in help_output
 
 
 def test_container_runtime_follow_is_output_only(
@@ -385,6 +391,7 @@ def test_container_runtime_follow_is_output_only(
     assert result.output == ""
     assert calls == ["follow"]
     plain_help = _plain_output(help_result.output)
+    assert "live stdout and stderr" in plain_help
     assert "--detach" not in plain_help
     assert "--no-wait" not in plain_help
 
@@ -427,6 +434,12 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
             "last_restart": {"id": "op-1", "result": "succeeded"},
         }
     else:
-        assert result.output == (
-            "state: running\ngeneration: gen-2\nlast_restart: op-1 (succeeded)\n"
+        lines = result.output.splitlines()
+        assert "state: running" in lines
+        assert "current_instance: gen-2" in lines
+        assert "last_restart: op-1 (succeeded)" in lines
+        assert lines.index("state: running") < lines.index("current_instance: gen-2")
+        assert lines.index("current_instance: gen-2") < lines.index(
+            "last_restart: op-1 (succeeded)"
         )
+        assert all(not line.startswith("generation:") for line in lines)

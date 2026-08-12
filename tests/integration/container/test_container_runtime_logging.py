@@ -66,8 +66,8 @@ descendant = subprocess.Popen(
     close_fds=False,
 )
 
-# A generation boundary does not close the controller-lifetime broker or wait
-# for pipe EOF while this descendant still owns redirected fd 1/2.
+# A runtime restart does not close live-log capture or wait for pipe EOF while
+# this descendant still owns redirected fd 1/2.
 assert descendant.stdin is not None
 descendant.stdin.write(b"x")
 descendant.stdin.close()
@@ -101,8 +101,8 @@ failure = broker.failure()
 if failure is None or failure.stream != "stdout":
     os._exit(22)
 
-# The failed primary writer remains actively drained/discarded, so this payload
-# cannot fill the pipe and freeze the workload before the owner handles fatal.
+# A failed primary output remains drained so the workload cannot block before
+# the runtime handles the fatal output error.
 payload = b"z" * (512 * 1024)
 remaining = memoryview(payload)
 while remaining:
@@ -128,8 +128,8 @@ descendant = subprocess.Popen(
     close_fds=False,
 )
 
-# The descendant retains redirected fd 1/2 while close must restore the owner
-# and return without treating pipe EOF as a lifecycle boundary.
+# The descendant retains redirected fd 1/2 while close restores the primary
+# streams and returns without waiting for pipe EOF.
 broker.close()
 assert descendant.stdin is not None
 descendant.stdin.write(b"x")
@@ -208,6 +208,7 @@ broker.close()
 """
 
 
+# Real descriptors prove live-log capture preserves primary output and cleanup.
 def test_broker_preserves_raw_primary_output_and_descendant_inheritance() -> None:
     result = subprocess.run(
         [sys.executable, "-c", _REAL_FD_BROKER],

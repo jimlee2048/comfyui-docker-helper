@@ -77,6 +77,7 @@ def _active_broker() -> RuntimeLoggingBroker:
     return broker
 
 
+# Live log delivery is byte-exact, live-only, and isolated per connection.
 def test_follower_is_live_only_and_preserves_stream_bytes_in_order() -> None:
     broker = _active_broker()
     broker._publish(RuntimeLogChunk("stdout", b"before"))
@@ -157,6 +158,8 @@ def test_broker_close_wakes_followers_and_rejects_new_subscriptions() -> None:
 
 
 def test_follower_close_and_publish_share_one_linearization_boundary() -> None:
+    # Publish may win just before close or lose to it; either order must leave the
+    # connection closed with no queued data and no blocked worker.
     broker = _active_broker()
     follower = broker.follow()
     start = threading.Barrier(3)

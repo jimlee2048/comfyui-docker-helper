@@ -1,4 +1,4 @@
-"""Serial full-generation runtime restart integration coverage."""
+"""Serial complete-instance runtime restart integration coverage."""
 
 from __future__ import annotations
 
@@ -99,6 +99,7 @@ def _hook_names(plan: RuntimeHookPlan, phase: str) -> list[str]:
     return [hook.filename for hook in plan.for_phase(phase)]
 
 
+# A controller-lifetime logging failure wakes the runtime and uses normal cleanup.
 def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
     tmp_path: Path,
 ) -> None:
@@ -167,6 +168,7 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
     ]
 
 
+# Restart arbitration must fully stop the current instance before replacement.
 def test_restart_replaces_the_complete_generation_without_owner_overlap(
     tmp_path: Path,
 ) -> None:
@@ -372,6 +374,7 @@ def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(
     assert submission.ticket.snapshot().state == "failed"
 
 
+# Container shutdown always wins if it arrives between current and replacement.
 def test_external_signal_in_generation_gap_suppresses_successor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -450,6 +453,7 @@ def test_external_signal_in_generation_gap_suppresses_successor(
     assert submission.ticket.snapshot().state == "failed"
 
 
+# A failed replacement is fully cleaned before clients receive its terminal result.
 def test_successor_post_start_failure_cleans_exact_owners_before_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

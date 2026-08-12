@@ -70,7 +70,7 @@ class CommandRunner(Protocol):
 
 
 class SshdProcess(Protocol):
-    """Minimal sshd child process interface used by the entrypoint."""
+    """Minimal sshd child process interface used by the runtime controller."""
 
     returncode: int | None
 

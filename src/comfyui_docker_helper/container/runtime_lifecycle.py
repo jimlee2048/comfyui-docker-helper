@@ -102,8 +102,8 @@ def _runtime_failure_message(observer: RuntimeHealthObserver | None) -> str | No
     return None if observer is None else observer.runtime_failure_message()
 
 
-class EntrypointError(ApplicationError):
-    """A user-facing container entrypoint failure."""
+class RuntimeExecutionError(ApplicationError):
+    """A user-facing container runtime execution failure."""
 
 
 class RuntimeHookRunner(Protocol):
@@ -277,7 +277,7 @@ def run_runtime_lifecycle(
                 return
             startup_shutdown.admit_runtime_failure()
             cleanup_startup_failure(child)
-            raise EntrypointError(f"runtime logging failed: {failure}")
+            raise RuntimeExecutionError(f"runtime logging failed: {failure}")
 
         def prioritize_runtime_health(
             error: BaseException,
@@ -288,7 +288,7 @@ def run_runtime_lifecycle(
                 return
             startup_shutdown.admit_runtime_failure()
             cleanup_startup_failure(child)
-            raise EntrypointError(f"runtime logging failed: {failure}") from error
+            raise RuntimeExecutionError(f"runtime logging failed: {failure}") from error
 
         try:
             ensure_runtime_health()
@@ -299,7 +299,7 @@ def run_runtime_lifecycle(
             except RuntimeFilePlanError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
-                raise EntrypointError(
+                raise RuntimeExecutionError(
                     format_runtime_diagnostics(
                         "runtime file configuration is invalid", error.diagnostics
                     )
@@ -307,11 +307,11 @@ def run_runtime_lifecycle(
             except RuntimeStateError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
-                raise EntrypointError(f"runtime state failed: {error}") from error
+                raise RuntimeExecutionError(f"runtime state failed: {error}") from error
             except RuntimeFileDownloadError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
-                raise EntrypointError(
+                raise RuntimeExecutionError(
                     format_runtime_diagnostics(
                         "runtime download failed", error.diagnostics
                     )
@@ -319,11 +319,15 @@ def run_runtime_lifecycle(
             except ApplicationError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
-                raise EntrypointError(f"runtime download failed: {error}") from error
+                raise RuntimeExecutionError(
+                    f"runtime download failed: {error}"
+                ) from error
             except RuntimeAsyncQueueStartupError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
-                raise EntrypointError(f"runtime download failed: {error}") from error
+                raise RuntimeExecutionError(
+                    f"runtime download failed: {error}"
+                ) from error
             finally:
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
 
@@ -339,7 +343,7 @@ def run_runtime_lifecycle(
                     startup_shutdown=startup_shutdown,
                     startup_cancellation=startup_cancellation,
                 )
-            except EntrypointError as error:
+            except RuntimeExecutionError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
                 raise
@@ -353,7 +357,7 @@ def run_runtime_lifecycle(
             except RuntimeSshServiceError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
-                raise EntrypointError(str(error)) from error
+                raise RuntimeExecutionError(str(error)) from error
             finally:
                 startup_shutdown.raise_on_signal = previous_raise_on_signal
             if startup_shutdown.requested_signal is not None:
@@ -363,7 +367,7 @@ def run_runtime_lifecycle(
                 ssh_service.ensure_running_before_comfyui()
             except RuntimeSshServiceError as error:
                 cleanup_startup_failure()
-                raise EntrypointError(str(error)) from error
+                raise RuntimeExecutionError(str(error)) from error
             ensure_runtime_health()
             try:
                 previous_raise_on_signal = startup_shutdown.raise_on_signal
@@ -372,7 +376,7 @@ def run_runtime_lifecycle(
             except RuntimeAsyncQueueStartupError as error:
                 prioritize_runtime_health(error)
                 cleanup_startup_failure()
-                raise EntrypointError(
+                raise RuntimeExecutionError(
                     f"async runtime download queue failed to start: {error}"
                 ) from error
             finally:
@@ -394,7 +398,7 @@ def run_runtime_lifecycle(
                     ssh_service.ensure_running_before_comfyui()
                 except RuntimeSshServiceError as error:
                     cleanup_startup_failure()
-                    raise EntrypointError(str(error)) from error
+                    raise RuntimeExecutionError(str(error)) from error
                 argv = build_comfyui_argv(runtime=runtime, config=config)
                 if startup_shutdown.requested_signal is not None:
                     return finish_startup_signal_shutdown()
@@ -411,7 +415,7 @@ def run_runtime_lifecycle(
                     if startup_shutdown.requested_signal is not None:
                         return finish_startup_signal_shutdown()
                     cleanup_startup_failure()
-                    raise EntrypointError(str(error)) from error
+                    raise RuntimeExecutionError(str(error)) from error
                 if startup_shutdown.requested_signal is not None:
                     return finish_startup_signal_shutdown(completed)
                 ssh_service.monitor_after_comfyui_start()
@@ -437,7 +441,7 @@ def run_runtime_lifecycle(
                     startup_shutdown=startup_shutdown,
                     startup_cancellation=startup_cancellation,
                 )
-            except EntrypointError as error:
+            except RuntimeExecutionError as error:
                 prioritize_runtime_health(error, completed)
                 cleanup_startup_failure(completed)
                 raise
@@ -446,7 +450,7 @@ def run_runtime_lifecycle(
             ensure_runtime_health(completed)
             try:
                 runtime_started()
-            except EntrypointError:
+            except RuntimeExecutionError:
                 cleanup_startup_failure(completed)
                 raise
         except _StartupShutdownRequested as request:
@@ -521,7 +525,7 @@ def _run_pre_start_hooks(
             raise _StartupShutdownRequested(
                 startup_shutdown.requested_signal
             ) from error
-        raise EntrypointError(
+        raise RuntimeExecutionError(
             format_runtime_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
     finally:
@@ -540,7 +544,7 @@ def _wait_for_readiness_if_required(
     try:
         readiness_waiter(config.comfyui.port, child=child)
     except ReadinessError as error:
-        raise EntrypointError(
+        raise RuntimeExecutionError(
             format_runtime_diagnostics("ComfyUI readiness failed", error.diagnostics)
         ) from error
 
@@ -573,7 +577,7 @@ def _run_post_start_hooks_if_required(
             raise _StartupShutdownRequested(
                 startup_shutdown.requested_signal
             ) from error
-        raise EntrypointError(
+        raise RuntimeExecutionError(
             format_runtime_diagnostics("runtime hook failed", error.diagnostics)
         ) from error
     finally:
@@ -1055,7 +1059,7 @@ def _finish_controller_failure(
 @dataclass(frozen=True, slots=True)
 class _StopHookAttempt:
     active_process: SessionLeaderProcess | None = None
-    failure: EntrypointError | None = None
+    failure: RuntimeExecutionError | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1203,7 +1207,7 @@ def _run_stop_hooks_before_signal(
         return _StopHookAttempt()
     if deadline is not None and monotonic() >= deadline:
         return _StopHookAttempt(
-            failure=EntrypointError(
+            failure=RuntimeExecutionError(
                 "runtime stop hook failed: shutdown deadline expired before execution"
             )
         )
@@ -1222,7 +1226,7 @@ def _run_stop_hooks_before_signal(
         render_runtime_diagnostics("Runtime stop hook failed:", error.diagnostics)
         return _StopHookAttempt(
             active_process=error.active_process,
-            failure=EntrypointError(
+            failure=RuntimeExecutionError(
                 format_runtime_diagnostics(
                     "runtime stop hook failed",
                     error.diagnostics,

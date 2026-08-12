@@ -53,8 +53,8 @@ from comfyui_docker_helper.container.runtime_hooks import (
     run_runtime_stop_hooks,
 )
 from comfyui_docker_helper.container.runtime_lifecycle import (
-    EntrypointError,
     ReadinessWaiter,
+    RuntimeExecutionError,
     RuntimeGenerationStopCause,
     RuntimeHealthObserver,
     RuntimeHookRunner,
@@ -126,7 +126,7 @@ class RuntimeGenerationFactory:
                 environ=self._source_env,
             )
         except RuntimeConfigurationError as error:
-            raise EntrypointError(
+            raise RuntimeExecutionError(
                 format_runtime_diagnostics(
                     "runtime configuration is invalid",
                     error.diagnostics,
@@ -140,7 +140,7 @@ class RuntimeGenerationFactory:
                 mounted_hooks_path=self._mounted_hooks_path,
             )
         except RuntimeHookError as error:
-            raise EntrypointError(
+            raise RuntimeExecutionError(
                 format_runtime_diagnostics(
                     "runtime hook configuration is invalid",
                     error.diagnostics,
@@ -330,10 +330,12 @@ def _run_runtime_serve(
                 failure = controller.runtime_failure_message()
                 if failure is None:
                     raise
-                raise EntrypointError(f"runtime logging failed: {failure}") from error
+                raise RuntimeExecutionError(
+                    f"runtime logging failed: {failure}"
+                ) from error
             initial_generation = True
 
-            def publish_start_failure(error: EntrypointError) -> None:
+            def publish_start_failure(error: RuntimeExecutionError) -> None:
                 snapshot = controller.snapshot()
                 if snapshot.operation is None:
                     controller.mark_generation_terminal(str(error))
@@ -363,12 +365,12 @@ def _run_runtime_serve(
             while True:
                 failure = controller.runtime_failure_message()
                 if failure is not None:
-                    error = EntrypointError(f"runtime logging failed: {failure}")
+                    error = RuntimeExecutionError(f"runtime logging failed: {failure}")
                     publish_start_failure(error)
                     raise error
                 try:
                     generation = factory.create_generation()
-                except EntrypointError as error:
+                except RuntimeExecutionError as error:
                     external_exit_code = external_failure_exit_code()
                     if external_exit_code is not None:
                         return external_exit_code
@@ -381,7 +383,9 @@ def _run_runtime_serve(
                 ) -> None:
                     failure = controller.runtime_failure_message()
                     if failure is not None:
-                        raise EntrypointError(f"runtime logging failed: {failure}")
+                        raise RuntimeExecutionError(
+                            f"runtime logging failed: {failure}"
+                        )
                     try:
                         if is_initial:
                             controller.mark_initial_generation_running()
@@ -392,7 +396,7 @@ def _run_runtime_serve(
                         failure = controller.runtime_failure_message()
                         if failure is None:
                             raise
-                        raise EntrypointError(
+                        raise RuntimeExecutionError(
                             f"runtime logging failed: {failure}"
                         ) from transition_error
                     generation_running(controller)
@@ -416,7 +420,7 @@ def _run_runtime_serve(
                         monotonic=monotonic,
                         sleep=sleep,
                     )
-                except EntrypointError as error:
+                except RuntimeExecutionError as error:
                     external_exit_code = external_failure_exit_code()
                     if external_exit_code is not None:
                         return external_exit_code
@@ -426,7 +430,9 @@ def _run_runtime_serve(
                 if result.cause is RuntimeGenerationStopCause.NATURAL_EXIT:
                     failure = controller.runtime_failure_message()
                     if failure is not None:
-                        error = EntrypointError(f"runtime logging failed: {failure}")
+                        error = RuntimeExecutionError(
+                            f"runtime logging failed: {failure}"
+                        )
                         publish_start_failure(error)
                         raise error
                     controller.mark_generation_terminal("ComfyUI exited.")
@@ -437,7 +443,7 @@ def _run_runtime_serve(
                 if result.cause is RuntimeGenerationStopCause.CONTROLLER_FAILURE:
                     failure = controller.runtime_failure_message()
                     assert failure is not None
-                    error = EntrypointError(f"runtime logging failed: {failure}")
+                    error = RuntimeExecutionError(f"runtime logging failed: {failure}")
                     publish_start_failure(error)
                     raise error
 
@@ -448,7 +454,9 @@ def _run_runtime_serve(
                         controller.wait_for_terminal_delivery(
                             RUNTIME_CONTROL_ACK_DRAIN_SECONDS
                         )
-                        raise EntrypointError(f"runtime logging failed: {failure}")
+                        raise RuntimeExecutionError(
+                            f"runtime logging failed: {failure}"
+                        )
                     controller.mark_external_shutdown()
                     shutdown = controller.external_shutdown_snapshot()
                     assert shutdown.signal is not None

@@ -36,8 +36,8 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime_lifecycle import (
-    EntrypointError,
     ReadinessWaiter,
+    RuntimeExecutionError,
     RuntimeHookRunner,
 )
 from comfyui_docker_helper.container.runtime_serve import run_runtime_generation_once
@@ -501,7 +501,7 @@ filename = "model.bin"
         )
 
     with pytest.raises(
-        EntrypointError,
+        RuntimeExecutionError,
         match="async runtime download queue failed to start",
     ):
         _run_with_real_async_queue(

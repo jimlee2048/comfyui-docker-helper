@@ -29,7 +29,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime_serve import (
-    EntrypointError,
+    RuntimeExecutionError,
     run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import (
@@ -82,7 +82,7 @@ def owned_preparation_processes() -> Iterator[list[subprocess.Popen[bytes]]]:
 
 
 class FakeChild:
-    """Minimal ComfyUI process handle for entrypoint integration tests."""
+    """Minimal ComfyUI process handle for runtime integration tests."""
 
     def __init__(
         self,
@@ -357,7 +357,7 @@ def _capture_signal_handlers(
     return handlers
 
 
-# Default/inactive SSH coverage ensures normal entrypoint startup is untouched.
+# Default/inactive SSH coverage ensures normal runtime startup is untouched.
 def test_default_inactive_ssh_does_not_call_starter_and_spawns(
     tmp_path: Path,
 ) -> None:
@@ -529,8 +529,8 @@ download_mode = "async"
     assert events == ["sync-download", "pre-start", "ssh-start", "async-start", "spawn"]
 
 
-# Real helper coverage exercises credential prep and entrypoint sshd argv.
-def test_entrypoint_can_start_real_ssh_helper_with_fake_system_dependencies(
+# Real helper coverage exercises credential prep and runtime sshd argv.
+def test_runtime_can_start_real_ssh_helper_with_fake_system_dependencies(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
@@ -660,7 +660,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
     assert VALID_SSH_KEY not in " ".join(process_starter.calls[0].argv)
 
 
-def test_env_ssh_overrides_and_appends_key_at_entrypoint_boundary(
+def test_env_ssh_overrides_and_appends_key_at_runtime_boundary(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
@@ -860,7 +860,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
         events.append("spawn")
         return FakeChild(0)
 
-    with pytest.raises(EntrypointError) as raised:
+    with pytest.raises(RuntimeExecutionError) as raised:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
@@ -895,7 +895,7 @@ password = "line1\\nline2"
 """,
     )
 
-    with pytest.raises(EntrypointError) as raised:
+    with pytest.raises(RuntimeExecutionError) as raised:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),

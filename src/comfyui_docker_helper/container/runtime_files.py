@@ -1,4 +1,4 @@
-"""Internal runtime file download planning for the container entrypoint."""
+"""Internal runtime file download planning for the container runtime."""
 
 from __future__ import annotations
 

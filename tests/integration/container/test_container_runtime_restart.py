@@ -36,7 +36,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime_serve import (
-    EntrypointError,
+    RuntimeExecutionError,
     run_runtime_serve,
 )
 
@@ -140,7 +140,7 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
         failure_observer[0]("Runtime stdout primary output failed.")
         events.append("logging:failed")
 
-    with pytest.raises(EntrypointError, match="runtime logging failed"):
+    with pytest.raises(RuntimeExecutionError, match="runtime logging failed"):
         run_runtime_serve(
             runtime=runtime,
             mounted_config_path=config,
@@ -296,7 +296,7 @@ def test_successor_admission_failure_exits_without_starting_a_second_owner(
         config.write_text("[comfyui\ninvalid", encoding="utf-8")
         submission = controller.submit_restart(delivery_expected=False)
 
-    with pytest.raises(EntrypointError, match="runtime configuration is invalid"):
+    with pytest.raises(RuntimeExecutionError, match="runtime configuration is invalid"):
         run_runtime_serve(
             runtime=runtime,
             mounted_config_path=config,
@@ -353,7 +353,7 @@ def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(
             )
         )
 
-    with pytest.raises(EntrypointError, match="runtime stop hook failed"):
+    with pytest.raises(RuntimeExecutionError, match="runtime stop hook failed"):
         run_runtime_serve(
             runtime=runtime,
             baked_config_path=tmp_path / "missing-baked.toml",
@@ -641,7 +641,7 @@ filename = "model.bin"
         _write_hook(hooks, "stop", "30-new-stop-must-not-run.sh")
         submission = controller.submit_restart(delivery_expected=False)
 
-    with pytest.raises(EntrypointError, match="runtime hook failed"):
+    with pytest.raises(RuntimeExecutionError, match="runtime hook failed"):
         run_runtime_serve(
             runtime=runtime,
             mounted_config_path=config,
@@ -744,7 +744,7 @@ def test_successor_cleanup_precedes_real_terminal_delivery_and_ack(
         client_thread = threading.Thread(target=restart_client)
         client_thread.start()
 
-    with pytest.raises(EntrypointError, match="runtime hook failed"):
+    with pytest.raises(RuntimeExecutionError, match="runtime hook failed"):
         run_runtime_serve(
             runtime=runtime,
             baked_config_path=tmp_path / "missing-baked.toml",

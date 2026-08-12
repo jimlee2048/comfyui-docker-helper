@@ -395,7 +395,7 @@ def _write_authorized_keys(
     ssh_dir = root_home / ".ssh"
     authorized_keys = ssh_dir / "authorized_keys"
     try:
-        _validate_root_home(root_home, owner_uid=owner_uid, owner_gid=owner_gid)
+        _validate_root_home(root_home, owner_uid=owner_uid)
         ssh_directory_created, directory_warning = _ensure_root_ssh_directory(
             ssh_dir,
             chown=chown,
@@ -406,7 +406,6 @@ def _write_authorized_keys(
         target_warning = _validate_authorized_keys_target(
             authorized_keys,
             owner_uid=owner_uid,
-            owner_gid=owner_gid,
         )
         _atomic_replace_authorized_keys(
             authorized_keys,
@@ -430,7 +429,7 @@ def _write_authorized_keys(
     )
 
 
-def _validate_root_home(path: Path, *, owner_uid: int, owner_gid: int) -> None:
+def _validate_root_home(path: Path, *, owner_uid: int) -> None:
     try:
         metadata = path.lstat()
     except FileNotFoundError as error:
@@ -441,7 +440,6 @@ def _validate_root_home(path: Path, *, owner_uid: int, owner_gid: int) -> None:
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != owner_uid
-        or metadata.st_gid != owner_gid
         or mode & 0o022
     ):
         raise SshCredentialPreparationError(
@@ -470,7 +468,6 @@ def _ensure_root_ssh_directory(
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != owner_uid
-        or metadata.st_gid != owner_gid
         or mode & 0o022
     ):
         raise SshCredentialPreparationError(
@@ -484,7 +481,6 @@ def _validate_authorized_keys_target(
     path: Path,
     *,
     owner_uid: int,
-    owner_gid: int,
 ) -> str | None:
     try:
         metadata = path.lstat()
@@ -494,7 +490,6 @@ def _validate_authorized_keys_target(
     if (
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_uid != owner_uid
-        or metadata.st_gid != owner_gid
         or mode & 0o022
     ):
         raise SshCredentialPreparationError(

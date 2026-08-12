@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-docker-helper"
-version = "0.8.0"
+version = "0.9.0"
 description = "Unofficial command-line helper for using ComfyUI with Docker"
 readme = { text = """
 `comfyui-docker-helper` (`cdh`) is an independent, unofficial command-line

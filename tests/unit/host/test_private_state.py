@@ -10,6 +10,7 @@ from comfyui_docker_helper import _windows_files
 from comfyui_docker_helper.host import private_state
 
 
+# POSIX private state proves restrictive modes and caller-owned descriptor lifetimes.
 @pytest.mark.skipif(
     os.name != "posix", reason="exercises the POSIX private-state backend"
 )
@@ -205,6 +206,7 @@ class _FakePrivateWindowsApi:
         self.closed_fds.append(descriptor)
 
 
+# Windows directories receive protected DACLs before their paths become observable.
 def test_windows_private_directory_passes_protected_security_at_creation() -> None:
     api = _FakePrivateWindowsApi()
 
@@ -270,6 +272,7 @@ def test_windows_private_state_rejects_a_remote_drive_before_creation() -> None:
     assert api.create_directory_calls == []
 
 
+# Handle-to-descriptor transfer has one owner at every success and failure boundary.
 def test_windows_exclusive_private_file_transfers_handle_ownership_once() -> None:
     api = _FakePrivateWindowsApi()
 

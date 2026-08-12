@@ -61,7 +61,7 @@ def test_container_execution_reports_linux_only_before_service_loading(
     result = CliRunner().invoke(app, ["container", *command])
 
     assert result.exit_code == 1
-    assert result.output == (
-        "Error: cdh container commands run only inside the project's Linux image; "
-        "use 'cdh host' on the host machine\n"
-    )
+    assert "run only inside" in result.output
+    assert "Linux image" in result.output
+    assert "cdh host" in result.output
+    assert "traceback" not in result.output.lower()

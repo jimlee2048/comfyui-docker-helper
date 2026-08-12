@@ -35,6 +35,7 @@ def test_bounded_admission_accepts_the_limit_and_rejects_the_next_byte(
         assert str(raised.value) == "admitted input exceeds the maximum byte count"
 
 
+# POSIX admission keeps static path checks and descriptor-bound observations distinct.
 @pytest.mark.skipif(
     os.name != "posix", reason="exercises the POSIX descriptor admission backend"
 )
@@ -109,6 +110,7 @@ def test_posix_admission_statically_observes_components_then_opens_only_the_leaf
     assert opened == [(os.fspath(source), None)]
 
 
+# Win32 admission combines strict lexical paths with handle-bound leaf validation.
 @pytest.mark.parametrize(
     "path",
     [

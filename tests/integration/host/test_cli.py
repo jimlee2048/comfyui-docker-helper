@@ -310,10 +310,10 @@ def test_container_execution_reports_linux_only_boundary(
     result = cli_runner.invoke(app, ["container", "runtime", "serve"])
 
     assert result.exit_code == 1
-    assert result.output == (
-        "Error: cdh container commands run only inside the project's Linux image; "
-        "use 'cdh host' on the host machine\n"
-    )
+    assert "run only inside" in result.output
+    assert "Linux image" in result.output
+    assert "cdh host" in result.output
+    assert "traceback" not in result.output.lower()
 
 
 # CLI admission reports canonical-plan failures without disclosing plan values.

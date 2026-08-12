@@ -728,7 +728,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
 @pytest.mark.parametrize(
     ("document", "environ"),
     [
-        (
+        pytest.param(
             """
 [system.ssh]
 enable = false
@@ -736,8 +736,9 @@ password = "configured-secret"
 pub_keys = []
 """,
             {"SSH_PUB_KEY": SECOND_SSH_KEY},
+            id="config-disabled",
         ),
-        (
+        pytest.param(
             f"""
 [system.ssh]
 enable = true
@@ -745,6 +746,7 @@ password = "configured-secret"
 pub_keys = ["{VALID_SSH_KEY}"]
 """,
             {"SSH_ENABLE": " false ", "SSH_PASSWORD": "env-secret"},
+            id="environment-disabled",
         ),
     ],
 )

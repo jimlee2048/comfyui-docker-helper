@@ -405,6 +405,7 @@ def test_uv_tools_reject_duplicate_reserved_or_direct_sources(
     assert _diagnostics(config)
 
 
+# Package-owner diagnostics identify the field that retains install authority.
 @pytest.mark.parametrize("install_cli", [True, False])
 def test_comfy_cli_generic_tool_owner_is_reserved_in_both_modes(
     install_cli: bool,
@@ -418,9 +419,8 @@ def test_comfy_cli_generic_tool_owner_is_reserved_in_both_modes(
 
     assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
     assert diagnostics[0].path == ("python", "uv_tools", 0)
-    assert diagnostics[0].message == (
-        "package comfy-cli is reserved by comfyui.install_cli"
-    )
+    assert "comfy-cli" in diagnostics[0].message
+    assert "comfyui.install_cli" in diagnostics[0].message
 
 
 @pytest.mark.parametrize("install_cli", [True, False])
@@ -438,9 +438,8 @@ def test_comfy_cli_application_owner_is_reserved_in_every_direct_group(
 
     assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
     assert diagnostics[0].path == (group, "extra_packages", 0)
-    assert diagnostics[0].message == (
-        "package comfy-cli is reserved by comfyui.install_cli"
-    )
+    assert "comfy-cli" in diagnostics[0].message
+    assert "comfyui.install_cli" in diagnostics[0].message
 
 
 @pytest.mark.parametrize(

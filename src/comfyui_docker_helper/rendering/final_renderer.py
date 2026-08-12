@@ -13,6 +13,11 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.git_credentials import git_credential_secret_target
 
+_BUILD_PLAN_MOUNT = (
+    "--mount=type=bind,source=build-plan.json,"
+    "target=/opt/cdh/build/build-plan.json,readonly"
+)
+
 
 def render_build_plan_dockerfile(plan: BuildPlan) -> str:
     """Render literal locked image identities and BuildPlan inputs."""
@@ -28,7 +33,7 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         f"FROM --platform={plan.toolchain.platform} "
         f"{plan.toolchain.cuda_image.reference}",
         "COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/",
-        "COPY --chmod=0644 build-plan.json /opt/cdh/build/build-plan.json",
+        "RUN mkdir -p /opt/cdh/build",
         "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml",
     ]
     if any(
@@ -245,7 +250,9 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         )
     plan_digest = _shell_word(build_plan_digest(plan))
     lines.append(
-        f"RUN {uv_cache_mount} {uv_cache_export} {_shell_word(cdh.executable)} "
+        f"RUN {uv_cache_mount} \\\n"
+        f"    {_BUILD_PLAN_MOUNT} \\\n"
+        f" {uv_cache_export} {_shell_word(cdh.executable)} "
         "container install-comfyui "
         f"--build-plan-digest {plan_digest} "
         "--constraints /opt/cdh/build/python-package-constraints.txt"
@@ -261,12 +268,14 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
     )
     if plan.files.files:
         lines.append(
-            f"RUN {_shell_word(cdh.executable)} "
+            f"RUN {_BUILD_PLAN_MOUNT} {_shell_word(cdh.executable)} "
             "container download-files "
             f"--build-plan-digest {plan_digest}"
         )
     lines.append(
-        f"RUN {uv_cache_mount} {uv_cache_export} {_shell_word(cdh.executable)} "
+        f"RUN {uv_cache_mount} \\\n"
+        f"    {_BUILD_PLAN_MOUNT} \\\n"
+        f" {uv_cache_export} {_shell_word(cdh.executable)} "
         "container emit-final-manifest "
         f"--build-plan-digest {plan_digest}"
     )
@@ -297,6 +306,7 @@ def _custom_node_install_line(
             for secret_id in git_credential_secret_ids(plan.custom_nodes)
         )
         environment = f"GIT_SSH_COMMAND={_shell_word(_git_ssh_command())} "
+    mounts.append(_BUILD_PLAN_MOUNT)
     mount_prefix = " \\\n    ".join(mounts)
     return (
         f"RUN {mount_prefix} {uv_cache_export} {environment}"

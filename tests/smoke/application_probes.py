@@ -15,20 +15,18 @@ import json
 import pathlib
 import sys
 
-plan = json.loads(pathlib.Path("/opt/cdh/build/build-plan.json").read_text())
-tool = plan["toolchain"]["tool_store"]["comfy_cli"]
-assert tool is not None
-assert metadata.version("comfy-cli") == tool["version"]
-assert pathlib.Path(sys.prefix) == pathlib.Path("/opt/uv/tools/comfy-cli")
 manifest = json.loads(pathlib.Path("/opt/cdh/build/manifest.json").read_text())
 evidence = manifest["toolchain"]["comfy_cli"]
+version = evidence["direct"]["intended"]
+assert metadata.version("comfy-cli") == version
+assert pathlib.Path(sys.prefix) == pathlib.Path("/opt/uv/tools/comfy-cli")
 assert evidence["direct"] == {
-    "intended": tool["version"],
-    "observed": tool["version"],
+    "intended": version,
+    "observed": version,
 }
 assert {item["name"]: item["version"] for item in evidence["inventory"]}[
     "comfy-cli"
-] == tool["version"]
+] == version
 '
 uv --no-config pip check \
   --python /opt/uv/tools/comfy-cli/bin/python \

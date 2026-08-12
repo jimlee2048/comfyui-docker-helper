@@ -195,7 +195,7 @@ A rendered context contains:
 
 - `.cdh-rendered`, the host marker for a cdh-owned context;
 - `config.lock.toml`, host-only reconciliation state;
-- `build-plan.json`, the canonical build-time execution plan;
+- `build-plan.json`, the canonical build-time execution plan, mounted read-only only while each owning build instruction runs;
 - `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`, the exact validated cdh wheel installed into the image;
 - `build/hooks/`, containing only referenced verified build-hook bytes when configured;
 - `runtime/config.toml`, derived from the BuildPlan;
@@ -203,7 +203,7 @@ A rendered context contains:
 - `Dockerfile`, rendered with literal digest-qualified base-image references; and
 - `.dockerignore`, which excludes `config.lock.toml` and `.cdh-rendered` from Buildx input.
 
-The context contains no root `config.toml`. Host-local source paths, Secret source locators, resolved Secret values, publication tags, and output selection are not BuildPlan inputs. The Dockerfile has no argument that can replace lock-authoritative image identities.
+The context contains no root `config.toml`. Host-local source paths, Secret source locators, resolved Secret values, publication tags, and output selection are not BuildPlan inputs. The Dockerfile has no argument that can replace lock-authoritative image identities. The complete Plan remains in the host context and is available to the selected local or remote builder, but its per-instruction read-only mounts do not persist `/opt/cdh/build/build-plan.json` in the final image; the final manifest retains the Plan digest binding.
 
 ## Python environments and package sources
 

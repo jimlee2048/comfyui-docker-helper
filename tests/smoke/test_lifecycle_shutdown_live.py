@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -59,26 +60,32 @@ def _assert_image_context_binding(context: Path | None = None) -> None:
     binding = (context, _image())
     if binding in _VERIFIED_BINDINGS:
         return
-    for filename in ("build-plan.json",):
-        expected = subprocess.run(
-            ["sha256sum", os.fspath(context / filename)],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.split()[0]
-        observed = _docker(
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sha256sum",
-            _image(),
-            f"/opt/cdh/build/{filename}",
-            timeout=120,
-        ).stdout.split()[0]
-        assert observed == expected, (
-            f"lifecycle image does not match formal context {filename}: "
-            f"expected={expected} observed={observed}"
-        )
+    expected = (
+        "sha256:"
+        + hashlib.sha256(context.joinpath("build-plan.json").read_bytes()).hexdigest()
+    )
+    image_probe = (
+        "import json, os, pathlib; "
+        "build=pathlib.Path('/opt/cdh/build'); "
+        "assert not os.path.lexists(build / 'build-plan.json'); "
+        "manifest=json.loads((build / 'manifest.json').read_text()); "
+        "print(manifest['binding']['build_plan_digest'])"
+    )
+    observed = _docker(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "/opt/uv/tools/comfyui-docker-helper/bin/python",
+        _image(),
+        "-I",
+        "-c",
+        image_probe,
+        timeout=120,
+    ).stdout.strip()
+    assert observed == expected, (
+        "lifecycle image does not match formal context BuildPlan: "
+        f"expected={expected} observed={observed}"
+    )
     _VERIFIED_BINDINGS.add(binding)
 
 
@@ -657,8 +664,8 @@ def test_image_declares_exact_stop_and_entrypoint_contract() -> None:
     ]
 
 
-# A formal context is accepted only for the image containing its exact plan and
-# manifest bytes; a different rendered context must fail before container use.
+# A formal context is accepted only when its canonical Plan digest matches the
+# final manifest binding; a different rendered context fails before container use.
 def test_image_rejects_different_formal_context(tmp_path: Path) -> None:
     changed = tmp_path / "changed-context"
     shutil.copytree(_formal_context(), changed)

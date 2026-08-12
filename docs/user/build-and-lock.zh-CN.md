@@ -195,7 +195,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 - `.cdh-rendered`，cdh 管理上下文的宿主机标记；
 - `config.lock.toml`，仅供宿主机使用的协调状态；
-- `build-plan.json`，规范的构建时执行计划；
+- `build-plan.json`，规范的构建时执行计划，仅在每个所属构建指令运行期间以只读方式挂载；
 - `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`，安装到镜像中且经过精确验证的 cdh wheel；
 - `build/hooks/`，配置后仅包含被引用且经过验证的构建 Hook 字节；
 - `runtime/config.toml`，派生自 BuildPlan；
@@ -203,7 +203,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 - `Dockerfile`，使用字面量且带 digest 的基础镜像引用渲染而成；以及
 - `.dockerignore`，将 `config.lock.toml` 和 `.cdh-rendered` 排除在 Buildx 输入之外。
 
-上下文不包含根级 `config.toml`。宿主机本地源路径、Secret source locator、解析后的 Secret 值、发布 tag 及 output selector 都不是 BuildPlan 输入。Dockerfile 没有能够替换由 lock 定权的镜像身份的参数。
+上下文不包含根级 `config.toml`。宿主机本地源路径、Secret source locator、解析后的 Secret 值、发布 tag 及 output selector 都不是 BuildPlan 输入。Dockerfile 没有能够替换由 lock 定权的镜像身份的参数。完整 Plan 仍保留在宿主机上下文中，所选的本地或远程 builder 仍可访问它，但每条指令的只读挂载不会把 `/opt/cdh/build/build-plan.json` 持久化到最终镜像中；最终 manifest 仍保留 Plan digest 绑定。
 
 ## Python 环境和包源
 

@@ -91,6 +91,37 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
     assert rendered == render_build_plan_dockerfile(plan)
 
 
+def test_renderer_mounts_build_plan_only_for_its_build_consumers() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+
+    rendered = render_build_plan_dockerfile(plan)
+    plan_mount = (
+        "--mount=type=bind,source=build-plan.json,"
+        "target=/opt/cdh/build/build-plan.json,readonly"
+    )
+    consumer_markers = (
+        "container install-comfyui",
+        "container install-custom-nodes",
+        "container download-files",
+        "container emit-final-manifest",
+    )
+
+    assert "COPY --chmod=0644 build-plan.json" not in rendered
+    assert rendered.count("RUN mkdir -p /opt/cdh/build") == 1
+    assert rendered.count(plan_mount) == len(consumer_markers)
+    for marker in consumer_markers:
+        block = next(item for item in _run_blocks(rendered) if marker in item)
+        assert block.count(plan_mount) == 1
+
+    document = final_config().model_dump(mode="python")
+    document["files"] = []
+    without_files = render_build_plan_dockerfile(
+        build_plan(FinalConfig.model_validate(document), accepted_resolution())
+    )
+    assert "container download-files" not in without_files
+    assert without_files.count(plan_mount) == len(consumer_markers) - 1
+
+
 # Build caches stay outside image layers, and package-generated SSH identity is removed.
 def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> None:
     plan = build_plan(final_config(), accepted_resolution())
@@ -109,6 +140,10 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
         "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked "
         "export UV_CACHE_DIR=/root/.cache/uv && "
     )
+    plan_mount = (
+        "--mount=type=bind,source=build-plan.json,"
+        "target=/opt/cdh/build/build-plan.json,readonly"
+    )
     for marker in (
         "uv --no-config python install",
         "comfy-cli==",
@@ -117,9 +152,13 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
         "container emit-final-manifest",
     ):
         block = next(item for item in run_blocks if marker in item)
-        if marker == "container install-custom-nodes":
+        if marker.startswith("container "):
             assert block.startswith(
-                "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \\\n"
+                "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked"
+            )
+            assert block.count(plan_mount) == 1
+            assert block.index(plan_mount) < block.index(
+                "export UV_CACHE_DIR=/root/.cache/uv &&"
             )
             assert block.index("export UV_CACHE_DIR=/root/.cache/uv &&") < block.index(
                 marker
@@ -525,9 +564,8 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert str(source).encode() not in (first / "build-plan.json").read_bytes()
 
     dockerfile = (first / "Dockerfile").read_text()
-    assert (
-        "COPY --chmod=0644 build-plan.json /opt/cdh/build/build-plan.json" in dockerfile
-    )
+    assert "COPY --chmod=0644 build-plan.json" not in dockerfile
+    assert dockerfile.count("RUN mkdir -p /opt/cdh/build") == 1
     assert "COPY --chmod=0755 build/hooks /opt/cdh/build/hooks" in dockerfile
     assert (
         f"--mount=type=bind,source=bootstrap/{wheel.filename},"

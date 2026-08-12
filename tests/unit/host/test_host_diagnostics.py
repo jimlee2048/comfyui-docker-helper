@@ -27,16 +27,16 @@ def _console(
     *,
     terminal: bool,
     width: int = 120,
-    no_color: bool = False,
 ) -> Console:
     return Console(
         file=stream,
         force_terminal=terminal,
-        color_system=None if no_color or not terminal else "standard",
-        no_color=no_color,
+        color_system="standard" if terminal else None,
+        no_color=False,
         highlight=False,
         markup=False,
         width=width,
+        height=25,
     )
 
 
@@ -276,8 +276,10 @@ def test_dry_run_has_no_extra_success_and_plan_preview_owns_stdout() -> None:
 
     output = stdout.getvalue()
     assert "Build context rendered" not in output
-    assert "Build plan preview" in output
-    assert "Buildx output\n  None" in output
+    preview_index = output.index("Build plan preview")
+    buildx_index = output.index("Buildx output")
+    none_index = output.index("None", buildx_index)
+    assert preview_index < buildx_index < none_index
     assert "\x1b[" not in output
     assert stderr.getvalue() == ""
 

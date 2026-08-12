@@ -33,7 +33,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     run_runtime_stop_hooks,
 )
 from comfyui_docker_helper.container.runtime_serve import (
-    EntrypointError,
+    RuntimeExecutionError,
     run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import RuntimeSshService
@@ -278,7 +278,7 @@ def test_startup_hook_observes_logging_failure_and_is_reaped_before_error(
             active_process=active_hook,
         )
 
-    with pytest.raises(EntrypointError, match="runtime logging failed"):
+    with pytest.raises(RuntimeExecutionError, match="runtime logging failed"):
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
@@ -430,7 +430,7 @@ def _hook_names(plan: RuntimeHookPlan, phase: str) -> list[str]:
     return [hook.filename for hook in plan.for_phase(phase)]
 
 
-# Happy-path lifecycle coverage pins the entrypoint order from downloads through
+# Happy-path lifecycle coverage pins the runtime order from downloads through
 # startup hooks, readiness, and normal child wait.
 def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
     tmp_path: Path,
@@ -1032,7 +1032,7 @@ def test_operator_restart_stop_hook_failure_cleans_exact_owners_before_error(
     )
     with (
         lifecycle_module._startup_shutdown_signal_handlers(startup_shutdown),
-        pytest.raises(lifecycle_module.EntrypointError, match="stop failed"),
+        pytest.raises(lifecycle_module.RuntimeExecutionError, match="stop failed"),
     ):
         lifecycle_module._wait_with_existing_signal_state(
             child,
@@ -1225,7 +1225,7 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         events.append("spawn")
         return FakeChild()
 
-    with pytest.raises(EntrypointError) as error:
+    with pytest.raises(RuntimeExecutionError) as error:
         run_runtime_generation_once(
             runtime=runtime,
             runtime_state_path=tmp_path / "state.json",
@@ -1297,7 +1297,7 @@ filename = "model.bin"
             )
         )
 
-    with pytest.raises(EntrypointError) as raised:
+    with pytest.raises(RuntimeExecutionError) as raised:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
@@ -1474,7 +1474,7 @@ filename = "model.bin"
             )
         pytest.fail(f"unexpected successful startup for {failure_point}")
 
-    with pytest.raises(EntrypointError):
+    with pytest.raises(RuntimeExecutionError):
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
@@ -1600,7 +1600,7 @@ filename = "model.bin"
         handle_observer(async_queue)
         return async_queue
 
-    with pytest.raises(EntrypointError, match="SSH runtime service exited"):
+    with pytest.raises(RuntimeExecutionError, match="SSH runtime service exited"):
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
@@ -1665,7 +1665,7 @@ def test_readiness_failure_after_spawn_prevents_post_start_and_is_startup_failur
         events.append("post-start")
         return ()
 
-    with pytest.raises(EntrypointError) as error:
+    with pytest.raises(RuntimeExecutionError) as error:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
@@ -1732,7 +1732,7 @@ def test_post_start_failure_after_readiness_terminates_child_as_startup_failure(
             )
         )
 
-    with pytest.raises(EntrypointError) as error:
+    with pytest.raises(RuntimeExecutionError) as error:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_path(tmp_path, "baked-config.toml"),

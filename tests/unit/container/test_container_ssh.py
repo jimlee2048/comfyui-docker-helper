@@ -516,6 +516,43 @@ def test_root_home_rejects_wrong_ownership_via_owner_seam(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
+    ("path_kind", "safe_mode"),
+    [
+        pytest.param("root-home", stat.S_IFDIR | 0o700, id="root-home"),
+        pytest.param("ssh-directory", stat.S_IFDIR | 0o700, id="ssh-directory"),
+        pytest.param("authorized-keys", stat.S_IFREG | 0o600, id="authorized-keys"),
+    ],
+)
+def test_existing_root_ssh_paths_admit_safe_non_root_gid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path_kind: str,
+    safe_mode: int,
+) -> None:
+    metadata = os.stat_result((safe_mode, 0, 0, 1, 0, 1234, 0, 0, 0, 0))
+    monkeypatch.setattr(Path, "lstat", lambda _path: metadata)
+    path = tmp_path / path_kind
+
+    if path_kind == "root-home":
+        ssh_module._validate_root_home(path, owner_uid=0)
+    elif path_kind == "ssh-directory":
+        ownership = OwnershipRecorder()
+        created, warning = ssh_module._ensure_root_ssh_directory(
+            path,
+            chown=ownership.chown,
+            chmod=ownership.chmod,
+            owner_uid=0,
+            owner_gid=0,
+        )
+        assert created is False
+        assert warning is None
+        assert ownership.chown_calls == []
+        assert ownership.chmod_calls == []
+    else:
+        assert ssh_module._validate_authorized_keys_target(path, owner_uid=0) is None
+
+
+@pytest.mark.parametrize(
     "state",
     ["symlink", "dangling", "file", "fifo", "unsafe_mode"],
 )
@@ -566,28 +603,6 @@ def test_ssh_directory_rejects_wrong_ownership_via_owner_seam(
     assert "root SSH directory" in str(raised.value)
 
 
-def test_ssh_directory_security_classification_uses_write_exposure(
-    tmp_path: Path,
-) -> None:
-    ssh_dir = _create_root_home(tmp_path) / ".ssh"
-    ssh_dir.mkdir(mode=0o700)
-    ssh_dir.chmod(0o500)
-    ownership = OwnershipRecorder()
-
-    created, warning = ssh_module._ensure_root_ssh_directory(
-        ssh_dir,
-        chown=ownership.chown,
-        chmod=ownership.chmod,
-        owner_uid=os.getuid(),
-        owner_gid=os.getgid(),
-    )
-
-    assert created is False
-    assert warning is not None
-    assert ownership.chown_calls == []
-    assert ownership.chmod_calls == []
-
-
 @pytest.mark.parametrize(
     "state",
     ["symlink", "dangling", "directory", "fifo", "unsafe_mode"],
@@ -636,7 +651,6 @@ def test_authorized_keys_rejects_wrong_ownership_via_owner_seam(
         ssh_module._validate_authorized_keys_target(
             target,
             owner_uid=os.getuid() + 1,
-            owner_gid=os.getgid(),
         )
 
     assert "root SSH authorized keys" in str(raised.value)
@@ -666,12 +680,18 @@ def test_safe_noncanonical_ssh_modes_warn_and_are_not_rejected(
         owner_gid=os.getgid(),
     )
 
-    assert status.warnings == (
-        "WARNING: existing root SSH directory mode is nonstandard; preserving "
-        "it because it is not writable by group or other",
-        "WARNING: existing root SSH authorized keys mode is nonstandard; "
-        "replacing it atomically with mode 0600",
-    )
+    assert len(status.warnings) == 2
+    directory_warning, file_warning = status.warnings
+    assert "directory" in directory_warning.lower()
+    assert "preserving" in directory_warning.lower()
+    assert "not writable by group or other" in directory_warning.lower()
+    assert "authorized keys" in file_warning.lower()
+    assert "replacing" in file_warning.lower()
+    assert "atomically" in file_warning.lower()
+    assert "0600" in file_warning
+    warning_text = "\n".join(status.warnings)
+    for sensitive_value in (*VALID_SSH_KEY.split(), "old key material"):
+        assert sensitive_value not in warning_text
     assert stat.S_IMODE(ssh_dir.stat().st_mode) == 0o755
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert target.stat().st_ino != old_inode

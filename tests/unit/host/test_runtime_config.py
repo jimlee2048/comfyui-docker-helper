@@ -6,6 +6,7 @@ import pytest
 
 from comfyui_docker_helper.config import (
     DiagnosticSeverity,
+    RuntimeConfig,
     RuntimeConfigurationError,
     load_runtime_config,
 )
@@ -41,18 +42,7 @@ def test_missing_baked_and_mounted_runtime_configs_use_code_defaults(
         mounted_config_path=tmp_path / "missing-etc.toml",
     )
 
-    assert result.config.comfyui.listen == "0.0.0.0"
-    assert result.config.comfyui.port == 8188
-    assert result.config.comfyui.extra_args == []
-    assert result.config.cdh.default_downloader == "aria2"
-    assert result.config.cdh.default_download_mode == "sync"
-    assert result.config.cdh.download_max_attempts == 3
-    assert result.config.cdh.download_failure_policy == "continue"
-    assert result.config.cdh.shutdown_timeout == 8
-    assert result.config.system.ssh.enable is False
-    assert result.config.system.ssh.port == 22
-    assert result.config.system.ssh.password == ""
-    assert result.config.system.ssh.pub_keys == []
+    assert result.config == RuntimeConfig()
     assert result.files == ()
     assert result.warnings == ()
 
@@ -212,6 +202,7 @@ download_failure_policy = "fail"
     assert result.config.cdh.download_failure_policy == "continue"
 
 
+# Runtime loading applies the generic merge contract before typed validation.
 def test_runtime_generic_merge_preserves_nested_siblings_and_sequence_resets(
     tmp_path: Path,
 ) -> None:
@@ -1329,41 +1320,7 @@ filename = "model.bin"
     assert context.path == ("files", 0)
 
 
-def test_runtime_file_duplicate_targets_report_pairwise_sources(
-    tmp_path: Path,
-) -> None:
-    mounted = _write(
-        tmp_path / "mounted.toml",
-        """
-[[files]]
-url = "https://example.com/one.bin"
-dir = "models"
-filename = "model.bin"
-
-[[files]]
-url = "https://example.com/two.bin"
-dir = "models"
-filename = "model.bin"
-""",
-    )
-
-    with pytest.raises(RuntimeConfigurationError) as error:
-        load_runtime_config(
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=mounted,
-        )
-
-    assert _identities(error.value) == [
-        (("files", 1, "filename"), "runtime_file.duplicate_target")
-    ]
-    context = error.value.diagnostics[0].source_context
-    assert isinstance(context, DiagnosticComparison)
-    assert context.earlier.location.path == ("files", 0, "filename")
-    assert context.later.location.path == ("files", 1, "filename")
-    assert context.earlier.display_value is None
-    assert context.later.display_value is None
-
-
+# One three-way collision owns pairwise source attribution and value non-disclosure.
 def test_three_runtime_file_duplicates_compare_first_with_each_later_item(
     tmp_path: Path,
 ) -> None:
@@ -1393,9 +1350,9 @@ filename = "model.bin"
             mounted_config_path=mounted,
         )
 
-    assert [diagnostic.path for diagnostic in error.value.diagnostics] == [
-        ("files", 1, "filename"),
-        ("files", 2, "filename"),
+    assert _identities(error.value) == [
+        (("files", 1, "filename"), "runtime_file.duplicate_target"),
+        (("files", 2, "filename"), "runtime_file.duplicate_target"),
     ]
     contexts = [diagnostic.source_context for diagnostic in error.value.diagnostics]
     assert all(isinstance(context, DiagnosticComparison) for context in contexts)
@@ -1410,6 +1367,11 @@ filename = "model.bin"
         (("files", 0, "filename"), ("files", 1, "filename")),
         (("files", 0, "filename"), ("files", 2, "filename")),
     ]
+    assert all(
+        context.earlier.display_value is None and context.later.display_value is None
+        for context in contexts
+        if isinstance(context, DiagnosticComparison)
+    )
 
 
 def test_cross_layer_runtime_file_ambiguity_preserves_authored_sources(

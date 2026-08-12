@@ -27,6 +27,14 @@ _SECURITY_KEY_APPLICATION_FIELD_COUNTS = {
     "sk-ecdsa-sha2-nistp256@openssh.com": 4,
 }
 _AUTHORIZED_KEYS_FORBIDDEN_CHARACTERS = frozenset({"\n", "\r", "\x00"})
+_AUTHORIZED_KEYS_FIELD_SEPARATORS = frozenset({" ", "\t"})
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedSshPublicKeyLine:
+    key_type: str
+    blob: str
+    comment: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,16 +52,19 @@ def normalize_ssh_public_keys(
     path: DiagnosticPath,
     code: str,
 ) -> SshPublicKeyNormalization:
-    """Return trimmed non-empty public keys plus validation diagnostics."""
+    """Return ASCII-trimmed non-empty keys plus validation diagnostics."""
     keys: list[str] = []
     diagnostics: list[Diagnostic] = []
     duplicate_paths: list[DiagnosticPath] = []
     seen: set[tuple[str, str]] = set()
     for index, value in enumerate(values):
-        normalized = value.strip()
+        normalized = value.strip(" \t")
         if not normalized:
             continue
-        key_error = _validate_ssh_public_key(normalized)
+        parsed = _parse_ssh_public_key_line(normalized)
+        key_error = (
+            parsed if isinstance(parsed, str) else _validate_ssh_public_key(parsed)
+        )
         if key_error is not None:
             diagnostics.append(
                 Diagnostic(
@@ -63,8 +74,8 @@ def normalize_ssh_public_keys(
                 )
             )
             continue
-        parts = normalized.split(maxsplit=2)
-        identity = (parts[0], parts[1])
+        assert not isinstance(parsed, str)
+        identity = (parsed.key_type, parsed.blob)
         if identity in seen:
             duplicate_paths.append((*path, index))
             continue
@@ -83,27 +94,67 @@ def normalize_ssh_public_key(
     path: DiagnosticPath,
     code: str,
 ) -> tuple[str | None, Diagnostic | None]:
-    """Return one trimmed public key, no key for empty input, or a diagnostic."""
-    normalized = value.strip()
+    """Return one ASCII-trimmed key, no key for empty input, or a diagnostic."""
+    normalized = value.strip(" \t")
     if not normalized:
         return None, None
-    key_error = _validate_ssh_public_key(normalized)
+    parsed = _parse_ssh_public_key_line(normalized)
+    key_error = parsed if isinstance(parsed, str) else _validate_ssh_public_key(parsed)
     if key_error is not None:
         return None, Diagnostic(path=path, code=code, message=key_error)
     return normalized, None
 
 
-def _validate_ssh_public_key(value: str) -> str | None:
+def _parse_ssh_public_key_line(value: str) -> _ParsedSshPublicKeyLine | str:
     if any(character in value for character in _AUTHORIZED_KEYS_FORBIDDEN_CHARACTERS):
         return "must be a single authorized_keys line without newline or NUL characters"
 
-    parts = value.split(maxsplit=2)
-    if len(parts) < 2:
+    key_type_end = _find_separator(value)
+    if key_type_end <= 0:
         return (
             "must be an OpenSSH public key line: key type, base64 key, optional comment"
         )
 
-    key_type, blob = parts[0], parts[1]
+    blob_start = _skip_separators(value, key_type_end)
+    if blob_start == len(value):
+        return (
+            "must be an OpenSSH public key line: key type, base64 key, optional comment"
+        )
+
+    blob_end = _find_separator(value, blob_start)
+    if blob_end == -1:
+        blob_end = len(value)
+        comment = None
+    else:
+        comment_start = _skip_separators(value, blob_end)
+        comment = value[comment_start:]
+
+    return _ParsedSshPublicKeyLine(
+        key_type=value[:key_type_end],
+        blob=value[blob_start:blob_end],
+        comment=comment,
+    )
+
+
+def _find_separator(value: str, start: int = 0) -> int:
+    return next(
+        (
+            index
+            for index in range(start, len(value))
+            if value[index] in _AUTHORIZED_KEYS_FIELD_SEPARATORS
+        ),
+        -1,
+    )
+
+
+def _skip_separators(value: str, start: int) -> int:
+    while start < len(value) and value[start] in _AUTHORIZED_KEYS_FIELD_SEPARATORS:
+        start += 1
+    return start
+
+
+def _validate_ssh_public_key(parsed: _ParsedSshPublicKeyLine) -> str | None:
+    key_type, blob = parsed.key_type, parsed.blob
     if key_type not in _OPENSSH_PUBLIC_KEY_TYPES:
         return "must use a supported OpenSSH public key type"
 

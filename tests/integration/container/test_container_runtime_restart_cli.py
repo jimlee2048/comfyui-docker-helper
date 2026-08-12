@@ -137,6 +137,8 @@ def test_restart_cli_ctrl_c_never_cancels_an_accepted_operation(
     master_fd: int | None = None
     child_reaped = False
 
+    # Before acceptance Ctrl-C withdraws the request; afterward it ends only the
+    # local wait while the accepted restart continues to completion.
     try:
         pid, master_fd = _spawn_restart_cli(endpoint, marker)
         with RuntimeControlServer(listener, controller, broker):

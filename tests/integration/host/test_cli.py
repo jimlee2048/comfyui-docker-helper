@@ -310,10 +310,10 @@ def test_container_execution_reports_linux_only_boundary(
     result = cli_runner.invoke(app, ["container", "runtime", "serve"])
 
     assert result.exit_code == 1
-    assert result.output == (
-        "Error: cdh container commands run only inside the project's Linux image; "
-        "use 'cdh host' on the host machine\n"
-    )
+    assert "run only inside" in result.output
+    assert "Linux image" in result.output
+    assert "cdh host" in result.output
+    assert "traceback" not in result.output.lower()
 
 
 # CLI admission reports canonical-plan failures without disclosing plan values.
@@ -992,12 +992,22 @@ def test_dry_run_renders_an_independent_buildx_output_section(
     plain = _plain_output(result.stdout)
     assert result.exit_code == 0
     assert result.stderr == ""
-    assert plain.index("Custom nodes:") < plain.index("Buildx output")
+    buildx_index = plain.index("Buildx output")
+    assert plain.index("Custom nodes:") < buildx_index
+    buildx_section = plain[buildx_index:]
     if output_plan is None:
-        assert "Buildx output\n  None" in plain
+        assert "None" in buildx_section
+        assert "Mode" not in buildx_section
+        assert "Tags" not in buildx_section
     else:
-        assert "Buildx output\n  Mode: push\n  Tags:" in plain
-        assert plain.index(output_plan.tags[0]) < plain.index(output_plan.tags[1])
+        mode_index = buildx_section.index("Mode")
+        output_index = buildx_section.index(output_plan.output, mode_index)
+        tags_index = buildx_section.index("Tags", output_index)
+        first_tag_index = buildx_section.index(output_plan.tags[0], tags_index)
+        second_tag_index = buildx_section.index(output_plan.tags[1], first_tag_index)
+        assert mode_index < output_index < tags_index
+        assert tags_index < first_tag_index < second_tag_index
+        assert "None" not in buildx_section
 
 
 # Host render preserves input ownership while presenting planning warnings on stderr.

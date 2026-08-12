@@ -1,4 +1,4 @@
-"""Runtime config precedence coverage for container entrypoint startup."""
+"""Runtime config precedence coverage for container runtime startup."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from comfyui_docker_helper.container.runtime_files import (
     RuntimeFilePlan,
 )
 from comfyui_docker_helper.container.runtime_serve import (
-    EntrypointError,
+    RuntimeExecutionError,
     run_runtime_generation_once,
 )
 
@@ -32,7 +32,7 @@ class SpawnCall:
 
 
 class FakeChild:
-    """Minimal child process for entrypoint integration tests."""
+    """Minimal child process for runtime integration tests."""
 
     def __init__(self, returncode: int = 0) -> None:
         self.returncode: int | None = None
@@ -119,8 +119,8 @@ def _missing_mounted_hooks(tmp_path: Path) -> Path:
 
 
 # Runtime config startup coverage pins the default argv/env contract and the
-# baked-to-mounted config precedence used by container entrypoint startup.
-def test_entrypoint_starts_with_defaults_without_runtime_config(
+# baked-to-mounted config precedence used by container runtime startup.
+def test_runtime_starts_with_defaults_without_runtime_config(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
@@ -165,7 +165,7 @@ def test_empty_file_plan_rejects_invalid_existing_runtime_state(
     calls: list[SpawnCall] = []
 
     with pytest.raises(
-        EntrypointError,
+        RuntimeExecutionError,
         match=r"runtime state failed: runtime state is invalid; remove .* and restart",
     ):
         run_runtime_generation_once(
@@ -183,7 +183,7 @@ def test_empty_file_plan_rejects_invalid_existing_runtime_state(
     assert state_path.read_text(encoding="utf-8") == "{not-json"
 
 
-def test_baked_runtime_config_feeds_entrypoint_argv(tmp_path: Path) -> None:
+def test_baked_runtime_config_feeds_runtime_argv(tmp_path: Path) -> None:
     baked = _write(
         tmp_path / "baked.toml",
         """
@@ -430,7 +430,7 @@ port = 0
     runtime = _runtime(tmp_path)
     calls: list[SpawnCall] = []
 
-    with pytest.raises(EntrypointError) as error:
+    with pytest.raises(RuntimeExecutionError) as error:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_baked_config(tmp_path),
@@ -467,7 +467,7 @@ def test_invalid_env_runtime_config_fails_before_spawn(
     runtime = _runtime(tmp_path)
     calls: list[SpawnCall] = []
 
-    with pytest.raises(EntrypointError) as error:
+    with pytest.raises(RuntimeExecutionError) as error:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_baked_config(tmp_path),
@@ -494,7 +494,7 @@ enabled = true
     runtime = _runtime(tmp_path)
     calls: list[SpawnCall] = []
 
-    with pytest.raises(EntrypointError) as error:
+    with pytest.raises(RuntimeExecutionError) as error:
         run_runtime_generation_once(
             runtime=runtime,
             baked_config_path=_missing_baked_config(tmp_path),

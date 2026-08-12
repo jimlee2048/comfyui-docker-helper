@@ -33,6 +33,7 @@ def _hold_lock(path: str, ready: _Event, release: _Event) -> None:
         os.close(descriptor)
 
 
+# A spawned peer proves real process contention, release, and descriptor independence.
 def test_descriptor_lock_contends_across_processes_without_owning_file(
     tmp_path: Path,
     request: pytest.FixtureRequest,

@@ -164,14 +164,14 @@ def emit_final_manifest_command(
 
 @runtime_app.command("serve", context_settings=HELP_CONTEXT_SETTINGS)
 def runtime_serve_command() -> None:
-    """Own and serve the ComfyUI container runtime."""
+    """Run the managed ComfyUI container runtime."""
     _require_linux_container()
     raise typer.Exit(code=run_runtime_serve())
 
 
 @runtime_app.command("restart", context_settings=HELP_CONTEXT_SETTINGS)
 def runtime_restart_command() -> None:
-    """Restart the complete ComfyUI runtime generation."""
+    """Restart the managed ComfyUI runtime."""
     _require_linux_container()
     operation = restart_runtime()
     typer.echo(f"Runtime restart completed: {operation}.")
@@ -184,7 +184,7 @@ def runtime_status_command(
         typer.Option("--json", help="Emit the fixed machine-readable status schema."),
     ] = False,
 ) -> None:
-    """Show the runtime controller lifecycle status."""
+    """Show the ComfyUI runtime and restart status."""
     _require_linux_container()
     status = read_runtime_status()
     last_restart = status.last_restart
@@ -203,17 +203,22 @@ def runtime_status_command(
         typer.echo(json.dumps(values, separators=(",", ":")))
         return
     typer.echo(f"state: {status.state}")
-    for key in ("phase", "generation", "operation"):
+    human_fields = (
+        ("phase", "phase"),
+        ("runtime", "generation"),
+        ("operation", "operation"),
+    )
+    for label, key in human_fields:
         value = values[key]
         if value is not None:
-            typer.echo(f"{key}: {value}")
+            typer.echo(f"{label}: {value}")
     if last_restart is not None:
         typer.echo(f"last_restart: {last_restart.id} ({last_restart.result})")
 
 
 @runtime_app.command("follow", context_settings=HELP_CONTEXT_SETTINGS)
 def runtime_follow_command() -> None:
-    """Follow live runtime stdout and stderr."""
+    """Stream live stdout and stderr from the running container."""
     _require_linux_container()
     raise typer.Exit(code=follow_runtime())
 

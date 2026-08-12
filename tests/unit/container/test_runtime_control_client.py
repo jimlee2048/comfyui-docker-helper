@@ -36,6 +36,7 @@ class _FakePeer:
         self.closed = True
 
 
+# Restart interruption has different outcomes before and after server acceptance.
 @pytest.mark.parametrize(
     ("sig", "exit_code"),
     [(signal.SIGINT, 130), (signal.SIGTERM, 143)],
@@ -127,7 +128,7 @@ def test_terminal_result_wins_when_best_effort_ack_write_fails(
             RuntimeTerminalResponse(
                 operation="op-9",
                 result=result,
-                message="synthetic successor failure" if result == "failed" else None,
+                message=None,
             ),
         )
     )
@@ -153,7 +154,7 @@ def test_terminal_result_wins_when_best_effort_ack_write_fails(
     else:
         with pytest.raises(
             RuntimeControlClientError,
-            match="synthetic successor failure",
+            match="ComfyUI did not start after the restart",
         ):
             restart_runtime(Path("unused"))
 
@@ -197,6 +198,7 @@ def test_terminal_result_wins_when_best_effort_ack_is_interrupted(
     assert peer.closed is True
 
 
+# Live log clients preserve stream identity and never change container lifecycle.
 def test_follow_preserves_binary_stdout_and_stderr_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

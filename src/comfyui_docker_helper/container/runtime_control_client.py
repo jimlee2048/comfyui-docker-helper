@@ -68,7 +68,7 @@ def restart_runtime(
                 if isinstance(response, RuntimeAcceptedResponse):
                     if accepted_operation is not None:
                         raise RuntimeControlClientError(
-                            "The runtime controller sent an invalid response sequence."
+                            "The runtime service sent an invalid response sequence."
                         )
                     accepted_operation = response.operation
                     continue
@@ -78,17 +78,20 @@ def restart_runtime(
                         or response.operation != accepted_operation
                     ):
                         raise RuntimeControlClientError(
-                            "The runtime controller sent an invalid response sequence."
+                            "The runtime service sent an invalid response sequence."
                         )
                     _send_terminal_ack_best_effort(peer, response.operation)
                     if response.result == "failed":
-                        detail = response.message or "The successor did not start."
+                        detail = (
+                            response.message
+                            or "ComfyUI did not start after the restart."
+                        )
                         raise RuntimeControlClientError(
                             f"Runtime restart {response.operation} failed: {detail}"
                         )
                     return response.operation
                 raise RuntimeControlClientError(
-                    "The runtime controller sent an unexpected response."
+                    "The runtime service sent an unexpected response."
                 )
     except _RuntimeControlClientInterrupted as interrupted:
         raise RuntimeControlClientError(
@@ -103,7 +106,7 @@ def restart_runtime(
 def read_runtime_status(
     path: Path = RUNTIME_CONTROL_SOCKET_PATH,
 ) -> RuntimeStatusResponse:
-    """Read one immutable status snapshot from the active owner."""
+    """Read one immutable snapshot of the current runtime status."""
     peer = connect_runtime_control(path)
     try:
         _send_message(peer, RuntimeStatusRequest())
@@ -114,9 +117,7 @@ def read_runtime_status(
         return response
     if isinstance(response, RuntimeErrorResponse):
         raise RuntimeControlClientError(response.message)
-    raise RuntimeControlClientError(
-        "The runtime controller sent an unexpected response."
-    )
+    raise RuntimeControlClientError("The runtime service sent an unexpected response.")
 
 
 def follow_runtime(
@@ -125,7 +126,7 @@ def follow_runtime(
     stdout_fd: int = 1,
     stderr_fd: int = 2,
 ) -> int:
-    """Follow live controller output without owning runtime lifecycle."""
+    """Stream live container output without changing its runtime state."""
     peer: socket.socket | None = None
     try:
         with _runtime_client_signal_handlers(
@@ -148,7 +149,7 @@ def follow_runtime(
                 if isinstance(response, RuntimeErrorResponse):
                     raise RuntimeControlClientError(response.message)
                 raise RuntimeControlClientError(
-                    "The runtime controller sent an unexpected response."
+                    "The runtime service sent an unexpected response."
                 )
     except _RuntimeControlClientInterrupted as interrupted:
         return 128 + int(interrupted.signal)
@@ -162,15 +163,15 @@ def _receive_response(peer: socket.socket) -> RuntimeControlResponse:
         response = receive_runtime_control_response(peer)
     except RuntimeControlProtocolError as error:
         raise RuntimeControlClientError(
-            "The runtime controller sent a malformed response."
+            "The runtime service sent a malformed response."
         ) from error
     except OSError as error:
         raise RuntimeControlClientError(
-            "The connection to the runtime controller was lost."
+            "The connection to the runtime service was lost."
         ) from error
     if response is None:
         raise RuntimeControlClientError(
-            "The runtime controller closed the connection without a result."
+            "The runtime service closed the connection without a result."
         )
     return response
 
@@ -182,11 +183,11 @@ def _receive_follow_response(
         return receive_runtime_control_response(peer)
     except RuntimeControlProtocolError as error:
         raise RuntimeControlClientError(
-            "The runtime controller sent a malformed response."
+            "The runtime service sent a malformed response."
         ) from error
     except OSError as error:
         raise RuntimeControlClientError(
-            "The connection to the runtime controller was lost."
+            "The connection to the runtime service was lost."
         ) from error
 
 
@@ -203,7 +204,7 @@ def _send_message(
         send_runtime_control_message(peer, message)
     except OSError as error:
         raise RuntimeControlClientError(
-            "The connection to the runtime controller was lost."
+            "The connection to the runtime service was lost."
         ) from error
 
 

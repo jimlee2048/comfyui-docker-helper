@@ -30,6 +30,7 @@ def _merge_result(*documents: dict[str, Any]) -> MergedDocument:
     )
 
 
+# Generic merge recurses through mappings while treating ordinary sequences atomically.
 def test_default_merge_recurses_mappings_and_replaces_scalars_and_sequences() -> None:
     base = {
         "system": {
@@ -329,6 +330,7 @@ def test_merge_does_not_mutate_or_alias_inputs_or_prior_results() -> None:
     assert prior_result["system"]["env"]["BASE"] == "1"
 
 
+# Provenance separates authored layers from effective positions and contributors.
 def test_source_identity_depends_on_layer_ordinal_not_display_label() -> None:
     assert SourceReference(2, "first-label") == SourceReference(2, "other-label")
 
@@ -566,6 +568,7 @@ def test_empty_mapping_keeps_an_authored_container_origin() -> None:
     assert system.children == {}
 
 
+# Field-owned identities decide whether later items replace or remain for validation.
 def test_apt_packages_compose_by_exact_admitted_identity() -> None:
     merged = _merge_result(
         {"system": {"extra_packages": ["git-lfs", "ffmpeg"]}},

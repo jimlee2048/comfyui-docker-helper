@@ -87,7 +87,7 @@ def test_public_service_rejects_invalid_shutdown_timeout(
     ]
 
 
-# Layered files merge before validation so diagnostics observe effective input.
+# Layered service integration proves merge and provenance before final validation.
 def test_layered_documents_merge_before_final_validation(tmp_path: Path) -> None:
     base = tmp_path / "base.toml"
     override = tmp_path / "override.toml"

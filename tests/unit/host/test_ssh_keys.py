@@ -5,7 +5,10 @@ import struct
 
 import pytest
 
-from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_key
+from comfyui_docker_helper.config.ssh_keys import (
+    normalize_ssh_public_key,
+    normalize_ssh_public_keys,
+)
 
 
 def _ssh_string(value: bytes) -> bytes:
@@ -87,6 +90,82 @@ def test_supported_public_key_formats_are_accepted(key: str) -> None:
 
     assert normalized == key
     assert diagnostic is None
+
+
+# OpenSSH treats only ASCII space and TAB as authorized_keys field separators.
+@pytest.mark.parametrize(
+    ("type_separator", "comment_separator"),
+    [(" ", " "), (" ", "\t"), ("\t", " "), ("\t", "\t")],
+    ids=("space-space", "space-tab", "tab-space", "tab-tab"),
+)
+def test_ascii_field_separators_are_accepted(
+    type_separator: str,
+    comment_separator: str,
+) -> None:
+    key_type, blob, _ = _key_line("ssh-ed25519", _ED25519_PUBLIC_KEY).split(
+        " ", maxsplit=2
+    )
+    key = f"{key_type}{type_separator}{blob}{comment_separator}构建节点 🔑"
+
+    normalized, diagnostic = normalize_ssh_public_key(
+        key,
+        path=("system", "ssh", "pub_keys", 0),
+        code="ssh.invalid_public_key",
+    )
+
+    assert normalized == key
+    assert diagnostic is None
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["\u00a0", "\v", "\f"],
+    ids=("nbsp", "vertical-tab", "form-feed"),
+)
+@pytest.mark.parametrize("boundary", ["type-blob", "blob-comment"])
+def test_non_ascii_structural_separators_are_rejected_without_disclosure(
+    separator: str,
+    boundary: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    key_type, blob, _ = _key_line("ssh-ed25519", _ED25519_PUBLIC_KEY).split(
+        " ", maxsplit=2
+    )
+    comment = "private-comment"
+    if boundary == "type-blob":
+        key = f"{key_type}{separator}{blob} {comment}"
+    else:
+        key = f"{key_type} {blob}{separator}{comment}"
+
+    normalized, diagnostic = normalize_ssh_public_key(
+        key,
+        path=("system", "ssh", "pub_keys", 0),
+        code="ssh.invalid_public_key",
+    )
+
+    assert normalized is None
+    assert diagnostic is not None
+    for sensitive_value in (key_type, blob, comment):
+        assert sensitive_value not in diagnostic.message
+        assert sensitive_value not in request.node.nodeid
+
+
+def test_mixed_ascii_separators_deduplicate_by_key_identity() -> None:
+    key_type, blob, _ = _key_line("ssh-ed25519", _ED25519_PUBLIC_KEY).split(
+        " ", maxsplit=2
+    )
+    first = f"{key_type} {blob}\tfirst-comment"
+    duplicate = f"{key_type}\t{blob} second-comment"
+
+    result = normalize_ssh_public_keys(
+        [f"\t{first} ", duplicate],
+        path=("system", "ssh", "pub_keys"),
+        code="ssh.invalid_public_key",
+    )
+
+    assert result.values == (first,)
+    assert result.diagnostics == ()
+    assert result.duplicate_paths == (("system", "ssh", "pub_keys", 1),)
 
 
 # These malformed blobs exercise CDH policy and the dependency-owned key checks.

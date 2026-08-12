@@ -133,7 +133,7 @@ class RuntimeControlServer:
                         peer,
                         RuntimeErrorResponse(
                             code="busy",
-                            message="A runtime mutation is already in progress.",
+                            message="A concurrent restart is already in progress.",
                             operation=submission.active_operation,
                         ),
                     )
@@ -150,7 +150,7 @@ class RuntimeControlServer:
                         peer,
                         RuntimeErrorResponse(
                             code="busy",
-                            message="The runtime log follower limit has been reached.",
+                            message="The live log connection limit has been reached.",
                         ),
                     )
                     return
@@ -203,8 +203,8 @@ class RuntimeControlServer:
                         RuntimeErrorResponse(
                             code="unavailable",
                             message=(
-                                "The runtime log follower fell behind and was "
-                                "disconnected."
+                                "This live log connection could not keep up and "
+                                "was disconnected."
                             ),
                         ),
                     )

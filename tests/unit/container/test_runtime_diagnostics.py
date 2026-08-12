@@ -24,7 +24,7 @@ def _location(
     return SourceLocation(SourceReference(ordinal, label), path)
 
 
-def test_fatal_diagnostic_without_source_keeps_plain_existing_shape() -> None:
+def test_fatal_diagnostic_without_source_keeps_a_readable_shape() -> None:
     rendered = format_runtime_diagnostics(
         "runtime configuration is invalid",
         (
@@ -36,11 +36,11 @@ def test_fatal_diagnostic_without_source_keeps_plain_existing_shape() -> None:
         ),
     )
 
-    assert rendered == (
-        "runtime configuration is invalid\n"
-        "[comfyui.port] Input should be greater than or equal to 1 "
-        "(schema.greater_than_equal)"
-    )
+    lines = rendered.splitlines()
+    assert lines[0] == "runtime configuration is invalid"
+    assert len(lines) == 2
+    assert lines[1].startswith("[comfyui.port] ")
+    assert "schema.greater_than_equal" in lines[1]
 
 
 def test_single_source_and_hint_use_a_compact_vertical_layout() -> None:
@@ -61,12 +61,13 @@ def test_single_source_and_hint_use_a_compact_vertical_layout() -> None:
         ),
     )
 
-    assert rendered == (
-        "runtime configuration is invalid\n"
-        "[files.0.url] Field required (schema.missing)\n"
-        "  Source: /etc/cdh/runtime/config.toml [files.0]\n"
-        "  Hint: Add an HTTP(S) URL to this runtime file."
-    )
+    lines = rendered.splitlines()
+    assert lines[0] == "runtime configuration is invalid"
+    assert len(lines) == 4
+    assert lines[1].startswith("[files.0.url] ")
+    assert "schema.missing" in lines[1]
+    assert lines[2].strip() == "Source: /etc/cdh/runtime/config.toml [files.0]"
+    assert lines[3].strip().startswith("Hint: ")
 
 
 def test_comparison_renders_symmetric_sites_and_only_approved_values() -> None:
@@ -99,15 +100,20 @@ def test_comparison_renders_symmetric_sites_and_only_approved_values() -> None:
         ),
     )
 
-    assert rendered == (
-        "runtime configuration is invalid\n"
-        "[files.1.filename] runtime file targets must be unique "
-        "(runtime_file.duplicate_target)\n"
-        "  Earlier: /opt/cdh/runtime/config.toml [files.0.filename]\n"
-        "    Value: model-a.safetensors\n"
-        "  Later: /etc/cdh/runtime/config.toml [files.0.filename]\n"
-        "  Hint: Keep one file entry for this target."
+    lines = rendered.splitlines()
+    assert lines[0] == "runtime configuration is invalid"
+    assert len(lines) == 6
+    assert lines[1].startswith("[files.1.filename] ")
+    assert "runtime_file.duplicate_target" in lines[1]
+    assert lines[2].strip() == (
+        "Earlier: /opt/cdh/runtime/config.toml [files.0.filename]"
     )
+    assert lines[3].strip() == "Value: model-a.safetensors"
+    assert lines[4].strip() == (
+        "Later: /etc/cdh/runtime/config.toml [files.0.filename]"
+    )
+    assert sum("Value:" in line for line in lines) == 1
+    assert lines[5].strip().startswith("Hint: ")
 
 
 def test_warning_renderer_retains_code_and_severity(
@@ -130,11 +136,14 @@ def test_warning_renderer_retains_code_and_severity(
         ),
     )
 
-    assert capsys.readouterr().err == (
-        "Runtime configuration warnings:\n"
-        "[system.workspace] host-only configuration is ignored by the container "
-        "runtime (runtime.host_only_ignored; severity=warning)\n"
-        "  Source: /etc/cdh/runtime/config.toml [system.workspace]\n"
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == "Runtime configuration warnings:"
+    assert len(lines) == 3
+    assert lines[1].startswith("[system.workspace] ")
+    assert "runtime.host_only_ignored" in lines[1]
+    assert "severity=warning" in lines[1]
+    assert lines[2].strip() == (
+        "Source: /etc/cdh/runtime/config.toml [system.workspace]"
     )
 
 

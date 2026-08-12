@@ -128,9 +128,7 @@ def test_terminal_result_wins_when_best_effort_ack_write_fails(
             RuntimeTerminalResponse(
                 operation="op-9",
                 result=result,
-                message=(
-                    "synthetic replacement failure" if result == "failed" else None
-                ),
+                message=None,
             ),
         )
     )
@@ -156,7 +154,7 @@ def test_terminal_result_wins_when_best_effort_ack_write_fails(
     else:
         with pytest.raises(
             RuntimeControlClientError,
-            match="synthetic replacement failure",
+            match="ComfyUI did not start after the restart",
         ):
             restart_runtime(Path("unused"))
 

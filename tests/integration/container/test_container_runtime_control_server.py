@@ -265,12 +265,16 @@ def test_restart_client_reports_success_failure_and_busy(tmp_path: Path) -> None
             assert controller.wait(1.0) is True
             assert controller.accept_if_requested(accepted_at=2.0) is True
             assert controller.allocate_restart_successor() == "gen-3"
-            controller.publish_restart_terminal("failed", message="broken successor")
+            controller.publish_restart_terminal(
+                "failed", message="synthetic restart failure"
+            )
             assert controller.wait_for_terminal_delivery(1.0) is True
 
         failure_driver = threading.Thread(target=complete_failure)
         failure_driver.start()
-        with pytest.raises(RuntimeControlClientError, match="broken successor"):
+        with pytest.raises(
+            RuntimeControlClientError, match="synthetic restart failure"
+        ):
             restart_runtime(endpoint)
         failure_driver.join(timeout=1.0)
         assert not failure_driver.is_alive()

@@ -171,7 +171,7 @@ def runtime_serve_command() -> None:
 
 @runtime_app.command("restart", context_settings=HELP_CONTEXT_SETTINGS)
 def runtime_restart_command() -> None:
-    """Replace the current ComfyUI runtime instance."""
+    """Restart the managed ComfyUI runtime."""
     _require_linux_container()
     operation = restart_runtime()
     typer.echo(f"Runtime restart completed: {operation}.")
@@ -184,7 +184,7 @@ def runtime_status_command(
         typer.Option("--json", help="Emit the fixed machine-readable status schema."),
     ] = False,
 ) -> None:
-    """Show the current runtime instance and restart status."""
+    """Show the ComfyUI runtime and restart status."""
     _require_linux_container()
     status = read_runtime_status()
     last_restart = status.last_restart
@@ -205,7 +205,7 @@ def runtime_status_command(
     typer.echo(f"state: {status.state}")
     human_fields = (
         ("phase", "phase"),
-        ("current_instance", "generation"),
+        ("runtime", "generation"),
         ("operation", "operation"),
     )
     for label, key in human_fields:

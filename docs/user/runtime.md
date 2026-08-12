@@ -49,13 +49,13 @@ docker exec CONTAINER cdh container runtime follow
 
 In an SSH session, use the installed absolute path `/opt/uv/bin/cdh` in place of `cdh`; the SSH login environment does not guarantee that the image entrypoint's tool path is present.
 
-`restart` waits while cdh stops the current ComfyUI instance and starts its replacement. The replacement rereads baked and mounted runtime configuration and hooks, then runs the normal startup sequence below. It continues to use the container's startup environment; environment values supplied only to the `docker exec` command do not become runtime overrides. Only one restart can run at a time, so a concurrent request exits with a busy error.
+`restart` waits while cdh stops the current ComfyUI runtime and starts it again. Once accepted, the restart rereads baked and mounted runtime configuration and hooks, then runs the normal startup sequence below. The restarted runtime continues to use the container's startup environment; environment values supplied only to the `docker exec` command do not become runtime overrides. Only one restart can run at a time, so a concurrent request exits with a busy error.
 
 A restart succeeds after ComfyUI is spawned when there are no post-start hooks. When post-start hooks exist, it succeeds only after conditional readiness and all post-start hooks complete. Asynchronous downloads need only be accepted into their queue; restart does not wait for every asynchronous transfer to finish.
 
 Interrupting a restart before cdh accepts it cancels that request. After acceptance, interruption stops only the local wait; the restart continues in the container, and `status` shows its current state. When the client knows the accepted operation ID, `Ctrl-C` reports it. A restart failure is reported to the waiting client and makes the container exit nonzero after cleanup. cdh does not provide runtime `start` or `stop` commands, and `restart` has no detached or no-wait mode. Natural ComfyUI exit still ends the container.
 
-`status` shows the current instance and any restart in progress; `--json` emits the stable machine-readable status. This is current in-memory state, not a health check or persistent history.
+`status` shows the current ComfyUI runtime and any restart in progress; `--json` emits the stable machine-readable status. This is current in-memory state, not a health check or persistent history.
 
 `follow` streams stdout and stderr produced after connection and stays attached across a manual restart. It does not replay or persist older output; use Docker logs or the deployment logging backend for history. Stopping the command or a connection that cannot keep up affects only that live log session and never stops or slows ComfyUI.
 
@@ -141,7 +141,7 @@ synchronous downloads
 
 cdh waits for readiness only when at least one post-start hook exists. It probes the effective ComfyUI port on loopback at `/system_stats` and requires an HTTP 200 JSON object with `system` and `devices`. If ComfyUI exits before readiness or the bounded readiness wait expires, startup fails and post-start hooks do not run.
 
-This complete startup order runs at initial container startup and for every manually requested replacement instance.
+This complete startup order runs at initial container startup and for each accepted restart.
 
 This readiness gate means the ComfyUI API is serving after startup initialization. It is not a general container health check and does not prove that every custom node, workflow, model, GPU path, or production workload works.
 
@@ -162,7 +162,7 @@ On the first `SIGTERM` or `SIGINT`, cdh:
 3. forwards the original signal to ComfyUI; and
 4. waits for cdh-managed processes to exit and be reaped.
 
-`shutdown_timeout` is one total monotonic budget for stopping the current instance, whether shutdown begins from an external signal or an accepted manual restart. Its default is eight seconds, with the final two seconds reserved for signaling ComfyUI and reaping managed children. When the earlier hook portion expires, cdh terminates the active hook and skips later hooks. At the total deadline it force-stops managed work that is still alive. A Docker shutdown accepted during restart takes precedence over the replacement instance and cannot extend a deadline that is already running.
+`shutdown_timeout` is one total monotonic budget for stopping the current ComfyUI runtime, whether shutdown begins from an external signal or an accepted manual restart. Its default is eight seconds, with the final two seconds reserved for signaling ComfyUI and reaping managed children. When the earlier hook portion expires, cdh terminates the active hook and skips later hooks. At the total deadline it force-stops managed work that is still alive. A Docker shutdown accepted during restart takes precedence, prevents ComfyUI from starting again, and cannot extend a deadline that is already running.
 
 A second `SIGTERM` or `SIGINT` skips the remaining grace period and enters force shutdown immediately. A force-killed ComfyUI normally makes the container exit with code 137. When ComfyUI exits naturally, cdh preserves its exit result, cleans up its auxiliary work, and does not run signal-only stop hooks.
 

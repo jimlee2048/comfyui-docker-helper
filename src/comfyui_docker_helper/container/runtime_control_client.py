@@ -84,7 +84,7 @@ def restart_runtime(
                     if response.result == "failed":
                         detail = (
                             response.message
-                            or "The replacement instance did not start."
+                            or "ComfyUI did not start after the restart."
                         )
                         raise RuntimeControlClientError(
                             f"Runtime restart {response.operation} failed: {detail}"

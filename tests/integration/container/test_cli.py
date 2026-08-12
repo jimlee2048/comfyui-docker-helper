@@ -362,7 +362,7 @@ def test_container_runtime_restart_waits_without_detach_options(
     assert "op-7" in output
     assert calls == ["restart"]
     help_output = _plain_output(help_result.output)
-    assert "current ComfyUI runtime instance" in help_output
+    assert "Restart the managed ComfyUI runtime." in help_output
     assert "generation" not in help_output
     assert "--detach" not in help_output
     assert "--no-wait" not in help_output
@@ -436,10 +436,10 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
     else:
         lines = result.output.splitlines()
         assert "state: running" in lines
-        assert "current_instance: gen-2" in lines
+        assert "runtime: gen-2" in lines
         assert "last_restart: op-1 (succeeded)" in lines
-        assert lines.index("state: running") < lines.index("current_instance: gen-2")
-        assert lines.index("current_instance: gen-2") < lines.index(
+        assert lines.index("state: running") < lines.index("runtime: gen-2")
+        assert lines.index("runtime: gen-2") < lines.index(
             "last_restart: op-1 (succeeded)"
         )
         assert all(not line.startswith("generation:") for line in lines)

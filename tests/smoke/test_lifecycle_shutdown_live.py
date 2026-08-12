@@ -669,7 +669,8 @@ def test_image_rejects_different_formal_context(tmp_path: Path) -> None:
         _assert_image_context_binding(changed)
 
 
-# A manual restart replaces ComfyUI while preserving the container's Tini/cdh spine.
+# A manual restart stops and starts ComfyUI while preserving the container's
+# Tini/cdh spine.
 def test_runtime_restart_replaces_full_generation_on_stable_topology(
     tmp_path: Path,
 ) -> None:
@@ -759,7 +760,7 @@ def test_runtime_restart_replaces_full_generation_on_stable_topology(
     )
 
 
-# A live log session spans replacement without consuming Docker's primary logs.
+# A live log session spans a restart without consuming Docker's primary logs.
 def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
     tmp_path: Path,
 ) -> None:
@@ -839,7 +840,7 @@ def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
 
 
 # Real docker exec SIGINT ends only the accepted client's wait; setup below also
-# proves exit 130, continued replacement, status visibility, and clean shutdown.
+# proves exit 130, the restart continuing in-container, status visibility, and cleanup.
 def test_accepted_restart_client_sigint_does_not_cancel_restart(
     tmp_path: Path,
 ) -> None:

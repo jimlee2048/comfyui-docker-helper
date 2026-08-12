@@ -49,13 +49,13 @@ docker exec CONTAINER cdh container runtime follow
 
 在 SSH 会话中，请使用已安装的绝对路径 `/opt/uv/bin/cdh` 代替 `cdh`；SSH 登录环境不保证包含镜像 entrypoint 的工具路径。
 
-`restart` 会在 cdh 停止当前 ComfyUI 实例并启动替代实例期间保持等待。替代实例会重新读取固化和挂载的运行时配置与 Hook，然后执行下文的正常启动顺序。它仍使用容器启动时的环境；仅提供给 `docker exec` 命令的环境变量不会成为运行时覆盖项。同一时间只能执行一次 restart，因此并发请求会以 busy 错误退出。
+`restart` 会在 cdh 停止当前 ComfyUI 运行时并重新启动的过程中保持等待。restart 被接纳后，会重新读取固化和挂载的运行时配置与 Hook，然后执行下文的正常启动顺序。重新启动的运行时仍使用容器启动时的环境；仅提供给 `docker exec` 命令的环境变量不会成为运行时覆盖项。同一时间只能执行一次 restart，因此并发请求会以 busy 错误退出。
 
 没有 post-start Hook 时，ComfyUI 成功启动进程即表示 restart 成功。存在 post-start Hook 时，只有在条件式 readiness 成功且所有 post-start Hook 执行完成后，restart 才成功。异步下载只需被接收到队列中；restart 不会等待所有异步传输完成。
 
 在 cdh 接纳 restart 前中断命令会取消该请求。接纳后，中断只会停止本地等待；restart 会在容器中继续，而 `status` 会显示其当前状态。客户端已知接纳的 operation ID 时，按 `Ctrl-C` 也会显示该 ID。restart 失败会报告给等待中的客户端，并在清理完成后使容器以非零状态退出。cdh 不提供 runtime `start` 或 `stop` 命令，`restart` 也没有 detach 或 no-wait 模式。ComfyUI 自然退出仍会结束容器。
 
-`status` 显示当前实例以及正在进行的 restart；`--json` 输出稳定的机器可读状态。这是当前的内存状态，不是健康检查或持久历史。
+`status` 显示当前 ComfyUI 运行时以及正在进行的 restart；`--json` 输出稳定的机器可读状态。这是当前的内存状态，不是健康检查或持久历史。
 
 `follow` 会流式输出建立连接后产生的 stdout 和 stderr，并在手动 restart 期间保持连接。它不会回放或持久化较早的输出；如需历史记录，请使用 Docker logs 或部署环境的日志后端。停止命令或连接无法及时读取时，只会影响该实时日志会话，绝不会停止或拖慢 ComfyUI。
 
@@ -141,7 +141,7 @@ synchronous downloads
 
 只有在至少存在一个 post-start Hook 时，cdh 才会等待 readiness。它通过回环地址探测有效 ComfyUI 端口上的 `/system_stats`，并要求响应是包含 `system` 和 `devices` 的 HTTP 200 JSON 对象。如果 ComfyUI 在达到 readiness 前退出，或者有界的 readiness 等待超时，则启动失败，且 post-start Hook 不会运行。
 
-这套完整的启动顺序会用于容器初始启动，并在每个手动请求的替代实例中重新执行。
+这套完整的启动顺序会用于容器初始启动和每次已接纳的 restart。
 
 此 readiness 检查表示 ComfyUI API 在启动初始化后正在提供服务。它不是通用的容器健康检查，也不能证明每个自定义节点、工作流、模型、GPU 路径或生产工作负载都能正常工作。
 
@@ -162,7 +162,7 @@ synchronous downloads
 3. 将原始信号转发给 ComfyUI；以及
 4. 等待由 cdh 管理的进程退出并被回收。
 
-`shutdown_timeout` 是停止当前实例时基于单调时钟计算的一份总时间预算，无论关闭由外部信号还是已接纳的手动 restart 发起。默认值为八秒，其中最后两秒预留给向 ComfyUI 发送信号和回收受管理的子进程。前段的 Hook 预算耗尽时，cdh 会终止当前活动的 Hook 并跳过后续 Hook。到达总截止时间时，它会强制停止仍在运行的受管理工作。在 restart 期间接纳的 Docker shutdown 会优先于替代实例，且不能延长已经开始计时的截止时间。
+`shutdown_timeout` 是停止当前 ComfyUI 运行时的一份基于单调时钟计算的总时间预算，无论关闭由外部信号还是已接纳的手动 restart 发起。默认值为八秒，其中最后两秒预留给向 ComfyUI 发送信号和回收受管理的子进程。前段的 Hook 预算耗尽时，cdh 会终止当前活动的 Hook 并跳过后续 Hook。到达总截止时间时，它会强制停止仍在运行的受管理工作。在 restart 期间接纳的 Docker shutdown 会取得优先权、阻止 ComfyUI 再次启动，且不能延长已经开始计时的截止时间。
 
 第二个 `SIGTERM` 或 `SIGINT` 会跳过剩余的宽限期并立即进入强制关闭。被强制终止的 ComfyUI 通常会使容器以代码 137 退出。当 ComfyUI 自然退出时，cdh 会保留其退出结果、清理辅助工作，并且不会运行仅限信号路径的 stop Hook。
 

@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.merge import KeyedItemMerge
 from comfyui_docker_helper.config.url_validation import (
     is_http_url,
     validate_file_name,
@@ -18,7 +19,7 @@ def runtime_file_target_identity(item: Any) -> tuple[str, ...] | None:
     """Return a pure merge key for one currently valid raw runtime file target."""
     if not isinstance(item, Mapping):
         return None
-    directory = item.get("dir")
+    directory = item.get("target_dir")
     filename = item.get("filename")
     if not isinstance(directory, str) or not isinstance(filename, str):
         return None
@@ -32,6 +33,16 @@ def runtime_file_target_identity(item: Any) -> tuple[str, ...] | None:
     if normalized is None:
         return None
     return ("runtime-file", normalized[1])
+
+
+def runtime_file_item_merge(base: Any, override: Any) -> KeyedItemMerge:
+    """Replace a file item atomically only when its source variant changes."""
+    if not isinstance(base, Mapping) or not isinstance(override, Mapping):
+        return KeyedItemMerge.ATOMIC
+    override_type = override.get("type")
+    if override_type is None or override_type == base.get("type"):
+        return KeyedItemMerge.RECURSIVE
+    return KeyedItemMerge.ATOMIC
 
 
 def validate_runtime_file_url(
@@ -61,7 +72,7 @@ def normalize_runtime_file_path(
     """Normalize runtime file directory and target path with stable diagnostics."""
     normalized_directory = normalize_runtime_file_directory(
         directory,
-        (*path, "dir"),
+        (*path, "target_dir"),
         diagnostics,
     )
     normalized_filename = normalize_runtime_file_filename(

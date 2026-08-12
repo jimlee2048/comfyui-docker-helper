@@ -172,8 +172,9 @@ def _file(
     mode: str | None = None,
 ) -> dict:
     item = {
+        "type": "http",
         "url": f"https://example.test/{name}",
-        "dir": "models",
+        "target_dir": "models",
         "filename": name,
         "overwrite": overwrite,
     }
@@ -269,7 +270,7 @@ def test_runtime_plan_projects_order_targets_modes_and_checksum(tmp_path: Path) 
 def test_runtime_plan_supports_a_file_in_the_comfyui_root(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     item = _file("root.bin")
-    item["dir"] = "./"
+    item["target_dir"] = "./"
 
     planned = _plan(root, item).items[0]
 
@@ -367,7 +368,11 @@ def test_runtime_staging_uses_transfer_identity_digest(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("field", "value", "code"),
     [
-        ("dir", "../models", "runtime_file.parent_directory_segment"),
+        (
+            "target_dir",
+            "../models",
+            "runtime_file.parent_directory_segment",
+        ),
         ("filename", "../a.bin", "runtime_file.invalid_filename"),
         ("url", "file:///tmp/a", "runtime_file.invalid_url"),
         ("checksum", "sha256:bad", "schema.value_error"),

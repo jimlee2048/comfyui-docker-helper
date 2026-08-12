@@ -106,12 +106,18 @@ class KeyedItemMerge(StrEnum):
     ATOMIC = "atomic"
 
 
+class KeyedItemMergeFunction(Protocol):
+    """Select how one uniquely matched keyed-sequence pair is overlaid."""
+
+    def __call__(self, base: Any, override: Any) -> KeyedItemMerge: ...
+
+
 @dataclass(frozen=True, slots=True)
 class KeyedSequencePolicy:
     """Overlay uniquely identified items while retaining ambiguous input."""
 
     identity: IdentityFunction
-    item_merge: KeyedItemMerge
+    item_merge: KeyedItemMerge | KeyedItemMergeFunction
 
 
 type FieldPolicy = AtomicPolicy | KeyedSequencePolicy
@@ -282,7 +288,12 @@ def _merge_keyed_sequence(
         override_child = override_origin.children[authored_index]
         if key is not None and base_counts[key] == 1 and override_counts[key] == 1:
             effective_index = unique_base_indexes[key]
-            if policy.item_merge == KeyedItemMerge.ATOMIC:
+            item_merge = (
+                policy.item_merge(result[effective_index], item)
+                if callable(policy.item_merge)
+                else policy.item_merge
+            )
+            if item_merge == KeyedItemMerge.ATOMIC:
                 result[effective_index] = deepcopy(item)
                 children[effective_index] = override_child
             else:

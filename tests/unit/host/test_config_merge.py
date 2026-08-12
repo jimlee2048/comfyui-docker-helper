@@ -61,8 +61,9 @@ def test_empty_sequence_resets_an_ordinary_or_keyed_sequence() -> None:
         "build": {"platforms": ["linux/amd64"]},
         "files": [
             {
+                "type": "http",
                 "url": "https://example.com/model.bin",
-                "dir": "models",
+                "target_dir": "models",
                 "filename": "model.bin",
             }
         ],
@@ -156,26 +157,27 @@ def test_unique_file_overlay_recurses_across_three_layers() -> None:
         {
             "files": [
                 {
+                    "type": "http",
                     "url": "https://example.com/base.bin",
-                    "dir": "models",
+                    "target_dir": "models",
                     "filename": "model.bin",
-                    "overwrite": False,
+                    "checksum": "sha256:" + "a" * 64,
                 }
             ]
         },
         {
             "files": [
                 {
-                    "dir": "models",
+                    "target_dir": "models",
                     "filename": "model.bin",
-                    "overwrite": True,
+                    "url": "https://example.com/later.bin",
                 }
             ]
         },
         {
             "files": [
                 {
-                    "dir": "models",
+                    "target_dir": "models",
                     "filename": "model.bin",
                     "downloader": "httpx",
                 }
@@ -186,16 +188,17 @@ def test_unique_file_overlay_recurses_across_three_layers() -> None:
 
     assert result["files"] == [
         {
-            "url": "https://example.com/base.bin",
-            "dir": "models",
+            "type": "http",
+            "url": "https://example.com/later.bin",
+            "target_dir": "models",
             "filename": "model.bin",
-            "overwrite": True,
+            "checksum": "sha256:" + "a" * 64,
             "downloader": "httpx",
         }
     ]
     assert [
         merged.origins.exact_location(("files", 0, field)).source.layer_ordinal
-        for field in ("url", "overwrite", "downloader")
+        for field in ("checksum", "url", "downloader")
     ] == [0, 1, 2]
 
 
@@ -358,40 +361,43 @@ def test_keyed_origins_keep_authored_indexes_separate_from_effective_indexes() -
         {
             "files": [
                 {
+                    "type": "http",
                     "url": "https://example.com/base.bin",
-                    "dir": "models",
+                    "target_dir": "models",
                     "filename": "model.bin",
-                    "overwrite": False,
+                    "checksum": "sha256:" + "a" * 64,
                 }
             ]
         },
         {
             "files": [
                 {
+                    "type": "http",
                     "url": "https://example.com/new.bin",
-                    "dir": "models",
+                    "target_dir": "models",
                     "filename": "new.bin",
                 },
                 {
-                    "dir": "models",
+                    "target_dir": "models",
                     "filename": "model.bin",
-                    "overwrite": True,
+                    "url": "https://example.com/later.bin",
                 },
             ]
         },
     )
 
-    retained_url = merged.origins.exact_location(("files", 0, "url"))
-    overlaid_value = merged.origins.exact_location(("files", 0, "overwrite"))
+    retained_checksum = merged.origins.exact_location(("files", 0, "checksum"))
+    overlaid_value = merged.origins.exact_location(("files", 0, "url"))
     appended_url = merged.origins.exact_location(("files", 1, "url"))
-    assert retained_url is not None and retained_url.path == ("files", 0, "url")
+    assert retained_checksum is not None
+    assert retained_checksum.path == ("files", 0, "checksum")
     assert overlaid_value is not None and overlaid_value.path == (
         "files",
         1,
-        "overwrite",
+        "url",
     )
     assert appended_url is not None and appended_url.path == ("files", 0, "url")
-    assert retained_url.source.layer_ordinal == 0
+    assert retained_checksum.source.layer_ordinal == 0
     assert overlaid_value.source.layer_ordinal == 1
     assert appended_url.source.layer_ordinal == 1
     item = merged.origins.node_at(("files", 0))
@@ -407,19 +413,19 @@ def test_file_overlay_uses_the_normalized_runtime_target_identity() -> None:
         {
             "files": [
                 {
+                    "type": "http",
                     "url": "https://example.com/base.bin",
-                    "dir": "models//checkpoints/",
+                    "target_dir": "models//checkpoints/",
                     "filename": "model.bin",
-                    "overwrite": False,
                 }
             ]
         },
         {
             "files": [
                 {
-                    "dir": "./models/checkpoints",
+                    "target_dir": "./models/checkpoints",
                     "filename": "model.bin",
-                    "overwrite": True,
+                    "downloader": "httpx",
                 }
             ]
         },
@@ -427,20 +433,58 @@ def test_file_overlay_uses_the_normalized_runtime_target_identity() -> None:
 
     assert merged.document["files"] == [
         {
+            "type": "http",
             "url": "https://example.com/base.bin",
-            "dir": "./models/checkpoints",
+            "target_dir": "./models/checkpoints",
             "filename": "model.bin",
-            "overwrite": True,
+            "downloader": "httpx",
         }
     ]
-    location = merged.origins.exact_location(("files", 0, "dir"))
+    location = merged.origins.exact_location(("files", 0, "target_dir"))
     assert location is not None
     assert location.source.layer_ordinal == 1
-    assert location.path == ("files", 0, "dir")
+    assert location.path == ("files", 0, "target_dir")
+
+
+@pytest.mark.parametrize(
+    ("base", "override"),
+    [
+        (
+            {
+                "type": "http",
+                "url": "https://example.com/model.bin",
+                "checksum": "sha256:" + "a" * 64,
+            },
+            {"type": "local", "path": "models/model.bin"},
+        ),
+        (
+            {"type": "local", "path": "models/model.bin", "content_lock": True},
+            {"type": "http", "url": "https://example.com/model.bin"},
+        ),
+    ],
+)
+def test_file_variant_switch_replaces_the_matched_item_atomically(
+    base: dict[str, Any],
+    override: dict[str, Any],
+) -> None:
+    target = {"target_dir": "models", "filename": "model.bin"}
+
+    merged = _merge_result(
+        {"files": [{**base, **target}]},
+        {"files": [{**override, **target}]},
+    )
+
+    assert merged.document["files"] == [{**override, **target}]
+    item = merged.origins.node_at(("files", 0))
+    assert item is not None
+    assert item.authored_at is not None
+    assert item.authored_at.source.layer_ordinal == 1
 
 
 def test_reset_and_atomic_replacement_own_missing_field_attribution() -> None:
-    base = {"files": [{"dir": "models", "filename": "model.bin"}]}
+    base = {
+        "files": [{"type": "http", "target_dir": "models", "filename": "model.bin"}]
+    }
     reset = _merge_result(base, {"files": []})
     reset_location = reset.origins.exact_location(("files",))
     assert reset_location is not None
@@ -454,8 +498,9 @@ def test_reset_and_atomic_replacement_own_missing_field_attribution() -> None:
         {
             "files": [
                 {
+                    "type": "http",
                     "url": "https://example.com/later.bin",
-                    "dir": "models",
+                    "target_dir": "models",
                     "filename": "later.bin",
                 }
             ]

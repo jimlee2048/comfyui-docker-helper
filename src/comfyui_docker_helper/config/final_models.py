@@ -132,6 +132,7 @@ class FinalCdhConfig(FinalConfigModel):
     download_max_attempts: int = Field(default=3, ge=1)
     download_failure_policy: Literal["continue", "fail"] = "fail"
     shutdown_timeout: ShutdownTimeout = 8
+    local_file_mode: Literal["auto", "clone", "copy"] = "auto"
     downloader: FinalDownloaderConfig = Field(default_factory=FinalDownloaderConfig)
     git: FinalGitConfig = Field(default_factory=FinalGitConfig)
 
@@ -188,13 +189,18 @@ class FinalComfyUIConfig(FinalConfigModel):
     custom_nodes: list[FinalCustomNodeConfig] = Field(default_factory=list)
 
 
-class FinalFileConfig(FinalConfigModel):
-    """A required file transfer request with optional trusted content identity."""
+class _FinalFileConfig(FinalConfigModel):
+    """Fields shared by build file source variants."""
 
-    url: str
-    dir: str
+    target_dir: str
     filename: str
-    overwrite: bool = False
+
+
+class FinalHttpFileConfig(_FinalFileConfig):
+    """A required HTTP(S) file download."""
+
+    type: Literal["http"]
+    url: str
     checksum: str | None = None
     downloader: Literal["aria2", "httpx"] | None = None
     download_mode: Literal["sync", "async"] | None = None
@@ -205,6 +211,20 @@ class FinalFileConfig(FinalConfigModel):
         if value is None:
             return None
         return normalize_file_checksum(value)
+
+
+class FinalLocalFileConfig(_FinalFileConfig):
+    """A host-local file materialized into the build context."""
+
+    type: Literal["local"]
+    path: str
+    content_lock: bool = False
+
+
+FinalFileConfig = Annotated[
+    FinalHttpFileConfig | FinalLocalFileConfig,
+    Field(discriminator="type"),
+]
 
 
 class FinalConfig(FinalConfigModel):

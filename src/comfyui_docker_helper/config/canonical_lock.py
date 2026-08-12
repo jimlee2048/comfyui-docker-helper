@@ -415,6 +415,31 @@ class RuntimeHookLockEntry(LocalExecutableLockEntry):
     """One baked runtime hook identity."""
 
 
+class LocalFileLockEntry(_StrictLockModel):
+    """Content identity for one locked host-local build file."""
+
+    relative_target: str
+    digest: str
+
+    @field_validator("relative_target")
+    @classmethod
+    def _validate_relative_target(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            value.startswith("/")
+            or "\\" in value
+            or has_control_characters(value)
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("relative_target must be one canonical relative file path")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return _require_sha256(value)
+
+
 CanonicalLockEntry = (
     CudaImageLockEntry
     | UvImageLockEntry
@@ -428,6 +453,7 @@ CanonicalLockEntry = (
     | UvToolLockEntry
     | BuildHookLockEntry
     | RuntimeHookLockEntry
+    | LocalFileLockEntry
 )
 
 
@@ -533,6 +559,24 @@ class HooksLock(_StrictLockModel):
         return self
 
 
+class FilesLock(_StrictLockModel):
+    """Optional locked identities for host-local build files."""
+
+    local: tuple[LocalFileLockEntry, ...] = ()
+
+    @field_validator("local", mode="before")
+    @classmethod
+    def _freeze_local(cls, value: object) -> tuple[object, ...]:
+        return _require_tuple(value, "files")
+
+    @model_validator(mode="after")
+    def _validate_local(self) -> FilesLock:
+        targets = [entry.relative_target for entry in self.local]
+        if targets != sorted(set(targets)):
+            raise ValueError("local file targets must be sorted and unique")
+        return self
+
+
 class CanonicalLock(_StrictLockModel):
     """Complete strict domain-grouped canonical config-lock schema v1."""
 
@@ -542,6 +586,7 @@ class CanonicalLock(_StrictLockModel):
     comfyui: ComfyUILock
     custom_nodes: CustomNodesLock = Field(default_factory=CustomNodesLock)
     hooks: HooksLock = Field(default_factory=HooksLock)
+    files: FilesLock = Field(default_factory=FilesLock)
 
     @property
     def entries(self) -> tuple[CanonicalLockEntry, ...]:
@@ -564,6 +609,7 @@ class CanonicalLock(_StrictLockModel):
             *self.custom_nodes.git,
             *self.hooks.build,
             *self.hooks.runtime,
+            *self.files.local,
         ]
         if self.python.package_groups.application_extras is not None:
             values.append(self.python.package_groups.application_extras)
@@ -972,6 +1018,8 @@ def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
         return ("hooks", "build", entry.relative_path)
     if isinstance(entry, RuntimeHookLockEntry):
         return ("hooks", "runtime", entry.relative_path)
+    if isinstance(entry, LocalFileLockEntry):
+        return ("files", "local", entry.relative_target)
     raise TypeError(f"unsupported canonical lock entry: {type(entry).__name__}")
 
 
@@ -1016,6 +1064,7 @@ def canonical_lock_from_entries(
     known.update(key for key in by_key if key[:2] == ("custom_nodes", "git"))
     known.update(key for key in by_key if key[:2] == ("hooks", "build"))
     known.update(key for key in by_key if key[:2] == ("hooks", "runtime"))
+    known.update(key for key in by_key if key[:2] == ("files", "local"))
     if set(by_key) != known:
         raise ValueError("canonical lock contains unsupported identities")
 
@@ -1068,6 +1117,14 @@ def canonical_lock_from_entries(
                 for key, entry in sorted(by_key.items())
                 if key[:2] == ("hooks", "runtime")
                 and isinstance(entry, RuntimeHookLockEntry)
+            ),
+        ),
+        files=FilesLock(
+            local=tuple(
+                entry
+                for key, entry in sorted(by_key.items())
+                if key[:2] == ("files", "local")
+                and isinstance(entry, LocalFileLockEntry)
             ),
         ),
     )

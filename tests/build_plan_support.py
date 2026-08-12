@@ -130,10 +130,10 @@ def final_config(
             },
             "files": [
                 {
+                    "type": "http",
                     "url": "https://example.test/model.safetensors",
-                    "dir": "models/checkpoints",
+                    "target_dir": "models/checkpoints",
                     "filename": "model.safetensors",
-                    "overwrite": True,
                 }
             ],
         }
@@ -378,8 +378,10 @@ def build_plan(
         "runtime_provenance",
         RuntimePlanningProvenance(
             failure_policy_explicit=False,
-            file_downloader_explicit=(False,) * len(config.files),
-            file_download_mode_explicit=(False,) * len(config.files),
+            file_downloader_explicit=(False,)
+            * sum(item.type == "http" for item in config.files),
+            file_download_mode_explicit=(False,)
+            * sum(item.type == "http" for item in config.files),
         ),
     )
     return construct_build_plan(

@@ -1106,13 +1106,15 @@ default_downloader = "httpx"
 default_download_mode = "async"
 
 [[files]]
+type = "http"
 url = "https://example.test/implicit.bin"
-dir = "models"
+target_dir = "models"
 filename = "implicit.bin"
 
 [[files]]
+type = "http"
 url = "https://example.test/explicit.bin"
-dir = "models"
+target_dir = "models"
 filename = "explicit.bin"
 downloader = "httpx"
 download_mode = "async"

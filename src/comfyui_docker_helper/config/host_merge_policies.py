@@ -25,6 +25,7 @@ from comfyui_docker_helper.config.requirement_validation import (
     parse_direct_requirement,
 )
 from comfyui_docker_helper.config.runtime_file_validation import (
+    runtime_file_item_merge,
     runtime_file_target_identity,
 )
 
@@ -113,7 +114,7 @@ HOST_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
         ),
         PolicyRule(
             ("files",),
-            KeyedSequencePolicy(_file_key, KeyedItemMerge.RECURSIVE),
+            KeyedSequencePolicy(_file_key, runtime_file_item_merge),
         ),
         PolicyRule(
             ("cdh", "git", "credentials"),

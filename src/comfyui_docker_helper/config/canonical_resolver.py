@@ -22,6 +22,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     LocalExecutableLockEntry,
+    LocalFileLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciRequestIdentity,
@@ -49,6 +50,7 @@ from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
 from comfyui_docker_helper.local_executable import (
     LocalExecutableIdentityRequest,
 )
+from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
 
 type LockEntryKey = tuple[str, ...]
 
@@ -118,6 +120,12 @@ class LocalExecutableEntryAcquirer(Protocol):
     ) -> LocalExecutableLockEntry: ...
 
 
+class LocalFileEntryAcquirer(Protocol):
+    """Host-local file content seam kept separate from executable hooks."""
+
+    def acquire(self, request: LocalFileIdentityRequest) -> LocalFileLockEntry: ...
+
+
 class CanonicalResolutionError(DiagnosticError):
     """Deterministically aggregated reconciliation/acquisition failures."""
 
@@ -131,6 +139,8 @@ def reconcile_canonical_lock(
     *,
     local_requests: tuple[LocalExecutableIdentityRequest, ...] = (),
     local_acquirer: LocalExecutableEntryAcquirer | None = None,
+    local_file_requests: tuple[LocalFileIdentityRequest, ...] = (),
+    local_file_acquirer: LocalFileEntryAcquirer | None = None,
     existing: CanonicalLock | None,
     acquirer: CanonicalEntryAcquirer,
     policy: LockPolicy = LockPolicy.DEFAULT,
@@ -140,7 +150,12 @@ def reconcile_canonical_lock(
     if purpose is ReconcilePurpose.CHECK and policy is not LockPolicy.DEFAULT:
         raise ValueError("check uses default reconciliation policy")
     ordered = tuple(sorted(desired, key=lambda item: item.keys))
-    fixed, local_reads = _acquire_local_entries(local_requests, local_acquirer)
+    hook_entries, hook_reads = _acquire_local_entries(local_requests, local_acquirer)
+    file_entries, file_reads = _acquire_local_file_entries(
+        local_file_requests, local_file_acquirer
+    )
+    fixed = (*hook_entries, *file_entries)
+    local_reads = (*hook_reads, *file_reads)
     _validate_desired_keys(ordered, fixed)
     existing_by_key = _entry_map(existing.entries if existing is not None else ())
 
@@ -213,7 +228,7 @@ def reconcile_canonical_lock(
 
 def _accept_locked(
     desired: tuple[DesiredResolution, ...],
-    fixed: tuple[LocalExecutableLockEntry, ...],
+    fixed: tuple[LocalExecutableLockEntry | LocalFileLockEntry, ...],
     local_reads: tuple[LockEntryKey, ...],
     existing: CanonicalLock | None,
     existing_by_key: dict[LockEntryKey, CanonicalLockEntry],
@@ -296,6 +311,38 @@ def _acquire_local_entries(
             continue
         if entry is None or canonical_entry_key(entry) != key:
             raise ValueError("local acquirer returned an incompatible identity")
+        entries.append(entry)
+    if diagnostics:
+        raise CanonicalResolutionError(tuple(diagnostics))
+    return tuple(entries), tuple(reads)
+
+
+def _acquire_local_file_entries(
+    requests: tuple[LocalFileIdentityRequest, ...],
+    acquirer: LocalFileEntryAcquirer | None,
+) -> tuple[tuple[LocalFileLockEntry, ...], tuple[LockEntryKey, ...]]:
+    if requests and acquirer is None:
+        raise ValueError("local file requests require a local file acquirer")
+    ordered = tuple(sorted(requests, key=lambda item: item.relative_target.as_posix()))
+    entries: list[LocalFileLockEntry] = []
+    diagnostics: list[Diagnostic] = []
+    reads: list[LockEntryKey] = []
+    for request in ordered:
+        key = ("files", "local", request.relative_target.as_posix())
+        reads.append(key)
+        try:
+            entry = acquirer.acquire(request) if acquirer is not None else None
+        except CanonicalAcquisitionError as error:
+            diagnostics.append(
+                Diagnostic(
+                    path=("config.lock.toml", *key),
+                    code="lock.local_read_failed",
+                    message=str(error),
+                )
+            )
+            continue
+        if entry is None or canonical_entry_key(entry) != key:
+            raise ValueError("local file acquirer returned an incompatible identity")
         entries.append(entry)
     if diagnostics:
         raise CanonicalResolutionError(tuple(diagnostics))
@@ -442,7 +489,7 @@ def _locked_diagnostic(key: LockEntryKey, reason: str) -> Diagnostic:
 
 def _validate_desired_keys(
     desired: tuple[DesiredResolution, ...],
-    fixed: tuple[LocalExecutableLockEntry, ...],
+    fixed: tuple[LocalExecutableLockEntry | LocalFileLockEntry, ...],
 ) -> None:
     keys = [key for item in desired for key in item.keys]
     keys.extend(canonical_entry_key(entry) for entry in fixed)

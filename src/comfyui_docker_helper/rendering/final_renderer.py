@@ -8,6 +8,7 @@ from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     GitNodePlan,
+    HttpFilePlan,
     build_plan_digest,
     git_credential_secret_ids,
 )
@@ -266,7 +267,7 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             plan_digest=plan_digest,
         )
     )
-    if plan.files.files:
+    if any(isinstance(item, HttpFilePlan) for item in plan.files.files):
         lines.append(
             f"RUN {_BUILD_PLAN_MOUNT} {_shell_word(cdh.executable)} "
             "container download-files "

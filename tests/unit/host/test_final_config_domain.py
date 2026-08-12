@@ -1061,10 +1061,16 @@ def test_requirement_extra_aliases_are_stably_deduplicated() -> None:
 def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     document = _document()
     document["files"] = [
-        {"url": "https://example.com/a", "dir": "models/x", "filename": "a.bin"},
         {
-            "url": "https://example.com/b",
-            "dir": "models//x/./",
+            "type": "http",
+            "url": "https://example.com/a",
+            "target_dir": "models/x",
+            "filename": "a.bin",
+        },
+        {
+            "type": "local",
+            "path": "model.bin",
+            "target_dir": "models//x/./",
             "filename": "a.bin",
         },
     ]
@@ -1081,8 +1087,9 @@ def test_file_directory_normalization_supports_the_comfyui_root() -> None:
     document = _document()
     document["files"] = [
         {
+            "type": "http",
             "url": "https://example.com/root",
-            "dir": "./",
+            "target_dir": "./",
             "filename": "root.bin",
         }
     ]
@@ -1093,20 +1100,22 @@ def test_file_directory_normalization_supports_the_comfyui_root() -> None:
     assert domains.diagnostics == ()
     assert [item.directory.as_posix() for item in domains.files] == ["."]
     assert [item.relative_target for item in domains.files] == ["root.bin"]
-    assert config.files[0].dir == "./"
+    assert config.files[0].target_dir == "./"
 
 
 def test_file_target_rejects_only_the_exact_internal_staging_leaf() -> None:
     document = _document()
     document["files"] = [
         {
+            "type": "http",
             "url": "https://example.com/reserved",
-            "dir": "models",
+            "target_dir": "models",
             "filename": ".cdh-staging",
         },
         {
-            "url": "https://example.com/ordinary",
-            "dir": ".cdh-staging",
+            "type": "local",
+            "path": "ordinary.bin",
+            "target_dir": ".cdh-staging",
             "filename": ".cdh-staging.part",
         },
     ]

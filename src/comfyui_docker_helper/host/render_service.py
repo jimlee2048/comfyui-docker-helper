@@ -564,10 +564,14 @@ def _runtime_provenance(result: ConfigurationResult) -> RuntimePlanningProvenanc
     return RuntimePlanningProvenance(
         failure_policy_explicit="download_failure_policy" in raw_cdh,
         file_downloader_explicit=tuple(
-            isinstance(item, dict) and "downloader" in item for item in raw_files
+            "downloader" in item
+            for item in raw_files
+            if isinstance(item, dict) and item.get("type") == "http"
         ),
         file_download_mode_explicit=tuple(
-            isinstance(item, dict) and "download_mode" in item for item in raw_files
+            "download_mode" in item
+            for item in raw_files
+            if isinstance(item, dict) and item.get("type") == "http"
         ),
     )
 

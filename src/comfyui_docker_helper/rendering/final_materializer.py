@@ -13,6 +13,7 @@ import tomli_w
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
+    HttpFilePlan,
     build_plan_hook_identities,
     dump_build_plan_json,
 )
@@ -168,6 +169,8 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
     comfyui_root = PurePosixPath(command[1]).parent
     files = []
     for item in plan.files.files:
+        if not isinstance(item, HttpFilePlan):
+            continue
         target = PurePosixPath(item.target)
         try:
             relative = target.relative_to(comfyui_root)
@@ -176,10 +179,10 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
                 "runtime file target is outside ComfyUI"
             ) from error
         runtime_item = {
+            "type": "http",
             "url": item.url,
-            "dir": relative.parent.as_posix(),
+            "target_dir": relative.parent.as_posix(),
             "filename": relative.name,
-            "overwrite": item.overwrite,
         }
         if item.checksum is not None:
             runtime_item["checksum"] = item.checksum

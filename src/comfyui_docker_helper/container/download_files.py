@@ -19,7 +19,7 @@ from typing import Literal, Protocol, runtime_checkable
 import aria2p
 import httpx
 
-from comfyui_docker_helper.config.build_plan import FilesPhase
+from comfyui_docker_helper.config.build_plan import FilesPhase, HttpFilePlan
 from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
     require_downloader_name,
@@ -801,11 +801,12 @@ def file_download_plan(
                 url=item.url,
                 filename=Path(item.target).name,
                 target=Path(item.target),
-                overwrite=item.overwrite,
+                overwrite=True,
                 downloader=require_downloader_name(item.downloader),
                 checksum=item.checksum,
             )
             for item in payload.files
+            if isinstance(item, HttpFilePlan)
         ),
         download_max_attempts=payload.download_max_attempts,
     )

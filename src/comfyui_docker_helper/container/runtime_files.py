@@ -34,7 +34,6 @@ from comfyui_docker_helper.container.download_files import (
     HttpxDownloader,
 )
 from comfyui_docker_helper.container.downloader_credentials import (
-    DownloaderCredentialError,
     DownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.runtime_diagnostics import (
@@ -66,6 +65,7 @@ from comfyui_docker_helper.container.transfer_core import (
     StagingDisposition,
     TransferDownloadFilesError,
     TransferIdentity,
+    TransportRequest,
     _admit_preserved_transfer,
     admitted_regular_final,
     confirm_indexed_transfer_artifacts_absent,
@@ -906,24 +906,23 @@ def _download_runtime_file_with_policy(
             f"status=failed reason={runtime_error_reason(error)}"
         )
 
-    try:
+    def admit_backend_call(request: TransportRequest) -> None:
         if backend_name == "httpx" and credential_policy is not None:
-            credential_policy.authorization_for(httpx.URL(item.url))
-    except DownloaderCredentialError as error:
-        result = AttemptLocalFailure(attempts=0, error=error)
-    else:
-        result = coordinate_transfer_attempts(
-            transfer_request,
-            backend_name=backend_name,
-            backend=backend,
-            settings=settings,
-            max_attempts=attempts,
-            cancel_requested=cancel_requested,
-            attempt_start_observer=observe_start,
-            retry_observer=observe_retry,
-            continuation_owner=True,
-            log=log,
-        )
+            credential_policy.authorization_for(httpx.URL(request.url))
+
+    result = coordinate_transfer_attempts(
+        transfer_request,
+        backend_name=backend_name,
+        backend=backend,
+        settings=settings,
+        max_attempts=attempts,
+        cancel_requested=cancel_requested,
+        backend_call_admission=admit_backend_call,
+        attempt_start_observer=observe_start,
+        retry_observer=observe_retry,
+        continuation_owner=True,
+        log=log,
+    )
     if isinstance(result, AttemptSucceeded):
         return result.attempts, result.outcome
     if isinstance(result, AttemptCancelled):

@@ -97,9 +97,11 @@ class _OneCallBackend:
         self,
         backend: DownloadBackend,
         *,
+        before_call: Callable[[TransportRequest], None] | None = None,
         on_call: Callable[[], None] | None = None,
     ) -> None:
         self._backend = backend
+        self._before_call = before_call
         self._on_call = on_call
         self.calls = 0
 
@@ -112,10 +114,12 @@ class _OneCallBackend:
             raise DownloadFilesError(
                 "one transfer-core attempt called its backend more than once"
             )
-        if self._on_call is not None:
-            self._on_call()
-        self.calls += 1
         try:
+            if self._before_call is not None:
+                self._before_call(request)
+            if self._on_call is not None:
+                self._on_call()
+            self.calls += 1
             return self._backend.download(request, settings)
         except DownloaderCredentialError as error:
             self.calls = 1 if error.network_attempted else 0
@@ -131,6 +135,7 @@ def coordinate_transfer_attempts(
     max_attempts: int,
     cancel_requested: CancelRequested = lambda: False,
     wait: CancellableWait | None = None,
+    backend_call_admission: Callable[[TransportRequest], None] | None = None,
     attempt_start_observer: AttemptStartObserver | None = None,
     retry_observer: AttemptRetryObserver | None = None,
     continuation_owner: bool = False,
@@ -176,6 +181,7 @@ def coordinate_transfer_attempts(
         clean_fallback_pending = False
         one_call = _OneCallBackend(
             backend,
+            before_call=backend_call_admission,
             on_call=(
                 (lambda attempt=next_attempt: attempt_start_observer(attempt))
                 if attempt_start_observer is not None

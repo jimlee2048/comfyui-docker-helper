@@ -1078,6 +1078,35 @@ def test_runtime_consumer_selects_backends_and_returns_typed_outcomes(
     assert httpx_backend.calls[0][0].sink.display_path != plan.items[0].target
 
 
+def test_runtime_verified_existing_target_skips_credential_and_backend(
+    tmp_path: Path,
+) -> None:
+    content = b"already complete"
+    plan = _plan(
+        tmp_path / "ComfyUI",
+        _file("a.bin", checksum=_checksum(content)),
+    )
+    item = plan.items[0]
+    item.target.parent.mkdir(parents=True)
+    item.target.write_bytes(content)
+    backend = FakeBackend()
+
+    class CredentialMustRemainLazy:
+        def authorization_for(self, _url: object) -> bytes | None:
+            pytest.fail("a skipped transfer must not acquire its credential")
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=_config(policy="fail"),
+        backends={"httpx": backend},
+        log=lambda _: None,
+        credential_policy=CredentialMustRemainLazy(),
+    )
+
+    assert results[0].status is DownloadStatus.SKIPPED
+    assert backend.calls == []
+
+
 def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"))
     backend = FakeBackend(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import tomllib
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -565,6 +566,11 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torch.whl" }]
 name = "torchvision"
 version = "0.27.1+cu130"
 wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
+
+[[packages]]
+name = "sageattention"
+version = "2.2.0+cu130"
+source = { url = "unconsumed" }
 """
     )
     request = PyTorchRequestIdentity(
@@ -583,6 +589,12 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
             DirectPythonRequestMember(
                 package="torchvision", extras=(), specifier="==0.27.1"
             ),
+            DirectPythonRequestMember(
+                package="sageattention",
+                extras=(),
+                specifier="",
+                direct_reference="https://example.test/sageattention.whl",
+            ),
         ),
     )
     metadata = (
@@ -592,17 +604,32 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
         "Requires-Dist: setuptools<82\n"
     )
 
+    metadata_urls = []
+
+    def read_metadata(url: str) -> str:
+        metadata_urls.append(url)
+        return metadata
+
     resolved = DockerPythonGroupResolver(
-        executor, metadata_reader=lambda _url: metadata
+        executor, metadata_reader=read_metadata
     ).resolve(request)
 
-    assert [(item.package, item.version) for item in resolved.members] == [
-        ("torch", "2.12.1+cu130"),
-        ("torchvision", "0.27.1+cu130"),
-    ]
+    assert {item.package: item.version for item in resolved.members} == {
+        "sageattention": "2.2.0+cu130",
+        "torch": "2.12.1+cu130",
+        "torchvision": "0.27.1+cu130",
+    }
     assert resolved.setuptools_specifier == "<82"
     assert executor.calls[0][0].digest == DIGEST_A
-    assert b'name = "pytorch"' in executor.calls[0][1].pyproject
+    manifest = tomllib.loads(executor.calls[0][1].pyproject.decode())
+    assert (
+        "sageattention @ https://example.test/sageattention.whl"
+        in manifest["project"]["dependencies"]
+    )
+    assert "sageattention" not in manifest["tool"]["uv"]["sources"]
+    assert metadata_urls == [
+        "https://download.pytorch.org/whl/cu130/torch.whl.metadata"
+    ]
 
 
 def test_pytorch_pylock_rejects_non_table_consumed_wheel() -> None:

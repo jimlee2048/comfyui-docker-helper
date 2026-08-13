@@ -115,7 +115,7 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     assert observed_manifest == [
         pytorch_resolution_manifest_bytes(
             requirements=tuple(package.requirement for package in group.packages),
-            direct_packages=tuple(package.name for package in group.packages),
+            pytorch_index_packages=tuple(package.name for package in group.packages),
             python_version=group.python_version,
             python_index_url=group.python_index_url,
             pytorch_index_url=group.pytorch_index_url,

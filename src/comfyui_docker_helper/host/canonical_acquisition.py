@@ -214,10 +214,13 @@ class DockerPythonGroupResolver:
     def _resolve_pytorch(self, request: PyTorchRequestIdentity) -> ResolvedPythonGroup:
         manifest = pytorch_resolution_manifest_bytes(
             requirements=tuple(
-                _requirement_text(member.package, member.extras, member.specifier)
-                for member in request.members
+                member.resolver_requirement for member in request.members
             ),
-            direct_packages=tuple(member.package for member in request.members),
+            pytorch_index_packages=tuple(
+                member.package
+                for member in request.members
+                if member.direct_reference is None
+            ),
             python_version=request.python_version,
             python_index_url=request.python_index_url,
             pytorch_index_url=request.pytorch_index_url,
@@ -242,8 +245,14 @@ class DockerPythonGroupResolver:
             raise _pytorch_resolution_error(
                 request, "resolver returned invalid PyTorch metadata"
             ) from error
+        index_owned = {
+            member.package
+            for member in request.members
+            if member.direct_reference is None
+        }
         if any(
-            not pytorch_core_version_matches_channel(
+            member.package in index_owned
+            and not pytorch_core_version_matches_channel(
                 member.package, member.version, request.channel
             )
             for member in resolved
@@ -733,11 +742,6 @@ def _comfyui_requirements_url(
         f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/"
         f"{request.commit}/{request.path}"
     )
-
-
-def _requirement_text(package: str, extras: list[str], selector: str) -> str:
-    rendered_extras = f"[{','.join(extras)}]" if extras else ""
-    return f"{package}{rendered_extras}{selector}"
 
 
 def _pytorch_resolution_error(

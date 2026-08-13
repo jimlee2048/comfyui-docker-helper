@@ -1016,7 +1016,7 @@ def test_registry_selector_ranges_reject_prerelease_operands() -> None:
     assert "custom_node.invalid_registry_version" in _codes(config)
 
 
-# Package ownership and requirement normalization prevent cross-source ambiguity.
+# Target marker projection precedes ownership and protected-source enforcement.
 def test_package_ownership_is_normalized_across_groups() -> None:
     document = _document()
     document["python"] = {"extra_packages": ["My_Package[cli]>=1,<2"]}
@@ -1067,6 +1067,31 @@ def test_python_extras_reject_reserved_application_package_owners(
     assert [(item.path, item.code) for item in diagnostics] == [
         (("python", "extra_packages", 0), "python.duplicate_package_owner")
     ]
+
+
+def test_pytorch_extras_reject_protected_direct_source() -> None:
+    document = _document()
+    document["pytorch"]["extra_packages"] = [
+        "torchvision @ https://example.test/torchvision.whl"
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (
+            ("pytorch", "extra_packages", 0),
+            "pytorch.protected_requirement_conflict",
+        )
+    ]
+
+
+def test_pytorch_extras_accept_protected_index_requirement() -> None:
+    document = _document()
+    document["pytorch"]["extra_packages"] = ["torchvision>=0.27"]
+    config = validate_final_config_structure(document)
+
+    assert _diagnostics(config) == ()
 
 
 def test_package_ownership_is_scoped_to_isolated_environment() -> None:

@@ -1541,6 +1541,19 @@ def _package_owner_diagnostics(
     authored_application_owners: dict[str, NormalizedRequirement] = {}
     authored_tool_owners: dict[str, NormalizedRequirement] = {}
     for requirement in requirements:
+        if (
+            requirement.path[:2] == ("pytorch", "extra_packages")
+            and requirement.name in CUDA_PROTECTED_REQUIREMENTS
+            and requirement.identity.direct_reference is not None
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    requirement.path,
+                    "pytorch.protected_requirement_conflict",
+                    "protected PyTorch requirements must use the managed index source",
+                )
+            )
+            continue
         owners = (
             tool_owners
             if requirement.path[:2] == ("python", "uv_tools")

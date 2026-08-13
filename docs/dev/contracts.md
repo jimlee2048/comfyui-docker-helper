@@ -8,7 +8,7 @@ The planning path has four distinct authorities. They must not be collapsed into
 
 ### Canonical request graph
 
-The [canonical request graph](../../src/comfyui_docker_helper/config/canonical_request.py) is immutable and process-local. It normalizes the effective configuration, target, release inputs, and admitted upstream requirements into one source for desired resolution and BuildPlan phase projection. It is deliberately not a serialized public artifact.
+The [canonical request graph](../../src/comfyui_docker_helper/config/canonical_request.py) is immutable and process-local. It normalizes the effective configuration, target, release inputs, admitted user-authored package requirements, and checkout-owned upstream requirements into one source for desired resolution and BuildPlan phase projection. User-authored marker text remains part of image-configuration identity, while only members active for the fixed target enter ownership and marker-free resolver requests. It is deliberately not a serialized public artifact.
 
 Resolution code may satisfy the graph's desired identities, but it must not invent phase behavior. BuildPlan construction may project phase behavior, but it must use the same graph rather than reconstructing intent from lock rows. This shared origin prevents resolver and image execution from becoming parallel planners.
 
@@ -16,7 +16,7 @@ Resolution code may satisfy the graph's desired identities, but it must not inve
 
 The [canonical lock](../../src/comfyui_docker_helper/config/canonical_lock.py) is strict schema-v1 host reconciliation state. It records exact external or content results. Resolver-backed domains retain the normalized request identity needed to decide whether each result is still reusable. Content-owned local executables use their canonical relative path and digest and deliberately have no resolver request. A content-locked local build file likewise owns a target-keyed SHA-256 row, while an unlocked local build file creates no content row. Request identity and acquired result remain separate concepts.
 
-The lock is complete for its typed direct-input domains, but it is not an installation script or a complete transitive artifact lock. Container helpers do not read it, and materialized `config.lock.toml` is excluded from Buildx input.
+The lock is complete for its typed direct-input domains, but it is not an installation script or a complete transitive artifact lock. A resolved user package result preserves matching request identity and an exact top-level distribution result while remaining artifact-free. Container helpers do not read the lock, and materialized `config.lock.toml` is excluded from Buildx input.
 
 ### Reconciliation policy and purpose
 
@@ -26,7 +26,7 @@ A no-write purpose may still need provider or Docker-backed acquisition. Locked 
 
 ### BuildPlan
 
-The [BuildPlan](../../src/comfyui_docker_helper/config/build_plan.py) is strict schema-v1 immutable build execution authority. It is constructed once from the canonical request graph and an accepted lock. Construction rejects missing, incompatible, duplicate, or unused lock identities and binds the image-configuration and canonical-lock digests. A local build-file plan carries its normalized target, fixed context slot, verification mode, and an opted-in digest, but never its host locator. Image configuration excludes Secret source definitions, host local-file execution policy, and the process-local publication fields `build.tags` and `build.output`, while retaining safe Git and downloader credential route metadata needed by image execution.
+The [BuildPlan](../../src/comfyui_docker_helper/config/build_plan.py) is strict schema-v1 immutable build execution authority. It is constructed once from the canonical request graph and an accepted lock. Construction rejects missing, incompatible, duplicate, or unused lock identities and binds the image-configuration and canonical-lock digests. A user package plan combines the matching accepted request with its exact top-level lock result; an authored direct source remains request-owned rather than becoming lock-owned. A local build-file plan carries its normalized target, fixed context slot, verification mode, and an opted-in digest, but never its host locator. Image configuration excludes Secret source definitions, host local-file execution policy, and the process-local publication fields `build.tags` and `build.output`, while retaining safe Git and downloader credential route metadata needed by image execution.
 
 The canonical `build-plan.json` remains in the rendered context. Each Dockerfile instruction that consumes it mounts that context file read-only at the fixed internal path for the lifetime of that instruction; the Plan is admitted as a regular file whose bytes match the expected digest, and the mount does not persist into the final image filesystem. The [container admission boundary](../../src/comfyui_docker_helper/container/build_plan_input.py) then exposes only command-specific typed projections. Installers and other helpers must not reload host configuration, read the canonical lock, reconstruct unrelated phases, or introduce a runtime Plan consumer.
 
@@ -97,11 +97,13 @@ The release projection deliberately contains the package/build metadata and runt
 
 ## Python and PyTorch package-source ownership
 
-cdh-controlled ordinary Python resolution and installation use the typed `[python].index_url`. Ambient pip or uv package configuration must not replace that authority.
+User-authored `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` are standard named requirements admitted through `packaging.Requirement`. Target markers are evaluated against the fixed configured CPython/Linux `amd64` environment before package ownership. Checkout-owned ComfyUI requirements remain a separate content authority: they may constrain the protected PyTorch foundation or enter ordinary application installation, but they cannot contribute a user package source.
 
-Configured PyTorch members and target-active protected requirements from the exact ComfyUI checkout form one atomic direct group. Every direct member uses only the CUDA-derived explicit PyTorch index; ordinary transitive dependencies use the Python index. A missing direct member must fail rather than fall back to a same-named package from the ordinary source.
+cdh-controlled ordinary Python resolution and installation use the typed `[python].index_url`. A target-active admitted named HTTP(S) or Git-over-HTTP(S) direct reference instead remains opaque source text in the canonical request and BuildPlan. Ambient pip or uv package configuration must not replace either authority. Target-active package references are public configuration that enters the rendered context; target-active configured direct uv-tool references additionally enter Dockerfile instruction text and may appear in image history. They reject URL userinfo and have no Secret-routing contract.
 
-The exact direct results and any compatibility constraint derived from the selected torch wheel protect later cdh-controlled application mutations. Requirements consumed by cdh cannot change package sources or introduce direct URL, VCS, local, editable, or raw-option inputs. This keeps upstream requirements and later installers from replacing the selected inference foundation or package-source policy.
+Target-active configured PyTorch members and target-active protected requirements from the exact ComfyUI checkout form one atomic direct group. Its members partition exactly by source: every index-backed member uses the CUDA-derived explicit PyTorch index, while a non-protected configured direct reference keeps its authored source and receives no index route. Ordinary transitive dependencies use the Python index. A missing index-backed direct member must fail rather than fall back to a same-named package from the ordinary source.
+
+The exact direct results and any compatibility constraint derived from the selected torch wheel protect later cdh-controlled application mutations. Protected PyTorch foundation members cannot use a direct reference. Checkout-owned requirements, including Manager requirements, and automatically consumed custom-node requirements cannot change package sources or introduce direct URL, VCS, local, editable, or raw-option inputs. User-authored package direct references remain confined to their accepted owner and use the existing uv resolver/install path rather than a downloader or alternate installer.
 
 ## Official ComfyUI source and requirements
 
@@ -167,6 +169,7 @@ Verified build-hook source remains in the final image as audit input and can rem
 cdh verifies selected direct identities and their typed consumers and records the final observed state. The resulting evidence does not strengthen the identity guarantees of its inputs:
 
 - exact direct Python package versions do not imply a complete transitive graph or wheel hashes;
+- a target-active authored package URL or moving VCS ref plus an exact installed version does not identify fetched bytes, a redirect target, or a VCS commit; locked host reconciliation does not contact the source, but image execution still fetches that active source;
 - Registry `id@version` does not imply a cdh-verified archive or tree digest;
 - a Git commit and gitlinks do not attest the retrieval endpoint, a clean post-script worktree, or arbitrary installer effects;
 - executable digests do not identify script effects;

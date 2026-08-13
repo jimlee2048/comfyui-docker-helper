@@ -213,6 +213,8 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 不写入并不一定意味着离线。默认、`--check` 和 `--dry-run` 可能会调用解析提供方；当当前 lock 无法提供所需的镜像身份时，它们可能还需要 Docker。完整且匹配的 lock 可使这些路径无需 Docker。只有 `--locked` 禁止在协调期间调用解析提供方和 Docker；Docker Buildx 仍是 `host build` 的一项独立要求。
 
+每个在目标环境生效的具名 Python direct reference 都是 moving request，即使其 URL 文本包含版本、hash fragment 或 VCS ref。完整 request digest（包括用户编写的 source 字符串）未变化时，默认协调和 `--check` 会复用兼容的现有精确版本；条目缺失或不兼容时则重新获取。`--locked` 只接受现有且匹配的 request/result，并且只在宿主端协调期间不接触 source。`--upgrade-lock` 会重新获取每个 moving direct reference。这些策略决定 cdh 何时让 uv 解析 source；它们不会把 URL 或 VCS ref 变成 artifact lock。之后执行的 Buildx build 仍会获取并安装每个在目标环境生效、由用户编写的 direct source。
+
 格式错误或不受支持的 lock 文件会以失败关闭，并给出诊断信息，提示删除并重新生成 lock。
 
 ## 渲染上下文
@@ -242,10 +244,16 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 `comfy-cli` 是可选的用户工具，在镜像构建期间不会用于安装 ComfyUI、Manager 或 Registry 自定义节点。
 
-由 cdh 控制的普通 Python 解析和安装使用 `[python].index_url`。直接 PyTorch 软件包与选定 ComfyUI 检出版本中在目标环境生效的受保护依赖要求共同构成一个精确分组，并且只使用由 CUDA 派生的 PyTorch 软件源。它们的普通传递依赖项使用普通 Python 源。缺失的直接 PyTorch 成员不会回退到普通源上的同名软件包，并且选定的精确分组受到保护，不会被后续由 cdh 控制的应用变更改动。
+除属于 PyTorch 分组的软件包外，由 cdh 控制的 index 解析和普通传递依赖都使用 `[python].index_url`。在 PyTorch 分组中，来自所选 ComfyUI 检出版本的受保护 requirement 及每个 index-backed 成员只使用由 CUDA 派生的 PyTorch index；缺失的 index-backed 成员不会回退到普通 index 上的同名包。在目标环境生效、非受保护且由用户配置的 `name @ URL` 成员则保留其编写的 direct source，并且不会获得 PyTorch-index route。该分组会被原子地解析和安装，最终顶层版本会得到精确验证，受保护的基础包也不能被 direct reference 替换。
+
+`python.extra_packages` 中每个在目标环境生效的 direct requirement 都会保留至应用安装，同时 `[python].index_url` 仍用于 index-backed 和传递依赖。每个生效的 `python.uv_tools` requirement 都使用 managed Python interpreter 安装在独立的 `/opt/uv/tools/<name>` 环境中；direct tool 保留其编写的 source，传递依赖仍使用默认 Python index。安装过程不会增加 downloader、URL rewrite 或第二条软件包路径。
+
+对于每个生效的软件包 request，canonical request digest 包含规范化的软件包 identity 和任何用户编写的 direct source。Canonical lock 保留匹配的 request 与解析得到的精确顶层版本，但不锁定 source artifact。BuildPlan 从已接受的 request 恢复在目标环境生效、由用户编写的 source，并将它与 lock 中的预期版本组合，因此执行会使用所请求的 source，而最终证据仍要求精确版本相等。
+
+软件包 direct reference 是普通公共配置，而不是 Secret locator。每个在目标环境生效的字面值都会进入 BuildPlan 和渲染上下文，因此可能对 builder、build cache 以及任何能够读取该上下文的人可见。在目标环境生效且配置为 direct 的 uv-tool reference 还会被渲染进 Dockerfile `RUN` 指令，并可能出现在 image history 中；生效的应用与 PyTorch direct reference 则从挂载的 BuildPlan 读取，而不会复制进 Dockerfile 指令文本。URL userinfo 会被拒绝，cdh 也不会把 downloader/Git credential route 附加到软件包安装。切勿在这些 reference 中放入 token 或私有凭据。
 
 ## 最终证据和重放边界
 
 所有镜像变更成功后，cdh 会写入严格的最终状态观测 `/opt/cdh/build/manifest.json`。它绑定镜像配置、canonical lock 和 BuildPlan 的 digest，并记录预期和观测到的直接身份。该 manifest 是证据，而不是另一个解析器、lock、重放输入、支持性结论或一般性的服务健康检查。
 
-cdh 为由 cdh 控制的直接输入提供有界且经过验证的重放。这并不承诺离线构建或字节完全一致的构建，也不承诺对传递依赖项或每个已获取工件进行完整锁定，不为缺少用户所提供 checksum 的下载内容提供真实性保证，不保证受信任安装程序或 Hook 的效果具有确定性，也不承诺重放部署时变更。
+cdh 为由 cdh 控制的直接输入提供有界且经过验证的重放。对于在目标环境生效的软件包 direct reference，重放 identity 是用户编写的 request 加精确的已安装顶层分发包版本，而不是已获取 artifact：它不会证明某个 URL 的内容未变，也不会把 moving VCS ref 固定到观测到的 commit。`--locked` 只在宿主端协调期间避免接触 source；之后执行的 Buildx build 仍会获取并安装该生效且由用户编写的 source。这并不承诺离线构建或字节完全一致的构建，也不承诺对传递依赖项或每个已获取 artifact 进行完整锁定，不为缺少用户所提供 hash/checksum 的软件包或文件下载提供真实性保证，不保证受信任安装程序或 Hook 的效果具有确定性，也不承诺重放部署时变更。

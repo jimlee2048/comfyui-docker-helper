@@ -27,13 +27,13 @@ Use `cdh host validate --help` for the current command options.
 Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recursively; a later scalar or ordinary array replaces the earlier value. The following composed collections instead merge by a field-specific identity:
 
 - `system.extra_packages` uses the admitted Debian package name;
-- `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, and canonical selector representation;
+- `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, selector or named direct reference, and marker;
 - `comfyui.custom_nodes` uses a lowercase-only Registry resource ID or the exact direct-Git URL;
 - `files` uses the normalized `target_dir` plus `filename` target; and
 - `cdh.downloader.credentials` uses the canonical HTTP(S) origin and path represented by `match`; and
 - `cdh.git.credentials` uses the canonical credential context represented by `match`.
 
-For package collections, a new identity appends in first-occurrence order. An exact Debian package repeated across uniquely keyed layers is kept once. If an effective `system.extra_packages` item is already in cdh's default OS package set, cdh warns at its source and omits the redundant item from the effective installation request. Duplicates authored together in one user-owned list remain errors. A Python requirement is deduplicated across layers only when the complete canonical requirement is equal; cdh does not infer general range equivalence. Requirements for the same normalized distribution that differ in extras or selectors remain visible so effective validation can report the conflict. Duplicates authored in one layer likewise remain visible for validation. A later empty list resets the corresponding collection.
+For package collections, a new identity appends in first-occurrence order. An exact Debian package repeated across uniquely keyed layers is kept once. If an effective `system.extra_packages` item is already in cdh's default OS package set, cdh warns at its source and omits the redundant item from the effective installation request. Duplicates authored together in one user-owned list remain errors. A Python requirement is deduplicated across layers only when the complete canonical requirement is equal; cdh does not infer general range equivalence. Requirements for the same normalized distribution that differ in extras, selector, direct source, or marker remain available for fixed-target projection. After projection, multiple active declarations for the same normalized distribution in the same ownership domain conflict. Duplicates authored in one layer likewise remain visible for validation. A later empty list resets the corresponding collection.
 
 `system.ssh.pub_keys` remains an ordinary whole-list replacement across TOML layers: omission inherits, a later non-empty list replaces, and `[]` clears it. After the winning list is selected, cdh trims each line, drops empty values, and stably deduplicates by declared key type plus base64 key blob. It retains the first normalized complete line, including its optional comment. Each later non-empty duplicate produces a source-aware warning that does not print key material.
 
@@ -78,7 +78,18 @@ Manager and comfy-cli are independently controlled optional capabilities. Both a
 
 Entries in `python.uv_tools` request additional isolated command-line tools. They do not install packages into the ComfyUI application environment. See the [build and lock guide](build-and-lock.md) for package-source, resolution, and tool-environment behavior.
 
-Direct requirements in `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` may be a bare distribution name or use `==`, `!=`, `<`, `<=`, `>`, `>=`, and `~=` selectors, including one-sided and compatible-release constraints. Direct URLs, VCS, local or editable requirements, environment markers, wildcard selectors, arbitrary equality `===`, and prerelease, development, or local-version operands are rejected. A requirement may contain at most one exact `==` selector, and that exact version must satisfy every other selector in the requirement. cdh canonicalizes supported syntax but does not solve or infer general range algebra.
+`python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` accept standard named PEP 508 requirement forms parsed by `packaging.Requirement`: a distribution name with optional extras, standard version specifiers, and a marker; or a named direct reference written as `name[extras] @ URL`, also with an optional marker. Examples include `numpy>=2,<3`, `ruff==0.16.0rc1`, and this named wheel:
+
+```toml
+[pytorch]
+extra_packages = ["sageattention @ https://github.com/jimlee2048/SageAttention/releases/download/v2.2.0/sageattention-2.2.0+cu130torch2.13-cp39-abi3-linux_x86_64.whl"]
+```
+
+cdh admits named direct references over `https`, `http`, `git+https`, and `git+http`. The URL must have a host, any authored port must be parseable, and username or password userinfo must be absent. A direct reference remains opaque after this structural check; uv decides whether the referenced wheel, source archive, or VCS project is installable for the selected target.
+
+Markers are evaluated once against cdh's fixed build target: the configured CPython version on Linux `amd64`/`x86_64`. Host values are never used, and unavailable kernel release/version values are fixed empty strings. An inactive declaration remains part of authored image-configuration identity but does not enter active package ownership, marker-free resolver requests, a canonical lock member, or BuildPlan direct input. Marker variables that require unavailable package metadata or dependency-group context (`extra`, `extras`, and `dependency_groups`) are rejected with a diagnostic.
+
+Unnamed bare URLs, local paths and `file:` URLs, editable requirements, raw pip/uv options, SSH transports including `git+ssh`, and every URL containing userinfo are unsupported. Use the required `name @ URL` form for a public remote source. Standard specifiers accepted by `packaging` are not narrowed by a cdh selector whitelist; this includes compatible-release and exclusion clauses, wildcard equality, arbitrary equality `===`, and prerelease, development, or local-version operands where the standard parser accepts them. cdh does not solve general range equivalence or pre-validate whether a selector has any release, and the resolver must still produce a canonical PEP 440 distribution version. The one-active-owner rules reject conflicting active requirements for the same normalized package in the same ownership domain.
 
 ## Choose custom nodes and build hooks
 

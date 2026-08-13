@@ -64,22 +64,27 @@ version = "3.13.14"
 # the official Debian-slim uv image tag and locks its exact descriptor.
 uv_version = "latest"
 # Default: "https://pypi.org/simple". Used by ordinary cdh-controlled Python
-# resolution and installation. Direct PyTorch-group members use their derived
-# explicit PyTorch source instead.
+# resolution and installation. Index-backed PyTorch-group members use their
+# derived explicit PyTorch source instead.
 index_url = "https://pypi.org/simple"
 # python.extra_packages, python.uv_tools, and pytorch.extra_packages accept a
-# bare distribution or ==, !=, <, <=, >, >=, and ~= with stable public operands.
-# Direct/VCS/local/editable inputs, markers, wildcards, ===, unstable operands,
-# multiple exact selectors, or one exact selector that contradicts another
-# selector are rejected; cdh does not infer general range algebra.
+# standard named PEP 508 requirement: a name with optional extras, specifiers,
+# and target marker, or name[extras] @ URL. Public https/http and Git over those
+# transports are supported. Bare URLs, local/file/editable/SSH inputs, raw
+# installer options, URL userinfo, and metadata-only marker contexts are rejected.
+# Markers use the configured CPython Linux/amd64 target, never the host.
+# Inactive entries stay authored but do not enter active requests or BuildPlan input.
 # Extra Python packages installed into the final virtualenv after PyTorch.
 # Across layered files, omission inherits; new canonical requirements append;
 # only a complete canonical requirement repeat is kept once; and [] resets.
-# Requirements for the same distribution with different extras or selectors
-# conflict instead of one silently replacing the other.
+# Requirements with different extras, selectors, direct sources, or markers remain
+# available for target projection. Multiple active declarations for one package in
+# the same ownership domain conflict instead of silently replacing one another.
 extra_packages = ["numpy"]
+# Named wheel example (ordinary public configuration, not a Secret):
+# extra_packages = ["sageattention @ https://example.org/sageattention.whl"]
 # Standalone CLI distributions installed into isolated uv tool environments.
-# Direct URL, VCS, local, editable, marker, and raw uv argument forms are rejected.
+# Named direct references use the same supported public transport boundary.
 # Layered composition and [] reset follow python.extra_packages semantics.
 uv_tools = ["ruff==0.15.18"]
 
@@ -92,10 +97,13 @@ version = "2.12.1"
 index_base_url = "https://download.pytorch.org/whl"
 # Additional PyTorch-source packages merged with torch and target-active
 # protected requirements from the exact ComfyUI checkout as one exact group.
-# Every direct member uses the derived PyTorch source; generic transitive
-# dependencies use [python].index_url. Do not include "torch" here.
+# Index-backed members use the derived PyTorch index. Non-protected named direct
+# references keep their authored source. Generic transitive dependencies use
+# [python].index_url. Do not include protected foundation packages such as torch.
 # Layered composition and [] reset follow python.extra_packages semantics.
 extra_packages = []
+# Named wheel example:
+# extra_packages = ["sageattention @ https://example.org/sageattention.whl"]
 
 [cdh]
 # Host-only local-file context materialization. Default: "auto". Supported:

@@ -111,6 +111,10 @@ from comfyui_docker_helper.config.os_packages import validate_apt_package_identi
 from comfyui_docker_helper.config.registry_validation import (
     validate_registry_node_authority,
 )
+from comfyui_docker_helper.config.requirement_validation import (
+    DirectRequirementError,
+    parse_direct_requirement,
+)
 from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
 )
@@ -262,10 +266,37 @@ class CdhToolPlan(_PlanModel):
         return validate_sha256_digest(value)
 
 
+def _validate_package_plan_source(
+    name: str,
+    extras: tuple[str, ...],
+    direct_reference: str | None,
+) -> None:
+    if direct_reference is None:
+        return
+    rendered_extras = f"[{','.join(extras)}]" if extras else ""
+    try:
+        identity = parse_direct_requirement(
+            f"{name}{rendered_extras} @ {direct_reference}"
+        )
+    except DirectRequirementError as error:
+        raise ValueError(
+            "direct_reference must be one admitted package source"
+        ) from error
+    if (
+        identity.name != name
+        or identity.extras != extras
+        or identity.specifier
+        or identity.direct_reference != direct_reference
+        or identity.marker is not None
+    ):
+        raise ValueError("direct_reference must be one admitted package source")
+
+
 class UvToolPlan(_PlanModel):
     name: str
     extras: tuple[str, ...]
     version: str
+    direct_reference: str | None
     environment: str
 
     @model_validator(mode="after")
@@ -280,11 +311,14 @@ class UvToolPlan(_PlanModel):
             canonicalize_name(extra) != extra for extra in self.extras
         ):
             raise ValueError("uv tool extras must be sorted, unique, and normalized")
+        _validate_package_plan_source(self.name, self.extras, self.direct_reference)
         return self
 
     @property
     def requirement(self) -> str:
         extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        if self.direct_reference is not None:
+            return f"{self.name}{extras} @ {self.direct_reference}"
         return f"{self.name}{extras}=={self.version}"
 
 
@@ -371,6 +405,7 @@ class ExactPackagePlan(_PlanModel):
     name: str
     extras: tuple[str, ...]
     version: str
+    direct_reference: str | None
     environment: Literal["application"]
 
     @field_validator("name")
@@ -401,9 +436,16 @@ class ExactPackagePlan(_PlanModel):
     def _validate_version(cls, value: str) -> str:
         return validate_exact_distribution_version(value)
 
+    @model_validator(mode="after")
+    def _validate_source(self) -> ExactPackagePlan:
+        _validate_package_plan_source(self.name, self.extras, self.direct_reference)
+        return self
+
     @property
     def requirement(self) -> str:
         extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        if self.direct_reference is not None:
+            return f"{self.name}{extras} @ {self.direct_reference}"
         return f"{self.name}{extras}=={self.version}"
 
 
@@ -467,6 +509,12 @@ class PyTorchGroupPlan(_PlanModel):
             raise ValueError("PyTorch packages must be unique and include torch")
         if {"pip", "setuptools"}.intersection(names):
             raise ValueError("PyTorch packages overlap application package owners")
+        protected_names = set(CudaBackendAdapter().protected_requirement_names)
+        if any(
+            package.name in protected_names and package.direct_reference is not None
+            for package in self.packages
+        ):
+            raise ValueError("protected PyTorch packages must use the PyTorch index")
         if names != tuple(sorted(names, key=lambda name: (name != "torch", name))):
             raise ValueError("PyTorch packages must be canonically ordered")
         if any(
@@ -1730,8 +1778,14 @@ def _package_group(
         else ApplicationExtrasLockEntry
     )
     entry = _take(entries, used, key, expected_type)
+    request_members = {member.package: member for member in request.members}
     packages: list[ExactPackagePlan] = []
     for package in entry.packages:
+        member = request_members.get(package.name)
+        if member is None:
+            raise ValueError(
+                f"canonical {package.name} does not match its package request"
+            )
         if package_channel is not None and not pytorch_core_version_matches_channel(
             package.name, package.version, package_channel
         ):
@@ -1743,6 +1797,7 @@ def _package_group(
                 name=package.name,
                 extras=package.extras,
                 version=package.version,
+                direct_reference=member.direct_reference,
                 environment="application",
             )
         )
@@ -1782,6 +1837,7 @@ def _uv_tool(
         name=entry.name,
         extras=entry.extras,
         version=entry.version,
+        direct_reference=member.direct_reference,
         environment=request.environment,
     )
 

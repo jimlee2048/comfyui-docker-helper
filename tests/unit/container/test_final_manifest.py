@@ -256,12 +256,14 @@ def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:
             "name": "z-tool",
             "extras": (),
             "version": "2.0.0",
+            "direct_reference": None,
             "environment": "uv-tool:z-tool",
         },
         {
             "name": "a-tool",
             "extras": (),
             "version": "1.0.0",
+            "direct_reference": None,
             "environment": "uv-tool:a-tool",
         },
     )

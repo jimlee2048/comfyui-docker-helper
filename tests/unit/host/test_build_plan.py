@@ -36,6 +36,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     DirectPythonRequestIdentity,
     LocalFileLockEntry,
+    PyTorchRequestIdentity,
     UvToolLockEntry,
     canonical_lock_from_entries,
 )
@@ -137,6 +138,86 @@ def test_constructor_carries_python_314_exact_identity_through_build_plan() -> N
         "/opt/venv/lib/python3.14/site-packages/comfyui-docker-helper-comfyui.pth"
     )
     assert plan.toolchain.tool_store.comfy_cli is not None
+
+
+def test_constructor_projects_application_direct_source_with_locked_version() -> None:
+    source = "https://example.test/numpy.whl#sha256=abc"
+    config = final_config().model_copy(deep=True)
+    config.python.extra_packages = [f"NumPy @ {source}"]
+    resolution = accepted_resolution()
+    graph = request_graph(config, resolution)
+    desired = next(
+        item
+        for item in graph.desired
+        if isinstance(item.request, DirectPythonRequestIdentity)
+        and item.request.group == "application-extra"
+    )
+    document = resolution.lock.model_dump(mode="python")
+    document["python"]["package_groups"]["application_extras"].update(
+        request_digest=desired.request_digest
+    )
+    changed = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(document),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+
+    plan = build_plan(config, changed)
+
+    assert plan.application.python_extras is not None
+    package = plan.application.python_extras.packages[0]
+    assert package.version == "2.3.1"
+    assert package.direct_reference == source
+    assert package.requirement == f"numpy @ {source}"
+
+
+def test_constructor_projects_pytorch_extra_direct_source() -> None:
+    source = "https://example.test/sageattention.whl"
+    config = final_config().model_copy(deep=True)
+    config.pytorch.extra_packages.append(f"SageAttention @ {source}")
+    resolution = accepted_resolution()
+    graph = request_graph(config, resolution)
+    desired = next(
+        item
+        for item in graph.desired
+        if isinstance(item.request, PyTorchRequestIdentity)
+    )
+    document = resolution.lock.model_dump(mode="python")
+    entry = document["python"]["package_groups"]["pytorch"]
+    entry["request_digest"] = desired.request_digest
+    entry["packages"] = tuple(
+        sorted(
+            (
+                *entry["packages"],
+                {
+                    "name": "sageattention",
+                    "extras": (),
+                    "version": "2.2.0+cu130",
+                },
+            ),
+            key=lambda item: item["name"],
+        )
+    )
+    changed = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(document),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+
+    plan = build_plan(config, changed)
+
+    package = next(
+        item
+        for item in plan.application.pytorch.packages
+        if item.name == "sageattention"
+    )
+    assert package.version == "2.2.0+cu130"
+    assert package.direct_reference == source
+    assert package.requirement == f"sageattention @ {source}"
 
 
 def test_request_graph_freezes_one_protected_name_read(
@@ -329,6 +410,39 @@ def test_constructor_projects_explicit_prerelease_uv_tool_result() -> None:
     assert plan.toolchain.tool_store.uv_tools[0].requirement == "ruff==0.16.0rc1"
 
 
+def test_constructor_projects_uv_tool_direct_source_with_locked_version() -> None:
+    source = "git+https://example.test/ruff.git@main"
+    config = final_config(with_uv_tool=True).model_copy(deep=True)
+    config.python.uv_tools = [f"Ruff @ {source}"]
+    resolution = accepted_resolution(with_uv_tool=True)
+    graph = request_graph(config, resolution)
+    desired = next(
+        item
+        for item in graph.desired
+        if isinstance(item.request, DirectPythonRequestIdentity)
+        and item.request.group == "uv-tool"
+    )
+    document = resolution.lock.model_dump(mode="python")
+    tool_entry = next(
+        item for item in document["python"]["uv_tools"] if item["name"] == "ruff"
+    )
+    tool_entry["request_digest"] = desired.request_digest
+    changed = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(document),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+
+    plan = build_plan(config, changed)
+
+    tool = plan.toolchain.tool_store.uv_tools[0]
+    assert tool.version == "0.15.18"
+    assert tool.direct_reference == source
+    assert tool.requirement == f"ruff @ {source}"
+
+
 def test_constructor_projects_optional_comfy_cli_only_to_the_tool_store() -> None:
     enabled = build_plan(final_config(), accepted_resolution())
     disabled = build_plan(
@@ -427,6 +541,7 @@ def test_build_plan_rejects_python_extra_overlap_with_arbitrary_pytorch_member()
         "name": "xformers",
         "extras": (),
         "version": "0.0.35",
+        "direct_reference": None,
         "environment": "application",
     }
     document["application"]["pytorch"]["packages"] = (
@@ -1094,6 +1209,7 @@ def test_exact_package_plan_rejects_noncanonical_pep503_identity(
         "name": "torch",
         "extras": (),
         "version": "2.12.1+cu130",
+        "direct_reference": None,
         "environment": "application",
     }
     document[field] = value
@@ -1110,17 +1226,64 @@ def test_user_package_and_tool_plans_accept_canonical_pep440_versions(
         name="demo",
         extras=(),
         version=version,
+        direct_reference=None,
         environment="application",
     )
     tool = UvToolPlan(
         name="demo-tool",
         extras=(),
         version=version,
+        direct_reference=None,
         environment="uv-tool:demo-tool",
     )
 
     assert package.version == version
     assert tool.version == version
+
+
+@pytest.mark.parametrize(
+    ("model", "document"),
+    [
+        (
+            ExactPackagePlan,
+            {
+                "name": "demo",
+                "extras": (),
+                "version": "1.0",
+                "direct_reference": "file:///tmp/demo.whl",
+                "environment": "application",
+            },
+        ),
+        (
+            UvToolPlan,
+            {
+                "name": "demo-tool",
+                "extras": (),
+                "version": "1.0",
+                "direct_reference": "https://user@example.test/demo.whl",
+                "environment": "uv-tool:demo-tool",
+            },
+        ),
+    ],
+)
+def test_user_package_plans_reject_unadmitted_direct_sources(
+    model: type[ExactPackagePlan] | type[UvToolPlan],
+    document: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="admitted package source"):
+        model.model_validate(document)
+
+
+def test_build_plan_rejects_protected_pytorch_direct_source() -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["application"]["pytorch"]["packages"][0]["direct_reference"] = (
+        "https://example.test/torch.whl"
+    )
+
+    with pytest.raises(ValidationError, match="protected PyTorch packages"):
+        BuildPlan.model_validate(document)
 
 
 # Parser self-validation rejects semantic forgeries at the execution trust boundary.
@@ -1388,6 +1551,7 @@ def test_build_plan_parser_allows_arbitrary_exact_pytorch_extra() -> None:
             "name": "xformers",
             "extras": (),
             "version": "0.0.35+cu130",
+            "direct_reference": None,
             "environment": "application",
         }
     )

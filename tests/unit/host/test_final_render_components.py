@@ -271,6 +271,37 @@ def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
     )
 
 
+def test_renderer_installs_uv_tool_from_authored_direct_requirement() -> None:
+    source = "git+https://example.test/ruff.git@main"
+    document = build_plan(
+        final_config(with_uv_tool=True), accepted_resolution(with_uv_tool=True)
+    ).model_dump(mode="python")
+    document["toolchain"]["tool_store"]["uv_tools"][0]["direct_reference"] = source
+    plan = BuildPlan.model_validate(document)
+    tool = plan.toolchain.tool_store.uv_tools[0]
+
+    rendered = render_build_plan_dockerfile(plan)
+
+    block = next(item for item in _run_blocks(rendered) if source in item)
+    tokens = shlex.split(block.replace("\\\n", " "))
+    python_minor = ".".join(plan.toolchain.python.version.split(".")[:2])
+    interpreter = (
+        f"/opt/python/{plan.toolchain.python.catalog_key}/bin/python{python_minor}"
+    )
+    assert tool.requirement in tokens
+    assert tokens[tokens.index("--python") + 1] == interpreter
+    assert tokens[tokens.index("--default-index") + 1] == (
+        plan.application.python_index_url
+    )
+    assert "/opt/uv/tools/ruff/bin/python" in tokens
+    version_check = (
+        "import importlib.metadata as m; "
+        f"assert m.version({tool.name!r}) == {tool.version!r}"
+    )
+    assert version_check in tokens
+    assert "uv --no-config pip check --python /opt/uv/tools/ruff/bin/python" in block
+
+
 def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:
     rendered = render_build_plan_dockerfile(
         build_plan(

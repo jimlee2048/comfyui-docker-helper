@@ -113,4 +113,6 @@ def _check(output: Path) -> None:
         object(),
         object(),
         (),
+        local_file_mode="copy",
+        check_unlocked_sources=True,
     )

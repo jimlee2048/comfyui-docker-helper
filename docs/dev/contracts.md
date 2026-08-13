@@ -169,7 +169,7 @@ Verified build-hook source remains in the final image as audit input and can rem
 cdh verifies selected direct identities and their typed consumers and records the final observed state. The resulting evidence does not strengthen the identity guarantees of its inputs:
 
 - exact direct Python package versions do not imply a complete transitive graph or wheel hashes;
-- a target-active authored package URL or moving VCS ref plus an exact installed version does not identify fetched bytes, a redirect target, or a VCS commit; locked host reconciliation does not contact the source, but image execution still fetches that active source;
+- a target-active authored package URL or moving VCS ref plus an exact installed version does not identify fetched bytes, a redirect target, or a VCS commit; locked host reconciliation does not contact the source, but image execution may still need to fetch and install that active source;
 - Registry `id@version` does not imply a cdh-verified archive or tree digest;
 - a Git commit and gitlinks do not attest the retrieval endpoint, a clean post-script worktree, or arbitrary installer effects;
 - executable digests do not identify script effects;

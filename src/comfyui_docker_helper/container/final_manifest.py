@@ -23,6 +23,7 @@ from comfyui_docker_helper.config.final_manifest import (
     ComfyUISourceEvidence,
     DigestEvidence,
     DisabledManagerEvidence,
+    DistributionVersionEvidence,
     EnabledManagerEvidence,
     FileEvidence,
     FinalBuildProbeEvidence,
@@ -344,7 +345,7 @@ def _image_evidence(image) -> ImageEvidence:
 def _direct_application_packages(
     projection: FinalManifestInput,
     inventory: tuple[tuple[str, str], ...],
-) -> tuple[tuple[str, VersionEvidence], ...]:
+) -> tuple[tuple[str, DistributionVersionEvidence], ...]:
     observed = dict(inventory)
     expected = {
         package.name: package.version
@@ -361,7 +362,7 @@ def _direct_application_packages(
         return tuple(
             (
                 name,
-                VersionEvidence(intended=version, observed=observed[name]),
+                DistributionVersionEvidence(intended=version, observed=observed[name]),
             )
             for name, version in sorted(expected.items())
         )
@@ -491,7 +492,7 @@ def _tool_evidence(
     return ToolEnvironmentEvidence(
         name=name,
         environment=environment,
-        direct=VersionEvidence(intended=version, observed=observed),
+        direct=DistributionVersionEvidence(intended=version, observed=observed),
         inventory=_inventory_models(inventory),
         dependency_check="passed",
     )

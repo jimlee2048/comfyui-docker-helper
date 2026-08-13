@@ -19,6 +19,7 @@ from comfyui_docker_helper.config.build_plan import (
 )
 from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.config.final_manifest import (
+    DistributionVersionEvidence,
     LocalFileEvidence,
     dump_final_manifest,
     final_build_check_ids,
@@ -107,6 +108,53 @@ def test_comfy_cli_evidence_observes_exact_interpreter_identity(
         Path("/opt/cdh/build"),
         "comfy-cli interpreter identity observation",
     )
+
+
+def test_configured_uv_tool_evidence_accepts_exact_prerelease_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = "0.16.0rc1"
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_environment_inventory",
+        lambda _python: (("ruff", version),),
+    )
+    monkeypatch.setattr(
+        final_manifest_service, "_dependency_check", lambda *_args: None
+    )
+
+    evidence = final_manifest_service._tool_evidence(
+        "ruff",
+        version,
+        "uv-tool:ruff",
+        Path("/opt/uv/tools/ruff/bin/python"),
+    )
+
+    assert isinstance(evidence.direct, DistributionVersionEvidence)
+    assert evidence.direct.intended == version
+    assert evidence.direct.observed == version
+
+
+def test_application_evidence_accepts_exact_prerelease_result() -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    document["application"]["python_extras"]["packages"][0]["version"] = "2.4.0rc1"
+    plan = BuildPlan.model_validate(document)
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    direct = tuple(
+        (package.name, package.version)
+        for package in (
+            *plan.application.pytorch.packages,
+            *plan.application.python_extras.packages,
+        )
+    )
+
+    evidence = final_manifest_service._direct_application_packages(projection, direct)
+
+    numpy = dict(evidence)["numpy"]
+    assert isinstance(numpy, DistributionVersionEvidence)
+    assert numpy.observed == "2.4.0rc1"
 
 
 @pytest.mark.parametrize(

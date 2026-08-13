@@ -9,9 +9,11 @@ from pydantic import ValidationError
 
 from comfyui_docker_helper.config.build_plan import BuildPlan
 from comfyui_docker_helper.config.final_manifest import (
+    DistributionVersionEvidence,
     FinalManifest,
     InventoryDistribution,
     SetuptoolsEvidence,
+    ToolEnvironmentEvidence,
     VersionEvidence,
     dump_final_manifest,
     parse_final_manifest,
@@ -63,6 +65,50 @@ def test_manifest_rejects_intended_observed_identity_mismatch() -> None:
 
     with pytest.raises(ValidationError, match="does not satisfy compatibility"):
         SetuptoolsEvidence(compatibility="<82", observed="82.0.0")
+
+
+@pytest.mark.parametrize("version", ["1.0rc1", "1.0.dev1", "1.0+cuda"])
+def test_user_distribution_evidence_accepts_canonical_complete_pep440(
+    version: str,
+) -> None:
+    direct = DistributionVersionEvidence(intended=version, observed=version)
+    tool = ToolEnvironmentEvidence(
+        name="configured-tool",
+        environment="uv-tool:configured-tool",
+        direct=direct,
+        inventory=(InventoryDistribution(name="configured-tool", version=version),),
+        dependency_check="passed",
+    )
+
+    assert tool.direct == direct
+
+
+def test_user_distribution_evidence_retains_exact_equality() -> None:
+    with pytest.raises(ValidationError, match="intended and observed versions"):
+        DistributionVersionEvidence(intended="1.0rc1", observed="1.0rc2")
+
+    with pytest.raises(ValidationError):
+        VersionEvidence(intended="1.0rc1", observed="1.0rc1")
+
+
+def test_application_direct_evidence_accepts_locked_prerelease_result() -> None:
+    document = manifest_for_plan(
+        build_plan(final_config(), accepted_resolution())
+    ).model_dump(mode="python")
+    application = document["application"]
+    direct = next(
+        identity for name, identity in application["direct_packages"] if name == "numpy"
+    )
+    direct.update(intended="2.4.0rc1", observed="2.4.0rc1")
+    inventory = next(
+        item for item in application["inventory"] if item["name"] == "numpy"
+    )
+    inventory["version"] = "2.4.0rc1"
+
+    manifest = FinalManifest.model_validate(document)
+
+    numpy = dict(manifest.application.direct_packages)["numpy"]
+    assert numpy.intended == "2.4.0rc1"
 
 
 @pytest.mark.parametrize("version", ["1.0rc1", "1.0.dev1", "1.0+cuda"])

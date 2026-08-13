@@ -89,6 +89,7 @@ _MARKER = {"tool": "comfyui-docker-helper", "kind": "build-context", "version": 
 _STAGE_PREFIX = "cdh-render-stage-"
 _BACKUP_PREFIX = "cdh-render-backup-"
 _CHECK_PREFIX = "cdh-render-check-"
+_LOCAL_FILE_COMPARE_BLOCK_BYTES = 1024 * 1024
 _platform_name = os.name
 
 
@@ -549,16 +550,25 @@ def _check_local_context_files(
 
 
 def _regular_files_equal(source: Path, context_file: Path) -> bool:
+    def read_block(reader: AdmittedRegularFileReader) -> bytearray:
+        block = bytearray()
+        while len(block) < _LOCAL_FILE_COMPARE_BLOCK_BYTES:
+            chunk = reader.read_chunk(_LOCAL_FILE_COMPARE_BLOCK_BYTES - len(block))
+            if not chunk:
+                break
+            block.extend(chunk)
+        return block
+
     def compare_source(source_reader: AdmittedRegularFileReader) -> bool:
         def compare_context(context_reader: AdmittedRegularFileReader) -> bool:
             if source_reader.size != context_reader.size:
                 return False
             while True:
-                source_chunk = source_reader.read_chunk()
-                context_chunk = context_reader.read_chunk()
-                if source_chunk != context_chunk:
+                source_block = read_block(source_reader)
+                context_block = read_block(context_reader)
+                if source_block != context_block:
                     return False
-                if not source_chunk:
+                if not source_block:
                     return True
 
         return operate_regular_absolute_file(context_file, compare_context)
@@ -655,7 +665,7 @@ def _validate_input_output_separation(
     try:
         output_resolved = output.resolve(strict=False)
         source_resolved = source.resolve(strict=True)
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise _render_error(
             "render.input_output_inspect_failed",
             f"{source_kind} source and output could not be compared",

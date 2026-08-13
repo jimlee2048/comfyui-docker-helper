@@ -1293,6 +1293,29 @@ filename = "model.bin"
     assert raised.value.diagnostics[0].code == "render.input_output_overlap"
 
 
+def test_invalid_local_file_locator_is_a_content_safe_render_diagnostic(
+    tmp_path: Path,
+) -> None:
+    marker = "review-sensitive-locator"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f"""
+[[files]]
+type = "local"
+path = "\\u0000{marker}"
+target_dir = "models"
+filename = "model.bin"
+"""
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, tmp_path / "context", FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.input_output_inspect_failed"
+    assert marker not in str(raised.value)
+
+
 @pytest.mark.parametrize("source_kind", ["build", "runtime"])
 @pytest.mark.parametrize("relation", ["equal", "output-descendant", "output-ancestor"])
 def test_render_rejects_every_source_output_overlap_before_overwrite(
@@ -2153,6 +2176,34 @@ filename = "model.bin"
         )
 
     assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_unlocked_local_file_comparison_ignores_short_read_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Path("/source.bin")
+    context = Path("/context.bin")
+    chunks = {
+        source: [b"a", b"bc", b"def", b""],
+        context: [b"ab", b"cdef", b""],
+    }
+
+    def operate(path: Path, operation):
+        reads = iter(chunks[path])
+        reader = render_service_module.AdmittedRegularFileReader(
+            6,
+            None,
+            lambda _limit=None: next(reads, b""),
+        )
+        return operation(reader)
+
+    monkeypatch.setattr(
+        render_service_module,
+        "operate_regular_absolute_file",
+        operate,
+    )
+
+    assert render_service_module._regular_files_equal(source, context)
 
 
 def test_check_locked_local_file_hashes_context_against_intended_digest(

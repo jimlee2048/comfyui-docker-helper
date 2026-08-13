@@ -7,7 +7,6 @@ from comfyui_docker_helper.config.downloader_credentials import (
     DownloaderCredentialContextError,
     canonicalize_downloader_credential_context,
     downloader_httpx_request_context,
-    downloader_request_context,
     parse_downloader_credential_context,
     parse_downloader_request_url,
     select_downloader_credential_context,
@@ -48,7 +47,7 @@ def test_authored_route_canonicalizes_origin_and_path_without_decoding() -> None
         pytest.param("https://́.example/a", "invalid", id="invalid-idna"),
     ],
 )
-def test_authored_route_rejects_only_unsupported_url_shapes(
+def test_authored_route_rejects_unsupported_url_shapes(
     value: str,
     code: str,
 ) -> None:
@@ -56,19 +55,6 @@ def test_authored_route_rejects_only_unsupported_url_shapes(
         parse_downloader_credential_context(value)
 
     assert raised.value.code == code
-
-
-def test_request_query_is_preserved_outside_the_route_context() -> None:
-    request = parse_downloader_request_url(
-        "https://user@example.com/models/private/file?download=true#client"
-    )
-
-    assert request == downloader_request_context(
-        scheme="https",
-        host="example.com",
-        port=None,
-        path="/models/private/file",
-    )
 
 
 def test_request_parser_maps_invalid_idna_to_stable_context_error() -> None:

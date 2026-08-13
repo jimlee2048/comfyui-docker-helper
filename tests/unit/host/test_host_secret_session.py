@@ -210,25 +210,21 @@ def test_empty_value_fails_at_first_use(
 
 @_POSIX_SECRET_SOURCE
 @pytest.mark.parametrize(
-    ("value", "expected_code"),
+    "suffix",
     [
-        (b"synthetic-sensitive-marker\n", "invalid_value"),
-        (b"synthetic-sensitive-marker\r", "invalid_value"),
-        (b"synthetic-sensitive-marker\0", "invalid_value"),
-        (
-            b"synthetic-sensitive-marker" + b"x" * (65_526 - 26),
-            "source_too_large",
-        ),
+        b"\n",
+        b"\r",
+        b"\0",
     ],
-    ids=("lf", "cr", "nul", "oversized"),
+    ids=("lf", "cr", "nul"),
 )
 def test_invalid_value_failures_do_not_echo_input(
-    value: bytes,
-    expected_code: str,
+    suffix: bytes,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     marker = "synthetic-sensitive-marker"
+    value = marker.encode() + suffix
     result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
     monkeypatch.setattr(
         secret_session_module.os,
@@ -242,7 +238,31 @@ def test_invalid_value_failures_do_not_echo_input(
     ):
         session.snapshot_git_password("root_token")
 
-    assert raised.value.code == expected_code
+    assert raised.value.code == "invalid_value"
+    assert marker not in str(raised.value)
+
+
+@_POSIX_SECRET_SOURCE
+def test_oversized_value_failure_does_not_echo_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "synthetic-sensitive-marker"
+    value = marker.encode() + b"x" * (65_526 - len(marker))
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    monkeypatch.setattr(
+        secret_session_module.os,
+        "environb",
+        {b"CDH_TEST_ROOT_TOKEN": value},
+    )
+
+    with (
+        HostSecretSession.from_configuration(result) as session,
+        pytest.raises(HostSecretSessionError) as raised,
+    ):
+        session.snapshot_git_password("root_token")
+
+    assert raised.value.code == "source_too_large"
     assert marker not in str(raised.value)
 
 

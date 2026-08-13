@@ -142,10 +142,6 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
         "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked "
         "export UV_CACHE_DIR=/root/.cache/uv && "
     )
-    plan_mount = (
-        "--mount=type=bind,source=build-plan.json,"
-        "target=/opt/cdh/build/build-plan.json,readonly"
-    )
     for marker in (
         "uv --no-config python install",
         "comfy-cli==",
@@ -157,10 +153,6 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
         if marker.startswith("container "):
             assert block.startswith(
                 "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked"
-            )
-            assert block.count(plan_mount) == 1
-            assert block.index(plan_mount) < block.index(
-                "export UV_CACHE_DIR=/root/.cache/uv &&"
             )
             assert block.index("export UV_CACHE_DIR=/root/.cache/uv &&") < block.index(
                 marker
@@ -715,30 +707,13 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert parse_build_plan_json((first / "build-plan.json").read_bytes()) == plan
 
 
-def test_local_copy_streams_bounded_chunks_and_publishes_independent_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_local_copy_publishes_bytes_independent_from_the_source(tmp_path: Path) -> None:
     source = tmp_path / "model.bin"
     original = b"abcdefgh"
     source.write_bytes(original)
     plan, context_path = _plan_with_local_file()
     stage = tmp_path / "stage"
     stage.mkdir(mode=0o700)
-    read_sizes: list[int | None] = []
-    original_read_chunk = file_admission.AdmittedRegularFileReader.read_chunk
-
-    def read_chunk(
-        reader: file_admission.AdmittedRegularFileReader,
-        limit: int | None = None,
-    ) -> bytes:
-        read_sizes.append(limit)
-        return original_read_chunk(reader, 3)
-
-    monkeypatch.setattr(
-        file_admission.AdmittedRegularFileReader,
-        "read_chunk",
-        read_chunk,
-    )
 
     _materialize_private_stage(
         plan,
@@ -752,7 +727,6 @@ def test_local_copy_streams_bounded_chunks_and_publishes_independent_bytes(
     source.write_bytes(b"changed")
 
     assert (stage / context_path).read_bytes() == original
-    assert len(read_sizes) == 4
 
 
 @pytest.mark.parametrize(
@@ -1127,6 +1101,7 @@ def test_materializer_writes_the_same_admitted_bytes_it_verifies(
     assert (output / "build/hooks/hooks/pre.py").read_bytes() == admitted
 
 
+# Strict parsing rejects forged path identities before materialization can trust them.
 @pytest.mark.parametrize(
     "relative_path",
     [

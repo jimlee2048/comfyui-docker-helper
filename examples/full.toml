@@ -140,28 +140,30 @@ min_split_size = "1M"
 # not resume, and any clean fallback still consumes the next available attempt.
 resume_download = true
 
-# Build-only downloader credential catalog. Validation and rendering check these
-# placeholders without reading their sources; host build requires the complete
-# distinct Secret set when this configuration contains an effective HTTPX file.
+# Optional build-only downloader credentials. To opt in, uncomment a Secret
+# definition together with every complete route that references it. If any build
+# [[files]] entry resolves to HTTPX, host build requires every distinct Secret
+# referenced by all active downloader routes.
 # Build routes and Secret sources are never baked into runtime configuration.
-[secrets.example_download_env]
-env = "CDH_EXAMPLE_DOWNLOAD_TOKEN"
-
-[secrets.example_download_file]
+#
+# [secrets.example_download_env]
+# env = "CDH_EXAMPLE_DOWNLOAD_TOKEN"
+#
+# [secrets.example_download_file]
 # Relative host Secret files use the first -f file's real parent as their base.
-file = "secrets/example-download-token"
-
-[[cdh.downloader.credentials]]
+# file = "secrets/example-download-token"
+#
+# [[cdh.downloader.credentials]]
 # Exact scheme/host/effective port plus raw path-segment prefix. Query selectors
 # are unsupported. Longest match wins independently for every HTTPX request.
-match = "https://models.example.test/private/"
-type = "bearer"
-token = { secret = "example_download_env" }
-
-[[cdh.downloader.credentials]]
-match = "https://models.example.test/private/team/"
-type = "bearer"
-token = { secret = "example_download_file" }
+# match = "https://models.example.test/private/"
+# type = "bearer"
+# token = { secret = "example_download_env" }
+#
+# [[cdh.downloader.credentials]]
+# match = "https://models.example.test/private/team/"
+# type = "bearer"
+# token = { secret = "example_download_file" }
 
 [build]
 # Optional for render. Required by host build when no CLI -t/--tag is supplied.

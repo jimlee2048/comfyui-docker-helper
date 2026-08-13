@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,10 +13,14 @@ import pytest
 
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
+    LocalFilePlan,
     build_plan_digest,
     dump_build_plan_json,
 )
-from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
+from comfyui_docker_helper.container.build_plan_input import (
+    BuildPlanInputAdmission,
+    FinalManifestLocalFileInput,
+)
 from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
@@ -23,6 +28,25 @@ def _write_plan(path: Path) -> tuple[BuildPlan, str]:
     plan = build_plan(final_config(), accepted_resolution())
     path.write_bytes(dump_build_plan_json(plan))
     return plan, build_plan_digest(plan)
+
+
+def _plan_with_local_file(*, locked: bool) -> BuildPlan:
+    plan = build_plan(final_config(), accepted_resolution())
+    digest = f"sha256:{'a' * 64}" if locked else None
+    relative_target = "models/model.bin"
+    local = LocalFilePlan(
+        type="local",
+        target="/workspace/ComfyUI/models/model.bin",
+        relative_target=relative_target,
+        context_path=(
+            "build/files/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+        ),
+        verification="sha256" if locked else "unverified-local",
+        digest=digest,
+    )
+    return plan.model_copy(
+        update={"files": plan.files.model_copy(update={"files": (local,)})}
+    )
 
 
 def test_admission_projects_authenticated_plan_for_container_consumers(
@@ -45,6 +69,24 @@ def test_admission_projects_authenticated_plan_for_container_consumers(
     assert admission.file_downloads() == (
         plan.files,
         plan.application.paths.comfyui,
+    )
+
+
+@pytest.mark.parametrize("locked", [True, False], ids=["locked", "unlocked"])
+def test_final_projection_retains_local_identity_without_context_locator(
+    locked: bool,
+) -> None:
+    plan = _plan_with_local_file(locked=locked)
+
+    projected = BuildPlanInputAdmission(plan).final_manifest().files
+
+    assert projected == (
+        FinalManifestLocalFileInput(
+            type="local",
+            target="/workspace/ComfyUI/models/model.bin",
+            verification="sha256" if locked else "unverified-local",
+            digest=f"sha256:{'a' * 64}" if locked else None,
+        ),
     )
 
 

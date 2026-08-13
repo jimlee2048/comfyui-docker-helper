@@ -137,11 +137,10 @@ def test_downloader_credentials_use_typed_bearer_secret_references() -> None:
     )
 
 
-def test_downloader_credential_routes_warn_deduplicate_and_require_httpx() -> None:
+def test_downloader_credential_routes_report_route_and_reference_diagnostics() -> None:
     document = _document()
     document["secrets"] = {"model_read": {"env": "MODEL_TOKEN"}}
     document["cdh"] = {
-        "default_downloader": "aria2",
         "downloader": {
             "credentials": [
                 {
@@ -157,17 +156,9 @@ def test_downloader_credential_routes_warn_deduplicate_and_require_httpx() -> No
             ]
         },
     }
-    document["files"] = [
-        {
-            "type": "http",
-            "url": "http://example.com/models/model.bin?download=true",
-            "target_dir": "models/checkpoints",
-            "filename": "model.bin",
-        }
-    ]
     config = validate_final_config_structure(document)
 
-    assert [(item.path, item.code, item.severity) for item in _diagnostics(config)] == [
+    assert {(item.path, item.code, item.severity) for item in _diagnostics(config)} == {
         (
             ("cdh", "downloader", "credentials", 0, "match"),
             "downloader_credential.insecure_http",
@@ -195,15 +186,45 @@ def test_downloader_credential_routes_warn_deduplicate_and_require_httpx() -> No
             "secret.unknown_reference",
             DiagnosticSeverity.ERROR,
         ),
+    }
+
+
+def test_authenticated_download_requires_httpx_with_actionable_hint() -> None:
+    document = _document()
+    document["secrets"] = {"model_read": {"env": "MODEL_TOKEN"}}
+    document["cdh"] = {
+        "default_downloader": "aria2",
+        "downloader": {
+            "credentials": [
+                {
+                    "match": "https://example.com/models/",
+                    "type": "bearer",
+                    "token": {"secret": "model_read"},
+                }
+            ]
+        },
+    }
+    document["files"] = [
+        {
+            "type": "http",
+            "url": "https://example.com/models/model.bin?download=true",
+            "target_dir": "models/checkpoints",
+            "filename": "model.bin",
+        }
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
         (
             ("files", 0, "downloader"),
             "file.authenticated_downloader_requires_httpx",
             DiagnosticSeverity.ERROR,
-        ),
+        )
     ]
     diagnostic = next(
         item
-        for item in _diagnostics(config)
+        for item in diagnostics
         if item.code == "file.authenticated_downloader_requires_httpx"
     )
     assert diagnostic.hint is not None and "httpx" in diagnostic.hint

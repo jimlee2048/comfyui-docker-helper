@@ -113,7 +113,7 @@ class FinalDownloaderConfig(FinalConfigModel):
 
 
 class FinalSecretSourceConfig(FinalConfigModel):
-    """One lazily resolved host Secret source."""
+    """One logical Secret source definition."""
 
     env: str | None = None
     file: str | None = None

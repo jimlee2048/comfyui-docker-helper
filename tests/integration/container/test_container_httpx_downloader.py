@@ -164,9 +164,9 @@ def test_httpx_reselects_cdh_authorization_for_every_redirect(
     def handler(request: httpx.Request) -> httpx.Response:
         observed.append((str(request.url), request.headers.get("Authorization")))
         locations = {
-            "/private/start": "/private/next",
-            "/private/next": "/public",
-            "/public": "https://other.test/protected/final",
+            "/private/start": "/private/next?download=next",
+            "/private/next": "/public?signature=public",
+            "/public": "https://other.test/protected/final?download=final",
         }
         location = locations.get(request.url.path)
         if location is not None:
@@ -178,16 +178,25 @@ def test_httpx_reselects_cdh_authorization_for_every_redirect(
         credential_policy=_PathCredentialPolicy(),
         log=lambda _: None,
     ).download(
-        _request(tmp_path, url="https://example.test/private/start"),
+        _request(
+            tmp_path,
+            url="https://example.test/private/start?download=initial",
+        ),
         _settings(),
     )
 
     assert isinstance(result, TransportSuccess)
     assert observed == [
-        ("https://example.test/private/start", "Bearer route-a"),
-        ("https://example.test/private/next", "Bearer route-a"),
-        ("https://example.test/public", None),
-        ("https://other.test/protected/final", "Bearer route-b"),
+        (
+            "https://example.test/private/start?download=initial",
+            "Bearer route-a",
+        ),
+        ("https://example.test/private/next?download=next", "Bearer route-a"),
+        ("https://example.test/public?signature=public", None),
+        (
+            "https://other.test/protected/final?download=final",
+            "Bearer route-b",
+        ),
     ]
 
 

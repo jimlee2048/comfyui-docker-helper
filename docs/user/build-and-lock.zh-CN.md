@@ -179,9 +179,9 @@ cdh host render \
 
 ## 经过认证的 HTTPX 文件下载
 
-Downloader credential route 只授权 cdh 的 HTTPX 文件下载指令。`validate` 与 `render` 会检查 route 结构及 Secret reference，但不读取 Secret 值。构建中只要存在至少一个生效的 HTTPX 文件，`host build` 就会在启动 Buildx 前为 effective downloader route 引用的每个 distinct Secret 创建 snapshot。它只把这些 snapshot 作为 required BuildKit Secret mount 提供给 `cdh container download-files`，因此 redirect 可以安全切换到任意已声明 route；installer、Git、Hook 及其他构建指令都不会获得 downloader credential grant。
+Downloader credential route 只授权 cdh 的 HTTPX 文件下载指令。`validate` 与 `render` 会检查 route 结构及 Secret reference，但不读取 Secret 值。构建中只要存在至少一个生效的 HTTPX 文件，`host build` 就会在启动 Buildx 前解析 effective downloader route 引用的完整 distinct Secret 集，并只将其授予文件下载指令。因此 redirect 可以选择另一条已声明 route，而 installer、Git、Hook 及其他构建指令都不会获得 downloader credential。
 
-完整的 canonical route、Bearer type、逻辑 Secret 名称和稳定 mount ID 是安全的 BuildPlan metadata，因此会影响镜像 identity。Secret source kind 与 locator、token bytes、生成的 `Authorization` 值及 token digest 都不会进入 lock、BuildPlan、context metadata、manifest、镜像 metadata/history 或 cdh 自有输出。镜像内 helper 只读取实际 request 所选择的 Secret，并在发送前独立校验 mount 中的 bytes。构建 route 和 Secret definition 不会进入固化的运行时配置。
+Route pattern 与逻辑 Secret 名称属于普通构建 metadata。Secret source locator、解析后的 token 值、生成的 authorization header 及 token digest 不会持久化到 cdh 管理的 lock、BuildPlan、context metadata、manifest、镜像 metadata/history 或命令输出。构建 route 和 Secret definition 不会固化到运行时配置；部署时下载需要认证时，应独立声明 runtime route 和容器内可见的 Secret source。
 
 手动构建已渲染 context 会绕过宿主机 Secret session。请按渲染 Dockerfile 中显示的稳定 `cdh-downloader-credential-<name>` ID 提供每个必要的 file-backed mount。不要通过 build argument 传入 token，也不要把 token 放进 context。
 

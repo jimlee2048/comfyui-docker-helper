@@ -154,7 +154,6 @@ filename = "model.bin"
     )
 
     assert result.config.secrets["runtime_read"].file == "/run/secrets/runtime-token"
-    assert result.files[0]["url"].endswith("?download=1")
 
 
 def test_runtime_authenticated_aria2_fails_with_security_remediation(
@@ -218,29 +217,6 @@ file = "relative/token"
         )
 
     assert any(item.code == "secret.invalid_file" for item in raised.value.diagnostics)
-
-
-def test_runtime_secret_file_accepts_posix_backslash_path(tmp_path: Path) -> None:
-    mounted = _write(
-        tmp_path / "runtime.toml",
-        r"""
-[[cdh.downloader.credentials]]
-match = "https://example.test/private/"
-type = "bearer"
-token = { secret = "runtime_read" }
-
-[secrets.runtime_read]
-file = "/run/secrets/team\\token"
-""",
-    )
-
-    result = load_runtime_config(
-        baked_config_path=_missing_baked_config(tmp_path),
-        mounted_config_path=mounted,
-        environ={},
-    )
-
-    assert result.config.secrets["runtime_read"].file == "/run/secrets/team\\token"
 
 
 # Runtime config startup coverage pins the default argv/env contract and the

@@ -12,12 +12,14 @@ import pytest
 
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
+    LocalFilePlan,
     build_plan_digest,
     dump_build_plan_json,
     manifest_binding,
 )
 from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.config.final_manifest import (
+    LocalFileEvidence,
     dump_final_manifest,
     final_build_check_ids,
 )
@@ -29,6 +31,24 @@ from comfyui_docker_helper.container.final_manifest_writer import (
 )
 from tests.build_plan_support import accepted_resolution, build_plan, final_config
 from tests.final_manifest_support import manifest_for_plan
+
+
+def _plan_with_local_file(*, locked: bool) -> BuildPlan:
+    plan = build_plan(final_config(), accepted_resolution())
+    relative_target = "models/model.bin"
+    local = LocalFilePlan(
+        type="local",
+        target="/workspace/ComfyUI/models/model.bin",
+        relative_target=relative_target,
+        context_path=(
+            "build/files/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+        ),
+        verification="sha256" if locked else "unverified-local",
+        digest=f"sha256:{'a' * 64}" if locked else None,
+    )
+    return plan.model_copy(
+        update={"files": plan.files.model_copy(update={"files": (local,)})}
+    )
 
 
 # Final comfy-cli evidence executes the tool interpreter and proves its isolation.
@@ -156,6 +176,41 @@ def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) 
         manager_enabled=plan.application.comfyui.manager is not None,
     )
     assert projection.shutdown_timeout == plan.runtime.shutdown_timeout
+
+
+@pytest.mark.parametrize("locked", [True, False], ids=["locked", "unlocked"])
+def test_local_file_evidence_preserves_declared_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    locked: bool,
+) -> None:
+    plan = _plan_with_local_file(locked=locked)
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    observations: list[tuple[Path, Path, str | None]] = []
+
+    def verify(*, root: Path, target: Path, expected_checksum: str | None) -> None:
+        observations.append((root, target, expected_checksum))
+
+    monkeypatch.setattr(final_manifest_service, "verify_required_final", verify)
+
+    evidence = final_manifest_service._file_evidence(projection)
+
+    digest = f"sha256:{'a' * 64}" if locked else None
+    assert evidence == (
+        LocalFileEvidence(
+            type="local",
+            target="/workspace/ComfyUI/models/model.bin",
+            verification="sha256" if locked else "unverified-local",
+            intended_checksum=digest,
+            observed_checksum=digest,
+        ),
+    )
+    assert observations == [
+        (
+            Path("/workspace/ComfyUI"),
+            Path("/workspace/ComfyUI/models/model.bin"),
+            digest,
+        )
+    ]
 
 
 def test_final_manifest_observes_build_hook_domain_and_retained_bytes(

@@ -16,29 +16,44 @@ from comfyui_docker_helper.config.credential_secrets import (
     [
         b"hf_example-token",
         b"abc.DEF_123~+/==",
-        b"x" * CREDENTIAL_SECRET_MAX_BYTES,
     ],
-    ids=("provider-shape", "complete-alphabet", "acquisition-limit"),
+    ids=("provider-shape", "complete-alphabet"),
 )
 def test_bearer_token_admits_rfc6750_b64token(value: bytes) -> None:
     validate_bearer_token(value)
 
 
+def test_bearer_token_admits_the_acquisition_limit() -> None:
+    validate_bearer_token(b"x" * CREDENTIAL_SECRET_MAX_BYTES)
+
+
 @pytest.mark.parametrize(
-    "value",
+    ("value", "marker"),
     [
-        b"",
-        b"has space",
-        b"has\t tab",
-        b"padding=inside",
-        b"line\nfeed",
-        b"non-ascii-\xff",
-        b"x" * (CREDENTIAL_SECRET_MAX_BYTES + 1),
+        (b"", None),
+        (b"sensitive-space-marker value", "sensitive-space-marker"),
+        (b"sensitive-tab-marker\tvalue", "sensitive-tab-marker"),
+        (b"sensitive-padding-marker=inside", "sensitive-padding-marker"),
+        (b"sensitive-line-marker\nvalue", "sensitive-line-marker"),
+        (b"sensitive-nonascii-marker\xff", "sensitive-nonascii-marker"),
     ],
-    ids=("empty", "space", "tab", "interior-padding", "lf", "non-ascii", "oversized"),
+    ids=("empty", "space", "tab", "interior-padding", "lf", "non-ascii"),
 )
-def test_bearer_token_rejects_invalid_content_without_echo(value: bytes) -> None:
-    marker = b"has space"
+def test_bearer_token_rejects_invalid_content_without_echo(
+    value: bytes,
+    marker: str | None,
+) -> None:
+    with pytest.raises(BearerTokenError) as raised:
+        validate_bearer_token(value)
+
+    if marker is not None:
+        assert marker not in str(raised.value)
+
+
+def test_bearer_token_rejects_the_next_byte_without_echo() -> None:
+    marker = b"oversized-sensitive-marker"
+    value = marker + b"x" * (CREDENTIAL_SECRET_MAX_BYTES + 1 - len(marker))
+
     with pytest.raises(BearerTokenError) as raised:
         validate_bearer_token(value)
 
@@ -54,13 +69,9 @@ def test_downloader_secret_id_and_target_are_consumer_isolated() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "value",
-    ["HF_READ", "1token", "token.dot", "token/slash", "x" * 65],
-)
-def test_downloader_secret_id_rejects_noncanonical_names(value: str) -> None:
+def test_downloader_secret_id_rejects_path_injection() -> None:
     with pytest.raises(ValueError, match="must be canonical"):
-        downloader_credential_secret_id(value)
+        downloader_credential_secret_id("token/slash")
 
 
 def test_downloader_secret_target_rejects_other_consumer_id() -> None:

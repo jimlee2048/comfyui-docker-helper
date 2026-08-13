@@ -26,6 +26,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     DirectPythonRequestIdentity,
+    LocalFileLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciLockEntry,
@@ -63,6 +64,8 @@ from comfyui_docker_helper.config.canonical_request import (
     CustomNodeRequest,
     GitCredentialRouteRequest,
     GitNodeRequest,
+    HttpFileRequest,
+    LocalFileRequest,
     RegistryNodeRequest,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
@@ -828,10 +831,21 @@ class DownloaderPlan(_PlanModel):
     httpx: HttpxPlan
 
 
-class FilePlan(_PlanModel):
-    url: str
+class _FilePlan(_PlanModel):
     target: str
-    overwrite: bool
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, value: str) -> str:
+        target = _absolute_posix_path(value, "file target")
+        if is_reserved_file_target_name(PurePosixPath(target).name):
+            raise ValueError("file target uses the reserved staging filename")
+        return target
+
+
+class HttpFilePlan(_FilePlan):
+    type: Literal["http"]
+    url: str
     checksum: str | None = None
     downloader: Literal["aria2", "httpx"]
     download_mode: Literal["sync", "async"]
@@ -843,20 +857,56 @@ class FilePlan(_PlanModel):
     def _validate_url(cls, value: str) -> str:
         return validate_http_url(value, "file URL")
 
-    @field_validator("target")
-    @classmethod
-    def _validate_target(cls, value: str) -> str:
-        target = _absolute_posix_path(value, "file target")
-        if is_reserved_file_target_name(PurePosixPath(target).name):
-            raise ValueError("file target uses the reserved staging filename")
-        return target
-
     @field_validator("checksum")
     @classmethod
     def _validate_checksum(cls, value: str | None) -> str | None:
         if value is None:
             return None
         return validate_canonical_file_checksum(value)
+
+
+class LocalFilePlan(_FilePlan):
+    type: Literal["local"]
+    relative_target: str
+    context_path: str
+    verification: Literal["sha256", "unverified-local"]
+    digest: str | None = None
+
+    @field_validator("relative_target")
+    @classmethod
+    def _validate_relative_target(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or path.as_posix() != value
+            or ".." in path.parts
+        ):
+            raise ValueError("local file relative target must be canonical")
+        return value
+
+    @field_validator("context_path")
+    @classmethod
+    def _validate_context_path(cls, value: str) -> str:
+        if re.fullmatch(r"build/files/[0-9a-f]{64}", value) is None:
+            raise ValueError("local file context path must be canonical")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str | None) -> str | None:
+        return None if value is None else validate_sha256_digest(value)
+
+    @model_validator(mode="after")
+    def _validate_verification(self) -> LocalFilePlan:
+        if self.verification == "sha256" and self.digest is None:
+            raise ValueError("locked local file requires a digest")
+        if self.verification == "unverified-local" and self.digest is not None:
+            raise ValueError("unverified local file must omit a digest")
+        return self
+
+
+FilePlan = Annotated[HttpFilePlan | LocalFilePlan, Field(discriminator="type")]
 
 
 class FilesPhase(_PlanModel):
@@ -1029,6 +1079,14 @@ class BuildPlan(_PlanModel):
             raise ValueError("file targets must be strict descendants of ComfyUI")
         if len(file_targets) != len(set(file_targets)):
             raise ValueError("file targets must be unique")
+        for item in self.files.files:
+            if not isinstance(item, LocalFilePlan):
+                continue
+            if PurePosixPath(item.target) != comfyui_root / item.relative_target:
+                raise ValueError("local file target does not match relative target")
+            slot = hashlib.sha256(item.relative_target.encode("utf-8")).hexdigest()
+            if item.context_path != f"build/files/{slot}":
+                raise ValueError("local file context path does not match target")
         expected_launch_head = (
             str(PurePosixPath(self.application.paths.venv) / "bin" / "python"),
             str(PurePosixPath(self.application.paths.comfyui) / "main.py"),
@@ -1131,7 +1189,7 @@ def construct_build_plan(
     toolchain = _project_toolchain(graph, entries, used)
     application = _project_application(graph, entries, used, toolchain)
     custom_nodes = _project_custom_nodes(graph, entries, used)
-    files = _project_files(graph, runtime_provenance)
+    files = _project_files(graph, entries, used, runtime_provenance)
     runtime = _project_runtime(graph, entries, used, runtime_provenance)
     unused = sorted(set(entries) - used)
     if unused:
@@ -1398,14 +1456,17 @@ def _git_credential_route(route: GitCredentialRouteRequest) -> GitCredentialRout
 
 def _project_files(
     graph: CanonicalRequestGraph,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
     provenance: RuntimePlanningProvenance,
 ) -> FilesPhase:
-    if len(provenance.file_downloader_explicit) != len(graph.files):
+    http_file_count = sum(isinstance(item, HttpFileRequest) for item in graph.files)
+    if len(provenance.file_downloader_explicit) != http_file_count:
         raise ValueError("runtime file downloader provenance does not match config")
-    if len(provenance.file_download_mode_explicit) != len(graph.files):
+    if len(provenance.file_download_mode_explicit) != http_file_count:
         raise ValueError("runtime file download-mode provenance does not match config")
-    downloader_explicit = provenance.file_downloader_explicit
-    mode_explicit = provenance.file_download_mode_explicit
+    downloader_explicit = iter(provenance.file_downloader_explicit)
+    mode_explicit = iter(provenance.file_download_mode_explicit)
     request = graph.downloader
     return FilesPhase(
         downloader=DownloaderPlan(
@@ -1424,18 +1485,63 @@ def _project_files(
         default_download_mode=request.default_download_mode,
         download_max_attempts=request.download_max_attempts,
         files=tuple(
-            FilePlan(
-                url=item.url,
-                target=item.target,
-                overwrite=item.overwrite,
-                checksum=item.checksum,
-                downloader=item.downloader,
-                download_mode=item.download_mode,
-                downloader_explicit=downloader_explicit[index],
-                download_mode_explicit=mode_explicit[index],
+            _project_file(
+                item,
+                entries,
+                used,
+                downloader_explicit=(
+                    next(downloader_explicit)
+                    if isinstance(item, HttpFileRequest)
+                    else False
+                ),
+                download_mode_explicit=(
+                    next(mode_explicit) if isinstance(item, HttpFileRequest) else False
+                ),
             )
-            for index, item in enumerate(graph.files)
+            for item in graph.files
         ),
+    )
+
+
+def _project_file(
+    item: HttpFileRequest | LocalFileRequest,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+    *,
+    downloader_explicit: bool,
+    download_mode_explicit: bool,
+) -> HttpFilePlan | LocalFilePlan:
+    if isinstance(item, HttpFileRequest):
+        return HttpFilePlan(
+            type="http",
+            url=item.url,
+            target=item.target,
+            checksum=item.checksum,
+            downloader=item.downloader,
+            download_mode=item.download_mode,
+            downloader_explicit=downloader_explicit,
+            download_mode_explicit=download_mode_explicit,
+        )
+    if not isinstance(item, LocalFileRequest):  # pragma: no cover - closed union
+        raise AssertionError("unsupported canonical file request")
+    digest = None
+    verification: Literal["sha256", "unverified-local"] = "unverified-local"
+    if item.content_lock:
+        entry = _take(
+            entries,
+            used,
+            ("files", "local", item.relative_target),
+            LocalFileLockEntry,
+        )
+        digest = entry.digest
+        verification = "sha256"
+    return LocalFilePlan(
+        type="local",
+        target=item.target,
+        relative_target=item.relative_target,
+        context_path=item.context_path,
+        verification=verification,
+        digest=digest,
     )
 
 

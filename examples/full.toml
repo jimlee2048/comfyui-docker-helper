@@ -98,6 +98,10 @@ index_base_url = "https://download.pytorch.org/whl"
 extra_packages = []
 
 [cdh]
+# Host-only local-file context materialization. Default: "auto". Supported:
+# "auto" (try copy-on-write clone, then copy only when unavailable), "clone"
+# (require clone support), and "copy" (always stream-copy).
+local_file_mode = "auto"
 # Default: "aria2". Supported: "aria2", "httpx".
 # Per-file downloader values override this default.
 default_downloader = "aria2"
@@ -265,29 +269,40 @@ post_install_hooks = ["post.sh"]
 # post_install_hooks = []
 
 [[files]]
+# Required source variant. Supported by build and runtime.
+type = "http"
 # Required. Must be an HTTP(S) URL with a host.
 url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
 # Required. Relative to COMFYUI_PATH. Redundant "/", "." segments, and a
 # trailing slash are normalized. Use "." or "./" for the ComfyUI root.
 # Absolute paths, empty values, control characters, and ".." are rejected.
-dir = "models/example-docs"
+target_dir = "models/example-docs"
 # Required. Must be a single filename component.
 filename = "comfyui-readme-aria2.md"
 # Optional. Trusted SHA-256 obtained independently from the download origin.
 # Hex case is normalized to lowercase; cdh never fetches or infers this value.
 # checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-# Default: false. Permits replacement of unknown or mismatching content. A
-# matching configured checksum always keeps the existing regular file.
-overwrite = false
 # Default: cdh.default_downloader. Supported: "aria2", "httpx".
 downloader = "aria2"
 # Default: cdh.default_download_mode. Supported: "sync", "async".
 download_mode = "sync"
 
 [[files]]
+type = "http"
 url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
-dir = "models/example-docs"
+target_dir = "models/example-docs"
 filename = "comfyui-readme-httpx.md"
-overwrite = true
 downloader = "httpx"
 download_mode = "sync"
+
+[[files]]
+# Build-only host-local source. Relative paths use the real parent of the first
+# -f file as their base; absolute paths are also accepted. The source must be
+# one regular file without symlink or reparse-point components.
+type = "local"
+path = "local-files/example-model.txt"
+target_dir = "models/example-docs"
+filename = "local-example-model.txt"
+# Default: false. true streams SHA-256 into the canonical lock and verifies the
+# same identity again during context materialization; false avoids that hash.
+content_lock = false

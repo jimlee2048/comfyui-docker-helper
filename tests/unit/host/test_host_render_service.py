@@ -56,6 +56,7 @@ from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
+    LocalFileEntryAcquirer,
     ProviderIdentityAcquirer,
 )
 from comfyui_docker_helper.host.identity_providers import (
@@ -1106,13 +1107,15 @@ default_downloader = "httpx"
 default_download_mode = "async"
 
 [[files]]
+type = "http"
 url = "https://example.test/implicit.bin"
-dir = "models"
+target_dir = "models"
 filename = "implicit.bin"
 
 [[files]]
+type = "http"
 url = "https://example.test/explicit.bin"
-dir = "models"
+target_dir = "models"
 filename = "explicit.bin"
 downloader = "httpx"
 download_mode = "async"
@@ -1150,6 +1153,167 @@ download_mode = "async"
     )
     assert runtime.config.cdh.default_downloader == "aria2"
     assert runtime.config.cdh.default_download_mode == "sync"
+
+
+def test_locked_local_file_uses_first_config_parent_and_omits_locator(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "assets" / "model.bin"
+    source.parent.mkdir()
+    source.write_bytes(b"local-model")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + """
+[[files]]
+type = "local"
+path = "assets/../assets/model.bin"
+target_dir = "models"
+filename = "model.bin"
+content_lock = true
+"""
+    )
+    output = tmp_path / "context"
+
+    prepared = _prepare(config, output, FakeAcquirer())
+
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    assert lock.files.local[0].digest == (
+        f"sha256:{hashlib.sha256(b'local-model').hexdigest()}"
+    )
+    serialized = (output / "build-plan.json").read_text()
+    assert "assets/model.bin" not in serialized
+    assert prepared.plan.files.files[0].verification == "sha256"
+
+
+@pytest.mark.parametrize("locator_kind", ["relative", "absolute"])
+def test_unlocked_local_file_admits_both_locator_shapes_without_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    locator_kind: str,
+) -> None:
+    config_dir = tmp_path / "configuration"
+    source = config_dir / "assets" / "model.bin"
+    source.parent.mkdir(parents=True)
+    original = b"unlocked local model"
+    source.write_bytes(original)
+    locator = "assets/model.bin" if locator_kind == "relative" else source.as_posix()
+    config = config_dir / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[cdh]
+local_file_mode = "copy"
+
+[[files]]
+type = "local"
+path = "{locator}"
+target_dir = "models"
+filename = "model.bin"
+'''
+    )
+    output = tmp_path / "context"
+
+    monkeypatch.setattr(
+        LocalFileEntryAcquirer,
+        "acquire",
+        lambda *_args: pytest.fail("unlocked local file must not be hashed"),
+    )
+    prepared = _prepare(config, output, FakeAcquirer())
+    local = prepared.plan.files.files[0]
+    source.write_bytes(b"source changed after publication")
+
+    assert local.verification == "unverified-local"
+    assert (
+        parse_canonical_lock_toml(
+            (output / "config.lock.toml").read_bytes()
+        ).files.local
+        == ()
+    )
+    assert (output / local.context_path).read_bytes() == original
+
+
+def test_locked_mode_does_not_compare_unlocked_local_source_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"initial unlocked bytes")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[cdh]
+local_file_mode = "copy"
+
+[[files]]
+type = "local"
+path = "{source.as_posix()}"
+target_dir = "models"
+filename = "model.bin"
+'''
+    )
+    output = tmp_path / "context"
+    _prepare(config, output, FakeAcquirer())
+    source.write_bytes(b"changed unlocked bytes")
+    monkeypatch.setattr(
+        render_service_module,
+        "_regular_files_equal",
+        lambda *_args: pytest.fail("--locked must not compare unlocked source bytes"),
+    )
+
+    _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        options=PlanningOptions(locked=True),
+    )
+
+
+def test_local_file_source_must_not_overlap_rendered_context(tmp_path: Path) -> None:
+    output = tmp_path / "context"
+    source = output / "model.bin"
+    source.parent.mkdir()
+    source.write_bytes(b"local-model")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f"""
+[[files]]
+type = "local"
+path = "{source.as_posix()}"
+target_dir = "models"
+filename = "model.bin"
+"""
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.input_output_overlap"
+
+
+def test_invalid_local_file_locator_is_a_content_safe_render_diagnostic(
+    tmp_path: Path,
+) -> None:
+    marker = "review-sensitive-locator"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f"""
+[[files]]
+type = "local"
+path = "\\u0000{marker}"
+target_dir = "models"
+filename = "model.bin"
+"""
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, tmp_path / "context", FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.input_output_inspect_failed"
+    assert marker not in str(raised.value)
 
 
 @pytest.mark.parametrize("source_kind", ["build", "runtime"])
@@ -1934,6 +2098,161 @@ def test_check_compares_complete_path_type_and_bytes_without_following(
 
     assert raised.value.diagnostics[0].code == "render.context_changed"
     assert outside.read_text() == "outside sentinel"
+
+
+def test_check_unlocked_local_file_rejects_size_before_reading_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[cdh]
+local_file_mode = "copy"
+
+[[files]]
+type = "local"
+path = "{source.as_posix()}"
+target_dir = "models"
+filename = "model.bin"
+'''
+    )
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = output / prepared.plan.files.files[0].context_path
+    context_file.write_bytes(b"different size")
+
+    monkeypatch.setattr(
+        render_service_module.AdmittedRegularFileReader,
+        "read_chunk",
+        lambda *_args, **_kwargs: pytest.fail(
+            "size mismatch must not consume file bytes"
+        ),
+    )
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_check_unlocked_local_file_detects_same_size_byte_mismatch(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[cdh]
+local_file_mode = "copy"
+
+[[files]]
+type = "local"
+path = "{source.as_posix()}"
+target_dir = "models"
+filename = "model.bin"
+'''
+    )
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = output / prepared.plan.files.files[0].context_path
+    context_file.write_bytes(b"changed!")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_unlocked_local_file_comparison_ignores_short_read_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Path("/source.bin")
+    context = Path("/context.bin")
+    chunks = {
+        source: [b"a", b"bc", b"def", b""],
+        context: [b"ab", b"cdef", b""],
+    }
+
+    def operate(path: Path, operation):
+        reads = iter(chunks[path])
+        reader = render_service_module.AdmittedRegularFileReader(
+            6,
+            None,
+            lambda _limit=None: next(reads, b""),
+        )
+        return operation(reader)
+
+    monkeypatch.setattr(
+        render_service_module,
+        "operate_regular_absolute_file",
+        operate,
+    )
+
+    assert render_service_module._regular_files_equal(source, context)
+
+
+def test_check_locked_local_file_hashes_context_against_intended_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[cdh]
+local_file_mode = "copy"
+
+[[files]]
+type = "local"
+path = "{source.as_posix()}"
+target_dir = "models"
+filename = "model.bin"
+content_lock = true
+'''
+    )
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = output / prepared.plan.files.files[0].context_path
+    context_file.write_bytes(b"changed!")
+    checked: list[Path] = []
+    consume = render_service_module.consume_regular_absolute_file
+
+    def observe(path: Path, callback) -> object:
+        checked.append(path)
+        return consume(path, callback)
+
+    monkeypatch.setattr(
+        render_service_module,
+        "consume_regular_absolute_file",
+        observe,
+    )
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+    assert checked == [context_file]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX rendered-mode contract")

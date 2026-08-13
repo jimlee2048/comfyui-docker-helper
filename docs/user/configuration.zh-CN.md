@@ -29,7 +29,7 @@ cdh host validate \
 - `system.extra_packages` 使用允许的 Debian 包名；
 - `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras，以及 canonical selector 表示；
 - `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID，或精确的直接 Git URL；
-- `files` 使用规范化后的 `dir` 加 `filename` 目标；
+- `files` 使用规范化后的 `target_dir` 加 `filename` 目标；
 - `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
 对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras 或 selector 不同，会继续保留，让生效配置校验报告冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
@@ -42,7 +42,7 @@ Registry ID 的大小写变体表示同一资源，并在原位置覆盖，靠�
 
 即使原始 `match` 字符串不同，canonical 等价的 credential context 也表示同一路由。靠后的路由会在原位置原子替换完整的靠前路由；路由字段不会逐字段合并。同一层中存在歧义的重复 route 仍然无效。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子来源定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
 
-对于 `[[files]]`，cdh 会将多余的 `/`、`.` 路径段和末尾 `/` 视为同一目录的等价写法。例如，`models//checkpoints/` 会规范化为 `models/checkpoints`。使用 `dir = "."` 或 `dir = "./"` 可将文件直接放在 ComfyUI 根目录。空目录、绝对目录、控制字符以及任何明确写出的 `..` 路径段仍然无效。
+对于 `[[files]]`，cdh 会将多余的 `/`、`.` 路径段和末尾 `/` 视为同一目录的等价写法。例如，`models//checkpoints/` 会规范化为 `models/checkpoints`。使用 `target_dir = "."` 或 `target_dir = "./"` 可将文件直接放在 ComfyUI 根目录。空目录、绝对目录、控制字符以及任何明确写出的 `..` 路径段仍然无效。相同规范化目标的 overlay 会修补相同 `type` 的条目；改变 `type` 会完整替换该条目，避免继承另一种来源专属的字段。
 
 例如，将以下内容保存为 `local.toml`，以禁用 comfy-cli，并移除完整示例所选择的节点和文件：
 
@@ -86,6 +86,32 @@ Manager 和 comfy-cli 是分别独立控制的可选功能。省略其开关时�
 每个节点都可以指定安装前或安装后 Hook。Hook 路径相对于通过 `--build-hooks-dir` 显式传入的目录；不存在隐式 Hook 根目录。仓库中包含简短的 [`pre.sh`](../../examples/build-hooks/pre.sh) 和 [`post.sh`](../../examples/build-hooks/post.sh) 示例。
 
 构建 Hook 和自定义节点安装程序会在镜像构建期间执行由用户选择的可信代码。使用前请检查这些代码；不要在 Hook 文件中放置机密信息，因为其内容会保留在镜像及其各层中。
+
+## 在镜像构建期间添加文件
+
+每个构建文件都要显式选择 HTTP 或宿主机本地来源。两种 variant 只共享镜像中的目标：
+
+```toml
+[[files]]
+type = "http"
+url = "https://example.test/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "remote-model.safetensors"
+downloader = "httpx"
+
+[[files]]
+type = "local"
+path = "artifacts/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "local-model.safetensors"
+content_lock = false
+```
+
+HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地文件改用 `path` 和可选的 `content_lock`，不使用 downloader，也不接受手写 checksum。所有构建文件都是权威内容：成功的构建会把声明的内容放到目标位置，因此构建配置没有 `overwrite` 字段。
+
+相对的本地 `path` 统一以第一个 `-f` 配置文件的真实父目录作为基准。绝对路径和规范化后的父目录穿越均可使用。所选来源必须是宿主机上的单个普通文件；cdh 会拒绝观测到的符号链接、Windows junction 和其他 reparse point、目录及特殊文件。该 locator 是普通的非 Secret 宿主机输入：它不会序列化到 lock、BuildPlan、渲染 metadata、manifest 或镜像配置中，但也不享受 Secret 值处理或脱敏。
+
+`content_lock = false` 是默认值，可避免 cdh 在规划期间执行 SHA-256 扫描。`content_lock = true` 会以流式方式为来源计算 SHA-256 identity，将其存入 canonical lock 和 BuildPlan，并在 materialization 上下文时再次验证该 identity。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明上下文 materialization mode、`--check` 成本、向远程 builder 传输以及镜像放置行为。本地来源仅用于构建；只有 HTTP 文件声明会成为固化的运行时默认配置。
 
 ## 提供私有 HTTP(S) Git 凭据
 

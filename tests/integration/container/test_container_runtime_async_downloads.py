@@ -255,26 +255,30 @@ def test_mixed_runtime_downloads_preserve_queue_order(
 default_downloader = "httpx"
 
 [[files]]
+type = "http"
 url = "https://example.com/async-a.bin"
-dir = "models"
+target_dir = "models"
 filename = "async-a.bin"
 download_mode = "async"
 
 [[files]]
+type = "http"
 url = "https://example.com/sync-a.bin"
-dir = "models"
+target_dir = "models"
 filename = "sync-a.bin"
 download_mode = "sync"
 
 [[files]]
+type = "http"
 url = "https://example.com/async-b.bin"
-dir = "models"
+target_dir = "models"
 filename = "async-b.bin"
 download_mode = "async"
 
 [[files]]
+type = "http"
 url = "https://example.com/sync-b.bin"
-dir = "models"
+target_dir = "models"
 filename = "sync-b.bin"
 download_mode = "sync"
 """,
@@ -366,8 +370,9 @@ default_downloader = "httpx"
 port = 8299
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -459,8 +464,9 @@ default_download_mode = "async"
 default_downloader = "httpx"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -556,8 +562,9 @@ default_download_mode = "async"
 default_downloader = "httpx"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -632,8 +639,9 @@ default_download_mode = "sync"
 default_downloader = "httpx"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -715,8 +723,9 @@ default_download_mode = "async"
 default_downloader = "httpx"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -844,8 +853,9 @@ default_download_mode = "async"
 default_downloader = "httpx"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 overwrite = true
 """,
@@ -942,13 +952,15 @@ download_max_attempts = 2
 download_failure_policy = "{policy}"
 
 [[files]]
+type = "http"
 url = "https://example.com/a.bin"
-dir = "models"
+target_dir = "models"
 filename = "a.bin"
 
 [[files]]
+type = "http"
 url = "https://example.com/b.bin"
-dir = "models"
+target_dir = "models"
 filename = "b.bin"
 """,
     )
@@ -1007,8 +1019,9 @@ filename = "b.bin"
             for item in runtime_files_module.build_runtime_file_plan(
                 [
                     {
+                        "type": "http",
                         "url": "https://example.com/a.bin",
-                        "dir": "models",
+                        "target_dir": "models",
                         "filename": "a.bin",
                     }
                 ],
@@ -1054,8 +1067,9 @@ default_downloader = "httpx"
 shutdown_timeout = 2.3
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -1128,8 +1142,9 @@ download_max_attempts = 2
 download_failure_policy = "continue"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )

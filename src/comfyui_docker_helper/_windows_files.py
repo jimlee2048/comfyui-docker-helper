@@ -414,7 +414,32 @@ class _HandleObservation:
 
 def read_regular_absolute_file(path: str, *, max_bytes: int | None) -> bytes:
     """Read one regular local Windows file through its admitted Win32 handle."""
-    return _read_regular_absolute_file(path, max_bytes=max_bytes, api=_PyWin32Api())
+    chunks: list[bytes] = []
+    consume_regular_absolute_file(path, max_bytes=max_bytes, consume=chunks.append)
+    return b"".join(chunks)
+
+
+def consume_regular_absolute_file(
+    path: str,
+    *,
+    max_bytes: int | None,
+    consume: Callable[[bytes], None],
+) -> int:
+    """Stream one regular local Windows file through its admitted handle."""
+    return _consume_regular_absolute_file(
+        path,
+        max_bytes=max_bytes,
+        consume=consume,
+        api=_PyWin32Api(),
+    )
+
+
+def operate_regular_absolute_file[T](
+    path: str,
+    operation: Callable[[int, Callable[[int | None], bytes]], T],
+) -> T:
+    """Run one scoped operation against an admitted Win32 file handle."""
+    return _operate_regular_absolute_file(path, operation=operation, api=_PyWin32Api())
 
 
 def validate_local_absolute_path(path: str) -> None:
@@ -460,8 +485,51 @@ def _read_regular_absolute_file(
     max_bytes: int | None,
     api: _WindowsApi,
 ) -> bytes:
+    chunks: list[bytes] = []
+    _consume_regular_absolute_file(
+        path,
+        max_bytes=max_bytes,
+        consume=chunks.append,
+        api=api,
+    )
+    return b"".join(chunks)
+
+
+def _consume_regular_absolute_file(
+    path: str,
+    *,
+    max_bytes: int | None,
+    consume: Callable[[bytes], None],
+    api: _WindowsApi,
+) -> int:
     if max_bytes is not None and max_bytes < 0:
         raise ValueError("maximum byte count must not be negative")
+
+    def operation(size: int, read_chunk: Callable[[int | None], bytes]) -> int:
+        if max_bytes is not None and size > max_bytes:
+            raise OSError("admitted input exceeds the maximum byte count")
+        total_bytes = 0
+        while True:
+            read_size = None
+            if max_bytes is not None:
+                read_size = min(_READ_CHUNK_BYTES, max_bytes - total_bytes + 1)
+            chunk = read_chunk(read_size)
+            if not chunk:
+                return total_bytes
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise OSError("admitted input exceeds the maximum byte count")
+            consume(chunk)
+
+    return _operate_regular_absolute_file(path, operation=operation, api=api)
+
+
+def _operate_regular_absolute_file[T](
+    path: str,
+    *,
+    operation: Callable[[int, Callable[[int | None], bytes]], T],
+    api: _WindowsApi,
+) -> T:
     parsed = _parse_windows_regular_file_path(path)
     if api.get_drive_type(parsed.drive_root) not in _LOCAL_DRIVE_TYPES:
         raise OSError("regular-file admission requires a verifiable local drive")
@@ -481,28 +549,32 @@ def _read_regular_absolute_file(
         )
         before = _observe_handle(api, leaf_handle)
         _require_regular_file(api, leaf_handle, before)
-        if max_bytes is not None and before.size > max_bytes:
-            raise OSError("admitted input exceeds the maximum byte count")
-
-        chunks: list[bytes] = []
         total_bytes = 0
-        while True:
-            read_size = _READ_CHUNK_BYTES
-            if max_bytes is not None:
-                read_size = min(read_size, max_bytes - total_bytes + 1)
+        eof = False
+
+        def read_chunk(limit: int | None = None) -> bytes:
+            nonlocal eof, total_bytes
+            if eof:
+                return b""
+            if limit is not None and limit < 1:
+                raise ValueError("read limit must be positive")
+            read_size = (
+                _READ_CHUNK_BYTES if limit is None else min(_READ_CHUNK_BYTES, limit)
+            )
             chunk = api.read_file(leaf_handle, read_size)
             if not chunk:
-                break
+                eof = True
+                return b""
             total_bytes += len(chunk)
-            if max_bytes is not None and total_bytes > max_bytes:
-                raise OSError("admitted input exceeds the maximum byte count")
-            chunks.append(chunk)
+            return chunk
+
+        result = operation(before.size, read_chunk)
 
         after = _observe_handle(api, leaf_handle)
         _require_regular_file(api, leaf_handle, after)
-        if before.size != after.size or total_bytes != before.size:
+        if before.size != after.size or (eof and total_bytes != before.size):
             raise OSError("admitted input changed during its bounded read")
-        return b"".join(chunks)
+        return result
     except BaseException:
         primary_error = True
         raise

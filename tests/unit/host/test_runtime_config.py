@@ -682,6 +682,9 @@ version = "2.10"
 [build]
 tags = ["example:dev"]
 
+[cdh]
+local_file_mode = "clone"
+
 [comfyui]
 version = "latest"
 install_cli = false
@@ -714,6 +717,11 @@ id = "node"
         (("python",), "runtime.host_only_ignored", DiagnosticSeverity.WARNING),
         (("pytorch",), "runtime.host_only_ignored", DiagnosticSeverity.WARNING),
         (("build",), "runtime.host_only_ignored", DiagnosticSeverity.WARNING),
+        (
+            ("cdh", "local_file_mode"),
+            "runtime.host_only_ignored",
+            DiagnosticSeverity.WARNING,
+        ),
         (
             ("comfyui", "version"),
             "runtime.host_only_ignored",
@@ -772,8 +780,9 @@ def test_runtime_file_entries_are_accepted_and_recorded(tmp_path: Path) -> None:
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -785,8 +794,9 @@ filename = "model.bin"
 
     assert result.files == (
         {
+            "type": "http",
             "url": "https://example.com/model.bin",
-            "dir": "models",
+            "target_dir": "models",
             "filename": "model.bin",
         },
     )
@@ -799,8 +809,9 @@ def test_runtime_file_merge_uses_canonical_target_and_returns_canonical_dir(
         tmp_path / "baked.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/base.bin"
-dir = "models//checkpoints/"
+target_dir = "models//checkpoints/"
 filename = "model.bin"
 overwrite = false
 """,
@@ -809,7 +820,8 @@ overwrite = false
         tmp_path / "mounted.toml",
         """
 [[files]]
-dir = "./models/checkpoints"
+type = "http"
+target_dir = "./models/checkpoints"
 filename = "model.bin"
 overwrite = true
 """,
@@ -822,8 +834,9 @@ overwrite = true
 
     assert result.files == (
         {
+            "type": "http",
             "url": "https://example.com/base.bin",
-            "dir": "models/checkpoints",
+            "target_dir": "models/checkpoints",
             "filename": "model.bin",
             "overwrite": True,
         },
@@ -835,8 +848,9 @@ def test_runtime_file_url_accepts_valid_userinfo(tmp_path: Path) -> None:
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://user:password@example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -853,7 +867,7 @@ filename = "model.bin"
     ("field", "value", "code"),
     [
         ("url", "https://example.com/model\\u007f.bin", "runtime_file.invalid_url"),
-        ("dir", "models\\u007fescape", "runtime_file.control_character"),
+        ("target_dir", "models\\u007fescape", "runtime_file.control_character"),
         ("filename", "model\\u007f.bin", "runtime_file.invalid_filename"),
     ],
 )
@@ -865,7 +879,7 @@ def test_runtime_file_domains_reject_control_characters(
 ) -> None:
     values = {
         "url": "https://example.com/model.bin",
-        "dir": "models",
+        "target_dir": "models",
         "filename": "model.bin",
     }
     values[field] = value
@@ -873,8 +887,9 @@ def test_runtime_file_domains_reject_control_characters(
         tmp_path / "mounted.toml",
         f"""
 [[files]]
+type = "http"
 url = "{values["url"]}"
-dir = "{values["dir"]}"
+target_dir = "{values["target_dir"]}"
 filename = "{values["filename"]}"
 """,
     )
@@ -895,8 +910,9 @@ def test_runtime_file_non_http_url_fails_runtime_validation(
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "ftp://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -917,8 +933,9 @@ def test_runtime_file_rejects_reserved_staging_final_leaf(tmp_path: Path) -> Non
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = ".cdh-staging"
 """,
     )
@@ -941,8 +958,9 @@ def test_invalid_mounted_runtime_file_after_baked_reports_effective_and_source_p
         tmp_path / "baked.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/baked.bin"
-dir = "models"
+target_dir = "models"
 filename = "baked.bin"
 """,
     )
@@ -950,8 +968,9 @@ filename = "baked.bin"
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "ftp://example.com/mounted.bin"
-dir = "models"
+target_dir = "models"
 filename = "mounted.bin"
 """,
     )
@@ -975,13 +994,15 @@ def test_multiple_invalid_runtime_file_items_keep_authored_indexes(
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/a.bin"
-dir = "/models"
+target_dir = "/models"
 filename = "a.bin"
 
 [[files]]
+type = "http"
 url = "https://example.com/b.bin"
-dir = "models"
+target_dir = "models"
 filename = "nested/b.bin"
 """,
     )
@@ -993,7 +1014,7 @@ filename = "nested/b.bin"
         )
 
     assert _identities(error.value) == [
-        (("files", 0, "dir"), "runtime_file.absolute_directory"),
+        (("files", 0, "target_dir"), "runtime_file.absolute_directory"),
         (("files", 1, "filename"), "runtime_file.invalid_filename"),
     ]
 
@@ -1005,8 +1026,9 @@ def test_runtime_file_async_download_mode_is_accepted(
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 download_mode = "async"
 """,
@@ -1027,8 +1049,9 @@ def test_runtime_file_invalid_download_mode_fails_schema_validation(
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 download_mode = "parallel"
 """,
@@ -1081,8 +1104,9 @@ def test_runtime_file_unknown_field_fails_schema_validation(tmp_path: Path) -> N
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 unexpected = true
 """,
@@ -1106,8 +1130,9 @@ def test_runtime_file_merge_preserves_current_baked_mounted_contract(
         tmp_path / "baked.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/baked.bin"
-dir = "models"
+target_dir = "models"
 filename = "baked.bin"
 """,
     )
@@ -1115,8 +1140,9 @@ filename = "baked.bin"
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/mounted.bin"
-dir = "models"
+target_dir = "models"
 filename = "mounted.bin"
 downloader = "httpx"
 """,
@@ -1129,13 +1155,15 @@ downloader = "httpx"
 
     assert appended.files == (
         {
+            "type": "http",
             "url": "https://example.com/baked.bin",
-            "dir": "models",
+            "target_dir": "models",
             "filename": "baked.bin",
         },
         {
+            "type": "http",
             "url": "https://example.com/mounted.bin",
-            "dir": "models",
+            "target_dir": "models",
             "filename": "mounted.bin",
             "downloader": "httpx",
         },
@@ -1145,8 +1173,9 @@ downloader = "httpx"
         tmp_path / "override-baked.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/baked.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 overwrite = false
 downloader = "aria2"
@@ -1156,7 +1185,8 @@ downloader = "aria2"
         tmp_path / "override-mounted.toml",
         """
 [[files]]
-dir = "models"
+type = "http"
+target_dir = "models"
 filename = "model.bin"
 overwrite = true
 """,
@@ -1169,8 +1199,9 @@ overwrite = true
 
     assert overridden.files == (
         {
+            "type": "http",
             "url": "https://example.com/baked.bin",
-            "dir": "models",
+            "target_dir": "models",
             "filename": "model.bin",
             "overwrite": True,
             "downloader": "aria2",
@@ -1181,8 +1212,9 @@ overwrite = true
         tmp_path / "reset-baked.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/baked.bin"
-dir = "models"
+target_dir = "models"
 filename = "baked.bin"
 """,
     )
@@ -1239,8 +1271,9 @@ def test_runtime_file_invalid_fields_may_be_repaired_by_later_layer(
         tmp_path / "baked.toml",
         """
 [[files]]
+type = "http"
 url = "ftp://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 checksum = "invalid"
 """,
@@ -1249,8 +1282,9 @@ checksum = "invalid"
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 """,
@@ -1263,14 +1297,41 @@ checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
     assert result.files == (
         {
+            "type": "http",
             "url": "https://example.com/model.bin",
-            "dir": "models",
+            "target_dir": "models",
             "filename": "model.bin",
             "checksum": (
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             ),
         },
     )
+
+
+def test_runtime_file_local_source_is_rejected_by_strict_admission(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+type = "local"
+path = "/run/seeds/model.bin"
+target_dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(raised.value) == [
+        (("files", 0, "type"), "schema.literal_error"),
+        (("files", 0, "path"), "schema.extra_forbidden"),
+    ]
 
 
 def test_invalid_runtime_files_may_be_reset_before_effective_validation(
@@ -1280,8 +1341,9 @@ def test_invalid_runtime_files_may_be_reset_before_effective_validation(
         tmp_path / "baked.toml",
         """
 [[files]]
+type = "http"
 url = "ftp://example.com/model.bin"
-dir = "/models"
+target_dir = "/models"
 filename = "nested/model.bin"
 """,
     )
@@ -1302,7 +1364,8 @@ def test_runtime_file_missing_effective_url_is_attributed_to_authored_item(
         tmp_path / "mounted.toml",
         """
 [[files]]
-dir = "models"
+type = "http"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -1328,18 +1391,21 @@ def test_three_runtime_file_duplicates_compare_first_with_each_later_item(
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/one.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 
 [[files]]
+type = "http"
 url = "https://example.com/two.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 
 [[files]]
+type = "http"
 url = "https://example.com/three.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -1381,8 +1447,9 @@ def test_cross_layer_runtime_file_ambiguity_preserves_authored_sources(
         tmp_path / "baked.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/base.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )
@@ -1390,13 +1457,15 @@ filename = "model.bin"
         tmp_path / "mounted.toml",
         """
 [[files]]
+type = "http"
 url = "https://example.com/later-one.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 
 [[files]]
+type = "http"
 url = "https://example.com/later-two.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """,
     )

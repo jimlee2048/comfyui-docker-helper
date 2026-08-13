@@ -32,7 +32,9 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     DirectPythonRequestIdentity,
+    LocalFileLockEntry,
     UvToolLockEntry,
+    canonical_lock_from_entries,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.final_models import FinalConfig
@@ -506,8 +508,8 @@ def test_canonical_requirement_spelling_is_stable_from_layered_config_to_plan(
 def test_runtime_file_directory_spelling_is_canonical_from_request_to_plan() -> None:
     first_document = final_config().model_dump(mode="json", exclude_none=True)
     second_document = deepcopy(first_document)
-    first_document["files"][0]["dir"] = "./models//checkpoints/"
-    second_document["files"][0]["dir"] = "models/checkpoints"
+    first_document["files"][0]["target_dir"] = "./models//checkpoints/"
+    second_document["files"][0]["target_dir"] = "models/checkpoints"
     first_config = validate_final_config_structure(first_document)
     second_config = validate_final_config_structure(second_document)
     resolution = accepted_resolution()
@@ -523,6 +525,77 @@ def test_runtime_file_directory_spelling_is_canonical_from_request_to_plan() -> 
     )
     assert first_graph.image_config_digest == second_graph.image_config_digest
     assert first_plan == second_plan
+
+
+def test_local_file_mode_does_not_change_image_config_identity() -> None:
+    first_document = final_config().model_dump(mode="json", exclude_none=True)
+    first_document["files"] = []
+    second_document = deepcopy(first_document)
+    second_document["cdh"]["local_file_mode"] = "copy"
+    first_config = validate_final_config_structure(first_document)
+    second_config = validate_final_config_structure(second_document)
+    resolution = accepted_resolution()
+
+    first_graph = request_graph(first_config, resolution)
+    second_graph = request_graph(second_config, resolution)
+
+    assert first_graph.image_config_digest == second_graph.image_config_digest
+
+
+def test_local_file_locator_is_not_serialized_and_slot_depends_only_on_target() -> None:
+    first_document = final_config().model_dump(mode="json", exclude_none=True)
+    first_document["files"] = [
+        {
+            "type": "local",
+            "path": "/private/first-model.bin",
+            "target_dir": "models",
+            "filename": "model.bin",
+            "content_lock": False,
+        }
+    ]
+    second_document = deepcopy(first_document)
+    second_document["files"][0]["path"] = "/other/private-model.bin"
+    first_config = validate_final_config_structure(first_document)
+    second_config = validate_final_config_structure(second_document)
+    resolution = accepted_resolution()
+
+    first_graph = request_graph(first_config, resolution)
+    second_graph = request_graph(second_config, resolution)
+
+    assert first_graph == second_graph
+    assert "/private/" not in repr(first_graph)
+    assert first_graph.files[0].context_path.startswith("build/files/")
+
+
+def test_local_file_plan_consumes_only_locked_content_identity() -> None:
+    document = final_config().model_dump(mode="json", exclude_none=True)
+    document["files"] = [
+        {
+            "type": "local",
+            "path": "model.bin",
+            "target_dir": "models",
+            "filename": "model.bin",
+            "content_lock": True,
+        }
+    ]
+    config = validate_final_config_structure(document)
+    resolution = accepted_resolution()
+    lock = canonical_lock_from_entries(
+        [
+            *resolution.lock.entries,
+            LocalFileLockEntry(
+                relative_target="models/model.bin",
+                digest=DIGEST_A,
+            ),
+        ]
+    )
+    locked_resolution = AcceptedCanonicalLock(lock, (), False, (), ())
+
+    item = build_plan(config, locked_resolution).files.files[0]
+
+    assert item.type == "local"
+    assert item.verification == "sha256"
+    assert item.digest == DIGEST_A
 
 
 def test_redundant_default_package_and_ssh_key_spelling_do_not_change_plan(

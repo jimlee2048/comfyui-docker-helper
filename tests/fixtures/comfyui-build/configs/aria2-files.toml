@@ -28,9 +28,9 @@ port = 8188
 extra_args = []
 
 [[files]]
+type = "http"
 url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
-dir = "models/cdh-smoke"
+target_dir = "models/cdh-smoke"
 filename = "aria2-readme.md"
-overwrite = true
 downloader = "aria2"
 download_mode = "sync"

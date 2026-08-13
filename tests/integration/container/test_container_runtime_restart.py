@@ -631,8 +631,9 @@ enable = true
 password = "secret"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models/checkpoints"
+target_dir = "models/checkpoints"
 filename = "model.bin"
 """,
             encoding="utf-8",

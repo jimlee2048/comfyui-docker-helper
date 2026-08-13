@@ -23,7 +23,6 @@ from comfyui_docker_helper.config.diagnostics import (
 )
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
 from comfyui_docker_helper.config.merge import (
-    KeyedItemMerge,
     KeyedSequencePolicy,
     MergePolicyRegistry,
     OriginNode,
@@ -34,6 +33,7 @@ from comfyui_docker_helper.config.merge import (
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime_file_validation import (
     normalize_runtime_file_path,
+    runtime_file_item_merge,
     runtime_file_target_identity,
     validate_runtime_file_url,
 )
@@ -54,7 +54,7 @@ _RUNTIME_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
             ("files",),
             KeyedSequencePolicy(
                 runtime_file_target_identity,
-                KeyedItemMerge.RECURSIVE,
+                runtime_file_item_merge,
             ),
         ),
     )
@@ -65,6 +65,7 @@ type RuntimePath = tuple[str, ...]
 type RuntimeFilePath = tuple[str | int, ...]
 
 _HOST_ONLY_ROOT_SECTIONS = frozenset({"compute_platform", "python", "pytorch", "build"})
+_HOST_ONLY_CDH_FIELDS = frozenset({"local_file_mode"})
 _HOST_ONLY_SYSTEM_FIELDS = frozenset(
     {"workspace", "comfyui_path", "extra_packages", "env"}
 )
@@ -139,8 +140,9 @@ class _RuntimeSystemConfigPatch(ConfigModel):
 
 
 class _RuntimeFilePatch(ConfigModel):
+    type: Literal["http"]
     url: str | None = None
-    dir: str
+    target_dir: str
     filename: str
     overwrite: bool | None = None
     checksum: str | None = None
@@ -493,12 +495,29 @@ def _prepare_runtime_document(
         if key == "system" and isinstance(value, Mapping):
             prepared[key] = _prepare_system_document(value, diagnostics, source)
             continue
+        if key == "cdh" and isinstance(value, Mapping):
+            prepared[key] = _prepare_cdh_document(value, diagnostics, source)
+            continue
         if key == "comfyui" and isinstance(value, Mapping):
             prepared[key] = _prepare_comfyui_document(value, diagnostics, source)
             continue
         prepared[key] = value
 
     return prepared, tuple(diagnostics)
+
+
+def _prepare_cdh_document(
+    document: Mapping[str, Any],
+    diagnostics: list[Diagnostic],
+    source: SourceReference,
+) -> dict[str, Any]:
+    prepared: dict[str, Any] = {}
+    for key, value in document.items():
+        if key in _HOST_ONLY_CDH_FIELDS:
+            diagnostics.append(_host_only_warning(("cdh", key), source))
+            continue
+        prepared[key] = value
+    return prepared
 
 
 def _prepare_system_document(
@@ -600,7 +619,7 @@ def _validate_effective_runtime_files(
         else:
             validate_runtime_file_url(item.url, (*path, "url"), diagnostics)
         normalized = normalize_runtime_file_path(
-            item.dir,
+            item.target_dir,
             item.filename,
             path,
             diagnostics,
@@ -625,7 +644,7 @@ def _validate_effective_runtime_files(
                 )
         document = item.model_dump(mode="json", exclude_none=True)
         if normalized is not None:
-            document["dir"] = normalized[0].as_posix()
+            document["target_dir"] = normalized[0].as_posix()
         documents.append(document)
 
     if diagnostics:

@@ -417,14 +417,16 @@ password = "baked-secret"
 pub_keys = ["{VALID_SSH_KEY}"]
 
 [[files]]
+type = "http"
 url = "https://example.com/sync.bin"
-dir = "models"
+target_dir = "models"
 filename = "sync.bin"
 download_mode = "sync"
 
 [[files]]
+type = "http"
 url = "https://example.com/async.bin"
-dir = "models"
+target_dir = "models"
 filename = "async.bin"
 download_mode = "async"
 """,
@@ -1008,8 +1010,9 @@ password = "secret"
 default_download_mode = "async"
 
 [[files]]
+type = "http"
 url = "https://example.com/async.bin"
-dir = "models"
+target_dir = "models"
 filename = "async.bin"
 """,
     )

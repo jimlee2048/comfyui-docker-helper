@@ -181,7 +181,8 @@ class RuntimeFileDownloadCancelled(Exception):
 
 
 class _RuntimeFileConfig(ConfigModel):
-    dir: str
+    type: Literal["http"]
+    target_dir: str
     filename: str
     url: str
     overwrite: bool = False
@@ -1062,7 +1063,12 @@ def _normalize_runtime_file_path(
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
 ) -> tuple[PurePosixPath, str] | None:
-    return normalize_runtime_file_path(item.dir, item.filename, path, diagnostics)
+    return normalize_runtime_file_path(
+        item.target_dir,
+        item.filename,
+        path,
+        diagnostics,
+    )
 
 
 def _diagnostics_from_validation_error(

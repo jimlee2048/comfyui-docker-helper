@@ -405,8 +405,9 @@ shutdown_timeout = -1
 timeout = 120
 
 [[files]]
+type = "http"
 url = "{hanging_url}"
-dir = "models"
+target_dir = "models"
 filename = "pending.bin"
 downloader = "httpx"
 download_mode = "async"

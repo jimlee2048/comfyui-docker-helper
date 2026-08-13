@@ -14,6 +14,8 @@ from comfyui_docker_helper.config.build_plan import (
     CustomNodesPhase,
     FilesPhase,
     GitCredentialRoutePlan,
+    HttpFilePlan,
+    LocalFilePlan,
     ManifestBinding,
     ToolchainPhase,
     build_plan_digest,
@@ -55,12 +57,26 @@ class FinalManifestHookInput:
 
 
 @dataclass(frozen=True, slots=True)
-class FinalManifestFileInput:
-    """Final file identity without downloader execution policy."""
+class FinalManifestHttpFileInput:
+    """Final HTTP file identity without downloader execution policy."""
 
+    type: Literal["http"]
     url: str
     target: str
     checksum: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FinalManifestLocalFileInput:
+    """Final local file identity without its host/context locator."""
+
+    type: Literal["local"]
+    target: str
+    verification: Literal["sha256", "unverified-local"]
+    digest: str | None
+
+
+type FinalManifestFileInput = FinalManifestHttpFileInput | FinalManifestLocalFileInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,14 +157,7 @@ class BuildPlanInputAdmission:
             toolchain=toolchain.model_copy(update={"tool_store": tool_store}),
             application=self._plan.application,
             custom_nodes=self._plan.custom_nodes,
-            files=tuple(
-                FinalManifestFileInput(
-                    url=item.url,
-                    target=item.target,
-                    checksum=item.checksum,
-                )
-                for item in self._plan.files.files
-            ),
+            files=tuple(_manifest_file_input(item) for item in self._plan.files.files),
             materialized_hooks=hooks,
             final_probe=FinalCoreProbeInput(
                 workspace=self._plan.application.paths.comfyui,
@@ -162,3 +171,21 @@ class BuildPlanInputAdmission:
             ),
             shutdown_timeout=self._plan.runtime.shutdown_timeout,
         )
+
+
+def _manifest_file_input(
+    item: HttpFilePlan | LocalFilePlan,
+) -> FinalManifestFileInput:
+    if isinstance(item, HttpFilePlan):
+        return FinalManifestHttpFileInput(
+            type="http",
+            url=item.url,
+            target=item.target,
+            checksum=item.checksum,
+        )
+    return FinalManifestLocalFileInput(
+        type="local",
+        target=item.target,
+        verification=item.verification,
+        digest=item.digest,
+    )

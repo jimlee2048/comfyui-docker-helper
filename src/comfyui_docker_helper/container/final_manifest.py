@@ -28,9 +28,11 @@ from comfyui_docker_helper.config.final_manifest import (
     FinalBuildProbeEvidence,
     FinalManifest,
     HookEvidence,
+    HttpFileEvidence,
     ImageEvidence,
     InventoryDistribution,
     LifecycleEvidence,
+    LocalFileEvidence,
     MaterializedInputsEvidence,
     PlatformEvidence,
     ProtectedRequirementEvidence,
@@ -510,28 +512,55 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
     root = Path(projection.application.paths.comfyui)
     for item in projection.files:
         target = Path(item.target)
+        expected_checksum = (
+            item.checksum
+            if item.type == "http"
+            else item.digest
+            if item.verification == "sha256"
+            else None
+        )
         verify_required_final(
             root=root,
             target=target,
-            expected_checksum=item.checksum,
+            expected_checksum=expected_checksum,
         )
-        if item.checksum is None:
+        if item.type == "local":
+            if item.verification == "sha256":
+                result.append(
+                    LocalFileEvidence(
+                        type="local",
+                        target=item.target,
+                        verification="sha256",
+                        intended_checksum=item.digest,
+                        observed_checksum=item.digest,
+                    )
+                )
+            else:
+                result.append(
+                    LocalFileEvidence(
+                        type="local",
+                        target=item.target,
+                        verification="unverified-local",
+                    )
+                )
+        elif item.checksum is None:
             result.append(
-                FileEvidence(
+                HttpFileEvidence(
+                    type="http",
                     url=item.url,
                     target=item.target,
                     verification="unverified-moving",
                 )
             )
         else:
-            observed = _sha256(read_regular_absolute_file(item.target))
             result.append(
-                FileEvidence(
+                HttpFileEvidence(
+                    type="http",
                     url=item.url,
                     target=item.target,
                     verification="sha256",
                     intended_checksum=item.checksum,
-                    observed_checksum=observed,
+                    observed_checksum=item.checksum,
                 )
             )
     return tuple(result)

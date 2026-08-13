@@ -26,6 +26,7 @@ from comfyui_docker_helper.config.final_models import (
     FinalConfig,
     FinalGitCredentialConfig,
     FinalGitCustomNodeConfig,
+    FinalHttpFileConfig,
     FinalRegistryCustomNodeConfig,
 )
 from comfyui_docker_helper.config.git_credentials import (
@@ -1017,7 +1018,7 @@ def _validate_file_domains(
 ) -> None:
     for index, item in enumerate(config.files):
         base: DiagnosticPath = ("files", index)
-        if not is_http_url(item.url):
+        if isinstance(item, FinalHttpFileConfig) and not is_http_url(item.url):
             diagnostics.append(
                 Diagnostic(
                     (*base, "url"),
@@ -1025,11 +1026,11 @@ def _validate_file_domains(
                     "must be an HTTP(S) URL with a host",
                 )
             )
-        directory = validate_relative_file_directory(item.dir)
+        directory = validate_relative_file_directory(item.target_dir)
         if directory.path is None:
             diagnostics.append(
                 Diagnostic(
-                    (*base, "dir"),
+                    (*base, "target_dir"),
                     f"file.{directory.code}",
                     directory.message or "invalid directory",
                 )

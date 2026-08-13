@@ -144,38 +144,41 @@ def test_service_tracks_keyed_file_overlay_and_append_origins(tmp_path: Path) ->
         + """
 
 [[files]]
+type = "http"
 url = "https://example.com/base.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
-overwrite = false
+checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 """
     )
     override.write_text(
         """
 [[files]]
-dir = "models"
+type = "http"
+url = "https://example.com/later.bin"
+target_dir = "models"
 filename = "model.bin"
-overwrite = true
 
 [[files]]
+type = "http"
 url = "https://example.com/new.bin"
-dir = "models"
+target_dir = "models"
 filename = "new.bin"
 """
     )
 
     result = load_validate_config_result([base, override])
 
-    assert [(item.filename, item.overwrite) for item in result.config.files] == [
-        ("model.bin", True),
-        ("new.bin", False),
+    assert [(item.filename, item.url) for item in result.config.files] == [
+        ("model.bin", "https://example.com/later.bin"),
+        ("new.bin", "https://example.com/new.bin"),
     ]
-    base_url = result.origins.exact_location(("files", 0, "url"))
-    later_overwrite = result.origins.exact_location(("files", 0, "overwrite"))
+    base_checksum = result.origins.exact_location(("files", 0, "checksum"))
+    later_url = result.origins.exact_location(("files", 0, "url"))
     appended = result.origins.exact_location(("files", 1))
-    assert base_url is not None and base_url.source.layer_ordinal == 0
-    assert later_overwrite is not None and later_overwrite.source.layer_ordinal == 1
-    assert later_overwrite.path == ("files", 0, "overwrite")
+    assert base_checksum is not None and base_checksum.source.layer_ordinal == 0
+    assert later_url is not None and later_url.source.layer_ordinal == 1
+    assert later_url.path == ("files", 0, "url")
     assert appended is not None and appended.source.layer_ordinal == 1
     assert appended.path == ("files", 1)
 
@@ -188,8 +191,9 @@ def test_service_tracks_an_empty_keyed_sequence_reset(tmp_path: Path) -> None:
         + """
 
 [[files]]
+type = "http"
 url = "https://example.com/base.bin"
-dir = "models"
+target_dir = "models"
 filename = "model.bin"
 """
     )

@@ -8,6 +8,8 @@ from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     GitNodePlan,
+    HttpFilePlan,
+    LocalFilePlan,
     build_plan_digest,
     git_credential_secret_ids,
 )
@@ -266,12 +268,18 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
             plan_digest=plan_digest,
         )
     )
-    if plan.files.files:
+    if any(isinstance(item, HttpFilePlan) for item in plan.files.files):
         lines.append(
             f"RUN {_BUILD_PLAN_MOUNT} {_shell_word(cdh.executable)} "
             "container download-files "
             f"--build-plan-digest {plan_digest}"
         )
+    lines.extend(
+        "COPY --link --chmod=0644 "
+        + json.dumps([item.context_path, item.target], ensure_ascii=True)
+        for item in plan.files.files
+        if isinstance(item, LocalFilePlan)
+    )
     lines.append(
         f"RUN {uv_cache_mount} \\\n"
         f"    {_BUILD_PLAN_MOUNT} \\\n"

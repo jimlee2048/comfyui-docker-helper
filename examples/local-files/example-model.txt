@@ -1,0 +1,1 @@
+Small host-local file used by the comprehensive configuration example.

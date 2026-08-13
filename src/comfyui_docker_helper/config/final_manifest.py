@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import re
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Annotated, Literal
 
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from comfyui_docker_helper.config.build_plan import ManifestBinding
 from comfyui_docker_helper.config.canonical_lock import (
@@ -384,17 +384,8 @@ class ApplicationEvidence(_ManifestModel):
         return self
 
 
-class FileEvidence(_ManifestModel):
-    url: str
+class _FileEvidence(_ManifestModel):
     target: str
-    verification: Literal["sha256", "unverified-moving"]
-    intended_checksum: str | None = None
-    observed_checksum: str | None = None
-
-    @field_validator("url")
-    @classmethod
-    def _validate_url(cls, value: str) -> str:
-        return validate_http_url(value, "file URL")
 
     @field_validator("target")
     @classmethod
@@ -404,13 +395,26 @@ class FileEvidence(_ManifestModel):
             raise ValueError("file target must be one canonical absolute path")
         return value
 
+
+class HttpFileEvidence(_FileEvidence):
+    type: Literal["http"]
+    url: str
+    verification: Literal["sha256", "unverified-moving"]
+    intended_checksum: str | None = None
+    observed_checksum: str | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        return validate_http_url(value, "file URL")
+
     @field_validator("intended_checksum", "observed_checksum")
     @classmethod
     def _validate_checksum(cls, value: str | None) -> str | None:
         return None if value is None else validate_canonical_file_checksum(value)
 
     @model_validator(mode="after")
-    def _validate_verification(self) -> FileEvidence:
+    def _validate_verification(self) -> HttpFileEvidence:
         expected = self.intended_checksum
         observed = self.observed_checksum
         if self.verification == "sha256":
@@ -419,6 +423,35 @@ class FileEvidence(_ManifestModel):
         elif expected is not None or observed is not None:
             raise ValueError("moving file evidence must omit content checksums")
         return self
+
+
+class LocalFileEvidence(_FileEvidence):
+    type: Literal["local"]
+    verification: Literal["sha256", "unverified-local"]
+    intended_checksum: str | None = None
+    observed_checksum: str | None = None
+
+    @field_validator("intended_checksum", "observed_checksum")
+    @classmethod
+    def _validate_checksum(cls, value: str | None) -> str | None:
+        return None if value is None else validate_canonical_file_checksum(value)
+
+    @model_validator(mode="after")
+    def _validate_verification(self) -> LocalFileEvidence:
+        if self.verification == "sha256":
+            if self.intended_checksum is None or (
+                self.intended_checksum != self.observed_checksum
+            ):
+                raise ValueError("verified local file checksum must match")
+        elif self.intended_checksum is not None or self.observed_checksum is not None:
+            raise ValueError("unverified local evidence must omit content checksums")
+        return self
+
+
+FileEvidence = Annotated[
+    HttpFileEvidence | LocalFileEvidence,
+    Field(discriminator="type"),
+]
 
 
 class HookEvidence(_ManifestModel):

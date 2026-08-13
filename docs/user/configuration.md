@@ -29,7 +29,7 @@ Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recur
 - `system.extra_packages` uses the admitted Debian package name;
 - `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, and canonical selector representation;
 - `comfyui.custom_nodes` uses a lowercase-only Registry resource ID or the exact direct-Git URL;
-- `files` uses the normalized `dir` plus `filename` target; and
+- `files` uses the normalized `target_dir` plus `filename` target; and
 - `cdh.git.credentials` uses the canonical credential context represented by `match`.
 
 For package collections, a new identity appends in first-occurrence order. An exact Debian package repeated across uniquely keyed layers is kept once. If an effective `system.extra_packages` item is already in cdh's default OS package set, cdh warns at its source and omits the redundant item from the effective installation request. Duplicates authored together in one user-owned list remain errors. A Python requirement is deduplicated across layers only when the complete canonical requirement is equal; cdh does not infer general range equivalence. Requirements for the same normalized distribution that differ in extras or selectors remain visible so effective validation can report the conflict. Duplicates authored in one layer likewise remain visible for validation. A later empty list resets the corresponding collection.
@@ -42,7 +42,7 @@ Registry ID case variants identify the same resource and overlay at the original
 
 Canonically equivalent credential contexts identify the same route even when their raw `match` strings differ. A later route atomically replaces the complete earlier route at its original position; route fields never merge individually. Ambiguous duplicates authored in one layer remain invalid. A later `credentials = []`, `custom_nodes = []`, or `files = []` resets that collection. Each `[secrets.<name>]` table is also an atomic source definition, so a later layer can replace `env` with `file` without retaining the old field. Strict structure, uniqueness, and cross-field rules are checked after all layers have produced the effective configuration.
 
-For `[[files]]`, cdh treats redundant `/`, `.` path segments, and a trailing `/` as alternate spellings of the same directory. For example, `models//checkpoints/` is canonicalized to `models/checkpoints`. Use `dir = "."` or `dir = "./"` to place a file directly in the ComfyUI root. Empty and absolute directories, control characters, and every authored `..` segment remain invalid.
+For `[[files]]`, cdh treats redundant `/`, `.` path segments, and a trailing `/` as alternate spellings of the same directory. For example, `models//checkpoints/` is canonicalized to `models/checkpoints`. Use `target_dir = "."` or `target_dir = "./"` to place a file directly in the ComfyUI root. Empty and absolute directories, control characters, and every authored `..` segment remain invalid. An overlay for the same normalized target patches an item of the same `type`; changing `type` replaces the complete item so source-specific fields are not inherited.
 
 For example, save this as `local.toml` to disable comfy-cli and remove the nodes and files selected by the full example:
 
@@ -86,6 +86,32 @@ Custom nodes may use either a Registry identity or a direct-Git URL. Registry no
 Each node may name pre-install or post-install hooks. Hook paths are relative to the directory passed explicitly with `--build-hooks-dir`; there is no implicit hook root. The repository includes small [`pre.sh`](../../examples/build-hooks/pre.sh) and [`post.sh`](../../examples/build-hooks/post.sh) examples.
 
 Build hooks and custom-node installers execute trusted user-selected code during the image build. Review them before use, and do not put secrets in hook files because their contents remain in the image and its layers.
+
+## Add files during the image build
+
+Every build file explicitly selects an HTTP or host-local source. The two variants share only their image target:
+
+```toml
+[[files]]
+type = "http"
+url = "https://example.test/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "remote-model.safetensors"
+downloader = "httpx"
+
+[[files]]
+type = "local"
+path = "artifacts/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "local-model.safetensors"
+content_lock = false
+```
+
+HTTP files may also select `checksum` and `download_mode`. Local files instead use `path` and optional `content_lock`; they do not use a downloader or a hand-authored checksum. All build files are authoritative: a successful build places the declared content at the target, so build configuration has no `overwrite` field.
+
+A relative local `path` uses the real parent directory of the first `-f` configuration file as its common base. Absolute paths and normalized parent traversal are accepted. The selected source must be one regular host file; cdh rejects observed symlinks, Windows junctions and other reparse points, directories, and special files. The locator is ordinary non-secret host input: it is not serialized into the lock, BuildPlan, rendered metadata, manifest, or image configuration, but it does not receive Secret-value handling or redaction.
+
+`content_lock = false` is the default and avoids a cdh SHA-256 scan during planning. `content_lock = true` streams the source into a SHA-256 identity stored in the canonical lock and BuildPlan, then verifies that identity again while materializing the context. The [build and lock guide](build-and-lock.md#build-files-and-local-context-materialization) explains context materialization modes, `--check` cost, remote-builder transfer, and image placement. Local sources are build-only; only HTTP file declarations become baked runtime defaults.
 
 ## Supply private HTTP(S) Git credentials
 

@@ -280,8 +280,9 @@ port = 8191
 extra_args = ["--cpu"]
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models/checkpoints"
+target_dir = "models/checkpoints"
 filename = "model.bin"
 download_mode = "sync"
 """,

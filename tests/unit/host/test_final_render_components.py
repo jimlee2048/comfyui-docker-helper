@@ -18,6 +18,7 @@ from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     GitCredentialRoutePlan,
     HookPlan,
+    LocalFilePlan,
     build_plan_digest,
     dump_build_plan_json,
     parse_build_plan_json,
@@ -299,6 +300,36 @@ def test_renderer_omits_build_download_command_when_no_files() -> None:
     assert "container download-files" not in render_build_plan_dockerfile(plan)
 
 
+def test_renderer_places_local_files_authoritatively_after_build_mutations() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    document = plan.model_dump(mode="python")
+    relative_target = "models/checkpoints/model [final].bin"
+    context_path = (
+        "build/files/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+    )
+    document["files"]["files"] = (
+        *document["files"]["files"],
+        {
+            "type": "local",
+            "target": f"{plan.application.paths.comfyui}/{relative_target}",
+            "relative_target": relative_target,
+            "context_path": context_path,
+            "verification": "unverified-local",
+        },
+    )
+    changed = BuildPlan.model_validate(document)
+
+    rendered = render_build_plan_dockerfile(changed)
+    copy_line = "COPY --link --chmod=0644 " + json.dumps(
+        [context_path, f"{plan.application.paths.comfyui}/{relative_target}"]
+    )
+
+    assert copy_line in rendered
+    assert rendered.index("container install-custom-nodes") < rendered.index(copy_line)
+    assert rendered.index("container download-files") < rendered.index(copy_line)
+    assert rendered.index(copy_line) < rendered.index("container emit-final-manifest")
+
+
 # Custom-node and application modes render one ordered observed execution boundary.
 def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> None:
     plan = build_plan(
@@ -506,6 +537,28 @@ def test_renderer_mounts_distinct_git_credentials_as_required_fixed_targets() ->
 
 
 # Materialization writes one deterministic BuildPlan and verified local inputs.
+def _plan_with_local_file(*, digest: str | None = None) -> tuple[BuildPlan, str]:
+    plan = build_plan(final_config(), accepted_resolution())
+    relative_target = "models/checkpoints/local-model.bin"
+    context_path = (
+        f"build/files/{hashlib.sha256(relative_target.encode('utf-8')).hexdigest()}"
+    )
+    local = LocalFilePlan(
+        type="local",
+        target=f"/workspace/ComfyUI/{relative_target}",
+        relative_target=relative_target,
+        context_path=context_path,
+        verification="sha256" if digest is not None else "unverified-local",
+        digest=digest,
+    )
+    return (
+        plan.model_copy(
+            update={"files": plan.files.model_copy(update={"files": (local,)})}
+        ),
+        context_path,
+    )
+
+
 def test_materializer_writes_deterministic_plan_and_verified_input(
     tmp_path: Path,
 ) -> None:
@@ -580,6 +633,116 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert "PIP_CONSTRAINT" not in dockerfile
 
     assert parse_build_plan_json((first / "build-plan.json").read_bytes()) == plan
+
+
+def test_local_copy_streams_bounded_chunks_and_publishes_independent_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "model.bin"
+    original = b"abcdefgh"
+    source.write_bytes(original)
+    plan, context_path = _plan_with_local_file()
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+    read_sizes: list[int | None] = []
+    original_read_chunk = file_admission.AdmittedRegularFileReader.read_chunk
+
+    def read_chunk(
+        reader: file_admission.AdmittedRegularFileReader,
+        limit: int | None = None,
+    ) -> bytes:
+        read_sizes.append(limit)
+        return original_read_chunk(reader, 3)
+
+    monkeypatch.setattr(
+        file_admission.AdmittedRegularFileReader,
+        "read_chunk",
+        read_chunk,
+    )
+
+    _materialize_private_stage(
+        plan,
+        stage,
+        canonical_wheel=canonical_wheel(),
+        local_sources=(
+            LocalMaterializationSource(PurePosixPath(context_path), source),
+        ),
+        local_file_mode="copy",
+    )
+    source.write_bytes(b"changed")
+
+    assert (stage / context_path).read_bytes() == original
+    assert len(read_sizes) == 4
+
+
+@pytest.mark.parametrize(
+    ("mode", "succeeds"),
+    [("auto", True), ("clone", False)],
+)
+def test_clone_unavailable_falls_back_only_in_auto_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    succeeds: bool,
+) -> None:
+    source = tmp_path / "model.bin"
+    content = b"local model"
+    source.write_bytes(content)
+    plan, context_path = _plan_with_local_file()
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+
+    def unavailable(
+        _reader: file_admission.AdmittedRegularFileReader, _fd: int
+    ) -> None:
+        raise file_admission.FileCloneUnavailableError("clone unavailable")
+
+    monkeypatch.setattr(
+        file_admission.AdmittedRegularFileReader,
+        "clone_to",
+        unavailable,
+    )
+
+    def call() -> None:
+        _materialize_private_stage(
+            plan,
+            stage,
+            canonical_wheel=canonical_wheel(),
+            local_sources=(
+                LocalMaterializationSource(PurePosixPath(context_path), source),
+            ),
+            local_file_mode=mode,
+        )
+
+    if succeeds:
+        call()
+        assert (stage / context_path).read_bytes() == content
+    else:
+        with pytest.raises(FinalMaterializationError, match="clone is unavailable"):
+            call()
+
+
+def test_locked_local_materialization_rejects_second_read_digest_drift(
+    tmp_path: Path,
+) -> None:
+    intended = b"intended local model"
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"changed local model")
+    digest = f"sha256:{hashlib.sha256(intended).hexdigest()}"
+    plan, context_path = _plan_with_local_file(digest=digest)
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+
+    with pytest.raises(FinalMaterializationError, match="digest"):
+        _materialize_private_stage(
+            plan,
+            stage,
+            canonical_wheel=canonical_wheel(),
+            local_sources=(
+                LocalMaterializationSource(PurePosixPath(context_path), source),
+            ),
+            local_file_mode="copy",
+        )
 
 
 def test_materializer_avoids_posix_mode_calls_on_windows(
@@ -711,7 +874,7 @@ def test_comfyui_root_file_is_materialized_and_reloaded_canonically(
     tmp_path: Path,
 ) -> None:
     document = final_config().model_dump(mode="json", exclude_none=True)
-    document["files"][0]["dir"] = "./"
+    document["files"][0]["target_dir"] = "./"
     config = validate_final_config_structure(document)
     plan = build_plan(config, accepted_resolution())
     output = tmp_path / "output"
@@ -725,8 +888,8 @@ def test_comfyui_root_file_is_materialized_and_reloaded_canonically(
         mounted_config_path=tmp_path / "missing.toml",
         environ={},
     )
-    assert baked_document["files"][0]["dir"] == "."
-    assert runtime.files[0]["dir"] == "."
+    assert baked_document["files"][0]["target_dir"] == "."
+    assert runtime.files[0]["target_dir"] == "."
 
 
 @pytest.mark.skipif(

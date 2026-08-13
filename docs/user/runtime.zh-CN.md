@@ -63,7 +63,7 @@ docker exec CONTAINER cdh container runtime follow
 
 ## 文件、下载与持久状态
 
-主机端的 `[[files]]` 声明会成为固化到镜像中的运行时默认配置。每次容器启动或 restart 被接纳时，固化和挂载的文件列表会以规范化后的 `dir` 加 `filename` 为键进行合并。在比较 identity 前，多余的 `/`、`.` 路径段和末尾 `/` 会被规范化；`.` 与 `./` 表示 `COMFYUI_PATH` 根目录本身。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。生效条目必须包含 URL，重复或无效的生效目标会在合并后失败。每个目标都相对于 `COMFYUI_PATH`，绝对路径和任何明确写出的 `..` 路径段仍然无效。
+主机端的 HTTP `[[files]]` 声明会成为固化到镜像中的运行时默认配置；宿主机本地构建文件不会。运行时只接受 `type = "http"` 条目；挂载配置中的本地来源会被拒绝，而不会尝试在容器内解释宿主机路径。每次容器启动或 restart 被接纳时，固化和挂载的文件列表会以规范化后的 `target_dir` 加 `filename` 为键进行合并。在比较 identity 前，多余的 `/`、`.` 路径段和末尾 `/` 会被规范化；`.` 与 `./` 表示 `COMFYUI_PATH` 根目录本身。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。生效条目必须包含 HTTP type 和 URL，重复或无效的生效目标会在合并后失败。每个目标都相对于 `COMFYUI_PATH`，绝对路径和任何明确写出的 `..` 路径段仍然无效。
 
 同步下载会在 pre-start Hook 之前完成。异步下载会在 ComfyUI 启动前被接收到一个后台队列中，并且可以在 ComfyUI 运行期间继续；它们不会阻塞 ComfyUI readiness。
 
@@ -73,7 +73,7 @@ docker exec CONTAINER cdh container runtime follow
 - 对于异步文件，`fail` 会停止队列中的剩余任务，但不会停止 ComfyUI，而 `continue` 会继续处理后续排队文件；以及
 - 路径边界、不安全目标类型、权限、身份、持久化和耐久性方面的失败一律采取失败关闭策略，不能被 `continue` 转为继续执行。
 
-构建时文件遵循不同的约定：每个声明的构建文件都是必需的。请参阅[构建与锁定指南](build-and-lock.zh-CN.md)。
+构建时文件遵循不同的约定：每个声明的构建文件都是必需的，并会权威替换 lower image 中的内容。下文的 `overwrite` 设置仅用于运行时。请参阅[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)。
 
 可选的 `checksum = "sha256:<64 hexadecimal digits>"` 声明可信内容的身份。应从相对于你的威胁模型足够独立的来源获取摘要；cdh 不会从下载来源获取或推断它。
 

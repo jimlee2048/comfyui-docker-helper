@@ -11,8 +11,8 @@ import pytest
 from comfyui_docker_helper.config.build_plan import (
     Aria2Plan,
     DownloaderPlan,
-    FilePlan,
     FilesPhase,
+    HttpFilePlan,
     HttpxPlan,
 )
 from comfyui_docker_helper.container import attempt_coordinator
@@ -121,10 +121,10 @@ def test_file_download_plan_projects_checksum_and_attempt_budget() -> None:
         default_download_mode="sync",
         download_max_attempts=3,
         files=(
-            FilePlan(
+            HttpFilePlan(
+                type="http",
                 url="https://example.test/model.bin",
                 target="/workspace/ComfyUI/models/model.bin",
-                overwrite=True,
                 checksum=checksum,
                 downloader="httpx",
                 download_mode="sync",
@@ -137,6 +137,7 @@ def test_file_download_plan_projects_checksum_and_attempt_budget() -> None:
     plan = file_download_plan(payload, "/workspace/ComfyUI")
 
     assert plan.items[0].checksum == checksum
+    assert plan.items[0].overwrite is True
     assert plan.download_max_attempts == 3
 
 
@@ -156,10 +157,10 @@ def test_file_download_plan_rejects_target_outside_admitted_root() -> None:
         default_download_mode="sync",
         download_max_attempts=1,
         files=(
-            FilePlan(
+            HttpFilePlan(
+                type="http",
                 url="https://example.test/model.bin",
                 target="/outside/model.bin",
-                overwrite=False,
                 downloader="httpx",
                 download_mode="sync",
                 downloader_explicit=True,

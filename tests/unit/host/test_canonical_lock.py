@@ -16,6 +16,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     ComfyUIRequirementsLockEntry,
     CudaImageLockEntry,
     DirectGitLockEntry,
+    LocalFileLockEntry,
     ManagedPythonLockEntry,
     OfficialComfyUILockEntry,
     PyTorchLockEntry,
@@ -284,3 +285,25 @@ def test_grouped_models_are_frozen() -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         lock.python.interpreter.version = "3.14.6"
+
+
+def test_local_file_lock_round_trip_is_target_keyed_and_deterministic() -> None:
+    entries = [
+        *_entries(),
+        LocalFileLockEntry(
+            relative_target="models/model.bin",
+            digest=DIGEST_C,
+        ),
+    ]
+
+    lock = canonical_lock_from_entries(entries)
+    document = dump_canonical_lock_toml(lock)
+    parsed = parse_canonical_lock_toml(document)
+
+    assert parsed == lock
+    assert canonical_entry_key(parsed.files.local[0]) == (
+        "files",
+        "local",
+        "models/model.bin",
+    )
+    assert "[[files.local]]" in document

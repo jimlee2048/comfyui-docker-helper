@@ -34,7 +34,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     compute_request_digest,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
-from comfyui_docker_helper.config.final_models import FinalConfig
+from comfyui_docker_helper.config.final_models import FinalConfig, FinalHttpFileConfig
 from comfyui_docker_helper.config.final_planning import (
     BackendPlan,
     CudaBackendAdapter,
@@ -122,13 +122,25 @@ class DownloaderRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class FileRequest:
+class HttpFileRequest:
+    type: Literal["http"]
     url: str
     target: str
-    overwrite: bool
     checksum: str | None
     downloader: Literal["aria2", "httpx"]
     download_mode: Literal["sync", "async"]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalFileRequest:
+    type: Literal["local"]
+    target: str
+    relative_target: str
+    context_path: str
+    content_lock: bool
+
+
+type FileRequest = HttpFileRequest | LocalFileRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,17 +458,35 @@ def build_canonical_request_graph(
         aria2_resume_download=config.cdh.downloader.aria2.resume_download,
         httpx_timeout=config.cdh.downloader.httpx.timeout,
     )
-    files = tuple(
-        FileRequest(
-            url=item.url,
-            target=str(PurePosixPath(comfyui_path) / normalized.relative_target),
-            overwrite=item.overwrite,
-            checksum=item.checksum,
-            downloader=item.downloader or downloader.default,
-            download_mode=item.download_mode or downloader.default_download_mode,
-        )
-        for item, normalized in zip(config.files, domains.files, strict=True)
-    )
+    files: list[FileRequest] = []
+    for item, normalized in zip(config.files, domains.files, strict=True):
+        target = str(PurePosixPath(comfyui_path) / normalized.relative_target)
+        if isinstance(item, FinalHttpFileConfig):
+            files.append(
+                HttpFileRequest(
+                    type="http",
+                    url=item.url,
+                    target=target,
+                    checksum=item.checksum,
+                    downloader=item.downloader or downloader.default,
+                    download_mode=(
+                        item.download_mode or downloader.default_download_mode
+                    ),
+                )
+            )
+        else:
+            slot = hashlib.sha256(
+                normalized.relative_target.encode("utf-8")
+            ).hexdigest()
+            files.append(
+                LocalFileRequest(
+                    type="local",
+                    target=target,
+                    relative_target=normalized.relative_target,
+                    context_path=f"build/files/{slot}",
+                    content_lock=item.content_lock,
+                )
+            )
     return CanonicalRequestGraph(
         image_config_digest=_image_config_digest(config, domains),
         target_platform=platform,
@@ -485,7 +515,7 @@ def build_canonical_request_graph(
             for route in config.cdh.git.credentials
         ),
         downloader=downloader,
-        files=files,
+        files=tuple(files),
         runtime=RuntimeRequest(
             environment=tuple(sorted(config.system.env.items())),
             ssh=SshRequest(
@@ -625,15 +655,25 @@ def _image_config_projection(
     document.pop("secrets")
     build = cast(dict[str, object], document["build"])
     cdh = cast(dict[str, object], document["cdh"])
+    cdh.pop("local_file_mode")
     git = cast(dict[str, object], cdh["git"])
     system = cast(dict[str, object], document["system"])
     python = cast(dict[str, object], document["python"])
     pytorch = cast(dict[str, object], document["pytorch"])
     document["files"] = [
-        {
-            **item.model_dump(mode="json"),
-            "dir": normalized.directory.as_posix(),
-        }
+        (
+            {
+                **item.model_dump(mode="json"),
+                "target_dir": normalized.directory.as_posix(),
+            }
+            if isinstance(item, FinalHttpFileConfig)
+            else {
+                "type": "local",
+                "target_dir": normalized.directory.as_posix(),
+                "filename": item.filename,
+                "content_lock": item.content_lock,
+            }
+        )
         for item, normalized in zip(config.files, domains.files, strict=True)
     ]
     system["extra_packages"] = [item.value for item in domains.apt_packages]

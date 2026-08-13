@@ -37,6 +37,29 @@ def test_windows_regular_file_uses_handle_bytes_without_posix_mode(
     assert str(raised.value) == "admitted input exceeds the maximum byte count"
 
 
+def test_windows_scoped_reader_observes_and_streams_small_chunks(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "model.bin"
+    payload = b"0123456789abcdef"
+    source.write_bytes(payload)
+    chunks: list[bytes] = []
+
+    observed = file_admission.observe_regular_absolute_file(source)
+
+    def consume(reader: file_admission.AdmittedRegularFileReader) -> None:
+        assert reader.size == len(payload)
+        assert reader.mode is None
+        while chunk := reader.read_chunk(3):
+            chunks.append(chunk)
+
+    file_admission.operate_regular_absolute_file(source, consume)
+
+    assert observed == file_admission.ObservedRegularFile(len(payload), None)
+    assert b"".join(chunks) == payload
+    assert all(0 < len(chunk) <= 3 for chunk in chunks)
+
+
 @pytest.mark.parametrize("location", ["leaf", "ancestor"])
 def test_windows_admission_rejects_leaf_symlink_and_ancestor_junction(
     tmp_path: Path, location: str

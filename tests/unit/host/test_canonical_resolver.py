@@ -18,6 +18,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     CudaImageLockEntry,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
+    LocalFileLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciRequestIdentity,
@@ -41,6 +42,7 @@ from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.local_executable import (
     LocalExecutableIdentityRequest,
 )
+from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
@@ -219,6 +221,19 @@ class FakeLocalAcquirer:
         )
 
 
+@dataclass
+class FakeLocalFileAcquirer:
+    digest: str = DIGEST_A
+    calls: list[LocalFileIdentityRequest] = field(default_factory=list)
+
+    def acquire(self, request: LocalFileIdentityRequest) -> LocalFileLockEntry:
+        self.calls.append(request)
+        return LocalFileLockEntry(
+            relative_target=request.relative_target.as_posix(),
+            digest=self.digest,
+        )
+
+
 def _initial_lock(*, application_extras: bool = False, local: bool = False):
     acquirer = FakeAcquirer()
     kwargs = {}
@@ -331,6 +346,39 @@ def test_locked_hook_drift_fails_without_external_provider_calls() -> None:
     assert acquirer.calls == []
     assert raised.value.diagnostics[0].message == (
         "locked identity is content changed; regenerate config.lock.toml"
+    )
+
+
+def test_locked_local_file_drift_fails_before_provider_work() -> None:
+    request = LocalFileIdentityRequest(
+        Path("/tmp/model.bin"), PurePosixPath("models/model.bin")
+    )
+    initial = FakeLocalFileAcquirer()
+    existing = reconcile_canonical_lock(
+        _desired(),
+        local_file_requests=(request,),
+        local_file_acquirer=initial,
+        existing=None,
+        acquirer=FakeAcquirer(),
+    ).lock
+    provider = FakeAcquirer()
+
+    with pytest.raises(CanonicalResolutionError) as raised:
+        reconcile_canonical_lock(
+            _desired(),
+            local_file_requests=(request,),
+            local_file_acquirer=FakeLocalFileAcquirer(DIGEST_B),
+            existing=existing,
+            acquirer=provider,
+            policy=LockPolicy.LOCKED,
+        )
+
+    assert provider.calls == []
+    assert raised.value.diagnostics[0].path == (
+        "config.lock.toml",
+        "files",
+        "local",
+        "models/model.bin",
     )
 
 

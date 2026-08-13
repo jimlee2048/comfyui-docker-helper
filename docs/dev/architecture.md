@@ -9,7 +9,7 @@ The same `comfyui-docker-helper` distribution provides operator-facing host comm
 ```mermaid
 flowchart LR
     Operator["Operator or CI"] --> Host["cdh host"]
-    Inputs["TOML, Secret sources, local hooks, existing lock"] --> Host
+    Inputs["TOML, Secret sources, local hooks/files, existing lock"] --> Host
     Host <--> Providers["Git, registries, package sources, Docker"]
     Host --> Context["Rendered build context"]
     Host --> Publication["Process-local tags and output"]
@@ -30,7 +30,7 @@ The root CLI, configuration, shared services, rendering, and every `cdh host *` 
 
 `cdh container *` is an image-internal Linux execution surface. On a non-Linux host the package and root CLI remain importable, container help remains available, and attempting to execute a container helper returns the platform-boundary diagnostic without importing its Linux-only implementation closure.
 
-Host source admission observes user-selected local inputs under a cooperative-input contract rather than treating them as an adversarial filesystem namespace. It rejects unsafe path shapes and statically observed links, reparse points, and special files, then obtains type, byte bounds, bytes, and content identity from one opened leaf. It does not isolate those inputs from an untrusted local process modifying them concurrently. This boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
+Host source admission observes user-selected local inputs under a cooperative-input contract rather than treating them as an adversarial filesystem namespace. It rejects unsafe path shapes and statically observed links, reparse points, and special files, then obtains regular-file shape, size, consumed bytes, and any requested content identity from one opened leaf. Large local build files use descriptor- or handle-backed bounded streaming without a cdh size ceiling. This does not isolate those inputs from an untrusted local process modifying them concurrently. The boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
 
 ## Component responsibilities
 
@@ -72,7 +72,7 @@ The following table locates the main planning and evidence concepts. The [cross-
 | Concept | Location and role |
 | --- | --- |
 | [Canonical request graph](../../src/comfyui_docker_helper/config/canonical_request.py) | An immutable in-memory projection assembled during host planning. Reconciliation consumes its desired requests, and BuildPlan construction consumes the same graph with the accepted lock. |
-| [Canonical lock](../../src/comfyui_docker_helper/config/canonical_lock.py) | Strict serialized host reconciliation state containing accepted exact external and local-content identities. It is written beside the context but excluded from Docker build input. |
+| [Canonical lock](../../src/comfyui_docker_helper/config/canonical_lock.py) | Strict serialized host reconciliation state containing accepted exact external and opted-in local-content identities. An unlocked local build file has no content row. The lock is written beside the context but excluded from Docker build input. |
 | [BuildPlan](../../src/comfyui_docker_helper/config/build_plan.py) | The immutable build execution plan constructed from the request graph and accepted lock, then serialized into the Docker context and mounted read-only for authenticated, command-specific container consumption. cdh does not retain it in the final image filesystem. |
 | [Buildx output plan](../../src/comfyui_docker_helper/host/buildx.py) | Process-local resolved publication tags and output selection for one Buildx invocation. It is not part of the BuildPlan, rendered context, final manifest, or image identity. |
 | [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) | A host-side projection boundary that verifies supplied wheel and local bytes, writes the BuildPlan-derived context, and performs no planning or resolution. Host orchestration publishes or compares the complete cdh-owned context. |
@@ -88,11 +88,11 @@ The canonical cdh wheel crosses the host-to-build boundary as one verified relea
 
 ### Render and reconcile a context
 
-The host render service admits local hook roots and any existing canonical lock, then obtains the prerequisite exact identities needed to assemble the canonical request graph. It reconciles the graph according to the selected policy, constructs one BuildPlan from the accepted lock, and passes the plan with the canonical wheel and exact local sources to materialization.
+The host render service admits local hook roots, local build-file locators, and any existing canonical lock, then obtains the prerequisite exact identities needed to assemble the canonical request graph. A local build-file locator remains host-only materialization data. Content-locked files contribute a streamed SHA-256 identity to reconciliation; unlocked files retain ordinary-file admission without gaining a content lock. The service constructs one BuildPlan from the accepted lock and passes the plan with the canonical wheel and exact local sources to materialization.
 
 Canonical Git credential route metadata enters the request graph, image-configuration digest, and BuildPlan, while Secret source locators and resolved values remain host-only. A command-scoped host session supplies credentials when direct-Git work needs them; on `host build`, the accepted BuildPlan determines which session snapshots are bound to the real Buildx invocation. See the [Secret source and Git credential contract](contracts.md#secret-source-and-git-credential-boundary) for exact matching, transport, persistence, and cleanup boundaries.
 
-Materialization re-verifies supplied local and release bytes and projects the complete context in a host-owned private stage. POSIX hosts retain deterministic context permission checks; Windows hosts compare filesystem shape and bytes, while the rendered Dockerfile applies the required Linux image modes to the plan, runtime configuration, and hooks. The host service owns stage cleanup and context publication. Overwrite is portable but not crash-durable, while a no-write check compares the complete expected tree. See the [materialization contract](contracts.md#materialization-boundary) for the exact ownership and failure boundaries and [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
+Materialization re-verifies supplied local and release inputs and projects the complete context in a host-owned private stage. A local build file occupies its Plan-owned context slot through an independent clone or bounded streaming copy; automatic selection falls back to copying only when cloning is unavailable. POSIX hosts retain deterministic context permission checks; Windows hosts compare filesystem shape and bytes, while the rendered Dockerfile applies the required Linux image modes to the plan, runtime configuration, hooks, and local file targets. The host service owns stage cleanup and context publication. Context replacement is portable but not crash-durable, while a no-write check compares the complete expected tree and streams local-file comparisons without constructing another full copy. See the [materialization contract](contracts.md#materialization-boundary) for the exact ownership and failure boundaries and [Build and lock images](../user/build-and-lock.md) for the operator workflow and reconciliation modes.
 
 ### Build and observe the final image
 
@@ -104,7 +104,7 @@ When `host build --ssh` is applicable to a direct-Git custom node, POSIX hosts r
 
 After context preparation, the host forwards any selected external-cache import or export specification directly to Buildx. Cache selection belongs to host Docker execution rather than the BuildPlan or rendered context; see the [Docker transport contract](contracts.md#uv-release-backend-docker-transport-and-cdh-wheel) for the complete ownership boundary.
 
-The Dockerfile installs the toolchain and application, processes configured nodes and files, and invokes final observation after all build mutations. Final observation rechecks current image state and publishes the manifest; it does not make another planning decision. The complete Plan remains available in the rendered host context for audit and rebuild, while cdh retains only its digest binding in the final manifest rather than retaining the Plan at its fixed product path.
+The Dockerfile installs the toolchain and application, processes configured nodes, and then applies the complete build-file authority before final observation. HTTP build files use the transfer core's authoritative atomic replacement policy. Local build files bypass the downloader and use `COPY --link` from their fixed context slots to authoritatively replace lower image state. Final observation rechecks both source kinds and publishes the manifest; it does not make another planning decision. Only HTTP file declarations project into baked runtime defaults, so a local build source never becomes a runtime import path. The complete Plan remains available in the rendered host context for audit and rebuild, while cdh retains only its digest binding in the final manifest rather than retaining the Plan at its fixed product path.
 
 ### Run the container lifecycle
 
@@ -121,4 +121,4 @@ runtime stdout/stderr         -> controller log broker  -> original container ou
 
 The private control endpoint provides container-local restart and observation without transferring lifecycle ownership to the client. The controller-lifetime output broker preserves the original container stdout and stderr as primary logging authorities while fan-out supplies live-only followers across generation replacement.
 
-This runtime path consumes the generated runtime projection and deployment-time overrides rather than host configuration, the canonical lock, or reconciliation providers. See [Runtime and lifecycle](../user/runtime.md) for operational order and shutdown behavior, and [Cross-module contracts](contracts.md) for process-ownership and trust boundaries.
+This runtime path consumes the generated remote-file runtime projection and deployment-time overrides rather than host configuration, local build-file inputs, the canonical lock, or reconciliation providers. See [Runtime and lifecycle](../user/runtime.md) for operational order and shutdown behavior, and [Cross-module contracts](contracts.md) for process-ownership and trust boundaries.

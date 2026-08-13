@@ -3,6 +3,10 @@
 from collections.abc import Mapping
 from typing import Any
 
+from comfyui_docker_helper.config.downloader_credentials import (
+    DownloaderCredentialContextError,
+    canonicalize_downloader_credential_context,
+)
 from comfyui_docker_helper.config.git_credentials import (
     GitCredentialContextError,
     canonicalize_git_credential_context,
@@ -86,6 +90,19 @@ def _git_credential_key(item: Any) -> MergeKey | None:
     return ("git-credential", canonical)
 
 
+def _downloader_credential_key(item: Any) -> MergeKey | None:
+    if not isinstance(item, Mapping):
+        return None
+    match = item.get("match")
+    if not isinstance(match, str):
+        return None
+    try:
+        canonical = canonicalize_downloader_credential_context(match)
+    except DownloaderCredentialContextError:
+        return None
+    return ("downloader-credential", canonical)
+
+
 HOST_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
     (
         PolicyRule(
@@ -119,6 +136,10 @@ HOST_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
         PolicyRule(
             ("cdh", "git", "credentials"),
             KeyedSequencePolicy(_git_credential_key, KeyedItemMerge.ATOMIC),
+        ),
+        PolicyRule(
+            ("cdh", "downloader", "credentials"),
+            KeyedSequencePolicy(_downloader_credential_key, KeyedItemMerge.ATOMIC),
         ),
     )
 )

@@ -20,11 +20,13 @@ cdh applies runtime settings in this order, with later sources taking precedence
 built-in defaults < baked config < mounted config < environment
 ```
 
-Runtime configuration covers ComfyUI `listen`, `port`, and `extra_args`; cdh download settings; `system.ssh`; and `files`. Known host-only fields in a runtime TOML file are ignored with a warning. Unknown or otherwise unsupported runtime fields fail startup instead of being silently accepted. A mounted runtime file cannot install packages, change the selected ComfyUI checkout, or rebuild the image.
+Runtime configuration covers ComfyUI `listen`, `port`, and `extra_args`; cdh download settings and downloader credentials; runtime Secret sources; `system.ssh`; and `files`. Known host-only fields in a runtime TOML file are ignored with a warning. Unknown or otherwise unsupported runtime fields fail startup instead of being silently accepted. A mounted runtime file cannot install packages, change the selected ComfyUI checkout, or rebuild the image.
 
 Each TOML source is first parsed and checked for runtime applicability. The remaining supported values are then merged with the defaults and environment overrides, and cdh validates the resulting effective runtime document. Consequently, a later partial item can inherit omitted fields from an earlier layer, but an invalid effective result still fails startup with source context.
 
 Ordinary runtime arrays use whole-list replacement: omission inherits the earlier list, a later non-empty list replaces it, and a later empty list clears it. This applies to `comfyui.extra_args` and TOML `system.ssh.pub_keys`. `SSH_PUB_KEY` is the deliberate append exception. After the other layers are merged, cdh stably deduplicates the effective public keys by declared key type plus base64 key blob and retains the first normalized complete line and its optional comment. An `SSH_PUB_KEY` with an existing key identity is therefore a quiet no-op even when its comment differs; otherwise cdh appends its normalized line.
+
+Downloader credential routes instead merge by canonical `match`: a later equivalent route atomically replaces the complete earlier route, a new route appends, and `credentials = []` clears the catalog. Each `[secrets.<name>]` source is an independent atomic definition. Runtime routes and sources are deployment-owned and are never inherited from their build-time counterparts.
 
 The supported environment overrides are:
 
@@ -92,6 +94,35 @@ If an operation fails after replacing a target, the complete new file may alread
 Runtime reconciliation state lives at `/var/lib/cdh/runtime/state.json`. This file is cdh-owned internal recovery state, not user configuration or a download-history API. Do not edit it. Runtime downloads require the state location to be writable. Mount `/var/lib/cdh/runtime` to preserve recovery state across container replacement, and mount each target directory that must preserve downloaded files. Preserving the state file alone does not preserve the downloaded files.
 
 Stop the old cdh container before starting its replacement with the same persisted state and download targets. Do not let overlapping instances or replicas write the same state file or the same download targets; separate state files do not make a shared target safe.
+
+## Authenticated HTTPX downloads
+
+Build-time downloader routes and Secret definitions are never baked into runtime configuration. To authenticate a runtime download, declare an independent route and container-visible Secret source in the mounted `/etc/cdh/runtime/config.toml`:
+
+```toml
+[secrets.hf_read]
+file = "/run/secrets/hf_read"
+
+[[cdh.downloader.credentials]]
+match = "https://huggingface.co/acme/private-model/"
+type = "bearer"
+token = { secret = "hf_read" }
+
+[[files]]
+type = "http"
+url = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "model.safetensors"
+downloader = "httpx"
+```
+
+A runtime Secret selects exactly one `env` or `file` source. Environment locators name variables already present in the container's startup environment. File locators must be absolute container paths. cdh follows deployment-managed symlink projections such as Kubernetes Secret mounts, then requires the resolved object to be a regular file and reads at most 65,525 bytes from one opened descriptor. It does not warn about projected-file modes such as `0444` or `0644`; the deployment owns mount mode, ACL, namespace, and same-UID access.
+
+Each runtime generation validates route structure and references without reading Secret content. After file reconciliation, the generation reads a selected Secret only immediately before its first protected outbound request and caches that value in memory for the rest of the generation. A completed target that schedules no network request does not require its Secret. An accepted runtime restart discards the previous snapshot and resolves each needed source again, so replacing a projected file and restarting rotates its value; changing the process environment normally requires recreating the container.
+
+Missing, unreadable, or invalid Bearer content fails locally without retrying that credential failure. Before an initial protected request it consumes zero network attempts; if a public request redirects into a protected route, the already completed attempt remains visible. The effective `download_failure_policy` then applies with its existing synchronous or asynchronous queue behavior. Real HTTP responses such as 401 or 403 remain ordinary download failures.
+
+Route definitions, Secret references and locators, resolved values, and value hashes do not enter runtime desired-content identity or persisted download state. Rotating a credential therefore does not redownload a completed file; pending work in a new generation uses that generation's value. cdh does not write the token or generated Authorization value to state, status, history, manifest, or its own logs. Code running as the same container UID remains within the deployment trust boundary and is not sandboxed from a Secret that the deployment makes readable.
 
 ## SSH and confidential values
 

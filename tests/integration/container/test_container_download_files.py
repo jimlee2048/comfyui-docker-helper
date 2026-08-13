@@ -118,6 +118,7 @@ def test_file_download_plan_projects_checksum_and_attempt_budget() -> None:
             ),
             httpx=HttpxPlan(timeout=42),
         ),
+        credentials=(),
         default_download_mode="sync",
         download_max_attempts=3,
         files=(
@@ -154,6 +155,7 @@ def test_file_download_plan_rejects_target_outside_admitted_root() -> None:
             ),
             httpx=HttpxPlan(timeout=42),
         ),
+        credentials=(),
         default_download_mode="sync",
         download_max_attempts=1,
         files=(

@@ -727,3 +727,76 @@ def test_git_credentials_overlay_by_canonical_context_atomically() -> None:
     assert merged["cdh"]["git"]["credentials"] == [
         {"match": "https://github.com/acme/", "username": "later"}
     ]
+
+
+def test_downloader_credentials_overlay_by_canonical_route_atomically() -> None:
+    merged = _merge(
+        {
+            "cdh": {
+                "downloader": {
+                    "credentials": [
+                        {
+                            "match": "https://EXAMPLE.com:443/models/",
+                            "type": "bearer",
+                            "token": {"secret": "base"},
+                        },
+                        {
+                            "match": "https://example.com/other",
+                            "type": "bearer",
+                            "token": {"secret": "other"},
+                        },
+                    ]
+                }
+            }
+        },
+        {
+            "cdh": {
+                "downloader": {
+                    "credentials": [
+                        {
+                            "match": "https://example.com/models",
+                            "type": "bearer",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    assert merged["cdh"]["downloader"]["credentials"] == [
+        {
+            "match": "https://example.com/models",
+            "type": "bearer",
+        },
+        {
+            "match": "https://example.com/other",
+            "type": "bearer",
+            "token": {"secret": "other"},
+        },
+    ]
+
+    reset = _merge(
+        merged,
+        {"cdh": {"downloader": {"credentials": []}}},
+        {
+            "cdh": {
+                "downloader": {
+                    "credentials": [
+                        {
+                            "match": "https://later.example/models",
+                            "type": "bearer",
+                            "token": {"secret": "later"},
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    assert reset["cdh"]["downloader"]["credentials"] == [
+        {
+            "match": "https://later.example/models",
+            "type": "bearer",
+            "token": {"secret": "later"},
+        }
+    ]

@@ -27,9 +27,15 @@ from comfyui_docker_helper.config.url_validation import (
 from comfyui_docker_helper.container.attempt_coordinator import (
     AttemptCancelled,
     AttemptExhausted,
+    AttemptLocalFailure,
     AttemptOrdinaryTerminal,
     AttemptSucceeded,
     coordinate_transfer_attempts,
+)
+from comfyui_docker_helper.container.downloader_credentials import (
+    DownloaderCredentialError,
+    DownloaderCredentialPolicy,
+    MountedDownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
@@ -110,11 +116,13 @@ class HttpxDownloader:
         monotonic: Monotonic = time.monotonic,
         wall_clock: Monotonic = time.time,
         log: Logger = print,
+        credential_policy: DownloaderCredentialPolicy | None = None,
     ) -> None:
         self._transport = transport
         self._monotonic = monotonic
         self._wall_clock = wall_clock
         self._log = log
+        self._credential_policy = credential_policy
         self._cancel_requested = threading.Event()
         self._active_lock = threading.Lock()
         self._active: (
@@ -183,6 +191,10 @@ class HttpxDownloader:
                     follow_redirects=True,
                     timeout=timeout,
                     transport=self._transport,
+                    event_hooks={
+                        "request": [self._apply_credential],
+                        "response": [self._record_network_response],
+                    },
                 ) as client,
                 client.stream("GET", request.url) as response,
             ):
@@ -225,6 +237,29 @@ class HttpxDownloader:
                 f"HTTP transport invariant failed for {request.url}: {error}"
             ) from error
 
+    async def _apply_credential(self, request: httpx.Request) -> None:
+        policy = self._credential_policy
+        if policy is None:
+            return
+
+        previous = request.extensions.pop("cdh.downloader.authorization", None)
+        if isinstance(previous, bytes) and _authorization_value(request) == previous:
+            request.headers.pop("Authorization", None)
+
+        try:
+            authorization = policy.authorization_for(request.url)
+        except DownloaderCredentialError as error:
+            if request.extensions.get("cdh.downloader.network-attempted") is True:
+                error.network_attempted = True
+            raise
+        if authorization is None:
+            return
+        request.headers["Authorization"] = authorization.decode("ascii")
+        request.extensions["cdh.downloader.authorization"] = authorization
+
+    async def _record_network_response(self, response: httpx.Response) -> None:
+        response.request.extensions["cdh.downloader.network-attempted"] = True
+
     async def _write_response(
         self,
         response: httpx.Response,
@@ -261,6 +296,13 @@ class HttpxDownloader:
     def force_cancel(self) -> None:
         """Cancel the active request without introducing a new wait budget."""
         self.cancel()
+
+
+def _authorization_value(request: httpx.Request) -> bytes | None:
+    values = [
+        value for name, value in request.headers.raw if name.lower() == b"authorization"
+    ]
+    return values[0] if len(values) == 1 else None
 
 
 class _Aria2LifecycleState(Enum):
@@ -864,7 +906,12 @@ def download_files(
 ) -> tuple[DownloadResult, ...]:
     """Download required build files from one admitted BuildPlan phase."""
     plan = file_download_plan(files, comfyui_root)
-    httpx_backend = httpx_downloader or HttpxDownloader(log=log)
+    httpx_backend = httpx_downloader or HttpxDownloader(
+        log=log,
+        credential_policy=MountedDownloaderCredentialPolicy.from_routes(
+            files.credentials
+        ),
+    )
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
     if not any(item.downloader == "aria2" for item in plan.items):
         return process_file_downloads(plan, backends=backends, log=log)
@@ -902,6 +949,8 @@ def _download_with_policy(
     if isinstance(result, AttemptOrdinaryTerminal):
         raise result.error
     if isinstance(result, AttemptExhausted):
+        raise result.error
+    if isinstance(result, AttemptLocalFailure):
         raise result.error
     if isinstance(result, AttemptCancelled):
         raise DownloadCancelled("required build file download was cancelled")

@@ -9,6 +9,9 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from comfyui_docker_helper.config.url_validation import DownloaderName
+from comfyui_docker_helper.container.downloader_credentials import (
+    DownloaderCredentialError,
+)
 from comfyui_docker_helper.container.transfer_core import (
     DownloadBackend,
     DownloadCancelled,
@@ -70,8 +73,20 @@ class AttemptCancelled:
     resume_authority: ResumeAuthority | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AttemptLocalFailure:
+    """A non-retryable local credential failure with truthful network count."""
+
+    attempts: int
+    error: DownloaderCredentialError
+
+
 type AttemptResult = (
-    AttemptSucceeded | AttemptOrdinaryTerminal | AttemptExhausted | AttemptCancelled
+    AttemptSucceeded
+    | AttemptOrdinaryTerminal
+    | AttemptExhausted
+    | AttemptCancelled
+    | AttemptLocalFailure
 )
 
 
@@ -100,7 +115,11 @@ class _OneCallBackend:
         if self._on_call is not None:
             self._on_call()
         self.calls += 1
-        return self._backend.download(request, settings)
+        try:
+            return self._backend.download(request, settings)
+        except DownloaderCredentialError as error:
+            self.calls = 1 if error.network_attempted else 0
+            raise
 
 
 def coordinate_transfer_attempts(
@@ -165,6 +184,9 @@ def coordinate_transfer_attempts(
         )
         try:
             outcome = transfer_file(admission, backend=one_call, settings=settings)
+        except DownloaderCredentialError as error:
+            attempts += one_call.calls
+            return AttemptLocalFailure(attempts=attempts, error=error)
         except DownloadCancelled as error:
             attempts += one_call.calls
             return AttemptCancelled(

@@ -30,6 +30,7 @@ Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recur
 - `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, and canonical selector representation;
 - `comfyui.custom_nodes` uses a lowercase-only Registry resource ID or the exact direct-Git URL;
 - `files` uses the normalized `target_dir` plus `filename` target; and
+- `cdh.downloader.credentials` uses the canonical HTTP(S) origin and path represented by `match`; and
 - `cdh.git.credentials` uses the canonical credential context represented by `match`.
 
 For package collections, a new identity appends in first-occurrence order. An exact Debian package repeated across uniquely keyed layers is kept once. If an effective `system.extra_packages` item is already in cdh's default OS package set, cdh warns at its source and omits the redundant item from the effective installation request. Duplicates authored together in one user-owned list remain errors. A Python requirement is deduplicated across layers only when the complete canonical requirement is equal; cdh does not infer general range equivalence. Requirements for the same normalized distribution that differ in extras or selectors remain visible so effective validation can report the conflict. Duplicates authored in one layer likewise remain visible for validation. A later empty list resets the corresponding collection.
@@ -112,6 +113,35 @@ HTTP files may also select `checksum` and `download_mode`. Local files instead u
 A relative local `path` uses the real parent directory of the first `-f` configuration file as its common base. Absolute paths and normalized parent traversal are accepted. The selected source must be one regular host file; cdh rejects observed symlinks, Windows junctions and other reparse points, directories, and special files. The locator is ordinary non-secret host input: it is not serialized into the lock, BuildPlan, rendered metadata, manifest, or image configuration, but it does not receive Secret-value handling or redaction.
 
 `content_lock = false` is the default and avoids a cdh SHA-256 scan during planning. `content_lock = true` streams the source into a SHA-256 identity stored in the canonical lock and BuildPlan, then verifies that identity again while materializing the context. The [build and lock guide](build-and-lock.md#build-files-and-local-context-materialization) explains context materialization modes, `--check` cost, remote-builder transfer, and image placement. Local sources are build-only; only HTTP file declarations become baked runtime defaults.
+
+## Authenticate HTTPX file downloads
+
+Define a named Secret and reference it from a Bearer credential route. The token is always a whole-value Secret reference rather than an inline value:
+
+```toml
+[secrets.hf_read]
+env = "HF_TOKEN"
+
+[[cdh.downloader.credentials]]
+match = "https://huggingface.co/acme/private-model/"
+type = "bearer"
+token = { secret = "hf_read" }
+
+[[files]]
+type = "http"
+url = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "model.safetensors"
+downloader = "httpx"
+```
+
+`match` defines a credential protection space from its exact scheme, case-normalized host, effective port, and raw path segments. The longest path-segment prefix wins for every actual outbound request, including redirects. Query parameters on the file URL remain unchanged but do not participate in route selection; a route itself cannot select by query. A redirect outside every route receives no cdh Bearer value, a redirect into another route uses that route's Secret, and an HTTPS route never authorizes an HTTP target unless that target has its own matching HTTP route. HTTP routes are permitted with a warning because the token then lacks TLS transport confidentiality.
+
+The named source uses the same host env/file acquisition boundary described for Git Secrets below and is limited to 65,525 bytes. Supply the bare RFC 6750 `b64token` value without a `Bearer ` prefix or trailing newline. cdh does not trim it, decode it as Base64, parse JWT claims, require a provider-specific prefix, or contact the provider during admission.
+
+Authenticated files must use the effective `httpx` downloader. cdh rejects an initial matching URL that selects aria2 because aria2 cannot enforce the same per-redirect credential scope; ordinary public downloads remain supported by either backend. cdh does not preflight a public aria2 URL to predict redirects, so a later protected endpoint simply follows aria2's normal HTTP failure path without receiving a token.
+
+Downloader routes merge by canonical `match`: a later equivalent route atomically replaces the earlier one at its original position, a distinct route appends, and `credentials = []` clears inherited routes. Secret definitions merge independently by logical name. Build routes and Secret sources are build-only and are not baked into runtime configuration; deployments that need authenticated runtime downloads declare an independent route and container-visible Secret source in the mounted runtime config. See [Build and lock](build-and-lock.md#authenticated-httpx-file-downloads) and [Runtime](runtime.md#authenticated-httpx-downloads) for their separate delivery and lifetime boundaries.
 
 ## Supply private HTTP(S) Git credentials
 

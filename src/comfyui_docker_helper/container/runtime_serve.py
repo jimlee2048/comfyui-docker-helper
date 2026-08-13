@@ -66,6 +66,9 @@ from comfyui_docker_helper.container.runtime_logging import (
     RuntimeLoggingFactory,
     open_runtime_logging_broker,
 )
+from comfyui_docker_helper.container.runtime_secret_session import (
+    RuntimeDownloaderCredentialPolicy,
+)
 from comfyui_docker_helper.container.runtime_ssh_service import (
     RuntimeSshService,
     RuntimeSshStarter,
@@ -147,6 +150,14 @@ class RuntimeGenerationFactory:
                 )
             ) from error
         render_runtime_diagnostics("Runtime hook warnings:", hook_plan.warnings)
+        credential_policy = (
+            RuntimeDownloaderCredentialPolicy.from_config(
+                result.config,
+                environ=self._source_env,
+            )
+            if result.config.cdh.downloader.credentials
+            else None
+        )
 
         return RuntimeGeneration(
             config=result.config,
@@ -159,6 +170,7 @@ class RuntimeGenerationFactory:
                 runtime_state_path=self._runtime_state_path,
                 downloader=self._runtime_downloader,
                 async_queue_starter=self._runtime_async_queue_starter,
+                credential_policy=credential_policy,
             ),
             ssh_service=RuntimeSshService(
                 result.config,

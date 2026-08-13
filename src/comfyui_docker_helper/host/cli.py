@@ -11,7 +11,13 @@ import typer
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
-from comfyui_docker_helper.config.build_plan import git_credential_secret_ids
+from comfyui_docker_helper.config.build_plan import (
+    downloader_credential_secret_ids,
+    git_credential_secret_ids,
+)
+from comfyui_docker_helper.config.credential_secrets import (
+    CREDENTIAL_SECRET_MAX_BYTES,
+)
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
 from comfyui_docker_helper.config.git_credentials import (
@@ -426,6 +432,15 @@ def build(
                         prepared.plan.custom_nodes
                     )
                 )
+                downloader_credential_bindings = tuple(
+                    FileSecretBinding(
+                        secret_id,
+                        secret_session.snapshot_downloader_credential(secret_id),
+                    )
+                    for secret_id in downloader_credential_secret_ids(
+                        prepared.plan.files
+                    )
+                )
                 presenter.warnings(secret_session.drain_warnings())
 
                 known_hosts_bindings = (
@@ -451,6 +466,7 @@ def build(
                     forward_default_ssh=use_ssh,
                     file_secret_bindings=(
                         *credential_bindings,
+                        *downloader_credential_bindings,
                         *known_hosts_bindings,
                     ),
                     cache_from=cache_from,
@@ -497,6 +513,14 @@ def _render_secret_session_failure(
             "the configured Git credential value must be non-empty, no more than "
             f"{GIT_CREDENTIAL_VALUE_MAX_BYTES:,} bytes, and contain no NUL, carriage "
             "return, or newline characters"
+        ),
+        "invalid_bearer_value": (
+            "the configured downloader credential must be one exact RFC 6750 "
+            "Bearer token"
+        ),
+        "source_too_large": (
+            "the configured source exceeds the credential Secret limit of "
+            f"{CREDENTIAL_SECRET_MAX_BYTES:,} bytes"
         ),
         "session_create_failed": "the private Secret session could not be created",
         "snapshot_failed": "the configured Secret could not be prepared",

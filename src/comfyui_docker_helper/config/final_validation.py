@@ -22,8 +22,15 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticPath,
     DiagnosticSeverity,
 )
+from comfyui_docker_helper.config.downloader_credentials import (
+    DownloaderCredentialContextError,
+    parse_downloader_credential_context,
+    parse_downloader_request_url,
+    select_downloader_credential_context,
+)
 from comfyui_docker_helper.config.final_models import (
     FinalConfig,
+    FinalDownloaderCredentialConfig,
     FinalGitCredentialConfig,
     FinalGitCustomNodeConfig,
     FinalHttpFileConfig,
@@ -165,6 +172,7 @@ class FinalConfigDomainResult:
     files: tuple[NormalizedFile, ...]
     controlled_extra_args: tuple[LocatedValue, ...]
     git_credential_contexts: tuple[LocatedValue, ...]
+    downloader_credential_contexts: tuple[LocatedValue, ...]
     workspace: PurePosixPath | None
     comfyui_path: PurePosixPath | None
 
@@ -202,6 +210,7 @@ def validate_final_config_domains(
     files: list[NormalizedFile] = []
     controlled_extra_args: list[LocatedValue] = []
     git_credential_contexts: list[LocatedValue] = []
+    downloader_credential_contexts: list[LocatedValue] = []
 
     _validate_platform_domain(config, diagnostics)
     _validate_python_domain(config, package_requirements, diagnostics)
@@ -223,6 +232,9 @@ def validate_final_config_domains(
     _validate_build_domains(config, diagnostics)
     _validate_secret_domains(config, diagnostics)
     _validate_git_credential_domains(config, git_credential_contexts, diagnostics)
+    _validate_downloader_credential_domains(
+        config, downloader_credential_contexts, diagnostics
+    )
 
     return FinalConfigDomainResult(
         diagnostics=tuple(diagnostics),
@@ -244,6 +256,7 @@ def validate_final_config_domains(
         files=tuple(files),
         controlled_extra_args=tuple(controlled_extra_args),
         git_credential_contexts=tuple(git_credential_contexts),
+        downloader_credential_contexts=tuple(downloader_credential_contexts),
         workspace=workspace,
         comfyui_path=comfyui_path,
     )
@@ -303,7 +316,15 @@ def validate_final_config_semantics(
         diagnostics,
         origins=origins,
     )
+    _duplicate_diagnostics(
+        domains.downloader_credential_contexts,
+        "downloader_credential.duplicate_match",
+        "credential match routes must be unique after normalization",
+        diagnostics,
+        origins=origins,
+    )
     _secret_reference_diagnostics(config, diagnostics)
+    _authenticated_downloader_diagnostics(config, diagnostics)
     _duplicate_diagnostics(
         domains.git_targets,
         "custom_node.duplicate_git_target_dir",
@@ -1133,6 +1154,58 @@ def _validate_git_credential_domains(
         _validate_git_credential_route(route, path, contexts, diagnostics)
 
 
+def _validate_downloader_credential_domains(
+    config: FinalConfig,
+    contexts: list[LocatedValue],
+    diagnostics: list[Diagnostic],
+) -> None:
+    for index, route in enumerate(config.cdh.downloader.credentials):
+        path: DiagnosticPath = ("cdh", "downloader", "credentials", index)
+        _validate_downloader_credential_route(route, path, contexts, diagnostics)
+
+
+def _validate_downloader_credential_route(
+    route: FinalDownloaderCredentialConfig,
+    path: DiagnosticPath,
+    contexts: list[LocatedValue],
+    diagnostics: list[Diagnostic],
+) -> None:
+    try:
+        context = parse_downloader_credential_context(route.match)
+    except DownloaderCredentialContextError as error:
+        diagnostics.append(
+            Diagnostic(
+                (*path, "match"),
+                (
+                    "downloader_credential.userinfo_forbidden"
+                    if error.code == "userinfo"
+                    else "downloader_credential.invalid_match"
+                ),
+                str(error),
+            )
+        )
+    else:
+        contexts.append(LocatedValue((*path, "match"), context.canonical_url))
+        if context.scheme == "http":
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "match"),
+                    "downloader_credential.insecure_http",
+                    "credentials sent over HTTP lack TLS transport confidentiality",
+                    DiagnosticSeverity.WARNING,
+                )
+            )
+
+    if _SECRET_NAME_PATTERN.fullmatch(route.token.secret) is None:
+        diagnostics.append(
+            Diagnostic(
+                (*path, "token", "secret"),
+                "secret.invalid_reference",
+                "Secret references must match [a-z][a-z0-9_-]{0,63}",
+            )
+        )
+
+
 def _validate_git_credential_route(
     route: FinalGitCredentialConfig,
     path: DiagnosticPath,
@@ -1198,6 +1271,64 @@ def _secret_reference_diagnostics(
                     ("cdh", "git", "credentials", index, "password", "secret"),
                     "secret.unknown_reference",
                     "must reference a defined Secret",
+                )
+            )
+    for index, route in enumerate(config.cdh.downloader.credentials):
+        name = route.token.secret
+        if (
+            _SECRET_NAME_PATTERN.fullmatch(name) is not None
+            and name not in config.secrets
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    (
+                        "cdh",
+                        "downloader",
+                        "credentials",
+                        index,
+                        "token",
+                        "secret",
+                    ),
+                    "secret.unknown_reference",
+                    "must reference a defined Secret",
+                )
+            )
+
+
+def _authenticated_downloader_diagnostics(
+    config: FinalConfig,
+    diagnostics: list[Diagnostic],
+) -> None:
+    routes = []
+    for route in config.cdh.downloader.credentials:
+        try:
+            routes.append(parse_downloader_credential_context(route.match))
+        except DownloaderCredentialContextError:
+            continue
+    if not routes:
+        return
+    for index, item in enumerate(config.files):
+        if not isinstance(item, FinalHttpFileConfig):
+            continue
+        try:
+            request = parse_downloader_request_url(item.url)
+        except DownloaderCredentialContextError:
+            continue
+        if (
+            select_downloader_credential_context(routes, request) is not None
+            and (item.downloader or config.cdh.default_downloader) != "httpx"
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    ("files", index, "downloader"),
+                    "file.authenticated_downloader_requires_httpx",
+                    "For credential safety, authenticated downloads require "
+                    'downloader = "httpx"; aria2 cannot constrain credential '
+                    "scope across redirects",
+                    hint=(
+                        'Set downloader = "httpx" for this file or change the '
+                        "default downloader"
+                    ),
                 )
             )
 

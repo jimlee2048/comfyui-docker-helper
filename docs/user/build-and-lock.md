@@ -177,6 +177,16 @@ With `content_lock = false`, ordinary planning does not hash the source. An expl
 
 Only HTTP build files are projected into `runtime/config.toml`. A local source locator is host-only and never becomes a runtime import instruction; deployment-time replacement remains the mounted runtime configuration's separate responsibility.
 
+## Authenticated HTTPX file downloads
+
+Downloader credential routes authorize only cdh's HTTPX file-download instruction. `validate` and `render` check route structure and Secret references without reading Secret values. When a build contains at least one effective HTTPX file, `host build` snapshots every distinct Secret referenced by the effective downloader routes before starting Buildx. It supplies those snapshots as required BuildKit Secret mounts only to `cdh container download-files`, so a redirect can safely switch to any declared route; installers, Git, hooks, and other build instructions receive no downloader credential grant.
+
+The complete canonical route, Bearer type, logical Secret name, and stable mount ID are safe BuildPlan metadata and therefore affect image identity. Secret source kind and locator, token bytes, the generated `Authorization` value, and any token digest are excluded from the lock, BuildPlan, context metadata, manifest, image metadata, history, and cdh-owned output. The image-side helper reads only the Secret selected for an actual request and independently validates the mounted bytes before sending them. Build routes and Secret definitions do not enter the baked runtime config.
+
+Building the rendered context manually bypasses the host Secret session. Supply each required file-backed mount shown by the rendered Dockerfile under its stable `cdh-downloader-credential-<name>` ID. Do not pass a token as a build argument or place it in the context.
+
+BuildKit Secret contents do not ordinarily invalidate an instruction cache. Rotating a token can therefore reuse a completed download layer, and a cache hit does not prove that the current credential works. Use the ordinary BuildKit cache controls when the build must perform a fresh authenticated request; cdh deliberately does not add a token-derived cachebuster.
+
 ## From effective configuration to a context
 
 cdh uses one forward-only planning flow:

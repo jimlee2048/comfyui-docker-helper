@@ -16,6 +16,7 @@ from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
+    DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,
     HookPlan,
     LocalFilePlan,
@@ -534,6 +535,85 @@ def test_renderer_mounts_distinct_git_credentials_as_required_fixed_targets() ->
         if "install-custom-nodes" in item
     )
     assert "cdh-git-credential-" not in registry_block
+
+
+def test_renderer_mounts_distinct_downloader_credentials_only_on_httpx_download() -> (
+    None
+):
+    plan = build_plan(final_config(), accepted_resolution())
+    routes = (
+        DownloaderCredentialRoutePlan(
+            match="https://example.test/",
+            type="bearer",
+            token={"secret": "shared"},
+            secret_id="cdh-downloader-credential-shared",
+        ),
+        DownloaderCredentialRoutePlan(
+            match="https://example.test/private",
+            type="bearer",
+            token={"secret": "shared"},
+            secret_id="cdh-downloader-credential-shared",
+        ),
+        DownloaderCredentialRoutePlan(
+            match="https://cdn.example.test/",
+            type="bearer",
+            token={"secret": "cdn"},
+            secret_id="cdh-downloader-credential-cdn",
+        ),
+    )
+    httpx_files = tuple(
+        item.model_copy(update={"downloader": "httpx"}) if item.type == "http" else item
+        for item in plan.files.files
+    )
+    plan = plan.model_copy(
+        update={
+            "files": plan.files.model_copy(
+                update={"credentials": routes, "files": httpx_files}
+            )
+        }
+    )
+
+    blocks = _run_blocks(render_build_plan_dockerfile(plan))
+    download = next(block for block in blocks if "download-files" in block)
+    shared = (
+        "--mount=type=secret,id=cdh-downloader-credential-shared,"
+        "target=/run/secrets/cdh-downloader-credential-shared,required=true"
+    )
+    cdn = (
+        "--mount=type=secret,id=cdh-downloader-credential-cdn,"
+        "target=/run/secrets/cdh-downloader-credential-cdn,required=true"
+    )
+
+    assert download.count(shared) == 1
+    assert download.count(cdn) == 1
+    assert download.index(shared) < download.index(cdn)
+    assert all(
+        "cdh-downloader-credential-" not in block
+        for block in blocks
+        if "download-files" not in block
+    )
+
+    aria2_plan = plan.model_copy(
+        update={
+            "files": plan.files.model_copy(
+                update={
+                    "credentials": routes[2:],
+                    "files": tuple(
+                        item.model_copy(update={"downloader": "aria2"})
+                        if item.type == "http"
+                        else item
+                        for item in plan.files.files
+                    ),
+                }
+            )
+        }
+    )
+    aria2_download = next(
+        block
+        for block in _run_blocks(render_build_plan_dockerfile(aria2_plan))
+        if "download-files" in block
+    )
+    assert "cdh-downloader-credential-" not in aria2_download
 
 
 # Materialization writes one deterministic BuildPlan and verified local inputs.

@@ -14,6 +14,9 @@ import pytest
 
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.container import transfer_core
+from comfyui_docker_helper.container.downloader_credentials import (
+    DownloaderCredentialError,
+)
 from comfyui_docker_helper.container.runtime_download_state import (
     RuntimeDownloadStateWriter,
 )
@@ -459,6 +462,20 @@ def test_reconciliation_reuses_completed_checksum_free_regular_final(
 
     assert result.download_plan.items == ()
     assert result.items[0].status == "completed"
+
+    class CredentialMustRemainLazy:
+        def authorization_for(self, _url: object) -> bytes | None:
+            pytest.fail("completed target must not acquire its credential")
+
+    assert (
+        process_runtime_file_downloads(
+            result.download_plan,
+            config=_config(),
+            backends={},
+            credential_policy=CredentialMustRemainLazy(),
+        )
+        == ()
+    )
 
 
 # Completed state cannot admit a final through a symlinked parent.
@@ -1123,6 +1140,62 @@ def test_runtime_fail_policy_stops_after_retryable_exhaustion(tmp_path: Path) ->
 
     assert len(backend.calls) == 2
     assert not plan.items[1].target.exists()
+
+
+@pytest.mark.parametrize(
+    ("network_attempted", "expected_attempts"),
+    [(False, 0), (True, 1)],
+)
+def test_runtime_credential_failure_is_not_retried_and_preserves_attempt_fact(
+    tmp_path: Path,
+    network_attempted: bool,
+    expected_attempts: int,
+) -> None:
+    plan = _plan(tmp_path / "ComfyUI", _file("a.bin"), _file("b.bin"))
+    calls = 0
+
+    class InitialCredentialPolicy:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def authorization_for(self, _url: object) -> bytes | None:
+            self.calls += 1
+            if self.calls == 1:
+                raise DownloaderCredentialError("credential unavailable")
+            return None
+
+    class CredentialBackend:
+        def download(
+            self,
+            request: TransportRequest,
+            settings: DownloaderSettings,
+        ) -> TransportOutcome:
+            nonlocal calls
+            del request, settings
+            calls += 1
+            if network_attempted and calls == 1:
+                raise DownloaderCredentialError(
+                    "credential unavailable",
+                    network_attempted=True,
+                )
+            return TransportSuccess(length=0, namespace="httpx", http_status=200)
+
+    logs: list[str] = []
+    results = process_runtime_file_downloads(
+        plan,
+        config=_config(policy="continue", attempts=3),
+        backends={"httpx": CredentialBackend()},
+        log=logs.append,
+        credential_policy=(None if network_attempted else InitialCredentialPolicy()),
+    )
+
+    assert [result.item.filename for result in results] == ["b.bin"]
+    assert calls == (2 if network_attempted else 1)
+    assert any(f"attempts={expected_attempts}/3" in line for line in logs)
+    if not network_attempted:
+        assert not any(
+            "target=models/a.bin" in line and "attempt=" in line for line in logs
+        )
 
 
 # Terminal item failures apply runtime policy once without spending retry budget.

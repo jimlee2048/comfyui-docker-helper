@@ -30,6 +30,7 @@ cdh host validate \
 - `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras，以及 canonical selector 表示；
 - `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID，或精确的直接 Git URL；
 - `files` 使用规范化后的 `target_dir` 加 `filename` 目标；
+- `cdh.downloader.credentials` 使用 `match` 表示的 canonical HTTP(S) origin 与路径；
 - `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
 对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras 或 selector 不同，会继续保留，让生效配置校验报告冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
@@ -112,6 +113,35 @@ HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地文件改用 `
 相对的本地 `path` 统一以第一个 `-f` 配置文件的真实父目录作为基准。绝对路径和规范化后的父目录穿越均可使用。所选来源必须是宿主机上的单个普通文件；cdh 会拒绝观测到的符号链接、Windows junction 和其他 reparse point、目录及特殊文件。该 locator 是普通的非 Secret 宿主机输入：它不会序列化到 lock、BuildPlan、渲染 metadata、manifest 或镜像配置中，但也不享受 Secret 值处理或脱敏。
 
 `content_lock = false` 是默认值，可避免 cdh 在规划期间执行 SHA-256 扫描。`content_lock = true` 会以流式方式为来源计算 SHA-256 identity，将其存入 canonical lock 和 BuildPlan，并在 materialization 上下文时再次验证该 identity。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明上下文 materialization mode、`--check` 成本、向远程 builder 传输以及镜像放置行为。本地来源仅用于构建；只有 HTTP 文件声明会成为固化的运行时默认配置。
+
+## 为 HTTPX 文件下载提供认证
+
+定义一个具名 Secret，再从 Bearer credential route 引用它。token 始终是对完整 Secret 值的引用，不接受 inline 值：
+
+```toml
+[secrets.hf_read]
+env = "HF_TOKEN"
+
+[[cdh.downloader.credentials]]
+match = "https://huggingface.co/acme/private-model/"
+type = "bearer"
+token = { secret = "hf_read" }
+
+[[files]]
+type = "http"
+url = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "model.safetensors"
+downloader = "httpx"
+```
+
+`match` 使用精确 scheme、大小写规范化后的 host、effective port 和 raw path segment 定义 credential protection space。包括 redirect 在内，每个实际 outbound request 都重新执行 longest path-segment prefix 匹配。文件 URL 的 query parameter 会原样保留，但不参与 route 选择；route 本身也不能按 query 选择 credential。redirect 离开所有 route 后不会收到 cdh Bearer 值；进入另一 route 时使用该 route 的 Secret；HTTPS route 不会授权 HTTP target，除非另有 route 明确匹配该 HTTP target。HTTP route 可以使用，但 cdh 会警告 token 缺少 TLS 传输机密性。
+
+具名 source 使用下文 Git Secret 所述的同一宿主机 env/file acquisition 边界，上限为 65,525 bytes。请提供不含 `Bearer ` 前缀和末尾换行的裸 RFC 6750 `b64token` 值。cdh 不会 trim、Base64 decode、解析 JWT claim、要求 provider 专属前缀或在准入期间联系 provider。
+
+认证文件的 effective downloader 必须是 `httpx`。如果初始 URL 命中 route 却选择 aria2，cdh 会拒绝配置，因为 aria2 无法执行同样的逐 redirect credential scope；普通公开下载仍可使用任一 backend。cdh 不会通过网络预检来预测公开 aria2 URL 的 redirect，因此它后来遇到受保护 endpoint 时，只会沿用 aria2 的普通 HTTP 失败路径，并且不会收到 token。
+
+Downloader route 按 canonical `match` 合并：靠后等价 route 会在原位置原子替换完整的靠前 route，不同 route 会追加，`credentials = []` 会清除继承的 route。Secret 定义则按逻辑名称独立合并。构建 route 和 Secret source 仅用于构建，不会固化到运行时配置；需要认证运行时下载的部署必须在挂载的运行时配置中独立声明 route 与容器可见 Secret source。它们各自的交付和生命周期边界见[构建与锁定](build-and-lock.zh-CN.md#经过认证的-httpx-文件下载)与[运行时](runtime.zh-CN.md#经过认证的-httpx-下载)。
 
 ## 提供私有 HTTP(S) Git 凭据
 

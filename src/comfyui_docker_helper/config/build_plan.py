@@ -62,6 +62,7 @@ from comfyui_docker_helper.config.canonical_lock import (
 from comfyui_docker_helper.config.canonical_request import (
     CanonicalRequestGraph,
     CustomNodeRequest,
+    DownloaderCredentialRouteRequest,
     GitCredentialRouteRequest,
     GitNodeRequest,
     HttpFileRequest,
@@ -71,8 +72,23 @@ from comfyui_docker_helper.config.canonical_request import (
 from comfyui_docker_helper.config.canonical_resolver import (
     entries_satisfy_request,
 )
+from comfyui_docker_helper.config.credential_secrets import (
+    downloader_credential_secret_id,
+    downloader_credential_secret_target,
+)
+from comfyui_docker_helper.config.downloader_credentials import (
+    DownloaderCredentialContextError,
+    canonicalize_downloader_credential_context,
+    parse_downloader_credential_context,
+    parse_downloader_request_url,
+    select_downloader_credential_context,
+)
 from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
-from comfyui_docker_helper.config.final_models import CudaImageDistro, CudaImageFlavor
+from comfyui_docker_helper.config.final_models import (
+    CudaImageDistro,
+    CudaImageFlavor,
+    FinalSecretRef,
+)
 from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
 from comfyui_docker_helper.config.final_validation import (
     is_aria2_argument_value,
@@ -909,11 +925,84 @@ class LocalFilePlan(_FilePlan):
 FilePlan = Annotated[HttpFilePlan | LocalFilePlan, Field(discriminator="type")]
 
 
+class DownloaderCredentialRoutePlan(_PlanModel):
+    """Safe downloader routing metadata without Secret source information."""
+
+    match: str
+    type: Literal["bearer"]
+    token: FinalSecretRef
+    secret_id: str
+
+    @field_validator("match")
+    @classmethod
+    def _validate_match(cls, value: str) -> str:
+        try:
+            canonical = canonicalize_downloader_credential_context(value)
+        except DownloaderCredentialContextError as error:
+            raise ValueError("downloader credential match must be canonical") from error
+        if canonical != value:
+            raise ValueError("downloader credential match must be canonical")
+        return value
+
+    @field_validator("secret_id")
+    @classmethod
+    def _validate_secret_id(cls, value: str) -> str:
+        downloader_credential_secret_target(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_secret_binding(self) -> DownloaderCredentialRoutePlan:
+        if self.secret_id != downloader_credential_secret_id(self.token.secret):
+            raise ValueError(
+                "downloader credential Secret reference and mount ID must agree"
+            )
+        return self
+
+
 class FilesPhase(_PlanModel):
     downloader: DownloaderPlan
+    credentials: tuple[DownloaderCredentialRoutePlan, ...]
     default_download_mode: Literal["sync", "async"]
     download_max_attempts: int = Field(ge=1)
     files: tuple[FilePlan, ...]
+
+    @model_validator(mode="after")
+    def _validate_credentials(self) -> FilesPhase:
+        matches = tuple(route.match for route in self.credentials)
+        if len(matches) != len(set(matches)):
+            raise ValueError("downloader credential match routes must be unique")
+        contexts = tuple(
+            parse_downloader_credential_context(route.match)
+            for route in self.credentials
+        )
+        for item in self.files:
+            if not isinstance(item, HttpFilePlan):
+                continue
+            request = parse_downloader_request_url(item.url)
+            if (
+                select_downloader_credential_context(contexts, request) is not None
+                and item.downloader != "httpx"
+            ):
+                raise ValueError(
+                    "authenticated file downloads require the HTTPX downloader"
+                )
+        return self
+
+
+def downloader_credential_secret_ids(files: FilesPhase) -> tuple[str, ...]:
+    """Project first-use Secret IDs only when HTTPX can send file requests."""
+    if not any(
+        isinstance(item, HttpFilePlan) and item.downloader == "httpx"
+        for item in files.files
+    ):
+        return ()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for route in files.credentials:
+        if route.secret_id not in seen:
+            seen.add(route.secret_id)
+            ordered.append(route.secret_id)
+    return tuple(ordered)
 
 
 class EnvironmentPlan(_PlanModel):
@@ -1482,6 +1571,10 @@ def _project_files(
                 timeout=request.httpx_timeout,
             ),
         ),
+        credentials=tuple(
+            _downloader_credential_route(route)
+            for route in graph.downloader_credentials
+        ),
         default_download_mode=request.default_download_mode,
         download_max_attempts=request.download_max_attempts,
         files=tuple(
@@ -1500,6 +1593,17 @@ def _project_files(
             )
             for item in graph.files
         ),
+    )
+
+
+def _downloader_credential_route(
+    route: DownloaderCredentialRouteRequest,
+) -> DownloaderCredentialRoutePlan:
+    return DownloaderCredentialRoutePlan(
+        match=route.match,
+        type=route.type,
+        token=FinalSecretRef(secret=route.secret),
+        secret_id=downloader_credential_secret_id(route.secret),
     )
 
 

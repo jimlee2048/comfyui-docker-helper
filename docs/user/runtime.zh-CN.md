@@ -20,11 +20,13 @@ cdh 按以下顺序应用运行时设置，越靠后的来源优先级越高：
 built-in defaults < baked config < mounted config < environment
 ```
 
-运行时配置包括 ComfyUI 的 `listen`、`port` 和 `extra_args`；cdh 下载设置；`system.ssh`；以及 `files`。运行时 TOML 文件中已知的仅限主机端字段会被忽略并产生警告。未知或其他不受支持的运行时字段会导致启动失败，而不会被静默接受。挂载的运行时文件无法安装软件包、更改选定的 ComfyUI 检出版本，也无法重新构建镜像。
+运行时配置包括 ComfyUI 的 `listen`、`port` 和 `extra_args`；cdh 下载设置与 downloader credential；运行时 Secret source；`system.ssh`；以及 `files`。运行时 TOML 文件中已知的仅限主机端字段会被忽略并产生警告。未知或其他不受支持的运行时字段会导致启动失败，而不会被静默接受。挂载的运行时文件无法安装软件包、更改选定的 ComfyUI 检出版本，也无法重新构建镜像。
 
 每个 TOML 来源会先完成解析和运行时适用性检查。剩余的受支持值随后与默认值及环境覆盖合并，最后由 cdh 校验生成的生效运行时文档。因此，靠后的局部条目可以从靠前层继承省略的字段，但无效的最终结果仍会带来源上下文使启动失败。
 
 普通运行时数组采用整列表替换：省略会继承靠前列表，靠后的非空列表会完整替换它，靠后的空列表会将其清空。这适用于 `comfyui.extra_args` 和 TOML 中的 `system.ssh.pub_keys`。`SSH_PUB_KEY` 是特意保留的追加例外。其他层合并后，cdh 会按声明的密钥类型与 base64 密钥 blob 对生效公钥进行稳定去重，并保留先出现的完整规范化行及其可选注释。因此，当 `SSH_PUB_KEY` 的密钥身份已存在时，即使注释不同也会静默地不做任何更改；否则 cdh 会追加其规范化行。
+
+Downloader credential route 则按 canonical `match` 合并：靠后等价 route 会原子替换完整的靠前 route，新 route 会追加，`credentials = []` 会清空 catalog。每个 `[secrets.<name>]` source 都是独立的原子定义。运行时 route 与 source 由部署拥有，绝不会从构建时 counterpart 继承。
 
 支持的环境变量覆盖项如下：
 
@@ -92,6 +94,35 @@ docker exec CONTAINER cdh container runtime follow
 运行时协调状态位于 `/var/lib/cdh/runtime/state.json`。此文件是 cdh 拥有的内部恢复状态，不是用户配置或下载历史 API。请勿编辑。运行时下载要求状态位置可写。挂载 `/var/lib/cdh/runtime` 可在容器替换后保留恢复状态，同时还需挂载每个必须保留下载文件的目标目录。仅保留状态文件并不会保留已下载的文件。
 
 使用相同的持久状态和下载目标启动替代容器前，必须先停止旧的 cdh 容器。不要让重叠运行的实例或多个副本写入同一个状态文件或相同的下载目标；使用不同的状态文件也不能让共享目标变得安全。
+
+## 经过认证的 HTTPX 下载
+
+构建时 downloader route 与 Secret definition 永远不会固化到运行时配置。要认证运行时下载，请在挂载的 `/etc/cdh/runtime/config.toml` 中独立声明 route 与容器可见 Secret source：
+
+```toml
+[secrets.hf_read]
+file = "/run/secrets/hf_read"
+
+[[cdh.downloader.credentials]]
+match = "https://huggingface.co/acme/private-model/"
+type = "bearer"
+token = { secret = "hf_read" }
+
+[[files]]
+type = "http"
+url = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+target_dir = "models/checkpoints"
+filename = "model.safetensors"
+downloader = "httpx"
+```
+
+运行时 Secret 必须且只能选择一个 `env` 或 `file` source。环境变量 locator 指向容器启动环境中已经存在的变量；文件 locator 必须是容器内绝对路径。cdh 会跟随 Kubernetes Secret mount 等由部署系统管理的 symlink projection，然后要求解析后的对象是普通文件，并从同一个已打开 descriptor 中最多读取 65,525 bytes。它不会对 `0444`、`0644` 等 projected-file mode 给出警告；mount mode、ACL、namespace 与相同 UID 的访问边界均由部署负责。
+
+每个运行时 generation 会先校验 route 结构和 reference，而不会读取 Secret 内容。文件 reconcile 完成后，generation 只在首次实际发送受保护 outbound request 之前读取所选 Secret，并在该 generation 剩余生命周期内把值缓存于内存。已经完成、无需安排网络请求的 target 不要求 Secret 可用。一次被接受的 runtime restart 会丢弃上一 generation 的 snapshot，并重新解析每个实际需要的 source，因此替换 projected file 后 restart 可以轮换值；改变进程环境通常需要重新创建容器。
+
+Secret 缺失、不可读或 Bearer 内容无效时，会在本地失败且不会重试该 credential failure。初始受保护 request 发送前失败时消耗零次 network attempt；如果公开 request redirect 进入受保护 route，已经完成的 attempt 仍会保留。之后由生效的 `download_failure_policy` 按既有同步或异步队列语义处理。401、403 等真实 HTTP response 仍属于普通下载失败。
+
+Route definition、Secret reference/locator、解析值与 value hash 都不会进入 runtime desired-content identity 或持久化 download state。因此 credential 轮换不会重新下载已完成文件；新 generation 中尚待处理的工作会使用该 generation 的值。cdh 不会把 token 或生成的 Authorization 值写入 state、status、history、manifest 或自有日志。以相同容器 UID 运行的代码仍属于部署信任边界；cdh 不会把它与部署设置为可读的 Secret 隔离。
 
 ## SSH 与机密值
 

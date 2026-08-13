@@ -57,8 +57,8 @@ def test_windows_unicode_environment_snapshot_is_private_reused_and_cleaned(
 
     with HostSecretSession.from_configuration(result) as session:
         root = session.root
-        first = session.snapshot("root_token")
-        second = session.snapshot("root_token")
+        first = session.snapshot_git_password("root_token")
+        second = session.snapshot_git_password("root_token")
 
         assert first == second
         assert first.read_bytes() == value.encode("utf-8")
@@ -77,5 +77,8 @@ def test_windows_file_snapshot_preserves_bytes_without_permission_warning(
     result = _configuration(tmp_path, source='file = "token"')
 
     with HostSecretSession.from_configuration(result) as session:
-        assert session.snapshot("root_token").read_bytes() == b"windows-file-secret"
+        assert (
+            session.snapshot_git_password("root_token").read_bytes()
+            == b"windows-file-secret"
+        )
         assert session.drain_warnings() == ()

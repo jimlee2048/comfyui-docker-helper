@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from comfyui_docker_helper.config import RuntimeConfig
+from comfyui_docker_helper.container.downloader_credentials import (
+    DownloaderCredentialPolicy,
+)
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_diagnostics import (
     runtime_error_reason,
@@ -55,6 +58,7 @@ class RuntimeDownloadRunner(Protocol):
         state_observer: RuntimeDownloadStateObserver | None = None,
         cancel_requested: Callable[[], bool] | None = None,
         backend_observer: Callable[[CancellableDownloadBackend], None] | None = None,
+        credential_policy: DownloaderCredentialPolicy | None = None,
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
 
 
@@ -93,6 +97,7 @@ class RuntimeAsyncQueueStarter(Protocol):
         log: Logger,
         handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
         cancel_requested: Callable[[], bool],
+        credential_policy: DownloaderCredentialPolicy | None = None,
     ) -> RuntimeAsyncDownloadQueueHandle: ...
 
 
@@ -220,6 +225,7 @@ class RuntimeDownloads:
         runtime_state_path: Path,
         downloader: RuntimeDownloadRunner = download_runtime_files,
         async_queue_starter: RuntimeAsyncQueueStarter | None = None,
+        credential_policy: DownloaderCredentialPolicy | None = None,
         log: Logger = print,
     ) -> None:
         self._config = config
@@ -233,6 +239,7 @@ class RuntimeDownloads:
             else async_queue_starter
         )
         self._log = log
+        self._credential_policy = credential_policy
         self._prepared = _empty_prepared_runtime_downloads()
         self._sync_handle: _RuntimeDownloadOperationHandle | None = None
         self._async_handle: RuntimeAsyncDownloadQueueHandle | None = None
@@ -272,6 +279,7 @@ class RuntimeDownloads:
                         log=self._log,
                         cancel_requested=stop_requested.is_set,
                         backend_observer=observe_backend,
+                        credential_policy=self._credential_policy,
                     )
                 )
             except BaseException as error:
@@ -336,6 +344,9 @@ class RuntimeDownloads:
                 )
             self._async_handle = handle
 
+        starter_kwargs: dict[str, Any] = {}
+        if self._credential_policy is not None:
+            starter_kwargs["credential_policy"] = self._credential_policy
         handle = self._async_queue_starter(
             plan,
             config=self._config,
@@ -345,6 +356,7 @@ class RuntimeDownloads:
             log=self._log,
             handle_observer=own_handle,
             cancel_requested=cancel_requested,
+            **starter_kwargs,
         )
         if self._async_handle is not handle:
             raise RuntimeAsyncQueueStartupError(
@@ -415,6 +427,7 @@ def start_runtime_async_download_queue(
     log: Logger,
     handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
     cancel_requested: Callable[[], bool],
+    credential_policy: DownloaderCredentialPolicy | None = None,
 ) -> RuntimeAsyncDownloadQueueHandle:
     """Start one cdh-managed background queue for async runtime files."""
     store: RuntimeStateStore | None = None
@@ -463,6 +476,7 @@ def start_runtime_async_download_queue(
                 startup_observer=accept_queue,
                 cancel_requested=stop_requested.is_set,
                 backend_observer=observe_backend,
+                credential_policy=credential_policy,
             )
             log(f"Async runtime download queue finished: items={len(plan.items)}")
         except Exception as error:
@@ -522,6 +536,7 @@ def _activate_runtime_file_plan(
     log: Logger,
     cancel_requested: Callable[[], bool],
     backend_observer: Callable[[CancellableDownloadBackend], None],
+    credential_policy: DownloaderCredentialPolicy | None,
 ) -> _PreparedRuntimeDownloads:
     store = RuntimeStateStore.open(
         runtime_state_path,
@@ -562,6 +577,9 @@ def _activate_runtime_file_plan(
             reconciliation.state,
             log=log,
         )
+        downloader_kwargs: dict[str, Any] = {}
+        if credential_policy is not None:
+            downloader_kwargs["credential_policy"] = credential_policy
         runtime_downloader(
             sync_plan,
             config=config,
@@ -569,6 +587,7 @@ def _activate_runtime_file_plan(
             state_observer=state_writer,
             cancel_requested=cancel_requested,
             backend_observer=backend_observer,
+            **downloader_kwargs,
         )
         return prepared
     finally:

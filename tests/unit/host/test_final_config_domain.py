@@ -104,6 +104,115 @@ def test_secret_sources_and_git_credentials_use_typed_complete_values() -> None:
     )
 
 
+def test_downloader_credentials_use_typed_bearer_secret_references() -> None:
+    document = _document()
+    document["secrets"] = {"hf_read": {"env": "HF_TOKEN"}}
+    document["cdh"] = {
+        "downloader": {
+            "credentials": [
+                {
+                    "match": "https://huggingface.co/acme/private/",
+                    "type": "bearer",
+                    "token": {"secret": "hf_read"},
+                }
+            ]
+        }
+    }
+    config = validate_final_config_structure(document)
+
+    route = config.cdh.downloader.credentials[0]
+    assert route.type == "bearer"
+    assert route.token.secret == "hf_read"
+    assert _diagnostics(config) == ()
+
+    document["cdh"]["downloader"]["credentials"][0]["token"] = "inline-token"
+    with pytest.raises(FinalConfigError) as raised:
+        validate_final_config_structure(document)
+    assert raised.value.diagnostics[0].path == (
+        "cdh",
+        "downloader",
+        "credentials",
+        0,
+        "token",
+    )
+
+
+def test_downloader_credential_routes_warn_deduplicate_and_require_httpx() -> None:
+    document = _document()
+    document["secrets"] = {"model_read": {"env": "MODEL_TOKEN"}}
+    document["cdh"] = {
+        "default_downloader": "aria2",
+        "downloader": {
+            "credentials": [
+                {
+                    "match": "http://EXAMPLE.com:80/models/",
+                    "type": "bearer",
+                    "token": {"secret": "model_read"},
+                },
+                {
+                    "match": "http://example.com/models",
+                    "type": "bearer",
+                    "token": {"secret": "missing"},
+                },
+            ]
+        },
+    }
+    document["files"] = [
+        {
+            "type": "http",
+            "url": "http://example.com/models/model.bin?download=true",
+            "target_dir": "models/checkpoints",
+            "filename": "model.bin",
+        }
+    ]
+    config = validate_final_config_structure(document)
+
+    assert [(item.path, item.code, item.severity) for item in _diagnostics(config)] == [
+        (
+            ("cdh", "downloader", "credentials", 0, "match"),
+            "downloader_credential.insecure_http",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("cdh", "downloader", "credentials", 1, "match"),
+            "downloader_credential.insecure_http",
+            DiagnosticSeverity.WARNING,
+        ),
+        (
+            ("cdh", "downloader", "credentials", 1, "match"),
+            "downloader_credential.duplicate_match",
+            DiagnosticSeverity.ERROR,
+        ),
+        (
+            (
+                "cdh",
+                "downloader",
+                "credentials",
+                1,
+                "token",
+                "secret",
+            ),
+            "secret.unknown_reference",
+            DiagnosticSeverity.ERROR,
+        ),
+        (
+            ("files", 0, "downloader"),
+            "file.authenticated_downloader_requires_httpx",
+            DiagnosticSeverity.ERROR,
+        ),
+    ]
+    diagnostic = next(
+        item
+        for item in _diagnostics(config)
+        if item.code == "file.authenticated_downloader_requires_httpx"
+    )
+    assert diagnostic.hint is not None and "httpx" in diagnostic.hint
+
+    document["files"][0]["downloader"] = "httpx"
+    accepted = validate_final_config_structure(document)
+    assert "file.authenticated_downloader_requires_httpx" not in _codes(accepted)
+
+
 @pytest.mark.parametrize(
     "locator",
     [

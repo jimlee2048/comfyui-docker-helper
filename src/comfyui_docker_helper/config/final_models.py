@@ -90,11 +90,26 @@ class FinalHttpxConfig(FinalConfigModel):
     timeout: int | float = Field(default=60, gt=0)
 
 
+class FinalSecretRef(FinalConfigModel):
+    """A complete typed reference to one logical Secret."""
+
+    secret: str
+
+
+class FinalDownloaderCredentialConfig(FinalConfigModel):
+    """One cdh-managed Bearer credential route for HTTPX downloads."""
+
+    match: str
+    type: Literal["bearer"]
+    token: FinalSecretRef
+
+
 class FinalDownloaderConfig(FinalConfigModel):
     """Downloader-specific settings."""
 
     aria2: FinalAria2Config = Field(default_factory=FinalAria2Config)
     httpx: FinalHttpxConfig = Field(default_factory=FinalHttpxConfig)
+    credentials: list[FinalDownloaderCredentialConfig] = Field(default_factory=list)
 
 
 class FinalSecretSourceConfig(FinalConfigModel):
@@ -102,12 +117,6 @@ class FinalSecretSourceConfig(FinalConfigModel):
 
     env: str | None = None
     file: str | None = None
-
-
-class FinalSecretRef(FinalConfigModel):
-    """A complete typed reference to one logical Secret."""
-
-    secret: str
 
 
 class FinalGitCredentialConfig(FinalConfigModel):

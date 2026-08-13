@@ -461,8 +461,11 @@ def observe_inventory(python_prefix):
     return dict(items)
 
 build = pathlib.Path("/opt/cdh/build")
-plan_path = build.joinpath("build-plan.json")
-assert stat.S_IMODE(plan_path.lstat().st_mode) == 0o644
+assert not os.path.lexists(build.joinpath("build-plan.json"))
+plan_path = pathlib.Path("/run/cdh-acceptance-build-plan.json")
+plan_metadata = plan_path.lstat()
+assert stat.S_ISREG(plan_metadata.st_mode)
+assert not stat.S_ISLNK(plan_metadata.st_mode)
 runtime_config_path = pathlib.Path("/opt/cdh/runtime/config.toml")
 assert stat.S_IMODE(runtime_config_path.lstat().st_mode) == 0o644
 plan = json.loads(plan_path.read_text())
@@ -511,7 +514,7 @@ digest_source = (
     "import pathlib; "
     "from comfyui_docker_helper.config.build_plan import "
     "build_plan_digest, parse_build_plan_json; "
-    "path=pathlib.Path('/opt/cdh/build/build-plan.json'); "
+    "path=pathlib.Path('/run/cdh-acceptance-build-plan.json'); "
     "print(build_plan_digest(parse_build_plan_json(path.read_bytes())))"
 )
 observed_plan_digest = subprocess.run(
@@ -1057,6 +1060,7 @@ def _run_disposable(
     script: str,
     *,
     environment: dict[str, str] | None = None,
+    read_only_mounts: tuple[tuple[Path, str], ...] = (),
     gpu: bool = False,
     timeout: int = 600,
 ) -> None:
@@ -1066,6 +1070,13 @@ def _run_disposable(
         command.extend(("--gpus", "all"))
     for key, value in (environment or {}).items():
         command.extend(("--env", f"{key}={value}"))
+    for source, target in read_only_mounts:
+        command.extend(
+            (
+                "--mount",
+                f"type=bind,source={source},target={target},readonly",
+            )
+        )
     command.extend(("--entrypoint", "/bin/sh", image, "-ec", script))
     try:
         subprocess.run(command, check=True, timeout=timeout)
@@ -1303,6 +1314,12 @@ def test_image_has_exact_environment_and_disposition(
             "EXPECTED_IMAGE_CONFIG_DIGEST": binding.image_config_digest,
             "EXPECTED_LOCK_DIGEST": lock_digest,
         },
+        read_only_mounts=(
+            (
+                context.joinpath("build-plan.json"),
+                "/run/cdh-acceptance-build-plan.json",
+            ),
+        ),
     )
 
 

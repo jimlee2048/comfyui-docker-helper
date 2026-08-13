@@ -655,6 +655,28 @@ def test_python_requirements_deduplicate_by_complete_canonical_identity(
     assert location is not None and location.source.layer_ordinal == 1
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("python", "extra_packages"),
+        ("python", "uv_tools"),
+        ("pytorch", "extra_packages"),
+    ],
+)
+def test_python_requirements_deduplicate_canonical_marker_spelling(
+    path: tuple[str, str],
+) -> None:
+    group, field = path
+    merged = _merge_result(
+        {group: {field: ['Demo>=1; python_version>="3.13"']}},
+        {group: {field: ['demo >= 1 ; python_version >= "3.13"']}},
+    )
+
+    assert merged.document[group][field] == ['demo >= 1 ; python_version >= "3.13"']
+    location = merged.origins.exact_location((group, field, 0))
+    assert location is not None and location.source.layer_ordinal == 1
+
+
 def test_same_python_owner_with_different_requirement_remains_for_validation() -> None:
     merged = _merge(
         {"python": {"extra_packages": ["demo>=1,<2"]}},

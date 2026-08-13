@@ -27,8 +27,7 @@ from comfyui_docker_helper.config.registry_identity import (
     validate_registry_id as validate_registry_resource_id,
 )
 from comfyui_docker_helper.config.requirement_validation import (
-    DirectRequirementError,
-    validate_direct_specifier_set,
+    parse_direct_requirement,
 )
 from comfyui_docker_helper.config.selector_validation import (
     normalize_comfyui_version,
@@ -105,7 +104,7 @@ class ProtectedRequirementProjection(_StrictLockModel):
     @field_validator("selector")
     @classmethod
     def _validate_selector(cls, value: str) -> str:
-        return _require_direct_package_selector(value)
+        return _require_direct_package_specifier(value)
 
 
 class OciLockEntry(_ResolverEntry):
@@ -296,7 +295,7 @@ class ResolvedPythonPackage(_StrictLockModel):
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        return _require_exact_stable_distribution_version(value)
+        return _require_exact_distribution_version(value)
 
 
 class PythonPackageGroupLockEntry(_ResolverEntry):
@@ -369,7 +368,7 @@ class UvToolLockEntry(_ResolverEntry):
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        return _require_exact_stable_distribution_version(value)
+        return _require_exact_distribution_version(value)
 
     @model_validator(mode="after")
     def _validate_comfy_cli_floor(self) -> UvToolLockEntry:
@@ -764,7 +763,8 @@ class DirectPythonRequestMember(_StrictLockModel):
 
     package: str
     extras: tuple[str, ...]
-    selector: str
+    specifier: str
+    direct_reference: str | None = None
 
     @field_validator("package")
     @classmethod
@@ -776,10 +776,38 @@ class DirectPythonRequestMember(_StrictLockModel):
     def _validate_extras(cls, value: object) -> tuple[str, ...]:
         return _require_normalized_extras(_require_tuple(value, "extras"))
 
-    @field_validator("selector")
+    @field_validator("specifier")
     @classmethod
-    def _validate_selector(cls, value: str) -> str:
-        return _require_direct_package_selector(value)
+    def _validate_specifier(cls, value: str) -> str:
+        return _require_direct_package_specifier(value)
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> DirectPythonRequestMember:
+        if self.direct_reference is not None and self.specifier:
+            raise ValueError("direct-reference members must not contain a specifier")
+        if self.direct_reference is not None:
+            identity = parse_direct_requirement(self.resolver_requirement)
+            if (
+                identity.name != self.package
+                or identity.extras != self.extras
+                or identity.specifier
+                or identity.direct_reference != self.direct_reference
+                or identity.marker is not None
+            ):
+                raise ValueError(
+                    "direct-reference member must be one canonical "
+                    "marker-free requirement"
+                )
+        return self
+
+    @property
+    def resolver_requirement(self) -> str:
+        """Render the complete marker-free requirement consumed by uv."""
+        extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        dependency = f"{self.package}{extras}"
+        if self.direct_reference is not None:
+            return f"{dependency} @ {self.direct_reference}"
+        return f"{dependency}{self.specifier}"
 
 
 class DirectPythonRequestIdentity(_StrictLockModel):
@@ -1148,6 +1176,10 @@ def validate_exact_stable_distribution_version(value: str) -> str:
     return _require_exact_stable_distribution_version(value)
 
 
+def validate_exact_distribution_version(value: str) -> str:
+    return _require_exact_distribution_version(value)
+
+
 def validate_oci_repository(value: str) -> str:
     return _require_oci_repository(value)
 
@@ -1236,16 +1268,24 @@ def _require_exact_stable_public_version(value: str) -> str:
 
 
 def _require_exact_stable_distribution_version(value: str) -> str:
+    value = _require_exact_distribution_version(value)
+    parsed = Version(value)
+    if parsed.is_prerelease or parsed.is_devrelease:
+        raise ValueError(
+            "version must be one canonical exact stable distribution version"
+        )
+    return value
+
+
+def _require_exact_distribution_version(value: str) -> str:
     try:
         parsed = Version(value)
     except InvalidVersion as error:
         raise ValueError(
-            "version must be one canonical exact stable distribution version"
+            "version must be one canonical exact distribution version"
         ) from error
-    if str(parsed) != value or parsed.is_prerelease or parsed.is_devrelease:
-        raise ValueError(
-            "version must be one canonical exact stable distribution version"
-        )
+    if str(parsed) != value:
+        raise ValueError("version must be one canonical exact distribution version")
     return value
 
 
@@ -1311,17 +1351,13 @@ def _require_registry_id(value: str) -> str:
     return validate_registry_resource_id(value)
 
 
-def _require_direct_package_selector(value: str) -> str:
+def _require_direct_package_specifier(value: str) -> str:
     try:
         specifiers = SpecifierSet(value)
     except InvalidSpecifier as error:
-        raise ValueError("selector must be a supported package selector") from error
+        raise ValueError("specifier must be a supported package specifier") from error
     if str(specifiers) != value:
-        raise ValueError("selector must be one canonical package selector")
-    try:
-        validate_direct_specifier_set(specifiers)
-    except DirectRequirementError as error:
-        raise ValueError(str(error)) from error
+        raise ValueError("specifier must be one canonical package specifier")
     return value
 
 

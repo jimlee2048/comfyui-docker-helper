@@ -260,6 +260,38 @@ def test_python_group_requires_sorted_unique_packages() -> None:
         )
 
 
+@pytest.mark.parametrize("version", ["1.0rc1", "1.0.dev1", "1.0+cu130"])
+def test_user_distribution_locks_accept_canonical_pep440_versions(
+    version: str,
+) -> None:
+    package = ResolvedPythonPackage(name="demo", extras=(), version=version)
+    tool = UvToolLockEntry(
+        request_digest=DIGEST_A,
+        name="demo-tool",
+        extras=(),
+        version=version,
+    )
+
+    assert package.version == version
+    assert tool.version == version
+
+
+@pytest.mark.parametrize("version", ["1.0RC1", "1.0-1", "not-a-version"])
+def test_user_distribution_locks_reject_noncanonical_versions(version: str) -> None:
+    with pytest.raises(ValidationError, match="canonical exact distribution version"):
+        ResolvedPythonPackage(name="demo", extras=(), version=version)
+
+
+def test_comfy_cli_lock_remains_stable_only() -> None:
+    with pytest.raises(ValidationError, match="stable public version"):
+        UvToolLockEntry(
+            request_digest=DIGEST_A,
+            name="comfy-cli",
+            extras=(),
+            version="1.8.0rc1",
+        )
+
+
 # Strict parsing rejects schema drift with stable public diagnostics, and parsed
 # lock models remain immutable.
 def test_grouped_parser_rejects_unknown_current_fields_with_stable_error() -> None:

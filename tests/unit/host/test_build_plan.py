@@ -21,6 +21,7 @@ from comfyui_docker_helper.config.build_plan import (
     GitCredentialRoutePlan,
     ManifestBinding,
     RuntimePlanningProvenance,
+    UvToolPlan,
     build_plan_digest,
     downloader_credential_secret_ids,
     dump_build_plan_json,
@@ -296,6 +297,38 @@ def test_constructor_projects_isolated_uv_tool_exact_result() -> None:
     assert plan.toolchain.tool_store.cdh.wheel_digest == canonical_wheel().digest
 
 
+def test_constructor_projects_explicit_prerelease_uv_tool_result() -> None:
+    config = final_config(with_uv_tool=True).model_copy(deep=True)
+    config.python.uv_tools = ["Ruff==0.16.0rc1"]
+    resolution = accepted_resolution(with_uv_tool=True)
+    graph = request_graph(config, resolution)
+    request = next(
+        item
+        for item in graph.desired
+        if isinstance(item.request, DirectPythonRequestIdentity)
+        and item.request.group == "uv-tool"
+    )
+    document = resolution.lock.model_dump(mode="python")
+    tool_entry = next(
+        item for item in document["python"]["uv_tools"] if item["name"] == "ruff"
+    )
+    tool_entry.update(
+        request_digest=request.request_digest,
+        version="0.16.0rc1",
+    )
+    changed = AcceptedCanonicalLock(
+        lock=CanonicalLock.model_validate(document),
+        delta=(),
+        write_intent=False,
+        provider_calls=(),
+        local_reads=(),
+    )
+
+    plan = build_plan(config, changed)
+
+    assert plan.toolchain.tool_store.uv_tools[0].requirement == "ruff==0.16.0rc1"
+
+
 def test_constructor_projects_optional_comfy_cli_only_to_the_tool_store() -> None:
     enabled = build_plan(final_config(), accepted_resolution())
     disabled = build_plan(
@@ -485,7 +518,8 @@ def test_canonical_requirement_spelling_is_stable_from_layered_config_to_plan(
     assert first_request.members[0].model_dump(mode="python") == {
         "package": "numpy",
         "extras": (),
-        "selector": expected_selector,
+        "specifier": expected_selector,
+        "direct_reference": None,
     }
     assert first_graph.image_config_digest == second_graph.image_config_digest
 
@@ -1066,6 +1100,27 @@ def test_exact_package_plan_rejects_noncanonical_pep503_identity(
 
     with pytest.raises(ValidationError, match=message):
         ExactPackagePlan.model_validate(document)
+
+
+@pytest.mark.parametrize("version", ["1.0rc1", "1.0.dev1", "1.0+cu130"])
+def test_user_package_and_tool_plans_accept_canonical_pep440_versions(
+    version: str,
+) -> None:
+    package = ExactPackagePlan(
+        name="demo",
+        extras=(),
+        version=version,
+        environment="application",
+    )
+    tool = UvToolPlan(
+        name="demo-tool",
+        extras=(),
+        version=version,
+        environment="uv-tool:demo-tool",
+    )
+
+    assert package.version == version
+    assert tool.version == version
 
 
 # Parser self-validation rejects semantic forgeries at the execution trust boundary.

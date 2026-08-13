@@ -284,9 +284,9 @@ def test_pytorch_provider_returns_one_complete_atomic_group() -> None:
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=(), specifier="==2.12.1"),
             DirectPythonRequestMember(
-                package="torchvision", extras=("image",), selector="==0.27.1"
+                package="torchvision", extras=("image",), specifier="==0.27.1"
             ),
         ),
     )
@@ -318,7 +318,7 @@ def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests()
         resolver_descriptor_digest=DIGEST_A,
         members=(
             DirectPythonRequestMember(
-                package="packaging", extras=(), selector="==26.2"
+                package="packaging", extras=(), specifier="==26.2"
             ),
         ),
     )
@@ -377,7 +377,7 @@ def test_direct_python_resolver_preserves_newly_admitted_requirement_text(
             DirectPythonRequestMember(
                 package="demo",
                 extras=(),
-                selector=selector,
+                specifier=selector,
             ),
         ),
     )
@@ -412,7 +412,7 @@ def test_direct_python_groups_preserve_controlled_executor_cleanup_identity(
         index_url="https://pypi.org/simple",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package=package, extras=(), selector=selector),
+            DirectPythonRequestMember(package=package, extras=(), specifier=selector),
         ),
     )
 
@@ -471,9 +471,9 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=(), specifier="==2.12.1"),
             DirectPythonRequestMember(
-                package="torchvision", extras=(), selector="==0.27.1"
+                package="torchvision", extras=(), specifier="==0.27.1"
             ),
         ),
     )
@@ -510,7 +510,7 @@ def test_pytorch_preserves_controlled_executor_cleanup_identity() -> None:
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=(), specifier="==2.12.1"),
         ),
     )
 
@@ -534,7 +534,7 @@ def test_controlled_cleanup_identity_reaches_final_reconciliation_diagnostic() -
         resolver_descriptor_digest=DIGEST_A,
         members=(
             DirectPythonRequestMember(
-                package="packaging", extras=(), selector="==26.2"
+                package="packaging", extras=(), specifier="==26.2"
             ),
         ),
     )

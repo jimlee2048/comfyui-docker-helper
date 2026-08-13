@@ -170,18 +170,19 @@ def accepted_resolution(
             DirectPythonRequestMember(
                 package=normalized.name,
                 extras=list(normalized.extras),
-                selector=normalized.specifier,
+                specifier=normalized.specifier,
+                direct_reference=normalized.identity.direct_reference,
             )
         )
     upstream = (
-        DirectPythonRequestMember(package="torch", extras=[], selector=""),
-        DirectPythonRequestMember(package="torchaudio", extras=[], selector=""),
-        DirectPythonRequestMember(package="torchvision", extras=[], selector=""),
+        DirectPythonRequestMember(package="torch", extras=[], specifier=""),
+        DirectPythonRequestMember(package="torchaudio", extras=[], specifier=""),
+        DirectPythonRequestMember(package="torchvision", extras=[], specifier=""),
     )
     pytorch_members = list(
         merge_pytorch_requirements(
             DirectPythonRequestMember(
-                package="torch", extras=[], selector=f"=={config.pytorch.version}"
+                package="torch", extras=[], specifier=f"=={config.pytorch.version}"
             ),
             upstream,
             tuple(configured_members),
@@ -203,7 +204,7 @@ def accepted_resolution(
                 ProtectedRequirementProjection(
                     package=item.package,
                     extras=item.extras,
-                    selector=item.selector,
+                    selector=item.specifier,
                 )
                 for item in upstream
             ],

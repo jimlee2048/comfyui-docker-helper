@@ -60,10 +60,12 @@ from comfyui_docker_helper.config.registry_identity import (
 from comfyui_docker_helper.config.requirement_validation import (
     DirectRequirementError,
     DirectRequirementIdentity,
-    is_stable_public_operand,
+    direct_requirement_is_active,
     parse_direct_requirement,
+    target_marker_environment,
 )
 from comfyui_docker_helper.config.selector_validation import (
+    is_stable_public_operand,
     normalize_comfyui_version,
     normalize_registry_version,
     resolve_git_target_dir,
@@ -160,6 +162,7 @@ class FinalConfigDomainResult:
 
     diagnostics: tuple[Diagnostic, ...]
     platforms: tuple[LocatedValue, ...]
+    authored_package_requirements: tuple[NormalizedRequirement, ...]
     package_requirements: tuple[NormalizedRequirement, ...]
     authored_apt_packages: tuple[LocatedValue, ...]
     apt_packages: tuple[LocatedValue, ...]
@@ -200,6 +203,7 @@ def validate_final_config_domains(
 ) -> FinalConfigDomainResult:
     """Validate individual consumer domains without enforcing relationships."""
     diagnostics: list[Diagnostic] = []
+    authored_package_requirements: list[NormalizedRequirement] = []
     package_requirements: list[NormalizedRequirement] = []
     apt_packages: list[LocatedValue] = []
     registry_ids: list[LocatedValue] = []
@@ -213,8 +217,21 @@ def validate_final_config_domains(
     downloader_credential_contexts: list[LocatedValue] = []
 
     _validate_platform_domain(config, diagnostics)
-    _validate_python_domain(config, package_requirements, diagnostics)
-    _validate_pytorch_domain(config, package_requirements, diagnostics)
+    requirement_environment = _requirement_marker_environment(config.python.version)
+    _validate_python_domain(
+        config,
+        authored_package_requirements,
+        package_requirements,
+        requirement_environment,
+        diagnostics,
+    )
+    _validate_pytorch_domain(
+        config,
+        authored_package_requirements,
+        package_requirements,
+        requirement_environment,
+        diagnostics,
+    )
     workspace, comfyui_path, ssh_public_keys = _validate_system_domains(
         config, apt_packages, diagnostics
     )
@@ -242,6 +259,7 @@ def validate_final_config_domains(
             LocatedValue(("build", "platforms", index), platform)
             for index, platform in enumerate(config.build.platforms)
         ),
+        authored_package_requirements=tuple(authored_package_requirements),
         package_requirements=tuple(package_requirements),
         authored_apt_packages=tuple(apt_packages),
         apt_packages=tuple(
@@ -383,7 +401,9 @@ def _validate_platform_domain(
 
 def _validate_python_domain(
     config: FinalConfig,
+    authored_requirements: list[NormalizedRequirement],
     requirements: list[NormalizedRequirement],
+    requirement_environment: dict[str, str] | None,
     diagnostics: list[Diagnostic],
 ) -> None:
     value = config.python.version
@@ -423,12 +443,19 @@ def _validate_python_domain(
         diagnostics,
     )
     _collect_requirements(
-        "python", config.python.extra_packages, requirements, diagnostics
+        "python",
+        config.python.extra_packages,
+        authored_requirements,
+        requirements,
+        requirement_environment,
+        diagnostics,
     )
     _collect_requirements(
         "python",
         config.python.uv_tools,
+        authored_requirements,
         requirements,
+        requirement_environment,
         diagnostics,
         field="uv_tools",
     )
@@ -436,7 +463,9 @@ def _validate_python_domain(
 
 def _validate_pytorch_domain(
     config: FinalConfig,
+    authored_requirements: list[NormalizedRequirement],
     requirements: list[NormalizedRequirement],
+    requirement_environment: dict[str, str] | None,
     diagnostics: list[Diagnostic],
 ) -> None:
     if not _is_exact_stable_release(config.pytorch.version):
@@ -454,7 +483,12 @@ def _validate_pytorch_domain(
         diagnostics,
     )
     _collect_requirements(
-        "pytorch", config.pytorch.extra_packages, requirements, diagnostics
+        "pytorch",
+        config.pytorch.extra_packages,
+        authored_requirements,
+        requirements,
+        requirement_environment,
+        diagnostics,
     )
 
 
@@ -486,7 +520,9 @@ def _validate_http_index(
 def _collect_requirements(
     group: str,
     values: list[str],
+    authored_requirements: list[NormalizedRequirement],
     requirements: list[NormalizedRequirement],
+    requirement_environment: dict[str, str] | None,
     diagnostics: list[Diagnostic],
     *,
     field: str = "extra_packages",
@@ -494,8 +530,36 @@ def _collect_requirements(
     for index, value in enumerate(values):
         path: DiagnosticPath = (group, field, index)
         normalized = validate_direct_requirement(value, path, diagnostics)
-        if normalized is not None:
+        if normalized is None:
+            continue
+        authored_requirements.append(normalized)
+        try:
+            active = (
+                normalized.identity.marker is None
+                if requirement_environment is None
+                else direct_requirement_is_active(
+                    normalized.identity,
+                    requirement_environment,
+                )
+            )
+        except DirectRequirementError as error:
+            diagnostics.append(Diagnostic(path, error.code, str(error)))
+            continue
+        if active:
             requirements.append(normalized)
+
+
+def _requirement_marker_environment(python_version: str) -> dict[str, str] | None:
+    try:
+        environment = target_marker_environment(
+            python_version,
+            "linux/amd64",
+            "x86_64",
+        )
+    except ValueError:
+        return None
+    environment.pop("extra")
+    return environment
 
 
 def validate_direct_requirement(

@@ -124,7 +124,9 @@ def test_exact_oci_uv_resolves_one_real_complete_group(
         index_url="https://pypi.org/simple",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="packaging", extras=[], selector="==26.2")
+            DirectPythonRequestMember(
+                package="packaging", extras=[], specifier="==26.2"
+            )
         ],
     )
 
@@ -150,7 +152,7 @@ def test_exact_oci_uv_resolves_one_isolated_uv_tool(
         index_url="https://pypi.org/simple",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="ruff", extras=[], selector="==0.15.18")
+            DirectPythonRequestMember(package="ruff", extras=[], specifier="==0.15.18")
         ],
     )
 
@@ -219,9 +221,9 @@ def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
-            DirectPythonRequestMember(package="torchvision", extras=[], selector=""),
-            DirectPythonRequestMember(package="torchaudio", extras=[], selector=""),
+            DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
+            DirectPythonRequestMember(package="torchvision", extras=[], specifier=""),
+            DirectPythonRequestMember(package="torchaudio", extras=[], specifier=""),
         ],
     )
 
@@ -253,9 +255,9 @@ def test_pytorch_direct_extra_does_not_fall_back_to_python_index(
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
             DirectPythonRequestMember(
-                package="pydantic-settings", extras=[], selector="==2.12.0"
+                package="pydantic-settings", extras=[], specifier="==2.12.0"
             ),
         ],
     )

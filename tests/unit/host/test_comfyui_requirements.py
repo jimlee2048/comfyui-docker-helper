@@ -40,12 +40,23 @@ numpy>=1.25
     )
 
     assert [item.model_dump(mode="json") for item in parsed.protected] == [
-        {"package": "torch", "extras": [], "selector": ""},
-        {"package": "torchaudio", "extras": [], "selector": ""},
+        {
+            "package": "torch",
+            "extras": [],
+            "specifier": "",
+            "direct_reference": None,
+        },
+        {
+            "package": "torchaudio",
+            "extras": [],
+            "specifier": "",
+            "direct_reference": None,
+        },
         {
             "package": "torchvision",
             "extras": ["image"],
-            "selector": ">=0.27",
+            "specifier": ">=0.27",
+            "direct_reference": None,
         },
     ]
     assert parsed.ordinary == ("numpy>=1.25",)
@@ -70,20 +81,20 @@ def test_parser_rejects_source_changing_direct_and_non_pep508_rows(row: str) -> 
 
 def test_merge_unions_extras_conjoins_selectors_and_treats_bare_as_neutral() -> None:
     merged = merge_pytorch_requirements(
-        DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
+        DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
         (
-            DirectPythonRequestMember(package="torch", extras=["dynamo"], selector=""),
+            DirectPythonRequestMember(package="torch", extras=["dynamo"], specifier=""),
             DirectPythonRequestMember(
-                package="torchvision", extras=[], selector=">=0.27"
+                package="torchvision", extras=[], specifier=">=0.27"
             ),
-            DirectPythonRequestMember(package="torchaudio", extras=[], selector=""),
+            DirectPythonRequestMember(package="torchaudio", extras=[], specifier=""),
         ),
         (
             DirectPythonRequestMember(
-                package="torchvision", extras=["image"], selector="<0.28"
+                package="torchvision", extras=["image"], specifier="<0.28"
             ),
             DirectPythonRequestMember(
-                package="torchaudio", extras=["io"], selector="==2.11.0"
+                package="torchaudio", extras=["io"], specifier="==2.11.0"
             ),
         ),
     )
@@ -92,17 +103,20 @@ def test_merge_unions_extras_conjoins_selectors_and_treats_bare_as_neutral() -> 
         {
             "package": "torch",
             "extras": ["dynamo"],
-            "selector": "==2.12.1",
+            "specifier": "==2.12.1",
+            "direct_reference": None,
         },
         {
             "package": "torchaudio",
             "extras": ["io"],
-            "selector": "==2.11.0",
+            "specifier": "==2.11.0",
+            "direct_reference": None,
         },
         {
             "package": "torchvision",
             "extras": ["image"],
-            "selector": "<0.28,>=0.27",
+            "specifier": "<0.28,>=0.27",
+            "direct_reference": None,
         },
     ]
 
@@ -118,17 +132,56 @@ def test_merge_unions_extras_conjoins_selectors_and_treats_bare_as_neutral() -> 
 def test_merge_rejects_exact_conflicts(selectors: tuple[str, str]) -> None:
     with pytest.raises(ComfyUIRequirementsError, match=r"conflict|incompatible"):
         merge_pytorch_requirements(
-            DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
             (
                 DirectPythonRequestMember(
-                    package="torchaudio", extras=[], selector=selectors[0]
+                    package="torchaudio", extras=[], specifier=selectors[0]
                 ),
             ),
             (
                 DirectPythonRequestMember(
-                    package="torchaudio", extras=[], selector=selectors[1]
+                    package="torchaudio", extras=[], specifier=selectors[1]
                 ),
             ),
+        )
+
+
+def test_merge_preserves_one_nonprotected_direct_source_exactly() -> None:
+    direct = DirectPythonRequestMember(
+        package="sageattention",
+        extras=["torch"],
+        specifier="",
+        direct_reference="https://example.test/sageattention.whl#sha256=abc",
+    )
+
+    merged = merge_pytorch_requirements(
+        DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
+        (),
+        (direct,),
+    )
+
+    assert merged == (
+        direct,
+        DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
+    )
+
+
+def test_merge_rejects_protected_direct_source() -> None:
+    direct = DirectPythonRequestMember(
+        package="torch",
+        extras=[],
+        specifier="",
+        direct_reference="https://example.test/torch.whl",
+    )
+
+    with pytest.raises(
+        ComfyUIRequirementsError,
+        match="protected PyTorch requirements must use the managed index source",
+    ):
+        merge_pytorch_requirements(
+            DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
+            (),
+            (direct,),
         )
 
 

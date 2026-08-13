@@ -165,7 +165,7 @@ class DockerPythonGroupResolver:
                     DirectPythonRequestMember(
                         package=request.package,
                         extras=[],
-                        selector=f">={request.minimum_version}",
+                        specifier=f">={request.minimum_version}",
                     )
                 ],
             )
@@ -173,7 +173,7 @@ class DockerPythonGroupResolver:
         if isinstance(request, PyTorchRequestIdentity):
             return self._resolve_pytorch(request)
         requirements = "\n".join(
-            _requirement_text(member.package, member.extras, member.selector)
+            _requirement_text(member.package, member.extras, member.specifier)
             for member in request.members
         )
         try:
@@ -209,7 +209,7 @@ class DockerPythonGroupResolver:
     def _resolve_pytorch(self, request: PyTorchRequestIdentity) -> ResolvedPythonGroup:
         manifest = pytorch_resolution_manifest_bytes(
             requirements=tuple(
-                _requirement_text(member.package, member.extras, member.selector)
+                _requirement_text(member.package, member.extras, member.specifier)
                 for member in request.members
             ),
             direct_packages=tuple(member.package for member in request.members),

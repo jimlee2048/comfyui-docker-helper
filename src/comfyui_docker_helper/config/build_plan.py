@@ -46,8 +46,8 @@ from comfyui_docker_helper.config.canonical_lock import (
     pytorch_index_matches_channel,
     uv_image_version_matches_tag,
     validate_environment,
+    validate_exact_distribution_version,
     validate_exact_registry_version,
-    validate_exact_stable_distribution_version,
     validate_exact_stable_version,
     validate_git_commit,
     validate_git_url,
@@ -271,7 +271,7 @@ class UvToolPlan(_PlanModel):
     @model_validator(mode="after")
     def _validate_identity(self) -> UvToolPlan:
         validate_normalized_package(self.name)
-        validate_exact_stable_distribution_version(self.version)
+        validate_exact_distribution_version(self.version)
         validate_normalized_extras(self.extras)
         validate_environment(self.environment)
         if self.environment != f"uv-tool:{self.name}":
@@ -399,7 +399,7 @@ class ExactPackagePlan(_PlanModel):
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        return validate_exact_stable_distribution_version(value)
+        return validate_exact_distribution_version(value)
 
     @property
     def requirement(self) -> str:
@@ -1509,7 +1509,7 @@ def _project_application(
                     ProtectedRequirementPlan(
                         package=item.package,
                         extras=item.extras,
-                        selector=item.selector,
+                        selector=item.specifier,
                     )
                     for item in graph.comfyui_requirements.protected
                 ),
@@ -1775,7 +1775,7 @@ def _uv_tool(
         UvToolLockEntry,
     )
     if entry.extras != member.extras or not _selector_accepts(
-        member.selector, entry.version
+        member.specifier, entry.version
     ):
         raise ValueError(f"canonical uv tool does not satisfy {member.package}")
     return UvToolPlan(
@@ -1787,7 +1787,7 @@ def _uv_tool(
 
 
 def _selector_accepts(selector: str, version: str) -> bool:
-    return not selector or SpecifierSet(selector).contains(version, prereleases=False)
+    return not selector or SpecifierSet(selector).contains(version, prereleases=True)
 
 
 def _absolute_posix_path(value: str, field: str) -> str:

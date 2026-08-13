@@ -585,6 +585,32 @@ def test_layered_requirement_conflict_reports_symmetric_sources(tmp_path: Path) 
     assert diagnostic.source_context.later.display_value == "Demo>=2,<3"
 
 
+def test_layered_inactive_requirement_does_not_conflict_with_active_owner(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(
+        _config()
+        + "\n[python]\n"
+        + "extra_packages = [\"demo<2; python_version < '3.13'\"]\n"
+    )
+    override.write_text(
+        "[python]\n" + "extra_packages = [\"Demo>=2; python_version >= '3.13'\"]\n"
+    )
+
+    result = load_validate_config_result([base, override])
+
+    assert result.config.python.extra_packages == [
+        "demo<2; python_version < '3.13'",
+        "Demo>=2; python_version >= '3.13'",
+    ]
+    assert len(result.domains.authored_package_requirements) == 2
+    assert [item.path for item in result.domains.package_requirements] == [
+        ("python", "extra_packages", 1)
+    ]
+
+
 def test_registry_case_variant_overlays_and_retains_later_spelling(
     tmp_path: Path,
 ) -> None:

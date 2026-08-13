@@ -355,14 +355,14 @@ def build_canonical_request_graph(
         DirectPythonRequestMember(
             package=item.package,
             extras=item.extras,
-            selector=item.selector,
+            specifier=item.specifier,
         )
         for item in requirements_projection.protected
     )
     try:
         pytorch_members = merge_pytorch_requirements(
             DirectPythonRequestMember(
-                package="torch", extras=(), selector=f"=={config.pytorch.version}"
+                package="torch", extras=(), specifier=f"=={config.pytorch.version}"
             ),
             upstream,
             tuple(_members(domains, "pytorch")),
@@ -405,7 +405,7 @@ def build_canonical_request_graph(
                 ProtectedRequirementProjection(
                     package=item.package,
                     extras=item.extras,
-                    selector=item.selector,
+                    selector=item.specifier,
                 )
                 for item in upstream
             ),
@@ -624,7 +624,11 @@ def request_stability(request: ResolverRequestIdentity) -> SelectorStability:
         )
     return (
         SelectorStability.EXACT
-        if all(direct_selector_is_exact(member.selector) for member in request.members)
+        if all(
+            member.direct_reference is None
+            and direct_selector_is_exact(member.specifier)
+            for member in request.members
+        )
         else SelectorStability.MOVING
     )
 
@@ -645,7 +649,8 @@ def _members(
         DirectPythonRequestMember(
             package=item.name,
             extras=item.extras,
-            selector=item.specifier,
+            specifier=item.specifier,
+            direct_reference=item.identity.direct_reference,
         )
         for item in domains.package_requirements
         if item.path[:2] == (group, field)
@@ -703,17 +708,17 @@ def _image_config_projection(
     ssh["pub_keys"] = list(domains.ssh_public_keys)
     python["extra_packages"] = [
         item.canonical_value
-        for item in domains.package_requirements
+        for item in domains.authored_package_requirements
         if item.path[:2] == ("python", "extra_packages")
     ]
     python["uv_tools"] = [
         item.canonical_value
-        for item in domains.package_requirements
+        for item in domains.authored_package_requirements
         if item.path[:2] == ("python", "uv_tools")
     ]
     pytorch["extra_packages"] = [
         item.canonical_value
-        for item in domains.package_requirements
+        for item in domains.authored_package_requirements
         if item.path[:2] == ("pytorch", "extra_packages")
     ]
     git["credentials"] = [

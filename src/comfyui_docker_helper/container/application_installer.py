@@ -280,7 +280,11 @@ def _pytorch_resolution_project(application: ApplicationPhase):
     group = application.pytorch
     content = pytorch_resolution_manifest_bytes(
         requirements=tuple(package.requirement for package in group.packages),
-        pytorch_index_packages=tuple(package.name for package in group.packages),
+        pytorch_index_packages=tuple(
+            package.name
+            for package in group.packages
+            if package.direct_reference is None
+        ),
         python_version=group.python_version,
         python_index_url=group.python_index_url,
         pytorch_index_url=group.pytorch_index_url,

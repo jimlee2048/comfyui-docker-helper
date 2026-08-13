@@ -140,6 +140,76 @@ def test_exact_oci_uv_resolves_one_real_complete_group(
 @pytest.mark.network
 @pytest.mark.docker
 @pytest.mark.smoke
+def test_exact_oci_uv_resolves_named_https_direct_reference(
+    uv_descriptor_digest: str,
+) -> None:
+    source = (
+        "https://files.pythonhosted.org/packages/df/b2/"
+        "87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/"
+        "packaging-26.2-py3-none-any.whl"
+        "#sha256=5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e"
+    )
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version=DEFAULT_MANAGED_PYTHON_VERSION,
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=uv_descriptor_digest,
+        members=[
+            DirectPythonRequestMember(
+                package="packaging",
+                extras=[],
+                specifier="",
+                direct_reference=source,
+            )
+        ],
+    )
+    resolved = DockerPythonGroupResolver().resolve(request)
+
+    assert [(item.package, item.version) for item in resolved.members] == [
+        ("packaging", "26.2")
+    ]
+
+
+@pytest.mark.network
+@pytest.mark.docker
+@pytest.mark.smoke
+def test_exact_oci_uv_resolves_public_git_https_direct_reference(
+    uv_descriptor_digest: str,
+) -> None:
+    source = (
+        "git+https://github.com/pypa/sampleproject.git"
+        "@621e4974ca25ce531773def586ba3ed8e736b3fc"
+    )
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version=DEFAULT_MANAGED_PYTHON_VERSION,
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=uv_descriptor_digest,
+        members=[
+            DirectPythonRequestMember(
+                package="sampleproject",
+                extras=[],
+                specifier="",
+                direct_reference=source,
+            )
+        ],
+    )
+    resolved = DockerPythonGroupResolver().resolve(request)
+
+    assert [(item.package, item.version) for item in resolved.members] == [
+        ("sampleproject", "4.0.0")
+    ]
+
+
+@pytest.mark.network
+@pytest.mark.docker
+@pytest.mark.smoke
 def test_exact_oci_uv_resolves_one_isolated_uv_tool(
     uv_descriptor_digest: str,
 ) -> None:

@@ -73,20 +73,20 @@ index_url = "https://pypi.org/simple"
 # transports are supported. Bare URLs, local/file/editable/SSH inputs, raw
 # installer options, URL userinfo, and metadata-only marker contexts are rejected.
 # Markers use the configured CPython Linux/amd64 target, never the host.
-# Inactive entries stay authored but do not enter active requests or BuildPlan input.
+# Entries whose markers are inactive for that target are not resolved or installed.
 # Extra Python packages installed into the final virtualenv after PyTorch.
 # Across layered files, omission inherits; new canonical requirements append;
 # only a complete canonical requirement repeat is kept once; and [] resets.
 # Requirements with different extras, selectors, direct sources, or markers remain
-# available for target projection. Multiple active declarations for one package in
-# the same ownership domain conflict instead of silently replacing one another.
+# available for target evaluation. Conflicting declarations that are active for the
+# target are rejected instead of silently replacing one another.
 extra_packages = ["numpy"]
-# Named wheel example (ordinary public configuration, not a Secret):
-# extra_packages = ["sageattention @ https://example.org/sageattention.whl"]
 # Standalone CLI distributions installed into isolated uv tool environments.
 # Named direct references use the same supported public transport boundary.
 # Layered composition and [] reset follow python.extra_packages semantics.
 uv_tools = ["ruff==0.15.18"]
+# Named Git tool example (ordinary public configuration, not a Secret):
+# uv_tools = ["my-cli @ git+https://github.com/example/my-cli.git@v1.2.3"]
 
 [pytorch]
 # Required. Installs torch==version from the CUDA wheel index inferred from CUDA.
@@ -102,8 +102,8 @@ index_base_url = "https://download.pytorch.org/whl"
 # [python].index_url. Do not include protected foundation packages such as torch.
 # Layered composition and [] reset follow python.extra_packages semantics.
 extra_packages = []
-# Named wheel example:
-# extra_packages = ["sageattention @ https://example.org/sageattention.whl"]
+# Named wheel example (ordinary public configuration, not a Secret):
+# extra_packages = ["sageattention @ https://github.com/jimlee2048/SageAttention/releases/download/v2.2.0/sageattention-2.2.0+cu130torch2.13-cp39-abi3-linux_x86_64.whl"]
 
 [cdh]
 # Host-only local-file context materialization. Default: "auto". Supported:

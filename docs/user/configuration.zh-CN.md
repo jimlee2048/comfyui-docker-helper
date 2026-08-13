@@ -33,7 +33,7 @@ cdh host validate \
 - `cdh.downloader.credentials` 使用 `match` 表示的 canonical HTTP(S) origin 与路径；
 - `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
-对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras、selector、direct source 或 marker 不同，会继续保留，以供固定目标投影。投影后，只有同一 ownership domain 中同一规范化分发包存在多条生效声明时才会冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
+对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras、selector、direct source 或 marker 不同，会保留到针对所选目标完成 marker 求值为止。之后，如果应用软件包或隔离工具中存在多条该分发包的生效声明，它们会冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
 
 `system.ssh.pub_keys` 在 TOML 层之间仍采用普通的整列表替换：省略会继承，靠后的非空列表会替换，`[]` 会清空。选出最终生效列表后，cdh 会裁剪每行首尾空白、丢弃空值，并按声明的密钥类型加 base64 密钥 blob 进行稳定去重。它会保留第一条规范化后的完整行及其可选注释。之后每个非空重复项都会产生带来源的警告，且警告不会打印密钥内容。
 
@@ -87,9 +87,9 @@ extra_packages = ["sageattention @ https://github.com/jimlee2048/SageAttention/r
 
 cdh 接受使用 `https`、`http`、`git+https` 和 `git+http` 的具名 direct reference。URL 必须包含 host；如果编写了 port，它必须可解析；同时不得包含 username 或 password userinfo。完成这一结构检查后，direct reference 保持不透明；引用的 wheel、源码归档或 VCS 项目是否能为所选目标安装，由 uv 决定。
 
-Marker 只针对 cdh 的固定构建目标求值一次：配置指定的 CPython 版本，以及 Linux `amd64`/`x86_64`。它绝不会使用宿主机值；不可用的 kernel release/version 值固定为空字符串。不生效的声明仍属于用户编写的 image-configuration identity，但不会进入生效的软件包 ownership、无 marker 的 resolver request、canonical lock member 或 BuildPlan direct input。需要当前不可用的软件包 metadata 或 dependency-group context 的 marker 变量（`extra`、`extras` 和 `dependency_groups`）会产生拒绝诊断。
+Marker 只针对 cdh 的固定构建目标求值一次：配置指定的 CPython 版本，以及 Linux `amd64`/`x86_64`。它绝不会使用宿主机值；不可用的 kernel release/version 值固定为空字符串。Marker 对该目标不生效的声明不会被解析或安装。需要当前不可用的软件包 metadata 或 dependency-group context 的 marker 变量（`extra`、`extras` 和 `dependency_groups`）会产生拒绝诊断。
 
-不具名的裸 URL、本地路径和 `file:` URL、editable requirement、原始 pip/uv option、包括 `git+ssh` 在内的 SSH transport，以及包含任何 userinfo 的 URL 均不受支持。公共远程 source 必须使用 `name @ URL` 形式。cdh 不会通过自定义 selector 白名单缩窄 `packaging` 接受的标准 specifier；其中包括 compatible-release 与 exclusion clause、wildcard equality、任意相等 `===`，以及标准解析器接受的 prerelease、development 或 local-version 操作数。cdh 不会求解一般性的范围等价关系，也不会预先验证 selector 是否存在可满足的发布版本；resolver 仍必须产出 canonical PEP 440 分发包版本。单一生效 owner 规则会拒绝同一 ownership domain 中同一规范化包的冲突生效 requirement。
+不具名的裸 URL、本地路径和 `file:` URL、editable requirement、原始 pip/uv option、包括 `git+ssh` 在内的 SSH transport，以及包含任何 userinfo 的 URL 均不受支持。公共远程 source 必须使用 `name @ URL` 形式。cdh 不会通过自定义 selector 白名单缩窄 `packaging` 接受的标准 specifier；其中包括 compatible-release 与 exclusion clause、wildcard equality、任意相等 `===`，以及标准解析器接受的 prerelease、development 或 local-version 操作数。cdh 不会求解一般性的范围等价关系，也不会预先验证 selector 是否存在可满足的发布版本；resolver 仍必须产出 canonical PEP 440 分发包版本。在应用软件包或隔离工具中，同一规范化包的冲突生效声明会被拒绝。
 
 ## 选择自定义节点和构建 Hook
 

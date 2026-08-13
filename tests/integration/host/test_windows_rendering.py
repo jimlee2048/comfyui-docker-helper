@@ -101,6 +101,7 @@ def _write(output: Path, *, overwrite: bool) -> None:
         object(),
         object(),
         (),
+        local_file_mode="copy",
         overwrite=overwrite,
     )
 

@@ -52,9 +52,7 @@ class RuntimeSecretSession:
     sources: Mapping[str, RuntimeSecretSource]
     environ: Mapping[str, str]
     _values: dict[str, bytes] = field(default_factory=dict, init=False, repr=False)
-    _failures: dict[str, RuntimeSecretSessionError] = field(
-        default_factory=dict, init=False, repr=False
-    )
+    _failures: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )
@@ -65,18 +63,18 @@ class RuntimeSecretSession:
             cached = self._values.get(secret_name)
             if cached is not None:
                 return cached
-            failure = self._failures.get(secret_name)
-            if failure is not None:
-                raise failure
+            failure_code = self._failures.get(secret_name)
+            if failure_code is not None:
+                raise RuntimeSecretSessionError(failure_code, secret_name)
             try:
                 value = self._read_source(secret_name)
                 validate_bearer_token(value)
             except RuntimeSecretSessionError as error:
-                self._failures[secret_name] = error
+                self._failures[secret_name] = error.code
                 raise
             except BearerTokenError:
                 error = RuntimeSecretSessionError("invalid_value", secret_name)
-                self._failures[secret_name] = error
+                self._failures[secret_name] = error.code
                 raise error from None
             self._values[secret_name] = value
             return value

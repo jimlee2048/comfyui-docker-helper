@@ -52,6 +52,24 @@ def test_environment_secret_is_lazy_and_cached_once() -> None:
     assert environ.reads == 1
 
 
+def test_cached_failure_raises_fresh_attempt_state() -> None:
+    session = RuntimeSecretSession(
+        {"hf_read": RuntimeSecretSource("env", "HF_TOKEN")},
+        {},
+    )
+
+    with pytest.raises(RuntimeSecretSessionError) as first:
+        session.bearer_token("hf_read")
+    first.value.network_attempted = True
+
+    with pytest.raises(RuntimeSecretSessionError) as second:
+        session.bearer_token("hf_read")
+
+    assert second.value is not first.value
+    assert second.value.code == "source_unavailable"
+    assert second.value.network_attempted is False
+
+
 def test_unexpected_bearer_validator_failure_is_not_policy_eligible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

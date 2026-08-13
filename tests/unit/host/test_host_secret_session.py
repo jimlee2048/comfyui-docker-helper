@@ -140,8 +140,8 @@ def test_session_binding_and_snapshot_are_private_exact_and_reused(
         assert stat.S_IMODE((session.root / "metadata.json").stat().st_mode) == 0o600
         assert value not in b"\0".join(item.encode() for item in binding.config_args)
 
-        first = session.snapshot("root_token")
-        second = session.snapshot("root_token")
+        first = session.snapshot_git_password("root_token")
+        second = session.snapshot_git_password("root_token")
 
         assert first == second
         assert first.read_bytes() == value
@@ -182,7 +182,9 @@ def test_windows_environment_secret_encodes_unicode_as_utf8(
     result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
 
     with HostSecretSession.from_configuration(result) as session:
-        assert session.snapshot("root_token").read_bytes() == value.encode("utf-8")
+        assert session.snapshot_git_password("root_token").read_bytes() == value.encode(
+            "utf-8"
+        )
 
 
 @_POSIX_SECRET_SOURCE
@@ -201,28 +203,28 @@ def test_empty_value_fails_at_first_use(
         HostSecretSession.from_configuration(result) as session,
         pytest.raises(HostSecretSessionError) as raised,
     ):
-        session.snapshot("root_token")
+        session.snapshot_git_password("root_token")
 
     assert raised.value.code == "invalid_value"
 
 
 @_POSIX_SECRET_SOURCE
 @pytest.mark.parametrize(
-    "value",
+    "suffix",
     [
-        b"synthetic-sensitive-marker\n",
-        b"synthetic-sensitive-marker\r",
-        b"synthetic-sensitive-marker\0",
-        b"synthetic-sensitive-marker" + b"x" * (65_526 - 26),
+        b"\n",
+        b"\r",
+        b"\0",
     ],
-    ids=("lf", "cr", "nul", "oversized"),
+    ids=("lf", "cr", "nul"),
 )
 def test_invalid_value_failures_do_not_echo_input(
-    value: bytes,
+    suffix: bytes,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     marker = "synthetic-sensitive-marker"
+    value = marker.encode() + suffix
     result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
     monkeypatch.setattr(
         secret_session_module.os,
@@ -234,9 +236,33 @@ def test_invalid_value_failures_do_not_echo_input(
         HostSecretSession.from_configuration(result) as session,
         pytest.raises(HostSecretSessionError) as raised,
     ):
-        session.snapshot("root_token")
+        session.snapshot_git_password("root_token")
 
     assert raised.value.code == "invalid_value"
+    assert marker not in str(raised.value)
+
+
+@_POSIX_SECRET_SOURCE
+def test_oversized_value_failure_does_not_echo_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "synthetic-sensitive-marker"
+    value = marker.encode() + b"x" * (65_526 - len(marker))
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+    monkeypatch.setattr(
+        secret_session_module.os,
+        "environb",
+        {b"CDH_TEST_ROOT_TOKEN": value},
+    )
+
+    with (
+        HostSecretSession.from_configuration(result) as session,
+        pytest.raises(HostSecretSessionError) as raised,
+    ):
+        session.snapshot_git_password("root_token")
+
+    assert raised.value.code == "source_too_large"
     assert marker not in str(raised.value)
 
 
@@ -254,11 +280,11 @@ def test_value_at_protocol_limit_is_accepted(
     result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
 
     with HostSecretSession.from_configuration(result) as session:
-        assert session.snapshot("root_token").stat().st_size == len(value)
+        assert session.snapshot_git_password("root_token").stat().st_size == len(value)
 
 
 @_POSIX_SECRET_SOURCE
-def test_failed_source_outcome_is_cached_without_a_second_read(
+def test_failed_source_acquisition_is_cached_without_a_second_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -273,20 +299,53 @@ def test_failed_source_outcome_is_cached_without_a_second_read(
     monkeypatch.setattr(
         secret_session_module.os,
         "environb",
-        CountingEnvironment({b"CDH_TEST_ROOT_TOKEN": b""}),
+        CountingEnvironment(),
     )
     result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
 
     with HostSecretSession.from_configuration(result) as session:
         for _ in range(2):
             with pytest.raises(HostSecretSessionError) as raised:
-                session.snapshot("root_token")
-            assert raised.value.code == "invalid_value"
+                session.snapshot_git_password("root_token")
+            assert raised.value.code == "source_unavailable"
         failure = session.root / "failure-root_token"
-        assert failure.read_bytes() == b"invalid_value"
+        assert failure.read_bytes() == b"source_unavailable"
         assert stat.S_IMODE(failure.stat().st_mode) == 0o600
 
     assert reads == 1
+
+
+@_POSIX_SECRET_SOURCE
+def test_raw_source_is_read_once_and_validated_independently_by_consumer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = b"valid Git password with spaces"
+    reads = 0
+
+    class CountingEnvironment(dict[bytes, bytes]):
+        def get(self, key: bytes, default=None):
+            nonlocal reads
+            reads += 1
+            return super().get(key, default)
+
+    monkeypatch.setattr(
+        secret_session_module.os,
+        "environb",
+        CountingEnvironment({b"CDH_TEST_ROOT_TOKEN": value}),
+    )
+    result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
+
+    with HostSecretSession.from_configuration(result) as session:
+        with pytest.raises(HostSecretSessionError) as raised:
+            session.snapshot_downloader_credential(
+                "cdh-downloader-credential-root_token"
+            )
+        git_snapshot = session.snapshot_git_credential("cdh-git-credential-root_token")
+
+        assert raised.value.code == "invalid_bearer_value"
+        assert git_snapshot.read_bytes() == value
+        assert reads == 1
 
 
 @pytest.mark.parametrize("spelling", ["token", "../token", "{absolute}"])
@@ -302,7 +361,7 @@ def test_file_sources_use_lexical_base_and_allow_absolute_or_parent_paths(
     result = _configuration(tmp_path, source=f'file = "{authored}"')
 
     with HostSecretSession.from_configuration(result) as session:
-        assert session.snapshot("root_token").read_bytes() == b"file-token"
+        assert session.snapshot_git_password("root_token").read_bytes() == b"file-token"
 
 
 def test_file_source_is_no_follow_and_error_omits_locator(
@@ -320,7 +379,7 @@ def test_file_source_is_no_follow_and_error_omits_locator(
         HostSecretSession.from_configuration(result) as session,
         pytest.raises(HostSecretSessionError) as raised,
     ):
-        session.snapshot("root_token")
+        session.snapshot_git_password("root_token")
 
     assert raised.value.code == "source_unavailable"
     assert os.fspath(link) not in str(raised.value)
@@ -338,7 +397,7 @@ def test_permissive_mode_warning_is_content_free(
     result = _configuration(tmp_path, source='file = "token"')
 
     with HostSecretSession.from_configuration(result) as session:
-        session.snapshot("root_token")
+        session.snapshot_git_password("root_token")
         warnings = session.drain_warnings()
         assert session.drain_warnings() == ()
 
@@ -362,7 +421,7 @@ def test_permissive_mode_warning_survives_invalid_file_value(
 
     with HostSecretSession.from_configuration(result) as session:
         with pytest.raises(HostSecretSessionError) as raised:
-            session.snapshot("root_token")
+            session.snapshot_git_password("root_token")
         warnings = session.drain_warnings()
 
     assert raised.value.code == "invalid_value"
@@ -395,7 +454,7 @@ def test_file_source_without_posix_mode_emits_no_permission_warning(
     )
 
     with HostSecretSession.from_configuration(result) as session:
-        session.snapshot("root_token")
+        session.snapshot_git_password("root_token")
         warnings = session.drain_warnings()
         assert session.drain_warnings() == ()
 
@@ -416,7 +475,7 @@ def test_private_session_files_are_exact_modes_under_restrictive_umask(
         # Private modes must remain exact even when the caller's umask removes
         # every requested permission bit.
         with HostSecretSession.from_configuration(result) as session:
-            session.snapshot("root_token")
+            session.snapshot_git_password("root_token")
             assert stat.S_IMODE(session.root.stat().st_mode) == 0o700
             private_files = tuple(
                 path for path in session.root.iterdir() if path.is_file()
@@ -516,7 +575,7 @@ def test_session_collects_warnings_and_cleans_up_for_every_exit(
     try:
         with session:
             root = session.root
-            session.snapshot("root_token")
+            session.snapshot_git_password("root_token")
             if raised is not None:
                 raise raised("expected exit")
     except (RuntimeError, KeyboardInterrupt):
@@ -653,7 +712,7 @@ def test_lock_acquire_failure_closes_descriptor_and_is_content_free(
             secret_session_module, "_close_lock_descriptor", record_close
         )
         with pytest.raises(HostSecretSessionError) as raised:
-            session.snapshot("root_token")
+            session.snapshot_git_password("root_token")
 
     assert raised.value.code == "snapshot_failed"
     assert marker not in str(raised.value)
@@ -691,7 +750,7 @@ def test_lock_cleanup_failure_is_content_free_and_attempts_close(
             secret_session_module, "_close_lock_descriptor", close_descriptor
         )
         with pytest.raises(HostSecretSessionError) as raised:
-            session.snapshot("root_token")
+            session.snapshot_git_password("root_token")
         assert (session.root / "snapshot-root_token").read_bytes() == b"valid-secret"
 
     assert raised.value.code == "snapshot_failed"
@@ -715,7 +774,7 @@ def test_snapshot_body_failure_is_cached_and_content_free(
             secret_session_module, "_write_snapshot", fail_snapshot_write
         )
         with pytest.raises(HostSecretSessionError) as raised:
-            session.snapshot("root_token")
+            session.snapshot_git_password("root_token")
         assert (session.root / "failure-root_token").read_bytes() == b"snapshot_failed"
 
     assert raised.value.code == "snapshot_failed"
@@ -729,11 +788,7 @@ def test_snapshot_body_error_outranks_lock_cleanup_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = _configuration(tmp_path, source='env = "CDH_TEST_ROOT_TOKEN"')
-    monkeypatch.setattr(
-        secret_session_module.os,
-        "environb",
-        {b"CDH_TEST_ROOT_TOKEN": b""},
-    )
+    monkeypatch.delenv("CDH_TEST_ROOT_TOKEN", raising=False)
     cleanup_calls: list[str] = []
     original_close = secret_session_module._close_lock_descriptor
 
@@ -752,7 +807,7 @@ def test_snapshot_body_error_outranks_lock_cleanup_failures(
         )
         monkeypatch.setattr(secret_session_module, "_close_lock_descriptor", fail_close)
         with pytest.raises(HostSecretSessionError) as raised:
-            session.snapshot("root_token")
+            session.snapshot_git_password("root_token")
 
-    assert raised.value.code == "invalid_value"
+    assert raised.value.code == "source_unavailable"
     assert cleanup_calls == ["unlock", "close"]

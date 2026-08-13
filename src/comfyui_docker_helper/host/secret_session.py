@@ -1,4 +1,4 @@
-"""Command-scoped host Secret snapshots for Git credential helpers."""
+"""Command-scoped host Secret acquisition and consumer-specific snapshots."""
 
 from __future__ import annotations
 
@@ -13,9 +13,14 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from comfyui_docker_helper.config.credential_secrets import (
+    CREDENTIAL_SECRET_MAX_BYTES,
+    BearerTokenError,
+    downloader_credential_secret_id,
+    validate_bearer_token,
+)
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.git_credentials import (
-    GIT_CREDENTIAL_VALUE_MAX_BYTES,
     canonicalize_git_credential_context,
     git_credential_secret_id,
     parse_git_credential_context,
@@ -194,8 +199,18 @@ class HostSecretSession:
             environment={GIT_CREDENTIAL_SESSION_ENV: os.fspath(root)},
         )
 
-    def snapshot(self, name: str) -> Path:
-        """Resolve and cache one logical Secret as a private regular file."""
+    def snapshot_git_password(self, name: str) -> Path:
+        """Resolve one logical Secret and admit it as a Git password."""
+        snapshot = self.raw_snapshot(name)
+        try:
+            data = snapshot.read_bytes()
+        except OSError:
+            raise HostSecretSessionError("snapshot_failed", name) from None
+        _validate_git_password(data, name)
+        return snapshot
+
+    def raw_snapshot(self, name: str) -> Path:
+        """Resolve and cache one logical Secret without consumer validation."""
         root = self._require_root()
         source = self._sources.get(name)
         if source is None:
@@ -214,7 +229,6 @@ class HostSecretSession:
                     data, mode = self._read_source(name, source)
                     if mode is not None and stat.S_IMODE(mode) & 0o077:
                         self._record_mode_warning(name)
-                    _validate_git_password(data, name)
                     _write_snapshot(snapshot, data)
                     return snapshot
                 except HostSecretSessionError as error:
@@ -233,7 +247,23 @@ class HostSecretSession:
         """Resolve one accepted BuildPlan credential ID through this session."""
         for route in self._routes:
             if git_credential_secret_id(route.secret) == secret_id:
-                return self.snapshot(route.secret)
+                return self.snapshot_git_password(route.secret)
+        raise HostSecretSessionError("unknown_credential_secret")
+
+    def snapshot_downloader_credential(self, secret_id: str) -> Path:
+        """Resolve one downloader credential ID and admit an exact Bearer token."""
+        for name in self._sources:
+            if downloader_credential_secret_id(name) != secret_id:
+                continue
+            snapshot = self.raw_snapshot(name)
+            try:
+                value = snapshot.read_bytes()
+                validate_bearer_token(value)
+            except BearerTokenError:
+                raise HostSecretSessionError("invalid_bearer_value", name) from None
+            except OSError:
+                raise HostSecretSessionError("snapshot_failed", name) from None
+            return snapshot
         raise HostSecretSessionError("unknown_credential_secret")
 
     def drain_warnings(self) -> tuple[Diagnostic, ...]:
@@ -286,7 +316,7 @@ class HostSecretSession:
             try:
                 admitted = read_bounded_regular_absolute_file(
                     source.locator,
-                    max_bytes=GIT_CREDENTIAL_VALUE_MAX_BYTES,
+                    max_bytes=CREDENTIAL_SECRET_MAX_BYTES,
                 )
             except (OSError, ValueError):
                 raise HostSecretSessionError("source_unavailable", name) from None
@@ -348,7 +378,7 @@ def _absolute_secret_path(base: Path, locator: str) -> str:
 def _validate_git_password(value: bytes, name: str) -> None:
     if (
         not value
-        or len(value) > GIT_CREDENTIAL_VALUE_MAX_BYTES
+        or len(value) > CREDENTIAL_SECRET_MAX_BYTES
         or any(character in value for character in b"\0\r\n")
     ):
         raise HostSecretSessionError("invalid_value", name)
@@ -375,6 +405,8 @@ def _read_environment_source(locator: str, name: str) -> bytes:
         raise HostSecretSessionError("environment_unavailable", name)
     if data is None:
         raise HostSecretSessionError("source_unavailable", name)
+    if len(data) > CREDENTIAL_SECRET_MAX_BYTES:
+        raise HostSecretSessionError("source_too_large", name)
     return data
 
 

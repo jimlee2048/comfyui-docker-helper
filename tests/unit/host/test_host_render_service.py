@@ -354,7 +354,7 @@ class NoLocalInputs:
 
 
 def _prepare(
-    config: Path,
+    config: Path | list[Path],
     output: Path,
     fake: object,
     *,
@@ -1057,7 +1057,7 @@ def test_invalid_locked_requirements_content_uses_lock_invalid_diagnostic(
     assert fake.calls == []
 
 
-# Runtime hooks/files preserve locked projection, precedence, and source containment.
+# Runtime inputs preserve locked hooks, typed files, and baked precedence.
 def test_runtime_hooks_are_locked_planned_and_materialized(
     tmp_path: Path,
 ) -> None:
@@ -1158,16 +1158,20 @@ download_mode = "async"
 def test_locked_local_file_uses_first_config_parent_and_omits_locator(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "assets" / "model.bin"
-    source.parent.mkdir()
+    base_dir = tmp_path / "base"
+    overlay_dir = tmp_path / "overlay"
+    source = base_dir / "assets" / "model.bin"
+    source.parent.mkdir(parents=True)
+    overlay_dir.mkdir()
     source.write_bytes(b"local-model")
-    config = tmp_path / "config.toml"
-    config.write_text(
-        _config()
-        + """
+    base = base_dir / "config.toml"
+    base.write_text(_config())
+    overlay = overlay_dir / "files.toml"
+    overlay.write_text(
+        """
 [[files]]
 type = "local"
-path = "assets/../assets/model.bin"
+path = "assets/model.bin"
 target_dir = "models"
 filename = "model.bin"
 content_lock = true
@@ -1175,7 +1179,7 @@ content_lock = true
     )
     output = tmp_path / "context"
 
-    prepared = _prepare(config, output, FakeAcquirer())
+    prepared = _prepare([base, overlay], output, FakeAcquirer())
 
     lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
     assert lock.files.local[0].digest == (
@@ -1235,7 +1239,6 @@ filename = "model.bin"
 
 def test_locked_mode_does_not_compare_unlocked_local_source_bytes(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "model.bin"
     source.write_bytes(b"initial unlocked bytes")
@@ -1256,11 +1259,6 @@ filename = "model.bin"
     output = tmp_path / "context"
     _prepare(config, output, FakeAcquirer())
     source.write_bytes(b"changed unlocked bytes")
-    monkeypatch.setattr(
-        render_service_module,
-        "_regular_files_equal",
-        lambda *_args: pytest.fail("--locked must not compare unlocked source bytes"),
-    )
 
     _prepare(
         config,

@@ -177,6 +177,16 @@ With `content_lock = false`, ordinary planning does not hash the source. An expl
 
 Only HTTP build files are projected into `runtime/config.toml`. A local source locator is host-only and never becomes a runtime import instruction; deployment-time replacement remains the mounted runtime configuration's separate responsibility.
 
+## Authenticated HTTPX file downloads
+
+Downloader credential routes authorize only cdh's HTTPX file-download instruction. `validate` and `render` check route structure and Secret references without reading Secret values. When a build contains at least one effective HTTPX file, `host build` resolves the complete distinct Secret set referenced by the effective downloader routes before starting Buildx and grants it only to the file-download instruction. Redirects can therefore select another declared route, while installers, Git, hooks, and other build instructions receive no downloader credentials.
+
+Route patterns and logical Secret names are ordinary build metadata. Secret source locators, resolved token values, generated authorization headers, and token digests are not persisted in cdh-owned locks, BuildPlans, context metadata, manifests, image metadata or history, or command output. Build routes and Secret definitions are not baked into runtime configuration; declare runtime routes and container-visible Secret sources independently when deployment-time downloads need authentication.
+
+Building the rendered context manually bypasses the host Secret session. Supply each required file-backed mount shown by the rendered Dockerfile under its stable `cdh-downloader-credential-<name>` ID. Do not pass a token as a build argument or place it in the context.
+
+BuildKit Secret contents do not ordinarily invalidate an instruction cache. Rotating a token can therefore reuse a completed download layer, and a cache hit does not prove that the current credential works. Use the ordinary BuildKit cache controls when the build must perform a fresh authenticated request; cdh deliberately does not add a token-derived cachebuster.
+
 ## From effective configuration to a context
 
 cdh uses one forward-only planning flow:

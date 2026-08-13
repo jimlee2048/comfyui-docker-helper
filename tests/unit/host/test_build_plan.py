@@ -16,11 +16,13 @@ from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
     CustomNodesPhase,
+    DownloaderCredentialRoutePlan,
     ExactPackagePlan,
     GitCredentialRoutePlan,
     ManifestBinding,
     RuntimePlanningProvenance,
     build_plan_digest,
+    downloader_credential_secret_ids,
     dump_build_plan_json,
     git_credential_secret_ids,
     manifest_binding,
@@ -828,6 +830,135 @@ def test_git_credential_plan_revalidates_protocol_bounds_and_unique_contexts() -
             user_directory=plan.custom_nodes.user_directory,
             nodes=plan.custom_nodes.nodes,
             git_credentials=(route, route),
+        )
+
+
+def test_downloader_credential_routes_project_only_safe_files_metadata() -> None:
+    document = final_config().model_dump(mode="python")
+    document["secrets"] = {
+        "shared": {"env": "SYNTHETIC_MODEL_TOKEN"},
+        "other": {"file": "/synthetic/private-token"},
+    }
+    document["cdh"]["default_downloader"] = "httpx"
+    document["cdh"]["downloader"]["credentials"] = [
+        {
+            "match": "https://EXAMPLE.test:443/",
+            "type": "bearer",
+            "token": {"secret": "shared"},
+        },
+        {
+            "match": "https://example.test/private/",
+            "type": "bearer",
+            "token": {"secret": "other"},
+        },
+    ]
+
+    plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+
+    assert [route.model_dump(mode="python") for route in plan.files.credentials] == [
+        {
+            "match": "https://example.test/",
+            "type": "bearer",
+            "token": {"secret": "shared"},
+            "secret_id": "cdh-downloader-credential-shared",
+        },
+        {
+            "match": "https://example.test/private",
+            "type": "bearer",
+            "token": {"secret": "other"},
+            "secret_id": "cdh-downloader-credential-other",
+        },
+    ]
+    assert downloader_credential_secret_ids(plan.files) == (
+        "cdh-downloader-credential-shared",
+        "cdh-downloader-credential-other",
+    )
+    serialized = dump_build_plan_json(plan)
+    assert b"SYNTHETIC_MODEL_TOKEN" not in serialized
+    assert b"/synthetic/private-token" not in serialized
+    assert parse_build_plan_json(serialized) == plan
+
+
+def test_downloader_secret_locator_is_excluded_but_route_reference_is_identity() -> (
+    None
+):
+    document = final_config().model_dump(mode="python")
+    document["secrets"] = {
+        "first": {"env": "FIRST_TOKEN"},
+        "second": {"env": "SECOND_TOKEN"},
+    }
+    document["cdh"]["default_downloader"] = "httpx"
+    document["cdh"]["downloader"]["credentials"] = [
+        {
+            "match": "https://EXAMPLE.test:443/",
+            "type": "bearer",
+            "token": {"secret": "first"},
+        }
+    ]
+    locator_changed = deepcopy(document)
+    locator_changed["secrets"]["first"] = {"file": "/other/token"}
+    locator_changed["cdh"]["downloader"]["credentials"][0]["match"] = (
+        "https://example.test"
+    )
+    reference_changed = deepcopy(document)
+    reference_changed["cdh"]["downloader"]["credentials"][0]["token"] = {
+        "secret": "second"
+    }
+
+    first = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+    same = build_plan(
+        FinalConfig.model_validate(locator_changed), accepted_resolution()
+    )
+    changed = build_plan(
+        FinalConfig.model_validate(reference_changed), accepted_resolution()
+    )
+
+    assert first == same
+    assert first.image_config_digest == same.image_config_digest
+    assert first.image_config_digest != changed.image_config_digest
+    assert build_plan_digest(first) != build_plan_digest(changed)
+
+
+def test_downloader_credential_plan_revalidates_routes_and_httpx_requirement() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    route = DownloaderCredentialRoutePlan(
+        match="https://unmatched.example/models",
+        type="bearer",
+        token={"secret": "model_read"},
+        secret_id="cdh-downloader-credential-model_read",
+    )
+    phase = plan.files.model_copy(update={"credentials": (route,)})
+    assert downloader_credential_secret_ids(phase) == ()
+
+    with pytest.raises(ValidationError, match="match routes must be unique"):
+        type(plan.files)(
+            downloader=plan.files.downloader,
+            credentials=(route, route),
+            default_download_mode=plan.files.default_download_mode,
+            download_max_attempts=plan.files.download_max_attempts,
+            files=plan.files.files,
+        )
+
+    matching = DownloaderCredentialRoutePlan(
+        match="https://example.test/",
+        type="bearer",
+        token=route.token,
+        secret_id=route.secret_id,
+    )
+    with pytest.raises(ValidationError, match="reference and mount ID must agree"):
+        DownloaderCredentialRoutePlan(
+            match="https://example.test/",
+            type="bearer",
+            token={"secret": "other"},
+            secret_id=route.secret_id,
+        )
+    with pytest.raises(ValidationError, match="require the HTTPX downloader"):
+        type(plan.files)(
+            downloader=plan.files.downloader,
+            credentials=(matching,),
+            default_download_mode=plan.files.default_download_mode,
+            download_max_attempts=plan.files.download_max_attempts,
+            files=plan.files.files,
         )
 
 

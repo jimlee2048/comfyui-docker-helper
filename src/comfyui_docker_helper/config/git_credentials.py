@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlsplit
 
+from comfyui_docker_helper.config.credential_secrets import (
+    CREDENTIAL_SECRET_MAX_BYTES,
+)
 from comfyui_docker_helper.config.value_validation import has_control_characters
 
 __all__ = [
@@ -23,7 +26,9 @@ __all__ = [
     "select_git_credential_context",
 ]
 
-GIT_CREDENTIAL_VALUE_MAX_BYTES = 65_525
+# Keep the established Git-facing name while one consumer-neutral acquisition
+# envelope owns credential Secret size.
+GIT_CREDENTIAL_VALUE_MAX_BYTES = CREDENTIAL_SECRET_MAX_BYTES
 
 type GitCredentialScheme = Literal["http", "https"]
 type GitCredentialContextErrorCode = Literal[

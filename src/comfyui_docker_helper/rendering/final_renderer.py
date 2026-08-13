@@ -11,7 +11,11 @@ from comfyui_docker_helper.config.build_plan import (
     HttpFilePlan,
     LocalFilePlan,
     build_plan_digest,
+    downloader_credential_secret_ids,
     git_credential_secret_ids,
+)
+from comfyui_docker_helper.config.credential_secrets import (
+    downloader_credential_secret_target,
 )
 from comfyui_docker_helper.config.git_credentials import git_credential_secret_target
 
@@ -269,8 +273,16 @@ def _toolchain_install_lines(plan: BuildPlan) -> list[str]:
         )
     )
     if any(isinstance(item, HttpFilePlan) for item in plan.files.files):
+        mounts = [_BUILD_PLAN_MOUNT]
+        mounts.extend(
+            "--mount=type=secret,"
+            f"id={secret_id},target={downloader_credential_secret_target(secret_id)},"
+            "required=true"
+            for secret_id in downloader_credential_secret_ids(plan.files)
+        )
+        mount_prefix = " \\\n    ".join(mounts)
         lines.append(
-            f"RUN {_BUILD_PLAN_MOUNT} {_shell_word(cdh.executable)} "
+            f"RUN {mount_prefix} {_shell_word(cdh.executable)} "
             "container download-files "
             f"--build-plan-digest {plan_digest}"
         )

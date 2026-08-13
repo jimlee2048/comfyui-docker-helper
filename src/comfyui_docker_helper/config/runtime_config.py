@@ -1,12 +1,14 @@
 """Runtime configuration loading and merge for container startup."""
 
 import os
+import posixpath
+import re
 import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from math import isfinite
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator
@@ -21,8 +23,23 @@ from comfyui_docker_helper.config.diagnostics import (
     SourceLocation,
     SourceReference,
 )
+from comfyui_docker_helper.config.downloader_credentials import (
+    DownloaderCredentialContext,
+    DownloaderCredentialContextError,
+    canonicalize_downloader_credential_context,
+    parse_downloader_credential_context,
+    parse_downloader_request_url,
+    select_downloader_credential_context,
+)
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
+from comfyui_docker_helper.config.final_models import (
+    FinalDownloaderCredentialConfig,
+    FinalSecretSourceConfig,
+)
 from comfyui_docker_helper.config.merge import (
+    ANY_PATH_PART,
+    AtomicPolicy,
+    KeyedItemMerge,
     KeyedSequencePolicy,
     MergePolicyRegistry,
     OriginNode,
@@ -46,10 +63,32 @@ from comfyui_docker_helper.config.ssh_keys import (
 from comfyui_docker_helper.config.url_validation import DownloaderName
 from comfyui_docker_helper.config.value_validation import is_argv_value
 
+
+def _runtime_downloader_credential_key(item: Any) -> tuple[str, ...] | None:
+    if not isinstance(item, Mapping):
+        return None
+    match = item.get("match")
+    if not isinstance(match, str):
+        return None
+    try:
+        canonical = canonicalize_downloader_credential_context(match)
+    except DownloaderCredentialContextError:
+        return None
+    return ("downloader-credential", canonical)
+
+
 BAKED_RUNTIME_CONFIG_PATH = Path("/opt/cdh/runtime/config.toml")
 MOUNTED_RUNTIME_CONFIG_PATH = Path("/etc/cdh/runtime/config.toml")
 _RUNTIME_CONFIG_MERGE_POLICIES = MergePolicyRegistry(
     (
+        PolicyRule(("secrets", ANY_PATH_PART), AtomicPolicy()),
+        PolicyRule(
+            ("cdh", "downloader", "credentials"),
+            KeyedSequencePolicy(
+                _runtime_downloader_credential_key,
+                KeyedItemMerge.ATOMIC,
+            ),
+        ),
         PolicyRule(
             ("files",),
             KeyedSequencePolicy(
@@ -75,6 +114,8 @@ _HOST_ONLY_COMFYUI_FIELDS = frozenset(
 _COMFYUI_CONTROLLED_STARTUP_FLAGS = frozenset(
     {"--listen", "--port", "--auto-launch", "--disable-auto-launch"}
 )
+_SECRET_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +152,7 @@ class _RuntimeHttpxConfigPatch(ConfigModel):
 class _RuntimeDownloaderConfigPatch(ConfigModel):
     aria2: _RuntimeAria2ConfigPatch | None = None
     httpx: _RuntimeHttpxConfigPatch | None = None
+    credentials: list[FinalDownloaderCredentialConfig] | None = None
 
 
 class _RuntimeCdhConfigPatch(ConfigModel):
@@ -162,6 +204,7 @@ class _RuntimeConfigPatch(ConfigModel):
     cdh: _RuntimeCdhConfigPatch | None = None
     system: _RuntimeSystemConfigPatch | None = None
     files: list[_RuntimeFilePatch] | None = None
+    secrets: dict[str, FinalSecretSourceConfig] | None = None
 
 
 def load_runtime_config(
@@ -222,6 +265,12 @@ def load_runtime_config(
     _validate_runtime_downloader(config, merged.origins)
     _validate_runtime_extra_args(config, merged.origins)
     files = _validate_effective_runtime_files(effective.files, merged.origins)
+    credential_warnings = _validate_runtime_downloader_credentials(
+        config,
+        files,
+        merged.origins,
+    )
+    warnings.extend(credential_warnings)
     return RuntimeConfigurationResult(
         config=config,
         files=files,
@@ -762,6 +811,147 @@ def _validate_runtime_downloader(
         raise RuntimeConfigurationError(
             _enrich_runtime_diagnostics(tuple(diagnostics), origins)
         )
+
+
+def _validate_runtime_downloader_credentials(
+    config: RuntimeConfig,
+    files: tuple[dict[str, Any], ...],
+    origins: OriginNode,
+) -> tuple[Diagnostic, ...]:
+    diagnostics: list[Diagnostic] = []
+    warnings: list[Diagnostic] = []
+    contexts: list[DownloaderCredentialContext] = []
+    canonical_matches: dict[str, RuntimePath] = {}
+
+    for name, source in config.secrets.items():
+        path: RuntimePath = ("secrets", name)
+        if _SECRET_NAME_PATTERN.fullmatch(name) is None:
+            diagnostics.append(
+                Diagnostic(
+                    path,
+                    "secret.invalid_name",
+                    "names must match [a-z][a-z0-9_-]{0,63}",
+                )
+            )
+        if (source.env is None) == (source.file is None):
+            diagnostics.append(
+                Diagnostic(
+                    path,
+                    "secret.invalid_source",
+                    "must define exactly one of env or file",
+                )
+            )
+        if (
+            source.env is not None
+            and _ENVIRONMENT_NAME_PATTERN.fullmatch(source.env) is None
+        ):
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "env"),
+                    "secret.invalid_env",
+                    "environment variable names must match [A-Za-z_][A-Za-z0-9_]*",
+                )
+            )
+        if source.file is not None and not _is_valid_runtime_secret_file(source.file):
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "file"),
+                    "secret.invalid_file",
+                    "runtime Secret file locators must be absolute POSIX paths",
+                )
+            )
+
+    for index, route in enumerate(config.cdh.downloader.credentials):
+        path: RuntimePath = ("cdh", "downloader", "credentials", index)
+        try:
+            context = parse_downloader_credential_context(route.match)
+        except DownloaderCredentialContextError as error:
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "match"), "downloader_credential.invalid_match", str(error)
+                )
+            )
+        else:
+            contexts.append(context)
+            earlier = canonical_matches.get(context.canonical_url)
+            if earlier is not None:
+                diagnostics.append(
+                    Diagnostic(
+                        (*path, "match"),
+                        "downloader_credential.duplicate_match",
+                        "credential route matches must be unique after normalization",
+                    )
+                )
+            else:
+                canonical_matches[context.canonical_url] = path
+            if context.scheme == "http":
+                warnings.append(
+                    Diagnostic(
+                        (*path, "match"),
+                        "downloader_credential.insecure_http",
+                        "Bearer credentials sent over HTTP lack TLS transport "
+                        "confidentiality",
+                        DiagnosticSeverity.WARNING,
+                    )
+                )
+        secret_name = route.token.secret
+        if _SECRET_NAME_PATTERN.fullmatch(secret_name) is None:
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "token", "secret"),
+                    "secret.invalid_reference",
+                    "Secret references must match [a-z][a-z0-9_-]{0,63}",
+                )
+            )
+        elif secret_name not in config.secrets:
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "token", "secret"),
+                    "secret.unknown_reference",
+                    "must reference a defined Secret",
+                )
+            )
+
+    if len(contexts) == len(config.cdh.downloader.credentials):
+        for index, item in enumerate(files):
+            try:
+                request = parse_downloader_request_url(item["url"])
+            except (KeyError, DownloaderCredentialContextError):
+                continue
+            if select_downloader_credential_context(contexts, request) is None:
+                continue
+            effective = item.get("downloader") or config.cdh.default_downloader
+            if effective == "aria2":
+                diagnostics.append(
+                    Diagnostic(
+                        ("files", index, "downloader"),
+                        "downloader_credential.httpx_required",
+                        "For security, authenticated downloads must use HTTPX",
+                        hint=(
+                            "aria2 cannot enforce per-redirect credential scope; set "
+                            'downloader = "httpx" for this file or change the '
+                            "default downloader"
+                        ),
+                    )
+                )
+
+    if diagnostics:
+        raise RuntimeConfigurationError(
+            _enrich_runtime_diagnostics(tuple(diagnostics), origins)
+        )
+    return _enrich_runtime_diagnostics(tuple(warnings), origins)
+
+
+def _is_valid_runtime_secret_file(value: str) -> bool:
+    parsed = PurePosixPath(value)
+    return (
+        bool(value)
+        and parsed.is_absolute()
+        and not value.startswith("//")
+        and not value.endswith("/")
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        and posixpath.normpath(value).startswith("/")
+    )
 
 
 def _validate_runtime_extra_args(

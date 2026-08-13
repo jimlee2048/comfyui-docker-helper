@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
 from comfyui_docker_helper.config.build_plan import (
+    DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,
 )
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
@@ -142,37 +143,60 @@ def _prepared_build() -> SimpleNamespace:
         plan=SimpleNamespace(
             toolchain=SimpleNamespace(platform="linux/amd64"),
             custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+            files=SimpleNamespace(files=(), credentials=()),
         ),
         output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
         warnings=(),
     )
 
 
-def _credential_build_plan():
+def _credential_build_plan(*, downloader: bool = False):
     plan = build_plan(final_config(), accepted_resolution())
+    updates = {
+        "custom_nodes": plan.custom_nodes.model_copy(
+            update={
+                "git_credentials": (
+                    GitCredentialRoutePlan(
+                        match="https://example.test/",
+                        username="root-user",
+                        secret_id="cdh-git-credential-root_token",
+                    ),
+                    GitCredentialRoutePlan(
+                        match="https://example.test/team",
+                        username="team-user",
+                        secret_id="cdh-git-credential-root_token",
+                    ),
+                    GitCredentialRoutePlan(
+                        match="https://gitlab.example.test/",
+                        username="oauth2",
+                        secret_id="cdh-git-credential-team_token",
+                    ),
+                )
+            }
+        )
+    }
+    if downloader:
+        updates["files"] = plan.files.model_copy(
+            update={
+                "credentials": (
+                    DownloaderCredentialRoutePlan(
+                        match="https://example.test/",
+                        type="bearer",
+                        token={"secret": "root_token"},
+                        secret_id="cdh-downloader-credential-root_token",
+                    ),
+                ),
+                "files": tuple(
+                    item.model_copy(update={"downloader": "httpx"})
+                    if item.type == "http"
+                    else item
+                    for item in plan.files.files
+                ),
+            }
+        )
     return plan.model_copy(
         update={
-            "custom_nodes": plan.custom_nodes.model_copy(
-                update={
-                    "git_credentials": (
-                        GitCredentialRoutePlan(
-                            match="https://example.test/",
-                            username="root-user",
-                            secret_id="cdh-git-credential-root_token",
-                        ),
-                        GitCredentialRoutePlan(
-                            match="https://example.test/team",
-                            username="team-user",
-                            secret_id="cdh-git-credential-root_token",
-                        ),
-                        GitCredentialRoutePlan(
-                            match="https://gitlab.example.test/",
-                            username="oauth2",
-                            secret_id="cdh-git-credential-team_token",
-                        ),
-                    )
-                }
-            )
+            **updates,
         }
     )
 
@@ -1188,6 +1212,7 @@ platforms = ["linux/amd64"]
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+                files=SimpleNamespace(files=(), credentials=()),
             ),
             output_plan=output_plan,
             warnings=(),
@@ -1304,6 +1329,11 @@ password = { secret = "root_token" }
 match = "https://gitlab.example.test/"
 username = "oauth2"
 password = { secret = "team_token" }
+
+[[cdh.downloader.credentials]]
+match = "https://example.test/"
+type = "bearer"
+token = { secret = "root_token" }
 """
         )
     values = {
@@ -1324,7 +1354,7 @@ password = { secret = "team_token" }
         "_read_environment_source",
         counting_environment_source,
     )
-    plan = _credential_build_plan()
+    plan = _credential_build_plan(downloader=True)
     observed_root: Path | None = None
     captured_bindings: tuple[FileSecretBinding, ...] = ()
 
@@ -1400,6 +1430,7 @@ password = { secret = "team_token" }
     assert [binding.secret_id for binding in captured_bindings] == [
         "cdh-git-credential-root_token",
         "cdh-git-credential-team_token",
+        "cdh-downloader-credential-root_token",
     ]
     assert reads == ["CDH_TEST_ROOT_TOKEN", "CDH_TEST_TEAM_TOKEN"]
     assert observed_root is not None and not observed_root.exists()
@@ -1486,6 +1517,140 @@ password = {{ secret = "team_token" }}
     assert "the configured source is unavailable" in result.stderr
     assert missing_locator not in result.stderr
     assert observed_root is not None and not observed_root.exists()
+
+
+def test_build_invalid_downloader_bearer_fails_content_safe_before_buildx(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    with config.open("a") as stream:
+        stream.write(
+            """
+[secrets.root_token]
+env = "CDH_TEST_ROOT_TOKEN"
+
+[[cdh.downloader.credentials]]
+match = "https://example.test/"
+type = "bearer"
+token = { secret = "root_token" }
+
+[[files]]
+type = "http"
+url = "https://example.test/model.bin"
+target_dir = "models/checkpoints"
+filename = "model.bin"
+downloader = "httpx"
+"""
+        )
+    marker = "synthetic sensitive marker with spaces"
+    monkeypatch.setenv("CDH_TEST_ROOT_TOKEN", marker)
+    plan = _credential_build_plan(downloader=True)
+    plan = plan.model_copy(
+        update={
+            "custom_nodes": plan.custom_nodes.model_copy(update={"git_credentials": ()})
+        }
+    )
+
+    @contextmanager
+    def providers():
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    def prepare(*_args, **_kwargs):
+        return SimpleNamespace(
+            plan=plan,
+            output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
+            warnings=(),
+        )
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
+    monkeypatch.setattr(
+        host_cli,
+        "build_image_with_buildx",
+        lambda **_kwargs: pytest.fail("invalid Bearer reached Docker boundary"),
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Error: Unable to access configured secrets" in result.stderr
+    assert "Field: secrets.root_token" in result.stderr
+    assert "one exact RFC 6750 Bearer token" in result.stderr
+    assert marker not in result.output
+
+
+def test_render_keeps_unused_downloader_secret_value_lazy(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    with config.open("a") as stream:
+        stream.write(
+            """
+[secrets.unused_token]
+env = "CDH_TEST_MISSING_TOKEN"
+
+[[cdh.downloader.credentials]]
+match = "https://example.test/private"
+type = "bearer"
+token = { secret = "unused_token" }
+"""
+        )
+    monkeypatch.delenv("CDH_TEST_MISSING_TOKEN", raising=False)
+
+    @contextmanager
+    def providers():
+        yield SimpleNamespace(
+            acquirer=object(),
+            local_acquirer=object(),
+            canonical_wheel=canonical_wheel(),
+        )
+
+    monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+    monkeypatch.setattr(
+        host_cli,
+        "prepare_render_context",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            warnings=(),
+            lock_result=SimpleNamespace(changed=False),
+        ),
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "CDH_TEST_MISSING_TOKEN" not in result.output
 
 
 def test_render_secret_failure_presentation_explains_invalid_value_requirements(
@@ -1644,6 +1809,7 @@ def test_build_cache_import_and_export_are_independent(
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+                files=SimpleNamespace(files=(), credentials=()),
             ),
             output_plan=output_plan,
             warnings=(),
@@ -2016,6 +2182,7 @@ platforms = ["linux/amd64"]
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
                 custom_nodes=SimpleNamespace(nodes=(), git_credentials=()),
+                files=SimpleNamespace(files=(), credentials=()),
             ),
             output_plan=output_plan,
             warnings=(),

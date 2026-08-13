@@ -4,6 +4,10 @@ from typing import Literal
 
 from pydantic import Field
 
+from comfyui_docker_helper.config.final_models import (
+    FinalDownloaderCredentialConfig,
+    FinalSecretSourceConfig,
+)
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.url_validation import DownloaderName
@@ -30,6 +34,7 @@ class RuntimeHttpxConfig(ConfigModel):
 class RuntimeDownloaderConfig(ConfigModel):
     aria2: RuntimeAria2Config = Field(default_factory=RuntimeAria2Config)
     httpx: RuntimeHttpxConfig = Field(default_factory=RuntimeHttpxConfig)
+    credentials: list[FinalDownloaderCredentialConfig] = Field(default_factory=list)
 
 
 class RuntimeCdhConfig(ConfigModel):
@@ -58,3 +63,4 @@ class RuntimeConfig(ConfigModel):
     comfyui: RuntimeComfyUIConfig = Field(default_factory=RuntimeComfyUIConfig)
     cdh: RuntimeCdhConfig = Field(default_factory=RuntimeCdhConfig)
     system: RuntimeSystemConfig = Field(default_factory=RuntimeSystemConfig)
+    secrets: dict[str, FinalSecretSourceConfig] = Field(default_factory=dict)

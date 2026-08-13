@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
+import httpx
 from pydantic import ValidationError, field_validator
 
 from comfyui_docker_helper.config import Diagnostic
@@ -21,6 +22,7 @@ from comfyui_docker_helper.config.url_validation import DownloaderName
 from comfyui_docker_helper.container.attempt_coordinator import (
     AttemptCancelled,
     AttemptExhausted,
+    AttemptLocalFailure,
     AttemptOrdinaryTerminal,
     AttemptSucceeded,
     coordinate_transfer_attempts,
@@ -30,6 +32,9 @@ from comfyui_docker_helper.container.download_files import (
     Aria2DownloaderFactory,
     DownloadBackendPreparer,
     HttpxDownloader,
+)
+from comfyui_docker_helper.container.downloader_credentials import (
+    DownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.runtime_diagnostics import (
     runtime_error_reason,
@@ -60,6 +65,7 @@ from comfyui_docker_helper.container.transfer_core import (
     StagingDisposition,
     TransferDownloadFilesError,
     TransferIdentity,
+    TransportRequest,
     _admit_preserved_transfer,
     admitted_regular_final,
     confirm_indexed_transfer_artifacts_absent,
@@ -254,6 +260,7 @@ def process_runtime_file_downloads(
     state_observer: RuntimeDownloadStateObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
+    credential_policy: DownloaderCredentialPolicy | None = None,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Run runtime policy around the shared transfer core."""
     settings = runtime_downloader_settings(config)
@@ -293,6 +300,7 @@ def process_runtime_file_downloads(
                 log=log,
                 state_observer=state_observer,
                 cancel_requested=is_cancelled,
+                credential_policy=credential_policy,
             )
             _notify_runtime_download_state(state_observer, item, "completed")
             log(
@@ -729,6 +737,7 @@ def download_runtime_files(
     startup_observer: RuntimeDownloadStartupObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
+    credential_policy: DownloaderCredentialPolicy | None = None,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
     is_cancelled = cancel_requested or _runtime_download_not_cancelled
@@ -737,7 +746,12 @@ def download_runtime_files(
         backend_observer,
         observed_backend_ids,
     )
-    httpx_backend = httpx_downloader or HttpxDownloader(log=log)
+    if httpx_downloader is not None:
+        httpx_backend = httpx_downloader
+    elif credential_policy is None:
+        httpx_backend = HttpxDownloader(log=log)
+    else:
+        httpx_backend = HttpxDownloader(log=log, credential_policy=credential_policy)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 
     if not _requires_aria2_backend(plan, config):
@@ -753,6 +767,7 @@ def download_runtime_files(
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
+            credential_policy=credential_policy,
         )
 
     with aria2_downloader_factory(log=log) as aria2_backend:
@@ -770,6 +785,7 @@ def download_runtime_files(
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
+            credential_policy=credential_policy,
         )
 
 
@@ -845,6 +861,7 @@ def _download_runtime_file_with_policy(
     log: Logger,
     state_observer: RuntimeDownloadStateObserver | None,
     cancel_requested: RuntimeDownloadCancelRequested,
+    credential_policy: DownloaderCredentialPolicy | None,
 ) -> tuple[int, FileTransferOutcome]:
     attempts = config.cdh.download_max_attempts
     source_host = runtime_source_host(item.url)
@@ -889,6 +906,10 @@ def _download_runtime_file_with_policy(
             f"status=failed reason={runtime_error_reason(error)}"
         )
 
+    def admit_backend_call(request: TransportRequest) -> None:
+        if backend_name == "httpx" and credential_policy is not None:
+            credential_policy.authorization_for(httpx.URL(request.url))
+
     result = coordinate_transfer_attempts(
         transfer_request,
         backend_name=backend_name,
@@ -896,6 +917,7 @@ def _download_runtime_file_with_policy(
         settings=settings,
         max_attempts=attempts,
         cancel_requested=cancel_requested,
+        backend_call_admission=admit_backend_call,
         attempt_start_observer=observe_start,
         retry_observer=observe_retry,
         continuation_owner=True,
@@ -916,6 +938,8 @@ def _download_runtime_file_with_policy(
     status: Literal["failed", "exhausted"] = (
         "failed" if isinstance(result, AttemptOrdinaryTerminal) else "exhausted"
     )
+    if isinstance(result, AttemptLocalFailure):
+        status = "failed"
     _notify_runtime_download_state(
         state_observer,
         item,
@@ -925,7 +949,10 @@ def _download_runtime_file_with_policy(
             result.resume_authority if isinstance(result, AttemptExhausted) else None
         ),
     )
-    if isinstance(result, (AttemptOrdinaryTerminal, AttemptExhausted)):
+    if isinstance(
+        result,
+        (AttemptOrdinaryTerminal, AttemptExhausted, AttemptLocalFailure),
+    ):
         _apply_runtime_item_failure_policy(
             item,
             error,

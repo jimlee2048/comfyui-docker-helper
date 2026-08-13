@@ -34,6 +34,9 @@ from comfyui_docker_helper.config.canonical_lock import (
     compute_request_digest,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.downloader_credentials import (
+    canonicalize_downloader_credential_context,
+)
 from comfyui_docker_helper.config.final_models import FinalConfig, FinalHttpFileConfig
 from comfyui_docker_helper.config.final_planning import (
     BackendPlan,
@@ -175,6 +178,15 @@ class GitCredentialRouteRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class DownloaderCredentialRouteRequest:
+    """Safe in-memory downloader credential intent before Plan projection."""
+
+    match: str
+    type: Literal["bearer"]
+    secret: str
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationRequest:
     workspace: str
     comfyui_path: str
@@ -206,6 +218,7 @@ class CanonicalRequestGraph:
     custom_nodes: tuple[CustomNodeRequest, ...]
     git_credentials: tuple[GitCredentialRouteRequest, ...]
     downloader: DownloaderRequest
+    downloader_credentials: tuple[DownloaderCredentialRouteRequest, ...]
     files: tuple[FileRequest, ...]
     runtime: RuntimeRequest
 
@@ -515,6 +528,14 @@ def build_canonical_request_graph(
             for route in config.cdh.git.credentials
         ),
         downloader=downloader,
+        downloader_credentials=tuple(
+            DownloaderCredentialRouteRequest(
+                match=canonicalize_downloader_credential_context(route.match),
+                type=route.type,
+                secret=route.token.secret,
+            )
+            for route in config.cdh.downloader.credentials
+        ),
         files=tuple(files),
         runtime=RuntimeRequest(
             environment=tuple(sorted(config.system.env.items())),
@@ -657,6 +678,7 @@ def _image_config_projection(
     cdh = cast(dict[str, object], document["cdh"])
     cdh.pop("local_file_mode")
     git = cast(dict[str, object], cdh["git"])
+    downloader = cast(dict[str, object], cdh["downloader"])
     system = cast(dict[str, object], document["system"])
     python = cast(dict[str, object], document["python"])
     pytorch = cast(dict[str, object], document["pytorch"])
@@ -701,6 +723,14 @@ def _image_config_projection(
             "password": {"secret": route.password.secret},
         }
         for route in config.cdh.git.credentials
+    ]
+    downloader["credentials"] = [
+        {
+            "match": canonicalize_downloader_credential_context(route.match),
+            "type": route.type,
+            "token": {"secret": route.token.secret},
+        }
+        for route in config.cdh.downloader.credentials
     ]
     return {
         **document,

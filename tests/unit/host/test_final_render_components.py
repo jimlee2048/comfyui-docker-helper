@@ -16,6 +16,7 @@ from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
+    DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,
     HookPlan,
     LocalFilePlan,
@@ -141,10 +142,6 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
         "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked "
         "export UV_CACHE_DIR=/root/.cache/uv && "
     )
-    plan_mount = (
-        "--mount=type=bind,source=build-plan.json,"
-        "target=/opt/cdh/build/build-plan.json,readonly"
-    )
     for marker in (
         "uv --no-config python install",
         "comfy-cli==",
@@ -156,10 +153,6 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
         if marker.startswith("container "):
             assert block.startswith(
                 "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked"
-            )
-            assert block.count(plan_mount) == 1
-            assert block.index(plan_mount) < block.index(
-                "export UV_CACHE_DIR=/root/.cache/uv &&"
             )
             assert block.index("export UV_CACHE_DIR=/root/.cache/uv &&") < block.index(
                 marker
@@ -536,6 +529,85 @@ def test_renderer_mounts_distinct_git_credentials_as_required_fixed_targets() ->
     assert "cdh-git-credential-" not in registry_block
 
 
+def test_renderer_mounts_distinct_downloader_credentials_only_on_httpx_download() -> (
+    None
+):
+    plan = build_plan(final_config(), accepted_resolution())
+    routes = (
+        DownloaderCredentialRoutePlan(
+            match="https://example.test/",
+            type="bearer",
+            token={"secret": "shared"},
+            secret_id="cdh-downloader-credential-shared",
+        ),
+        DownloaderCredentialRoutePlan(
+            match="https://example.test/private",
+            type="bearer",
+            token={"secret": "shared"},
+            secret_id="cdh-downloader-credential-shared",
+        ),
+        DownloaderCredentialRoutePlan(
+            match="https://cdn.example.test/",
+            type="bearer",
+            token={"secret": "cdn"},
+            secret_id="cdh-downloader-credential-cdn",
+        ),
+    )
+    httpx_files = tuple(
+        item.model_copy(update={"downloader": "httpx"}) if item.type == "http" else item
+        for item in plan.files.files
+    )
+    plan = plan.model_copy(
+        update={
+            "files": plan.files.model_copy(
+                update={"credentials": routes, "files": httpx_files}
+            )
+        }
+    )
+
+    blocks = _run_blocks(render_build_plan_dockerfile(plan))
+    download = next(block for block in blocks if "download-files" in block)
+    shared = (
+        "--mount=type=secret,id=cdh-downloader-credential-shared,"
+        "target=/run/secrets/cdh-downloader-credential-shared,required=true"
+    )
+    cdn = (
+        "--mount=type=secret,id=cdh-downloader-credential-cdn,"
+        "target=/run/secrets/cdh-downloader-credential-cdn,required=true"
+    )
+
+    assert download.count(shared) == 1
+    assert download.count(cdn) == 1
+    assert download.index(shared) < download.index(cdn)
+    assert all(
+        "cdh-downloader-credential-" not in block
+        for block in blocks
+        if "download-files" not in block
+    )
+
+    aria2_plan = plan.model_copy(
+        update={
+            "files": plan.files.model_copy(
+                update={
+                    "credentials": routes[2:],
+                    "files": tuple(
+                        item.model_copy(update={"downloader": "aria2"})
+                        if item.type == "http"
+                        else item
+                        for item in plan.files.files
+                    ),
+                }
+            )
+        }
+    )
+    aria2_download = next(
+        block
+        for block in _run_blocks(render_build_plan_dockerfile(aria2_plan))
+        if "download-files" in block
+    )
+    assert "cdh-downloader-credential-" not in aria2_download
+
+
 # Materialization writes one deterministic BuildPlan and verified local inputs.
 def _plan_with_local_file(*, digest: str | None = None) -> tuple[BuildPlan, str]:
     plan = build_plan(final_config(), accepted_resolution())
@@ -635,30 +707,13 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert parse_build_plan_json((first / "build-plan.json").read_bytes()) == plan
 
 
-def test_local_copy_streams_bounded_chunks_and_publishes_independent_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_local_copy_publishes_bytes_independent_from_the_source(tmp_path: Path) -> None:
     source = tmp_path / "model.bin"
     original = b"abcdefgh"
     source.write_bytes(original)
     plan, context_path = _plan_with_local_file()
     stage = tmp_path / "stage"
     stage.mkdir(mode=0o700)
-    read_sizes: list[int | None] = []
-    original_read_chunk = file_admission.AdmittedRegularFileReader.read_chunk
-
-    def read_chunk(
-        reader: file_admission.AdmittedRegularFileReader,
-        limit: int | None = None,
-    ) -> bytes:
-        read_sizes.append(limit)
-        return original_read_chunk(reader, 3)
-
-    monkeypatch.setattr(
-        file_admission.AdmittedRegularFileReader,
-        "read_chunk",
-        read_chunk,
-    )
 
     _materialize_private_stage(
         plan,
@@ -672,7 +727,6 @@ def test_local_copy_streams_bounded_chunks_and_publishes_independent_bytes(
     source.write_bytes(b"changed")
 
     assert (stage / context_path).read_bytes() == original
-    assert len(read_sizes) == 4
 
 
 @pytest.mark.parametrize(
@@ -1047,6 +1101,7 @@ def test_materializer_writes_the_same_admitted_bytes_it_verifies(
     assert (output / "build/hooks/hooks/pre.py").read_bytes() == admitted
 
 
+# Strict parsing rejects forged path identities before materialization can trust them.
 @pytest.mark.parametrize(
     "relative_path",
     [

@@ -39,7 +39,7 @@ def main() -> int:
         if decision is None:
             return 0
         secret_name = routes_with_names[decision.route_index][1]
-        password = session.snapshot(secret_name).read_bytes()
+        password = session.snapshot_git_password(secret_name).read_bytes()
         sys.stdout.buffer.write(render_git_credential_response(decision, password))
         sys.stdout.buffer.flush()
     except (

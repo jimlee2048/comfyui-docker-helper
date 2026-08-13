@@ -1,4 +1,4 @@
-"""Secret-only bounded regular-file admission contracts."""
+"""Bounded and streaming regular-file admission contracts."""
 
 import errno
 import os

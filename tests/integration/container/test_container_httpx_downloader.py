@@ -27,6 +27,9 @@ from comfyui_docker_helper.container.download_files import (
     TransportRetryable,
     TransportSuccess,
 )
+from comfyui_docker_helper.container.downloader_credentials import (
+    DownloaderCredentialError,
+)
 from comfyui_docker_helper.container.transfer_core import (
     FileTransferRequest,
     StagingDisposition,
@@ -142,6 +145,142 @@ def test_httpx_follows_redirects_without_changing_supplied_target(
     assert result.length == 5
     assert result.http_status == 200
     assert request.sink.display_path.read_bytes() == b"final"
+
+
+class _PathCredentialPolicy:
+    def authorization_for(self, url: httpx.URL) -> bytes | None:
+        if url.host == "example.test" and url.path.startswith("/private/"):
+            return b"Bearer route-a"
+        if url.host == "other.test" and url.path.startswith("/protected/"):
+            return b"Bearer route-b"
+        return None
+
+
+def test_httpx_reselects_cdh_authorization_for_every_redirect(
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.append((str(request.url), request.headers.get("Authorization")))
+        locations = {
+            "/private/start": "/private/next?download=next",
+            "/private/next": "/public?signature=public",
+            "/public": "https://other.test/protected/final?download=final",
+        }
+        location = locations.get(request.url.path)
+        if location is not None:
+            return httpx.Response(302, headers={"Location": location})
+        return httpx.Response(200, content=b"authenticated")
+
+    result = HttpxDownloader(
+        transport=httpx.MockTransport(handler),
+        credential_policy=_PathCredentialPolicy(),
+        log=lambda _: None,
+    ).download(
+        _request(
+            tmp_path,
+            url="https://example.test/private/start?download=initial",
+        ),
+        _settings(),
+    )
+
+    assert isinstance(result, TransportSuccess)
+    assert observed == [
+        (
+            "https://example.test/private/start?download=initial",
+            "Bearer route-a",
+        ),
+        ("https://example.test/private/next?download=next", "Bearer route-a"),
+        ("https://example.test/public?signature=public", None),
+        (
+            "https://other.test/protected/final?download=final",
+            "Bearer route-b",
+        ),
+    ]
+
+
+def test_httpx_preserves_unowned_authorization_until_a_route_matches(
+    tmp_path: Path,
+) -> None:
+    observed: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request.headers.get("Authorization"))
+        if request.url.path == "/public":
+            return httpx.Response(302, headers={"Location": "/private/final"})
+        return httpx.Response(200, content=b"authenticated")
+
+    result = HttpxDownloader(
+        transport=httpx.MockTransport(handler),
+        credential_policy=_PathCredentialPolicy(),
+        log=lambda _: None,
+    ).download(
+        _request(tmp_path, url="https://user:password@example.test/public"),
+        _settings(),
+    )
+
+    assert isinstance(result, TransportSuccess)
+    assert observed == ["Basic dXNlcjpwYXNzd29yZA==", "Bearer route-a"]
+
+
+class _FailingCredentialPolicy:
+    def authorization_for(self, url: httpx.URL) -> bytes | None:
+        if url.path.startswith("/private/"):
+            raise DownloaderCredentialError("Downloader credential is unavailable")
+        return None
+
+
+def test_httpx_reports_initial_credential_failure_before_network(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    downloader = HttpxDownloader(
+        transport=httpx.MockTransport(handler),
+        credential_policy=_FailingCredentialPolicy(),
+        log=lambda _: None,
+    )
+
+    with pytest.raises(DownloaderCredentialError) as caught:
+        downloader.download(
+            _request(tmp_path, url="https://example.test/private/file"),
+            _settings(),
+        )
+
+    assert calls == 0
+    assert caught.value.network_attempted is False
+
+
+def test_httpx_retains_network_attempt_when_redirect_enters_failing_route(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(302, headers={"Location": "/private/file"})
+
+    downloader = HttpxDownloader(
+        transport=httpx.MockTransport(handler),
+        credential_policy=_FailingCredentialPolicy(),
+        log=lambda _: None,
+    )
+
+    with pytest.raises(DownloaderCredentialError) as caught:
+        downloader.download(
+            _request(tmp_path, url="https://example.test/public"),
+            _settings(),
+        )
+
+    assert calls == 1
+    assert caught.value.network_attempted is True
 
 
 def test_httpx_preserves_terminal_status_after_redirect(tmp_path: Path) -> None:

@@ -177,6 +177,16 @@ cdh host render \
 
 只有 HTTP 构建文件会投影到 `runtime/config.toml`。本地来源 locator 仅属于宿主机，不会成为 runtime import 指令；部署时替换仍由挂载的运行时配置独立负责。
 
+## 经过认证的 HTTPX 文件下载
+
+Downloader credential route 只授权 cdh 的 HTTPX 文件下载指令。`validate` 与 `render` 会检查 route 结构及 Secret reference，但不读取 Secret 值。构建中只要存在至少一个生效的 HTTPX 文件，`host build` 就会在启动 Buildx 前解析 effective downloader route 引用的完整 distinct Secret 集，并只将其授予文件下载指令。因此 redirect 可以选择另一条已声明 route，而 installer、Git、Hook 及其他构建指令都不会获得 downloader credential。
+
+Route pattern 与逻辑 Secret 名称属于普通构建 metadata。Secret source locator、解析后的 token 值、生成的 authorization header 及 token digest 不会持久化到 cdh 管理的 lock、BuildPlan、context metadata、manifest、镜像 metadata/history 或命令输出。构建 route 和 Secret definition 不会固化到运行时配置；部署时下载需要认证时，应独立声明 runtime route 和容器内可见的 Secret source。
+
+手动构建已渲染 context 会绕过宿主机 Secret session。请按渲染 Dockerfile 中显示的稳定 `cdh-downloader-credential-<name>` ID 提供每个必要的 file-backed mount。不要通过 build argument 传入 token，也不要把 token 放进 context。
+
+BuildKit Secret 内容通常不会使指令 cache 失效。因此 token 轮换仍可能复用已经完成的下载 layer，cache hit 也不能证明当前 credential 有效。构建必须重新执行认证请求时，请使用普通 BuildKit cache control；cdh 不会加入由 token 派生的 cachebuster。
+
 ## 从生效配置到上下文
 
 cdh 使用单向前进的规划流程：

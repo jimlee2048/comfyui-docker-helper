@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_secret_session import (
+    RuntimeDownloaderCredentialPolicy,
+)
 from comfyui_docker_helper.container.runtime_serve import RuntimeGenerationFactory
 
 
@@ -93,3 +97,90 @@ def test_generation_factory_rereads_inputs_and_creates_fresh_owners(
     assert second_diagnostics.err.count("Runtime hook warnings:") == 1
     assert "ignored 1 ordinary top-level runtime hook" in first_diagnostics.err
     assert "ignored 1 ordinary top-level runtime hook" in second_diagnostics.err
+
+
+def test_generation_factory_wires_one_fresh_credential_policy_per_generation(
+    tmp_path: Path,
+) -> None:
+    runtime = ContainerRuntime(
+        workspace=tmp_path / "workspace",
+        comfyui_path=tmp_path / "workspace" / "ComfyUI",
+        virtual_env=tmp_path / "venv",
+    )
+    runtime.comfyui_path.mkdir(parents=True)
+    config = tmp_path / "runtime.toml"
+    _write(
+        config,
+        """
+[cdh]
+default_downloader = "httpx"
+
+[[cdh.downloader.credentials]]
+match = "https://example.test/private/"
+type = "bearer"
+token = { secret = "runtime_read" }
+
+[secrets.runtime_read]
+env = "RUNTIME_TOKEN"
+
+[[files]]
+type = "http"
+url = "https://example.test/private/sync.bin"
+target_dir = "models"
+filename = "sync.bin"
+download_mode = "sync"
+
+[[files]]
+type = "http"
+url = "https://example.test/private/async.bin"
+target_dir = "models"
+filename = "async.bin"
+download_mode = "async"
+""",
+    )
+    sync_policies: list[RuntimeDownloaderCredentialPolicy] = []
+    async_policies: list[RuntimeDownloaderCredentialPolicy] = []
+
+    def downloader(_plan, **kwargs: object):
+        policy = kwargs["credential_policy"]
+        assert isinstance(policy, RuntimeDownloaderCredentialPolicy)
+        sync_policies.append(policy)
+        return ()
+
+    class AcceptedQueue:
+        pass
+
+    def async_starter(_plan, **kwargs: object):
+        policy = kwargs["credential_policy"]
+        handle_observer = kwargs["handle_observer"]
+        assert isinstance(policy, RuntimeDownloaderCredentialPolicy)
+        assert callable(handle_observer)
+        async_policies.append(policy)
+        handle = AcceptedQueue()
+        handle_observer(handle)
+        return handle
+
+    factory = RuntimeGenerationFactory(
+        runtime=runtime,
+        baked_config_path=config,
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+        environ={"RUNTIME_TOKEN": "runtime-test-token"},
+        runtime_downloader=downloader,
+        runtime_async_queue_starter=async_starter,
+        runtime_state_path=tmp_path / "state.json",
+    )
+
+    for generation in (factory.create_generation(), factory.create_generation()):
+        generation.downloads.activate()
+        generation.downloads.start_async(cancel_requested=lambda: False)
+
+    assert sync_policies[0] is async_policies[0]
+    assert sync_policies[1] is async_policies[1]
+    assert sync_policies[0] is not sync_policies[1]
+    assert sync_policies[0].session is not sync_policies[1].session
+    assert [
+        policy.authorization_for(httpx.URL("https://example.test/private/model.bin"))
+        for policy in sync_policies
+    ] == [b"Bearer runtime-test-token", b"Bearer runtime-test-token"]

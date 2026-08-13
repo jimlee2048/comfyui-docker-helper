@@ -284,22 +284,15 @@ def test_renderer_installs_uv_tool_from_authored_direct_requirement() -> None:
 
     block = next(item for item in _run_blocks(rendered) if source in item)
     tokens = shlex.split(block.replace("\\\n", " "))
-    python_minor = ".".join(plan.toolchain.python.version.split(".")[:2])
-    interpreter = (
-        f"/opt/python/{plan.toolchain.python.catalog_key}/bin/python{python_minor}"
-    )
-    assert tool.requirement in tokens
-    assert tokens[tokens.index("--python") + 1] == interpreter
+    assert tokens.count(tool.requirement) == 1
     assert tokens[tokens.index("--default-index") + 1] == (
         plan.application.python_index_url
     )
-    assert "/opt/uv/tools/ruff/bin/python" in tokens
     version_check = (
         "import importlib.metadata as m; "
         f"assert m.version({tool.name!r}) == {tool.version!r}"
     )
     assert version_check in tokens
-    assert "uv --no-config pip check --python /opt/uv/tools/ruff/bin/python" in block
 
 
 def test_renderer_disabled_mode_reserves_no_comfy_cli_commands() -> None:

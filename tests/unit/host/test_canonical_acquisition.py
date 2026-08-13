@@ -369,7 +369,7 @@ def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests()
         ("~=1.2", b"demo~=1.2\n"),
     ],
 )
-def test_direct_python_resolver_preserves_newly_admitted_requirement_text(
+def test_direct_python_resolver_preserves_name_based_requirement_text(
     selector: str,
     expected: bytes,
 ) -> None:

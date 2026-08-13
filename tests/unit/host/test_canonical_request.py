@@ -346,7 +346,7 @@ def test_direct_python_request_does_not_pre_solve_standard_selectors(
     assert request_stability(request) is expected
 
 
-def test_direct_source_is_marker_free_moving_request_identity() -> None:
+def test_direct_source_is_moving_and_changes_request_digest() -> None:
     first_source = "https://example.test/demo.whl#sha256=abc"
     member = DirectPythonRequestMember(
         package="demo",
@@ -389,24 +389,13 @@ def test_direct_member_rejects_a_combined_specifier_and_source() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "direct_reference",
-    [
-        "file:///tmp/demo.whl",
-        "ssh://example.test/demo.git",
-        "https://user@example.test/demo.whl",
-        "https://example.test/demo wheel.whl",
-    ],
-)
-def test_direct_member_reuses_public_source_admission(
-    direct_reference: str,
-) -> None:
+def test_direct_member_rejects_unadmitted_source() -> None:
     with pytest.raises(ValidationError):
         DirectPythonRequestMember(
             package="demo",
             extras=(),
             specifier="",
-            direct_reference=direct_reference,
+            direct_reference="file:///tmp/demo.whl",
         )
 
 

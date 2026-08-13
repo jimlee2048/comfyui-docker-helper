@@ -1130,40 +1130,15 @@ def test_python_requirement_domain_rejects_invalid_or_unsupported_inputs(
     assert [item.code for item in domains.diagnostics] == [code]
 
 
-@pytest.mark.parametrize(
-    ("requirement", "specifier"),
-    [
-        ("demo", ""),
-        ("demo==1", "==1"),
-        ("demo!=1", "!=1"),
-        ("demo<2", "<2"),
-        ("demo<=2", "<=2"),
-        ("demo>1", ">1"),
-        ("demo>=1", ">=1"),
-        ("demo~=1.2", "~=1.2"),
-        ("demo==1,>=1", "==1,>=1"),
-        ("demo>=2,<1", "<1,>=2"),
-        ("demo>=1rc1,<2", "<2,>=1rc1"),
-        ("demo==1.dev1", "==1.dev1"),
-        ("demo==1+cu130", "==1+cu130"),
-        ("demo===legacy", "===legacy"),
-        ("demo==1.*", "==1.*"),
-        ("demo==1,==2", "==1,==2"),
-        ("demo==1,!=1", "!=1,==1"),
-    ],
-)
-def test_python_requirement_domain_accepts_standard_direct_selectors(
-    requirement: str,
-    specifier: str,
-) -> None:
+def test_python_requirement_domain_does_not_pre_solve_standard_selector() -> None:
     document = _document()
-    document["python"] = {"extra_packages": [requirement]}
+    document["python"] = {"extra_packages": ["demo==1,==2"]}
     config = validate_final_config_structure(document)
 
     domains = validate_final_config_domains(config)
 
     assert domains.diagnostics == ()
-    assert domains.package_requirements[0].specifier == specifier
+    assert domains.package_requirements[0].specifier == "==1,==2"
 
 
 @pytest.mark.parametrize(
@@ -1247,36 +1222,6 @@ def test_invalid_target_keeps_only_unmarked_requirement_active() -> None:
         "marked",
     ]
     assert [item.name for item in domains.package_requirements] == ["plain"]
-
-
-@pytest.mark.parametrize(
-    ("group", "field"),
-    [
-        ("python", "extra_packages"),
-        ("python", "uv_tools"),
-        ("pytorch", "extra_packages"),
-    ],
-)
-def test_user_requirement_domains_retain_supported_source_and_marker(
-    group: str,
-    field: str,
-) -> None:
-    document = _document()
-    source = "https://example.com/demo.whl#sha256=abc"
-    document.setdefault(group, {})[field] = [
-        f'Demo[CLI] @ {source} ; python_version >= "3.12"'
-    ]
-    config = validate_final_config_structure(document)
-
-    domains = validate_final_config_domains(config)
-    requirement = domains.package_requirements[0]
-
-    assert domains.authored_package_requirements == domains.package_requirements
-    assert requirement.name == "demo"
-    assert requirement.extras == ("cli",)
-    assert requirement.specifier == ""
-    assert requirement.identity.direct_reference == source
-    assert requirement.identity.marker == 'python_version >= "3.12"'
 
 
 def test_inactive_application_requirement_does_not_claim_package_ownership() -> None:

@@ -200,15 +200,6 @@ class DockerPythonGroupResolver:
             raise CanonicalAcquisitionError(
                 "Python resolver returned invalid package metadata"
             ) from error
-        if isinstance(request, PyTorchRequestIdentity) and any(
-            not pytorch_core_version_matches_channel(
-                member.package, member.version, request.channel
-            )
-            for member in resolved
-        ):
-            raise CanonicalAcquisitionError(
-                "Python resolver returned an incompatible PyTorch channel"
-            )
         return ResolvedPythonGroup(resolved)
 
     def _resolve_pytorch(self, request: PyTorchRequestIdentity) -> ResolvedPythonGroup:

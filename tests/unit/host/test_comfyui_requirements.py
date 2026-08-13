@@ -39,25 +39,10 @@ numpy>=1.25
 """
     )
 
-    assert [item.model_dump(mode="json") for item in parsed.protected] == [
-        {
-            "package": "torch",
-            "extras": [],
-            "specifier": "",
-            "direct_reference": None,
-        },
-        {
-            "package": "torchaudio",
-            "extras": [],
-            "specifier": "",
-            "direct_reference": None,
-        },
-        {
-            "package": "torchvision",
-            "extras": ["image"],
-            "specifier": ">=0.27",
-            "direct_reference": None,
-        },
+    assert [item.resolver_requirement for item in parsed.protected] == [
+        "torch",
+        "torchaudio",
+        "torchvision[image]>=0.27",
     ]
     assert parsed.ordinary == ("numpy>=1.25",)
     assert parsed.digest.startswith("sha256:")
@@ -99,25 +84,10 @@ def test_merge_unions_extras_conjoins_selectors_and_treats_bare_as_neutral() -> 
         ),
     )
 
-    assert [item.model_dump(mode="json") for item in merged] == [
-        {
-            "package": "torch",
-            "extras": ["dynamo"],
-            "specifier": "==2.12.1",
-            "direct_reference": None,
-        },
-        {
-            "package": "torchaudio",
-            "extras": ["io"],
-            "specifier": "==2.11.0",
-            "direct_reference": None,
-        },
-        {
-            "package": "torchvision",
-            "extras": ["image"],
-            "specifier": "<0.28,>=0.27",
-            "direct_reference": None,
-        },
+    assert [item.resolver_requirement for item in merged] == [
+        "torch[dynamo]==2.12.1",
+        "torchaudio[io]==2.11.0",
+        "torchvision[image]<0.28,>=0.27",
     ]
 
 

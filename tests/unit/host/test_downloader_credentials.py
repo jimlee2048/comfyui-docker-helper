@@ -27,6 +27,24 @@ def test_authored_route_canonicalizes_origin_and_path_without_decoding() -> None
 
 
 @pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.test/private//",
+        "https://example.test/private///",
+    ],
+)
+def test_canonical_route_round_trips_trailing_empty_segments(value: str) -> None:
+    parsed = parse_downloader_credential_context(value)
+    reparsed = parse_downloader_credential_context(parsed.canonical_url)
+
+    assert reparsed == parsed
+    assert (
+        canonicalize_downloader_credential_context(parsed.canonical_url)
+        == parsed.canonical_url
+    )
+
+
+@pytest.mark.parametrize(
     ("value", "code"),
     [
         pytest.param("ftp://example.com/models", "invalid", id="scheme"),

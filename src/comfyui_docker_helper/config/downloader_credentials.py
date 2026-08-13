@@ -47,6 +47,8 @@ class DownloaderCredentialContext:
         host = f"[{self.host}]" if ":" in self.host else self.host
         port = "" if self.port == _DEFAULT_PORTS[self.scheme] else f":{self.port}"
         path = "/".join(self.path_segments)
+        if self.path_segments and self.path_segments[-1] == "":
+            path += "/"
         return f"{self.scheme}://{host}{port}/{path}"
 
 

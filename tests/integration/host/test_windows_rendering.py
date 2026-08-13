@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,7 +110,7 @@ def _write(output: Path, *, overwrite: bool) -> None:
 def _check(output: Path) -> None:
     render_service._check_context(
         output,
-        object(),
+        SimpleNamespace(files=SimpleNamespace(files=())),
         object(),
         object(),
         (),

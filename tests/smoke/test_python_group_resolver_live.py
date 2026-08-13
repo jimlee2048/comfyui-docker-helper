@@ -112,7 +112,7 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
 @pytest.mark.network
 @pytest.mark.docker
 @pytest.mark.smoke
-def test_exact_oci_uv_resolves_one_real_complete_group(
+def test_exact_oci_uv_resolves_explicit_prerelease_requirement(
     uv_descriptor_digest: str,
 ) -> None:
     request = DirectPythonRequestIdentity(
@@ -125,7 +125,7 @@ def test_exact_oci_uv_resolves_one_real_complete_group(
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
             DirectPythonRequestMember(
-                package="packaging", extras=[], specifier="==26.2"
+                package="django-tools", extras=[], specifier="==0.54.0rc1"
             )
         ],
     )
@@ -133,7 +133,7 @@ def test_exact_oci_uv_resolves_one_real_complete_group(
     resolved = DockerPythonGroupResolver().resolve(request)
 
     assert [(item.package, item.version) for item in resolved.members] == [
-        ("packaging", "26.2")
+        ("django-tools", "0.54.0rc1")
     ]
 
 

@@ -10,6 +10,7 @@ from comfyui_docker_helper.config.final_manifest import (
     ComfyUISourceEvidence,
     DigestEvidence,
     DisabledManagerEvidence,
+    DistributionVersionEvidence,
     EnabledManagerEvidence,
     FinalBuildProbeEvidence,
     FinalManifest,
@@ -21,6 +22,7 @@ from comfyui_docker_helper.config.final_manifest import (
     ProtectedRequirementEvidence,
     SetuptoolsEvidence,
     ToolchainEvidence,
+    ToolEnvironmentEvidence,
     VersionEvidence,
     final_build_check_ids,
 )
@@ -90,6 +92,19 @@ def manifest_for_plan(plan: BuildPlan) -> FinalManifest:
     )
     expected_uv = plan.toolchain.uv_image.resolved_version
     assert expected_uv is not None
+    uv_tools = tuple(
+        ToolEnvironmentEvidence(
+            name=tool.name,
+            environment=tool.environment,
+            direct=DistributionVersionEvidence(
+                intended=tool.version,
+                observed=tool.version,
+            ),
+            inventory=_inventory(((tool.name, tool.version),)),
+            dependency_check="passed",
+        )
+        for tool in plan.toolchain.tool_store.uv_tools
+    )
     return FinalManifest(
         schema_version=1,
         binding=manifest_binding(plan),
@@ -141,7 +156,7 @@ def manifest_for_plan(plan: BuildPlan) -> FinalManifest:
                 wheel_digest=cdh.wheel_digest,
             ),
             comfy_cli=comfy_cli,
-            uv_tools=(),
+            uv_tools=uv_tools,
         ),
         application=ApplicationEvidence(
             pip=VersionEvidence(
@@ -151,7 +166,7 @@ def manifest_for_plan(plan: BuildPlan) -> FinalManifest:
             direct_packages=tuple(
                 (
                     name,
-                    VersionEvidence(intended=version, observed=version),
+                    DistributionVersionEvidence(intended=version, observed=version),
                 )
                 for name, version in direct
             ),

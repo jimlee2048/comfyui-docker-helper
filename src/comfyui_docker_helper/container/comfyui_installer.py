@@ -361,7 +361,7 @@ def _verify_requirements(application: ApplicationPhase, path: Path):
     except ComfyUIRequirementsError as error:
         raise ComfyUIInstallError(str(error)) from error
     projection = tuple(
-        (item.package, tuple(item.extras), item.selector) for item in parsed.protected
+        (item.package, tuple(item.extras), item.specifier) for item in parsed.protected
     )
     expected_projection = tuple(
         (item.package, item.extras, item.selector) for item in expected.protected

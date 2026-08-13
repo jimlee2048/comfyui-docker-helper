@@ -112,7 +112,7 @@ def test_exact_v011_source_requirements_and_manager_ownership_are_live() -> None
 @pytest.mark.network
 @pytest.mark.docker
 @pytest.mark.smoke
-def test_exact_oci_uv_resolves_one_real_complete_group(
+def test_exact_oci_uv_resolves_explicit_prerelease_requirement(
     uv_descriptor_digest: str,
 ) -> None:
     request = DirectPythonRequestIdentity(
@@ -124,14 +124,86 @@ def test_exact_oci_uv_resolves_one_real_complete_group(
         index_url="https://pypi.org/simple",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="packaging", extras=[], selector="==26.2")
+            DirectPythonRequestMember(
+                package="django-tools", extras=[], specifier="==0.54.0rc1"
+            )
         ],
     )
 
     resolved = DockerPythonGroupResolver().resolve(request)
 
     assert [(item.package, item.version) for item in resolved.members] == [
+        ("django-tools", "0.54.0rc1")
+    ]
+
+
+@pytest.mark.network
+@pytest.mark.docker
+@pytest.mark.smoke
+def test_exact_oci_uv_resolves_named_https_direct_reference(
+    uv_descriptor_digest: str,
+) -> None:
+    source = (
+        "https://files.pythonhosted.org/packages/df/b2/"
+        "87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/"
+        "packaging-26.2-py3-none-any.whl"
+        "#sha256=5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e"
+    )
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version=DEFAULT_MANAGED_PYTHON_VERSION,
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=uv_descriptor_digest,
+        members=[
+            DirectPythonRequestMember(
+                package="packaging",
+                extras=[],
+                specifier="",
+                direct_reference=source,
+            )
+        ],
+    )
+    resolved = DockerPythonGroupResolver().resolve(request)
+
+    assert [(item.package, item.version) for item in resolved.members] == [
         ("packaging", "26.2")
+    ]
+
+
+@pytest.mark.network
+@pytest.mark.docker
+@pytest.mark.smoke
+def test_exact_oci_uv_resolves_public_git_https_direct_reference(
+    uv_descriptor_digest: str,
+) -> None:
+    source = (
+        "git+https://github.com/pypa/sampleproject.git"
+        "@621e4974ca25ce531773def586ba3ed8e736b3fc"
+    )
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version=DEFAULT_MANAGED_PYTHON_VERSION,
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=uv_descriptor_digest,
+        members=[
+            DirectPythonRequestMember(
+                package="sampleproject",
+                extras=[],
+                specifier="",
+                direct_reference=source,
+            )
+        ],
+    )
+    resolved = DockerPythonGroupResolver().resolve(request)
+
+    assert [(item.package, item.version) for item in resolved.members] == [
+        ("sampleproject", "4.0.0")
     ]
 
 
@@ -150,7 +222,7 @@ def test_exact_oci_uv_resolves_one_isolated_uv_tool(
         index_url="https://pypi.org/simple",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="ruff", extras=[], selector="==0.15.18")
+            DirectPythonRequestMember(package="ruff", extras=[], specifier="==0.15.18")
         ],
     )
 
@@ -219,9 +291,9 @@ def test_exact_oci_uv_resolves_cu130_pytorch_group_for_every_release_profile(
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
-            DirectPythonRequestMember(package="torchvision", extras=[], selector=""),
-            DirectPythonRequestMember(package="torchaudio", extras=[], selector=""),
+            DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
+            DirectPythonRequestMember(package="torchvision", extras=[], specifier=""),
+            DirectPythonRequestMember(package="torchaudio", extras=[], specifier=""),
         ],
     )
 
@@ -253,9 +325,9 @@ def test_pytorch_direct_extra_does_not_fall_back_to_python_index(
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=uv_descriptor_digest,
         members=[
-            DirectPythonRequestMember(package="torch", extras=[], selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=[], specifier="==2.12.1"),
             DirectPythonRequestMember(
-                package="pydantic-settings", extras=[], selector="==2.12.0"
+                package="pydantic-settings", extras=[], specifier="==2.12.0"
             ),
         ],
     )

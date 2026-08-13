@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import tomllib
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -121,6 +122,14 @@ class _UvExecutor:
     def execute(self, descriptor, operation):
         self.calls.append((descriptor, operation))
         return UvResolverResult(self.stdout, b"")
+
+
+def _pylock(*packages: tuple[str, str]) -> bytes:
+    rows = "".join(
+        f'[[packages]]\nname = "{name}"\nversion = "{version}"\n'
+        for name, version in packages
+    )
+    return rows.encode()
 
 
 class _FailingUvExecutor:
@@ -284,9 +293,9 @@ def test_pytorch_provider_returns_one_complete_atomic_group() -> None:
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=(), specifier="==2.12.1"),
             DirectPythonRequestMember(
-                package="torchvision", extras=("image",), selector="==0.27.1"
+                package="torchvision", extras=("image",), specifier="==0.27.1"
             ),
         ),
     )
@@ -307,7 +316,7 @@ def test_pytorch_provider_returns_one_complete_atomic_group() -> None:
 def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests() -> (
     None
 ):
-    ordinary_executor = _UvExecutor(b"packaging==26.2\n")
+    ordinary_executor = _UvExecutor(_pylock(("packaging", "26.2")))
     ordinary = DirectPythonRequestIdentity(
         type="python-group",
         environment="application",
@@ -318,7 +327,7 @@ def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests()
         resolver_descriptor_digest=DIGEST_A,
         members=(
             DirectPythonRequestMember(
-                package="packaging", extras=(), selector="==26.2"
+                package="packaging", extras=(), specifier="==26.2"
             ),
         ),
     )
@@ -331,7 +340,7 @@ def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests()
     assert ordinary_executor.calls[0][0].digest == DIGEST_A
     assert ordinary_executor.calls[0][1].index_url == "https://pypi.org/simple"
 
-    cli_executor = _UvExecutor(b"comfy-cli==1.8.0\n")
+    cli_executor = _UvExecutor(_pylock(("comfy-cli", "1.8.0")))
     cli = ComfyCliRequestIdentity(
         type="comfy-cli",
         package="comfy-cli",
@@ -360,11 +369,11 @@ def test_docker_python_group_resolver_compiles_ordinary_and_comfy_cli_requests()
         ("~=1.2", b"demo~=1.2\n"),
     ],
 )
-def test_direct_python_resolver_preserves_newly_admitted_requirement_text(
+def test_direct_python_resolver_preserves_name_based_requirement_text(
     selector: str,
     expected: bytes,
 ) -> None:
-    executor = _UvExecutor(b"demo==1.5.0\n")
+    executor = _UvExecutor(_pylock(("demo", "1.5.0")))
     request = DirectPythonRequestIdentity(
         type="python-group",
         environment="application",
@@ -377,7 +386,7 @@ def test_direct_python_resolver_preserves_newly_admitted_requirement_text(
             DirectPythonRequestMember(
                 package="demo",
                 extras=(),
-                selector=selector,
+                specifier=selector,
             ),
         ),
     )
@@ -388,6 +397,106 @@ def test_direct_python_resolver_preserves_newly_admitted_requirement_text(
         ("demo", "1.5.0")
     ]
     assert executor.calls[0][1].requirements == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://example.test/opaque-artifact.whl#sha256=abc",
+        "git+https://example.test/demo.git@main#subdirectory=package",
+    ],
+)
+def test_direct_python_resolver_renders_complete_direct_reference(
+    source: str,
+) -> None:
+    executor = _UvExecutor(
+        b"""
+[[packages]]
+name = "demo"
+version = "1.0rc1"
+source = { vcs = "unconsumed", precise = "unconsumed" }
+"""
+    )
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(
+                package="demo",
+                extras=("cli",),
+                specifier="",
+                direct_reference=source,
+            ),
+        ),
+    )
+
+    result = DockerPythonGroupResolver(executor).resolve(request)
+
+    assert result.members == (ResolvedPythonMember("demo", "1.0rc1"),)
+    assert executor.calls[0][1].requirements == f"demo[cli] @ {source}\n".encode()
+
+
+def test_generic_pylock_ignores_transitive_and_unconsumed_fields() -> None:
+    executor = _UvExecutor(
+        b"""
+[[packages]]
+name = "demo"
+version = "1.0+cu130"
+wheels = "unconsumed"
+source = { arbitrary = true }
+
+[[packages]]
+name = "transitive"
+unconsumed = true
+"""
+    )
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(DirectPythonRequestMember(package="demo", extras=(), specifier=""),),
+    )
+
+    result = DockerPythonGroupResolver(executor).resolve(request)
+
+    assert result.members == (ResolvedPythonMember("demo", "1.0+cu130"),)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"invalid = [",
+        _pylock(("transitive", "1.0")),
+        _pylock(("demo", "1.0"), ("Demo", "1.0")),
+        _pylock(("demo", "1.0RC1")),
+    ],
+)
+def test_generic_pylock_rejects_malformed_requested_results(output: bytes) -> None:
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(DirectPythonRequestMember(package="demo", extras=(), specifier=""),),
+    )
+
+    with pytest.raises(
+        CanonicalAcquisitionError,
+        match="Python resolver returned invalid package metadata",
+    ):
+        DockerPythonGroupResolver(_UvExecutor(output)).resolve(request)
 
 
 @pytest.mark.parametrize(
@@ -412,7 +521,7 @@ def test_direct_python_groups_preserve_controlled_executor_cleanup_identity(
         index_url="https://pypi.org/simple",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package=package, extras=(), selector=selector),
+            DirectPythonRequestMember(package=package, extras=(), specifier=selector),
         ),
     )
 
@@ -457,6 +566,11 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torch.whl" }]
 name = "torchvision"
 version = "0.27.1+cu130"
 wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
+
+[[packages]]
+name = "sageattention"
+version = "2.2.0+cu130"
+source = { url = "unconsumed" }
 """
     )
     request = PyTorchRequestIdentity(
@@ -471,9 +585,15 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=(), specifier="==2.12.1"),
             DirectPythonRequestMember(
-                package="torchvision", extras=(), selector="==0.27.1"
+                package="torchvision", extras=(), specifier="==0.27.1"
+            ),
+            DirectPythonRequestMember(
+                package="sageattention",
+                extras=(),
+                specifier="",
+                direct_reference="https://example.test/sageattention.whl",
             ),
         ),
     )
@@ -484,17 +604,64 @@ wheels = [{ url = "https://download.pytorch.org/whl/cu130/torchvision.whl" }]
         "Requires-Dist: setuptools<82\n"
     )
 
+    metadata_urls = []
+
+    def read_metadata(url: str) -> str:
+        metadata_urls.append(url)
+        return metadata
+
     resolved = DockerPythonGroupResolver(
-        executor, metadata_reader=lambda _url: metadata
+        executor, metadata_reader=read_metadata
     ).resolve(request)
 
-    assert [(item.package, item.version) for item in resolved.members] == [
-        ("torch", "2.12.1+cu130"),
-        ("torchvision", "0.27.1+cu130"),
-    ]
+    assert {item.package: item.version for item in resolved.members} == {
+        "sageattention": "2.2.0+cu130",
+        "torch": "2.12.1+cu130",
+        "torchvision": "0.27.1+cu130",
+    }
     assert resolved.setuptools_specifier == "<82"
     assert executor.calls[0][0].digest == DIGEST_A
-    assert b'name = "pytorch"' in executor.calls[0][1].pyproject
+    manifest = tomllib.loads(executor.calls[0][1].pyproject.decode())
+    assert (
+        "sageattention @ https://example.test/sageattention.whl"
+        in manifest["project"]["dependencies"]
+    )
+    assert "sageattention" not in manifest["tool"]["uv"]["sources"]
+    assert metadata_urls == [
+        "https://download.pytorch.org/whl/cu130/torch.whl.metadata"
+    ]
+
+
+def test_pytorch_pylock_rejects_non_table_consumed_wheel() -> None:
+    executor = _UvExecutor(
+        b"""
+[[packages]]
+name = "torch"
+version = "2.12.1+cu130"
+wheels = ["not-a-table"]
+"""
+    )
+    request = PyTorchRequestIdentity(
+        type="pytorch-group",
+        environment="application",
+        group="pytorch",
+        backend="cuda",
+        channel="cu130",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        python_index_url="https://pypi.org/simple",
+        pytorch_index_url="https://download.pytorch.org/whl/cu130",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(package="torch", extras=(), specifier="==2.12.1"),
+        ),
+    )
+
+    with pytest.raises(
+        CanonicalAcquisitionError,
+        match="resolver did not select one exact torch wheel",
+    ):
+        DockerPythonGroupResolver(executor).resolve(request)
 
 
 def test_pytorch_preserves_controlled_executor_cleanup_identity() -> None:
@@ -510,7 +677,7 @@ def test_pytorch_preserves_controlled_executor_cleanup_identity() -> None:
         pytorch_index_url="https://download.pytorch.org/whl/cu130",
         resolver_descriptor_digest=DIGEST_A,
         members=(
-            DirectPythonRequestMember(package="torch", extras=(), selector="==2.12.1"),
+            DirectPythonRequestMember(package="torch", extras=(), specifier="==2.12.1"),
         ),
     )
 
@@ -534,7 +701,7 @@ def test_controlled_cleanup_identity_reaches_final_reconciliation_diagnostic() -
         resolver_descriptor_digest=DIGEST_A,
         members=(
             DirectPythonRequestMember(
-                package="packaging", extras=(), selector="==26.2"
+                package="packaging", extras=(), specifier="==26.2"
             ),
         ),
     )

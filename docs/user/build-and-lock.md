@@ -213,6 +213,8 @@ Provider policy and filesystem/build side effects are separate. Choose among the
 
 No-write does not necessarily mean offline. Default, `--check`, and `--dry-run` may call providers and may require Docker when the current lock cannot supply a required image identity. A complete matching lock keeps those paths Docker-free. Only `--locked` forbids provider and Docker calls during reconciliation; Docker Buildx remains a separate requirement for `host build`.
 
+Every target-active named direct Python reference is treated as moving, even when its URL text contains a version, hash fragment, or VCS ref. Default reconciliation and `--check` may reuse an unchanged matching result, while `--locked` requires an existing matching result and does not contact the source during host-side reconciliation. `--upgrade-lock` resolves every moving direct reference again. None of these modes turns a URL or VCS ref into an artifact lock, and a subsequent Buildx build may still need to fetch and install each active direct source.
+
 Malformed or unsupported lock files fail closed with a diagnostic instructing you to remove and regenerate the lock.
 
 ## Rendered context
@@ -242,10 +244,16 @@ The image keeps application packages and user tools in separate ownership domain
 
 `comfy-cli` is an optional user tool and is not used to install ComfyUI, Manager, or Registry custom nodes during the image build.
 
-cdh-controlled ordinary Python resolution and installation use `[python].index_url`. Direct PyTorch packages and target-active protected requirements from the selected ComfyUI checkout form one exact group and use only the CUDA-derived PyTorch source. Their generic transitive dependencies use the ordinary Python source. A missing direct PyTorch member does not fall back to a same-named package on the ordinary source, and the selected exact group is protected from later cdh-controlled application mutations.
+cdh-controlled index resolution and generic transitive dependencies use `[python].index_url` unless the package belongs to the PyTorch group. In that group, protected requirements from the selected ComfyUI checkout and every index-backed member use only the CUDA-derived PyTorch index; a missing index-backed member does not fall back to a same-named package on the ordinary index. A non-protected, target-active configured `name @ URL` member instead keeps its authored direct source and receives no PyTorch-index route. The group is resolved and installed atomically, its exact resulting top-level versions are verified, and the protected foundation cannot be replaced by a direct reference.
+
+Each target-active direct requirement in `python.extra_packages` is preserved for application installation while `[python].index_url` remains available for index-backed and transitive dependencies. Each active `python.uv_tools` requirement is installed under its own `/opt/uv/tools/<name>` environment with the managed Python interpreter; a direct tool keeps its authored source while transitive dependencies retain the default Python index. Installation never adds a downloader, URL rewriting, or a second package path.
+
+cdh records and verifies the exact resolved top-level package version, but it does not lock the bytes or VCS commit behind a direct source. The image build installs the source that was configured and fails if the resulting package name or version does not match the resolved result.
+
+Package direct references are ordinary public configuration, not Secret locators. Active references become rendered build inputs and may be visible to the builder or build cache; configured direct uv-tool references may also appear in image history. URL userinfo is rejected, and cdh does not attach downloader/Git credential routes to package installation. Never put tokens or private credentials in these references.
 
 ## Final evidence and replay boundary
 
 After all image mutations succeed, cdh writes the strict final-state observation `/opt/cdh/build/manifest.json`. It binds the image-configuration, canonical lock, and BuildPlan digests and records intended and observed direct identities. The manifest is evidence, not another resolver, lock, replay input, support verdict, or general service-health check.
 
-cdh provides bounded verified replay of cdh-controlled direct inputs. This does not promise an offline or byte-identical build, a complete lock of transitive dependencies or every fetched artifact, authenticity for downloads without a user-supplied checksum, deterministic effects from trusted installers or hooks, or replay of deployment-time mutations.
+cdh provides bounded verified replay of cdh-controlled direct inputs. For a target-active package direct reference, the replay identity is the authored request plus the exact installed top-level distribution version, not the fetched artifact: unchanged content at a URL is not proved, and a moving VCS ref is not pinned to an observed commit. `--locked` avoids source contact only during host-side reconciliation; a subsequent Buildx build may still need to fetch and install that active authored source. This does not promise an offline or byte-identical build, a complete lock of transitive dependencies or every fetched artifact, authenticity for package or file downloads without a user-supplied hash/checksum, deterministic effects from trusted installers or hooks, or replay of deployment-time mutations.

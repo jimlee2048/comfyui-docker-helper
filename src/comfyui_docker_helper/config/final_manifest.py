@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from comfyui_docker_helper.config.build_plan import ManifestBinding
 from comfyui_docker_helper.config.canonical_lock import (
+    validate_exact_distribution_version,
     validate_exact_stable_distribution_version,
     validate_exact_stable_version,
     validate_git_commit,
@@ -70,6 +71,24 @@ class VersionEvidence(_ManifestModel):
 
     @model_validator(mode="after")
     def _validate_equality(self) -> VersionEvidence:
+        if self.intended != self.observed:
+            raise ValueError("intended and observed versions must match")
+        return self
+
+
+class DistributionVersionEvidence(_ManifestModel):
+    """Exact equality evidence for one canonical PEP 440 distribution version."""
+
+    intended: str
+    observed: str
+
+    @field_validator("intended", "observed")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        return validate_exact_distribution_version(value)
+
+    @model_validator(mode="after")
+    def _validate_equality(self) -> DistributionVersionEvidence:
         if self.intended != self.observed:
             raise ValueError("intended and observed versions must match")
         return self
@@ -144,7 +163,7 @@ class PlatformEvidence(_ManifestModel):
 class ToolEnvironmentEvidence(_ManifestModel):
     name: str
     environment: str
-    direct: VersionEvidence
+    direct: DistributionVersionEvidence
     inventory: tuple[InventoryDistribution, ...]
     dependency_check: Literal["passed"]
 
@@ -169,6 +188,7 @@ class ToolEnvironmentEvidence(_ManifestModel):
 class CdhToolEnvironmentEvidence(ToolEnvironmentEvidence):
     name: Literal["comfyui-docker-helper"]
     environment: Literal["uv-tool:comfyui-docker-helper"]
+    direct: VersionEvidence
     wheel_digest: str
 
     @field_validator("wheel_digest")
@@ -180,6 +200,7 @@ class CdhToolEnvironmentEvidence(ToolEnvironmentEvidence):
 class ComfyCliEvidence(ToolEnvironmentEvidence):
     name: Literal["comfy-cli"]
     environment: Literal["uv-tool:comfy-cli"]
+    direct: VersionEvidence
     entrypoints: tuple[Literal["comfy", "comfy-cli", "comfycli"], ...]
 
     @field_validator("entrypoints")
@@ -340,7 +361,7 @@ def final_build_check_ids(
 
 class ApplicationEvidence(_ManifestModel):
     pip: VersionEvidence
-    direct_packages: tuple[tuple[str, VersionEvidence], ...]
+    direct_packages: tuple[tuple[str, DistributionVersionEvidence], ...]
     setuptools: SetuptoolsEvidence | None = None
     inventory: tuple[InventoryDistribution, ...]
     dependency_check: Literal["passed"]

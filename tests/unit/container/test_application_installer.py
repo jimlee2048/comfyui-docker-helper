@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,27 @@ def _write_phases(tmp_path: Path):
     plan = build_plan(final_config(), accepted_resolution())
     digest = build_plan_digest(plan)
     return plan, digest, plan.application, plan.toolchain
+
+
+def _application_with_pytorch_direct_source() -> tuple[ApplicationPhase, str]:
+    application = build_plan(final_config(), accepted_resolution()).application
+    source = "https://example.test/sageattention.whl#sha256=abc"
+    document = application.model_dump(mode="python")
+    packages = document["pytorch"]["packages"]
+    packages = (
+        *packages,
+        {
+            "name": "sageattention",
+            "extras": (),
+            "version": "2.2.0+cu130",
+            "direct_reference": source,
+            "environment": "application",
+        },
+    )
+    document["pytorch"]["packages"] = tuple(
+        sorted(packages, key=lambda item: (item["name"] != "torch", item["name"]))
+    )
+    return ApplicationPhase.model_validate(document), source
 
 
 # Application installation consumes one exact source-routed plan and emits exact
@@ -115,7 +137,11 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
     assert observed_manifest == [
         pytorch_resolution_manifest_bytes(
             requirements=tuple(package.requirement for package in group.packages),
-            direct_packages=tuple(package.name for package in group.packages),
+            pytorch_index_packages=tuple(
+                package.name
+                for package in group.packages
+                if package.direct_reference is None
+            ),
             python_version=group.python_version,
             python_index_url=group.python_index_url,
             pytorch_index_url=group.pytorch_index_url,
@@ -135,6 +161,89 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "check",
     )
     assert constraints.read_bytes() == managed_constraints_bytes(group)
+
+
+def test_inference_install_routes_only_index_backed_packages_to_pytorch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    application, source = _application_with_pytorch_direct_source()
+    group = application.pytorch
+    observed_manifest: list[bytes] = []
+
+    def record_call(argv, **_kwargs) -> None:
+        if "--requirements" in argv:
+            observed_manifest.append(Path(argv[-1]).read_bytes())
+
+    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
+    monkeypatch.setattr(application_installer, "run_argv", record_call)
+    monkeypatch.setattr(
+        application_installer,
+        "_application_inventory",
+        lambda *_args: tuple(
+            (package.name, package.version) for package in group.packages
+        ),
+    )
+    monkeypatch.setattr(
+        application_installer,
+        "_verify_setuptools_compatibility",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        application_installer,
+        "_write_constraints",
+        lambda *_args, **_kwargs: None,
+    )
+
+    install_inference_group(
+        application,
+        plan.toolchain,
+        runtime=ContainerRuntime(virtual_env=Path("/opt/venv")),
+        constraints_path=tmp_path / "constraints.txt",
+    )
+
+    assert len(observed_manifest) == 1
+    manifest = tomllib.loads(observed_manifest[0].decode())
+    assert f"sageattention @ {source}" in manifest["project"]["dependencies"]
+    assert manifest["tool"]["uv"]["sources"] == {
+        "torch": {"index": "pytorch"},
+        "torchaudio": {"index": "pytorch"},
+        "torchvision": {"index": "pytorch"},
+    }
+
+
+def test_inference_direct_source_still_requires_locked_installed_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    application, _source = _application_with_pytorch_direct_source()
+    observed = tuple(
+        (
+            package.name,
+            "2.2.1+cu130" if package.name == "sageattention" else package.version,
+        )
+        for package in application.pytorch.packages
+    )
+    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
+    monkeypatch.setattr(
+        application_installer, "run_argv", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        application_installer,
+        "_application_inventory",
+        lambda *_args: observed,
+    )
+
+    with pytest.raises(
+        ApplicationInstallError,
+        match=r"inference package identity changed.*sageattention",
+    ):
+        install_inference_group(
+            application,
+            plan.toolchain,
+            runtime=ContainerRuntime(virtual_env=Path("/opt/venv")),
+            constraints_path=tmp_path / "constraints.txt",
+        )
 
 
 # Managed constraints preserve exact content and never replace foreign entries.
@@ -304,6 +413,36 @@ def test_python_extras_install_exact_results_from_python_source(
         "numpy==2.3.1",
     )
     assert "PIP_INDEX_URL" not in kwargs["env"]
+    assert kwargs["env"]["PIP_CONSTRAINT"] == str(tmp_path / "constraints.txt")
+    assert kwargs["env"]["UV_CONSTRAINT"] == str(tmp_path / "constraints.txt")
+
+
+def test_python_extras_install_authored_direct_requirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = build_plan(final_config(), accepted_resolution()).application
+    source = "git+https://example.test/numpy.git@main"
+    document = application.model_dump(mode="python")
+    document["python_extras"]["packages"][0]["direct_reference"] = source
+    application = ApplicationPhase.model_validate(document)
+    calls: list[tuple[tuple[str, ...], dict]] = []
+    monkeypatch.setattr(application_installer, "_BUILD_DIRECTORY", tmp_path)
+    monkeypatch.setattr(
+        application_installer,
+        "run_argv",
+        lambda argv, **kwargs: calls.append((tuple(map(str, argv)), kwargs)),
+    )
+
+    install_python_extras(
+        application,
+        ContainerRuntime(virtual_env=Path("/opt/venv")),
+        constraints_path=tmp_path / "constraints.txt",
+    )
+
+    argv, kwargs = calls[0]
+    assert argv[-2:] == ("--", f"numpy @ {source}")
+    assert argv[argv.index("--default-index") + 1] == "https://pypi.org/simple"
+    assert argv[argv.index("--constraint") + 1] == str(tmp_path / "constraints.txt")
     assert kwargs["env"]["PIP_CONSTRAINT"] == str(tmp_path / "constraints.txt")
     assert kwargs["env"]["UV_CONSTRAINT"] == str(tmp_path / "constraints.txt")
 

@@ -28,6 +28,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     ResolvedPythonPackage,
     UvImageLockEntry,
     UvToolLockEntry,
+    canonical_lock_from_entries,
 )
 from comfyui_docker_helper.config.canonical_request import DesiredResolution
 from comfyui_docker_helper.config.canonical_resolver import (
@@ -36,6 +37,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
     DeltaKind,
     LockPolicy,
     ReconcilePurpose,
+    entries_satisfy_request,
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
@@ -98,7 +100,7 @@ def _requests(*, application_extras: bool = False):
             resolver_descriptor_digest=DIGEST_A,
             members=(
                 DirectPythonRequestMember(
-                    package="torch", extras=(), selector="==2.12.1"
+                    package="torch", extras=(), specifier="==2.12.1"
                 ),
             ),
         ),
@@ -115,10 +117,10 @@ def _requests(*, application_extras: bool = False):
                 resolver_descriptor_digest=DIGEST_A,
                 members=(
                     DirectPythonRequestMember(
-                        package="numpy", extras=(), selector="<3,>=2"
+                        package="numpy", extras=(), specifier="<3,>=2"
                     ),
                     DirectPythonRequestMember(
-                        package="pillow", extras=(), selector="<12,>=11"
+                        package="pillow", extras=(), specifier="<12,>=11"
                     ),
                 ),
             )
@@ -321,6 +323,84 @@ def test_locked_matching_lock_has_zero_provider_calls_and_no_write() -> None:
     assert acquirer.calls == []
     assert accepted.write_intent is False
     assert accepted.local_reads == (("hooks", "build", "setup.sh"),)
+
+
+def test_locked_matching_direct_source_has_zero_provider_calls() -> None:
+    requests = list(_requests(application_extras=True))
+    index = next(
+        index
+        for index, request in enumerate(requests)
+        if isinstance(request, DirectPythonRequestIdentity)
+    )
+    current = requests[index]
+    assert isinstance(current, DirectPythonRequestIdentity)
+    requests[index] = current.model_copy(
+        update={
+            "members": (
+                DirectPythonRequestMember(
+                    package="numpy",
+                    extras=(),
+                    specifier="",
+                    direct_reference="https://example.test/numpy.whl",
+                ),
+                current.members[1],
+            )
+        }
+    )
+    desired = tuple(DesiredResolution(request) for request in requests)
+    direct_digest = desired[index].request_digest
+    existing = _initial_lock(application_extras=True)
+    entries = [
+        entry.model_copy(update={"request_digest": direct_digest})
+        if isinstance(entry, ApplicationExtrasLockEntry)
+        else entry
+        for entry in existing.entries
+    ]
+    acquirer = FakeAcquirer()
+
+    accepted = reconcile_canonical_lock(
+        desired,
+        existing=canonical_lock_from_entries(entries),
+        acquirer=acquirer,
+        policy=LockPolicy.LOCKED,
+    )
+
+    assert accepted.provider_calls == ()
+    assert acquirer.calls == []
+    assert accepted.write_intent is False
+
+
+@pytest.mark.parametrize("version", ["1.0rc1", "1.0.dev1", "1.0+cu130"])
+def test_user_selector_satisfaction_accepts_explicit_pep440_versions(
+    version: str,
+) -> None:
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST_A,
+        members=(
+            DirectPythonRequestMember(
+                package="demo",
+                extras=(),
+                specifier=f"=={version}",
+            ),
+        ),
+    )
+    desired = DesiredResolution(request)
+    entry = ApplicationExtrasLockEntry(
+        request_digest=desired.request_digest,
+        packages=(ResolvedPythonPackage(name="demo", extras=(), version=version),),
+    )
+
+    assert entries_satisfy_request(
+        request,
+        (entry,),
+        desired.request_digest,
+    )
 
 
 def test_locked_hook_drift_fails_without_external_provider_calls() -> None:

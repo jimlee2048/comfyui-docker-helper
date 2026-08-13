@@ -196,6 +196,9 @@ def test_requirements_compile_uses_one_exact_owned_container(
         "/tmp/requirements.in",
     )
     assert "--default-index" in resolve[0]
+    assert resolve[0][resolve[0].index("--format") + 1] == "pylock.toml"
+    # The bound uv version owns its compatible prerelease default.
+    assert "--prerelease" not in resolve[0]
     assert resolve[1]["workdir"] == "/tmp"
     assert resolve[1]["tty"] is False
     assert resolve[1]["interactive"] is False
@@ -423,6 +426,7 @@ def test_pytorch_operation_copies_project_and_requests_pylock(
         "/tmp/pyproject.toml",
     )
     assert resolver_argv[resolver_argv.index("--format") + 1] == "pylock.toml"
+    assert "--prerelease" not in resolver_argv
     assert resolver_argv[-2:] == ("--project", "/tmp")
 
 

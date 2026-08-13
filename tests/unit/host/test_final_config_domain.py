@@ -522,10 +522,9 @@ def test_uv_tools_are_active_strict_isolated_requirements() -> None:
         ["ruff", "Ruff==0.15.18"],
         ["comfyui-docker-helper==0.5.0"],
         ["Comfy_CLI>=1.7"],
-        ["demo @ https://example.com/demo.whl"],
     ],
 )
-def test_uv_tools_reject_duplicate_reserved_or_direct_sources(
+def test_uv_tools_reject_duplicate_or_reserved_owners(
     uv_tools: list[str],
 ) -> None:
     document = _document()
@@ -1017,7 +1016,7 @@ def test_registry_selector_ranges_reject_prerelease_operands() -> None:
     assert "custom_node.invalid_registry_version" in _codes(config)
 
 
-# Package ownership and requirement normalization prevent cross-source ambiguity.
+# Target marker projection precedes ownership and protected-source enforcement.
 def test_package_ownership_is_normalized_across_groups() -> None:
     document = _document()
     document["python"] = {"extra_packages": ["My_Package[cli]>=1,<2"]}
@@ -1070,6 +1069,31 @@ def test_python_extras_reject_reserved_application_package_owners(
     ]
 
 
+def test_pytorch_extras_reject_protected_direct_source() -> None:
+    document = _document()
+    document["pytorch"]["extra_packages"] = [
+        "torchvision @ https://example.test/torchvision.whl"
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = _diagnostics(config)
+
+    assert [(item.path, item.code) for item in diagnostics] == [
+        (
+            ("pytorch", "extra_packages", 0),
+            "pytorch.protected_requirement_conflict",
+        )
+    ]
+
+
+def test_pytorch_extras_accept_protected_index_requirement() -> None:
+    document = _document()
+    document["pytorch"]["extra_packages"] = ["torchvision>=0.27"]
+    config = validate_final_config_structure(document)
+
+    assert _diagnostics(config) == ()
+
+
 def test_package_ownership_is_scoped_to_isolated_environment() -> None:
     document = _document()
     document["python"] = {
@@ -1084,16 +1108,15 @@ def test_package_ownership_is_scoped_to_isolated_environment() -> None:
 @pytest.mark.parametrize(
     ("requirement", "code"),
     [
-        ("demo @ https://example.com/demo.whl", "python.direct_requirement_forbidden"),
-        ("demo>=1rc1,<2", "python.prerelease_selector_forbidden"),
-        ("demo==1,==2", "python.ambiguous_exact_requirement"),
-        ("demo==1,!=1", "python.ambiguous_exact_requirement"),
-        ("demo===1", "python.unsupported_requirement_selector"),
-        ("demo==1.*", "python.unsupported_requirement_selector"),
         (" demo==1", "python.invalid_requirement"),
+        ("demo @ file:///tmp/demo.whl", "python.unsupported_direct_reference"),
+        (
+            "demo @ https://user@example.com/demo.whl",
+            "python.unsupported_direct_reference",
+        ),
     ],
 )
-def test_python_requirement_domain_rejects_ambiguous_inputs(
+def test_python_requirement_domain_rejects_invalid_or_unsupported_inputs(
     requirement: str,
     code: str,
 ) -> None:
@@ -1101,50 +1124,130 @@ def test_python_requirement_domain_rejects_ambiguous_inputs(
     document["python"] = {"extra_packages": [requirement]}
     config = validate_final_config_structure(document)
 
-    assert code in _codes(config)
+    domains = validate_final_config_domains(config)
+
+    assert domains.package_requirements == ()
+    assert [item.code for item in domains.diagnostics] == [code]
 
 
-@pytest.mark.parametrize(
-    ("requirement", "specifier"),
-    [
-        ("demo", ""),
-        ("demo==1", "==1"),
-        ("demo!=1", "!=1"),
-        ("demo<2", "<2"),
-        ("demo<=2", "<=2"),
-        ("demo>1", ">1"),
-        ("demo>=1", ">=1"),
-        ("demo~=1.2", "~=1.2"),
-        ("demo==1,>=1", "==1,>=1"),
-        ("demo>=2,<1", "<1,>=2"),
-    ],
-)
-def test_python_requirement_domain_accepts_standard_direct_selectors(
-    requirement: str,
-    specifier: str,
-) -> None:
+def test_python_requirement_domain_does_not_pre_solve_standard_selector() -> None:
     document = _document()
-    document["python"] = {"extra_packages": [requirement]}
+    document["python"] = {"extra_packages": ["demo==1,==2"]}
     config = validate_final_config_structure(document)
 
     domains = validate_final_config_domains(config)
 
     assert domains.diagnostics == ()
-    assert domains.package_requirements[0].specifier == specifier
+    assert domains.package_requirements[0].specifier == "==1,==2"
 
 
-@pytest.mark.parametrize("group", ["python", "pytorch"])
-def test_direct_requirements_reject_environment_markers(group: str) -> None:
+@pytest.mark.parametrize(
+    ("group", "field", "marker", "active"),
+    [
+        ("python", "extra_packages", 'python_version == "3.13"', True),
+        ("python", "extra_packages", 'python_version < "3.13"', False),
+        ("python", "uv_tools", 'platform_system == "Linux"', True),
+        ("python", "uv_tools", 'platform_system == "Windows"', False),
+        ("pytorch", "extra_packages", 'platform_machine == "x86_64"', True),
+        ("pytorch", "extra_packages", 'platform_machine == "aarch64"', False),
+    ],
+)
+def test_requirement_fields_project_representative_target_markers(
+    group: str,
+    field: str,
+    marker: str,
+    active: bool,
+) -> None:
     document = _document()
-    document.setdefault(group, {})["extra_packages"] = [
-        'demo>=1,<2; python_version < "3.13"'
-    ]
+    document.setdefault(group, {})[field] = [f"demo; {marker}"]
     config = validate_final_config_structure(document)
 
     domains = validate_final_config_domains(config)
 
-    assert [item.code for item in domains.diagnostics] == [
-        "python.environment_marker_forbidden"
+    assert domains.diagnostics == ()
+    assert len(domains.authored_package_requirements) == 1
+    assert bool(domains.package_requirements) is active
+    if active:
+        assert domains.package_requirements == domains.authored_package_requirements
+
+
+def test_requirement_marker_uses_empty_unavailable_kernel_value() -> None:
+    document = _document()
+    document["python"] = {
+        "extra_packages": ['demo; platform_release == ""'],
+    }
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert domains.diagnostics == ()
+    assert domains.package_requirements == domains.authored_package_requirements
+
+
+def test_requirement_domain_rejects_undefined_containing_marker_context() -> None:
+    document = _document()
+    document["python"] = {
+        "uv_tools": ['demo; "gpu" in dependency_groups'],
+    }
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert [(item.path, item.code) for item in domains.diagnostics] == [
+        (("python", "uv_tools", 0), "python.unsupported_marker_context")
+    ]
+    assert (
+        str(domains.diagnostics[0].message)
+        == "marker requires an unsupported extra or dependency-group context"
+    )
+    assert len(domains.authored_package_requirements) == 1
+    assert domains.package_requirements == ()
+
+
+def test_invalid_target_keeps_only_unmarked_requirement_active() -> None:
+    document = _document()
+    document["python"] = {
+        "version": "latest",
+        "extra_packages": [
+            "plain",
+            'marked; python_version >= "3.12"',
+        ],
+    }
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert [item.name for item in domains.authored_package_requirements] == [
+        "plain",
+        "marked",
+    ]
+    assert [item.name for item in domains.package_requirements] == ["plain"]
+
+
+def test_inactive_application_requirement_does_not_claim_package_ownership() -> None:
+    document = _document()
+    document["python"] = {"extra_packages": ['demo<2; python_version < "3.13"']}
+    document["pytorch"]["extra_packages"] = ['Demo>=2; python_version >= "3.13"']
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert len(domains.authored_package_requirements) == 2
+    assert [item.path for item in domains.package_requirements] == [
+        ("pytorch", "extra_packages", 0)
+    ]
+    assert validate_final_config_semantics(config, domains) == ()
+
+
+def test_undefined_marker_comparison_is_a_domain_diagnostic() -> None:
+    document = _document()
+    document["python"] = {"extra_packages": ['demo; os_name ~= "posix"']}
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert [(item.path, item.code) for item in domains.diagnostics] == [
+        (("python", "extra_packages", 0), "python.invalid_environment_marker")
     ]
     assert domains.package_requirements == ()
 

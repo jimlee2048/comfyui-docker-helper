@@ -18,6 +18,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     compute_request_digest,
 )
 from comfyui_docker_helper.config.canonical_request import (
+    CanonicalRequestError,
     DesiredResolution,
     PlanningReleaseInputs,
     SelectorStability,
@@ -25,6 +26,7 @@ from comfyui_docker_helper.config.canonical_request import (
     request_stability,
     uv_provider_tag,
 )
+from tests.build_plan_support import accepted_resolution, final_config, request_graph
 
 DIGEST = f"sha256:{'a' * 64}"
 COMMIT = "1" * 40
@@ -61,10 +63,10 @@ def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
             resolver_descriptor_digest=DIGEST,
             members=(
                 DirectPythonRequestMember(
-                    package="torch", extras=(), selector="==2.12.1"
+                    package="torch", extras=(), specifier="==2.12.1"
                 ),
                 DirectPythonRequestMember(
-                    package="torchvision", extras=(), selector="==0.27.1"
+                    package="torchvision", extras=(), specifier="==0.27.1"
                 ),
             ),
         ),
@@ -78,10 +80,10 @@ def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
             resolver_descriptor_digest=DIGEST,
             members=(
                 DirectPythonRequestMember(
-                    package="numpy", extras=(), selector="<3,>=2"
+                    package="numpy", extras=(), specifier="<3,>=2"
                 ),
                 DirectPythonRequestMember(
-                    package="pillow", extras=(), selector="<12,>=11"
+                    package="pillow", extras=(), specifier="<12,>=11"
                 ),
             ),
         ),
@@ -95,7 +97,7 @@ def test_fixed_domains_define_one_atomic_key_per_resolution() -> None:
             resolver_descriptor_digest=DIGEST,
             members=(
                 DirectPythonRequestMember(
-                    package="ruff", extras=(), selector="<0.16,>=0.15"
+                    package="ruff", extras=(), specifier="<0.16,>=0.15"
                 ),
             ),
         ),
@@ -200,7 +202,7 @@ def test_uv_release_selector_maps_to_owned_provider_family(
 def test_uv_descriptor_digest_invalidates_every_uv_backed_request_domain() -> None:
     def requests(digest: str):
         direct_member = DirectPythonRequestMember(
-            package="packaging", extras=(), selector="==26.2"
+            package="packaging", extras=(), specifier="==26.2"
         )
         return (
             ManagedPythonRequestIdentity(
@@ -244,7 +246,7 @@ def test_uv_descriptor_digest_invalidates_every_uv_backed_request_domain() -> No
                 resolver_descriptor_digest=digest,
                 members=(
                     DirectPythonRequestMember(
-                        package="torch", extras=(), selector="==2.12.1"
+                        package="torch", extras=(), specifier="==2.12.1"
                     ),
                 ),
             ),
@@ -309,7 +311,7 @@ def test_direct_python_stability_uses_admitted_exact_selector_semantics(
             DirectPythonRequestMember(
                 package="demo",
                 extras=(),
-                selector=selector,
+                specifier=selector,
             ),
         ),
     )
@@ -317,9 +319,183 @@ def test_direct_python_stability_uses_admitted_exact_selector_semantics(
     assert request_stability(request) is expected
 
 
-@pytest.mark.parametrize("selector", ["==1,==2", "!=1,==1", "==1,<1"])
-def test_direct_python_request_rejects_conflicting_exact_selectors(
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    [
+        ("==1,==2", SelectorStability.MOVING),
+        ("!=1,==1", SelectorStability.EXACT),
+        ("<1,==1", SelectorStability.EXACT),
+    ],
+)
+def test_direct_python_request_does_not_pre_solve_standard_selectors(
     selector: str,
+    expected: SelectorStability,
 ) -> None:
+    member = DirectPythonRequestMember(package="demo", extras=(), specifier=selector)
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST,
+        members=(member,),
+    )
+
+    assert request_stability(request) is expected
+
+
+def test_direct_source_is_moving_and_changes_request_digest() -> None:
+    first_source = "https://example.test/demo.whl#sha256=abc"
+    member = DirectPythonRequestMember(
+        package="demo",
+        extras=("cli",),
+        specifier="",
+        direct_reference=first_source,
+    )
+    request = DirectPythonRequestIdentity(
+        type="python-group",
+        environment="application",
+        group="application-extra",
+        python_version="3.13.14",
+        platform="linux/amd64",
+        index_url="https://pypi.org/simple",
+        resolver_descriptor_digest=DIGEST,
+        members=(member,),
+    )
+    changed = request.model_copy(
+        update={
+            "members": (
+                member.model_copy(
+                    update={"direct_reference": "https://example.test/demo-v2.whl"}
+                ),
+            )
+        }
+    )
+
+    assert member.resolver_requirement == f"demo[cli] @ {first_source}"
+    assert request_stability(request) is SelectorStability.MOVING
+    assert compute_request_digest(request) != compute_request_digest(changed)
+
+
+def test_direct_member_rejects_a_combined_specifier_and_source() -> None:
     with pytest.raises(ValidationError):
-        DirectPythonRequestMember(package="demo", extras=(), selector=selector)
+        DirectPythonRequestMember(
+            package="demo",
+            extras=(),
+            specifier=">=1",
+            direct_reference="https://example.test/demo.whl",
+        )
+
+
+def test_direct_member_rejects_unadmitted_source() -> None:
+    with pytest.raises(ValidationError):
+        DirectPythonRequestMember(
+            package="demo",
+            extras=(),
+            specifier="",
+            direct_reference="file:///tmp/demo.whl",
+        )
+
+
+@pytest.mark.parametrize(
+    ("group", "field", "request_group"),
+    [
+        ("python", "extra_packages", "application-extra"),
+        ("python", "uv_tools", "uv-tool"),
+        ("pytorch", "extra_packages", "pytorch"),
+    ],
+)
+def test_active_direct_source_enters_each_user_request_field(
+    group: str,
+    field: str,
+    request_group: str,
+) -> None:
+    config = final_config().model_copy(deep=True)
+    source = "https://example.test/source-demo.whl#sha256=abc"
+    setattr(getattr(config, group), field, [f"SourceDemo[CLI] @ {source}"])
+
+    graph = request_graph(config, accepted_resolution())
+    request = next(
+        item.request
+        for item in graph.desired
+        if isinstance(
+            item.request, (DirectPythonRequestIdentity, PyTorchRequestIdentity)
+        )
+        and item.request.group == request_group
+    )
+    member = next(item for item in request.members if item.package == "sourcedemo")
+
+    assert member.specifier == ""
+    assert member.direct_reference == source
+    assert member.resolver_requirement == f"sourcedemo[cli] @ {source}"
+
+
+def test_protected_pytorch_direct_source_fails_before_resolution() -> None:
+    config = final_config().model_copy(deep=True)
+    config.pytorch.extra_packages = [
+        "torch @ https://example.test/torch.whl",
+    ]
+
+    with pytest.raises(CanonicalRequestError) as raised:
+        request_graph(config, accepted_resolution())
+
+    assert [item.code for item in raised.value.diagnostics] == [
+        "pytorch.protected_requirement_conflict"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("group", "field"),
+    [
+        ("python", "extra_packages"),
+        ("python", "uv_tools"),
+        ("pytorch", "extra_packages"),
+    ],
+)
+def test_inactive_requirement_changes_image_identity_without_entering_requests(
+    group: str,
+    field: str,
+) -> None:
+    baseline = final_config()
+    configured = baseline.model_copy(deep=True)
+    values = getattr(getattr(configured, group), field)
+    values.append('inactive-demo; python_version < "3.13"')
+    resolution = accepted_resolution()
+
+    baseline_graph = request_graph(baseline, resolution)
+    configured_graph = request_graph(configured, resolution)
+
+    assert baseline_graph.image_config_digest != configured_graph.image_config_digest
+    assert all(
+        not isinstance(item.request, DirectPythonRequestIdentity)
+        or all(member.package != "inactive-demo" for member in item.request.members)
+        for item in configured_graph.desired
+    )
+
+
+def test_distinct_true_markers_share_one_active_request_identity() -> None:
+    first = final_config().model_copy(deep=True)
+    second = final_config().model_copy(deep=True)
+    first.python.extra_packages = ['NumPy>=2,<3; python_version >= "3.12"']
+    second.python.extra_packages = ['NumPy>=2,<3; platform_system == "Linux"']
+    resolution = accepted_resolution()
+
+    first_graph = request_graph(first, resolution)
+    second_graph = request_graph(second, resolution)
+    first_request = next(
+        item.request
+        for item in first_graph.desired
+        if isinstance(item.request, DirectPythonRequestIdentity)
+        and item.request.group == "application-extra"
+    )
+    second_request = next(
+        item.request
+        for item in second_graph.desired
+        if isinstance(item.request, DirectPythonRequestIdentity)
+        and item.request.group == "application-extra"
+    )
+
+    assert first_request == second_request
+    assert first_graph.image_config_digest != second_graph.image_config_digest

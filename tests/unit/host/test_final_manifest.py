@@ -9,9 +9,12 @@ from pydantic import ValidationError
 
 from comfyui_docker_helper.config.build_plan import BuildPlan
 from comfyui_docker_helper.config.final_manifest import (
+    ComfyCliEvidence,
+    DistributionVersionEvidence,
     FinalManifest,
     InventoryDistribution,
     SetuptoolsEvidence,
+    ToolEnvironmentEvidence,
     VersionEvidence,
     dump_final_manifest,
     parse_final_manifest,
@@ -25,13 +28,19 @@ from tests.final_manifest_support import manifest_for_plan
 
 # Canonical bytes retain exact local versions without promoting observations.
 def test_manifest_round_trip_is_canonical_observational_and_strict() -> None:
-    plan = build_plan(final_config(), accepted_resolution())
+    plan = build_plan(
+        final_config(with_uv_tool=True), accepted_resolution(with_uv_tool=True)
+    )
     manifest = manifest_for_plan(plan)
 
     content = dump_final_manifest(manifest)
 
     assert content.endswith(b"\n") and content.count(b"\n") == 1
     assert parse_final_manifest(content) == manifest
+    assert [
+        (tool.name, tool.environment, tool.direct.intended)
+        for tool in manifest.toolchain.uv_tools
+    ] == [("ruff", "uv-tool:ruff", "0.15.18")]
     assert dump_final_manifest(parse_final_manifest(content)) == content
     assert b'"observed":"2.11.0+cu130"' in content
     assert b"timestamp" not in content
@@ -63,6 +72,60 @@ def test_manifest_rejects_intended_observed_identity_mismatch() -> None:
 
     with pytest.raises(ValidationError, match="does not satisfy compatibility"):
         SetuptoolsEvidence(compatibility="<82", observed="82.0.0")
+
+
+# User package evidence admits complete versions; managed tool evidence stays stable.
+@pytest.mark.parametrize("version", ["1.0rc1", "1.0.dev1", "1.0+cuda"])
+def test_user_distribution_evidence_accepts_canonical_complete_pep440(
+    version: str,
+) -> None:
+    direct = DistributionVersionEvidence(intended=version, observed=version)
+    tool = ToolEnvironmentEvidence(
+        name="configured-tool",
+        environment="uv-tool:configured-tool",
+        direct=direct,
+        inventory=(InventoryDistribution(name="configured-tool", version=version),),
+        dependency_check="passed",
+    )
+
+    assert tool.direct == direct
+
+
+def test_user_distribution_evidence_retains_exact_equality() -> None:
+    with pytest.raises(ValidationError, match="intended and observed versions"):
+        DistributionVersionEvidence(intended="1.0rc1", observed="1.0rc2")
+
+    with pytest.raises(
+        ValidationError, match="canonical exact stable distribution version"
+    ):
+        ComfyCliEvidence(
+            name="comfy-cli",
+            environment="uv-tool:comfy-cli",
+            direct={"intended": "1.8.0rc1", "observed": "1.8.0rc1"},
+            inventory=(InventoryDistribution(name="comfy-cli", version="1.8.0rc1"),),
+            dependency_check="passed",
+            entrypoints=("comfy", "comfy-cli", "comfycli"),
+        )
+
+
+def test_application_direct_evidence_accepts_locked_prerelease_result() -> None:
+    document = manifest_for_plan(
+        build_plan(final_config(), accepted_resolution())
+    ).model_dump(mode="python")
+    application = document["application"]
+    direct = next(
+        identity for name, identity in application["direct_packages"] if name == "numpy"
+    )
+    direct.update(intended="2.4.0rc1", observed="2.4.0rc1")
+    inventory = next(
+        item for item in application["inventory"] if item["name"] == "numpy"
+    )
+    inventory["version"] = "2.4.0rc1"
+
+    manifest = FinalManifest.model_validate(document)
+
+    numpy = dict(manifest.application.direct_packages)["numpy"]
+    assert numpy.intended == "2.4.0rc1"
 
 
 @pytest.mark.parametrize("version", ["1.0rc1", "1.0.dev1", "1.0+cuda"])

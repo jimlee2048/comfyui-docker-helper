@@ -432,7 +432,7 @@ def entries_satisfy_request(
             isinstance(entry, UvToolLockEntry)
             and entry.name == member.package
             and entry.extras == member.extras
-            and _direct_result_matches(member.selector, entry.version)
+            and _direct_result_matches(member.specifier, entry.version)
         )
     entry = entries[0]
     if isinstance(request, PyTorchRequestIdentity):
@@ -451,7 +451,7 @@ def entries_satisfy_request(
     for package in packages:
         member = members[package.name]
         if package.extras != member.extras or not _direct_result_matches(
-            member.selector, package.version
+            member.specifier, package.version
         ):
             return False
         if isinstance(request, PyTorchRequestIdentity) and not (
@@ -557,10 +557,7 @@ def _published_result_matches(selector: str, value: str) -> bool:
 
 
 def _direct_result_matches(selector: str, value: str) -> bool:
-    version = Version(value)
-    if version.is_prerelease or version.is_devrelease:
-        return False
-    return not selector or SpecifierSet(selector).contains(version, prereleases=False)
+    return not selector or SpecifierSet(selector).contains(value, prereleases=True)
 
 
 def _is_stable(version: Version) -> bool:

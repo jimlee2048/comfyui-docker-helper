@@ -16,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
-from packaging.utils import canonicalize_name
+from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.comfyui_requirements import target_marker_environment
@@ -51,6 +51,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     UvToolLockEntry,
     pytorch_core_version_matches_channel,
     uv_image_version_matches_tag,
+    validate_exact_distribution_version,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
@@ -165,7 +166,7 @@ class DockerPythonGroupResolver:
                     DirectPythonRequestMember(
                         package=request.package,
                         extras=[],
-                        selector=f">={request.minimum_version}",
+                        specifier=f">={request.minimum_version}",
                     )
                 ],
             )
@@ -173,8 +174,7 @@ class DockerPythonGroupResolver:
         if isinstance(request, PyTorchRequestIdentity):
             return self._resolve_pytorch(request)
         requirements = "\n".join(
-            _requirement_text(member.package, member.extras, member.selector)
-            for member in request.members
+            member.resolver_requirement for member in request.members
         )
         try:
             result = (self.executor or UvDockerExecutor()).execute(
@@ -187,32 +187,31 @@ class DockerPythonGroupResolver:
                     f"{requirements}\n".encode(),
                 ),
             )
-            output = result.stdout.decode("utf-8")
         except UvDockerExecutorError as error:
             raise CanonicalAcquisitionError(
                 f"Python group resolution failed: {error}"
             ) from error
-        except UnicodeDecodeError as error:
-            raise CanonicalAcquisitionError("Python group resolution failed") from error
-        resolved = _parse_direct_members(output, request)
-        if isinstance(request, PyTorchRequestIdentity) and any(
-            not pytorch_core_version_matches_channel(
-                member.package, member.version, request.channel
+        try:
+            resolved, _packages = _parse_pylock_members(
+                result.stdout,
+                tuple(member.package for member in request.members),
             )
-            for member in resolved
-        ):
+        except ValueError as error:
             raise CanonicalAcquisitionError(
-                "Python resolver returned an incompatible PyTorch channel"
-            )
+                "Python resolver returned invalid package metadata"
+            ) from error
         return ResolvedPythonGroup(resolved)
 
     def _resolve_pytorch(self, request: PyTorchRequestIdentity) -> ResolvedPythonGroup:
         manifest = pytorch_resolution_manifest_bytes(
             requirements=tuple(
-                _requirement_text(member.package, member.extras, member.selector)
-                for member in request.members
+                member.resolver_requirement for member in request.members
             ),
-            direct_packages=tuple(member.package for member in request.members),
+            pytorch_index_packages=tuple(
+                member.package
+                for member in request.members
+                if member.direct_reference is None
+            ),
             python_version=request.python_version,
             python_index_url=request.python_index_url,
             pytorch_index_url=request.pytorch_index_url,
@@ -224,49 +223,27 @@ class DockerPythonGroupResolver:
                 ),
                 PyTorchCompileOperation(request.python_version, manifest),
             )
-            document = tomllib.loads(result.stdout.decode("utf-8"))
-            packages = document["packages"]
         except UvDockerExecutorError as error:
             raise _pytorch_resolution_error(
                 request, f"resolution failed: {error}"
             ) from error
-        except (
-            KeyError,
-            TypeError,
-            UnicodeDecodeError,
-            tomllib.TOMLDecodeError,
-        ) as error:
+        try:
+            resolved, resolved_by_name = _parse_pylock_members(
+                result.stdout,
+                tuple(member.package for member in request.members),
+            )
+        except ValueError as error:
             raise _pytorch_resolution_error(
                 request, "resolver returned invalid PyTorch metadata"
             ) from error
-        direct = {member.package for member in request.members}
-        if not isinstance(packages, list) or any(
-            not isinstance(item, dict) for item in packages
-        ):
-            raise _pytorch_resolution_error(
-                request, "resolver returned invalid PyTorch metadata"
-            )
-        selected = [item for item in packages if item.get("name") in direct]
-        resolved_by_name = {item["name"]: item for item in selected}
-        if len(selected) != len(resolved_by_name) or set(resolved_by_name) != direct:
-            raise _pytorch_resolution_error(
-                request, "resolver returned an incompatible direct group"
-            )
-        if any(
-            not isinstance(item.get("version"), str)
-            for item in resolved_by_name.values()
-        ):
-            raise _pytorch_resolution_error(
-                request, "resolver returned invalid PyTorch metadata"
-            )
-        resolved = tuple(
-            ResolvedPythonMember(
-                member.package, resolved_by_name[member.package]["version"]
-            )
+        index_owned = {
+            member.package
             for member in request.members
-        )
+            if member.direct_reference is None
+        }
         if any(
-            not pytorch_core_version_matches_channel(
+            member.package in index_owned
+            and not pytorch_core_version_matches_channel(
                 member.package, member.version, request.channel
             )
             for member in resolved
@@ -276,7 +253,11 @@ class DockerPythonGroupResolver:
             )
         torch = resolved_by_name["torch"]
         wheels = torch.get("wheels")
-        if not isinstance(wheels, list) or len(wheels) != 1:
+        if (
+            not isinstance(wheels, list)
+            or len(wheels) != 1
+            or not isinstance(wheels[0], dict)
+        ):
             raise _pytorch_resolution_error(
                 request, "resolver did not select one exact torch wheel"
             )
@@ -641,36 +622,44 @@ def _select_registry_candidate(
     return max(compatible, key=lambda item: Version(item.version))
 
 
-def _parse_direct_members(
-    output: str, request: PythonGroupRequestIdentity
-) -> tuple[ResolvedPythonMember, ...]:
-    requested = {member.package for member in request.members}
-    matches: dict[str, str] = {}
-    for line in output.splitlines():
-        value = line.strip()
-        if not value or value.startswith(("#", "--")):
+def _parse_pylock_members(
+    output: bytes,
+    requested: tuple[str, ...],
+) -> tuple[tuple[ResolvedPythonMember, ...], dict[str, dict[str, object]]]:
+    """Consume only exact requested distribution versions from one uv pylock."""
+    try:
+        document = tomllib.loads(output.decode("utf-8"))
+        packages = document["packages"]
+    except (KeyError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ValueError("resolver output is not one pylock document") from error
+    if not isinstance(packages, list) or any(
+        not isinstance(item, dict) for item in packages
+    ):
+        raise ValueError("pylock packages must be one table array")
+    requested_names = set(requested)
+    matched: dict[str, dict[str, object]] = {}
+    versions: dict[str, str] = {}
+    for item in packages:
+        raw_name = item.get("name")
+        if not isinstance(raw_name, str):
             continue
         try:
-            requirement = Requirement(value)
-        except InvalidRequirement as error:
-            raise CanonicalAcquisitionError(
-                "Python resolver returned invalid data"
-            ) from error
-        package = canonicalize_name(requirement.name)
-        if package not in requested:
+            name = canonicalize_name(raw_name, validate=True)
+        except InvalidName:
             continue
-        exact = [item for item in requirement.specifier if item.operator == "=="]
-        if len(exact) != 1 or len(tuple(requirement.specifier)) != 1:
-            raise CanonicalAcquisitionError("Python resolver returned invalid data")
-        version = _stable_direct_version(exact[0].version)
-        if version is None or package in matches:
-            raise CanonicalAcquisitionError("Python resolver returned invalid data")
-        matches[package] = str(version)
-    if set(matches) != requested:
-        raise CanonicalAcquisitionError("Python resolver omitted a direct package")
-    return tuple(
-        ResolvedPythonMember(member.package, matches[member.package])
-        for member in request.members
+        if name not in requested_names:
+            continue
+        version = item.get("version")
+        if name in matched or not isinstance(version, str):
+            raise ValueError("requested package metadata is ambiguous")
+        validate_exact_distribution_version(version)
+        matched[name] = item
+        versions[name] = version
+    if set(matched) != requested_names:
+        raise ValueError("pylock omitted a requested package")
+    return (
+        tuple(ResolvedPythonMember(name, versions[name]) for name in requested),
+        matched,
     )
 
 
@@ -746,11 +735,6 @@ def _comfyui_requirements_url(
     )
 
 
-def _requirement_text(package: str, extras: list[str], selector: str) -> str:
-    rendered_extras = f"[{','.join(extras)}]" if extras else ""
-    return f"{package}{rendered_extras}{selector}"
-
-
 def _pytorch_resolution_error(
     request: PyTorchRequestIdentity, detail: str
 ) -> CanonicalAcquisitionError:
@@ -774,19 +758,6 @@ def _stable_version(value: str) -> Version | None:
     except InvalidVersion:
         return None
     if version.is_prerelease or version.is_devrelease or version.local is not None:
-        return None
-    return version
-
-
-def _stable_direct_version(value: str) -> Version | None:
-    """Return one complete canonical stable distribution version."""
-    try:
-        version = Version(value)
-    except InvalidVersion:
-        return None
-    if version.is_prerelease or version.is_devrelease:
-        return None
-    if str(version) != value:
         return None
     return version
 

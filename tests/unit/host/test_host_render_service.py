@@ -276,6 +276,7 @@ def test_active_uv_tool_flows_from_config_through_lock_plan_and_dockerfile(
             "extras": [],
             "name": "ruff",
             "version": "0.15.18",
+            "direct_reference": None,
         }
     ]
     assert plan["toolchain"]["tool_store"]["comfy_cli"] == {

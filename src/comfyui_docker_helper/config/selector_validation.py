@@ -4,7 +4,7 @@ import re
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.specifiers import InvalidSpecifier, Specifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 _SEMVER_PATTERN = re.compile(
@@ -33,6 +33,17 @@ _GIT_TARGET_DIR_PATTERN = re.compile(r"[A-Za-z0-9._-]+\Z")
 _FULL_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 _SUPPORTED_VERSION_CONSTRAINT_OPERATORS = ("==", "!=", "<=", ">=", "<", ">")
 _UNSUPPORTED_VERSION_CONSTRAINT_TOKENS = ("~=", "===", "^", "||")
+
+
+def is_stable_public_operand(specifier: Specifier) -> bool:
+    """Return whether a selector operand is one stable public version."""
+    try:
+        operand = Version(specifier.version)
+    except InvalidVersion:
+        return False
+    return not (
+        operand.is_prerelease or operand.is_devrelease or operand.local is not None
+    )
 
 
 def normalize_comfyui_version(version: str) -> str:

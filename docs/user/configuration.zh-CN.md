@@ -27,13 +27,13 @@ cdh host validate \
 重复使用 `-f/--file` 可按命令行中的顺序合并 TOML 文件。表会递归合并；靠后的标量或普通数组会替换靠前的值。以下组合型集合改为按各字段专属的标识合并：
 
 - `system.extra_packages` 使用允许的 Debian 包名；
-- `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras，以及 canonical selector 表示；
+- `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras、selector 或具名 direct reference，以及 marker；
 - `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID，或精确的直接 Git URL；
 - `files` 使用规范化后的 `target_dir` 加 `filename` 目标；
 - `cdh.downloader.credentials` 使用 `match` 表示的 canonical HTTP(S) origin 与路径；
 - `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
-对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras 或 selector 不同，会继续保留，让生效配置校验报告冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
+对于包集合，新标识会按首次出现顺序追加。在具有唯一键的不同层之间完全重复的 Debian 包只保留一次。如果生效的 `system.extra_packages` 条目已属于 cdh 默认 OS 包集合，cdh 会在其来源位置给出警告，并从生效安装请求中忽略这个冗余条目。在同一个用户编写的列表中声明的重复项仍是错误。Python requirement 只有在完整 canonical requirement 相等时才会跨层去重；cdh 不推断一般意义上的版本范围等价关系。同一规范化分发包如果 extras、selector、direct source 或 marker 不同，会保留到针对所选目标完成 marker 求值为止。之后，如果应用软件包或隔离工具中存在多条该分发包的生效声明，它们会冲突。同一层中编写的重复项也会保留给校验处理。靠后的空列表会重置对应集合。
 
 `system.ssh.pub_keys` 在 TOML 层之间仍采用普通的整列表替换：省略会继承，靠后的非空列表会替换，`[]` 会清空。选出最终生效列表后，cdh 会裁剪每行首尾空白、丢弃空值，并按声明的密钥类型加 base64 密钥 blob 进行稳定去重。它会保留第一条规范化后的完整行及其可选注释。之后每个非空重复项都会产生带来源的警告，且警告不会打印密钥内容。
 
@@ -78,7 +78,18 @@ Manager 和 comfy-cli 是分别独立控制的可选功能。省略其开关时�
 
 `python.uv_tools` 中的条目用于请求额外的隔离命令行工具。这些工具不会把软件包安装到 ComfyUI 应用环境中。有关软件包来源、解析和工具环境的行为，请参阅[构建与锁定指南](build-and-lock.zh-CN.md)。
 
-`python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 中的直接 requirement 可以只写分发包名，也可以使用 `==`、`!=`、`<`、`<=`、`>`、`>=` 和 `~=` selector，包括单边约束和 compatible-release 约束。直接 URL、VCS、本地或 editable requirement、环境 marker、通配符 selector、任意相等 `===`，以及 prerelease、development 或 local-version 操作数都会被拒绝。一个 requirement 最多只能包含一个精确 `==` selector，且该精确版本必须满足同一 requirement 中的所有其他 selector。cdh 会规范化受支持的语法，但不会求解或推断一般意义上的版本范围代数。
+`python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 接受由 `packaging.Requirement` 解析的标准具名 PEP 508 requirement：一种是带可选 extras、标准版本 specifier 和 marker 的分发包名；另一种是写成 `name[extras] @ URL` 并可带 marker 的具名 direct reference。例如 `numpy>=2,<3`、`ruff==0.16.0rc1`，以及以下具名 wheel：
+
+```toml
+[pytorch]
+extra_packages = ["sageattention @ https://github.com/jimlee2048/SageAttention/releases/download/v2.2.0/sageattention-2.2.0+cu130torch2.13-cp39-abi3-linux_x86_64.whl"]
+```
+
+cdh 接受使用 `https`、`http`、`git+https` 和 `git+http` 的具名 direct reference。URL 必须包含 host；如果编写了 port，它必须可解析；同时不得包含 username 或 password userinfo。完成这一结构检查后，direct reference 保持不透明；引用的 wheel、源码归档或 VCS 项目是否能为所选目标安装，由 uv 决定。
+
+Marker 只针对 cdh 的固定构建目标求值一次：配置指定的 CPython 版本，以及 Linux `amd64`/`x86_64`。它绝不会使用宿主机值；不可用的 kernel release/version 值固定为空字符串。Marker 对该目标不生效的声明不会被解析或安装。需要当前不可用的软件包 metadata 或 dependency-group context 的 marker 变量（`extra`、`extras` 和 `dependency_groups`）会产生拒绝诊断。
+
+不具名的裸 URL、本地路径和 `file:` URL、editable requirement、原始 pip/uv option、包括 `git+ssh` 在内的 SSH transport，以及包含任何 userinfo 的 URL 均不受支持。公共远程 source 必须使用 `name @ URL` 形式。cdh 不会通过自定义 selector 白名单缩窄 `packaging` 接受的标准 specifier；其中包括 compatible-release 与 exclusion clause、wildcard equality、任意相等 `===`，以及标准解析器接受的 prerelease、development 或 local-version 操作数。cdh 不会求解一般性的范围等价关系，也不会预先验证 selector 是否存在可满足的发布版本；resolver 仍必须产出 canonical PEP 440 分发包版本。在应用软件包或隔离工具中，同一规范化包的冲突生效声明会被拒绝。
 
 ## 选择自定义节点和构建 Hook
 

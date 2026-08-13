@@ -12,6 +12,9 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
+from comfyui_docker_helper.config.requirement_validation import (
+    target_marker_environment as _target_marker_environment,
+)
 from comfyui_docker_helper.exact_ledger import (
     CUDA_PROTECTED_REQUIREMENTS as CUDA_PROTECTED_REQUIREMENTS,
 )
@@ -203,6 +206,14 @@ def merge_pytorch_requirements(
     """Merge all direct PyTorch ownership into one deterministic request."""
     if mandatory_torch.package != "torch":
         raise ComfyUIRequirementsError("mandatory PyTorch member must be torch")
+    if any(
+        member.direct_reference is not None
+        and member.package in CUDA_PROTECTED_REQUIREMENTS
+        for member in (mandatory_torch, *upstream, *configured_extras)
+    ):
+        raise ComfyUIRequirementsError(
+            "protected PyTorch requirements must use the managed index source"
+        )
     return merge_requirement_members((mandatory_torch, *upstream, *configured_extras))
 
 
@@ -219,13 +230,22 @@ def merge_requirement_members(
     result: list[DirectPythonRequestMember] = []
     for package in sorted(grouped):
         values = grouped[package]
+        direct = tuple(item for item in values if item.direct_reference is not None)
+        if direct:
+            if len(values) != 1:
+                raise ComfyUIRequirementsError(
+                    f"requirement {package} cannot merge a direct source "
+                    "with another declaration"
+                )
+            result.append(direct[0])
+            continue
         extras = sorted({extra for item in values for extra in item.extras})
-        selector = _merge_selectors(package, tuple(item.selector for item in values))
+        specifier = _merge_selectors(package, tuple(item.specifier for item in values))
         result.append(
             DirectPythonRequestMember(
                 package=package,
                 extras=extras,
-                selector=selector,
+                specifier=specifier,
             )
         )
     return tuple(result)
@@ -239,7 +259,7 @@ def _member(requirement: Requirement) -> DirectPythonRequestMember:
     return DirectPythonRequestMember(
         package=canonicalize_name(requirement.name),
         extras=sorted(canonicalize_name(extra) for extra in requirement.extras),
-        selector=selector,
+        specifier=selector,
     )
 
 
@@ -314,22 +334,6 @@ def target_marker_environment(
 ) -> dict[str, str]:
     """Return the exact target environment used for PEP 508 marker evaluation."""
     try:
-        parsed = Version(python_version)
-    except InvalidVersion as error:
-        raise ComfyUIRequirementsError("target Python version is invalid") from error
-    if platform != "linux/amd64" or machine != "x86_64" or len(parsed.release) < 2:
-        raise ComfyUIRequirementsError("requirements target is unsupported")
-    return {
-        "implementation_name": "cpython",
-        "implementation_version": python_version,
-        "os_name": "posix",
-        "platform_machine": machine,
-        "platform_python_implementation": "CPython",
-        "platform_release": "",
-        "platform_system": "Linux",
-        "platform_version": "",
-        "python_full_version": python_version,
-        "python_version": ".".join(str(value) for value in parsed.release[:2]),
-        "sys_platform": "linux",
-        "extra": "",
-    }
+        return _target_marker_environment(python_version, platform, machine)
+    except ValueError as error:
+        raise ComfyUIRequirementsError(str(error)) from error

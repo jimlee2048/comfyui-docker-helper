@@ -33,6 +33,7 @@ from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
+    LocalFileEntryAcquirer,
     ProviderIdentityAcquirer,
     ResolvedPythonGroup,
     ResolvedPythonMember,
@@ -49,6 +50,7 @@ from comfyui_docker_helper.host.uv_docker_executor import (
 from comfyui_docker_helper.local_executable import (
     LocalExecutableIdentityRequest,
 )
+from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
@@ -571,3 +573,19 @@ def test_local_hook_acquisition_returns_typed_tree_row_without_prefix() -> None:
     assert isinstance(entry, BuildHookLockEntry)
     assert entry.relative_path == "common/setup.sh"
     assert entry.digest == DIGEST_A
+
+
+def test_local_file_acquisition_streams_current_content_into_target_key(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"model-content")
+    request = LocalFileIdentityRequest(
+        source,
+        PurePosixPath("models/model.bin"),
+    )
+
+    entry = LocalFileEntryAcquirer().acquire(request)
+
+    assert entry.relative_target == "models/model.bin"
+    assert entry.digest == (f"sha256:{hashlib.sha256(b'model-content').hexdigest()}")

@@ -8,7 +8,7 @@ from rich.text import Text
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config.build_plan import build_plan_digest
+from comfyui_docker_helper.config.build_plan import HttpFilePlan, build_plan_digest
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
@@ -172,12 +172,14 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
                         application=plan.application,
                         custom_nodes=plan.custom_nodes,
                         files=tuple(
-                            build_plan_input_module.FinalManifestFileInput(
+                            build_plan_input_module.FinalManifestHttpFileInput(
+                                type="http",
                                 url=item.url,
                                 target=item.target,
                                 checksum=item.checksum,
                             )
                             for item in plan.files.files
+                            if isinstance(item, HttpFilePlan)
                         ),
                         materialized_hooks=(),
                         final_probe=build_plan_input_module.FinalCoreProbeInput(

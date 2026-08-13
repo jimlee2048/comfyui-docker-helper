@@ -376,8 +376,9 @@ def _runtime_config(root: Path, *, include_file: bool = False) -> Path:
     files = (
         """
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models/checkpoints"
+target_dir = "models/checkpoints"
 filename = "model.bin"
 """
         if include_file
@@ -1258,8 +1259,9 @@ def test_file_infrastructure_failure_prevents_application_spawn(
 default_download_mode = "sync"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models/checkpoints"
+target_dir = "models/checkpoints"
 filename = "model.bin"
 """,
     )
@@ -1335,8 +1337,9 @@ password = "secret"
 default_download_mode = "async"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models/checkpoints"
+target_dir = "models/checkpoints"
 filename = "model.bin"
 """,
     )
@@ -1526,8 +1529,9 @@ password = "secret"
 default_download_mode = "async"
 
 [[files]]
+type = "http"
 url = "https://example.com/model.bin"
-dir = "models/checkpoints"
+target_dir = "models/checkpoints"
 filename = "model.bin"
 """,
     )

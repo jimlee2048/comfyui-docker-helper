@@ -63,7 +63,7 @@ Run these commands with the container's default user. A different UID, including
 
 ## Files, downloads, and persistent state
 
-Host `[[files]]` declarations become baked runtime defaults. On each container start or accepted restart, baked and mounted file lists merge by normalized `dir` plus `filename`. Redundant `/`, `.` segments, and a trailing `/` are canonicalized before identity comparison; `.` and `./` select the `COMFYUI_PATH` root itself. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. The effective item must contain a URL, and duplicate or invalid effective targets fail after merging. Every target is relative to `COMFYUI_PATH`, and absolute paths or any authored `..` segment remain invalid.
+Host HTTP `[[files]]` declarations become baked runtime defaults; host-local build files do not. Runtime accepts only `type = "http"` items and rejects a mounted local source instead of trying to interpret a host path inside the container. On each container start or accepted restart, baked and mounted file lists merge by normalized `target_dir` plus `filename`. Redundant `/`, `.` segments, and a trailing `/` are canonicalized before identity comparison; `.` and `./` select the `COMFYUI_PATH` root itself. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. The effective item must contain its HTTP type and URL, and duplicate or invalid effective targets fail after merging. Every target is relative to `COMFYUI_PATH`, and absolute paths or any authored `..` segment remain invalid.
 
 Synchronous downloads finish before pre-start hooks. Asynchronous downloads are accepted into one background queue before ComfyUI starts and may continue while it runs; they do not gate ComfyUI readiness.
 
@@ -73,7 +73,7 @@ Synchronous downloads finish before pre-start hooks. Asynchronous downloads are 
 - for asynchronous files, `fail` stops the remaining queue without stopping ComfyUI, while `continue` moves to later queued files; and
 - containment, unsafe target type, permission, identity, persistence, and durability failures always fail closed and are not converted into `continue`.
 
-Build-time files have a different contract: every declared build file is required. See the [build and lock guide](build-and-lock.md).
+Build-time files have a different contract: every declared build file is required and authoritatively replaces lower-image content. The `overwrite` setting below is runtime-only. See the [build and lock guide](build-and-lock.md#build-files-and-local-context-materialization).
 
 An optional `checksum = "sha256:<64 hexadecimal digits>"` declares trusted content identity. Obtain the digest from a source independent enough for your threat model; cdh does not fetch or infer it from the download origin.
 

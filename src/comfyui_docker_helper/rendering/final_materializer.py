@@ -14,6 +14,7 @@ from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     HookPlan,
     HttpFilePlan,
+    LocalFilePlan,
     build_plan_hook_identities,
     dump_build_plan_json,
 )
@@ -21,7 +22,12 @@ from comfyui_docker_helper.config.runtime_hooks import (
     BUILD_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )
-from comfyui_docker_helper.file_admission import read_regular_absolute_file
+from comfyui_docker_helper.file_admission import (
+    AdmittedRegularFileReader,
+    FileCloneUnavailableError,
+    operate_regular_absolute_file,
+    read_regular_absolute_file,
+)
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
@@ -48,6 +54,8 @@ def _materialize_private_stage(
     *,
     canonical_wheel: CanonicalWheel,
     local_sources: tuple[LocalMaterializationSource, ...] = (),
+    local_file_mode: str = "copy",
+    check_placeholders: bool = False,
 ) -> None:
     """Populate one existing real empty private stage owned by HostRenderService."""
     stage = Path(directory)
@@ -71,11 +79,17 @@ def _materialize_private_stage(
         raise FinalMaterializationError("materialization stage must be empty")
 
     build_hooks, runtime_hooks = _expected_hooks(plan)
-    expected = {**build_hooks, **runtime_hooks}
+    expected_hooks = {**build_hooks, **runtime_hooks}
+    local_files = {
+        item.context_path: item
+        for item in plan.files.files
+        if isinstance(item, LocalFilePlan)
+    }
+    expected_sources = {*expected_hooks, *local_files}
     sources = {item.relative_path.as_posix(): item for item in local_sources}
-    if len(sources) != len(local_sources) or set(sources) != set(expected):
+    if len(sources) != len(local_sources) or set(sources) != expected_sources:
         raise FinalMaterializationError(
-            "local materialization sources must exactly match locked inputs"
+            "local materialization sources must exactly match plan inputs"
         )
     _write(
         stage,
@@ -83,7 +97,7 @@ def _materialize_private_stage(
         b"/.cdh-rendered\n/config.lock.toml\n",
     )
     _write(stage, PurePosixPath("build-plan.json"), dump_build_plan_json(plan))
-    for relative_path, hook in expected.items():
+    for relative_path, hook in expected_hooks.items():
         source = sources[relative_path].source_path
         content = _verified_source(source, hook.digest)
         if relative_path in runtime_hooks:
@@ -97,6 +111,18 @@ def _materialize_private_stage(
             )
             output = PurePosixPath("build/hooks") / build_relative
         _write(stage, output, content, executable=True)
+    for relative_path, item in local_files.items():
+        output = PurePosixPath(relative_path)
+        if check_placeholders:
+            _write(stage, output, b"")
+            continue
+        _materialize_local_file(
+            stage,
+            output,
+            sources[relative_path].source_path,
+            item,
+            mode=local_file_mode,
+        )
     _write(
         stage,
         PurePosixPath("runtime/config.toml"),
@@ -216,6 +242,78 @@ def _verified_source(path: Path, expected_digest: str) -> bytes:
     if observed != expected_digest:
         raise FinalMaterializationError("local source digest does not match BuildPlan")
     return content
+
+
+def _materialize_local_file(
+    stage: Path,
+    relative_path: PurePosixPath,
+    source: Path,
+    plan: LocalFilePlan,
+    *,
+    mode: str,
+) -> None:
+    if mode not in {"auto", "clone", "copy"}:
+        raise FinalMaterializationError("local file materialization mode is invalid")
+    _write(stage, relative_path, b"")
+    target = stage.joinpath(*relative_path.parts)
+
+    def materialize(reader: AdmittedRegularFileReader) -> None:
+        digest = hashlib.sha256() if plan.digest is not None else None
+        try:
+            with target.open("r+b", buffering=0) as output:
+                cloned = False
+                if mode != "copy":
+                    try:
+                        reader.clone_to(output.fileno())
+                    except FileCloneUnavailableError:
+                        if mode == "clone":
+                            raise FinalMaterializationError(
+                                "copy-on-write clone is unavailable"
+                            ) from None
+                        os.ftruncate(output.fileno(), 0)
+                        os.lseek(output.fileno(), 0, os.SEEK_SET)
+                    else:
+                        cloned = True
+                if not cloned:
+                    while chunk := reader.read_chunk():
+                        if digest is not None:
+                            digest.update(chunk)
+                        _write_all(output.fileno(), chunk)
+                elif digest is not None:
+                    while chunk := reader.read_chunk():
+                        digest.update(chunk)
+                if os.fstat(output.fileno()).st_size != reader.size:
+                    raise FinalMaterializationError(
+                        "materialized local file size does not match its source"
+                    )
+        except FinalMaterializationError:
+            raise
+        except OSError as error:
+            raise FinalMaterializationError(
+                "local file could not be materialized"
+            ) from error
+        if digest is not None and f"sha256:{digest.hexdigest()}" != plan.digest:
+            raise FinalMaterializationError(
+                "local source digest does not match BuildPlan"
+            )
+
+    try:
+        operate_regular_absolute_file(source, materialize)
+    except FinalMaterializationError:
+        raise
+    except (OSError, ValueError) as error:
+        raise FinalMaterializationError(
+            "local source must be a readable regular file without symlinks"
+        ) from error
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    remaining = memoryview(content)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written < 1:
+            raise OSError("materialized target write made no progress")
+        remaining = remaining[written:]
 
 
 def _write(

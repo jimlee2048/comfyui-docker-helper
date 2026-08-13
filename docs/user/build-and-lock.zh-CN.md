@@ -12,7 +12,7 @@
 
 Windows 自动化验证覆盖原生 CLI、文件系统、Git、渲染、打包以及 Docker/Buildx 适配器行为，但不会运行真实的 Docker Desktop 构建，也不证明 Docker Desktop 的 SSH agent forwarding。因此，Docker Desktop、builder 或 agent 集成失败会保留其底层 Docker/BuildKit 诊断。
 
-读取本地 Secret 和 Hook 输入时，cdh 会验证当时观测到的文件类型和词法路径形状，并拒绝已观测到的符号链接、Windows junction 或其他 reparse point，以及特殊文件。Secret 文件还会执行 65,525 字节上限；Hook 文件会把身份规划时读取的字节绑定到 digest，并在 materialization 前复验该 digest。这并不隔离其他本地进程：不要允许不受信任的进程在 cdh 运行期间并发修改选中的输入文件或其目录。
+读取本地 Secret、Hook 和构建文件输入时，cdh 会验证当时观测到的文件类型和词法路径形状，并拒绝已观测到的符号链接、Windows junction 或其他 reparse point，以及特殊文件。Secret 文件还会执行 65,525 字节上限。Hook 文件和启用内容锁的本地构建文件会把流式读取的来源字节绑定到 digest，并在发布前复验该 digest；未启用内容锁的本地构建文件仍会完成准入和 materialization，但不会创建 cdh 内容 digest。这并不隔离其他本地进程：不要允许不受信任的进程在 cdh 运行期间并发修改选中的输入文件或其目录。
 
 ## 验证、渲染和构建
 
@@ -161,6 +161,22 @@ cdh host render \
 
 只有直接位于 `pre-start.d/`、`post-start.d/` 和 `stop.d/` 下的普通 `.sh` 和 `.py` 文件会被选择并固化。其他普通文件和目录会在不递归遍历的情况下被忽略并产生聚合警告；不安全的文件系统条目以及来源检查/读取失败仍是错误。省略该选项时不会烘焙运行时 Hook 目录树。挂载的运行时 Hook 是独立的部署时输入；参见[运行时指南](runtime.zh-CN.md)和[运行时 Hook 示例](../../examples/runtime-hooks/)。
 
+## 构建文件与本地上下文 materialization
+
+构建 `[[files]]` 声明是最终镜像内容的权威。HTTP 文件会下载到 staging，并在通过已配置的 checksum 后原子替换目标。本地文件会 materialize 到 Plan 拥有的 `build/files/` 上下文 slot，再通过 `COPY --link --chmod=0644` 放到精确目标。lower image 中已有的内容不会阻止这两种操作，因此构建文件没有 `overwrite` 设置。每个目标仍必须是 `COMFYUI_PATH` 的严格后代路径。
+
+通过 `[cdh].local_file_mode` 选择本地字节如何进入渲染上下文：
+
+- `auto` 是默认值。它会尝试 copy-on-write clone，只有在 clone capability 不可用或文件系统不支持该操作时才回退到流式 copy。
+- `clone` 要求支持 copy-on-write clone；不可用时会失败且不发布上下文。
+- `copy` 始终执行固定 buffer 的流式复制。
+
+任何 clone mode 都不会使用 hardlink 或 symlink：已发布的上下文文件不受后续来源变更影响。可用的本地文件系统上，clone 可以避免实际复制未变化的 extent，但完整文件仍属于上下文。BuildKit 必须读取它，远程 builder 也必须接收它，因此 `content_lock = false` 不会消除上下文存储、builder cache 或上传成本。
+
+使用 `content_lock = false` 时，普通规划不会对来源执行 hash。显式 `--check` 会先比较安全文件形状和 size，仅在 size 相同时才以流式方式逐字节比较。使用 `content_lock = true` 时，规划会流式计算 SHA-256 并写入 canonical lock 和 BuildPlan；materialization 会重新 hash 来源，而 `--check` 会以流式方式将上下文 slot 与该预期 digest 比较。这些操作均为有界内存，但当结果需要时必然读取完整文件。
+
+只有 HTTP 构建文件会投影到 `runtime/config.toml`。本地来源 locator 仅属于宿主机，不会成为 runtime import 指令；部署时替换仍由挂载的运行时配置独立负责。
+
 ## 从生效配置到上下文
 
 cdh 使用单向前进的规划流程：
@@ -169,7 +185,7 @@ cdh 使用单向前进的规划流程：
 effective configuration -> canonical lock -> BuildPlan -> rendered context
 ```
 
-生效配置描述意图。`config.lock.toml` 记录宿主机协调所使用并已接受的外部内容和本地内容的精确身份。随后，cdh 构造一个不可变的 BuildPlan，作为构建时执行权威。上下文渲染会将该计划连同其精确 wheel 和经过验证的 Hook 输入一起投影出来；构建时辅助程序不会重新读取宿主机配置或 lock 来作出新的规划决策。
+生效配置描述意图。`config.lock.toml` 记录宿主机协调所使用并已接受的精确外部 identity、Hook identity 和显式启用内容锁的本地文件 identity。随后，cdh 构造一个不可变的 BuildPlan，作为构建时执行权威。上下文渲染会将该计划连同其精确 wheel 和已准入的本地输入一起投影出来；构建时辅助程序不会重新读取宿主机配置或 lock 来作出新的规划决策。
 
 ## 协调模式
 
@@ -178,7 +194,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 | 模式 | 解析行为 | 上下文和构建行为 |
 | --- | --- | --- |
 | 默认 | 复用未变更的条目，解析缺失或已变更的输入，并移除已删除的身份。 | 写入已接受的 lock 和渲染上下文。 |
-| `--locked` | 要求现有 lock 与本地输入完全匹配；协调期间不调用解析提供方或 Docker。 | 比较现有上下文且不写入任何内容。检查通过后，`host build` 仍会调用 Buildx。 |
+| `--locked` | 要求现有 lock 与启用内容锁的本地输入完全匹配；协调期间不调用解析提供方或 Docker。 | 比较现有上下文且不写入任何内容。未启用内容锁的本地 source bytes 不会被比较；如需显式流式比较，请使用 `--check`。检查通过后，`host build` 仍会调用 Buildx。 |
 | `--upgrade-lock` | 刷新浮动选择器，同时保留未变更的精确选择。 | 写入更新后的 lock 和渲染上下文。 |
 | `--check` | 应用默认协调策略。 | 将完整的预期上下文与现有上下文进行比较；不写入任何内容，也不构建。 |
 | `--dry-run` | 使用默认策略；与 `--locked` 或 `--upgrade-lock` 组合使用时除外。 | 输出精确的 BuildPlan，并在独立的进程内 `Buildx output` 区段中显示适用时已展开的 mode 和 tag，否则显示 `None`；不写入任何内容，也不构建。 |
@@ -198,6 +214,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 - `build-plan.json`，规范的构建时执行计划，仅在每个所属构建指令运行期间以只读方式挂载；
 - `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`，安装到镜像中且经过精确验证的 cdh wheel；
 - `build/hooks/`，配置后仅包含被引用且经过验证的构建 Hook 字节；
+- `build/files/`，包含按 Plan 定址且独立复制或克隆的宿主机本地构建文件；
 - `runtime/config.toml`，派生自 BuildPlan；
 - `runtime/hooks/`，配置后包含经过验证且已烘焙的运行时 Hook 目录树；
 - `Dockerfile`，使用字面量且带 digest 的基础镜像引用渲染而成；以及

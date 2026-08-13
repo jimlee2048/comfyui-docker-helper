@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -9,10 +10,11 @@ import stat
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
+    LocalFilePlan,
     RuntimePlanningProvenance,
     construct_build_plan,
 )
@@ -24,6 +26,8 @@ from comfyui_docker_helper.config.canonical_lock import (
 )
 from comfyui_docker_helper.config.canonical_request import (
     CanonicalRequestError,
+    FileRequest,
+    LocalFileRequest,
     build_canonical_request_graph,
 )
 from comfyui_docker_helper.config.canonical_resolver import (
@@ -35,6 +39,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.final_models import FinalLocalFileConfig
 from comfyui_docker_helper.config.publication_tags import (
     PublicationTagError,
     resolve_publication_tags,
@@ -42,7 +47,16 @@ from comfyui_docker_helper.config.publication_tags import (
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
 )
+from comfyui_docker_helper.file_admission import (
+    AdmittedRegularFileReader,
+    consume_regular_absolute_file,
+    observe_regular_absolute_file,
+    operate_regular_absolute_file,
+)
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
+from comfyui_docker_helper.host.canonical_acquisition import (
+    LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
+)
 from comfyui_docker_helper.host.hook_paths import (
     lexical_hook_source_root,
     observed_path_is_real_directory,
@@ -61,6 +75,7 @@ from comfyui_docker_helper.host.runtime_hook_inputs import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
 )
+from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
@@ -180,10 +195,15 @@ def prepare_render_context(
             build_hooks_dir=build_hook_source_root,
             runtime_hook_requests=runtime_hooks.requests,
         )
+        local_file_sources, local_file_requests = _local_file_inputs(
+            result, graph.files, output
+        )
         accepted = reconcile_canonical_lock(
             graph.desired,
             local_requests=local_requests,
             local_acquirer=local_acquirer,
+            local_file_requests=local_file_requests,
+            local_file_acquirer=FilesystemLocalFileEntryAcquirer(),
             existing=existing,
             acquirer=acquirer,
             policy=selected.policy,
@@ -213,14 +233,25 @@ def prepare_render_context(
             )
         ) from error
 
-    sources = tuple(
-        LocalMaterializationSource(
-            request.canonical_path, request.root / request.relative_path
+    sources = (
+        tuple(
+            LocalMaterializationSource(
+                request.canonical_path, request.root / request.relative_path
+            )
+            for request in local_requests
         )
-        for request in local_requests
+        + local_file_sources
     )
     if selected.check or (selected.locked and not selected.dry_run):
-        _check_context(output, plan, accepted.lock, canonical_wheel, sources)
+        _check_context(
+            output,
+            plan,
+            accepted.lock,
+            canonical_wheel,
+            sources,
+            local_file_mode=result.config.cdh.local_file_mode,
+            check_unlocked_sources=selected.check,
+        )
     elif selected.writes:
         _write_context(
             output,
@@ -228,6 +259,7 @@ def prepare_render_context(
             accepted.lock,
             canonical_wheel,
             sources,
+            local_file_mode=result.config.cdh.local_file_mode,
             overwrite=overwrite,
         )
     return PreparedContext(
@@ -236,6 +268,48 @@ def prepare_render_context(
         output_plan=output_plan,
         warnings=runtime_hooks.warnings,
     )
+
+
+def _local_file_inputs(
+    result: ConfigurationResult,
+    graph_files: tuple[FileRequest, ...],
+    output: Path,
+) -> tuple[
+    tuple[LocalMaterializationSource, ...],
+    tuple[LocalFileIdentityRequest, ...],
+]:
+    sources: list[LocalMaterializationSource] = []
+    requests: list[LocalFileIdentityRequest] = []
+    for item, normalized, request in zip(
+        result.config.files, result.domains.files, graph_files, strict=True
+    ):
+        if not isinstance(item, FinalLocalFileConfig):
+            continue
+        if not isinstance(request, LocalFileRequest):
+            raise AssertionError("local file request projection is inconsistent")
+        locator = Path(item.path)
+        source = locator if locator.is_absolute() else result.secret_file_base / locator
+        source = Path(os.path.abspath(source))
+        _validate_input_output_separation(output, source, "local file")
+        if not item.content_lock:
+            try:
+                observe_regular_absolute_file(source)
+            except (OSError, ValueError) as error:
+                raise _render_error(
+                    "render.local_file_source_unavailable",
+                    "local file source must be a readable regular file without links",
+                ) from error
+        sources.append(
+            LocalMaterializationSource(PurePosixPath(request.context_path), source)
+        )
+        if item.content_lock:
+            requests.append(
+                LocalFileIdentityRequest(
+                    source_path=source,
+                    relative_target=PurePosixPath(normalized.relative_target),
+                )
+            )
+    return tuple(sources), tuple(requests)
 
 
 def _resolve_buildx_output_plan(
@@ -295,6 +369,7 @@ def _write_context(
     canonical_wheel: CanonicalWheel,
     sources: tuple[LocalMaterializationSource, ...],
     *,
+    local_file_mode: str,
     overwrite: bool,
 ) -> None:
     try:
@@ -321,6 +396,7 @@ def _write_context(
             stage,
             canonical_wheel=canonical_wheel,
             local_sources=sources,
+            local_file_mode=local_file_mode,
         )
         _write_private_stage_metadata(
             stage, _LOCK_FILE, dump_canonical_lock_toml(lock).encode("utf-8")
@@ -374,6 +450,9 @@ def _check_context(
     lock: CanonicalLock,
     canonical_wheel: CanonicalWheel,
     sources: tuple[LocalMaterializationSource, ...],
+    *,
+    local_file_mode: str,
+    check_unlocked_sources: bool,
 ) -> None:
     if not _is_real_directory(output) or not _valid_marker(output):
         raise _render_error(
@@ -387,6 +466,8 @@ def _check_context(
                 expected,
                 canonical_wheel=canonical_wheel,
                 local_sources=sources,
+                local_file_mode=local_file_mode,
+                check_placeholders=True,
             )
             _write_private_stage_metadata(
                 expected, _LOCK_FILE, dump_canonical_lock_toml(lock).encode("utf-8")
@@ -396,10 +477,23 @@ def _check_context(
                 _MARKER_FILE,
                 (json.dumps(_MARKER, sort_keys=True) + "\n").encode("utf-8"),
             )
-            if _tree(expected) != _tree(output):
+            local_paths = {
+                item.context_path
+                for item in plan.files.files
+                if isinstance(item, LocalFilePlan)
+            }
+            if _tree(expected, content_excluded=local_paths) != _tree(
+                output, content_excluded=local_paths
+            ):
                 raise _render_error(
                     "render.context_changed", "rendered context is out of date"
                 )
+            _check_local_context_files(
+                plan,
+                output,
+                sources,
+                check_unlocked_sources=check_unlocked_sources,
+            )
         finally:
             shutil.rmtree(expected)
     except HostRenderServiceError:
@@ -422,7 +516,62 @@ def _write_private_stage_metadata(stage: Path, name: str, content: bytes) -> Non
             os.fchmod(output.fileno(), 0o644)
 
 
-def _tree(root: Path) -> dict[str, tuple[str, int | None, bytes | None]]:
+def _check_local_context_files(
+    plan: BuildPlan,
+    output: Path,
+    sources: tuple[LocalMaterializationSource, ...],
+    *,
+    check_unlocked_sources: bool,
+) -> None:
+    by_identity = {item.relative_path.as_posix(): item for item in sources}
+    for item in plan.files.files:
+        if not isinstance(item, LocalFilePlan):
+            continue
+        source = by_identity[item.context_path].source_path
+        context_file = Path(os.path.abspath(output / item.context_path))
+        try:
+            if item.digest is not None:
+                digest = hashlib.sha256()
+                consume_regular_absolute_file(context_file, digest.update)
+                matches = f"sha256:{digest.hexdigest()}" == item.digest
+            elif check_unlocked_sources:
+                matches = _regular_files_equal(source, context_file)
+            else:
+                matches = True
+        except (OSError, ValueError) as error:
+            raise FinalMaterializationError(
+                "local context file could not be checked"
+            ) from error
+        if not matches:
+            raise _render_error(
+                "render.context_changed", "rendered context is out of date"
+            )
+
+
+def _regular_files_equal(source: Path, context_file: Path) -> bool:
+    def compare_source(source_reader: AdmittedRegularFileReader) -> bool:
+        def compare_context(context_reader: AdmittedRegularFileReader) -> bool:
+            if source_reader.size != context_reader.size:
+                return False
+            while True:
+                source_chunk = source_reader.read_chunk()
+                context_chunk = context_reader.read_chunk()
+                if source_chunk != context_chunk:
+                    return False
+                if not source_chunk:
+                    return True
+
+        return operate_regular_absolute_file(context_file, compare_context)
+
+    return operate_regular_absolute_file(source, compare_source)
+
+
+def _tree(
+    root: Path,
+    *,
+    content_excluded: set[str] | None = None,
+) -> dict[str, tuple[str, int | None, bytes | None]]:
+    excluded = set() if content_excluded is None else content_excluded
     entries: dict[str, tuple[str, int | None, bytes | None]] = {}
     pending = [root]
     while pending:
@@ -439,7 +588,8 @@ def _tree(root: Path) -> dict[str, tuple[str, int | None, bytes | None]]:
                 entries[relative] = ("directory", permissions, None)
                 pending.append(path)
             elif stat.S_ISREG(mode):
-                entries[relative] = ("file", permissions, path.read_bytes())
+                content = None if relative in excluded else path.read_bytes()
+                entries[relative] = ("file", permissions, content)
             else:
                 entries[relative] = ("special", permissions, None)
     return entries

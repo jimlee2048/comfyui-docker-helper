@@ -137,6 +137,7 @@ def test_file_download_plan_projects_checksum_and_attempt_budget() -> None:
     plan = file_download_plan(payload, "/workspace/ComfyUI")
 
     assert plan.items[0].checksum == checksum
+    assert plan.items[0].overwrite is True
     assert plan.download_max_attempts == 3
 
 

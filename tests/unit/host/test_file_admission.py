@@ -1,7 +1,9 @@
 """Secret-only bounded regular-file admission contracts."""
 
+import errno
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +35,91 @@ def test_bounded_admission_accepts_the_limit_and_rejects_the_next_byte(
                 source, max_bytes=_SECRET_LIMIT
             )
         assert str(raised.value) == "admitted input exceeds the maximum byte count"
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="exercises the POSIX descriptor admission backend"
+)
+def test_unbounded_consumer_streams_multiple_fixed_size_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "model.bin"
+    chunk_bytes = 3
+    payload = b"abcdefgh"
+    source.write_bytes(payload)
+    chunks: list[bytes] = []
+    monkeypatch.setattr(file_admission, "_READ_CHUNK_BYTES", chunk_bytes)
+
+    observed = file_admission.consume_regular_absolute_file(source, chunks.append)
+
+    assert observed.size == len(payload)
+    assert b"".join(chunks) == payload
+    assert len(chunks) == 3
+    assert max(map(len, chunks)) == chunk_bytes
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX FICLONE adapter")
+@pytest.mark.parametrize(
+    ("error_number", "classified"),
+    [
+        (errno.EINVAL, True),
+        (errno.ENOTTY, True),
+        (errno.EOPNOTSUPP, True),
+        (errno.EXDEV, True),
+        (errno.EIO, False),
+        (errno.EPERM, False),
+    ],
+)
+def test_posix_clone_classifies_only_unsupported_capability_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    classified: bool,
+) -> None:
+    import fcntl
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.write_bytes(b"source bytes")
+    target.write_bytes(b"")
+
+    def fail_ioctl(*_args: object) -> None:
+        raise OSError(error_number, "ioctl sentinel")
+
+    monkeypatch.setattr(fcntl, "ioctl", fail_ioctl)
+
+    def clone(reader: file_admission.AdmittedRegularFileReader) -> None:
+        with target.open("r+b", buffering=0) as output:
+            reader.clone_to(output.fileno())
+
+    expected = file_admission.FileCloneUnavailableError if classified else OSError
+    with pytest.raises(expected) as raised:
+        file_admission.operate_regular_absolute_file(source, clone)
+
+    if not classified:
+        assert raised.value.errno == error_number
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires native Linux reflink")
+def test_native_posix_clone_is_independent_when_supported(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.write_bytes(b"reflink source bytes")
+    target.write_bytes(b"")
+
+    def clone(reader: file_admission.AdmittedRegularFileReader) -> None:
+        with target.open("r+b", buffering=0) as output:
+            reader.clone_to(output.fileno())
+
+    try:
+        file_admission.operate_regular_absolute_file(source, clone)
+    except file_admission.FileCloneUnavailableError:
+        pytest.skip("test filesystem does not support FICLONE")
+
+    assert target.read_bytes() == b"reflink source bytes"
+    assert source.stat().st_ino != target.stat().st_ino
+    source.write_bytes(b"changed source bytes")
+    assert target.read_bytes() == b"reflink source bytes"
 
 
 # POSIX admission keeps static path checks and descriptor-bound observations distinct.
@@ -288,6 +375,68 @@ def test_windows_admission_statically_observes_components_and_reads_one_handle()
     leaf = api.read_handles[0]
     assert set(api.read_handles) == {leaf}
     assert api.information_handles.count(leaf) == 2
+    assert api.closed_paths == ["C:\\safe\\nested\\secret.txt"]
+
+
+def test_windows_scoped_metadata_rechecks_and_closes_without_reading() -> None:
+    api = _FakeWindowsApi(content=b"model bytes")
+
+    size = _windows_files._operate_regular_absolute_file(
+        "C:\\safe\\nested\\secret.txt",
+        operation=lambda observed_size, _read_chunk: observed_size,
+        api=api,
+    )
+
+    assert size == len(b"model bytes")
+    assert api.read_handles == []
+    assert len(api.information_handles) == 2
+    assert len(set(api.information_handles)) == 1
+    assert api.closed_paths == ["C:\\safe\\nested\\secret.txt"]
+
+
+def test_windows_consumer_streams_bounded_chunks_from_one_admitted_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeWindowsApi(content=b"0123456789")
+    chunks: list[bytes] = []
+    monkeypatch.setattr(_windows_files, "_READ_CHUNK_BYTES", 4)
+
+    size = _windows_files._consume_regular_absolute_file(
+        "C:\\safe\\nested\\secret.txt",
+        max_bytes=None,
+        consume=chunks.append,
+        api=api,
+    )
+
+    assert size == len(b"0123456789")
+    assert chunks == [b"0123", b"4567", b"89"]
+    assert len(set(api.read_handles)) == 1
+    assert api.closed_paths == ["C:\\safe\\nested\\secret.txt"]
+
+
+def test_windows_operation_error_remains_primary_when_close_fails() -> None:
+    api = _FakeWindowsApi()
+
+    def fail_operation(
+        _size: int,
+        _read_chunk: Callable[[int | None], bytes],
+    ) -> None:
+        raise RuntimeError("operation sentinel")
+
+    def close_with_error(handle: object) -> None:
+        assert isinstance(handle, _FakeWindowsHandle)
+        api.closed_paths.append(handle.path)
+        raise OSError("close sentinel")
+
+    api.close_handle = close_with_error  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="operation sentinel"):
+        _windows_files._operate_regular_absolute_file(
+            "C:\\safe\\nested\\secret.txt",
+            operation=fail_operation,
+            api=api,
+        )
+
     assert api.closed_paths == ["C:\\safe\\nested\\secret.txt"]
 
 

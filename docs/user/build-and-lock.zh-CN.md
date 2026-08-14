@@ -248,6 +248,8 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 `python.extra_packages` 中每个在目标环境生效的 direct requirement 都会保留至应用安装，同时 `[python].index_url` 仍用于 index-backed 和传递依赖。每个生效的 `python.uv_tools` requirement 都使用 managed Python interpreter 安装在独立的 `/opt/uv/tools/<name>` 环境中；direct tool 保留其编写的 source，传递依赖仍使用默认 Python index。安装过程不会增加 downloader、URL rewrite 或第二条软件包路径。
 
+安装自定义节点时，Registry Manager 和 Direct-Git 的 Python 子进程都会获得由 BuildPlan 定权的软件包源和 PyTorch 保护；具体的 index、运行时/隔离构建约束及 uv 选择行为由[开发者软件包源契约](../dev/contracts.md#python-and-pytorch-package-source-ownership)统一定义。受信任的 Manager 或 `install.py` 所选择的依赖不会成为 canonical lock 或 BuildPlan 身份，其中的 moving direct/VCS 效果仍不属于 cdh 验证的重放范围；参见[自定义节点身份与信任契约](../dev/contracts.md#custom-node-identity-order-and-trust)。
+
 cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁定 direct source 背后的字节或 VCS commit。镜像构建会安装配置中指定的 source；如果最终软件包名称或版本与解析结果不匹配，构建会失败。
 
 软件包 direct reference 是普通公共配置，而不是 Secret locator。生效的 reference 会成为渲染后的构建输入，并可能对 builder 或 build cache 可见；配置为 direct 的 uv-tool reference 还可能出现在 image history 中。URL userinfo 会被拒绝，cdh 也不会把 downloader/Git credential route 附加到软件包安装。切勿在这些 reference 中放入 token 或私有凭据。

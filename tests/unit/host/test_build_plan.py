@@ -11,6 +11,7 @@ import pytest
 import tomli_w
 from pydantic import ValidationError
 
+from comfyui_docker_helper.config import build_plan as build_plan_module
 from comfyui_docker_helper.config import canonical_request as canonical_request_module
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
@@ -69,6 +70,18 @@ _VALID_SSH_KEY = (
     "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
     "first@example"
 )
+
+
+def test_runtime_and_build_constraint_projections_have_distinct_compatibility() -> None:
+    group = build_plan(final_config(), accepted_resolution()).application.pytorch
+
+    assert build_plan_module.managed_runtime_constraints_bytes(group) == (
+        b"setuptools<82\ntorch==2.12.1+cu130\n"
+        b"torchaudio==2.11.0+cu130\ntorchvision==0.27.1+cu130\n"
+    )
+    assert build_plan_module.managed_build_constraints_bytes(group) == (
+        b"torch==2.12.1+cu130\ntorchaudio==2.11.0+cu130\ntorchvision==0.27.1+cu130\n"
+    )
 
 
 # BuildPlan projection binds every execution input to admitted immutable authorities.

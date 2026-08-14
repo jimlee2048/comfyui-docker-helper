@@ -527,11 +527,24 @@ class PyTorchGroupPlan(_PlanModel):
         return self
 
 
-def managed_constraints_bytes(group: PyTorchGroupPlan) -> bytes:
-    """Project exact protected packages plus wheel-derived compatibility."""
-    requirements = [f"{package.name}=={package.version}" for package in group.packages]
+def managed_runtime_constraints_bytes(group: PyTorchGroupPlan) -> bytes:
+    """Project exact application packages plus wheel-derived compatibility."""
+    requirements = _exact_pytorch_group_constraints(group)
     if group.setuptools_specifier is not None:
         requirements.append(f"setuptools{group.setuptools_specifier}")
+    return _constraints_bytes(requirements)
+
+
+def managed_build_constraints_bytes(group: PyTorchGroupPlan) -> bytes:
+    """Project exact PyTorch packages for isolated build dependencies."""
+    return _constraints_bytes(_exact_pytorch_group_constraints(group))
+
+
+def _exact_pytorch_group_constraints(group: PyTorchGroupPlan) -> list[str]:
+    return [f"{package.name}=={package.version}" for package in group.packages]
+
+
+def _constraints_bytes(requirements: list[str]) -> bytes:
     requirements.sort()
     return ("\n".join(requirements) + "\n").encode("utf-8")
 

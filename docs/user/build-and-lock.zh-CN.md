@@ -1,6 +1,6 @@
 # 构建和锁定镜像
 
-[English](build-and-lock.md) | 简体中文
+规范性来源：[English](build-and-lock.md) | 简体中文
 
 本指南介绍本地验证、canonical lock 协调、渲染构建上下文以及 Docker 镜像构建。请先阅读[配置指南](configuration.zh-CN.md)，以选择和分层配置文件。以下命令假定你的配置名为 `cdh.toml`，并从其所在目录运行。
 
@@ -243,6 +243,14 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 - 工具命令链接在 `/opt/uv/bin` 下；发生可执行命令所有权冲突时会失败，而不是替换现有命令。
 
 `comfy-cli` 是可选的用户工具，在镜像构建期间不会用于安装 ComfyUI、Manager 或 Registry 自定义节点。
+
+### 软件包构建环境
+
+当 cdh 安装应用依赖或自定义节点软件包时，会使用受控的子进程环境。该环境包含已有且受支持的 HTTP 代理设置，以及构建容器中已有的一小部分构建工具链变量，例如编译器、链接器和所选计算后端相关设置。工具链变量可能来自所选基础镜像，也可能来自生效的 `[system.env]`；不要重复声明基础镜像已经提供的值。只有在需要添加或覆盖持久镜像环境值时，才使用 `[system.env]`。
+
+通过 `[system.env]` 配置的值会渲染为 Docker `ENV`，并继续提供给用户之后从生成镜像启动的进程。这种持久性独立于受限的软件包构建子进程边界：环境中任意的 `PATH`、软件包来源设置，以及 pip、uv 或 Python 配置都不能取得 cdh 管理安装的控制权。适用的 index、constraint、解释器和命令路径仍由 cdh 管理。
+
+环境准入只会提供已有设置；它不会安装编译器、header、library 或其他开发文件。请选择包含待编译软件包所需开发输入的基础镜像。对于缺少这些输入的镜像 flavor，cdh 不承诺能够从源码编译。
 
 除属于 PyTorch 分组的软件包外，由 cdh 控制的 index 解析和普通传递依赖都使用 `[python].index_url`。在 PyTorch 分组中，来自所选 ComfyUI 检出版本的受保护 requirement 及每个 index-backed 成员只使用由 CUDA 派生的 PyTorch index；缺失的 index-backed 成员不会回退到普通 index 上的同名包。在目标环境生效、非受保护且由用户配置的 `name @ URL` 成员则保留其编写的 direct source，并且不会获得 PyTorch-index route。该分组会被原子地解析和安装，最终顶层版本会得到精确验证，受保护的基础包也不能被 direct reference 替换。
 

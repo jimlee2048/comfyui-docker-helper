@@ -24,7 +24,8 @@ from comfyui_docker_helper.container.application_installer import (
     _verify_application_pip_commands,
     _verify_ordinary_requirements,
     _write_constraints,
-    application_install_environment,
+    application_build_environment,
+    application_process_environment,
     install_inference_group,
     install_python_extras,
     verify_application_environment,
@@ -113,6 +114,9 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
             "UV_INDEX_URL": "https://poison.example",
             "PIP_CONSTRAINT": "/tmp/poison",
             "PYTHONPATH": "/tmp/poison",
+            "PATH": "/poison/bin",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
             "HTTPS_PROXY": "https://proxy.example",
         },
     )
@@ -152,7 +156,9 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "HTTPS_PROXY": "https://proxy.example",
         "HOME": "/root",
         "LANG": "C.UTF-8",
-        "PATH": "/usr/bin:/bin",
+        "PATH": "/usr/local/cuda/bin:/usr/bin:/bin",
+        "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+        "CUDA_HOME": "/usr/local/cuda",
     }
     assert calls[1][0][:4] == (
         "/usr/local/bin/uv",
@@ -160,6 +166,12 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "pip",
         "check",
     )
+    assert calls[1][1]["env"] == {
+        "HTTPS_PROXY": "https://proxy.example",
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+    }
     assert constraints.read_bytes() == managed_runtime_constraints_bytes(group)
 
 
@@ -392,7 +404,12 @@ def test_python_extras_install_exact_results_from_python_source(
         plan.application,
         ContainerRuntime(virtual_env=Path("/opt/venv")),
         constraints_path=tmp_path / "constraints.txt",
-        environ={"PIP_INDEX_URL": "https://poison.example/simple"},
+        environ={
+            "PIP_INDEX_URL": "https://poison.example/simple",
+            "PATH": "/poison/bin",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+        },
     )
 
     assert len(calls) == 1
@@ -415,6 +432,9 @@ def test_python_extras_install_exact_results_from_python_source(
     assert "PIP_INDEX_URL" not in kwargs["env"]
     assert kwargs["env"]["PIP_CONSTRAINT"] == str(tmp_path / "constraints.txt")
     assert kwargs["env"]["UV_CONSTRAINT"] == str(tmp_path / "constraints.txt")
+    assert kwargs["env"]["PATH"] == "/usr/local/cuda/bin:/usr/bin:/bin"
+    assert kwargs["env"]["LIBRARY_PATH"] == "/usr/local/cuda/lib64/stubs"
+    assert kwargs["env"]["CUDA_HOME"] == "/usr/local/cuda"
 
 
 def test_python_extras_install_authored_direct_requirement(
@@ -538,7 +558,7 @@ def test_final_application_verification_checks_direct_identities(
         ("torchaudio", "2.11.0+cu130"),
         ("torchvision", "0.27.1+cu130"),
     )
-    calls: list[tuple[str, ...]] = []
+    calls: list[tuple[tuple[str, ...], dict]] = []
     monkeypatch.setattr(application_installer, "_verify_constraints", lambda *_: None)
     monkeypatch.setattr(
         application_installer, "_application_inventory", lambda *_: inventory
@@ -551,15 +571,19 @@ def test_final_application_verification_checks_direct_identities(
     monkeypatch.setattr(
         application_installer,
         "run_argv",
-        lambda argv, **_kwargs: calls.append(tuple(map(str, argv))),
+        lambda argv, **kwargs: calls.append((tuple(map(str, argv)), kwargs)),
     )
     verify_application_environment(
         application,
         ContainerRuntime(virtual_env=Path("/opt/venv")),
         constraints_path=tmp_path / "constraints.txt",
+        environ={
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+        },
     )
 
-    assert calls == [
+    assert [call[0] for call in calls] == [
         (
             "/usr/local/bin/uv",
             "--no-config",
@@ -570,6 +594,11 @@ def test_final_application_verification_checks_direct_identities(
             "--no-python-downloads",
         )
     ]
+    assert calls[0][1]["env"] == {
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+    }
 
 
 def test_final_application_verification_reports_missing_setuptools(
@@ -687,7 +716,11 @@ def test_pip_verification_proves_command_ownership_and_routing(
     _verify_application_pip_commands(
         application,
         runtime,
-        {"HTTPS_PROXY": "https://proxy.example"},
+        {
+            "HTTPS_PROXY": "https://proxy.example",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+        },
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
     )
@@ -699,6 +732,10 @@ def test_pip_verification_proves_command_ownership_and_routing(
     ]
     assert all(
         call[1]["HTTPS_PROXY"] == "https://proxy.example" for call in command_calls
+    )
+    assert all(call[1]["PATH"] == "/usr/bin:/bin" for call in command_calls)
+    assert all(
+        {"LIBRARY_PATH", "CUDA_HOME"}.isdisjoint(call[1]) for call in command_calls
     )
 
 
@@ -722,14 +759,17 @@ def test_install_rejects_cross_channel_phase_before_running(
         )
 
 
-def test_install_environment_does_not_inherit_package_or_python_configuration() -> None:
-    assert application_install_environment(
+def test_process_environment_does_not_inherit_package_or_python_configuration() -> None:
+    assert application_process_environment(
         {
             "UV_INDEX": "poison",
             "PIP_INDEX_URL": "poison",
             "PIP_CONSTRAINT": "poison",
             "PYTHONPATH": "poison",
             "VIRTUAL_ENV": "poison",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+            "TORCH_CUDA_ARCH_LIST": "8.9",
             "HTTPS_PROXY": "https://proxy.example",
         },
         constraints_path=Path("/opt/cdh/build/constraints.txt"),
@@ -745,3 +785,83 @@ def test_install_environment_does_not_inherit_package_or_python_configuration() 
         "COMFYUI_PATH": "/workspace/ComfyUI",
         "VIRTUAL_ENV": "/opt/venv",
     }
+
+
+def test_build_environment_admits_the_reviewed_cuda_toolchain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = build_plan(final_config(), accepted_resolution()).application
+    admitted = {
+        "LIBRARY_PATH": "value-01",
+        "LD_LIBRARY_PATH": "value-02",
+        "CC": "value-03",
+        "CXX": "value-04",
+        "CPPFLAGS": "value-05",
+        "CFLAGS": "value-06",
+        "CXXFLAGS": "value-07",
+        "LDFLAGS": "value-08",
+        "CUDA_PATH": "value-09",
+        "CUDA_HOME": "value-10",
+        "CUDAToolkit_ROOT": "value-11",
+        "CUDA_VERSION": "value-12",
+        "NVCC": "value-13",
+        "CUDACXX": "value-14",
+        "CUDAHOSTCXX": "value-15",
+        "NVCC_CCBIN": "value-16",
+        "CUDAARCHS": "value-17",
+        "TORCH_CUDA_ARCH_LIST": "value-18",
+    }
+    monkeypatch.setattr(application_installer.os, "environ", admitted)
+
+    assert application_build_environment(application, None) == {
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/local/cuda/bin:/usr/bin:/bin",
+        **admitted,
+    }
+
+
+def test_build_environment_excludes_ambient_configuration_and_owns_overlays() -> None:
+    application = build_plan(final_config(), accepted_resolution()).application
+
+    assert application_build_environment(
+        application,
+        {
+            "PATH": "/poison/bin",
+            "UNRELATED": "poison",
+            "PYTHONPATH": "/poison/python",
+            "PIP_INDEX_URL": "https://poison.example/simple",
+            "PIP_CONSTRAINT": "/poison/constraints.txt",
+            "UV_INDEX": "https://poison.example/simple",
+            "UV_CONSTRAINT": "/poison/constraints.txt",
+            "ROCM_HOME": "/poison/rocm",
+            "COMFYUI_PATH": "/poison/ComfyUI",
+            "VIRTUAL_ENV": "/poison/venv",
+            "LIBRARY_PATH": "",
+            "HTTPS_PROXY": "https://proxy.example",
+        },
+        constraints_path=Path("/opt/cdh/build/constraints.txt"),
+        comfyui_path=Path("/workspace/ComfyUI"),
+        virtual_env=Path("/opt/venv"),
+    ) == {
+        "HTTPS_PROXY": "https://proxy.example",
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/local/cuda/bin:/usr/bin:/bin",
+        "PIP_CONSTRAINT": "/opt/cdh/build/constraints.txt",
+        "UV_CONSTRAINT": "/opt/cdh/build/constraints.txt",
+        "COMFYUI_PATH": "/workspace/ComfyUI",
+        "VIRTUAL_ENV": "/opt/venv",
+        "LIBRARY_PATH": "",
+    }
+
+
+@pytest.mark.parametrize("value", ["8.9;not-validated", ""])
+def test_build_environment_copies_torch_cuda_arch_list_opaquely(value: str) -> None:
+    application = build_plan(final_config(), accepted_resolution()).application
+
+    environment = application_build_environment(
+        application, {"TORCH_CUDA_ARCH_LIST": value}
+    )
+
+    assert environment["TORCH_CUDA_ARCH_LIST"] == value

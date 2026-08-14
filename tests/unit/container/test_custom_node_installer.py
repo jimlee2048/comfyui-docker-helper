@@ -717,6 +717,7 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
     monkeypatch.setattr(custom_node_installer, "run_argv", run)
     constraints = tmp_path / "constraints.txt"
     python_environment = {
+        "BUILD_ENV_SENTINEL": "kept",
         "PIP_CONSTRAINT": str(constraints),
         "UV_CONSTRAINT": str(constraints),
     }
@@ -753,7 +754,8 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
     install_argv, install_kwargs = commands[1]
     assert install_argv == ("/opt/venv/bin/python", str(target / "install.py"))
     assert install_kwargs["close_stdin"] is True
-    assert install_kwargs["env"] == python_environment
+    for command_kwargs in (requirements_kwargs, install_kwargs):
+        assert command_kwargs["env"] == python_environment
 
 
 def test_git_root_installer_rejects_symlinked_surface(tmp_path: Path) -> None:
@@ -927,6 +929,14 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     _patch_phases(monkeypatch, application, custom_nodes)
     events: list[object] = []
     observed_git_environment: dict[str, str] = {}
+    observed_python_environment: dict[str, str] = {}
+    source_environment = {
+        "GIT_SSH_COMMAND": "ssh -F /tmp/user-config",
+        "HOME": "/user/home",
+        "PATH": "/ambient/bin",
+        "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+        "CUDA_HOME": "/usr/local/cuda",
+    }
 
     def names(items: Sequence[CustomNodePlan]) -> tuple[str, ...]:
         return tuple(
@@ -947,15 +957,31 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         lambda node, *_args: events.append(("install", node.id)),
     )
 
-    def install_git(node, *args) -> None:
-        observed_git_environment.update(args[6])
+    def install_git(
+        node,
+        _custom_nodes_root,
+        _application,
+        _runtime,
+        _git_path,
+        _uv_path,
+        _constraints_path,
+        git_environment,
+        python_environment,
+    ) -> None:
+        observed_git_environment.update(git_environment)
+        observed_python_environment.update(python_environment)
         events.append(("install", Path(node.target).name))
 
     monkeypatch.setattr(custom_node_installer, "_install_git_node", install_git)
+
+    def run_hook(hook, **kwargs) -> None:
+        assert kwargs["env"] == source_environment
+        events.append(("hook", hook, kwargs["expected_digest"]))
+
     monkeypatch.setattr(
         custom_node_installer,
         "run_hook",
-        lambda hook, **kwargs: events.append(("hook", hook, kwargs["expected_digest"])),
+        run_hook,
     )
     monkeypatch.setattr(
         custom_node_installer,
@@ -967,11 +993,13 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         "observe_manager_capability",
         lambda *_args: events.append(("manager-check",)),
     )
+    constraints = tmp_path / "constraints.txt"
     custom_node_installer.install_custom_nodes(
         custom_nodes,
         application,
         runtime=runtime,
-        environ={"GIT_SSH_COMMAND": "ssh -F /tmp/user-config", "HOME": "/user/home"},
+        constraints_path=constraints,
+        environ=source_environment,
     )
 
     assert [event for event in events if event[0] == "install"] == [
@@ -1022,6 +1050,22 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     assert events.index(("application-check",)) < events.index(("install", "first"))
     assert observed_git_environment["GIT_SSH_COMMAND"] == ("ssh -F /tmp/user-config")
     assert observed_git_environment["HOME"] == "/user/home"
+    assert observed_git_environment["PATH"] == "/opt/venv/bin:/ambient/bin"
+    assert observed_git_environment["LIBRARY_PATH"] == ("/usr/local/cuda/lib64/stubs")
+    assert observed_git_environment["CUDA_HOME"] == "/usr/local/cuda"
+    assert observed_python_environment["PATH"] == (
+        "/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin"
+    )
+    assert observed_python_environment["LIBRARY_PATH"] == (
+        "/usr/local/cuda/lib64/stubs"
+    )
+    assert observed_python_environment["CUDA_HOME"] == "/usr/local/cuda"
+    assert observed_python_environment["PIP_CONSTRAINT"] == str(constraints)
+    assert observed_python_environment["UV_CONSTRAINT"] == str(constraints)
+    assert observed_python_environment["PIP_INDEX_URL"] == application.python_index_url
+    assert observed_python_environment["UV_DEFAULT_INDEX"] == (
+        application.python_index_url
+    )
 
 
 def test_registry_orchestration_uses_shared_managed_python_environment(
@@ -1095,6 +1139,9 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
             "UV_INDEX": "poison=https://poison-uv.example/simple",
             "UV_INDEX_STRATEGY": "first-index",
             "UV_NO_CONFIG": "0",
+            "PATH": "/poison/bin",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
             "USER_VALUE": "kept-for-hooks",
         },
     )
@@ -1153,6 +1200,14 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
     assert build_constraints_path != constraints_path
     assert first_kwargs["env"]["UV_INDEX_STRATEGY"] == "unsafe-best-match"
     assert first_kwargs["env"]["UV_NO_CONFIG"] == "1"
+    assert first_kwargs["env"]["PATH"] == (
+        "/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin"
+    )
+    assert first_kwargs["env"]["LIBRARY_PATH"] == ("/usr/local/cuda/lib64/stubs")
+    assert first_kwargs["env"]["CUDA_HOME"] == "/usr/local/cuda"
+    assert first_kwargs["env"]["COMFYUI_PATH"] == str(runtime.comfyui_path)
+    assert first_kwargs["env"]["VIRTUAL_ENV"] == str(runtime.virtual_env)
+    assert first_kwargs["env"]["WORKSPACE"] == str(runtime.workspace)
     assert first_kwargs["env"]["HTTPS_PROXY"] == "https://proxy.test"
     assert "UV_CONFIG_FILE" not in first_kwargs["env"]
     assert "UV_EXTRA_INDEX_URL" not in first_kwargs["env"]

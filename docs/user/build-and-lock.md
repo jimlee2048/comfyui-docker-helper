@@ -244,6 +244,14 @@ The image keeps application packages and user tools in separate ownership domain
 
 `comfy-cli` is an optional user tool and is not used to install ComfyUI, Manager, or Registry custom nodes during the image build.
 
+### Package-build environment
+
+When cdh installs application dependencies or custom-node packages, it uses a controlled subprocess environment. That environment includes existing supported HTTP proxy settings and a limited subset of build-toolchain values already present in the build container, such as compiler, linker, and selected compute-backend settings. Toolchain values may come from the selected base image or the effective `[system.env]`; do not repeat values that the base image already provides. Use `[system.env]` only when you need to add or override a persistent image value.
+
+Values configured through `[system.env]` are rendered as Docker `ENV` and remain available to processes that users later start from the resulting image. This persistence is separate from the narrow package-build subprocess boundary: an ambient `PATH`, package-source settings, and pip, uv, or Python configuration do not gain control of cdh-managed installation. cdh continues to own the applicable indexes, constraints, interpreter, and command paths.
+
+Environment admission only exposes existing settings; it does not install a compiler, headers, libraries, or other development files. Select a base image that contains the development inputs required by the packages you intend to compile. cdh does not promise source compilation from an image flavor that lacks them.
+
 cdh-controlled index resolution and generic transitive dependencies use `[python].index_url` unless the package belongs to the PyTorch group. In that group, protected requirements from the selected ComfyUI checkout and every index-backed member use only the CUDA-derived PyTorch index; a missing index-backed member does not fall back to a same-named package on the ordinary index. A non-protected, target-active configured `name @ URL` member instead keeps its authored direct source and receives no PyTorch-index route. The group is resolved and installed atomically, its exact resulting top-level versions are verified, and the protected foundation cannot be replaced by a direct reference.
 
 Each target-active direct requirement in `python.extra_packages` is preserved for application installation while `[python].index_url` remains available for index-backed and transitive dependencies. Each active `python.uv_tools` requirement is installed under its own `/opt/uv/tools/<name>` environment with the managed Python interpreter; a direct tool keeps its authored source while transitive dependencies retain the default Python index. Installation never adds a downloader, URL rewriting, or a second package path.

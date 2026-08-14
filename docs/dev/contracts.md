@@ -107,6 +107,12 @@ The exact direct results and any compatibility constraint derived from the selec
 
 Registry Manager and the Direct-Git Python processes for root requirements and `install.py` receive the BuildPlan-owned ordinary and CUDA-derived PyTorch indexes. Runtime and isolated-build constraint projections both retain the exact PyTorch-group results, while only the runtime projection adds the selected torch wheel's setuptools compatibility; installer-specific propagation of ordinary runtime constraints into build isolation remains installer-owned. uv considers compatible candidates across both indexes, matching pip's merged-candidate behavior, and ambient pip or uv configuration cannot replace these plan-owned inputs. This environment governs available sources and protected versions without widening the [custom-node identity and trust contract](#custom-node-identity-order-and-trust).
 
+### Package-build subprocess environment
+
+cdh-controlled application and custom-node package mutations use a dedicated package-build subprocess environment. The [application installer](../../src/comfyui_docker_helper/container/application_installer.py) owns the exact admitted names and constructs this environment from the narrow application process environment: it retains reviewed network proxy names and exact values owned by the invoking command, then copies only reviewed generic and BuildPlan-selected backend toolchain names that are present in the current container environment. It does not inherit an ambient `PATH`, package-manager configuration, or Python configuration. This constructor is a process boundary, not a second configuration or image-rendering authority.
+
+Ordinary ComfyUI Git and observation subprocesses retain their narrow process environment, direct-Git Git operations retain their separate Git and credential contract, and trusted build hooks retain their full-environment contract. Persistent Docker `ENV` from the selected base image and `[system.env]` has a separate rendering and image owner; the package-build constructor neither re-emits nor revalidates it.
+
 ## Official ComfyUI source and requirements
 
 cdh owns one fixed official ComfyUI repository. A user selector resolves to one exact commit. The container exclusively creates the required-absent final directory, materializes the detached checkout there, and proves its repository, HEAD, and ancestry from the immutable support-floor commit before package mutation.

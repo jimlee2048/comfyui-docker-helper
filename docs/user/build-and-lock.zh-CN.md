@@ -248,7 +248,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 `python.extra_packages` 中每个在目标环境生效的 direct requirement 都会保留至应用安装，同时 `[python].index_url` 仍用于 index-backed 和传递依赖。每个生效的 `python.uv_tools` requirement 都使用 managed Python interpreter 安装在独立的 `/opt/uv/tools/<name>` 环境中；direct tool 保留其编写的 source，传递依赖仍使用默认 Python index。安装过程不会增加 downloader、URL rewrite 或第二条软件包路径。
 
-安装自定义节点时，Registry Manager 以及 Direct-Git 用于根 requirements 和 `install.py` 的 Python 安装进程都会获得由 BuildPlan 定权的普通 index 和由 CUDA 派生的 PyTorch index。运行时约束保留精确的 PyTorch 分组及所选 torch wheel 的 setuptools 兼容范围；隔离构建投影保留精确的 PyTorch 分组，其自身不会加入这个仅属于运行时的 setuptools 范围。软件包管理器仍可能在隔离构建中应用自身的普通运行时约束行为。uv 会与共享的 pip 路径保持一致，从两个 index 中考虑兼容候选，因此 CUDA index 上的普通软件包名称不会遮蔽普通 index 中的兼容版本。这样，隔离的软件包构建可以根据受保护的应用基础完成解析，但受信任安装程序选中的依赖并不会因此全部成为 cdh lock 或 BuildPlan 输入。Manager 负责 Registry 节点特有的安装效果；对于 Direct-Git 节点，cdh 会验证精确的根 commit 和递归 gitlink 并接纳根 requirements，而依赖安装和 `install.py` 效果仍属于受信任代码执行。
+安装自定义节点时，Registry Manager 和 Direct-Git 的 Python 子进程都会获得由 BuildPlan 定权的软件包源和 PyTorch 保护；具体的 index、运行时/隔离构建约束及 uv 选择行为由[开发者软件包源契约](../dev/contracts.md#python-and-pytorch-package-source-ownership)统一定义。受信任的 Manager 或 `install.py` 所选择的依赖不会成为 canonical lock 或 BuildPlan 身份，其中的 moving direct/VCS 效果仍不属于 cdh 验证的重放范围；参见[自定义节点身份与信任契约](../dev/contracts.md#custom-node-identity-order-and-trust)。
 
 cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁定 direct source 背后的字节或 VCS commit。镜像构建会安装配置中指定的 source；如果最终软件包名称或版本与解析结果不匹配，构建会失败。
 
@@ -258,4 +258,4 @@ cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁�
 
 所有镜像变更成功后，cdh 会写入严格的最终状态观测 `/opt/cdh/build/manifest.json`。它绑定镜像配置、canonical lock 和 BuildPlan 的 digest，并记录预期和观测到的直接身份。该 manifest 是证据，而不是另一个解析器、lock、重放输入、支持性结论或一般性的服务健康检查。
 
-cdh 为由 cdh 控制的直接输入提供有界且经过验证的重放。对于在目标环境生效的软件包 direct reference，重放 identity 是用户编写的 request 加精确的已安装顶层分发包版本，而不是已获取 artifact：它不会证明某个 URL 的内容未变，也不会把 moving VCS ref 固定到观测到的 commit。Registry Manager 或 Direct-Git 安装脚本选中的 moving direct/VCS 依赖同样不会被 cdh 独立锁定，也不会获得 cdh 的来源证明。`--locked` 只在宿主端协调期间避免接触 source；之后执行的 Buildx build 仍可能需要获取并安装该生效且由用户编写的 source。这并不承诺离线构建或字节完全一致的构建，也不承诺对传递依赖项或每个已获取 artifact 进行完整锁定，不为缺少用户所提供 hash/checksum 的软件包或文件下载提供真实性保证，不保证受信任安装程序或 Hook 的效果具有确定性，也不承诺重放部署时变更。
+cdh 为由 cdh 控制的直接输入提供有界且经过验证的重放。对于在目标环境生效的软件包 direct reference，重放 identity 是用户编写的 request 加精确的已安装顶层分发包版本，而不是已获取 artifact：它不会证明某个 URL 的内容未变，也不会把 moving VCS ref 固定到观测到的 commit。`--locked` 只在宿主端协调期间避免接触 source；之后执行的 Buildx build 仍可能需要获取并安装该生效且由用户编写的 source。这并不承诺离线构建或字节完全一致的构建，也不承诺对传递依赖项或每个已获取 artifact 进行完整锁定，不为缺少用户所提供 hash/checksum 的软件包或文件下载提供真实性保证，不保证受信任安装程序或 Hook 的效果具有确定性，也不承诺重放部署时变更。

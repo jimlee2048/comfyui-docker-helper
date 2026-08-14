@@ -436,6 +436,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import tomllib
 
 from packaging.specifiers import SpecifierSet
@@ -509,6 +510,24 @@ assert manifest["binding"] == {
 expected_cli = os.environ["EXPECTED_CLI"] == "1"
 expected_manager = os.environ["EXPECTED_MANAGER"] == "1"
 expected_mixed = os.environ["EXPECTED_MIXED"] == "1"
+assert os.environ["TZ"] == "Asia/Shanghai"
+
+def local_timestamp(zone, epoch):
+    os.environ["TZ"] = zone
+    time.tzset()
+    return time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(epoch))
+
+assert local_timestamp("Etc/UTC", 1705320000) == "2024-01-15 12:00:00 +0000"
+assert local_timestamp("Asia/Shanghai", 1705320000) == "2024-01-15 20:00:00 +0800"
+assert local_timestamp("America/New_York", 1705320000) == (
+    "2024-01-15 07:00:00 -0500"
+)
+assert local_timestamp("America/New_York", 1721044800) == (
+    "2024-07-15 08:00:00 -0400"
+)
+os.environ["TZ"] = "Asia/Shanghai"
+time.tzset()
+
 assert plan["lock_digest"] == os.environ["EXPECTED_LOCK_DIGEST"]
 digest_source = (
     "import pathlib; "
@@ -1313,6 +1332,7 @@ def test_image_has_exact_environment_and_disposition(
             "EXPECTED_BUILD_PLAN_DIGEST": binding.build_plan_digest,
             "EXPECTED_IMAGE_CONFIG_DIGEST": binding.image_config_digest,
             "EXPECTED_LOCK_DIGEST": lock_digest,
+            "TZ": "Asia/Shanghai",
         },
         read_only_mounts=(
             (

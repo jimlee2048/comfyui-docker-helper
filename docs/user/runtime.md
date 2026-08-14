@@ -10,6 +10,16 @@ For the complete annotated host configuration, see [`examples/full.toml`](../../
 
 Running a cdh-built image with GPU access requires NVIDIA Container Toolkit support, an NVIDIA driver `>=580.65.06`, and a Turing-or-newer NVIDIA GPU.
 
+## Set the container timezone
+
+Set a standard process timezone when starting the container:
+
+```bash
+docker run --env TZ=Asia/Shanghai IMAGE
+```
+
+The container-start `TZ` overrides any value baked through `[system.env]` for programs that honor standard `TZ` behavior.
+
 ## Runtime configuration precedence
 
 Each image contains generated runtime defaults at `/opt/cdh/runtime/config.toml`. You can mount an optional `/etc/cdh/runtime/config.toml` to change runtime-only behavior without rebuilding the image.

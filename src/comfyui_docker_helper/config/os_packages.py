@@ -11,6 +11,7 @@ DEFAULT_OS_PACKAGES = (
     "aria2",
     "openssh-server",
     "tini",
+    "tzdata",
 )
 
 _DEBIAN_PACKAGE_PATTERN = re.compile(r"[a-z0-9][a-z0-9+.-]+\Z")

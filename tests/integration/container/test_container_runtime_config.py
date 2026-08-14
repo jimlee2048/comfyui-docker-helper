@@ -443,6 +443,7 @@ extra_args = ["--preview-method", "auto"]
         mounted_hooks_path=_missing_mounted_hooks(tmp_path),
         environ={
             "PATH": "/usr/bin",
+            "TZ": "Asia/Shanghai",
             "CDH_COMFYUI_LISTEN": "127.0.0.30",
             "CDH_COMFYUI_PORT": "8391",
             "CDH_COMFYUI_EXTRA_ARGS": '--preview-method "latent2rgb" --fast',
@@ -471,6 +472,7 @@ extra_args = ["--preview-method", "auto"]
     assert downloader_configs[0].cdh.download_max_attempts == 6
     assert downloader_configs[0].cdh.download_failure_policy == "continue"
     assert downloader_configs[0].cdh.shutdown_timeout == 55.5
+    assert calls[0].env["TZ"] == "Asia/Shanghai"
     assert downloader_plans[0].items[0].target == (
         runtime.comfyui_path / "models" / "checkpoints" / "model.bin"
     )

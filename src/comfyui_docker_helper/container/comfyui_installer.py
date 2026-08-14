@@ -28,7 +28,8 @@ from comfyui_docker_helper.config.build_plan import (
     ToolchainPhase,
 )
 from comfyui_docker_helper.container.application_installer import (
-    application_install_environment,
+    application_build_environment,
+    application_process_environment,
     install_inference_group,
     install_python_extras,
     verify_application_environment,
@@ -137,7 +138,7 @@ def observe_application_state(
 ) -> None:
     """Observe complete application health against immutable requirements input."""
     _validate_paths(application, runtime)
-    environment = application_install_environment(environ)
+    environment = application_process_environment(environ)
     _verify_checkout_identity(application, runtime.comfyui_path, git_path, environment)
     current = _verify_requirements(
         application,
@@ -188,7 +189,7 @@ def _checkout_exact(
         raise ComfyUIInstallError("ComfyUI target already exists") from None
     except OSError as error:
         raise ComfyUIInstallError("ComfyUI target could not be created") from error
-    environment = application_install_environment(environ)
+    environment = application_process_environment(environ)
     _run_git(
         (
             git_path,
@@ -403,8 +404,10 @@ def _install_ordinary_requirements(
                 temporary,
             ),
             cwd=_BUILD_DIRECTORY,
-            env=application_install_environment(
-                environ, constraints_path=constraints_path
+            env=application_build_environment(
+                application,
+                environ,
+                constraints_path=constraints_path,
             ),
             description="ComfyUI ordinary requirements install",
         )
@@ -441,8 +444,10 @@ def _install_manager_capability(
                 temporary,
             ),
             cwd=_BUILD_DIRECTORY,
-            env=application_install_environment(
-                environ, constraints_path=constraints_path
+            env=application_build_environment(
+                application,
+                environ,
+                constraints_path=constraints_path,
             ),
             description="Manager requirements install",
         )

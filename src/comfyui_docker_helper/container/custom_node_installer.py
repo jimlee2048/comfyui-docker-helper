@@ -39,7 +39,7 @@ from comfyui_docker_helper.config.registry_validation import (
 )
 from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
 from comfyui_docker_helper.container.application_installer import (
-    application_install_environment,
+    application_build_environment,
 )
 from comfyui_docker_helper.container.comfyui_installer import (
     capture_application_requirements,
@@ -145,6 +145,7 @@ def install_custom_nodes(
     )
     application_authority = capture_application_requirements(application, runtime)
     registry_environment = _managed_python_environment(
+        application,
         runtime,
         application.python_index_url,
         constraints_path,
@@ -1172,24 +1173,28 @@ def _optional_root_file(root: Path, name: str) -> Path | None:
 
 
 def _managed_python_environment(
+    application: ApplicationPhase,
     runtime: ContainerRuntime,
     python_index_url: str,
     constraints_path: Path,
     environ: Mapping[str, str] | None,
 ) -> dict[str, str]:
-    environment = application_install_environment(environ)
+    environment = application_build_environment(
+        application,
+        environ,
+        constraints_path=constraints_path,
+        comfyui_path=runtime.comfyui_path,
+        virtual_env=runtime.virtual_env,
+    )
+    build_path = environment["PATH"]
     environment.update(
         {
-            "COMFYUI_PATH": os.fspath(runtime.comfyui_path),
-            "PIP_CONSTRAINT": os.fspath(constraints_path),
             "PIP_CONFIG_FILE": os.devnull,
             "PIP_INDEX_URL": python_index_url,
-            "UV_CONSTRAINT": os.fspath(constraints_path),
             "UV_DEFAULT_INDEX": python_index_url,
             "UV_NO_CONFIG": "1",
-            "VIRTUAL_ENV": os.fspath(runtime.virtual_env),
             "WORKSPACE": os.fspath(runtime.workspace),
-            "PATH": f"{runtime.virtual_env}/bin:/usr/local/bin:/usr/bin:/bin",
+            "PATH": f"{runtime.virtual_env}/bin:/usr/local/bin:{build_path}",
         }
     )
     return environment

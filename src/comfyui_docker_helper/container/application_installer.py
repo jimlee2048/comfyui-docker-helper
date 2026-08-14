@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
+from types import MappingProxyType
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
@@ -46,6 +47,40 @@ _NETWORK_ENVIRONMENT = frozenset(
         "no_proxy",
     }
 )
+_GENERIC_BUILD_ENVIRONMENT = frozenset(
+    {
+        "LIBRARY_PATH",
+        "LD_LIBRARY_PATH",
+        "CC",
+        "CXX",
+        "CPPFLAGS",
+        "CFLAGS",
+        "CXXFLAGS",
+        "LDFLAGS",
+    }
+)
+_BACKEND_BUILD_ENVIRONMENT: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "cuda": frozenset(
+            {
+                "CUDA_PATH",
+                "CUDA_HOME",
+                "CUDAToolkit_ROOT",
+                "CUDA_VERSION",
+                "NVCC",
+                "CUDACXX",
+                "CUDAHOSTCXX",
+                "NVCC_CCBIN",
+                "CUDAARCHS",
+                "TORCH_CUDA_ARCH_LIST",
+            }
+        )
+    }
+)
+_BACKEND_EXECUTABLE_DIRECTORIES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {"cuda": ("/usr/local/cuda/bin",)}
+)
+_APPLICATION_PROCESS_PATH = "/usr/bin:/bin"
 
 
 class ApplicationInstallError(ApplicationError):
@@ -80,7 +115,7 @@ def install_inference_group(
                 str(resolution_manifest_path),
             ],
             cwd=_BUILD_DIRECTORY,
-            env=application_install_environment(environ),
+            env=application_build_environment(application, environ),
             description="inference package install",
         )
     expected = {package.name: package.version for package in group.packages}
@@ -106,7 +141,7 @@ def install_inference_group(
             "--no-python-downloads",
         ],
         cwd=_BUILD_DIRECTORY,
-        env=application_install_environment(environ),
+        env=application_process_environment(environ),
         description="application dependency verification",
     )
     _write_constraints(
@@ -147,11 +182,11 @@ def install_python_extras(
             *(package.requirement for package in group.packages),
         ),
         cwd=_BUILD_DIRECTORY,
-        env={
-            **application_install_environment(environ),
-            "PIP_CONSTRAINT": os.fspath(constraints_path),
-            "UV_CONSTRAINT": os.fspath(constraints_path),
-        },
+        env=application_build_environment(
+            application,
+            environ,
+            constraints_path=constraints_path,
+        ),
         description="application Python extras install",
     )
 
@@ -211,7 +246,7 @@ def verify_application_environment(
             "--no-python-downloads",
         ),
         cwd=_BUILD_DIRECTORY,
-        env=application_install_environment(environ),
+        env=application_process_environment(environ),
         description="application dependency verification",
     )
     _verify_application_pip_commands(application, runtime, environ)
@@ -489,7 +524,7 @@ def _verify_application_pip_commands(
     owner_uid: int = 0,
     owner_gid: int = 0,
 ) -> None:
-    environment = application_install_environment(environ)
+    environment = application_process_environment(environ)
     python_minor = ".".join(application.pytorch.python_version.split(".")[:2])
     site_packages_path = (
         runtime.virtual_env / "lib" / f"python{python_minor}" / "site-packages"
@@ -589,21 +624,23 @@ _PIP_VERSION_PATTERN = re.compile(
 )
 
 
-def application_install_environment(
+def application_process_environment(
     environ: Mapping[str, str] | None,
     *,
     constraints_path: Path | None = None,
     comfyui_path: Path | None = None,
     virtual_env: Path | None = None,
 ) -> dict[str, str]:
-    """Build the narrow environment owned by application installation."""
+    """Build the narrow environment owned by an ordinary application process."""
     source = os.environ if environ is None else environ
     result = {
         name: source[name]
         for name in _NETWORK_ENVIRONMENT
         if source.get(name) is not None
     }
-    result.update({"HOME": "/root", "LANG": "C.UTF-8", "PATH": "/usr/bin:/bin"})
+    result.update(
+        {"HOME": "/root", "LANG": "C.UTF-8", "PATH": _APPLICATION_PROCESS_PATH}
+    )
     if constraints_path is not None:
         result.update(
             {
@@ -615,4 +652,29 @@ def application_install_environment(
         result["COMFYUI_PATH"] = os.fspath(comfyui_path)
     if virtual_env is not None:
         result["VIRTUAL_ENV"] = os.fspath(virtual_env)
+    return result
+
+
+def application_build_environment(
+    application: ApplicationPhase,
+    environ: Mapping[str, str] | None,
+    *,
+    constraints_path: Path | None = None,
+    comfyui_path: Path | None = None,
+    virtual_env: Path | None = None,
+) -> dict[str, str]:
+    """Build the controlled environment for application package mutation."""
+    source = os.environ if environ is None else environ
+    result = application_process_environment(
+        source,
+        constraints_path=constraints_path,
+        comfyui_path=comfyui_path,
+        virtual_env=virtual_env,
+    )
+    backend = application.pytorch.backend
+    admitted_names = _GENERIC_BUILD_ENVIRONMENT | _BACKEND_BUILD_ENVIRONMENT[backend]
+    result.update({name: source[name] for name in admitted_names if name in source})
+    result["PATH"] = ":".join(
+        (*_BACKEND_EXECUTABLE_DIRECTORIES[backend], _APPLICATION_PROCESS_PATH)
+    )
     return result

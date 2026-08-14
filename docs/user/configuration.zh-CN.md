@@ -1,6 +1,6 @@
 # 配置
 
-[English](configuration.md) | 简体中文
+规范性来源：[English](configuration.md) | 简体中文
 
 本指南面向为 cdh 选择和组合 TOML 输入的用户。[严格配置模型](../../src/comfyui_docker_helper/config/final_models.py) 和验证代码是机器权威；本指南说明面向用户的选择，而不重复每一个字段。
 
@@ -68,6 +68,12 @@ cdh host validate -f examples/full.toml -f local.toml
 当前计算后端是 CUDA，当前镜像目标是 `linux/amd64`。CUDA 和 PyTorch 版本必须显式选择。ComfyUI 同样需要显式选择器：`latest`、`nightly`、完整的小写提交哈希、带或不带 `v` 前缀的精确语义化发布版本，或受支持的版本约束。cdh 只从 ComfyUI 官方仓库解析该选择器，并且每个可接受的检出版本都必须派生自受支持的 v0.11.0 版本下限。
 
 完整示例记录了可接受的选择器形式和其余默认值。不受支持的上游镜像标签、版本或目标组合会失败，而不会被静默替换。
+
+## 设置持久的镜像环境变量
+
+当需要在所选基础镜像中添加或覆盖非 Secret 的 Docker `ENV` 值时，请使用 `[system.env]`。不要重复声明基础镜像已经提供且受支持的工具链值。配置的值会保留在生成的镜像中，并可能出现在镜像 metadata、history 或日志里，因此不要在此放置 Secret；cdh 保留的运行时、路径和软件包管理器名称仍不允许覆盖。
+
+当 cdh 安装应用或自定义节点软件包时，生效构建容器环境中受支持的工具链变量可供软件包构建步骤使用。已有的受控代理处理和命令自有值仍保持独立；任意其他条目不会成为 installer 或 Python 配置。受支持的变量和完整操作边界请参阅[软件包构建环境](build-and-lock.zh-CN.md#软件包构建环境)。
 
 ## 选择应用和工具功能
 

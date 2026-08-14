@@ -187,7 +187,13 @@ def test_checkout_wires_final_target_and_proofs_before_requirements(
     events: list[str] = []
 
     def fake_run_git(argv, *, cwd, env, description):
-        del cwd, env, description
+        del cwd, description
+        assert env == {
+            "HTTPS_PROXY": "https://proxy.example",
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        }
         command = tuple(os.fspath(item) for item in argv)
         if "clone" in command:
             checkout = Path(command[-1])
@@ -233,7 +239,16 @@ def test_checkout_wires_final_target_and_proofs_before_requirements(
         lambda *_args: events.append("manager requirements"),
     )
 
-    _checkout_exact(application, runtime, Path("/usr/bin/git"), {})
+    _checkout_exact(
+        application,
+        runtime,
+        Path("/usr/bin/git"),
+        {
+            "HTTPS_PROXY": "https://proxy.example",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+        },
+    )
 
     assert events == [
         "clone",
@@ -499,10 +514,20 @@ def test_application_observation_rechecks_source_input_and_environment(
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
     events: list[object] = []
+
+    def verify_checkout_identity(*args) -> None:
+        assert args[3] == {
+            "HTTPS_PROXY": "https://proxy.example",
+            "HOME": "/root",
+            "LANG": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        }
+        events.append("source")
+
     monkeypatch.setattr(
         comfyui_installer,
         "_verify_checkout_identity",
-        lambda *_args: events.append("source"),
+        verify_checkout_identity,
     )
     monkeypatch.setattr(
         comfyui_installer,
@@ -520,7 +545,16 @@ def test_application_observation_rechecks_source_input_and_environment(
         ),
     )
 
-    observe_application_state(application, runtime, parsed)
+    observe_application_state(
+        application,
+        runtime,
+        parsed,
+        environ={
+            "HTTPS_PROXY": "https://proxy.example",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+        },
+    )
 
     assert events == [
         "source",
@@ -540,10 +574,16 @@ def test_ordinary_requirements_use_only_python_index_constraints_and_cleanup(
     temporary_paths: list[Path] = []
     captured_requirements: list[str] = []
 
-    def fake_run_argv(argv, **_kwargs) -> None:
+    def fake_run_argv(argv, **kwargs) -> None:
         command = tuple(os.fspath(item) for item in argv)
         commands.append(command)
         if "install" in command:
+            assert kwargs["env"]["PATH"] == "/usr/local/cuda/bin:/usr/bin:/bin"
+            assert kwargs["env"]["LIBRARY_PATH"] == "/usr/local/cuda/lib64/stubs"
+            assert kwargs["env"]["CUDA_HOME"] == "/usr/local/cuda"
+            assert kwargs["env"]["PIP_CONSTRAINT"] == os.fspath(constraints)
+            assert kwargs["env"]["UV_CONSTRAINT"] == os.fspath(constraints)
+            assert "PIP_INDEX_URL" not in kwargs["env"]
             path = Path(command[command.index("--requirements") + 1])
             temporary_paths.append(path)
             captured_requirements.append(path.read_text())
@@ -559,7 +599,12 @@ def test_ordinary_requirements_use_only_python_index_constraints_and_cleanup(
         runtime,
         Path("/usr/local/bin/uv"),
         constraints,
-        {},
+        {
+            "PATH": "/poison/bin",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+            "PIP_INDEX_URL": "https://poison.example/simple",
+        },
     )
 
     assert captured_requirements == ["numpy>=1.25\nrequests\n"]
@@ -678,7 +723,12 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
         runtime,
         Path("/usr/local/bin/uv"),
         constraints,
-        {},
+        {
+            "PATH": "/poison/bin",
+            "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
+            "CUDA_HOME": "/usr/local/cuda",
+            "PIP_INDEX_URL": "https://poison.example/simple",
+        },
     )
 
     assert len(commands) == 1
@@ -690,6 +740,10 @@ def test_manager_requirements_are_verified_before_install_and_use_python_source(
     assert "download.pytorch.org" not in " ".join(install)
     assert install_kwargs["env"]["UV_CONSTRAINT"] == os.fspath(constraints)
     assert install_kwargs["env"]["PIP_CONSTRAINT"] == os.fspath(constraints)
+    assert install_kwargs["env"]["PATH"] == "/usr/local/cuda/bin:/usr/bin:/bin"
+    assert install_kwargs["env"]["LIBRARY_PATH"] == "/usr/local/cuda/lib64/stubs"
+    assert install_kwargs["env"]["CUDA_HOME"] == "/usr/local/cuda"
+    assert "PIP_INDEX_URL" not in install_kwargs["env"]
     assert events == [
         f"anchor:{manager.import_anchor}:{runtime.comfyui_path}",
         "import root",

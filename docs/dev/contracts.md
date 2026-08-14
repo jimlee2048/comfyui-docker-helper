@@ -105,6 +105,12 @@ Target-active configured PyTorch members and target-active protected requirement
 
 The exact direct results and any compatibility constraint derived from the selected torch wheel protect later cdh-controlled application mutations. Protected PyTorch foundation members cannot use a direct reference. Checkout-owned requirements, including Manager requirements, and automatically consumed custom-node requirements cannot change package sources or introduce direct URL, VCS, local, editable, or raw-option inputs. User-authored package direct references remain confined to their accepted owner and use the existing uv resolver/install path rather than a downloader or alternate installer.
 
+### Package-build subprocess environment
+
+cdh-controlled application and custom-node package mutations use a dedicated package-build subprocess environment. It starts from the narrow application process environment, retaining its reviewed network proxy names and exact values owned by the invoking command, then copies only reviewed generic and BuildPlan-selected backend toolchain names that are present in the current container environment. It does not inherit an ambient `PATH`, package-manager configuration, or Python configuration. This constructor is a process boundary, not a second configuration or image-rendering authority.
+
+Ordinary ComfyUI Git and observation subprocesses retain their narrow process environment, direct-Git Git operations retain their separate Git and credential contract, and trusted build hooks retain their full-environment contract. Persistent Docker `ENV` from the selected base image and `[system.env]` has a separate rendering and image owner; the package-build constructor neither re-emits nor revalidates it.
+
 ## Official ComfyUI source and requirements
 
 cdh owns one fixed official ComfyUI repository. A user selector resolves to one exact commit. The container exclusively creates the required-absent final directory, materializes the detached checkout there, and proves its repository, HEAD, and ancestry from the immutable support-floor commit before package mutation.

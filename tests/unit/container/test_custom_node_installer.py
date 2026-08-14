@@ -1038,8 +1038,13 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
     custom_nodes = _phase(runtime, (first, second))
     _patch_phases(monkeypatch, application, custom_nodes)
     events: list[object] = []
+    build_constraint_snapshots: list[tuple[Path, bytes]] = []
 
     def run_command(argv, **kwargs):
+        build_constraints = Path(kwargs["env"]["UV_BUILD_CONSTRAINT"])
+        build_constraint_snapshots.append(
+            (build_constraints, build_constraints.read_bytes())
+        )
         events.append(("command", tuple(str(item) for item in argv), kwargs))
         return SimpleNamespace(returncode=0)
 
@@ -1080,6 +1085,7 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
             "UV_DEFAULT_INDEX": "https://poison-uv.example/simple",
             "UV_EXTRA_INDEX_URL": "https://poison-uv-extra.example/simple",
             "UV_INDEX": "poison=https://poison-uv.example/simple",
+            "UV_INDEX_STRATEGY": "first-index",
             "UV_NO_CONFIG": "0",
             "USER_VALUE": "kept-for-hooks",
         },
@@ -1133,16 +1139,49 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
     )
     assert first_kwargs["env"]["UV_INDEX"] == "https://pytorch.example/whl/cu130"
     assert first_kwargs["env"]["PIP_CONSTRAINT"] == constraints_path
-    assert first_kwargs["env"]["PIP_BUILD_CONSTRAINT"] == constraints_path
     assert first_kwargs["env"]["UV_CONSTRAINT"] == constraints_path
-    assert first_kwargs["env"]["UV_BUILD_CONSTRAINT"] == constraints_path
+    build_constraints_path = first_kwargs["env"]["PIP_BUILD_CONSTRAINT"]
+    assert build_constraints_path == first_kwargs["env"]["UV_BUILD_CONSTRAINT"]
+    assert build_constraints_path != constraints_path
+    assert first_kwargs["env"]["UV_INDEX_STRATEGY"] == "unsafe-best-match"
     assert first_kwargs["env"]["UV_NO_CONFIG"] == "1"
     assert first_kwargs["env"]["HTTPS_PROXY"] == "https://proxy.test"
     assert "UV_CONFIG_FILE" not in first_kwargs["env"]
     assert "UV_EXTRA_INDEX_URL" not in first_kwargs["env"]
     assert "https://packages.example/simple" not in first_argv
     assert "USER_VALUE" not in first_kwargs["env"]
+    assert {content for _path, content in build_constraint_snapshots} == {
+        b"torch==2.12.1+cu130\ntorchaudio==2.11.0+cu130\ntorchvision==0.27.1+cu130\n"
+    }
+    assert {path for path, _content in build_constraint_snapshots} == {
+        Path(build_constraints_path)
+    }
+    assert not Path(build_constraints_path).exists()
     assert events[-1] == ("application-check",)
+
+
+def test_temporary_build_constraints_are_cleaned_after_failure(
+    tmp_path: Path,
+) -> None:
+    application, _runtime = _application(tmp_path)
+    observed_path: Path | None = None
+
+    with (
+        pytest.raises(RuntimeError, match="installer failed"),
+        custom_node_installer._temporary_build_constraints(
+            application.pytorch,
+            directory=tmp_path,
+        ) as path,
+    ):
+        observed_path = path
+        assert path.read_bytes() == (
+            b"torch==2.12.1+cu130\ntorchaudio==2.11.0+cu130\n"
+            b"torchvision==0.27.1+cu130\n"
+        )
+        raise RuntimeError("installer failed")
+
+    assert observed_path is not None
+    assert not observed_path.exists()
 
 
 def test_empty_hook_phases_reuse_observations_and_force_fresh_final_evidence(

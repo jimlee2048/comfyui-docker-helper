@@ -248,7 +248,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 `python.extra_packages` 中每个在目标环境生效的 direct requirement 都会保留至应用安装，同时 `[python].index_url` 仍用于 index-backed 和传递依赖。每个生效的 `python.uv_tools` requirement 都使用 managed Python interpreter 安装在独立的 `/opt/uv/tools/<name>` 环境中；direct tool 保留其编写的 source，传递依赖仍使用默认 Python index。安装过程不会增加 downloader、URL rewrite 或第二条软件包路径。
 
-安装自定义节点时，Registry Manager 以及 Direct-Git 用于根 requirements 和 `install.py` 的 Python 安装进程都会获得由 BuildPlan 定权的普通 index、由 CUDA 派生的 PyTorch index，以及通过运行时约束和隔离构建约束渠道提供的同一份精确应用约束。这样，隔离的软件包构建可以根据受保护的应用基础完成解析，但受信任安装程序选中的依赖并不会因此全部成为 cdh lock 或 BuildPlan 输入。Manager 负责 Registry 节点特有的安装效果；对于 Direct-Git 节点，cdh 会验证精确的根 commit 和递归 gitlink 并接纳根 requirements，而依赖安装和 `install.py` 效果仍属于受信任代码执行。
+安装自定义节点时，Registry Manager 以及 Direct-Git 用于根 requirements 和 `install.py` 的 Python 安装进程都会获得由 BuildPlan 定权的普通 index 和由 CUDA 派生的 PyTorch index。运行时约束保留精确的 PyTorch 分组及所选 torch wheel 的 setuptools 兼容范围；隔离构建投影保留精确的 PyTorch 分组，其自身不会加入这个仅属于运行时的 setuptools 范围。软件包管理器仍可能在隔离构建中应用自身的普通运行时约束行为。uv 会与共享的 pip 路径保持一致，从两个 index 中考虑兼容候选，因此 CUDA index 上的普通软件包名称不会遮蔽普通 index 中的兼容版本。这样，隔离的软件包构建可以根据受保护的应用基础完成解析，但受信任安装程序选中的依赖并不会因此全部成为 cdh lock 或 BuildPlan 输入。Manager 负责 Registry 节点特有的安装效果；对于 Direct-Git 节点，cdh 会验证精确的根 commit 和递归 gitlink 并接纳根 requirements，而依赖安装和 `install.py` 效果仍属于受信任代码执行。
 
 cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁定 direct source 背后的字节或 VCS commit。镜像构建会安装配置中指定的 source；如果最终软件包名称或版本与解析结果不匹配，构建会失败。
 

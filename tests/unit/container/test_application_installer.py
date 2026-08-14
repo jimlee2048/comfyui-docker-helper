@@ -16,7 +16,7 @@ from comfyui_docker_helper.config.build_plan import (
     PackageGroupPlan,
     PyTorchGroupPlan,
     build_plan_digest,
-    managed_constraints_bytes,
+    managed_runtime_constraints_bytes,
 )
 from comfyui_docker_helper.container import application_installer
 from comfyui_docker_helper.container.application_installer import (
@@ -160,7 +160,7 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "pip",
         "check",
     )
-    assert constraints.read_bytes() == managed_constraints_bytes(group)
+    assert constraints.read_bytes() == managed_runtime_constraints_bytes(group)
 
 
 def test_inference_install_routes_only_index_backed_packages_to_pytorch(
@@ -246,13 +246,13 @@ def test_inference_direct_source_still_requires_locked_installed_version(
         )
 
 
-# Managed constraints preserve exact content and never replace foreign entries.
-def test_constraints_are_exact_exclusive_and_read_only(tmp_path: Path) -> None:
+# Managed runtime constraints preserve exact content and never replace foreign entries.
+def test_runtime_constraints_are_exact_exclusive_and_read_only(tmp_path: Path) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     constraints = tmp_path / "constraints.txt"
     _write_constraints(
         constraints,
-        managed_constraints_bytes(plan.application.pytorch),
+        managed_runtime_constraints_bytes(plan.application.pytorch),
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
     )

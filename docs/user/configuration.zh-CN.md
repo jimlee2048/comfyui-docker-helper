@@ -73,6 +73,15 @@ cdh host validate -f examples/full.toml -f local.toml
 
 当需要在所选基础镜像中添加或覆盖非 Secret 的 Docker `ENV` 值时，请使用 `[system.env]`。不要重复声明基础镜像已经提供且受支持的工具链值。配置的值会保留在生成的镜像中，并可能出现在镜像 metadata、history 或日志里，因此不要在此放置 Secret；cdh 保留的运行时、路径和软件包管理器名称仍不允许覆盖。
 
+例如，可以用 IANA 时区名称将非 Secret 的时区默认值固化到镜像中：
+
+```toml
+[system.env]
+TZ = "Etc/UTC"
+```
+
+省略 `TZ` 时，cdh 不会添加时区值，并保留所选基础镜像的行为。
+
 当 cdh 安装应用或自定义节点软件包时，生效构建容器环境中一部分受控的构建工具链变量可供软件包构建步骤使用。已有的受控代理处理和命令自有值仍保持独立；任意其他条目不会成为 installer 或 Python 配置。完整操作边界请参阅[软件包构建环境](build-and-lock.zh-CN.md#软件包构建环境)。
 
 ## 选择应用和工具功能

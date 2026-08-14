@@ -90,6 +90,7 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
     ]
     assert rendered.count("test -x /usr/bin/tini") == 1
     assert plan.application.os_packages.count("tini") == 1
+    assert plan.application.os_packages.count("tzdata") == 1
     assert rendered == render_build_plan_dockerfile(plan)
 
 
@@ -138,6 +139,7 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
     assert apt_block.index("apt-get install") < apt_block.index(
         "rm -f /etc/ssh/ssh_host_*"
     )
+    assert apt_block.splitlines().count("    tzdata \\") == 1
     uv_cache_prefix = (
         "RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked "
         "export UV_CACHE_DIR=/root/.cache/uv && "
@@ -225,6 +227,26 @@ def test_renderer_preserves_non_package_runtime_environment() -> None:
 
     assert 'ENV ALPHA="first"' in rendered
     assert 'ENV ZED="last"' in rendered
+
+
+def test_renderer_projects_configured_timezone_as_ordinary_runtime_environment() -> (
+    None
+):
+    document = final_config().model_dump(mode="python")
+    document["system"]["env"]["TZ"] = "Asia/Shanghai"
+    plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+
+    rendered = render_build_plan_dockerfile(plan)
+
+    assert rendered.splitlines().count('ENV TZ="Asia/Shanghai"') == 1
+
+
+def test_renderer_omits_unconfigured_timezone_environment() -> None:
+    rendered = render_build_plan_dockerfile(
+        build_plan(final_config(), accepted_resolution())
+    )
+
+    assert all(not line.startswith("ENV TZ=") for line in rendered.splitlines())
 
 
 def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:

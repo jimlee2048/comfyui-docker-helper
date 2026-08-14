@@ -73,6 +73,15 @@ The full example documents the accepted selector forms and the remaining default
 
 Use `[system.env]` for non-secret Docker `ENV` values that you need to add to or override in the selected base image. Do not repeat supported toolchain values that the base image already supplies. Configured values persist in the resulting image and may be visible in image metadata, history, or logs, so do not place secrets there; cdh-reserved runtime, path, and package-manager names remain unavailable for override.
 
+For example, bake a non-secret timezone default into the image with an IANA zone name:
+
+```toml
+[system.env]
+TZ = "Etc/UTC"
+```
+
+When `TZ` is omitted, cdh adds no timezone value and preserves the selected base image's behavior.
+
 When cdh installs application or custom-node packages, a controlled subset of build-toolchain values from the effective build-container environment is available to package build steps. Existing controlled proxy handling and command-owned values remain separate; arbitrary entries do not become installer or Python configuration. See [Package-build environment](build-and-lock.md#package-build-environment) for the complete operational boundary.
 
 ## Choose application and tool capabilities

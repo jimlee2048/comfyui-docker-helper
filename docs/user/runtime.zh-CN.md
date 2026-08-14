@@ -10,6 +10,16 @@
 
 使用 GPU 运行由 cdh 构建的镜像需要 NVIDIA Container Toolkit、版本不低于 `580.65.06` 的 NVIDIA 驱动，以及 Turing 或更新架构的 NVIDIA GPU。
 
+## 设置容器时区
+
+启动容器时可设置标准进程时区：
+
+```bash
+docker run --env TZ=Asia/Shanghai IMAGE
+```
+
+对于遵循标准 `TZ` 行为的程序，容器启动时的 `TZ` 会覆盖通过 `[system.env]` 固化的值。
+
 ## 运行时配置优先级
 
 每个镜像都在 `/opt/cdh/runtime/config.toml` 中包含生成的运行时默认配置。你可以挂载可选的 `/etc/cdh/runtime/config.toml`，无需重新构建镜像即可更改仅限运行时的行为。

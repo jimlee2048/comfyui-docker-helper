@@ -37,6 +37,9 @@ extra_packages = ["ffmpeg", "libgl1"]
 # Do not put secrets here unless that exposure is acceptable.
 # UV_* and PIP_* names are reserved to cdh package and tool authority.
 EXAMPLE_PROFILE = "full"
+# This example bakes a timezone default into the image. Omit TZ to preserve the
+# selected base image's default behavior.
+TZ = "Etc/UTC"
 
 [system.ssh]
 # Default: false. Enable at runtime with SSH_ENABLE=true when SSH access is

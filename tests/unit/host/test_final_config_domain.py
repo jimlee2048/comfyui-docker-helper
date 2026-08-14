@@ -601,6 +601,7 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
         "env": {
             "APP_PROFILE": "production",
             "PIPER_MODE": "fast",
+            "TZ": "Asia/Shanghai",
             "UVICORN_WORKERS": "2",
         }
     }
@@ -610,13 +611,14 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
     assert config.system.env == {
         "APP_PROFILE": "production",
         "PIPER_MODE": "fast",
+        "TZ": "Asia/Shanghai",
         "UVICORN_WORKERS": "2",
     }
 
 
 # Public OS-package diagnostics cover the effective default-plus-user set and
 # enforce canonical lowercase Debian identities before planning.
-@pytest.mark.parametrize("package", ["bash", "tini"])
+@pytest.mark.parametrize("package", ["bash", "tini", "tzdata"])
 def test_system_extra_package_warns_and_filters_default_overlap(package: str) -> None:
     document = _document()
     document["system"] = {"extra_packages": [package]}

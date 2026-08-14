@@ -698,7 +698,9 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
     application, runtime = _application(tmp_path)
     target = runtime.comfyui_path / "custom_nodes/direct"
     target.mkdir()
-    target.joinpath("requirements.txt").write_text("example==1.0\n")
+    target.joinpath("requirements.txt").write_text(
+        "nvidia-ml-py # for GPU util/power/temp only\n"
+    )
     target.joinpath("install.py").write_text("print('root')\n")
     nested = target / "nested"
     nested.mkdir()
@@ -714,6 +716,10 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
 
     monkeypatch.setattr(custom_node_installer, "run_argv", run)
     constraints = tmp_path / "constraints.txt"
+    python_environment = {
+        "PIP_CONSTRAINT": str(constraints),
+        "UV_CONSTRAINT": str(constraints),
+    }
     custom_node_installer._install_git_root_surfaces(
         node,
         target,
@@ -721,7 +727,7 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
         runtime,
         Path("/usr/local/bin/uv"),
         constraints,
-        {"PIP_CONSTRAINT": str(constraints), "UV_CONSTRAINT": str(constraints)},
+        python_environment,
     )
 
     assert len(commands) == 2
@@ -743,9 +749,11 @@ def test_git_installer_runs_only_root_requirements_then_install_py(
         str(target / "requirements.txt"),
     )
     assert requirements_kwargs["close_stdin"] is True
+    assert requirements_kwargs["env"] == python_environment
     install_argv, install_kwargs = commands[1]
     assert install_argv == ("/opt/venv/bin/python", str(target / "install.py"))
     assert install_kwargs["close_stdin"] is True
+    assert install_kwargs["env"] == python_environment
 
 
 def test_git_root_installer_rejects_symlinked_surface(tmp_path: Path) -> None:

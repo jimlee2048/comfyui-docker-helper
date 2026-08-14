@@ -246,12 +246,7 @@ effective configuration -> canonical lock -> BuildPlan -> rendered context
 
 ### 软件包构建环境
 
-当 cdh 安装应用依赖或自定义节点软件包时，它会传递构建容器中已有且受支持的编译器、链接器和计算后端环境变量。已有且受支持的 HTTP 代理变量仍然生效。工具链变量可能来自所选基础镜像，也可能来自生效的 `[system.env]`；不要重复声明基础镜像已经提供的值。只有在需要添加或覆盖以下值时，才使用 `[system.env]`。
-
-- 通用构建变量：`LIBRARY_PATH`、`LD_LIBRARY_PATH`、`CC`、`CXX`、`CPPFLAGS`、`CFLAGS`、`CXXFLAGS` 和 `LDFLAGS`。
-- CUDA 构建变量：`CUDA_PATH`、`CUDA_HOME`、`CUDAToolkit_ROOT`、`CUDA_VERSION`、`NVCC`、`CUDACXX`、`CUDAHOSTCXX`、`NVCC_CCBIN`、`CUDAARCHS` 和 `TORCH_CUDA_ARCH_LIST`。
-
-当构建容器环境中存在上述变量的键时，cdh 会原样传递其值，包括空值。cdh 不会创建缺失值，也不会按照变量名前缀接纳其他名称。
+当 cdh 安装应用依赖或自定义节点软件包时，会使用受控的子进程环境。该环境包含已有且受支持的 HTTP 代理设置，以及构建容器中已有的一小部分构建工具链变量，例如编译器、链接器和所选计算后端相关设置。工具链变量可能来自所选基础镜像，也可能来自生效的 `[system.env]`；不要重复声明基础镜像已经提供的值。只有在需要添加或覆盖持久镜像环境值时，才使用 `[system.env]`。
 
 通过 `[system.env]` 配置的值会渲染为 Docker `ENV`，并继续提供给用户之后从生成镜像启动的进程。这种持久性独立于受限的软件包构建子进程边界：环境中任意的 `PATH`、软件包来源设置，以及 pip、uv 或 Python 配置都不能取得 cdh 管理安装的控制权。适用的 index、constraint、解释器和命令路径仍由 cdh 管理。
 

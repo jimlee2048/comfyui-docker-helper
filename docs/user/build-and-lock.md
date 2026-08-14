@@ -246,12 +246,7 @@ The image keeps application packages and user tools in separate ownership domain
 
 ### Package-build environment
 
-When cdh installs application dependencies or custom-node packages, it passes through supported compiler, linker, and compute-backend environment variables that already exist in the build container. Existing supported HTTP proxy variables continue to apply. Toolchain values may come from the selected base image or the effective `[system.env]`; do not repeat values that the base image already provides. Use `[system.env]` only when you need to add or override one of these values.
-
-- Generic build values: `LIBRARY_PATH`, `LD_LIBRARY_PATH`, `CC`, `CXX`, `CPPFLAGS`, `CFLAGS`, `CXXFLAGS`, and `LDFLAGS`.
-- CUDA build values: `CUDA_PATH`, `CUDA_HOME`, `CUDAToolkit_ROOT`, `CUDA_VERSION`, `NVCC`, `CUDACXX`, `CUDAHOSTCXX`, `NVCC_CCBIN`, `CUDAARCHS`, and `TORCH_CUDA_ARCH_LIST`.
-
-cdh passes a listed value through unchanged when its key exists in the build container environment, including when the value is empty. It does not create a missing value or accept additional names by prefix.
+When cdh installs application dependencies or custom-node packages, it uses a controlled subprocess environment. That environment includes existing supported HTTP proxy settings and a limited subset of build-toolchain values already present in the build container, such as compiler, linker, and selected compute-backend settings. Toolchain values may come from the selected base image or the effective `[system.env]`; do not repeat values that the base image already provides. Use `[system.env]` only when you need to add or override a persistent image value.
 
 Values configured through `[system.env]` are rendered as Docker `ENV` and remain available to processes that users later start from the resulting image. This persistence is separate from the narrow package-build subprocess boundary: an ambient `PATH`, package-source settings, and pip, uv, or Python configuration do not gain control of cdh-managed installation. cdh continues to own the applicable indexes, constraints, interpreter, and command paths.
 

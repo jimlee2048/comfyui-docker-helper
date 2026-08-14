@@ -103,7 +103,9 @@ cdh-controlled ordinary Python resolution and installation use the typed `[pytho
 
 Target-active configured PyTorch members and target-active protected requirements from the exact ComfyUI checkout form one atomic direct group. Its members partition exactly by source: every index-backed member uses the CUDA-derived explicit PyTorch index, while a non-protected configured direct reference keeps its authored source and receives no index route. Ordinary transitive dependencies use the Python index. A missing index-backed direct member must fail rather than fall back to a same-named package from the ordinary source.
 
-The exact direct results and any compatibility constraint derived from the selected torch wheel protect later cdh-controlled application mutations. Protected PyTorch foundation members cannot use a direct reference. Checkout-owned requirements, including Manager requirements, and automatically consumed custom-node requirements cannot change package sources or introduce direct URL, VCS, local, editable, or raw-option inputs. User-authored package direct references remain confined to their accepted owner and use the existing uv resolver/install path rather than a downloader or alternate installer.
+The exact direct results and any compatibility constraint derived from the selected torch wheel protect later cdh-controlled application mutations. Protected PyTorch foundation members cannot use a direct reference. Checkout-owned requirements, including Manager requirements, and cdh-admitted direct-Git root requirements cannot change package sources or introduce direct URL, VCS, local, editable, or raw-option inputs. User-authored package direct references remain confined to their accepted owner and use the existing uv resolver/install path rather than a downloader or alternate installer.
+
+Registry Manager and the Direct-Git Python processes for root requirements and `install.py` receive the BuildPlan-owned ordinary and CUDA-derived PyTorch indexes. Runtime and isolated-build constraint projections both retain the exact PyTorch-group results, while only the runtime projection adds the selected torch wheel's setuptools compatibility; installer-specific propagation of ordinary runtime constraints into build isolation remains installer-owned. uv considers compatible candidates across both indexes, matching pip's merged-candidate behavior, and ambient pip or uv configuration cannot replace these plan-owned inputs. This environment governs available sources and protected versions without widening the [custom-node identity and trust contract](#custom-node-identity-order-and-trust).
 
 ### Package-build subprocess environment
 
@@ -135,10 +137,10 @@ pre-install hooks -> node installation -> post-install hooks
 
 The source types retain distinct identity contracts:
 
-- A Registry node is selected by exact locked `id@version` and controlled through verified checkout-owned `cm-cli`. Success requires proof of the normalized installed project identity and version; process exit zero alone is insufficient.
+- A Registry node is selected by exact locked `id@version` and controlled through verified checkout-owned `cm-cli`. Success requires proof of the normalized installed project identity and version; process exit zero alone is insufficient. Manager remains the trusted executor of node-specific installation effects.
 - A direct-Git node retains the configured raw URL as an acquisition locator, while the exact root commit and recursive gitlinks are the content authority. User Git and SSH configuration may rewrite transport, so cdh does not attest the network endpoint.
 
-Direct-Git automatic execution is limited to a root `requirements.txt` and then root `install.py` when present. Hooks and installers are trusted code. cdh re-proves admitted repository and target state across these mutations, but an exact commit does not make the resulting worktree or arbitrary script effects deterministic. Final custom-node observation does not import or execute node code.
+Direct-Git automatic execution is limited to a root `requirements.txt` and then root `install.py` when present. cdh parses and admits the root requirements before installation; dependencies chosen internally by Registry Manager or a Direct-Git `install.py` remain trusted executor effects and may include a node-authored moving VCS source that cdh does not independently lock or attest. cdh re-proves admitted repository and target state across these mutations, but an exact commit does not make the resulting worktree or arbitrary script effects deterministic. Final custom-node observation does not import or execute node code.
 
 ## Host Secret source and credential boundary
 

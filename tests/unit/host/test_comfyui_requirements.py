@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from comfyui_docker_helper.comfyui_requirements import (
@@ -28,16 +30,15 @@ def _parse(content: bytes, *, python_version: str = "3.13.14"):
 # Requirements projection preserves target markers, protected ownership, and
 # source safety.
 def test_projection_evaluates_target_markers_and_filters_every_protected_row() -> None:
-    parsed = _parse(
-        b"""
+    content = b"""
 # root requirements
-torch
-TorchVision[image]>=0.27; python_version >= "3.13"
+torch # protected foundation
+TorchVision[image]>=0.27; python_version >= "3.13" # active protected row
 torchaudio; python_version < "3.14"
 torchaudio[io]; python_version >= "3.14"
-numpy>=1.25
+numpy>=1.25 # ordinary row
 """
-    )
+    parsed = _parse(content)
 
     assert [item.resolver_requirement for item in parsed.protected] == [
         "torch",
@@ -45,23 +46,24 @@ numpy>=1.25
         "torchvision[image]>=0.27",
     ]
     assert parsed.ordinary == ("numpy>=1.25",)
-    assert parsed.digest.startswith("sha256:")
+    assert parsed.digest == f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
 @pytest.mark.parametrize(
     "row",
     [
-        "--index-url https://poison.test/simple",
+        "--index-url https://poison.test/simple # source option stays rejected",
         "--extra-index-url=https://poison.test/simple",
         "-e git+https://poison.test/repo.git#egg=torch",
         "torch @ https://poison.test/torch.whl",
         "git+https://poison.test/repo.git#egg=torch",
+        "example==1#not-a-comment",
         "not a requirement ???",
     ],
 )
 def test_parser_rejects_source_changing_direct_and_non_pep508_rows(row: str) -> None:
-    with pytest.raises(ComfyUIRequirementsError, match="line 1"):
-        _parse(f"{row}\n".encode())
+    with pytest.raises(ComfyUIRequirementsError, match="line 3"):
+        _parse(f"# checkout comment\n\n{row}\n".encode())
 
 
 def test_merge_unions_extras_conjoins_selectors_and_treats_bare_as_neutral() -> None:
@@ -173,13 +175,14 @@ def test_target_marker_environment_is_complete_and_host_independent() -> None:
 
 
 def test_manager_parser_projects_exact_checkout_owned_distribution() -> None:
-    parsed = parse_manager_requirements(
-        b"""
+    content = b"""
 # exact checkout declaration
-comfyui_manager==4.0.5
-packaging>=24; python_version >= "3.13"
+comfyui_manager==4.0.5 # exact Manager identity
+packaging>=24; python_version >= "3.13" # active dependency
 ignored==1; python_version < "3.13"
-""",
+"""
+    parsed = parse_manager_requirements(
+        content,
         python_version="3.13.14",
         platform="linux/amd64",
         machine="x86_64",
@@ -190,7 +193,7 @@ ignored==1; python_version < "3.13"
         'packaging>=24; python_version >= "3.13"',
         'ignored==1; python_version < "3.13"',
     )
-    assert parsed.digest.startswith("sha256:")
+    assert parsed.digest == f"sha256:{hashlib.sha256(content).hexdigest()}"
     assert [(item.package, item.specifier) for item in parsed.active] == [
         ("comfyui-manager", "==4.0.5"),
         ("packaging", ">=24"),

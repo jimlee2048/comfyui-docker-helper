@@ -8,8 +8,10 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -26,7 +28,9 @@ from comfyui_docker_helper.config.build_plan import (
     CustomNodePlan,
     CustomNodesPhase,
     GitNodePlan,
+    PyTorchGroupPlan,
     RegistryNodePlan,
+    managed_build_constraints_bytes,
 )
 from comfyui_docker_helper.config.canonical_lock import normalized_registry_id
 from comfyui_docker_helper.config.custom_node_inventory import (
@@ -131,6 +135,35 @@ def install_custom_nodes(
 ) -> None:
     """Install all custom nodes in one original-order admitted-prefix sequence."""
     _validate_inputs(custom_nodes, application, runtime)
+    with _temporary_build_constraints(application.pytorch) as build_constraints_path:
+        _install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+            git_path=git_path,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            build_constraints_path=build_constraints_path,
+            build_hooks_directory=build_hooks_directory,
+            environ=environ,
+            build_plan_digest=build_plan_digest,
+        )
+
+
+def _install_custom_nodes(
+    custom_nodes: CustomNodesPhase,
+    application: ApplicationPhase,
+    *,
+    runtime: ContainerRuntime,
+    git_path: Path,
+    uv_path: Path,
+    constraints_path: Path,
+    build_constraints_path: Path,
+    build_hooks_directory: Path,
+    environ: Mapping[str, str] | None,
+    build_plan_digest: str | None,
+) -> None:
+    """Execute one validated custom-node sequence."""
 
     nodes = custom_nodes.nodes
     has_registry = any(isinstance(node, RegistryNodePlan) for node in nodes)
@@ -144,11 +177,13 @@ def install_custom_nodes(
         runtime.comfyui_path / "custom_nodes", "custom-nodes root"
     )
     application_authority = capture_application_requirements(application, runtime)
-    registry_environment = _managed_python_environment(
+    custom_node_python_environment = _managed_python_environment(
         application,
         runtime,
         application.python_index_url,
+        application.pytorch.pytorch_index_url,
         constraints_path,
+        build_constraints_path,
         environ,
     )
     # Git/SSH interpretation belongs to the caller's environment. In particular,
@@ -230,7 +265,7 @@ def install_custom_nodes(
                 application,
                 runtime,
                 manager_authority,
-                registry_environment,
+                custom_node_python_environment,
             )
         else:
             _install_git_node(
@@ -242,7 +277,7 @@ def install_custom_nodes(
                 uv_path,
                 constraints_path,
                 git_environment,
-                registry_environment,
+                custom_node_python_environment,
             )
 
         admitted.append(node)
@@ -1176,7 +1211,9 @@ def _managed_python_environment(
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     python_index_url: str,
+    pytorch_index_url: str,
     constraints_path: Path,
+    build_constraints_path: Path,
     environ: Mapping[str, str] | None,
 ) -> dict[str, str]:
     environment = application_build_environment(
@@ -1189,15 +1226,51 @@ def _managed_python_environment(
     build_path = environment["PATH"]
     environment.update(
         {
+            "PIP_BUILD_CONSTRAINT": os.fspath(build_constraints_path),
             "PIP_CONFIG_FILE": os.devnull,
+            "PIP_EXTRA_INDEX_URL": pytorch_index_url,
             "PIP_INDEX_URL": python_index_url,
+            "UV_BUILD_CONSTRAINT": os.fspath(build_constraints_path),
             "UV_DEFAULT_INDEX": python_index_url,
+            "UV_INDEX": pytorch_index_url,
+            "UV_INDEX_STRATEGY": "unsafe-best-match",
             "UV_NO_CONFIG": "1",
             "WORKSPACE": os.fspath(runtime.workspace),
             "PATH": f"{runtime.virtual_env}/bin:/usr/local/bin:{build_path}",
         }
     )
     return environment
+
+
+@contextmanager
+def _temporary_build_constraints(
+    group: PyTorchGroupPlan,
+    *,
+    directory: Path | None = None,
+) -> Iterator[Path]:
+    try:
+        descriptor, name = tempfile.mkstemp(
+            prefix=".python-build-constraints-",
+            suffix=".txt",
+            dir=directory,
+        )
+    except OSError as error:
+        raise CustomNodeInstallError(
+            "managed build constraints could not be materialized"
+        ) from error
+    path = Path(name)
+    try:
+        try:
+            stream = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with stream:
+            stream.write(managed_build_constraints_bytes(group))
+        path.chmod(0o444)
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _parse_project_identity(content: bytes) -> _ObservedRegistryIdentity:

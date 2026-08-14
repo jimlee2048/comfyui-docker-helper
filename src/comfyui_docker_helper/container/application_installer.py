@@ -22,7 +22,7 @@ from comfyui_docker_helper.comfyui_requirements import target_marker_environment
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     ToolchainPhase,
-    managed_constraints_bytes,
+    managed_runtime_constraints_bytes,
 )
 from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
@@ -111,7 +111,7 @@ def install_inference_group(
     )
     _write_constraints(
         constraints_path,
-        managed_constraints_bytes(group),
+        managed_runtime_constraints_bytes(group),
         owner_uid=0,
         owner_gid=0,
     )
@@ -416,7 +416,7 @@ def _verify_constraints(path: Path, application: ApplicationPhase) -> None:
         raise ApplicationInstallError("managed constraints must be root-owned")
     if stat.S_IMODE(metadata.st_mode) != 0o444:
         raise ApplicationInstallError("managed constraints must be read-only")
-    if content != managed_constraints_bytes(application.pytorch):
+    if content != managed_runtime_constraints_bytes(application.pytorch):
         raise ApplicationInstallError("managed constraints do not match BuildPlan")
 
 

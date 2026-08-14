@@ -15,6 +15,8 @@ from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
+from comfyui_docker_helper.config.build_plan import ProtectedRequirementPlan
+from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
 from comfyui_docker_helper.config.final_manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
@@ -163,24 +165,10 @@ def _observe_final_manifest(
         cwd=runtime.comfyui_path,
         description="ComfyUI commit observation",
     ).strip()
-    protected = tuple(
-        ProtectedRequirementEvidence(
-            package=item.package,
-            extras=item.extras,
-            selector=item.selector,
-        )
-        for item in application_authority.protected
+    protected = _protected_requirement_evidence(
+        application_authority.protected,
+        projection.application.comfyui.requirements.protected,
     )
-    expected_protected = tuple(
-        (item.package, item.extras, item.selector)
-        for item in projection.application.comfyui.requirements.protected
-    )
-    if tuple((item.package, item.extras, item.selector) for item in protected) != (
-        expected_protected
-    ):
-        raise FinalManifestError(
-            "ComfyUI protected projection does not match BuildPlan"
-        )
 
     observed = dict(application_inventory)
     setuptools_specifier = projection.application.pytorch.setuptools_specifier
@@ -292,6 +280,31 @@ def _observe_final_manifest(
             shutdown_timeout=projection.shutdown_timeout,
         ),
     )
+
+
+def _protected_requirement_evidence(
+    observed: tuple[DirectPythonRequestMember, ...],
+    expected: tuple[ProtectedRequirementPlan, ...],
+) -> tuple[ProtectedRequirementEvidence, ...]:
+    evidence = tuple(
+        ProtectedRequirementEvidence(
+            package=item.package,
+            extras=item.extras,
+            selector=item.specifier,
+        )
+        for item in observed
+    )
+    expected_identity = tuple(
+        (item.package, item.extras, item.selector) for item in expected
+    )
+    if (
+        tuple((item.package, item.extras, item.selector) for item in evidence)
+        != expected_identity
+    ):
+        raise FinalManifestError(
+            "ComfyUI protected projection does not match BuildPlan"
+        )
+    return evidence
 
 
 def _run_final_core_probe(

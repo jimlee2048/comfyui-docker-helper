@@ -144,9 +144,10 @@ def install_custom_nodes(
         runtime.comfyui_path / "custom_nodes", "custom-nodes root"
     )
     application_authority = capture_application_requirements(application, runtime)
-    registry_environment = _managed_python_environment(
+    custom_node_python_environment = _managed_python_environment(
         runtime,
         application.python_index_url,
+        application.pytorch.pytorch_index_url,
         constraints_path,
         environ,
     )
@@ -229,7 +230,7 @@ def install_custom_nodes(
                 application,
                 runtime,
                 manager_authority,
-                registry_environment,
+                custom_node_python_environment,
             )
         else:
             _install_git_node(
@@ -241,7 +242,7 @@ def install_custom_nodes(
                 uv_path,
                 constraints_path,
                 git_environment,
-                registry_environment,
+                custom_node_python_environment,
             )
 
         admitted.append(node)
@@ -1174,6 +1175,7 @@ def _optional_root_file(root: Path, name: str) -> Path | None:
 def _managed_python_environment(
     runtime: ContainerRuntime,
     python_index_url: str,
+    pytorch_index_url: str,
     constraints_path: Path,
     environ: Mapping[str, str] | None,
 ) -> dict[str, str]:
@@ -1182,10 +1184,14 @@ def _managed_python_environment(
         {
             "COMFYUI_PATH": os.fspath(runtime.comfyui_path),
             "PIP_CONSTRAINT": os.fspath(constraints_path),
+            "PIP_BUILD_CONSTRAINT": os.fspath(constraints_path),
             "PIP_CONFIG_FILE": os.devnull,
+            "PIP_EXTRA_INDEX_URL": pytorch_index_url,
             "PIP_INDEX_URL": python_index_url,
             "UV_CONSTRAINT": os.fspath(constraints_path),
+            "UV_BUILD_CONSTRAINT": os.fspath(constraints_path),
             "UV_DEFAULT_INDEX": python_index_url,
+            "UV_INDEX": pytorch_index_url,
             "UV_NO_CONFIG": "1",
             "VIRTUAL_ENV": os.fspath(runtime.virtual_env),
             "WORKSPACE": os.fspath(runtime.workspace),

@@ -17,10 +17,12 @@ from comfyui_docker_helper.config.build_plan import (
     dump_build_plan_json,
     manifest_binding,
 )
+from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
 from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.config.final_manifest import (
     DistributionVersionEvidence,
     LocalFileEvidence,
+    ProtectedRequirementEvidence,
     dump_final_manifest,
     final_build_check_ids,
 )
@@ -50,6 +52,53 @@ def _plan_with_local_file(*, locked: bool) -> BuildPlan:
     return plan.model_copy(
         update={"files": plan.files.model_copy(update={"files": (local,)})}
     )
+
+
+def test_final_observation_projects_protected_request_specifiers() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    protected = tuple(
+        DirectPythonRequestMember(
+            package=item.package,
+            extras=item.extras,
+            specifier=item.selector,
+        )
+        for item in plan.application.comfyui.requirements.protected
+    )
+
+    evidence = final_manifest_service._protected_requirement_evidence(
+        protected,
+        plan.application.comfyui.requirements.protected,
+    )
+
+    assert evidence == tuple(
+        ProtectedRequirementEvidence(
+            package=item.package,
+            extras=item.extras,
+            selector=item.selector,
+        )
+        for item in plan.application.comfyui.requirements.protected
+    )
+
+
+def test_final_observation_rejects_protected_request_name_mismatch() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    protected = tuple(
+        DirectPythonRequestMember(
+            package="torch-runtime" if index == 0 else item.package,
+            extras=item.extras,
+            specifier=item.selector,
+        )
+        for index, item in enumerate(plan.application.comfyui.requirements.protected)
+    )
+
+    with pytest.raises(
+        FinalManifestError,
+        match="ComfyUI protected projection does not match BuildPlan",
+    ):
+        final_manifest_service._protected_requirement_evidence(
+            protected,
+            plan.application.comfyui.requirements.protected,
+        )
 
 
 # Final comfy-cli evidence executes the tool interpreter and proves its isolation.

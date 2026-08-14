@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from packaging.requirements import InvalidRequirement, Requirement
@@ -20,6 +21,7 @@ from comfyui_docker_helper.exact_ledger import (
 )
 
 COMFYUI_REQUIREMENTS_PATH = "requirements.txt"
+_COMMENT_SUFFIX = re.compile(r"(^|\s+)#.*$")
 _SOURCE_OPTION = re.compile(
     r"(?:-e(?:ditable)?|-i|--index-url|--extra-index-url|--find-links|"
     r"--trusted-host|--no-index|--pre|--prefer-binary|--only-binary|"
@@ -79,10 +81,7 @@ def parse_comfyui_requirements(
         document = content.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ComfyUIRequirementsError("ComfyUI requirements must be UTF-8") from error
-    for line_number, raw in enumerate(document.splitlines(), start=1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
+    for line_number, line in _iter_requirement_rows(document):
         if line.startswith("-") or _SOURCE_OPTION.match(line):
             raise ComfyUIRequirementsError(
                 f"ComfyUI requirements line {line_number} changes package sources"
@@ -144,10 +143,7 @@ def parse_manager_requirements(
         document = content.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ComfyUIRequirementsError("Manager requirements must be UTF-8") from error
-    for line_number, raw in enumerate(document.splitlines(), start=1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
+    for line_number, line in _iter_requirement_rows(document):
         if line.startswith("-") or _SOURCE_OPTION.match(line):
             raise ComfyUIRequirementsError(
                 f"Manager requirements line {line_number} changes package sources"
@@ -215,6 +211,13 @@ def merge_pytorch_requirements(
             "protected PyTorch requirements must use the managed index source"
         )
     return merge_requirement_members((mandatory_torch, *upstream, *configured_extras))
+
+
+def _iter_requirement_rows(document: str) -> Iterator[tuple[int, str]]:
+    for line_number, raw in enumerate(document.splitlines(), start=1):
+        line = _COMMENT_SUFFIX.sub("", raw).strip()
+        if line:
+            yield line_number, line
 
 
 def merge_requirement_members(

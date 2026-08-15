@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
+from comfyui_docker_helper.cli_settings import (
+    HELP_CONTEXT_SETTINGS,
+    require_output_settings,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 if TYPE_CHECKING:
@@ -67,6 +70,7 @@ app.add_typer(runtime_app)
 @app.callback()
 def container(ctx: typer.Context) -> None:
     """Run container-side helper commands."""
+    ctx.obj = require_output_settings(ctx)
     if (
         sys.platform != "linux"
         and ctx.invoked_subcommand is not None

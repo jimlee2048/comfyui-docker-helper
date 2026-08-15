@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
+from comfyui_docker_helper.cli_output import CliOutputSettings, OutputDetail
 from comfyui_docker_helper.config.build_plan import (
     DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,
@@ -233,6 +234,85 @@ def test_version_option_reports_installed_distribution_version(
 
     assert result.exit_code == 0
     assert result.output == f"cdh {version('comfyui-docker-helper')}\n"
+
+
+def test_quiet_does_not_hide_version(cli_runner: CliRunner) -> None:
+    normal = cli_runner.invoke(app, ["--version"])
+    quiet = cli_runner.invoke(app, ["--quiet", "--version"])
+
+    assert quiet.exit_code == 0
+    assert quiet.stdout == normal.stdout
+    assert quiet.stderr == normal.stderr == ""
+
+
+def test_root_help_owns_output_detail_options_once(cli_runner: CliRunner) -> None:
+    root = _plain_output(cli_runner.invoke(app, ["--help"]).output)
+    host = _plain_output(cli_runner.invoke(app, ["host", "--help"]).output)
+    leaf = _plain_output(cli_runner.invoke(app, ["host", "validate", "--help"]).output)
+
+    assert root.count("--quiet") == 1
+    assert root.count("--verbose") == 1
+    assert "--quiet" not in host
+    assert "--verbose" not in host
+    assert "--quiet" not in leaf
+    assert "--verbose" not in leaf
+
+
+def test_quiet_and_verbose_fail_as_root_parameter_conflict(
+    cli_runner: CliRunner,
+) -> None:
+    result = cli_runner.invoke(app, ["--quiet", "--verbose", "host", "validate"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    output = _plain_output(result.stderr)
+    assert "Usage: cdh" in output
+    assert "--quiet" in output
+    assert "--verbose" in output
+    assert "used together" in output
+
+
+def test_output_detail_options_are_root_only(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(app, ["host", "validate", "--quiet"])
+
+    assert result.exit_code == 2
+    assert "No such option" in _plain_output(result.stderr)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["-v"], OutputDetail.VERBOSE),
+        (["-vv"], OutputDetail.DEBUG),
+        (["-vvv"], OutputDetail.DEBUG),
+    ],
+)
+def test_host_group_receives_root_output_settings(
+    args: list[str],
+    expected: OutputDetail,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    observed: list[CliOutputSettings] = []
+    original = host_cli.require_output_settings
+
+    def observe(context: typer.Context) -> CliOutputSettings:
+        settings = original(context)
+        observed.append(settings)
+        return settings
+
+    monkeypatch.setattr(host_cli, "require_output_settings", observe)
+
+    result = cli_runner.invoke(
+        app,
+        [*args, "host", "validate", "-f", str(config)],
+    )
+
+    assert result.exit_code == 0
+    assert [settings.detail for settings in observed] == [expected]
 
 
 def test_root_command_exposes_current_groups() -> None:
@@ -2268,6 +2348,28 @@ def test_application_error_boundary(cli_runner: CliRunner) -> None:
     assert result.stdout == ""
     assert result.stderr == "Error: expected failure\n"
     assert result.output == "Error: expected failure\n"
+
+
+def test_application_error_boundary_escapes_terminal_controls(
+    cli_runner: CliRunner,
+) -> None:
+    probe_app = typer.Typer(cls=ApplicationGroup)
+
+    @probe_app.callback()
+    def probe() -> None:
+        """Keep the probe as a group so its custom group class is exercised."""
+
+    @probe_app.command()
+    def fail() -> None:
+        raise ApplicationError("expected\nforged\r\t\x1b\\suffix", exit_code=7)
+
+    result = cli_runner.invoke(probe_app, ["fail"])
+
+    assert result.exit_code == 7
+    assert result.stdout == ""
+    assert result.stderr == ("Error: expected\\nforged\\r\\t\\x1b\\\\suffix\n")
+    assert "\x1b" not in result.stderr
+    assert result.stderr.count("\n") == 1
 
 
 def test_application_error_requires_nonzero_exit_code() -> None:

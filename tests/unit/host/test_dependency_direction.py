@@ -8,11 +8,13 @@ from tests.project_paths import PROJECT_ROOT
 PACKAGE_NAME = "comfyui_docker_helper"
 SOURCE_ROOT = PROJECT_ROOT / "src" / "comfyui_docker_helper"
 FORBIDDEN_COMPONENTS = {
+    "cli_output": frozenset({"config", "host", "rendering", "container"}),
     "config": frozenset({"host", "rendering", "container"}),
     "rendering": frozenset({"host", "container"}),
     "host": frozenset({"container"}),
     "container": frozenset({"host", "rendering"}),
 }
+FORBIDDEN_CLI_OUTPUT_DEPENDENCIES = frozenset({"rich", "typer"})
 
 
 def _imported_components(path: Path) -> tuple[tuple[int, str], ...]:
@@ -64,5 +66,20 @@ def test_component_dependencies_follow_documented_direction() -> None:
                     violations.append(
                         f"{relative}:{line} imports forbidden component {target}"
                     )
+
+    assert violations == []
+
+
+def test_shared_cli_output_foundation_has_no_renderer_dependency() -> None:
+    """Keep shared policy independent of concrete CLI presentation stacks."""
+    violations = []
+    for path in sorted((SOURCE_ROOT / "cli_output").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            for name in _imported_module_names(path, node):
+                root = name.split(".", maxsplit=1)[0]
+                if root in FORBIDDEN_CLI_OUTPUT_DEPENDENCIES:
+                    relative = path.relative_to(SOURCE_ROOT)
+                    violations.append(f"{relative}:{node.lineno} imports {root}")
 
     assert violations == []

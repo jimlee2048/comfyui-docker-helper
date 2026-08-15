@@ -371,6 +371,23 @@ def test_container_runtime_restart_waits_without_detach_options(
     assert "-d" not in help_output
 
 
+def test_quiet_preserves_restart_operation_result(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(container_cli, "restart_runtime", lambda: "op-7")
+
+    normal = cli_runner.invoke(app, ["container", "runtime", "restart"])
+    quiet = cli_runner.invoke(
+        app,
+        ["--quiet", "container", "runtime", "restart"],
+    )
+
+    assert quiet.exit_code == 0
+    assert quiet.stdout == normal.stdout
+    assert quiet.stderr == normal.stderr == ""
+
+
 def test_container_runtime_follow_is_output_only(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
@@ -445,3 +462,34 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
             "last_restart: op-1 (succeeded)"
         )
         assert all(not line.startswith("generation:") for line in lines)
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_quiet_preserves_runtime_status_result(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    json_output: bool,
+) -> None:
+    from comfyui_docker_helper.container.runtime_control import RuntimeStatusResponse
+
+    monkeypatch.setattr(
+        container_cli,
+        "read_runtime_status",
+        lambda: RuntimeStatusResponse(
+            state="running",
+            phase=None,
+            generation="gen-2",
+            operation=None,
+            last_restart=None,
+        ),
+    )
+    command = ["container", "runtime", "status"]
+    if json_output:
+        command.append("--json")
+
+    normal = cli_runner.invoke(app, command)
+    quiet = cli_runner.invoke(app, ["--quiet", *command])
+
+    assert quiet.exit_code == 0
+    assert quiet.stdout == normal.stdout
+    assert quiet.stderr == normal.stderr == ""

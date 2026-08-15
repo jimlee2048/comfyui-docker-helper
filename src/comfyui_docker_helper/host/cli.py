@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
-from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
+from comfyui_docker_helper.cli_settings import (
+    HELP_CONTEXT_SETTINGS,
+    require_output_settings,
+)
 from comfyui_docker_helper.config.build_plan import (
     downloader_credential_secret_ids,
     git_credential_secret_ids,
@@ -71,8 +74,9 @@ app = typer.Typer(
 
 
 @app.callback()
-def host() -> None:
+def host(context: typer.Context) -> None:
     """Run host-side commands."""
+    context.obj = require_output_settings(context)
 
 
 @app.command("validate", context_settings=HELP_CONTEXT_SETTINGS)

@@ -59,6 +59,15 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     LocalFileEntryAcquirer,
     ProviderIdentityAcquirer,
 )
+from comfyui_docker_helper.host.events import (
+    HostPhase,
+    HostPhaseCompleted,
+    HostPhaseStarted,
+    HostSubphase,
+    HostSubphaseCompleted,
+    HostSubphaseStarted,
+    HostWorkflowEvent,
+)
 from comfyui_docker_helper.host.identity_providers import (
     DockerEngineOciIdentityProvider,
     DockerManagedPythonIdentityProvider,
@@ -366,6 +375,7 @@ def _prepare(
     build_hooks_dir: Path | str | None = None,
     tag_templates: tuple[str, ...] = (),
     output_mode: BuildxOutput = "load",
+    event_sink=None,
 ):
     configuration_result = load_validate_config_result(
         config, build_hooks_dir=build_hooks_dir
@@ -391,7 +401,62 @@ def _prepare(
         overwrite=overwrite,
         runtime_hooks_dir=runtime_hooks_dir,
         working_directory=working_directory,
+        event_sink=event_sink,
     )
+
+
+@dataclass
+class RecordingHostEvents:
+    events: list[HostWorkflowEvent] = field(default_factory=list)
+
+    def emit(self, event: HostWorkflowEvent, /) -> None:
+        self.events.append(event)
+
+
+def test_render_service_emits_one_truthful_coarse_phase_sequence(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    events = RecordingHostEvents()
+
+    _prepare(config, tmp_path / "output", FakeAcquirer(), event_sink=events)
+
+    assert events.events == [
+        HostPhaseCompleted(HostPhase.BUILD_INPUT_RESOLUTION),
+        HostPhaseStarted(HostPhase.LOCK_RECONCILIATION),
+        HostSubphaseStarted(HostSubphase.CANONICAL_IDENTITY_RECONCILIATION),
+        HostSubphaseCompleted(HostSubphase.CANONICAL_IDENTITY_RECONCILIATION),
+        HostPhaseCompleted(HostPhase.LOCK_RECONCILIATION),
+        HostPhaseStarted(HostPhase.BUILD_PLAN_PREPARATION),
+        HostPhaseCompleted(HostPhase.BUILD_PLAN_PREPARATION),
+        HostPhaseStarted(HostPhase.CONTEXT_RENDER_CHECK),
+    ]
+
+
+def test_render_service_dry_run_returns_with_plan_active_and_no_context(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(_config())
+    events = RecordingHostEvents()
+
+    _prepare(
+        config,
+        tmp_path / "output",
+        FakeAcquirer(),
+        options=PlanningOptions(dry_run=True),
+        event_sink=events,
+    )
+
+    assert events.events == [
+        HostPhaseCompleted(HostPhase.BUILD_INPUT_RESOLUTION),
+        HostPhaseStarted(HostPhase.LOCK_RECONCILIATION),
+        HostSubphaseStarted(HostSubphase.CANONICAL_IDENTITY_RECONCILIATION),
+        HostSubphaseCompleted(HostSubphase.CANONICAL_IDENTITY_RECONCILIATION),
+        HostPhaseCompleted(HostPhase.LOCK_RECONCILIATION),
+        HostPhaseStarted(HostPhase.BUILD_PLAN_PREPARATION),
+    ]
 
 
 def _write_cross_dependent_incompatible_uv_lock(output: Path) -> None:

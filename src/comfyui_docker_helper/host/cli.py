@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
+from comfyui_docker_helper.cli_output import CliOutputSettings
 from comfyui_docker_helper.cli_settings import (
     HELP_CONTEXT_SETTINGS,
     require_output_settings,
@@ -42,11 +45,20 @@ from comfyui_docker_helper.host.buildx import (
     FileSecretBinding,
     build_image_with_buildx,
 )
-from comfyui_docker_helper.host.diagnostics import (
+from comfyui_docker_helper.host.events import (
+    HostPhase,
+    HostPhaseCompleted,
+    HostPhaseStarted,
+    HostSubphase,
+    HostSubphaseCompleted,
+    HostSubphaseStarted,
+    HostWorkflowSucceeded,
+)
+from comfyui_docker_helper.host.planning_authority import default_planning_providers
+from comfyui_docker_helper.host.presentation import (
     HostPresenter,
     default_host_presenter,
 )
-from comfyui_docker_helper.host.planning_authority import default_planning_providers
 from comfyui_docker_helper.host.release_wheel import CanonicalWheelError
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,
@@ -54,6 +66,7 @@ from comfyui_docker_helper.host.render_service import (
     admit_build_hook_source,
     prepare_render_context,
 )
+from comfyui_docker_helper.host.workflow_display import HostWorkflowDisplay
 
 if TYPE_CHECKING:
     from comfyui_docker_helper.host.secret_session import (
@@ -81,6 +94,7 @@ def host(context: typer.Context) -> None:
 
 @app.command("validate", context_settings=HELP_CONTEXT_SETTINGS)
 def validate(
+    context: typer.Context,
     config_files: Annotated[
         list[Path],
         typer.Option(
@@ -101,7 +115,7 @@ def validate(
 ) -> None:
     """Validate configuration locally without network access, Docker, or writes."""
     config_files = _require_at_least_one(config_files, "--file/-f")
-    presenter = default_host_presenter()
+    presenter = _default_presenter(context)
     try:
         result = load_validate_config_result(
             config_files, build_hooks_dir=build_hooks_dir
@@ -115,6 +129,7 @@ def validate(
 
 @app.command("render", context_settings=HELP_CONTEXT_SETTINGS)
 def render(
+    context: typer.Context,
     config_files: Annotated[
         list[Path],
         typer.Option(
@@ -193,7 +208,7 @@ def render(
 
     config_files = _require_at_least_one(config_files, "--file/-f")
     output_dir = _require_exactly_one(output_dirs, "--output/-o")
-    presenter = default_host_presenter()
+    presenter = _default_presenter(context)
     try:
         options = PlanningOptions(
             locked=locked,
@@ -201,38 +216,51 @@ def render(
             upgrade_lock=upgrade_lock,
             dry_run=dry_run,
         )
-        validated = load_validate_config_result(
-            config_files, build_hooks_dir=build_hooks_dir
-        )
-        presenter.warnings(validated.warnings)
-        build_hook_source_root = admit_build_hook_source(
-            validated,
-            build_hooks_dir,
-            output_dir,
-            working_directory=Path.cwd(),
-        )
-        secret_session = HostSecretSession.from_configuration(validated)
-        try:
-            with secret_session:
-                with _planning_providers(secret_session) as providers:
-                    prepared = prepare_render_context(
-                        output_dir,
-                        configuration_result=validated,
-                        build_hook_source_root=build_hook_source_root,
-                        runtime_hooks_dir=runtime_hooks_dir,
-                        acquirer=providers.acquirer,
-                        local_acquirer=providers.local_acquirer,
-                        canonical_wheel=providers.canonical_wheel,
-                        tag_templates=validated.config.build.tags,
-                        output_mode=validated.config.build.output,
-                        options=options,
-                        overwrite=overwrite,
-                        working_directory=Path.cwd(),
-                    )
-                presenter.warnings(prepared.warnings)
+        workflow = presenter.workflow("Preparing build context")
+        with _workflow_scope(workflow):
+            with _workflow_phase(workflow, HostPhase.CONFIGURATION_VALIDATION):
+                validated = load_validate_config_result(
+                    config_files, build_hooks_dir=build_hooks_dir
+                )
+                presenter.warnings(validated.warnings)
+            workflow.emit(HostPhaseStarted(HostPhase.BUILD_INPUT_RESOLUTION))
+            build_hook_source_root = admit_build_hook_source(
+                validated,
+                build_hooks_dir,
+                output_dir,
+                working_directory=Path.cwd(),
+            )
+            secret_session = HostSecretSession.from_configuration(validated)
+            try:
+                with secret_session:
+                    with _planning_providers(secret_session, workflow) as providers:
+                        prepared = prepare_render_context(
+                            output_dir,
+                            configuration_result=validated,
+                            build_hook_source_root=build_hook_source_root,
+                            runtime_hooks_dir=runtime_hooks_dir,
+                            acquirer=providers.acquirer,
+                            local_acquirer=providers.local_acquirer,
+                            canonical_wheel=providers.canonical_wheel,
+                            tag_templates=validated.config.build.tags,
+                            output_mode=validated.config.build.output,
+                            options=options,
+                            overwrite=overwrite,
+                            working_directory=Path.cwd(),
+                            event_sink=workflow,
+                        )
+                    presenter.warnings(prepared.warnings)
+                    presenter.warnings(secret_session.drain_warnings())
+            finally:
                 presenter.warnings(secret_session.drain_warnings())
-        finally:
-            presenter.warnings(secret_session.drain_warnings())
+            workflow.emit(
+                HostPhaseCompleted(
+                    HostPhase.BUILD_PLAN_PREPARATION
+                    if dry_run
+                    else HostPhase.CONTEXT_RENDER_CHECK
+                )
+            )
+            workflow.finish(HostWorkflowSucceeded())
     except ConfigurationServiceError as error:
         presenter.diagnostics("Configuration is invalid", error.diagnostics)
         raise typer.Exit(code=1) from error
@@ -255,11 +283,13 @@ def render(
         output_dir,
         options=options,
         lock_changed=prepared.lock_result.changed,
+        workflow_summary=workflow.completed_summary,
     )
 
 
 @app.command("build", context_settings=HELP_CONTEXT_SETTINGS)
 def build(
+    context: typer.Context,
     config_files: Annotated[
         list[Path],
         typer.Option(
@@ -377,108 +407,115 @@ def build(
     cache_to = _admit_single_cache_spec(cache_to_specs or [], "--cache-to")
     cli_tags = image_tags or []
     cli_output = _resolve_cli_build_output(load=load, push=push)
-    presenter = default_host_presenter()
-
-    try:
-        validated = load_validate_config_result(
-            config_files, build_hooks_dir=build_hooks_dir
-        )
-    except ConfigurationServiceError as error:
-        presenter.diagnostics("Configuration is invalid", error.diagnostics)
-        raise typer.Exit(code=1) from error
-    presenter.warnings(validated.warnings)
-    effective_tags = _resolve_effective_image_tags(
-        cli_tags=cli_tags,
-        config_tags=validated.config.build.tags,
-        comfyui_selector=validated.config.comfyui.version,
-    )
-    use_ssh = _prepare_build_ssh_input(
-        requested=ssh,
-        result=validated,
-        presenter=presenter,
-    )
-    effective_output = cli_output or validated.config.build.output
+    presenter = _default_presenter(context)
 
     try:
         options = PlanningOptions(locked=locked, upgrade_lock=upgrade_lock)
-        build_hook_source_root = admit_build_hook_source(
-            validated,
-            build_hooks_dir,
-            context_dir,
-            working_directory=Path.cwd(),
-        )
-        secret_session = HostSecretSession.from_configuration(validated)
+        workflow = presenter.workflow("Preparing image build")
+        secret_session: HostSecretSession | None = None
         try:
-            with secret_session:
-                with _planning_providers(secret_session) as providers:
-                    prepared = prepare_render_context(
+            with _workflow_scope(workflow):
+                with _workflow_phase(workflow, HostPhase.CONFIGURATION_VALIDATION):
+                    validated = load_validate_config_result(
+                        config_files, build_hooks_dir=build_hooks_dir
+                    )
+                    presenter.warnings(validated.warnings)
+                workflow.emit(HostPhaseStarted(HostPhase.BUILD_INPUT_RESOLUTION))
+                effective_tags = _resolve_effective_image_tags(
+                    cli_tags=cli_tags,
+                    config_tags=validated.config.build.tags,
+                    comfyui_selector=validated.config.comfyui.version,
+                )
+                use_ssh = _prepare_build_ssh_input(
+                    requested=ssh,
+                    result=validated,
+                    presenter=presenter,
+                )
+                effective_output = cli_output or validated.config.build.output
+
+                with ExitStack() as resources:
+                    build_hook_source_root = admit_build_hook_source(
+                        validated,
+                        build_hooks_dir,
                         context_dir,
-                        configuration_result=validated,
-                        build_hook_source_root=build_hook_source_root,
-                        runtime_hooks_dir=runtime_hooks_dir,
-                        acquirer=providers.acquirer,
-                        local_acquirer=providers.local_acquirer,
-                        canonical_wheel=providers.canonical_wheel,
-                        tag_templates=effective_tags,
-                        output_mode=effective_output,
-                        options=options,
-                        overwrite=True,
                         working_directory=Path.cwd(),
                     )
-                presenter.warnings(prepared.warnings)
-                presenter.warnings(secret_session.drain_warnings())
-                credential_bindings = tuple(
-                    FileSecretBinding(
-                        secret_id,
-                        secret_session.snapshot_git_credential(secret_id),
+                    secret_session = HostSecretSession.from_configuration(validated)
+                    resources.enter_context(secret_session)
+                    with _planning_providers(secret_session, workflow) as providers:
+                        prepared = prepare_render_context(
+                            context_dir,
+                            configuration_result=validated,
+                            build_hook_source_root=build_hook_source_root,
+                            runtime_hooks_dir=runtime_hooks_dir,
+                            acquirer=providers.acquirer,
+                            local_acquirer=providers.local_acquirer,
+                            canonical_wheel=providers.canonical_wheel,
+                            tag_templates=effective_tags,
+                            output_mode=effective_output,
+                            options=options,
+                            overwrite=True,
+                            working_directory=Path.cwd(),
+                            event_sink=workflow,
+                        )
+                    presenter.warnings(prepared.warnings)
+                    presenter.warnings(secret_session.drain_warnings())
+                    credential_bindings = tuple(
+                        FileSecretBinding(
+                            secret_id,
+                            secret_session.snapshot_git_credential(secret_id),
+                        )
+                        for secret_id in git_credential_secret_ids(
+                            prepared.plan.custom_nodes
+                        )
                     )
-                    for secret_id in git_credential_secret_ids(
-                        prepared.plan.custom_nodes
+                    downloader_credential_bindings = tuple(
+                        FileSecretBinding(
+                            secret_id,
+                            secret_session.snapshot_downloader_credential(secret_id),
+                        )
+                        for secret_id in downloader_credential_secret_ids(
+                            prepared.plan.files
+                        )
                     )
-                )
-                downloader_credential_bindings = tuple(
-                    FileSecretBinding(
-                        secret_id,
-                        secret_session.snapshot_downloader_credential(secret_id),
-                    )
-                    for secret_id in downloader_credential_secret_ids(
-                        prepared.plan.files
-                    )
-                )
-                presenter.warnings(secret_session.drain_warnings())
+                    presenter.warnings(secret_session.drain_warnings())
 
-                known_hosts_bindings = (
-                    _collect_default_known_hosts_bindings() if use_ssh else ()
-                )
+                    known_hosts_bindings = (
+                        _collect_default_known_hosts_bindings() if use_ssh else ()
+                    )
 
-                buildx_output = prepared.output_plan
-                if buildx_output is None:  # pragma: no cover
-                    raise RuntimeError("host build requires a Buildx output plan")
-                platforms = (prepared.plan.toolchain.platform,)
-                presenter.build_start(
-                    context_dir,
-                    output_plan=buildx_output,
-                    platforms=platforms,
-                )
-                build_image_with_buildx(
-                    image_tags=buildx_output.tags,
-                    output=buildx_output.output,
-                    context_dir=context_dir,
-                    platforms=platforms,
-                    cwd=Path.cwd(),
-                    log=_write_external_build_line,
-                    forward_default_ssh=use_ssh,
-                    file_secret_bindings=(
-                        *credential_bindings,
-                        *downloader_credential_bindings,
-                        *known_hosts_bindings,
-                    ),
-                    cache_from=cache_from,
-                    cache_to=cache_to,
-                )
+                    buildx_output = prepared.output_plan
+                    if buildx_output is None:  # pragma: no cover
+                        raise RuntimeError("host build requires a Buildx output plan")
+                    platforms = (prepared.plan.toolchain.platform,)
+
+                    workflow.emit(HostPhaseCompleted(HostPhase.CONTEXT_RENDER_CHECK))
+                    workflow.seal_for_external_stream()
+                    presenter.build_start(
+                        context_dir,
+                        output_plan=buildx_output,
+                        platforms=platforms,
+                    )
+                    build_image_with_buildx(
+                        image_tags=buildx_output.tags,
+                        output=buildx_output.output,
+                        context_dir=context_dir,
+                        platforms=platforms,
+                        cwd=Path.cwd(),
+                        log=_write_external_build_line,
+                        forward_default_ssh=use_ssh,
+                        file_secret_bindings=(
+                            *credential_bindings,
+                            *downloader_credential_bindings,
+                            *known_hosts_bindings,
+                        ),
+                        cache_from=cache_from,
+                        cache_to=cache_to,
+                    )
                 presenter.build_complete(output_plan=buildx_output)
         finally:
-            presenter.warnings(secret_session.drain_warnings())
+            if secret_session is not None:
+                presenter.warnings(secret_session.drain_warnings())
     except ConfigurationServiceError as error:
         presenter.diagnostics("Configuration is invalid", error.diagnostics)
         raise typer.Exit(code=1) from error
@@ -493,11 +530,60 @@ def build(
         raise typer.Exit(code=error.exit_code) from error
 
 
-def _planning_providers(secret_session: HostSecretSession):
+def _default_presenter(context: typer.Context) -> HostPresenter:
+    settings = context.find_object(CliOutputSettings)
+    if settings is None:
+        raise RuntimeError("CLI output settings were not initialized")
+    return default_host_presenter(settings)
+
+
+@contextmanager
+def _workflow_scope(workflow: HostWorkflowDisplay) -> Iterator[None]:
+    try:
+        yield
+    except KeyboardInterrupt as error:
+        workflow.terminate_for_error(error, interrupted=True)
+        raise
+    except BaseException as error:
+        workflow.terminate_for_error(error)
+        raise
+
+
+@contextmanager
+def _workflow_phase(
+    workflow: HostWorkflowDisplay,
+    phase: HostPhase,
+) -> Iterator[None]:
+    workflow.emit(HostPhaseStarted(phase))
+    yield
+    workflow.emit(HostPhaseCompleted(phase))
+
+
+@contextmanager
+def _workflow_subphase(
+    workflow: HostWorkflowDisplay,
+    subphase: HostSubphase,
+) -> Iterator[None]:
+    workflow.emit(HostSubphaseStarted(subphase))
+    yield
+    workflow.emit(HostSubphaseCompleted(subphase))
+
+
+@contextmanager
+def _planning_providers(
+    secret_session: HostSecretSession,
+    workflow: HostWorkflowDisplay,
+):
     binding = secret_session.git_binding()
-    if binding is None:
-        return default_planning_providers()
-    return default_planning_providers(git_credential_binding=binding)
+    manager = (
+        default_planning_providers()
+        if binding is None
+        else default_planning_providers(git_credential_binding=binding)
+    )
+    with ExitStack() as resources:
+        with _workflow_subphase(workflow, HostSubphase.CANONICAL_WHEEL_PREPARATION):
+            providers = resources.enter_context(manager)
+        yield providers
 
 
 def _write_external_build_line(message: str) -> None:

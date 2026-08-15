@@ -1,11 +1,15 @@
 """Control-safe text helpers shared by CLI presentation boundaries."""
 
 
-def control_safe_text(value: str) -> str:
-    """Escape backslashes and non-printing characters for terminal output."""
+def control_safe_text(
+    value: str,
+    *,
+    escape_backslashes: bool = True,
+) -> str:
+    """Escape non-printing characters and, by default, printable backslashes."""
     escaped: list[str] = []
     for character in value:
-        if character == "\\":
+        if character == "\\" and escape_backslashes:
             escaped.append("\\\\")
             continue
         if character.isprintable():

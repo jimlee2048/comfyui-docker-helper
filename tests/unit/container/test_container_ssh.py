@@ -280,44 +280,6 @@ def test_start_sshd_observes_controlled_credential_path_mode_warning(
     assert VALID_SSH_KEY not in "\n".join(messages)
 
 
-def test_start_sshd_legacy_warning_passthrough_accepts_unrecognized_text(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    warning = "WARNING: legacy injected SSH preparation warning"
-
-    def prepare_with_warning(
-        _config: RuntimeSystemSshConfig,
-        **_kwargs: object,
-    ) -> RootSshCredentialPreparationStatus:
-        return RootSshCredentialPreparationStatus(
-            ssh_enabled=True,
-            public_key_count=1,
-            password_configured=False,
-            warnings=(warning,),
-        )
-
-    monkeypatch.setattr(
-        ssh_module,
-        "prepare_root_ssh_credentials",
-        prepare_with_warning,
-    )
-    messages: list[str] = []
-
-    start_sshd_if_enabled(
-        RuntimeConfig.model_validate(
-            {"system": {"ssh": {"enable": True, "pub_keys": [VALID_SSH_KEY]}}}
-        ),
-        runtime=ContainerRuntime(),
-        runtime_dir=tmp_path / "run" / "sshd",
-        command_runner=RecordingCommandRunner(),
-        process_starter=RecordingProcessStarter(),
-        log=messages.append,
-    )
-
-    assert messages == [warning]
-
-
 def test_public_keys_prepare_authorized_keys_permissions_and_ownership(
     tmp_path: Path,
 ) -> None:

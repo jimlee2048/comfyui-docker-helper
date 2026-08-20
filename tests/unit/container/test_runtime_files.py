@@ -27,6 +27,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeDownloadItemCompleted,
     RuntimeDownloadItemProgress,
     RuntimeDownloadItemRetryScheduled,
+    RuntimeDownloadItemVerificationStarted,
 )
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
@@ -256,6 +257,26 @@ class FakeAria2Factory:
     def __call__(self, *, log: Logger) -> FakeBackend:
         self.logs.append(log)
         return self.backend
+
+
+class RecordingEventSink:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+        self.progress_events: list[tuple[object, object]] = []
+        self.closed_scopes: list[object] = []
+        self.operations: list[tuple[str, object]] = []
+
+    def emit(self, event: object, /) -> None:
+        self.events.append(event)
+        self.operations.append(("emit", event))
+
+    def emit_progress(self, scope: object, event: object) -> None:
+        self.events.append(event)
+        self.progress_events.append((scope, event))
+
+    def close_progress(self, scope: object) -> None:
+        self.closed_scopes.append(scope)
+        self.operations.append(("close", scope))
 
 
 # Planning preserves ordered user intent and canonical checksum identity.
@@ -1103,17 +1124,7 @@ def test_runtime_verified_existing_target_skips_credential_and_backend(
     item.target.parent.mkdir(parents=True)
     item.target.write_bytes(content)
     backend = FakeBackend()
-    presentation_events: list[object] = []
-
-    class Recorder:
-        def emit(self, event: object, /) -> None:
-            presentation_events.append(event)
-
-        def emit_progress(self, _scope: object, event: object) -> None:
-            presentation_events.append(event)
-
-        def close_progress(self, _scope: object) -> None:
-            return
+    recorder = RecordingEventSink()
 
     class CredentialMustRemainLazy:
         def authorization_for(self, _url: object) -> bytes | None:
@@ -1125,17 +1136,21 @@ def test_runtime_verified_existing_target_skips_credential_and_backend(
         backends={"httpx": backend},
         log=lambda _: None,
         credential_policy=CredentialMustRemainLazy(),
-        event_sink=Recorder(),
+        event_sink=recorder,
     )
 
     assert results[0].status is DownloadStatus.SKIPPED
     assert backend.calls == []
     completion = next(
         event
-        for event in presentation_events
+        for event in recorder.events
         if isinstance(event, RuntimeDownloadItemCompleted)
     )
     assert completion.attempts == 0
+    assert not any(
+        isinstance(event, RuntimeDownloadItemVerificationStarted)
+        for event in recorder.events
+    )
 
 
 def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> None:
@@ -1144,36 +1159,27 @@ def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> Non
         failures=[TransportRetryable(TransportDiagnostic("httpx", "temporary"))]
     )
 
-    events: list[object] = []
+    recorder = RecordingEventSink()
     logs: list[str] = []
-
-    class Recorder:
-        def emit(self, event: object, /) -> None:
-            events.append(event)
-
-        def emit_progress(self, _scope: object, event: object) -> None:
-            events.append(event)
-
-        def close_progress(self, _scope: object) -> None:
-            return
 
     result = process_runtime_file_downloads(
         plan,
         config=_config(attempts=2),
         backends={"httpx": backend},
         log=logs.append,
-        event_sink=Recorder(),
+        event_sink=recorder,
     )
 
     assert result[0].status is DownloadStatus.DOWNLOADED
     assert len(backend.calls) == 2
-    assert [type(event) for event in events] == [
+    assert [type(event) for event in recorder.events] == [
         RuntimeDownloadAttemptStarted,
         RuntimeDownloadItemRetryScheduled,
         RuntimeDownloadAttemptStarted,
+        RuntimeDownloadItemVerificationStarted,
         RuntimeDownloadItemCompleted,
     ]
-    assert all("https://" not in repr(event) for event in events)
+    assert all("https://" not in repr(event) for event in recorder.events)
     assert logs == []
 
 
@@ -1198,30 +1204,19 @@ def test_runtime_transport_progress_is_projected_to_background_scope(
             request.progress_sink.emit(progress)
             return super().download(request, settings)
 
-    emitted_progress: list[tuple[object, object]] = []
-    closed_scopes: list[object] = []
-
-    class Recorder:
-        def emit(self, _event: object, /) -> None:
-            return
-
-        def emit_progress(self, scope: object, event: object) -> None:
-            emitted_progress.append((scope, event))
-
-        def close_progress(self, scope: object) -> None:
-            closed_scopes.append(scope)
+    recorder = RecordingEventSink()
 
     result = process_runtime_file_downloads(
         plan,
         config=_config(attempts=2),
         backends={"httpx": ProgressBackend()},
         log=lambda _: None,
-        event_sink=Recorder(),
+        event_sink=recorder,
     )
 
     assert result[0].status is DownloadStatus.DOWNLOADED
-    assert len(emitted_progress) == 1
-    scope, event = emitted_progress[0]
+    assert len(recorder.progress_events) == 1
+    scope, event = recorder.progress_events[0]
     assert event == RuntimeDownloadItemProgress(
         index=1,
         total=1,
@@ -1231,7 +1226,49 @@ def test_runtime_transport_progress_is_projected_to_background_scope(
         max_attempts=2,
         progress=progress,
     )
-    assert closed_scopes == [scope]
+    assert recorder.closed_scopes == [scope]
+    verification = next(
+        event
+        for operation, event in recorder.operations
+        if operation == "emit"
+        and isinstance(event, RuntimeDownloadItemVerificationStarted)
+    )
+    assert verification == RuntimeDownloadItemVerificationStarted(
+        index=1,
+        total=1,
+        target="models/a.bin",
+    )
+    assert recorder.operations.index(("close", scope)) < recorder.operations.index(
+        ("emit", verification)
+    )
+
+
+def test_runtime_verification_failure_never_claims_the_file_is_ready(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(
+        tmp_path / "ComfyUI",
+        _file("a.bin", checksum=_checksum(b"expected")),
+    )
+    recorder = RecordingEventSink()
+
+    results = process_runtime_file_downloads(
+        plan,
+        config=_config(policy="continue", attempts=1),
+        backends={"httpx": FakeBackend(payload=b"unexpected")},
+        log=lambda _: None,
+        event_sink=recorder,
+    )
+
+    assert results == ()
+    assert any(
+        isinstance(event, RuntimeDownloadItemVerificationStarted)
+        for event in recorder.events
+    )
+    assert any(isinstance(event, RuntimeDownloadFailed) for event in recorder.events)
+    assert not any(
+        isinstance(event, RuntimeDownloadItemCompleted) for event in recorder.events
+    )
 
 
 def test_runtime_continue_applies_only_after_retryable_exhaustion(
@@ -1320,17 +1357,7 @@ def test_runtime_credential_failure_is_not_retried_and_preserves_attempt_fact(
             return TransportSuccess(length=0, namespace="httpx", http_status=200)
 
     logs: list[str] = []
-    presentation_events: list[object] = []
-
-    class Recorder:
-        def emit(self, event: object, /) -> None:
-            presentation_events.append(event)
-
-        def emit_progress(self, _scope: object, event: object) -> None:
-            presentation_events.append(event)
-
-        def close_progress(self, _scope: object) -> None:
-            return
+    recorder = RecordingEventSink()
 
     results = process_runtime_file_downloads(
         plan,
@@ -1338,22 +1365,16 @@ def test_runtime_credential_failure_is_not_retried_and_preserves_attempt_fact(
         backends={"httpx": CredentialBackend()},
         log=logs.append,
         credential_policy=(None if network_attempted else InitialCredentialPolicy()),
-        event_sink=Recorder(),
+        event_sink=recorder,
     )
 
     assert [result.item.filename for result in results] == ["b.bin"]
     assert calls == (2 if network_attempted else 1)
     assert logs == []
     failure = next(
-        event
-        for event in presentation_events
-        if isinstance(event, RuntimeDownloadFailed)
+        event for event in recorder.events if isinstance(event, RuntimeDownloadFailed)
     )
     assert failure.attempts == expected_attempts
-    if not network_attempted:
-        assert not any(
-            "target=models/a.bin" in line and "attempt=" in line for line in logs
-        )
 
 
 # Terminal item failures apply runtime policy once without spending retry budget.
@@ -1487,18 +1508,7 @@ def test_runtime_cancelled_transfer_stops_without_exhausted_failure(
         failures=[TransportCancelled(TransportDiagnostic("httpx", "cancelled"))]
     )
     statuses: list[str] = []
-    events: list[object] = []
-    closed_scopes: list[object] = []
-
-    class Recorder:
-        def emit(self, event: object, /) -> None:
-            events.append(event)
-
-        def emit_progress(self, _scope: object, event: object) -> None:
-            events.append(event)
-
-        def close_progress(self, scope: object) -> None:
-            closed_scopes.append(scope)
+    recorder = RecordingEventSink()
 
     results = process_runtime_file_downloads(
         plan,
@@ -1506,17 +1516,19 @@ def test_runtime_cancelled_transfer_stops_without_exhausted_failure(
         backends={"httpx": backend},
         state_observer=lambda item, status, **_: statuses.append(status),
         log=lambda _: None,
-        event_sink=Recorder(),
+        event_sink=recorder,
     )
 
     assert results == ()
     assert statuses == ["failed"]
     assert len(backend.calls) == 1
-    assert len(closed_scopes) == 1
-    assert any(isinstance(event, RuntimeDownloadAttemptStarted) for event in events)
+    assert len(recorder.closed_scopes) == 1
+    assert any(
+        isinstance(event, RuntimeDownloadAttemptStarted) for event in recorder.events
+    )
     assert not any(
         isinstance(event, (RuntimeDownloadFailed, RuntimeDownloadItemCompleted))
-        for event in events
+        for event in recorder.events
     )
 
 

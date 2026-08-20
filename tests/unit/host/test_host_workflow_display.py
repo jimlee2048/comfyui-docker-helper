@@ -33,6 +33,16 @@ from comfyui_docker_helper.host.events import (
 from comfyui_docker_helper.host.workflow_display import HostWorkflowDisplay
 
 
+class _FlushTrackingStream(StringIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.flushes = 0
+
+    def flush(self) -> None:
+        self.flushes += 1
+        super().flush()
+
+
 def _capabilities(*, terminal: bool) -> StreamCapabilities:
     return StreamCapabilities.from_facts(
         is_terminal=terminal,
@@ -50,7 +60,7 @@ def _display(
     stderr_terminal: bool = False,
     clock: Callable[[], float] | None = None,
 ) -> tuple[HostWorkflowDisplay, StringIO]:
-    stderr = StringIO()
+    stderr = _FlushTrackingStream()
     console = Console(
         file=stderr,
         force_terminal=stderr_terminal,
@@ -79,7 +89,9 @@ def _display(
 
 class _FakeLive:
     instances: ClassVar[list[_FakeLive]] = []
-    fail_stop: ClassVar[bool] = False
+    start_error: ClassVar[BaseException | None] = None
+    update_error: ClassVar[BaseException | None] = None
+    stop_error: ClassVar[BaseException | None] = None
 
     def __init__(self, renderable: object, **options: object) -> None:
         self.renderable = renderable
@@ -92,22 +104,28 @@ class _FakeLive:
     def start(self, *, refresh: bool) -> None:
         assert refresh is True
         self.started += 1
+        if type(self).start_error is not None:
+            raise type(self).start_error
 
     def update(self, renderable: object, *, refresh: bool) -> None:
         assert refresh is True
         self.renderable = renderable
         self.updates.append(renderable)
+        if type(self).update_error is not None:
+            raise type(self).update_error
 
     def stop(self) -> None:
         self.stopped += 1
-        if type(self).fail_stop:
-            raise OSError("terminal teardown failed")
+        if type(self).stop_error is not None:
+            raise type(self).stop_error
 
 
 @pytest.fixture(autouse=True)
 def _reset_fake_live() -> None:
     _FakeLive.instances = []
-    _FakeLive.fail_stop = False
+    _FakeLive.start_error = None
+    _FakeLive.update_error = None
+    _FakeLive.stop_error = None
 
 
 def test_host_phase_events_are_immutable() -> None:
@@ -154,6 +172,7 @@ def test_plain_output_is_append_only_control_free_and_avoids_duplicate_history()
     assert "Completed: Validating configuration\n" not in output
     assert "In progress: Resolving build inputs\n" in output
     assert output[len(before_failure) :] == "Failed: Resolving build inputs\n"
+    assert stderr.flushes == len(output.splitlines())
     assert "\x1b" not in output
     assert "\r" not in output
 
@@ -273,7 +292,8 @@ def test_live_teardown_failure_does_not_replace_the_primary_workflow_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(display_module, "Live", _FakeLive)
-    _FakeLive.fail_stop = True
+    _FakeLive.update_error = RuntimeError("terminal update failed")
+    _FakeLive.stop_error = OSError("terminal teardown failed")
     display, stderr = _display(stderr_terminal=True)
     primary_error = ValueError("workflow failed")
     display.emit(HostPhaseStarted(HostPhase.CONFIGURATION_VALIDATION))
@@ -291,11 +311,49 @@ def test_live_teardown_failure_does_not_replace_the_primary_workflow_error(
     assert "Failed: Validating configuration" in stderr.getvalue()
 
 
+def test_live_start_failure_stops_and_preserves_the_start_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(display_module, "Live", _FakeLive)
+    start_error = KeyboardInterrupt("terminal start interrupted")
+    _FakeLive.start_error = start_error
+    _FakeLive.stop_error = OSError("terminal teardown failed")
+    display, _ = _display(stderr_terminal=True)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        display.emit(HostPhaseStarted(HostPhase.CONFIGURATION_VALIDATION))
+
+    assert raised.value is start_error
+    assert _FakeLive.instances[0].stopped == 1
+    assert display._live is None
+    display.terminate_for_error(ValueError("workflow failed"))
+    assert _FakeLive.instances[0].stopped == 1
+
+
+def test_terminal_update_failure_still_stops_and_remains_the_first_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(display_module, "Live", _FakeLive)
+    update_error = RuntimeError("terminal update failed")
+    _FakeLive.update_error = update_error
+    _FakeLive.stop_error = OSError("terminal teardown failed")
+    display, stderr = _display(stderr_terminal=True)
+    display.emit(HostPhaseStarted(HostPhase.CONFIGURATION_VALIDATION))
+
+    with pytest.raises(RuntimeError) as raised:
+        display.finish(HostPhaseInterrupted(HostPhase.CONFIGURATION_VALIDATION))
+
+    assert raised.value is update_error
+    assert _FakeLive.instances[0].stopped == 1
+    assert display._live is None
+    assert "Interrupted: Validating configuration" in stderr.getvalue()
+
+
 def test_live_teardown_failure_remains_observable_without_a_primary_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(display_module, "Live", _FakeLive)
-    _FakeLive.fail_stop = True
+    _FakeLive.stop_error = OSError("terminal teardown failed")
     display, stderr = _display(stderr_terminal=True)
     display.emit(HostPhaseStarted(HostPhase.CONFIGURATION_VALIDATION))
 

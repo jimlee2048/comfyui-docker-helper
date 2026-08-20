@@ -25,6 +25,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeDownloadItemCompleted,
     RuntimeDownloadItemProgress,
     RuntimeDownloadItemRetryScheduled,
+    RuntimeDownloadItemVerificationStarted,
     RuntimeDownloadQueue,
     RuntimeDownloadQueueState,
     RuntimeDownloadQueueSummary,
@@ -51,6 +52,8 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeSshWarning,
     RuntimeSshWarningKind,
     RuntimeStaleCleanupPending,
+    RuntimeWarningCategory,
+    RuntimeWarningsAggregated,
 )
 from comfyui_docker_helper.container.runtime_presentation import (
     RuntimeDisplay,
@@ -151,6 +154,7 @@ def _render(detail: OutputDetail) -> str:
             3,
             DownloadTransferProgress(512, 1024, 600, 256),
         ),
+        RuntimeDownloadItemVerificationStarted(1, 1, "models/model.bin"),
         RuntimeDownloadItemRetryScheduled(
             1,
             1,
@@ -179,9 +183,15 @@ def test_runtime_display_owns_the_four_detail_levels_once() -> None:
     verbose = _render(OutputDetail.VERBOSE)
     debug = _render(OutputDetail.DEBUG)
 
-    assert "saturated" in quiet
+    saturation_line = next(
+        line for line in quiet.splitlines() if "Runtime output was busy" in line
+    )
+    assert "2" in saturation_line
+    assert "omitted" in saturation_line
+    assert "event delivery" not in saturation_line
     assert "queue stopped after a failure" in quiet
     assert "Starting a runtime generation" not in quiet
+    assert "Verifying runtime file" not in quiet
     assert "Preparing runtime files" in normal
     assert "[1/1]" in normal
     assert "baked" in normal
@@ -190,6 +200,7 @@ def test_runtime_display_owns_the_four_detail_levels_once() -> None:
     assert "[1/3] Downloading runtime file" in normal
     assert "50%" in normal
     assert "ETA" in normal
+    assert "Verifying runtime file: models/model.bin" in normal
     assert "Retrying runtime file" in normal
     assert "immediately" in normal
     assert "Runtime file ready" in normal
@@ -235,6 +246,35 @@ def test_runtime_display_ignores_terminal_capability_and_preserves_unknown_total
     assert stream.flushes == 1
 
 
+@pytest.mark.parametrize(
+    ("transferred_bytes", "expected_percentage"),
+    [(999, "99%"), (1000, "100%")],
+)
+def test_runtime_display_does_not_round_incomplete_transfer_to_completion(
+    transferred_bytes: int,
+    expected_percentage: str,
+) -> None:
+    stream = StringIO()
+    display = RuntimeDisplay(stderr=stream, settings=CliOutputSettings())
+
+    display.emit(
+        RuntimeDownloadItemProgress(
+            1,
+            1,
+            "models/model.bin",
+            "sync",
+            1,
+            1,
+            DownloadTransferProgress(transferred_bytes, 1000, transferred_bytes),
+        )
+    )
+
+    output = stream.getvalue()
+    assert expected_percentage in output
+    if transferred_bytes < 1000:
+        assert "100%" not in output
+
+
 def test_runtime_warnings_keep_safe_context_even_when_quiet() -> None:
     stream = StringIO()
     display = RuntimeDisplay(
@@ -268,6 +308,7 @@ def test_runtime_warnings_keep_safe_context_even_when_quiet() -> None:
             "mounted",
             "90-cleanup.sh",
         ),
+        RuntimeWarningsAggregated(RuntimeWarningCategory.DOWNLOAD_FAILURE, 3),
     ):
         display.emit(warning)
 
@@ -278,6 +319,12 @@ def test_runtime_warnings_keep_safe_context_even_when_quiet() -> None:
     assert "models/required.bin" in output
     assert "exit code 7" in output
     assert "mounted/stop/90-cleanup.sh" in output
+    aggregate_line = next(
+        line for line in output.splitlines() if "output was busy" in line
+    )
+    assert "3" in aggregate_line
+    assert "download" in aggregate_line
+    assert "warning" in aggregate_line
 
     debug_stream = StringIO()
     RuntimeDisplay(

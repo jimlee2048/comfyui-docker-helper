@@ -19,6 +19,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeDownloadItemCompleted,
     RuntimeDownloadItemProgress,
     RuntimeDownloadItemRetryScheduled,
+    RuntimeDownloadItemVerificationStarted,
     RuntimeDownloadProgressState,
     RuntimeDownloadQueueSummary,
     RuntimeDownloadQueueWarning,
@@ -37,6 +38,7 @@ type RuntimeBackgroundEvent = (
     | RuntimeDownloadAttemptStarted
     | RuntimeDownloadItemProgress
     | RuntimeDownloadItemRetryScheduled
+    | RuntimeDownloadItemVerificationStarted
     | RuntimeDownloadItemCompleted
     | RuntimeDownloadQueueWarning
     | RuntimeStaleCleanupPending

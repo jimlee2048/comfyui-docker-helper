@@ -18,6 +18,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeDownloadItemCompleted,
     RuntimeDownloadItemProgress,
     RuntimeDownloadItemRetryScheduled,
+    RuntimeDownloadItemVerificationStarted,
     RuntimeDownloadProgressState,
     RuntimeDownloadQueue,
     RuntimeDownloadQueueState,
@@ -43,6 +44,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeSshWarning,
     RuntimeSshWarningKind,
     RuntimeStaleCleanupPending,
+    RuntimeWarningCategory,
     RuntimeWarningsAggregated,
 )
 
@@ -98,6 +100,12 @@ _RETRY_REASON_LABELS = {
     DownloadRetryReason.RESUME_REJECTED: "the server rejected the resumed transfer",
     DownloadRetryReason.CHECKSUM_MISMATCH: "verification did not match",
     DownloadRetryReason.UNKNOWN: "the transfer failed",
+}
+
+_WARNING_CATEGORY_LABELS = {
+    RuntimeWarningCategory.STALE_CLEANUP: "stale-file cleanup",
+    RuntimeWarningCategory.DOWNLOAD_FAILURE: "download",
+    RuntimeWarningCategory.SSH: "SSH",
 }
 
 
@@ -174,6 +182,8 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
                 self._download_attempt_started(event)
             elif isinstance(event, RuntimeDownloadItemProgress):
                 self._download_progress(event)
+            elif isinstance(event, RuntimeDownloadItemVerificationStarted):
+                self._download_verification_started(event)
             elif isinstance(event, RuntimeDownloadItemRetryScheduled):
                 self._download_retry(event)
             elif isinstance(event, RuntimeDownloadItemCompleted):
@@ -274,10 +284,9 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
         if progress.total_bytes is None:
             status = f"{transferred} transferred"
         else:
-            percentage = (
-                0.0
-                if progress.total_bytes == 0
-                else progress.transferred_bytes / progress.total_bytes * 100
+            percentage = _transfer_percentage(
+                progress.transferred_bytes,
+                progress.total_bytes,
             )
             status = (
                 f"{transferred} / {_format_bytes(progress.total_bytes)} "
@@ -304,6 +313,14 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
         if self._settings.includes(OutputDetail.DEBUG):
             value += f" mode={event.mode} attempt={event.attempt}/{event.max_attempts}"
         self._write(value)
+
+    def _download_verification_started(
+        self,
+        event: RuntimeDownloadItemVerificationStarted,
+    ) -> None:
+        self._write(
+            f"[{event.index}/{event.total}] Verifying runtime file: {event.target}"
+        )
 
     def _download_retry(self, event: RuntimeDownloadItemRetryScheduled) -> None:
         retry = event.retry
@@ -345,18 +362,20 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
     ) -> None:
         if isinstance(event, RuntimePresentationSaturated):
             count = event.omitted_transition_count
-            noun = "transition" if count == 1 else "transitions"
+            noun = "update" if count == 1 else "updates"
+            verb = "was" if count == 1 else "were"
             value = (
-                "Warning: Runtime event delivery was saturated; "
-                f"{count} informational {noun} could not be presented"
+                "Warning: Runtime output was busy; "
+                f"{count} informational {noun} {verb} omitted"
             )
             code = "presentation-saturated"
         elif isinstance(event, RuntimeWarningsAggregated):
             count = event.count
             noun = "warning" if count == 1 else "warnings"
             value = (
-                f"Warning: {count} additional Runtime {event.category.value} "
-                f"{noun} occurred while diagnostic delivery was full"
+                f"Warning: {count} additional runtime "
+                f"{_WARNING_CATEGORY_LABELS[event.category]} {noun} occurred "
+                "while output was busy"
             )
             code = f"warnings-aggregated-{event.category.value}"
         elif isinstance(event, RuntimeDownloadQueueWarning):
@@ -441,6 +460,14 @@ def _format_bytes(value: int | float) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} {units[-1]}"
+
+
+def _transfer_percentage(transferred_bytes: int, total_bytes: int) -> float:
+    if total_bytes == 0:
+        return 0.0
+    if transferred_bytes == total_bytes:
+        return 100.0
+    return min(transferred_bytes / total_bytes * 100.0, 99.0)
 
 
 def _format_duration(seconds: float) -> str:

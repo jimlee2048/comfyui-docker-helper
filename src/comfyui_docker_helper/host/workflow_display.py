@@ -307,14 +307,24 @@ class HostWorkflowDisplay(EventSink[HostWorkflowEvent]):
         if self._policy.allows_live(OutputStream.STDERR):
             renderable = self._interactive_tree()
             if self._live is None:
-                self._live = Live(
+                live = Live(
                     renderable,
                     console=self._stderr,
                     transient=True,
                     redirect_stdout=False,
                     redirect_stderr=False,
                 )
-                self._live.start(refresh=True)
+                self._live = live
+                try:
+                    live.start(refresh=True)
+                except BaseException:
+                    try:
+                        live.stop()
+                    except BaseException:
+                        pass
+                    finally:
+                        self._live = None
+                    raise
             else:
                 self._live.update(renderable, refresh=True)
             return
@@ -333,10 +343,23 @@ class HostWorkflowDisplay(EventSink[HostWorkflowEvent]):
     def _render_terminal(self, event: HostWorkflowTerminalEvent) -> None:
         live = self._live
         if live is not None:
-            if not isinstance(event, HostWorkflowSucceeded):
-                live.update(self._interactive_tree(), refresh=True)
-            live.stop()
-            self._live = None
+            presentation_error: BaseException | None = None
+            try:
+                if not isinstance(event, HostWorkflowSucceeded):
+                    live.update(self._interactive_tree(), refresh=True)
+            except BaseException as error:
+                presentation_error = error
+            try:
+                live.stop()
+            except BaseException as error:
+                if presentation_error is None:
+                    presentation_error = error
+            finally:
+                self._live = None
+            if presentation_error is not None:
+                raise presentation_error.with_traceback(
+                    presentation_error.__traceback__
+                )
 
         if isinstance(event, HostWorkflowSucceeded):
             return
@@ -477,8 +500,10 @@ class HostWorkflowDisplay(EventSink[HostWorkflowEvent]):
         try:
             live = self._live
             if live is not None:
-                live.stop()
-                self._live = None
+                try:
+                    live.stop()
+                finally:
+                    self._live = None
                 if self._policy.includes(OutputDetail.NORMAL):
                     self._stderr.print(
                         self._interactive_tree(terminal=True), soft_wrap=True

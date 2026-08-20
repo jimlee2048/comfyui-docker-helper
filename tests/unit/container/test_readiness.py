@@ -103,7 +103,7 @@ def test_wait_succeeds_after_failed_polls() -> None:
         assert port == 8188
         attempts.append(port)
         if len(attempts) < 3:
-            return ReadinessProbeResult(False, "not yet")
+            return ReadinessProbeResult(False)
         return ReadinessProbeResult(True)
 
     result = wait_for_comfyui_readiness(
@@ -128,7 +128,7 @@ def test_wait_times_out_when_probe_never_becomes_ready() -> None:
         wait_for_comfyui_readiness(
             8188,
             child=RunningChild(),
-            probe=lambda port: ReadinessProbeResult(False, f"port {port} not ready"),
+            probe=lambda _port: ReadinessProbeResult(False),
             timeout_seconds=0.2,
             poll_interval_seconds=0.1,
             monotonic=clock.monotonic,
@@ -141,33 +141,25 @@ def test_wait_times_out_when_probe_never_becomes_ready() -> None:
     assert diagnostic.hint == (
         "Inspect ComfyUI startup output and verify its listen port"
     )
-    assert "port 8188 not ready" not in diagnostic.message
 
 
 @pytest.mark.parametrize(
-    ("response_factory", "expected_reason"),
+    "response_factory",
     [
-        (
-            lambda: FakeResponse(status_code=503),
-            "readiness probe returned HTTP 503",
-        ),
-        (
+        pytest.param(lambda: FakeResponse(status_code=503), id="http-status"),
+        pytest.param(
             lambda: FakeResponse(json_error=ValueError("bad json")),
-            "readiness probe returned invalid JSON",
+            id="invalid-json",
         ),
-        (
+        pytest.param(
             lambda: FakeResponse(payload={"system": {}}),
-            "readiness probe JSON payload is missing: devices",
+            id="missing-field",
         ),
-        (
-            lambda: FakeResponse(payload=[]),
-            "readiness probe JSON payload must be an object",
-        ),
+        pytest.param(lambda: FakeResponse(payload=[]), id="non-object"),
     ],
 )
 def test_probe_not_ready_responses_eventually_fail_readiness(
     response_factory,
-    expected_reason: str,
 ) -> None:
     clock = FakeClock()
 
@@ -176,7 +168,7 @@ def test_probe_not_ready_responses_eventually_fail_readiness(
         return response_factory()
 
     probe_result = probe_comfyui_readiness(8188, http_get=http_get)
-    assert probe_result.reason == expected_reason
+    assert probe_result.ready is False
 
     with pytest.raises(ReadinessError) as error:
         wait_for_comfyui_readiness(
@@ -192,7 +184,6 @@ def test_probe_not_ready_responses_eventually_fail_readiness(
     assert locations_and_codes(error.value) == [(("readiness",), "readiness.timeout")]
     diagnostic = error.value.diagnostics[0]
     assert diagnostic.message == "ComfyUI did not become ready before timeout"
-    assert expected_reason not in diagnostic.message
 
 
 def test_transport_errors_eventually_fail_readiness() -> None:
@@ -204,7 +195,7 @@ def test_transport_errors_eventually_fail_readiness() -> None:
         raise httpx.ConnectError("connection refused", request=request)
 
     probe_result = probe_comfyui_readiness(8188, http_get=http_get)
-    assert probe_result.reason == "readiness probe request failed"
+    assert probe_result.ready is False
 
     with pytest.raises(ReadinessError) as error:
         wait_for_comfyui_readiness(

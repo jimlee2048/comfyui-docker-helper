@@ -4,7 +4,6 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.cli_output.policy import (
     CliOutputSettings,
     OutputContextKind,
@@ -209,18 +208,6 @@ def test_stream_detection_treats_failed_isatty_as_plain() -> None:
 
     assert capabilities.is_terminal is False
     assert capabilities.supports_live is False
-
-
-def test_event_sink_protocol_has_no_concrete_event_or_renderer_dependency() -> None:
-    received: list[str] = []
-
-    class RecordingSink(EventSink[str]):
-        def emit(self, event: str, /) -> None:
-            received.append(event)
-
-    RecordingSink().emit("phase-started")
-
-    assert received == ["phase-started"]
 
 
 def test_control_safe_text_escapes_terminal_controls_and_backslashes() -> None:

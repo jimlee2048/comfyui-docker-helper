@@ -536,10 +536,8 @@ filename = "model.bin"
         isinstance(event, RuntimeDownloadItemCompleted) for event in presentation_events
     )
     cdh_output = capsys.readouterr()
-    assert "source_host=" not in cdh_output.out
-    assert "identity=" not in cdh_output.out
-    assert "Runtime download state persisted" not in cdh_output.out
-    assert "Async runtime download queue" not in cdh_output.out
+    assert cdh_output.out == ""
+    assert cdh_output.err == ""
 
 
 def test_async_queue_rejects_replaced_start_generation_before_thread(

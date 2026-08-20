@@ -64,7 +64,6 @@ class ReadinessProbeResult:
     """One HTTP readiness probe result."""
 
     ready: bool
-    reason: str = ""
 
 
 def probe_comfyui_readiness(
@@ -85,38 +84,21 @@ def probe_comfyui_readiness(
     try:
         response = http_get(url, timeout=timeout)
     except httpx.HTTPError:
-        return ReadinessProbeResult(
-            ready=False,
-            reason="readiness probe request failed",
-        )
+        return ReadinessProbeResult(ready=False)
 
     if response.status_code != 200:
-        return ReadinessProbeResult(
-            ready=False,
-            reason=f"readiness probe returned HTTP {response.status_code}",
-        )
+        return ReadinessProbeResult(ready=False)
 
     try:
         payload = response.json()
     except ValueError:
-        return ReadinessProbeResult(
-            ready=False,
-            reason="readiness probe returned invalid JSON",
-        )
+        return ReadinessProbeResult(ready=False)
 
     if not isinstance(payload, dict):
-        return ReadinessProbeResult(
-            ready=False,
-            reason="readiness probe JSON payload must be an object",
-        )
+        return ReadinessProbeResult(ready=False)
 
-    missing = [field for field in ("system", "devices") if field not in payload]
-    if missing:
-        names = ", ".join(missing)
-        return ReadinessProbeResult(
-            ready=False,
-            reason=f"readiness probe JSON payload is missing: {names}",
-        )
+    if "system" not in payload or "devices" not in payload:
+        return ReadinessProbeResult(ready=False)
 
     return ReadinessProbeResult(ready=True)
 

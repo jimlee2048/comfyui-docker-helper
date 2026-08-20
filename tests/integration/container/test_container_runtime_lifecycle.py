@@ -114,9 +114,8 @@ class FakeChild:
         pytest.param(True, RuntimeSshStatus.READY, id="ready"),
     ],
 )
-def test_managed_ssh_lifecycle_emits_one_typed_outcome_without_legacy_warning(
+def test_managed_ssh_lifecycle_emits_one_typed_outcome(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
     ready: bool,
     expected_status: RuntimeSshStatus,
 ) -> None:
@@ -190,10 +189,6 @@ def test_managed_ssh_lifecycle_emits_one_typed_outcome_without_legacy_warning(
         for event in semantic_events
         if isinstance(event, RuntimeSshOutcome)
     ] == [expected_status]
-    captured = capsys.readouterr()
-    assert "WARNING: SSH is enabled but no root SSH credentials are configured" not in (
-        captured.out + captured.err
-    )
 
 
 # Generation admission keeps ordinary non-hook content nonfatal and reports only

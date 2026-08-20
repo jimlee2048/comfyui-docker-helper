@@ -42,6 +42,16 @@ _MANAGER_REQUIREMENTS = b"comfyui_manager==4.0.5\n"
 _LOCAL_GIT_TIMEOUT_SECONDS = 30
 
 
+def _helper_event_signature(event: object) -> object:
+    if isinstance(event, ContainerHelperPhaseStarted):
+        return ("phase-started", event.phase)
+    if isinstance(event, ContainerHelperPhaseCompleted):
+        return ("phase-completed", event.phase)
+    if isinstance(event, ComfyUIInstallCompleted):
+        return ("install-completed",)
+    return event
+
+
 @pytest.fixture(autouse=True)
 def _fixture_checkout_has_supported_ancestry(
     monkeypatch: pytest.MonkeyPatch,
@@ -387,35 +397,37 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
         event_sink=SimpleNamespace(emit=events.append),
     )
 
-    assert events == [
-        ContainerHelperPhaseStarted(ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
+    assert [_helper_event_signature(event) for event in events] == [
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
         "checkout",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
-        ContainerHelperPhaseStarted(ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
         "verify",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
-        ContainerHelperPhaseStarted(ContainerHelperPhase.PYTORCH_INSTALLATION),
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
+        ("phase-started", ContainerHelperPhase.PYTORCH_INSTALLATION),
         "inference",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.PYTORCH_INSTALLATION),
-        ContainerHelperPhaseStarted(ContainerHelperPhase.PYTHON_EXTRAS_INSTALLATION),
+        ("phase-completed", ContainerHelperPhase.PYTORCH_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.PYTHON_EXTRAS_INSTALLATION),
         "extras",
         "health",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.PYTHON_EXTRAS_INSTALLATION),
-        ContainerHelperPhaseStarted(
-            ContainerHelperPhase.COMFYUI_REQUIREMENTS_INSTALLATION
+        ("phase-completed", ContainerHelperPhase.PYTHON_EXTRAS_INSTALLATION),
+        (
+            "phase-started",
+            ContainerHelperPhase.COMFYUI_REQUIREMENTS_INSTALLATION,
         ),
         "ordinary",
         "health",
-        ContainerHelperPhaseCompleted(
-            ContainerHelperPhase.COMFYUI_REQUIREMENTS_INSTALLATION
+        (
+            "phase-completed",
+            ContainerHelperPhase.COMFYUI_REQUIREMENTS_INSTALLATION,
         ),
-        ContainerHelperPhaseStarted(ContainerHelperPhase.MANAGER_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.MANAGER_INSTALLATION),
         "manager",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.MANAGER_INSTALLATION),
-        ContainerHelperPhaseStarted(ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
+        ("phase-completed", ContainerHelperPhase.MANAGER_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
         "health",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
-        ComfyUIInstallCompleted(),
+        ("phase-completed", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
+        ("install-completed",),
     ]
 
 
@@ -483,25 +495,25 @@ def test_orchestration_skips_disabled_optional_phases_and_checks_manager_absence
         event_sink=SimpleNamespace(emit=events.append),
     )
 
-    assert events == [
-        ContainerHelperPhaseStarted(ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
+    assert [_helper_event_signature(event) for event in events] == [
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
         "checkout",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
-        ContainerHelperPhaseStarted(ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
         "verify",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
-        ContainerHelperPhaseStarted(ContainerHelperPhase.PYTORCH_INSTALLATION),
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
+        ("phase-started", ContainerHelperPhase.PYTORCH_INSTALLATION),
         "inference",
         "extras",
         "health",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.PYTORCH_INSTALLATION),
+        ("phase-completed", ContainerHelperPhase.PYTORCH_INSTALLATION),
         "ordinary",
         "health",
         "manager absent",
-        ContainerHelperPhaseStarted(ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
+        ("phase-started", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
         "health",
-        ContainerHelperPhaseCompleted(ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
-        ComfyUIInstallCompleted(),
+        ("phase-completed", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
+        ("install-completed",),
     ]
 
 

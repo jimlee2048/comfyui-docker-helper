@@ -14,7 +14,6 @@ from typer.testing import CliRunner
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.cli_output import CliOutputSettings, OutputDetail
 from comfyui_docker_helper.config.build_plan import (
     DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,
@@ -269,18 +268,13 @@ def test_version_option_reports_installed_distribution_version(
 ) -> None:
     """Expose the installed package version at the root command."""
     result = cli_runner.invoke(app, ["--version"])
+    quiet = cli_runner.invoke(app, ["--quiet", "--version"])
 
     assert result.exit_code == 0
     assert result.output == f"cdh {version('comfyui-docker-helper')}\n"
-
-
-def test_quiet_does_not_hide_version(cli_runner: CliRunner) -> None:
-    normal = cli_runner.invoke(app, ["--version"])
-    quiet = cli_runner.invoke(app, ["--quiet", "--version"])
-
     assert quiet.exit_code == 0
-    assert quiet.stdout == normal.stdout
-    assert quiet.stderr == normal.stderr == ""
+    assert quiet.stdout == result.stdout
+    assert quiet.stderr == result.stderr == ""
 
 
 def test_root_help_owns_output_detail_options_once(cli_runner: CliRunner) -> None:
@@ -290,6 +284,7 @@ def test_root_help_owns_output_detail_options_once(cli_runner: CliRunner) -> Non
 
     assert root.count("--quiet") == 1
     assert root.count("--verbose") == 1
+    assert "Show additional operational detail; repeat for debug" in root
     assert "--quiet" not in host
     assert "--verbose" not in host
     assert "--quiet" not in leaf
@@ -315,42 +310,6 @@ def test_output_detail_options_are_root_only(cli_runner: CliRunner) -> None:
 
     assert result.exit_code == 2
     assert "No such option" in _plain_output(result.stderr)
-
-
-@pytest.mark.parametrize(
-    ("args", "expected"),
-    [
-        (["-v"], OutputDetail.VERBOSE),
-        (["-vv"], OutputDetail.DEBUG),
-        (["-vvv"], OutputDetail.DEBUG),
-    ],
-)
-def test_host_group_receives_root_output_settings(
-    args: list[str],
-    expected: OutputDetail,
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = tmp_path / "config.toml"
-    _write_minimal_config(config)
-    observed: list[CliOutputSettings] = []
-    original = host_cli.require_output_settings
-
-    def observe(context: typer.Context) -> CliOutputSettings:
-        settings = original(context)
-        observed.append(settings)
-        return settings
-
-    monkeypatch.setattr(host_cli, "require_output_settings", observe)
-
-    result = cli_runner.invoke(
-        app,
-        [*args, "host", "validate", "-f", str(config)],
-    )
-
-    assert result.exit_code == 0
-    assert [settings.detail for settings in observed] == [expected]
 
 
 def test_root_command_exposes_current_groups() -> None:

@@ -348,6 +348,19 @@ class RuntimeDownloadItemProgress:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeDownloadItemVerificationStarted:
+    """Begin verification for one transferred Runtime file."""
+
+    index: int
+    total: int
+    target: str
+
+    def __post_init__(self) -> None:
+        _require_position(self.index, self.total, "Runtime download")
+        _require_canonical_target(self.target)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeDownloadItemRetryScheduled:
     """Wrap one shared retry fact with its Runtime item identity."""
 
@@ -509,6 +522,7 @@ type RuntimeEvent = (
     | RuntimeDownloadQueueSummary
     | RuntimeDownloadAttemptStarted
     | RuntimeDownloadItemProgress
+    | RuntimeDownloadItemVerificationStarted
     | RuntimeDownloadItemRetryScheduled
     | RuntimeDownloadItemCompleted
     | RuntimePresentationSaturated

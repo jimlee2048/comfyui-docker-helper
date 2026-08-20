@@ -35,6 +35,7 @@ from comfyui_docker_helper.container.download_events import (
     DownloadRetryReason,
     DownloadRetryScheduled,
     DownloadTransferProgress,
+    DownloadVerificationStarted,
 )
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
@@ -54,6 +55,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeDownloadItemCompleted,
     RuntimeDownloadItemProgress,
     RuntimeDownloadItemRetryScheduled,
+    RuntimeDownloadItemVerificationStarted,
 )
 from comfyui_docker_helper.container.runtime_state import (
     RuntimeDownloadDigestKey,
@@ -1090,6 +1092,18 @@ class _RuntimeDownloadPresentation(EventSink[DownloadEvent]):
                     self._max_attempts,
                     event,
                 ),
+            )
+            return
+        if isinstance(event, DownloadVerificationStarted):
+            if self._attempt is None or self._scope is None:
+                return
+            self.close()
+            self._sink.emit(
+                RuntimeDownloadItemVerificationStarted(
+                    self._index,
+                    self._total,
+                    self._target,
+                )
             )
             return
         if isinstance(event, DownloadRetryScheduled):

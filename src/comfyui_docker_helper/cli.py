@@ -55,7 +55,7 @@ def main(
             count=True,
             metavar="",
             show_default=False,
-            help="Add safe operational detail; repeat for debug detail.",
+            help="Show additional operational detail; repeat for debug detail.",
         ),
     ] = 0,
 ) -> None:

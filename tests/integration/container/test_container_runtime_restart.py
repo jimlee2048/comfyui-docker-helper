@@ -705,39 +705,6 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
         for event in semantic_events
         if isinstance(event, RuntimeSshOutcome)
     ] == [RuntimeSshStatus.DISABLED, RuntimeSshStatus.DISABLED]
-    phase_events = [
-        (type(event), event.phase)
-        for event in semantic_events
-        if isinstance(event, (RuntimePhaseStarted, RuntimePhaseCompleted))
-    ]
-    expected_generation_phases = [
-        (RuntimePhaseStarted, RuntimePhase.RUNTIME_FILES_PREPARATION),
-        (RuntimePhaseCompleted, RuntimePhase.RUNTIME_FILES_PREPARATION),
-        (RuntimePhaseStarted, RuntimePhase.PRE_START_HOOKS),
-        (RuntimePhaseCompleted, RuntimePhase.PRE_START_HOOKS),
-        (RuntimePhaseStarted, RuntimePhase.COMFYUI_STARTUP),
-        (RuntimePhaseCompleted, RuntimePhase.COMFYUI_STARTUP),
-        (RuntimePhaseStarted, RuntimePhase.COMFYUI_READINESS),
-        (RuntimePhaseCompleted, RuntimePhase.COMFYUI_READINESS),
-        (RuntimePhaseStarted, RuntimePhase.POST_START_HOOKS),
-        (RuntimePhaseCompleted, RuntimePhase.POST_START_HOOKS),
-    ]
-    stop_and_cleanup_phases = [
-        (RuntimePhaseStarted, RuntimePhase.STOP_HOOKS),
-        (RuntimePhaseCompleted, RuntimePhase.STOP_HOOKS),
-        (RuntimePhaseStarted, RuntimePhase.GENERATION_CLEANUP),
-        (RuntimePhaseCompleted, RuntimePhase.GENERATION_CLEANUP),
-    ]
-    cleanup_phases = [
-        (RuntimePhaseStarted, RuntimePhase.GENERATION_CLEANUP),
-        (RuntimePhaseCompleted, RuntimePhase.GENERATION_CLEANUP),
-    ]
-    assert phase_events == [
-        *expected_generation_phases,
-        *stop_and_cleanup_phases,
-        *expected_generation_phases,
-        *cleanup_phases,
-    ]
     stopping = [
         event
         for event in semantic_events

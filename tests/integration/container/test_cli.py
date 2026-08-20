@@ -492,7 +492,7 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
     assert target.read_bytes() == b"authenticated-plan"
 
 
-def test_download_files_cli_renders_plain_non_terminal_lifecycle(
+def test_download_files_cli_renders_normal_and_suppresses_quiet_lifecycle(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -507,6 +507,16 @@ def test_download_files_cli_renders_plain_non_terminal_lifecycle(
     result = cli_runner.invoke(
         app,
         [
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+    quiet = cli_runner.invoke(
+        app,
+        [
+            "--quiet",
             "container",
             "download-files",
             "--build-plan-digest",
@@ -522,34 +532,9 @@ def test_download_files_cli_renders_plain_non_terminal_lifecycle(
     assert "Placing required file" in result.stderr
     assert "Downloads complete: 1 required file" in result.stderr
     assert "backend=" not in result.stderr
-
-
-def test_download_files_cli_quiet_suppresses_success_lifecycle(
-    cli_runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    plan = _materialized_download_plan(tmp_path, monkeypatch)
-
-    def fake_download(_files, _root, *, event_sink) -> None:
-        _emit_download_success(event_sink)
-
-    monkeypatch.setattr(container_cli, "download_files", fake_download)
-
-    result = cli_runner.invoke(
-        app,
-        [
-            "--quiet",
-            "container",
-            "download-files",
-            "--build-plan-digest",
-            build_plan_digest(plan),
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert result.stdout == ""
-    assert result.stderr == ""
+    assert quiet.exit_code == 0
+    assert quiet.stdout == ""
+    assert quiet.stderr == ""
 
 
 def test_download_files_cli_verbose_retry_is_human_oriented(
@@ -729,6 +714,10 @@ def test_container_runtime_restart_waits_without_detach_options(
     monkeypatch.setattr(container_cli, "restart_runtime", fake_restart_runtime)
 
     result = cli_runner.invoke(app, ["container", "runtime", "restart"])
+    quiet = cli_runner.invoke(
+        app,
+        ["--quiet", "container", "runtime", "restart"],
+    )
     help_result = cli_runner.invoke(
         app,
         ["container", "runtime", "restart", "--help"],
@@ -739,30 +728,16 @@ def test_container_runtime_restart_waits_without_detach_options(
     assert "restart" in output
     assert "completed" in output
     assert "op-7" in output
-    assert calls == ["restart"]
+    assert quiet.exit_code == 0
+    assert quiet.stdout == result.stdout
+    assert quiet.stderr == result.stderr == ""
+    assert calls == ["restart", "restart"]
     help_output = _plain_output(help_result.output)
     assert "Restart the managed ComfyUI runtime." in help_output
     assert "generation" not in help_output
     assert "--detach" not in help_output
     assert "--no-wait" not in help_output
     assert "-d" not in help_output
-
-
-def test_quiet_preserves_restart_operation_result(
-    cli_runner: CliRunner,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(container_cli, "restart_runtime", lambda: "op-7")
-
-    normal = cli_runner.invoke(app, ["container", "runtime", "restart"])
-    quiet = cli_runner.invoke(
-        app,
-        ["--quiet", "container", "runtime", "restart"],
-    )
-
-    assert quiet.exit_code == 0
-    assert quiet.stdout == normal.stdout
-    assert quiet.stderr == normal.stderr == ""
 
 
 def test_container_runtime_follow_is_output_only(
@@ -826,8 +801,12 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
         args.append("--json")
 
     result = cli_runner.invoke(app, args)
+    quiet = cli_runner.invoke(app, ["--quiet", *args])
 
     assert result.exit_code == 0
+    assert quiet.exit_code == 0
+    assert quiet.stdout == result.stdout
+    assert quiet.stderr == result.stderr == ""
     if json_output:
         assert json.loads(result.output) == {
             "state": "running",
@@ -846,34 +825,3 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
             "last_restart: op-1 (succeeded)"
         )
         assert all(not line.startswith("generation:") for line in lines)
-
-
-@pytest.mark.parametrize("json_output", [False, True])
-def test_quiet_preserves_runtime_status_result(
-    cli_runner: CliRunner,
-    monkeypatch: pytest.MonkeyPatch,
-    json_output: bool,
-) -> None:
-    from comfyui_docker_helper.container.runtime_control import RuntimeStatusResponse
-
-    monkeypatch.setattr(
-        container_cli,
-        "read_runtime_status",
-        lambda: RuntimeStatusResponse(
-            state="running",
-            phase=None,
-            generation="gen-2",
-            operation=None,
-            last_restart=None,
-        ),
-    )
-    command = ["container", "runtime", "status"]
-    if json_output:
-        command.append("--json")
-
-    normal = cli_runner.invoke(app, command)
-    quiet = cli_runner.invoke(app, ["--quiet", *command])
-
-    assert quiet.exit_code == 0
-    assert quiet.stdout == normal.stdout
-    assert quiet.stderr == normal.stderr == ""

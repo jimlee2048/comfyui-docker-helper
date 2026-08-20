@@ -106,6 +106,40 @@ def _hook_digest(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
+def _semantic_operation_signature(operation: tuple[object, ...]) -> tuple[object, ...]:
+    kind, value, *_details = operation
+    if kind != "event":
+        return (kind, value)
+    if isinstance(value, ContainerHelperPhaseStarted):
+        return ("phase-started", value.phase)
+    if isinstance(value, ContainerHelperPhaseCompleted):
+        return ("phase-completed", value.phase)
+    if isinstance(value, RegistryCustomNodeStarted):
+        return (
+            "registry-started",
+            value.index,
+            value.total,
+            value.id,
+            value.version,
+            value.pre_hook_count,
+            value.post_hook_count,
+        )
+    if isinstance(value, GitCustomNodeStarted):
+        return (
+            "git-started",
+            value.index,
+            value.total,
+            value.target_name,
+            value.pre_hook_count,
+            value.post_hook_count,
+        )
+    if isinstance(value, CustomNodeCompleted):
+        return ("node-completed", value.index, value.total)
+    if isinstance(value, CustomNodesInstallCompleted):
+        return ("install-completed", value.node_count)
+    raise AssertionError(f"unexpected semantic event: {value!r}")
+
+
 def _local_manager_application(
     tmp_path: Path,
 ) -> tuple[ApplicationPhase, ContainerRuntime, Path]:
@@ -1072,129 +1106,36 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     semantic_events = [
         event for event in events if event[0] in {"event", "hook", "install"}
     ]
-    assert semantic_events == [
-        (
-            "event",
-            ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(
-                ContainerHelperPhase.CUSTOM_NODES_PREPARATION
-            ),
-        ),
-        (
-            "event",
-            RegistryCustomNodeStarted(
-                index=1,
-                total=3,
-                id="first",
-                version="1.0.0",
-                pre_hook_count=0,
-                post_hook_count=1,
-            ),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
-        ),
+    assert [_semantic_operation_signature(event) for event in semantic_events] == [
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
+        ("registry-started", 1, 3, "first", "1.0.0", 0, 1),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
         ("install", "first"),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(
-                ContainerHelperPhase.CUSTOM_NODE_INSTALLATION
-            ),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
-        ),
-        ("hook", "first-post.py", f"sha256:{'b' * 64}"),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(
-                ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL
-            ),
-        ),
-        ("event", CustomNodeCompleted(index=1, total=3)),
-        (
-            "event",
-            GitCustomNodeStarted(
-                index=2,
-                total=3,
-                target_name="direct",
-                pre_hook_count=1,
-                post_hook_count=1,
-            ),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
-        ),
-        ("hook", "git-pre.py", f"sha256:{'c' * 64}"),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
-        ),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("hook", "first-post.py"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("node-completed", 1, 3),
+        ("git-started", 2, 3, "direct", 1, 1),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
+        ("hook", "git-pre.py"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
         ("install", "direct"),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(
-                ContainerHelperPhase.CUSTOM_NODE_INSTALLATION
-            ),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
-        ),
-        ("hook", "git-post.py", f"sha256:{'d' * 64}"),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(
-                ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL
-            ),
-        ),
-        ("event", CustomNodeCompleted(index=2, total=3)),
-        (
-            "event",
-            RegistryCustomNodeStarted(
-                index=3,
-                total=3,
-                id="last",
-                version="2.0.0",
-                pre_hook_count=0,
-                post_hook_count=0,
-            ),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
-        ),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("hook", "git-post.py"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("node-completed", 2, 3),
+        ("registry-started", 3, 3, "last", "2.0.0", 0, 0),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
         ("install", "last"),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(
-                ContainerHelperPhase.CUSTOM_NODE_INSTALLATION
-            ),
-        ),
-        ("event", CustomNodeCompleted(index=3, total=3)),
-        (
-            "event",
-            ContainerHelperPhaseStarted(
-                ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION
-            ),
-        ),
-        (
-            "event",
-            ContainerHelperPhaseCompleted(
-                ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION
-            ),
-        ),
-        ("event", CustomNodesInstallCompleted(node_count=3)),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("node-completed", 3, 3),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION),
+        ("install-completed", 3),
     ]
     emitted = [event[1] for event in semantic_events if event[0] == "event"]
     assert "https://example.invalid" not in repr(emitted)

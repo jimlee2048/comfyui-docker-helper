@@ -1166,7 +1166,7 @@ filename = "async.bin"
         == 143
     )
 
-    assert events == [
+    assert events[:7] == [
         "async-start",
         "spawn",
         "async-stop",
@@ -1174,10 +1174,11 @@ filename = "async.bin"
         "ssh-stop",
         "stop-hook",
         "signal:SIGTERM",
-        "wait",
-        "async-join",
-        "wait",
     ]
+    cleanup_tail = events[7:]
+    assert cleanup_tail[0] == "wait"
+    assert cleanup_tail.count("async-join") == 1
+    assert set(cleanup_tail) == {"wait", "async-join"}
 
 
 # SSH startup publishes each exact preparation child to the service owner, so

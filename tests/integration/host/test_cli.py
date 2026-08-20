@@ -58,10 +58,6 @@ def _plain_output(output: str) -> str:
     return Text.from_ansi(output).plain
 
 
-def _diagnostic_path(path: Path) -> str:
-    return str(path).replace("\\", "\\\\")
-
-
 def _write_minimal_config(path: Path) -> None:
     path.write_text(
         """
@@ -769,8 +765,8 @@ def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
     assert "package demo has conflicting requirements" in output
     assert "python.conflicting_package_requirement" not in output
     assert "Earlier:" in output and "Later:" in output
-    assert _diagnostic_path(base) in output.replace("\n", "")
-    assert _diagnostic_path(override) in output.replace("\n", "")
+    assert str(base) in output.replace("\n", "")
+    assert str(override) in output.replace("\n", "")
     assert "Value: demo>=1,<2" in output
     assert "Value: Demo>=2,<3" in output
     assert "\x1b" not in result.stderr
@@ -796,7 +792,7 @@ def test_quiet_host_validate_preserves_redundant_default_os_package_warning(
     assert output.count("already installed") == 1
     assert "bash" in output
     assert "Field: system.extra_packages.0" in output
-    assert _diagnostic_path(config) in output.replace("\n", "")
+    assert str(config) in output.replace("\n", "")
 
 
 def test_host_validate_displays_http_credential_warning_offline(

@@ -39,9 +39,9 @@ from comfyui_docker_helper.container.download_events import (
 )
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
-    Aria2DownloaderFactory,
     DownloadBackendPreparer,
     HttpxDownloader,
+    ManagedDownloadBackend,
 )
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialPolicy,
@@ -75,7 +75,6 @@ from comfyui_docker_helper.container.transfer_core import (
     FileTransferOutcome,
     FileTransferRequest,
     HttpxDownloadSettings,
-    Logger,
     PreservedTransferCleanupError,
     ResumeAuthority,
     StagingDisposition,
@@ -93,6 +92,14 @@ type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeDownloadStartupObserver = Callable[[], None]
 type RuntimeDownloadCancelRequested = Callable[[], bool]
 type RuntimeDownloadBackendObserver = Callable[[CancellableDownloadBackend], None]
+
+
+class RuntimeAria2DownloaderFactory(Protocol):
+    """Construct the Runtime-owned aria2 backend."""
+
+    def __call__(self) -> ManagedDownloadBackend: ...
+
+
 type RuntimeDownloadObservedStatus = Literal[
     "failed",
     "exhausted",
@@ -272,12 +279,11 @@ def process_runtime_file_downloads(
     *,
     config: RuntimeConfig,
     backends: Mapping[str, DownloadBackend],
-    log: Logger = print,
     state_observer: RuntimeDownloadStateObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
     credential_policy: DownloaderCredentialPolicy | None = None,
-    event_sink: RuntimeBackgroundEventSink | None = None,
+    event_sink: RuntimeBackgroundEventSink,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Run runtime policy around the shared transfer core."""
     settings = runtime_downloader_settings(config)
@@ -303,11 +309,6 @@ def process_runtime_file_downloads(
             ) from error
 
         try:
-            if event_sink is None:
-                log(
-                    f"Processing runtime file {index}/{len(plan.items)} "
-                    f"with {backend_name}"
-                )
             _observe_cancellable_runtime_backend(backend, backend_observer)
             attempts_used, outcome = _download_runtime_file_with_policy(
                 item,
@@ -316,7 +317,6 @@ def process_runtime_file_downloads(
                 settings,
                 ("files", index - 1),
                 config=config,
-                log=log,
                 state_observer=state_observer,
                 cancel_requested=is_cancelled,
                 credential_policy=credential_policy,
@@ -325,37 +325,21 @@ def process_runtime_file_downloads(
                 total=len(plan.items),
             )
             _notify_runtime_download_state(state_observer, item, "completed")
-            if event_sink is not None:
-                event_sink.emit(
-                    RuntimeDownloadItemCompleted(
-                        index,
-                        len(plan.items),
-                        item.relative_target,
-                        item.download_mode,
-                        attempts_used,
-                        config.cdh.download_max_attempts,
-                    )
+            event_sink.emit(
+                RuntimeDownloadItemCompleted(
+                    index,
+                    len(plan.items),
+                    item.relative_target,
+                    item.download_mode,
+                    attempts_used,
+                    config.cdh.download_max_attempts,
                 )
-            if event_sink is None:
-                log(
-                    "Runtime download completed: "
-                    f"mode={item.download_mode} target={item.relative_target} "
-                    f"backend={backend_name} attempts={attempts_used} "
-                    f"status={outcome.status} verification={outcome.verification}"
-                )
+            )
         except _RuntimeDownloadContinued:
             continue
         except RuntimeFileDownloadCancelled:
             break
-        except _RuntimeDownloadPolicyFailure as error:
-            if event_sink is None:
-                _log_async_queue_stopping_after_failure(
-                    log,
-                    item,
-                    status=error.status,
-                    config=config,
-                    pending=len(plan.items) - index,
-                )
+        except _RuntimeDownloadPolicyFailure:
             raise
         except RuntimeStateError:
             raise
@@ -766,14 +750,13 @@ def download_runtime_files(
     *,
     config: RuntimeConfig,
     httpx_downloader: DownloadBackend | None = None,
-    aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
-    log: Logger = print,
+    aria2_downloader_factory: RuntimeAria2DownloaderFactory = Aria2Downloader,
     state_observer: RuntimeDownloadStateObserver | None = None,
     startup_observer: RuntimeDownloadStartupObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
     credential_policy: DownloaderCredentialPolicy | None = None,
-    event_sink: RuntimeBackgroundEventSink | None = None,
+    event_sink: RuntimeBackgroundEventSink,
 ) -> tuple[RuntimeFileDownloadResult, ...]:
     """Download runtime file plan items through existing backend adapters."""
     is_cancelled = cancel_requested or _runtime_download_not_cancelled
@@ -785,9 +768,9 @@ def download_runtime_files(
     if httpx_downloader is not None:
         httpx_backend = httpx_downloader
     elif credential_policy is None:
-        httpx_backend = HttpxDownloader(log=log)
+        httpx_backend = HttpxDownloader()
     else:
-        httpx_backend = HttpxDownloader(log=log, credential_policy=credential_policy)
+        httpx_backend = HttpxDownloader(credential_policy=credential_policy)
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
 
     if not _requires_aria2_backend(plan, config):
@@ -799,7 +782,6 @@ def download_runtime_files(
             plan,
             config=config,
             backends=backends,
-            log=log,
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
@@ -807,7 +789,7 @@ def download_runtime_files(
             event_sink=event_sink,
         )
 
-    with aria2_downloader_factory(log=log) as aria2_backend:
+    with aria2_downloader_factory() as aria2_backend:
         backends["aria2"] = aria2_backend
         _observe_cancellable_runtime_backend(httpx_backend, observe_backend)
         _observe_cancellable_runtime_backend(aria2_backend, observe_backend)
@@ -818,7 +800,6 @@ def download_runtime_files(
             plan,
             config=config,
             backends=backends,
-            log=log,
             state_observer=state_observer,
             cancel_requested=is_cancelled,
             backend_observer=observe_backend,
@@ -896,11 +877,10 @@ def _download_runtime_file_with_policy(
     path: RuntimeFilePath,
     *,
     config: RuntimeConfig,
-    log: Logger,
     state_observer: RuntimeDownloadStateObserver | None,
     cancel_requested: RuntimeDownloadCancelRequested,
     credential_policy: DownloaderCredentialPolicy | None,
-    event_sink: RuntimeBackgroundEventSink | None,
+    event_sink: RuntimeBackgroundEventSink,
     index: int,
     total: int,
 ) -> tuple[int, FileTransferOutcome]:
@@ -919,17 +899,8 @@ def _download_runtime_file_with_policy(
         resume_authority=item.resume_authority,
     )
 
-    def observe_start(attempt: int) -> None:
-        if event_sink is None:
-            log(
-                "Runtime download attempt: "
-                f"mode={item.download_mode} target={item.relative_target} "
-                f"backend={backend_name} attempt={attempt}/{attempts} "
-                "status=downloading"
-            )
-
     def observe_retry(
-        attempt: int,
+        _attempt: int,
         error: TransferDownloadFilesError,
     ) -> None:
         _notify_runtime_download_state(
@@ -939,31 +910,19 @@ def _download_runtime_file_with_policy(
             error=error,
             resume_authority=error.resume_authority,
         )
-        if event_sink is None:
-            reason = _controlled_download_failure_reason(error)
-            log(
-                "Runtime download attempt failed: "
-                f"mode={item.download_mode} target={item.relative_target} "
-                f"backend={backend_name} attempt={attempt}/{attempts} "
-                f"status=failed reason={reason.value}"
-            )
 
     def admit_backend_call(request: TransportRequest) -> None:
         if backend_name == "httpx" and credential_policy is not None:
             credential_policy.authorization_for(httpx.URL(request.url))
 
-    presentation = (
-        _RuntimeDownloadPresentation(
-            event_sink,
-            index=index,
-            total=total,
-            target=item.relative_target,
-            mode=item.download_mode,
-            backend=DownloadBackendName(backend_name),
-            max_attempts=attempts,
-        )
-        if event_sink is not None
-        else None
+    presentation = _RuntimeDownloadPresentation(
+        event_sink,
+        index=index,
+        total=total,
+        target=item.relative_target,
+        mode=item.download_mode,
+        backend=DownloadBackendName(backend_name),
+        max_attempts=attempts,
     )
     result = coordinate_transfer_attempts(
         transfer_request,
@@ -973,18 +932,15 @@ def _download_runtime_file_with_policy(
         max_attempts=attempts,
         cancel_requested=cancel_requested,
         backend_call_admission=admit_backend_call,
-        attempt_start_observer=observe_start,
         retry_observer=observe_retry,
         continuation_owner=True,
         event_sink=presentation,
     )
     if isinstance(result, AttemptSucceeded):
-        if presentation is not None:
-            presentation.close()
+        presentation.close()
         return result.attempts, result.outcome
     if isinstance(result, AttemptCancelled):
-        if presentation is not None:
-            presentation.close()
+        presentation.close()
         _notify_runtime_download_state(
             state_observer,
             item,
@@ -999,8 +955,7 @@ def _download_runtime_file_with_policy(
     )
     if isinstance(result, AttemptLocalFailure):
         status = "failed"
-    if presentation is not None:
-        presentation.close()
+    presentation.close()
     _notify_runtime_download_state(
         state_observer,
         item,
@@ -1014,17 +969,16 @@ def _download_runtime_file_with_policy(
         result,
         (AttemptOrdinaryTerminal, AttemptExhausted, AttemptLocalFailure),
     ):
-        if event_sink is not None:
-            event_sink.emit(
-                RuntimeDownloadFailed(
-                    item.relative_target,
-                    item.download_mode,
-                    config.cdh.download_failure_policy,
-                    _controlled_download_failure_reason(error),
-                    result.attempts,
-                    attempts,
-                )
+        event_sink.emit(
+            RuntimeDownloadFailed(
+                item.relative_target,
+                item.download_mode,
+                config.cdh.download_failure_policy,
+                _controlled_download_failure_reason(error),
+                result.attempts,
+                attempts,
             )
+        )
         _apply_runtime_item_failure_policy(
             item,
             error,
@@ -1032,7 +986,6 @@ def _download_runtime_file_with_policy(
             config=config,
             path=path,
             status=status,
-            log=log if event_sink is None else None,
         )
     raise AssertionError("attempt coordinator returned an unknown result")
 
@@ -1141,24 +1094,9 @@ def _apply_runtime_item_failure_policy(
     config: RuntimeConfig,
     path: RuntimeFilePath,
     status: Literal["failed", "exhausted"],
-    log: Logger | None,
 ) -> None:
     reason = _controlled_download_failure_reason(error)
-    if log is not None:
-        log(
-            f"WARNING: Runtime download {status}: "
-            f"mode={item.download_mode} target={item.relative_target} "
-            f"attempts={attempts}/{config.cdh.download_max_attempts} "
-            f"policy={config.cdh.download_failure_policy} status={status} "
-            f"reason={reason.value}"
-        )
     if config.cdh.download_failure_policy == "continue":
-        if log is not None:
-            log(
-                "WARNING: runtime file download failed after "
-                f"{attempts} attempt(s), continuing: target={item.relative_target} "
-                f"reason={reason.value}"
-            )
         raise _RuntimeDownloadContinued from error
     raise _RuntimeDownloadPolicyFailure(
         (
@@ -1173,24 +1111,6 @@ def _apply_runtime_item_failure_policy(
         ),
         status=status,
     ) from error
-
-
-def _log_async_queue_stopping_after_failure(
-    log: Logger,
-    item: RuntimeFilePlanItem,
-    *,
-    status: Literal["failed", "exhausted"],
-    config: RuntimeConfig,
-    pending: int,
-) -> None:
-    if item.download_mode != "async" or config.cdh.download_failure_policy != "fail":
-        return
-    log(
-        "WARNING: Async runtime download queue stopping: "
-        f"reason=download_{status} "
-        f"policy={config.cdh.download_failure_policy} "
-        f"target={item.relative_target} pending={pending}"
-    )
 
 
 def _runtime_download_not_cancelled() -> bool:

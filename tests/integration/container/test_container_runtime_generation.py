@@ -12,6 +12,7 @@ from comfyui_docker_helper.container.runtime_secret_session import (
     RuntimeDownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.runtime_serve import RuntimeGenerationFactory
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 
 def _write(path: Path, content: str) -> None:
@@ -48,8 +49,11 @@ def test_generation_factory_rereads_inputs_and_creates_fresh_owners(
     _write_hook(mounted_hooks, "20-mounted.sh")
     _write(mounted_hooks / "README.md", "ordinary deployment notes\n")
 
+    runtime_events = RecordingRuntimeEventSink()
     factory = RuntimeGenerationFactory(
         runtime=runtime,
+        background_event_sink=runtime_events,
+        event_sink=runtime_events,
         baked_config_path=baked_config,
         mounted_config_path=mounted_config,
         baked_hooks_path=baked_hooks,
@@ -160,8 +164,11 @@ download_mode = "async"
         handle_observer(handle)
         return handle
 
+    runtime_events = RecordingRuntimeEventSink()
     factory = RuntimeGenerationFactory(
         runtime=runtime,
+        background_event_sink=runtime_events,
+        event_sink=runtime_events,
         baked_config_path=config,
         mounted_config_path=tmp_path / "missing-mounted.toml",
         baked_hooks_path=tmp_path / "missing-baked-hooks",

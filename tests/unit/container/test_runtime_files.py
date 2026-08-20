@@ -54,7 +54,6 @@ from comfyui_docker_helper.container.transfer_core import (
     DownloaderSettings,
     DownloadFilesError,
     DownloadStatus,
-    Logger,
     PreservedTransferCleanupError,
     ResumeAuthority,
     TransportCancelled,
@@ -66,6 +65,7 @@ from comfyui_docker_helper.container.transfer_core import (
     TransportSuccess,
     VerificationStatus,
 )
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 
 def _checksum(content: bytes) -> str:
@@ -252,31 +252,9 @@ class FakeBackend:
 class FakeAria2Factory:
     def __init__(self, backend: FakeBackend) -> None:
         self.backend = backend
-        self.logs: list[Logger] = []
 
-    def __call__(self, *, log: Logger) -> FakeBackend:
-        self.logs.append(log)
+    def __call__(self) -> FakeBackend:
         return self.backend
-
-
-class RecordingEventSink:
-    def __init__(self) -> None:
-        self.events: list[object] = []
-        self.progress_events: list[tuple[object, object]] = []
-        self.closed_scopes: list[object] = []
-        self.operations: list[tuple[str, object]] = []
-
-    def emit(self, event: object, /) -> None:
-        self.events.append(event)
-        self.operations.append(("emit", event))
-
-    def emit_progress(self, scope: object, event: object) -> None:
-        self.events.append(event)
-        self.progress_events.append((scope, event))
-
-    def close_progress(self, scope: object) -> None:
-        self.closed_scopes.append(scope)
-        self.operations.append(("close", scope))
 
 
 # Planning preserves ordered user intent and canonical checksum identity.
@@ -502,6 +480,7 @@ def test_reconciliation_reuses_completed_checksum_free_regular_final(
             config=_config(),
             backends={},
             credential_policy=CredentialMustRemainLazy(),
+            event_sink=RecordingRuntimeEventSink(),
         )
         == ()
     )
@@ -1095,7 +1074,7 @@ def test_runtime_consumer_selects_backends_and_returns_typed_outcomes(
         plan,
         config=_config(),
         backends={"httpx": httpx_backend, "aria2": aria2_backend},
-        log=lambda _: None,
+        event_sink=RecordingRuntimeEventSink(),
     )
 
     assert [result.status for result in results] == [
@@ -1124,7 +1103,7 @@ def test_runtime_verified_existing_target_skips_credential_and_backend(
     item.target.parent.mkdir(parents=True)
     item.target.write_bytes(content)
     backend = FakeBackend()
-    recorder = RecordingEventSink()
+    recorder = RecordingRuntimeEventSink()
 
     class CredentialMustRemainLazy:
         def authorization_for(self, _url: object) -> bytes | None:
@@ -1134,7 +1113,6 @@ def test_runtime_verified_existing_target_skips_credential_and_backend(
         plan,
         config=_config(policy="fail"),
         backends={"httpx": backend},
-        log=lambda _: None,
         credential_policy=CredentialMustRemainLazy(),
         event_sink=recorder,
     )
@@ -1159,14 +1137,12 @@ def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> Non
         failures=[TransportRetryable(TransportDiagnostic("httpx", "temporary"))]
     )
 
-    recorder = RecordingEventSink()
-    logs: list[str] = []
+    recorder = RecordingRuntimeEventSink()
 
     result = process_runtime_file_downloads(
         plan,
         config=_config(attempts=2),
         backends={"httpx": backend},
-        log=logs.append,
         event_sink=recorder,
     )
 
@@ -1180,7 +1156,6 @@ def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> Non
         RuntimeDownloadItemCompleted,
     ]
     assert all("https://" not in repr(event) for event in recorder.events)
-    assert logs == []
 
 
 def test_runtime_transport_progress_is_projected_to_background_scope(
@@ -1204,13 +1179,23 @@ def test_runtime_transport_progress_is_projected_to_background_scope(
             request.progress_sink.emit(progress)
             return super().download(request, settings)
 
-    recorder = RecordingEventSink()
+    operation_order: list[tuple[str, object]] = []
+
+    class OrderedRecorder(RecordingRuntimeEventSink):
+        def emit(self, event: object, /) -> None:
+            operation_order.append(("emit", event))
+            super().emit(event)
+
+        def close_progress(self, scope: object) -> None:
+            operation_order.append(("close", scope))
+            super().close_progress(scope)
+
+    recorder = OrderedRecorder()
 
     result = process_runtime_file_downloads(
         plan,
         config=_config(attempts=2),
         backends={"httpx": ProgressBackend()},
-        log=lambda _: None,
         event_sink=recorder,
     )
 
@@ -1226,10 +1211,10 @@ def test_runtime_transport_progress_is_projected_to_background_scope(
         max_attempts=2,
         progress=progress,
     )
-    assert recorder.closed_scopes == [scope]
+    assert recorder.closed_progress_scopes == [scope]
     verification = next(
         event
-        for operation, event in recorder.operations
+        for operation, event in operation_order
         if operation == "emit"
         and isinstance(event, RuntimeDownloadItemVerificationStarted)
     )
@@ -1238,7 +1223,7 @@ def test_runtime_transport_progress_is_projected_to_background_scope(
         total=1,
         target="models/a.bin",
     )
-    assert recorder.operations.index(("close", scope)) < recorder.operations.index(
+    assert operation_order.index(("close", scope)) < operation_order.index(
         ("emit", verification)
     )
 
@@ -1250,13 +1235,12 @@ def test_runtime_verification_failure_never_claims_the_file_is_ready(
         tmp_path / "ComfyUI",
         _file("a.bin", checksum=_checksum(b"expected")),
     )
-    recorder = RecordingEventSink()
+    recorder = RecordingRuntimeEventSink()
 
     results = process_runtime_file_downloads(
         plan,
         config=_config(policy="continue", attempts=1),
         backends={"httpx": FakeBackend(payload=b"unexpected")},
-        log=lambda _: None,
         event_sink=recorder,
     )
 
@@ -1290,14 +1274,16 @@ def test_runtime_continue_applies_only_after_retryable_exhaustion(
         plan,
         config=_config(policy="continue", attempts=2),
         backends={"httpx": backend},
-        log=lambda _: None,
+        event_sink=RecordingRuntimeEventSink(),
     )
 
     assert [result.item.filename for result in results] == ["b.bin"]
     assert len(backend.calls) == 3
 
 
-def test_runtime_fail_policy_stops_after_retryable_exhaustion(tmp_path: Path) -> None:
+def test_runtime_fail_policy_stops_after_retryable_exhaustion(
+    tmp_path: Path,
+) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"), _file("b.bin"))
     backend = FakeBackend(
         failures=[
@@ -1311,7 +1297,7 @@ def test_runtime_fail_policy_stops_after_retryable_exhaustion(tmp_path: Path) ->
             plan,
             config=_config(policy="fail", attempts=2),
             backends={"httpx": backend},
-            log=lambda _: None,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert len(backend.calls) == 2
@@ -1356,21 +1342,18 @@ def test_runtime_credential_failure_is_not_retried_and_preserves_attempt_fact(
                 )
             return TransportSuccess(length=0, namespace="httpx", http_status=200)
 
-    logs: list[str] = []
-    recorder = RecordingEventSink()
+    recorder = RecordingRuntimeEventSink()
 
     results = process_runtime_file_downloads(
         plan,
         config=_config(policy="continue", attempts=3),
         backends={"httpx": CredentialBackend()},
-        log=logs.append,
         credential_policy=(None if network_attempted else InitialCredentialPolicy()),
         event_sink=recorder,
     )
 
     assert [result.item.filename for result in results] == ["b.bin"]
     assert calls == (2 if network_attempted else 1)
-    assert logs == []
     failure = next(
         event for event in recorder.events if isinstance(event, RuntimeDownloadFailed)
     )
@@ -1392,7 +1375,7 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
         ]
     )
     statuses: list[str] = []
-    logs: list[str] = []
+    recorder = RecordingRuntimeEventSink()
     failure_text = ""
 
     if policy == "fail":
@@ -1402,7 +1385,7 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
                 config=_config(policy=policy, attempts=3),
                 backends={"httpx": backend},
                 state_observer=lambda _item, status, **_: statuses.append(status),
-                log=logs.append,
+                event_sink=recorder,
             )
         failure_text = str(raised.value)
     else:
@@ -1411,7 +1394,7 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
             config=_config(policy=policy, attempts=3),
             backends={"httpx": backend},
             state_observer=lambda _item, status, **_: statuses.append(status),
-            log=logs.append,
+            event_sink=recorder,
         )
         assert [result.item.filename for result in results] == ["b.bin"]
 
@@ -1419,11 +1402,18 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
     assert statuses[0] == "failed"
     if policy == "continue":
         assert statuses[-1] == "completed"
-    assert any(
-        "Runtime download failed:" in line and "status=failed" in line for line in logs
+    failure = next(
+        event for event in recorder.events if isinstance(event, RuntimeDownloadFailed)
     )
-    assert all("status=exhausted" not in line for line in logs)
-    assert "credential-url-raw-reason" not in "\n".join((*logs, failure_text))
+    assert (
+        failure.target,
+        failure.mode,
+        failure.policy,
+        failure.attempts,
+        failure.max_attempts,
+    ) == ("models/a.bin", "sync", policy, 1, 3)
+    assert "credential-url-raw-reason" not in repr(recorder.events)
+    assert "credential-url-raw-reason" not in failure_text
 
 
 # Cleanup failure must not overwrite the exact persisted authority it could not use.
@@ -1468,7 +1458,7 @@ def test_skip_cleanup_failure_preserves_persisted_resume_state(
             config=_config(default="aria2", resume=True),
             backends={"aria2": backend},
             state_observer=lambda _item, status, **_: observed.append(status),
-            log=lambda _: None,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert "fsync failed" not in str(raised.value)
@@ -1481,7 +1471,9 @@ def test_skip_cleanup_failure_preserves_persisted_resume_state(
     assert not staging.parent.exists()
 
 
-def test_runtime_continue_cannot_mask_local_target_invariant(tmp_path: Path) -> None:
+def test_runtime_continue_cannot_mask_local_target_invariant(
+    tmp_path: Path,
+) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"))
     plan.items[0].target.mkdir(parents=True)
     backend = FakeBackend()
@@ -1493,7 +1485,7 @@ def test_runtime_continue_cannot_mask_local_target_invariant(tmp_path: Path) -> 
             config=_config(policy="continue"),
             backends={"httpx": backend},
             state_observer=lambda _item, status, **_: statuses.append(status),
-            log=lambda _: None,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert backend.calls == []
@@ -1508,21 +1500,20 @@ def test_runtime_cancelled_transfer_stops_without_exhausted_failure(
         failures=[TransportCancelled(TransportDiagnostic("httpx", "cancelled"))]
     )
     statuses: list[str] = []
-    recorder = RecordingEventSink()
+    recorder = RecordingRuntimeEventSink()
 
     results = process_runtime_file_downloads(
         plan,
         config=_config(),
         backends={"httpx": backend},
         state_observer=lambda item, status, **_: statuses.append(status),
-        log=lambda _: None,
         event_sink=recorder,
     )
 
     assert results == ()
     assert statuses == ["failed"]
     assert len(backend.calls) == 1
-    assert len(recorder.closed_scopes) == 1
+    assert len(recorder.closed_progress_scopes) == 1
     assert any(
         isinstance(event, RuntimeDownloadAttemptStarted) for event in recorder.events
     )
@@ -1556,7 +1547,7 @@ def test_required_completion_state_persistence_failure_is_fatal(
             config=_config(),
             backends={"httpx": backend},
             state_observer=fail_state_write,
-            log=lambda _: None,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert observations == ["completed"]
@@ -1659,7 +1650,7 @@ def test_quiescent_aria_resume_authority_round_trips_through_reconciliation(
             ),
             backends={"aria2": PreservingAriaBackend()},
             state_observer=observe,
-            log=lambda _: None,
+            event_sink=RecordingRuntimeEventSink(),
         )
         == ()
     )
@@ -1681,7 +1672,9 @@ def test_quiescent_aria_resume_authority_round_trips_through_reconciliation(
     assert reconciled.download_plan.items[0].resume_authority == authority
 
 
-def test_runtime_missing_backend_is_structured_terminal_failure(tmp_path: Path) -> None:
+def test_runtime_missing_backend_is_structured_terminal_failure(
+    tmp_path: Path,
+) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"))
 
     with pytest.raises(RuntimeFileDownloadError) as captured:
@@ -1689,7 +1682,7 @@ def test_runtime_missing_backend_is_structured_terminal_failure(tmp_path: Path) 
             plan,
             config=_config(),
             backends={},
-            log=lambda _: None,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert captured.value.diagnostics[0].code == "runtime_file.downloader_unavailable"
@@ -1708,19 +1701,18 @@ def test_download_runtime_files_constructs_aria2_only_when_required(
         config=_config(),
         httpx_downloader=httpx,
         aria2_downloader_factory=factory,
-        log=lambda _: None,
+        event_sink=RecordingRuntimeEventSink(),
     )
     aria2_results = download_runtime_files(
         _plan(root, _file("b.bin", downloader="aria2")),
         config=_config(),
         httpx_downloader=httpx,
         aria2_downloader_factory=factory,
-        log=lambda _: None,
+        event_sink=RecordingRuntimeEventSink(),
     )
 
     assert httpx_results[0].backend == "httpx"
     assert aria2_results[0].backend == "aria2"
-    assert len(factory.logs) == 1
     assert aria2.entered and aria2.exited
 
 
@@ -1746,7 +1738,7 @@ def test_startup_observer_runs_after_backend_prepare_before_transfer(
         config=_config(),
         aria2_downloader_factory=FakeAria2Factory(backend),
         startup_observer=lambda: events.append("startup"),
-        log=lambda _: None,
+        event_sink=RecordingRuntimeEventSink(),
     )
 
     assert events == ["prepare", "startup", "download"]

@@ -29,6 +29,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
 from comfyui_docker_helper.container.runtime_lifecycle import (
     _wait_for_managed_shutdown,
 )
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 10
 _PROCESS_CLEANUP_POLL_INTERVAL_SECONDS = 0.02
@@ -196,6 +197,7 @@ def test_real_long_stop_hook_is_reaped_in_lifecycle_final_window(
         run_runtime_stop_hooks(
             plan,
             runtime=runtime,
+            event_sink=RecordingRuntimeEventSink(),
             deadline=started_at + 0.2,
             poll_interval_seconds=0.02,
             runner=owned_runtime_processes.start_hook,

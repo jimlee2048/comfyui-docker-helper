@@ -263,7 +263,6 @@ def run_runtime_startup_hooks(
     *,
     runtime: ContainerRuntime,
     env: Mapping[str, str] | None = None,
-    log: Callable[[str], object] = print,
     runner: RuntimeHookProcessRunner = start_argv,
     cancel_requested: CancelRequested = lambda: False,
     termination_grace_seconds: float = STOP_HOOK_TERMINATION_GRACE_SECONDS,
@@ -271,10 +270,11 @@ def run_runtime_startup_hooks(
     monotonic: Monotonic = time.monotonic,
     sleep: Sleep = time.sleep,
     process_group_signaler: ProcessGroupSignaler | None = None,
-    event_sink: EventSink[RuntimeEvent] | None = None,
+    event_sink: EventSink[RuntimeEvent],
 ) -> tuple[RuntimeHookResult, ...]:
     """Run startup hooks with shutdown cancellation and process-group cleanup."""
     event_sink = safe_runtime_event_sink(event_sink)
+    assert event_sink is not None
     _validate_hook_process_bounds(
         termination_grace_seconds=termination_grace_seconds,
         poll_interval_seconds=poll_interval_seconds,
@@ -287,15 +287,9 @@ def run_runtime_startup_hooks(
     for index, hook in enumerate(phase_hooks, start=1):
         _raise_if_hook_cancelled(hook, cancel_requested)
         argv = _hook_argv(hook, runtime)
-        if event_sink is None:
-            log(
-                "Running runtime hook "
-                f"source={hook.source} phase={hook.phase} filename={hook.filename}"
-            )
-        else:
-            event_sink.emit(
-                RuntimeHookStarted(index, total, hook.phase, hook.source, hook.filename)
-            )
+        event_sink.emit(
+            RuntimeHookStarted(index, total, hook.phase, hook.source, hook.filename)
+        )
         try:
             process = runner(
                 argv,
@@ -339,12 +333,9 @@ def run_runtime_startup_hooks(
                     ),
                 )
             )
-        if event_sink is not None:
-            event_sink.emit(
-                RuntimeHookCompleted(
-                    index, total, hook.phase, hook.source, hook.filename
-                )
-            )
+        event_sink.emit(
+            RuntimeHookCompleted(index, total, hook.phase, hook.source, hook.filename)
+        )
         results.append(
             RuntimeHookResult(
                 hook=hook,
@@ -361,7 +352,6 @@ def run_runtime_stop_hooks(
     *,
     runtime: ContainerRuntime,
     env: Mapping[str, str] | None = None,
-    log: Callable[[str], object] = print,
     runner: RuntimeHookProcessRunner = start_argv,
     cancel_requested: CancelRequested = lambda: False,
     deadline: float | None = None,
@@ -370,10 +360,11 @@ def run_runtime_stop_hooks(
     monotonic: Monotonic = time.monotonic,
     sleep: Sleep = time.sleep,
     process_group_signaler: ProcessGroupSignaler | None = None,
-    event_sink: EventSink[RuntimeEvent] | None = None,
+    event_sink: EventSink[RuntimeEvent],
 ) -> tuple[RuntimeHookResult, ...]:
     """Run stop hooks within the lifecycle owner's absolute deadline."""
     event_sink = safe_runtime_event_sink(event_sink)
+    assert event_sink is not None
     _validate_hook_process_bounds(
         termination_grace_seconds=termination_grace_seconds,
         poll_interval_seconds=poll_interval_seconds,
@@ -388,15 +379,9 @@ def run_runtime_stop_hooks(
             break
         _raise_if_stop_cancelled(hook, cancel_requested)
         argv = _hook_argv(hook, runtime)
-        if event_sink is None:
-            log(
-                "Running runtime hook "
-                f"source={hook.source} phase={hook.phase} filename={hook.filename}"
-            )
-        else:
-            event_sink.emit(
-                RuntimeHookStarted(index, total, hook.phase, hook.source, hook.filename)
-            )
+        event_sink.emit(
+            RuntimeHookStarted(index, total, hook.phase, hook.source, hook.filename)
+        )
         try:
             process = runner(
                 argv,
@@ -441,12 +426,9 @@ def run_runtime_stop_hooks(
                     ),
                 )
             )
-        if event_sink is not None:
-            event_sink.emit(
-                RuntimeHookCompleted(
-                    index, total, hook.phase, hook.source, hook.filename
-                )
-            )
+        event_sink.emit(
+            RuntimeHookCompleted(index, total, hook.phase, hook.source, hook.filename)
+        )
         results.append(
             RuntimeHookResult(
                 hook=hook,

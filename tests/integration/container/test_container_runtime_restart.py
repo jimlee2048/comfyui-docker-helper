@@ -45,7 +45,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeSshOutcome,
     RuntimeSshStatus,
 )
-from comfyui_docker_helper.container.runtime_files import Logger, RuntimeFilePlan
+from comfyui_docker_helper.container.runtime_files import RuntimeFilePlan
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     RuntimeHookPlan,
@@ -639,11 +639,10 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
-        event_sink: object = None,
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log, cancel_requested, event_sink
+        del runtime, env, cancel_requested, event_sink
         events.append(f"{phase}:{','.join(_hook_names(plan, phase))}")
         return ()
 

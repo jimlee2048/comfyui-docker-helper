@@ -16,16 +16,17 @@ from comfyui_docker_helper.config import (
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
-    Logger,
     RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
-    run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_state import RuntimeStateError
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,11 +435,10 @@ extra_args = ["--preview-method", "auto"]
         plan: RuntimeFilePlan,
         *,
         config: RuntimeConfig,
-        log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
         **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del log, state_observer
+        del state_observer
         events.append("download")
         downloader_plans.append(plan)
         downloader_configs.append(config)

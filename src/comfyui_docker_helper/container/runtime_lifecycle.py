@@ -56,7 +56,6 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeSshStatus,
 )
 from comfyui_docker_helper.container.runtime_files import (
-    Logger,
     RuntimeFileDownloadError,
     RuntimeFilePlanError,
 )
@@ -129,10 +128,11 @@ class _RuntimeLifecycleEvents:
 
     def __init__(
         self,
-        event_sink: EventSink[RuntimeEvent] | None,
+        event_sink: EventSink[RuntimeEvent],
         generation: str | None,
     ) -> None:
         self._event_sink = safe_runtime_event_sink(event_sink)
+        assert self._event_sink is not None
         self._generation = generation
         self._active_phase: RuntimePhase | None = None
         self._stop_cause: RuntimeGenerationStopCause | None = None
@@ -192,11 +192,10 @@ class _RuntimeLifecycleEvents:
         self._emit(event)
 
     def _emit(self, event: RuntimeEvent) -> None:
-        if self._event_sink is not None:
-            self._event_sink.emit(event)
+        self._event_sink.emit(event)
 
     @property
-    def event_sink(self) -> EventSink[RuntimeEvent] | None:
+    def event_sink(self) -> EventSink[RuntimeEvent]:
         return self._event_sink
 
 
@@ -210,9 +209,8 @@ class RuntimeHookRunner(Protocol):
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
-        event_sink: EventSink[RuntimeEvent] | None = None,
+        event_sink: EventSink[RuntimeEvent],
     ) -> tuple[RuntimeHookResult, ...]: ...
 
 
@@ -225,12 +223,11 @@ class RuntimeStopHookRunner(Protocol):
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
         deadline: float | None,
         monotonic: Callable[[], float],
         sleep: Callable[[float], object],
-        event_sink: EventSink[RuntimeEvent] | None = None,
+        event_sink: EventSink[RuntimeEvent],
     ) -> tuple[RuntimeHookResult, ...]: ...
 
 
@@ -258,7 +255,7 @@ def run_runtime_lifecycle(
     external_shutdown_observer: Callable[[signal.Signals], object] = lambda _sig: None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
-    event_sink: EventSink[RuntimeEvent] | None = None,
+    event_sink: EventSink[RuntimeEvent],
     generation: str | None = None,
     runtime_ownership_claimed: Callable[[], object] = lambda: None,
 ) -> RuntimeGenerationResult:
@@ -674,31 +671,20 @@ def _run_pre_start_hooks(
     runtime_hook_runner: RuntimeHookRunner,
     startup_shutdown: _StartupShutdownState,
     startup_cancellation: _RuntimeStartupCancellation,
-    event_sink: EventSink[RuntimeEvent] | None,
+    event_sink: EventSink[RuntimeEvent],
 ) -> None:
     if not hook_plan.for_phase("pre-start"):
         return
     startup_shutdown.raise_on_signal = False
     try:
-        if event_sink is None:
-            runtime_hook_runner(
-                hook_plan,
-                "pre-start",
-                runtime=runtime,
-                env=source_env,
-                log=print,
-                cancel_requested=startup_cancellation,
-            )
-        else:
-            runtime_hook_runner(
-                hook_plan,
-                "pre-start",
-                runtime=runtime,
-                env=source_env,
-                log=print,
-                cancel_requested=startup_cancellation,
-                event_sink=event_sink,
-            )
+        runtime_hook_runner(
+            hook_plan,
+            "pre-start",
+            runtime=runtime,
+            env=source_env,
+            cancel_requested=startup_cancellation,
+            event_sink=event_sink,
+        )
     except RuntimeHookError as error:
         startup_shutdown.active_hook_process = error.active_process
         if startup_shutdown.requested_signal is not None:
@@ -738,31 +724,20 @@ def _run_post_start_hooks_if_required(
     runtime_hook_runner: RuntimeHookRunner,
     startup_shutdown: _StartupShutdownState,
     startup_cancellation: _RuntimeStartupCancellation,
-    event_sink: EventSink[RuntimeEvent] | None,
+    event_sink: EventSink[RuntimeEvent],
 ) -> None:
     if not hook_plan.for_phase("post-start"):
         return
     startup_shutdown.raise_on_signal = False
     try:
-        if event_sink is None:
-            runtime_hook_runner(
-                hook_plan,
-                "post-start",
-                runtime=runtime,
-                env=source_env,
-                log=print,
-                cancel_requested=startup_cancellation,
-            )
-        else:
-            runtime_hook_runner(
-                hook_plan,
-                "post-start",
-                runtime=runtime,
-                env=source_env,
-                log=print,
-                cancel_requested=startup_cancellation,
-                event_sink=event_sink,
-            )
+        runtime_hook_runner(
+            hook_plan,
+            "post-start",
+            runtime=runtime,
+            env=source_env,
+            cancel_requested=startup_cancellation,
+            event_sink=event_sink,
+        )
     except RuntimeHookError as error:
         startup_shutdown.active_hook_process = error.active_process
         if startup_shutdown.requested_signal is not None:
@@ -1066,15 +1041,13 @@ def _wait_with_existing_signal_state(
     downloads: RuntimeDownloads,
     ssh_service: RuntimeSshService,
     startup_shutdown: _StartupShutdownState,
-    lifecycle_events: _RuntimeLifecycleEvents | None = None,
+    lifecycle_events: _RuntimeLifecycleEvents,
     restart_acceptor: RuntimeRestartAcceptor | None = None,
     runtime_health: RuntimeHealthObserver | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
 ) -> RuntimeGenerationResult:
     """Wait for the child under the startup-installed signal authority."""
-    if lifecycle_events is None:
-        lifecycle_events = _RuntimeLifecycleEvents(None, None)
     startup_shutdown.raise_on_signal = True
     try:
         try:
@@ -1483,29 +1456,16 @@ def _run_stop_hooks_before_signal(
         )
     try:
         lifecycle_events.start_phase(RuntimePhase.STOP_HOOKS)
-        if lifecycle_events.event_sink is None:
-            runtime_stop_hook_runner(
-                hook_plan,
-                runtime=runtime,
-                env=source_env,
-                log=print,
-                cancel_requested=cancel_requested,
-                deadline=deadline,
-                monotonic=monotonic,
-                sleep=sleep,
-            )
-        else:
-            runtime_stop_hook_runner(
-                hook_plan,
-                runtime=runtime,
-                env=source_env,
-                log=print,
-                cancel_requested=cancel_requested,
-                deadline=deadline,
-                monotonic=monotonic,
-                sleep=sleep,
-                event_sink=lifecycle_events.event_sink,
-            )
+        runtime_stop_hook_runner(
+            hook_plan,
+            runtime=runtime,
+            env=source_env,
+            cancel_requested=cancel_requested,
+            deadline=deadline,
+            monotonic=monotonic,
+            sleep=sleep,
+            event_sink=lifecycle_events.event_sink,
+        )
     except RuntimeHookError as error:
         lifecycle_events.fail_active_phase()
         render_runtime_diagnostics("Runtime stop hook failed:", error.diagnostics)

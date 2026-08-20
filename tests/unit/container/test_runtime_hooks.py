@@ -26,6 +26,7 @@ from comfyui_docker_helper.container.runtime_hooks import (
     run_runtime_startup_hooks,
     run_runtime_stop_hooks,
 )
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -305,10 +306,12 @@ def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:
 
 
 # Startup hook process tests pin interpreter selection, environment shaping,
-# ordering, logging, and failure reporting before ComfyUI starts.
+# ordering, typed events, and failure reporting before ComfyUI starts.
 # A successful terminal result releases each hook's original group without a
 # cleanup signal, while cancellation/deadline paths retain exact group authority.
-def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> None:
+def test_stop_hooks_request_process_group(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime(tmp_path)
     baked = tmp_path / "baked"
     mounted = tmp_path / "mounted"
@@ -319,7 +322,6 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
         mounted_hooks_path=mounted,
     )
     calls: list[tuple[str, bool]] = []
-    logs: list[str] = []
     group_signals: list[tuple[int, signal.Signals]] = []
 
     def runner(
@@ -337,16 +339,12 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
     run_runtime_stop_hooks(
         plan,
         runtime=runtime,
-        log=logs.append,
         runner=runner,
         process_group_signaler=lambda pid, sig: group_signals.append((pid, sig)),
+        event_sink=RecordingRuntimeEventSink(),
     )
 
     assert calls == [("10-baked.sh", True), ("10-mounted.py", True)]
-    assert logs == [
-        "Running runtime hook source=baked phase=stop filename=10-baked.sh",
-        "Running runtime hook source=mounted phase=stop filename=10-mounted.py",
-    ]
     assert group_signals == []
 
 
@@ -360,12 +358,7 @@ def test_runtime_hooks_emit_safe_indexed_facts_without_argv(tmp_path: Path) -> N
         baked_hooks_path=tmp_path / "missing-baked",
         mounted_hooks_path=mounted,
     )
-    events: list[object] = []
-    logs: list[str] = []
-
-    class Sink:
-        def emit(self, event: object) -> None:
-            events.append(event)
+    recorder = RecordingRuntimeEventSink()
 
     def runner(
         argv: Sequence[str | os.PathLike[str]],
@@ -374,24 +367,21 @@ def test_runtime_hooks_emit_safe_indexed_facts_without_argv(tmp_path: Path) -> N
         del argv
         return FakeHookProcess(pid=100, returncode=0)
 
-    sink = Sink()
     run_runtime_startup_hooks(
         plan,
         "pre-start",
         runtime=runtime,
-        log=logs.append,
         runner=runner,  # type: ignore[arg-type]
-        event_sink=sink,  # type: ignore[arg-type]
+        event_sink=recorder,
     )
     run_runtime_stop_hooks(
         plan,
         runtime=runtime,
-        log=logs.append,
         runner=runner,  # type: ignore[arg-type]
-        event_sink=sink,  # type: ignore[arg-type]
+        event_sink=recorder,
     )
 
-    assert events == [
+    assert recorder.events == [
         RuntimeHookStarted(1, 1, "pre-start", "mounted", "05-prepare.sh"),
         RuntimeHookCompleted(1, 1, "pre-start", "mounted", "05-prepare.sh"),
         RuntimeHookStarted(1, 2, "stop", "mounted", "10-first.sh"),
@@ -399,8 +389,7 @@ def test_runtime_hooks_emit_safe_indexed_facts_without_argv(tmp_path: Path) -> N
         RuntimeHookStarted(2, 2, "stop", "mounted", "20-second.py"),
         RuntimeHookCompleted(2, 2, "stop", "mounted", "20-second.py"),
     ]
-    assert logs == []
-    assert os.fspath(tmp_path) not in repr(events)
+    assert os.fspath(tmp_path) not in repr(recorder.events)
 
 
 def test_runtime_hook_failure_diagnostics_omit_argv_and_runner_reason(
@@ -423,6 +412,7 @@ def test_runtime_hook_failure_diagnostics_omit_argv_and_runner_reason(
                 pid=101,
                 returncode=7,
             ),
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     diagnostic = error.value.diagnostics[0]
@@ -439,6 +429,7 @@ def test_runtime_hook_failure_diagnostics_omit_argv_and_runner_reason(
             "pre-start",
             runtime=runtime,
             runner=fail_start,  # type: ignore[arg-type]
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     start_diagnostic = start_error.value.diagnostics[0]
@@ -510,6 +501,7 @@ def test_startup_hook_cancellation_uses_outer_deadline_and_skips_remaining(
             monotonic=clock.monotonic,
             sleep=clock.sleep,
             process_group_signaler=signaler,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert started == ["10-hang.sh"]
@@ -566,6 +558,7 @@ def test_stop_hook_deadline_kills_process_group_and_skips_remaining(
             monotonic=clock.monotonic,
             sleep=clock.sleep,
             process_group_signaler=signaler,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert started == ["10-hang.sh"]
@@ -607,6 +600,7 @@ def test_stop_hook_deadline_signal_failure_does_not_wait(
             monotonic=clock.monotonic,
             sleep=clock.sleep,
             process_group_signaler=signaler,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert locations_and_codes(error.value) == [
@@ -659,6 +653,7 @@ def test_stop_hooks_do_not_start_later_hook_after_shared_deadline(
         deadline=0.2,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
+        event_sink=RecordingRuntimeEventSink(),
     )
 
     assert started == ["10-finish.sh"]
@@ -710,6 +705,7 @@ def test_stop_hook_cancellation_terminates_group_and_skips_remaining(
             monotonic=clock.monotonic,
             sleep=clock.sleep,
             process_group_signaler=signaler,
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert started == ["10-hang.sh"]
@@ -754,6 +750,7 @@ def test_stop_hook_cancel_winner_signals_group_after_leader_exit(
             runner=lambda *_args, **_kwargs: process,
             cancel_requested=LeaderExitCancellation(),
             process_group_signaler=lambda pid, sig: signals.append((pid, sig)),
+            event_sink=RecordingRuntimeEventSink(),
         )
 
     assert locations_and_codes(error.value) == [
@@ -800,6 +797,7 @@ def test_stop_hook_force_cancellation_skips_termination_grace(
             runner=lambda *_args, **_kwargs: process,
             cancel_requested=cancellation,
             process_group_signaler=signaler,
+            event_sink=RecordingRuntimeEventSink(),
         )
     assert locations_and_codes(error.value) == [
         (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.cancelled")

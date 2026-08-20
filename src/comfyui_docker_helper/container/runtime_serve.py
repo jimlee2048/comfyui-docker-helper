@@ -107,7 +107,7 @@ class _ServeGenerationLease:
     def close(
         self,
         cause: RuntimeGenerationStopCause,
-        event_sink: EventSink[RuntimeEvent] | None,
+        event_sink: EventSink[RuntimeEvent],
     ) -> None:
         if self.state == "stopped":
             return
@@ -115,13 +115,11 @@ class _ServeGenerationLease:
             self.cause = cause
         if self.state == "owned":
             self.state = "stopping"
-            if event_sink is not None:
-                event_sink.emit(RuntimeGenerationStopping(self.generation))
+            event_sink.emit(RuntimeGenerationStopping(self.generation))
         terminal_cause = self.cause
         assert terminal_cause is not None
         self.state = "stopped"
-        if event_sink is not None:
-            event_sink.emit(RuntimeGenerationStopped(self.generation, terminal_cause))
+        event_sink.emit(RuntimeGenerationStopped(self.generation, terminal_cause))
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +140,8 @@ class RuntimeGenerationFactory:
         self,
         *,
         runtime: ContainerRuntime,
+        background_event_sink: RuntimeBackgroundEventSink,
+        event_sink: EventSink[RuntimeEvent],
         baked_config_path: str | Path = BAKED_RUNTIME_CONFIG_PATH,
         mounted_config_path: str | Path = MOUNTED_RUNTIME_CONFIG_PATH,
         baked_hooks_path: str | Path = BAKED_RUNTIME_HOOKS_PATH,
@@ -153,8 +153,6 @@ class RuntimeGenerationFactory:
         ),
         runtime_ssh_starter: RuntimeSshStarter = start_sshd_if_enabled,
         runtime_state_path: str | Path = RUNTIME_STATE_PATH,
-        background_event_sink: RuntimeBackgroundEventSink | None = None,
-        event_sink: EventSink[RuntimeEvent] | None = None,
     ) -> None:
         self._runtime = runtime
         self._baked_config_path = Path(baked_config_path)
@@ -169,7 +167,8 @@ class RuntimeGenerationFactory:
         self._runtime_ssh_starter = runtime_ssh_starter
         self._runtime_state_path = Path(runtime_state_path)
         self._background_event_sink = background_event_sink
-        self._event_sink = event_sink
+        self._event_sink = safe_runtime_event_sink(event_sink)
+        assert self._event_sink is not None
 
     def create_generation(self) -> RuntimeGeneration:
         """Read current runtime files and construct fresh component owners."""
@@ -237,6 +236,8 @@ class RuntimeGenerationFactory:
 
 def run_runtime_generation_once(
     *,
+    event_sink: EventSink[RuntimeEvent],
+    background_event_sink: RuntimeBackgroundEventSink,
     runtime: ContainerRuntime | None = None,
     baked_config_path: str | Path = BAKED_RUNTIME_CONFIG_PATH,
     mounted_config_path: str | Path = MOUNTED_RUNTIME_CONFIG_PATH,
@@ -256,9 +257,10 @@ def run_runtime_generation_once(
     runtime_health: RuntimeHealthObserver | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
-    background_event_sink: RuntimeBackgroundEventSink | None = None,
 ) -> int:
     """Compose and execute one generation through the injected test seam."""
+    event_sink = safe_runtime_event_sink(event_sink)
+    assert event_sink is not None
     source_env = MappingProxyType(dict(os.environ if environ is None else environ))
     effective_runtime = (
         ContainerRuntime.from_env(source_env) if runtime is None else runtime
@@ -275,6 +277,7 @@ def run_runtime_generation_once(
         runtime_ssh_starter=runtime_ssh_starter,
         runtime_state_path=runtime_state_path,
         background_event_sink=background_event_sink,
+        event_sink=event_sink,
     ).create_generation()
     result = run_runtime_lifecycle(
         generation.config,
@@ -290,6 +293,7 @@ def run_runtime_generation_once(
         runtime_health=runtime_health,
         monotonic=monotonic,
         sleep=sleep,
+        event_sink=event_sink,
     )
     return _normalize_exit_code(result.returncode)
 
@@ -381,11 +385,12 @@ def _run_runtime_serve(
     generation_running: Callable[[RuntimeController], object],
     monotonic: Callable[[], float],
     sleep: Callable[[float], object],
-    event_sink: EventSink[RuntimeEvent] | None = None,
-    background_event_sink: RuntimeBackgroundEventSink | None = None,
+    event_sink: EventSink[RuntimeEvent],
+    background_event_sink: RuntimeBackgroundEventSink,
 ) -> int:
     """Own the private endpoint and execute serial runtime generations."""
     event_sink = safe_runtime_event_sink(event_sink)
+    assert event_sink is not None
     source_env = MappingProxyType(dict(os.environ if environ is None else environ))
     effective_runtime = (
         ContainerRuntime.from_env(source_env) if runtime is None else runtime
@@ -435,13 +440,12 @@ def _run_runtime_serve(
                     RUNTIME_LOGGING_UNAVAILABLE_MESSAGE
                 ) from error
             serve_owned_generation = _ServeGenerationLease(current_generation)
-            if event_sink is not None:
-                event_sink.emit(
-                    RuntimeGenerationAdmitted(
-                        current_generation,
-                        RuntimeGenerationOperation.INITIAL_START,
-                    )
+            event_sink.emit(
+                RuntimeGenerationAdmitted(
+                    current_generation,
+                    RuntimeGenerationOperation.INITIAL_START,
                 )
+            )
             initial_generation = True
 
             def publish_start_failure(error: RuntimeExecutionError) -> None:
@@ -517,8 +521,7 @@ def _run_runtime_serve(
                             RUNTIME_LOGGING_UNAVAILABLE_MESSAGE
                         ) from transition_error
                     generation_running(controller)
-                    if event_sink is not None:
-                        event_sink.emit(RuntimeGenerationReady(generation_id))
+                    event_sink.emit(RuntimeGenerationReady(generation_id))
 
                 try:
 
@@ -589,13 +592,12 @@ def _run_runtime_serve(
                     return 128 + int(shutdown.signal)
                 current_generation = successor
                 serve_owned_generation = _ServeGenerationLease(successor)
-                if event_sink is not None:
-                    event_sink.emit(
-                        RuntimeGenerationAdmitted(
-                            current_generation,
-                            RuntimeGenerationOperation.OPERATOR_RESTART,
-                        )
+                event_sink.emit(
+                    RuntimeGenerationAdmitted(
+                        current_generation,
+                        RuntimeGenerationOperation.OPERATOR_RESTART,
                     )
+                )
                 initial_generation = False
         except _RuntimeControllerShutdownRequested as request:
             close_serve_owned_generation(RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN)

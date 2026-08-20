@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from comfyui_docker_helper.container.runtime_files import (
-    Logger,
     RuntimeDownloadObservedStatus,
     RuntimeFilePlanItem,
     runtime_file_state_identity_digest,
@@ -25,12 +24,9 @@ class RuntimeDownloadStateWriter:
         self,
         store: RuntimeStateStore,
         state: RuntimeState,
-        *,
-        log: Logger | None = None,
     ) -> None:
         self._store = store
         self._state = state
-        self._log = log
 
     def __call__(
         self,
@@ -74,9 +70,3 @@ class RuntimeDownloadStateWriter:
             downloads=entries,
         )
         self._store.write(self._state)
-        if self._log is not None:
-            self._log(
-                "Runtime download state persisted: "
-                f"mode={item.download_mode} target={item.relative_target} "
-                f"status={updated_entry.status}"
-            )

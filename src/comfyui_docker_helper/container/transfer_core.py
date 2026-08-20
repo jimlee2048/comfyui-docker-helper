@@ -517,12 +517,6 @@ class FileTransferOutcome:
     verification: VerificationStatus
 
 
-class Logger(Protocol):
-    """Minimal logger protocol used by transfer orchestration."""
-
-    def __call__(self, message: str) -> None: ...
-
-
 @dataclass(slots=True)
 class _DirectoryAnchor:
     path: Path

@@ -132,7 +132,6 @@ class _RuntimeLifecycleEvents:
         generation: str | None,
     ) -> None:
         self._event_sink = safe_runtime_event_sink(event_sink)
-        assert self._event_sink is not None
         self._generation = generation
         self._active_phase: RuntimePhase | None = None
         self._stop_cause: RuntimeGenerationStopCause | None = None

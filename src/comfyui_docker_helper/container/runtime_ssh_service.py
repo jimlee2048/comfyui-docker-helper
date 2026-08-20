@@ -16,7 +16,6 @@ from comfyui_docker_helper.container.process_control import (
     request_terminate_direct_process,
     terminate_direct_process_until,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_event_delivery import (
     RuntimeBackgroundEventSink,
     safe_runtime_event_sink,
@@ -45,7 +44,6 @@ class RuntimeSshStarter(Protocol):
         self,
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
         preparation_process_observer: Callable[[DirectProcess | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> SshdProcess | None: ...
@@ -103,17 +101,14 @@ class RuntimeSshService:
         self,
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
         background_event_sink: RuntimeBackgroundEventSink,
         event_sink: EventSink[RuntimeEvent],
         starter: RuntimeSshStarter = start_sshd_if_enabled,
     ) -> None:
         self._config = config
-        self._runtime = runtime
         self._starter = starter
         self._background_event_sink = background_event_sink
         self._event_sink = safe_runtime_event_sink(event_sink)
-        assert self._event_sink is not None
         self._reported_direct_warnings: set[RuntimeSshWarningKind] = set()
         self._handle: SshdProcess | None = None
         self._shutdown_requested = threading.Event()
@@ -152,7 +147,6 @@ class RuntimeSshService:
             try:
                 handle = self._starter(
                     self._config,
-                    runtime=self._runtime,
                     preparation_process_observer=observe_preparation_process,
                     preparation_warning_observer=preparation_warnings.append,
                 )

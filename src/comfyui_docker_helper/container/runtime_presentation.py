@@ -168,12 +168,18 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
                     minimum=OutputDetail.VERBOSE,
                 )
             elif isinstance(event, RuntimeSshOutcome):
-                minimum = (
-                    OutputDetail.VERBOSE
-                    if event.status is RuntimeSshStatus.DISABLED
-                    else OutputDetail.NORMAL
-                )
-                self._write(_SSH_STATUS_LABELS[event.status], minimum=minimum)
+                if event.status is RuntimeSshStatus.ENABLED_WITHOUT_CREDENTIALS:
+                    self._write(
+                        f"Warning: {_SSH_STATUS_LABELS[event.status]}",
+                        warning=True,
+                    )
+                else:
+                    minimum = (
+                        OutputDetail.VERBOSE
+                        if event.status is RuntimeSshStatus.DISABLED
+                        else OutputDetail.NORMAL
+                    )
+                    self._write(_SSH_STATUS_LABELS[event.status], minimum=minimum)
             elif isinstance(event, RuntimeDownloadReconciled):
                 self._download_reconciled(event)
             elif isinstance(event, RuntimeDownloadQueueSummary):

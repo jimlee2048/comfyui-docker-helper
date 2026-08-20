@@ -19,19 +19,10 @@ from comfyui_docker_helper.container.process_control import (
     DirectProcess,
     terminate_direct_process_until,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.errors import ApplicationError
 
 _ROOT_UID = 0
 _ROOT_GID = 0
-_SSH_DIRECTORY_MODE_WARNING = (
-    "WARNING: existing root SSH directory mode is nonstandard; preserving it "
-    "because it is not writable by group or other"
-)
-_AUTHORIZED_KEYS_MODE_WARNING = (
-    "WARNING: existing root SSH authorized keys mode is nonstandard; replacing "
-    "it atomically with mode 0600"
-)
 type Chown = Callable[
     [str | bytes | os.PathLike[str] | os.PathLike[bytes], int, int],
     None,
@@ -111,7 +102,7 @@ class RootSshCredentialPreparationStatus:
     authorized_keys_path: Path | None = None
     root_password_set: bool = False
     root_unlocked: bool = False
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[SshPreparationWarningKind, ...] = ()
 
     @property
     def has_credentials(self) -> bool:
@@ -122,8 +113,6 @@ class RootSshCredentialPreparationStatus:
 def start_sshd_if_enabled(
     config: RuntimeConfig,
     *,
-    runtime: ContainerRuntime,
-    log: Callable[[str], object] = print,
     root_home: Path = Path("/root"),
     runtime_dir: Path = Path("/run/sshd"),
     credential_command_runner: SensitiveCommandRunner | None = None,
@@ -136,10 +125,9 @@ def start_sshd_if_enabled(
     command_runner: CommandRunner | None = None,
     process_starter: SshdProcessStarter | None = None,
     preparation_process_observer: PreparationProcessObserver = lambda _process: None,
-    preparation_warning_observer: SshPreparationWarningObserver | None = None,
+    preparation_warning_observer: SshPreparationWarningObserver,
 ) -> SshdProcess | None:
     """Prepare and start foreground sshd when effective SSH is active."""
-    del runtime
     ssh = config.system.ssh
     if not ssh.enable:
         return None
@@ -161,22 +149,9 @@ def start_sshd_if_enabled(
         raise SshdStartupError("SSH credential preparation failed") from error
 
     for warning in status.warnings:
-        if preparation_warning_observer is None:
-            log(warning)
-        else:
-            kind = {
-                _SSH_DIRECTORY_MODE_WARNING: (
-                    SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
-                ),
-                _AUTHORIZED_KEYS_MODE_WARNING: (
-                    SshPreparationWarningKind.AUTHORIZED_KEYS_MODE_NONSTANDARD
-                ),
-            }[warning]
-            preparation_warning_observer(kind)
+        preparation_warning_observer(warning)
 
     if not status.has_credentials:
-        if preparation_warning_observer is None:
-            log("WARNING: SSH is enabled but no root SSH credentials are configured")
         return None
 
     run_command = (
@@ -267,7 +242,7 @@ def prepare_root_ssh_credentials(
 
     public_keys = _normalize_runtime_public_keys(ssh.pub_keys)
     authorized_keys_path = None
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[SshPreparationWarningKind, ...] = ()
     if public_keys:
         authorized_keys_path, warnings = _write_authorized_keys(
             public_keys,
@@ -411,7 +386,7 @@ def _write_authorized_keys(
     fchmod: Fchmod,
     owner_uid: int,
     owner_gid: int,
-) -> tuple[Path, tuple[str, ...]]:
+) -> tuple[Path, tuple[SshPreparationWarningKind, ...]]:
     ssh_dir = root_home / ".ssh"
     authorized_keys = ssh_dir / "authorized_keys"
     try:
@@ -474,7 +449,7 @@ def _ensure_root_ssh_directory(
     chmod: Chmod,
     owner_uid: int,
     owner_gid: int,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, SshPreparationWarningKind | None]:
     created = False
     try:
         metadata = path.lstat()
@@ -493,7 +468,9 @@ def _ensure_root_ssh_directory(
         raise SshCredentialPreparationError(
             "root SSH directory must be root-owned and not writable by group or other"
         )
-    warning = None if mode == 0o700 else _SSH_DIRECTORY_MODE_WARNING
+    warning = (
+        None if mode == 0o700 else SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
+    )
     return created, warning
 
 
@@ -501,7 +478,7 @@ def _validate_authorized_keys_target(
     path: Path,
     *,
     owner_uid: int,
-) -> str | None:
+) -> SshPreparationWarningKind | None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -516,7 +493,11 @@ def _validate_authorized_keys_target(
             "root SSH authorized keys must be a root-owned regular file that is "
             "not writable by group or other"
         )
-    return None if mode == 0o600 else _AUTHORIZED_KEYS_MODE_WARNING
+    return (
+        None
+        if mode == 0o600
+        else SshPreparationWarningKind.AUTHORIZED_KEYS_MODE_NONSTANDARD
+    )
 
 
 def _atomic_replace_authorized_keys(

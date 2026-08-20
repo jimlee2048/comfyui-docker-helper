@@ -105,13 +105,11 @@ def _request(
 def _downloader(
     transport: httpx.MockTransport,
     *,
-    logs: list[str] | None = None,
     monotonic: Callable[[], float] | None = None,
     wall_clock: Callable[[], float] | None = None,
 ) -> HttpxDownloader:
     return HttpxDownloader(
         transport=transport,
-        log=(logs if logs is not None else []).append,
         monotonic=monotonic or (lambda: 0.0),
         wall_clock=wall_clock or time.time,
     )
@@ -370,7 +368,6 @@ def test_httpx_reselects_cdh_authorization_for_every_redirect(
     result = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_PathCredentialPolicy(),
-        log=lambda _: None,
     ).download(
         _request(
             tmp_path,
@@ -408,7 +405,6 @@ def test_httpx_preserves_unowned_authorization_until_a_route_matches(
     result = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_PathCredentialPolicy(),
-        log=lambda _: None,
     ).download(
         _request(tmp_path, url="https://user:password@example.test/public"),
         _settings(),
@@ -438,7 +434,6 @@ def test_httpx_reports_initial_credential_failure_before_network(
     downloader = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_FailingCredentialPolicy(),
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloaderCredentialError) as caught:
@@ -464,7 +459,6 @@ def test_httpx_retains_network_attempt_when_redirect_enters_failing_route(
     downloader = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_FailingCredentialPolicy(),
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloaderCredentialError) as caught:
@@ -744,7 +738,7 @@ def test_httpx_stalled_response_body_cancels_within_a_fixed_bound(
 
     server = threading.Thread(target=serve, name="httpx-test-server")
     server.start()
-    downloader = HttpxDownloader(log=lambda _: None)
+    downloader = HttpxDownloader()
     results: list[object] = []
     worker = threading.Thread(
         target=lambda: results.append(
@@ -859,25 +853,10 @@ def test_httpx_decoding_failure_fails_closed(tmp_path: Path) -> None:
         )
 
 
-def test_httpx_adapter_does_not_log_internal_staging_progress(tmp_path: Path) -> None:
-    request = _request(tmp_path)
-    logs: list[str] = []
-    downloader = _downloader(
-        httpx.MockTransport(lambda _: httpx.Response(200, content=b"abc")),
-        logs=logs,
-    )
-    downloader.chunk_size = 1
-
-    downloader.download(request, _settings())
-
-    assert logs == []
-
-
 def test_httpx_controlled_error_hides_url_credentials_and_raw_exception(
     tmp_path: Path,
 ) -> None:
     sentinel = "raw-exception-sentinel"
-    logs: list[str] = []
 
     def handler(_: httpx.Request) -> httpx.Response:
         raise httpx.LocalProtocolError(
@@ -885,7 +864,7 @@ def test_httpx_controlled_error_hides_url_credentials_and_raw_exception(
         )
 
     with pytest.raises(DownloadFilesError) as raised:
-        _downloader(httpx.MockTransport(handler), logs=logs).download(
+        _downloader(httpx.MockTransport(handler)).download(
             _request(
                 tmp_path,
                 url=(
@@ -896,7 +875,7 @@ def test_httpx_controlled_error_hides_url_credentials_and_raw_exception(
             _settings(),
         )
 
-    visible = f"{raised.value}\n{' '.join(logs)}"
+    visible = str(raised.value)
     assert sentinel not in visible
     assert "credential-sentinel" not in visible
     assert "url-sentinel" not in visible

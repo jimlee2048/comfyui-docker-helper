@@ -265,7 +265,6 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
     argv_calls: list[list[str]] = []
     client_calls: list[FakeClient] = []
     api = FakeApi(FakeDownload(["complete"]))
-    logs: list[str] = []
     secret = "test-secret"
     item = make_item(tmp_path)
     settings = make_settings()
@@ -291,7 +290,6 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
         api_factory=lambda _: api,
         secret_factory=lambda: secret,
         cancel_wait=lambda _: False,
-        log=logs.append,
     )
 
     result = downloader.download(item, settings)
@@ -338,7 +336,6 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
     assert secret not in repr(settings)
     assert secret not in repr(item)
     assert secret not in repr(downloader)
-    assert all(secret not in line for line in logs)
 
 
 def test_aria2_downloader_context_always_shuts_down_daemon(tmp_path: Path) -> None:
@@ -352,7 +349,6 @@ def test_aria2_downloader_context_always_shuts_down_daemon(tmp_path: Path) -> No
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with downloader:
@@ -374,7 +370,6 @@ def test_aria2_progress_uses_existing_update_metrics(tmp_path: Path) -> None:
         api_factory=lambda _: FakeApi(download),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with downloader:
@@ -435,7 +430,6 @@ def test_aria2_malformed_optional_metrics_do_not_change_strict_status(
         api_factory=lambda _: FakeApi(MalformedMetricsDownload()),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with downloader:
@@ -472,7 +466,6 @@ def test_aria2_oversized_optional_metrics_do_not_change_completion(
         api_factory=lambda _: FakeApi(download),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with downloader:
@@ -506,7 +499,6 @@ def test_aria2_progress_sink_failure_reaps_daemon(tmp_path: Path) -> None:
         api_factory=lambda _: FakeApi(FakeDownload(["active"], metrics=[(1, 10, 2)])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(RuntimeError, match="display-progress-sentinel"):
@@ -528,7 +520,6 @@ def test_aria2_force_cancel_kills_exact_active_daemon(tmp_path: Path) -> None:
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     assert isinstance(
         downloader.download(make_item(tmp_path), make_settings()),
@@ -555,7 +546,6 @@ def test_aria2_downloader_context_cleans_up_after_download_failure(
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match="RPC disconnected"), downloader:
@@ -578,7 +568,6 @@ def test_aria2_downloader_terminates_process_when_shutdown_does_not_exit(
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with downloader:
@@ -620,7 +609,6 @@ def test_aria2_error_code_maps_to_capability_aware_outcome(
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     result = downloader.download(make_item(tmp_path), make_settings())
@@ -648,7 +636,6 @@ def test_aria2_error_message_is_never_read_for_classification(
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     result = downloader.download(make_item(tmp_path), make_settings())
@@ -675,7 +662,6 @@ def test_aria2_code_eight_is_typed_only_for_an_admitted_resumed_request(
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     result = downloader.download(
@@ -697,7 +683,6 @@ def test_aria2_code_eight_on_clean_request_fails_closed(tmp_path: Path) -> None:
         api_factory=lambda _: FakeApi(FakeDownload(["error"], error_code="8")),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match="without an admitted resumed"):
@@ -719,7 +704,6 @@ def test_aria2_missing_or_unclassified_error_code_fails_closed(
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match=r"malformed|unclassified"):
@@ -736,7 +720,6 @@ def test_aria2_code_eight_requires_resume_to_be_enabled_in_settings(
         api_factory=lambda _: FakeApi(FakeDownload(["error"], error_code="8")),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match="without an admitted resumed"):
@@ -755,7 +738,6 @@ def test_aria2_downloader_reports_removed_status(tmp_path: Path) -> None:
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match="removed"):
@@ -773,7 +755,6 @@ def test_aria2_removed_after_cdh_cancellation_is_cancelled(tmp_path: Path) -> No
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     download.on_update = downloader.cancel
 
@@ -806,7 +787,6 @@ def test_aria2_cancellation_during_readiness_returns_cancelled(
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     results: list[object] = []
     download_worker = threading.Thread(
@@ -837,7 +817,6 @@ def test_aria2_downloader_reports_rpc_disconnect(tmp_path: Path) -> None:
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match="RPC disconnected"):
@@ -854,7 +833,6 @@ def test_aria2_downloader_reports_daemon_exit(tmp_path: Path) -> None:
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match="exited with code 7"):
@@ -877,7 +855,6 @@ def test_aria2_downloader_reports_startup_port_failure(tmp_path: Path) -> None:
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match="exited with code 1"):
@@ -896,7 +873,6 @@ def test_aria2_downloader_does_not_own_control_file_cleanup(tmp_path: Path) -> N
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     downloader.download(item, make_settings(resume_download=False))
@@ -922,7 +898,6 @@ def test_aria2_prepare_and_download_reuse_one_matching_daemon(tmp_path: Path) ->
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     settings = make_settings()
 
@@ -968,7 +943,6 @@ def test_aria2_never_exposes_api_before_authenticated_readiness(
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     errors: list[BaseException] = []
 
@@ -1003,7 +977,6 @@ def test_aria2_rejects_incompatible_settings_for_live_daemon(tmp_path: Path) -> 
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     downloader.download(make_item(tmp_path), make_settings())
 
@@ -1029,7 +1002,6 @@ def test_aria2_close_is_idempotent_and_escalation_uses_one_total_bound(
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
         monotonic=lambda: clock[0],
-        log=lambda _: None,
     )
     downloader.download(make_item(tmp_path), make_settings())
 
@@ -1070,7 +1042,6 @@ def test_aria2_cancel_before_complete_observation_prevents_core_placement(
         api_factory=lambda _: api,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     errors: list[BaseException] = []
 
@@ -1105,7 +1076,6 @@ def test_aria2_complete_observation_precedes_later_cancel(tmp_path: Path) -> Non
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     result = downloader.download(
@@ -1137,7 +1107,6 @@ def test_aria2_close_waits_for_startup_and_reaps_the_spawned_child(
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     original_wait = downloader._wait_for_lifecycle_change
 
@@ -1197,7 +1166,6 @@ def test_aria2_interrupted_teardown_notifies_waiter_and_later_retries_reap(
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     downloader.prepare(make_settings())
     original_wait = downloader._wait_for_lifecycle_change
@@ -1240,7 +1208,6 @@ def test_aria2_ordinary_teardown_failure_is_controlled_and_retryable(
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     downloader.prepare(make_settings())
 
@@ -1293,7 +1260,6 @@ def test_aria2_pre_spawn_base_exception_releases_waiting_starter(
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=secret_factory,
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     original_wait = downloader._wait_for_lifecycle_change
 
@@ -1371,7 +1337,6 @@ def test_aria2_post_spawn_base_exception_cleans_child_and_notifies_waiter(
         api_factory=api_factory,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     original_wait = downloader._wait_for_lifecycle_change
 
@@ -1436,7 +1401,6 @@ def test_aria2_post_spawn_startup_failure_always_reaps_child(
         api_factory=api_factory,
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
     if failure_point == "readiness":
         downloader.startup_timeout_seconds = 0.0
@@ -1471,7 +1435,6 @@ def test_aria2_pre_spawn_startup_failure_never_leaves_lifecycle_starting(
         api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
         secret_factory=secret_factory,
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError):
@@ -1499,7 +1462,6 @@ def test_aria2_rpc_submit_failure_fails_closed_and_context_reaps(
         ),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     item = make_item(tmp_path)
@@ -1533,7 +1495,6 @@ def test_aria2_malformed_or_unknown_status_fails_closed(
         api_factory=lambda _: FakeApi(FakeDownload([status])),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloadFilesError, match=r"malformed|unexpected"):

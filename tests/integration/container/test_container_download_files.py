@@ -221,7 +221,6 @@ def test_build_orchestrator_preserves_order_and_places_via_shared_core(
     results = process_file_downloads(
         plan,
         backends={"httpx": httpx, "aria2": aria2},
-        log=lambda _: None,
     )
 
     assert [result.status for result in results] == [
@@ -270,7 +269,6 @@ def test_build_grants_each_declared_file_a_fresh_attempt_budget(
     results = process_file_downloads(
         FileDownloadPlan(root, _settings(), (first, second), 2),
         backends={"httpx": backend},
-        log=lambda _: None,
     )
 
     assert [call.url for call in backend.calls] == [
@@ -292,16 +290,13 @@ def test_build_retry_emits_one_complete_typed_lifecycle(
     root.mkdir()
     item = _item(root, "model.bin")
     events = RecordingEventSink()
-    logs: list[str] = []
 
     process_file_downloads(
         FileDownloadPlan(root, _settings(), (item,), 2),
         backends={"httpx": RecordingBackend(fail_times=1)},
-        log=logs.append,
         event_sink=events,
     )
 
-    assert logs == []
     assert events.events == [
         DownloadItemStarted(
             index=1,
@@ -395,7 +390,6 @@ def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
         process_file_downloads(
             FileDownloadPlan(root, _settings(), (first, second), 1),
             backends={"httpx": backend},
-            log=lambda _: None,
         )
 
     assert raised.value.reason is DownloadRetryReason.NETWORK
@@ -421,7 +415,6 @@ def test_successful_replacement_returns_stable_observation_and_cleans_staging(
     (result,) = process_file_downloads(
         FileDownloadPlan(root, _settings(), (item,), 1),
         backends={"httpx": RecordingBackend()},
-        log=lambda _: None,
     )
 
     assert result.item == item
@@ -471,7 +464,6 @@ def test_build_terminal_outcomes_are_fatal_and_stop_declaration_order(
         process_file_downloads(
             FileDownloadPlan(root, _settings(), (first, second), 3),
             backends={"httpx": backend},
-            log=lambda _: None,
         )
 
     visible = str(raised.value)
@@ -569,7 +561,6 @@ def test_build_batch_rechecks_every_required_final(tmp_path: Path) -> None:
         process_file_downloads(
             FileDownloadPlan(root, _settings(), (first, second), 1),
             backends={"httpx": MutatingBackend()},
-            log=lambda _: None,
             event_sink=events,
         )
 

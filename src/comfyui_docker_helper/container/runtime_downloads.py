@@ -251,7 +251,6 @@ class RuntimeDownloads:
         self._credential_policy = credential_policy
         self._event_sink = event_sink
         self._direct_event_sink = safe_runtime_event_sink(direct_event_sink)
-        assert self._direct_event_sink is not None
         self._prepared = _empty_prepared_runtime_downloads()
         self._sync_handle: _RuntimeDownloadOperationHandle | None = None
         self._async_handle: RuntimeAsyncDownloadQueueHandle | None = None

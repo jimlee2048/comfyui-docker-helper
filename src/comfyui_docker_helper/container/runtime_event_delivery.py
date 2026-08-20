@@ -66,11 +66,9 @@ class _FailureLatchingRuntimeEventSink(EventSink[RuntimeEvent]):
 
 
 def safe_runtime_event_sink(
-    sink: EventSink[RuntimeEvent] | None,
-) -> EventSink[RuntimeEvent] | None:
+    sink: EventSink[RuntimeEvent],
+) -> EventSink[RuntimeEvent]:
     """Return one idempotently wrapped, failure-latching direct event sink."""
-    if sink is None:
-        return None
     if isinstance(sink, _FailureLatchingRuntimeEventSink):
         return sink
     return _FailureLatchingRuntimeEventSink(sink)
@@ -135,7 +133,6 @@ class RuntimeEventDelivery(EventSink[RuntimeBackgroundEvent]):
             if type(value) is not int or value < 1:
                 raise ValueError(f"Runtime delivery {label} must be positive")
         self._event_sink = safe_runtime_event_sink(event_sink)
-        assert self._event_sink is not None
         self._transition_capacity = transition_capacity
         self._warning_capacity = warning_capacity
         self._progress_capacity = progress_capacity

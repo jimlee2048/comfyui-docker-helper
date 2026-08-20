@@ -62,7 +62,6 @@ from comfyui_docker_helper.container.transfer_core import (
     FileTransferOutcome,
     FileTransferRequest,
     HttpxDownloadSettings,
-    Logger,
     StagingDisposition,
     TerminalTransferDownloadFilesError,
     TransferDownloadFilesError,
@@ -134,13 +133,11 @@ class HttpxDownloader:
         transport: httpx.AsyncBaseTransport | None = None,
         monotonic: Monotonic = time.monotonic,
         wall_clock: Monotonic = time.time,
-        log: Logger = print,
         credential_policy: DownloaderCredentialPolicy | None = None,
     ) -> None:
         self._transport = transport
         self._monotonic = monotonic
         self._wall_clock = wall_clock
-        del log
         self._credential_policy = credential_policy
         self._cancel_requested = threading.Event()
         self._active_lock = threading.Lock()
@@ -509,14 +506,12 @@ class Aria2Downloader:
         secret_factory: SecretFactory = lambda: secrets.token_urlsafe(32),
         cancel_wait: CancellationWait | None = None,
         monotonic: Monotonic = time.monotonic,
-        log: Logger = print,
     ) -> None:
         self._process_factory = process_factory
         self._client_factory = client_factory
         self._api_factory = api_factory
         self._secret_factory = secret_factory
         self._monotonic = monotonic
-        del log
         self._process: Aria2Process | None = None
         self._client: Aria2Client | None = None
         self._api: Aria2Api | None = None
@@ -1041,7 +1036,6 @@ def process_file_downloads(
     plan: FileDownloadPlan,
     *,
     backends: Mapping[str, DownloadBackend],
-    log: Logger = print,
     event_sink: EventSink[DownloadEvent] | None = None,
 ) -> tuple[DownloadResult, ...]:
     """Process required build files serially; every failure remains fatal."""
@@ -1049,9 +1043,7 @@ def process_file_downloads(
     results: list[DownloadResult] = []
     for index, item in enumerate(plan.items, 1):
         target = _download_target(plan, item)
-        if event_sink is None:
-            log(f"Processing required build file {index}/{len(plan.items)}: {target}")
-        else:
+        if event_sink is not None:
             event_sink.emit(
                 DownloadItemStarted(
                     index=index,
@@ -1074,11 +1066,6 @@ def process_file_downloads(
             plan,
             event_sink=event_sink,
         )
-        if event_sink is None:
-            if outcome.status is DownloadStatus.SKIPPED:
-                log(f"Required build file already present: {target}")
-            else:
-                log(f"Required build file placed: {target}")
         _verify_build_file_postcondition(plan, item)
         if event_sink is not None:
             status = (
@@ -1141,13 +1128,11 @@ def download_files(
     *,
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
-    log: Logger = print,
-    event_sink: EventSink[DownloadEvent] | None = None,
+    event_sink: EventSink[DownloadEvent],
 ) -> tuple[DownloadResult, ...]:
     """Download required build files from one admitted BuildPlan phase."""
     plan = file_download_plan(files, comfyui_root)
     httpx_backend = httpx_downloader or HttpxDownloader(
-        log=log,
         credential_policy=MountedDownloaderCredentialPolicy.from_routes(
             files.credentials
         ),
@@ -1157,15 +1142,13 @@ def download_files(
         return process_file_downloads(
             plan,
             backends=backends,
-            log=log,
             event_sink=event_sink,
         )
-    with aria2_downloader_factory(log=log) as aria2_backend:
+    with aria2_downloader_factory() as aria2_backend:
         backends["aria2"] = aria2_backend
         return process_file_downloads(
             plan,
             backends=backends,
-            log=log,
             event_sink=event_sink,
         )
 
@@ -1335,7 +1318,7 @@ class ManagedDownloadBackend(DownloadBackend, Protocol):
 
 
 class Aria2DownloaderFactory(Protocol):
-    def __call__(self, *, log: Logger) -> ManagedDownloadBackend: ...
+    def __call__(self) -> ManagedDownloadBackend: ...
 
 
 def _http_failure_outcome(

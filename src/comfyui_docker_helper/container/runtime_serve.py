@@ -168,7 +168,6 @@ class RuntimeGenerationFactory:
         self._runtime_state_path = Path(runtime_state_path)
         self._background_event_sink = background_event_sink
         self._event_sink = safe_runtime_event_sink(event_sink)
-        assert self._event_sink is not None
 
     def create_generation(self) -> RuntimeGeneration:
         """Read current runtime files and construct fresh component owners."""
@@ -226,7 +225,6 @@ class RuntimeGenerationFactory:
             ),
             ssh_service=RuntimeSshService(
                 result.config,
-                runtime=self._runtime,
                 starter=self._runtime_ssh_starter,
                 background_event_sink=self._background_event_sink,
                 event_sink=self._event_sink,
@@ -260,7 +258,6 @@ def run_runtime_generation_once(
 ) -> int:
     """Compose and execute one generation through the injected test seam."""
     event_sink = safe_runtime_event_sink(event_sink)
-    assert event_sink is not None
     source_env = MappingProxyType(dict(os.environ if environ is None else environ))
     effective_runtime = (
         ContainerRuntime.from_env(source_env) if runtime is None else runtime
@@ -330,7 +327,6 @@ def run_runtime_serve(
     settings = output_settings or CliOutputSettings()
     with runtime_logging_factory(controller.observe_runtime_failure) as logging_broker:
         event_sink = safe_runtime_event_sink(default_runtime_display(settings))
-        assert event_sink is not None
         with RuntimeEventDelivery(
             event_sink,
             clock=time.monotonic,
@@ -390,7 +386,6 @@ def _run_runtime_serve(
 ) -> int:
     """Own the private endpoint and execute serial runtime generations."""
     event_sink = safe_runtime_event_sink(event_sink)
-    assert event_sink is not None
     source_env = MappingProxyType(dict(os.environ if environ is None else environ))
     effective_runtime = (
         ContainerRuntime.from_env(source_env) if runtime is None else runtime

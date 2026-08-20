@@ -377,11 +377,9 @@ def test_default_inactive_ssh_does_not_call_starter_and_spawns(
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del config, runtime
+        del config
         events.append("ssh-start")
         return FakeSshdProcess()
 
@@ -463,11 +461,8 @@ download_mode = "async"
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del runtime
         assert config.system.ssh.enable is True
         assert config.system.ssh.password == "baked-secret"
         assert config.system.ssh.pub_keys == [VALID_SSH_KEY]
@@ -557,15 +552,12 @@ pub_keys = ["{VALID_SSH_KEY}"]
     def runtime_ssh_starter(
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
         preparation_process_observer: Callable[[object | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> FakeSshdProcess | None:
         events.append("ssh-start")
         return start_sshd_if_enabled(
             config,
-            runtime=runtime,
-            log=lambda _message: None,
             root_home=root_home,
             runtime_dir=runtime_dir,
             credential_command_runner=credential_runner,
@@ -689,11 +681,8 @@ pub_keys = ["{VALID_SSH_KEY}"]
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del runtime
         seen.append(config)
         return FakeSshdProcess()
 
@@ -761,11 +750,9 @@ def test_disabled_ssh_does_not_start_even_with_credentials(
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del config, runtime
+        del config
         events.append("ssh-start")
         return FakeSshdProcess()
 
@@ -820,10 +807,7 @@ enable = true
     ] == [RuntimeSshOutcome(RuntimeSshStatus.ENABLED_WITHOUT_CREDENTIALS)]
 
 
-def test_managed_ssh_preparation_warning_is_emitted_directly_after_join(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime(tmp_path)
+def test_managed_ssh_preparation_warning_is_emitted_directly_after_join() -> None:
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
@@ -836,15 +820,11 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join(
     def managed_starter(
         _config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
         preparation_process_observer: Callable[[object | None], None],
-        preparation_warning_observer: (
-            Callable[[SshPreparationWarningKind], object] | None
-        ) = None,
+        preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> None:
-        del runtime, preparation_process_observer
+        del preparation_process_observer
         assert threading.current_thread().name == "cdh-ssh-startup"
-        assert preparation_warning_observer is not None
         preparation_warning_observer(
             SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
         )
@@ -852,7 +832,6 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join(
 
     service = RuntimeSshService(
         config,
-        runtime=runtime,
         starter=managed_starter,
         background_event_sink=RecordingRuntimeEventSink(),
         event_sink=Recorder(),
@@ -867,10 +846,7 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join(
     ]
 
 
-def test_managed_ssh_direct_reap_warning_is_deduplicated(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime(tmp_path)
+def test_managed_ssh_direct_reap_warning_is_deduplicated() -> None:
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
@@ -897,7 +873,6 @@ def test_managed_ssh_direct_reap_warning_is_deduplicated(
 
     service = RuntimeSshService(
         config,
-        runtime=runtime,
         starter=lambda *_args, **_kwargs: ReapFailureSshd(),
         background_event_sink=RecordingRuntimeEventSink(),
         event_sink=Recorder(),
@@ -929,11 +904,8 @@ pub_keys = ["{VALID_SSH_KEY}"]
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del runtime
         assert config.system.ssh.password == secret
         events.append("ssh-start")
         raise SshdStartupError("raw-host-key-sentinel\ncredential-url")
@@ -1211,10 +1183,8 @@ filename = "async.bin"
 # SSH startup publishes each exact preparation child to the service owner, so
 # cancellation terminates and reaps it before startup can return.
 def test_ssh_startup_operation_cancels_and_reaps_published_process(
-    tmp_path: Path,
     owned_preparation_processes: list[subprocess.Popen[bytes]],
 ) -> None:
-    runtime = _runtime(tmp_path)
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
@@ -1224,12 +1194,11 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
     def starter(
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
         preparation_process_observer: Callable[[object | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> None:
         nonlocal process
-        del config, runtime, preparation_warning_observer
+        del config, preparation_warning_observer
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"]
         )
@@ -1250,7 +1219,6 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
     runtime_events = RecordingRuntimeEventSink()
     RuntimeSshService(
         config,
-        runtime=runtime,
         starter=starter,
         background_event_sink=runtime_events,
         event_sink=runtime_events,
@@ -1264,10 +1232,7 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
 
 # A monitor wait exception does not manufacture reap evidence; the SSH owner
 # retains the handle and continues to report non-quiescence.
-def test_ssh_monitor_wait_failure_retains_unreaped_owner(
-    tmp_path: Path,
-) -> None:
-    runtime = _runtime(tmp_path)
+def test_ssh_monitor_wait_failure_retains_unreaped_owner() -> None:
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
@@ -1293,7 +1258,6 @@ def test_ssh_monitor_wait_failure_retains_unreaped_owner(
     runtime_events = RecordingRuntimeEventSink()
     service = RuntimeSshService(
         config,
-        runtime=runtime,
         starter=lambda *_args, **_kwargs: sshd,
         background_event_sink=runtime_events,
         event_sink=runtime_events,
@@ -1308,8 +1272,7 @@ def test_ssh_monitor_wait_failure_retains_unreaped_owner(
     )
 
 
-def test_ssh_stop_waits_for_inflight_monitor_warning_delivery(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
+def test_ssh_stop_waits_for_inflight_monitor_warning_delivery() -> None:
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
@@ -1350,7 +1313,6 @@ def test_ssh_stop_waits_for_inflight_monitor_warning_delivery(tmp_path: Path) ->
     sshd = TerminalSshd()
     service = RuntimeSshService(
         config,
-        runtime=runtime,
         starter=lambda *_args, **_kwargs: sshd,
         background_event_sink=Recorder(),
         event_sink=RecordingRuntimeEventSink(),

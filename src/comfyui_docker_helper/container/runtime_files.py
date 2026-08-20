@@ -39,9 +39,9 @@ from comfyui_docker_helper.container.download_events import (
 )
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
+    Aria2DownloaderFactory,
     DownloadBackendPreparer,
     HttpxDownloader,
-    ManagedDownloadBackend,
 )
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialPolicy,
@@ -92,12 +92,6 @@ type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeDownloadStartupObserver = Callable[[], None]
 type RuntimeDownloadCancelRequested = Callable[[], bool]
 type RuntimeDownloadBackendObserver = Callable[[CancellableDownloadBackend], None]
-
-
-class RuntimeAria2DownloaderFactory(Protocol):
-    """Construct the Runtime-owned aria2 backend."""
-
-    def __call__(self) -> ManagedDownloadBackend: ...
 
 
 type RuntimeDownloadObservedStatus = Literal[
@@ -750,7 +744,7 @@ def download_runtime_files(
     *,
     config: RuntimeConfig,
     httpx_downloader: DownloadBackend | None = None,
-    aria2_downloader_factory: RuntimeAria2DownloaderFactory = Aria2Downloader,
+    aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
     state_observer: RuntimeDownloadStateObserver | None = None,
     startup_observer: RuntimeDownloadStartupObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,

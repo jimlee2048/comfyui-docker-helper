@@ -274,7 +274,6 @@ def run_runtime_startup_hooks(
 ) -> tuple[RuntimeHookResult, ...]:
     """Run startup hooks with shutdown cancellation and process-group cleanup."""
     event_sink = safe_runtime_event_sink(event_sink)
-    assert event_sink is not None
     _validate_hook_process_bounds(
         termination_grace_seconds=termination_grace_seconds,
         poll_interval_seconds=poll_interval_seconds,
@@ -364,7 +363,6 @@ def run_runtime_stop_hooks(
 ) -> tuple[RuntimeHookResult, ...]:
     """Run stop hooks within the lifecycle owner's absolute deadline."""
     event_sink = safe_runtime_event_sink(event_sink)
-    assert event_sink is not None
     _validate_hook_process_bounds(
         termination_grace_seconds=termination_grace_seconds,
         poll_interval_seconds=poll_interval_seconds,

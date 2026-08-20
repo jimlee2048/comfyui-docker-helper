@@ -190,6 +190,7 @@ def test_runtime_display_owns_the_four_detail_levels_once() -> None:
     assert "omitted" in saturation_line
     assert "event delivery" not in saturation_line
     assert "queue stopped after a failure" in quiet
+    assert "without configured credentials" in quiet
     assert "Starting a runtime generation" not in quiet
     assert "Verifying runtime file" not in quiet
     assert "Preparing runtime files" in normal
@@ -445,7 +446,6 @@ def test_safe_runtime_event_sink_latches_exceptions_but_preserves_interrupts() -
             raise OSError("ordinary presentation failure")
 
     safe_sink = safe_runtime_event_sink(FailingSink())  # type: ignore[arg-type]
-    assert safe_sink is not None
     safe_sink.emit(RuntimeGenerationReady("gen-1"))
     safe_sink.emit(RuntimeGenerationReady("gen-2"))
     assert calls == [RuntimeGenerationReady("gen-1")]
@@ -455,6 +455,5 @@ def test_safe_runtime_event_sink_latches_exceptions_but_preserves_interrupts() -
             raise KeyboardInterrupt
 
     interrupting = safe_runtime_event_sink(InterruptingSink())  # type: ignore[arg-type]
-    assert interrupting is not None
     with pytest.raises(KeyboardInterrupt):
         interrupting.emit(RuntimeGenerationReady("gen-3"))

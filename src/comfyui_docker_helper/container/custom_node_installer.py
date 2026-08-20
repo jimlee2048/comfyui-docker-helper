@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from packaging.version import InvalidVersion, Version
 
+from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.comfyui_requirements import (
     ComfyUIRequirementsError,
     ParsedComfyUIRequirements,
@@ -55,6 +56,16 @@ from comfyui_docker_helper.container.comfyui_installer import (
 )
 from comfyui_docker_helper.container.git_credential_helper import (
     GIT_CREDENTIAL_BUILD_PLAN_DIGEST_ENV,
+)
+from comfyui_docker_helper.container.helper_events import (
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    CustomNodeCompleted,
+    CustomNodesInstallCompleted,
+    GitCustomNodeStarted,
+    RegistryCustomNodeStarted,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
 from comfyui_docker_helper.errors import ApplicationError
@@ -132,6 +143,7 @@ def install_custom_nodes(
     build_hooks_directory: Path = _BUILD_HOOKS_DIRECTORY,
     environ: Mapping[str, str] | None = None,
     build_plan_digest: str | None = None,
+    event_sink: EventSink[ContainerHelperEvent] | None = None,
 ) -> None:
     """Install all custom nodes in one original-order admitted-prefix sequence."""
     _validate_inputs(custom_nodes, application, runtime)
@@ -147,6 +159,7 @@ def install_custom_nodes(
             build_hooks_directory=build_hooks_directory,
             environ=environ,
             build_plan_digest=build_plan_digest,
+            event_sink=event_sink,
         )
 
 
@@ -162,41 +175,52 @@ def _install_custom_nodes(
     build_hooks_directory: Path,
     environ: Mapping[str, str] | None,
     build_plan_digest: str | None,
+    event_sink: EventSink[ContainerHelperEvent] | None,
 ) -> None:
     """Execute one validated custom-node sequence."""
 
-    nodes = custom_nodes.nodes
-    has_registry = any(isinstance(node, RegistryNodePlan) for node in nodes)
-    manager_authority: ParsedManagerRequirements | None = None
-    if nodes:
-        if application.comfyui.manager is None:
-            observe_manager_absence(application, runtime)
-        else:
-            manager_authority = capture_manager_authority(application, runtime)
-    custom_nodes_root = _require_real_directory(
-        runtime.comfyui_path / "custom_nodes", "custom-nodes root"
-    )
-    application_authority = capture_application_requirements(application, runtime)
-    custom_node_python_environment = _managed_python_environment(
-        application,
-        runtime,
-        application.python_index_url,
-        application.pytorch.pytorch_index_url,
-        constraints_path,
-        build_constraints_path,
-        environ,
-    )
-    # Git/SSH interpretation belongs to the caller's environment. In particular,
-    # cdh neither suppresses nor attests user-managed URL rewrites and transports.
-    git_environment = _git_environment(
-        custom_nodes,
-        runtime.env(environ),
-        build_plan_digest=build_plan_digest,
-    )
-    admitted: list[CustomNodePlan] = []
-    observations = _VerificationObservations.initial(has_manager_observer=bool(nodes))
+    with _helper_phase(event_sink, ContainerHelperPhase.CUSTOM_NODES_PREPARATION):
+        nodes = custom_nodes.nodes
+        has_registry = any(isinstance(node, RegistryNodePlan) for node in nodes)
+        manager_authority: ParsedManagerRequirements | None = None
+        if nodes:
+            if application.comfyui.manager is None:
+                observe_manager_absence(application, runtime)
+            else:
+                manager_authority = capture_manager_authority(application, runtime)
+        custom_nodes_root = _require_real_directory(
+            runtime.comfyui_path / "custom_nodes", "custom-nodes root"
+        )
+        application_authority = capture_application_requirements(application, runtime)
+        custom_node_python_environment = _managed_python_environment(
+            application,
+            runtime,
+            application.python_index_url,
+            application.pytorch.pytorch_index_url,
+            constraints_path,
+            build_constraints_path,
+            environ,
+        )
+        # Git/SSH interpretation belongs to the caller's environment. In particular,
+        # cdh neither suppresses nor attests user-managed URL rewrites and transports.
+        git_environment = _git_environment(
+            custom_nodes,
+            runtime.env(environ),
+            build_plan_digest=build_plan_digest,
+        )
+        admitted: list[CustomNodePlan] = []
+        observations = _VerificationObservations.initial(
+            has_manager_observer=bool(nodes)
+        )
 
     for index, node in enumerate(nodes):
+        position = index + 1
+        _emit_custom_node_started(
+            event_sink,
+            node,
+            index=position,
+            total=len(nodes),
+        )
         future = nodes[index:]
         _verify_boundary(
             custom_nodes_root,
@@ -214,15 +238,37 @@ def _install_custom_nodes(
             environ=environ,
             application_authority=application_authority,
         )
-        for hook in node.pre_install_hooks:
-            observations.invalidate_mutation()
-            run_hook(
-                hook.relative_path,
-                expected_digest=hook.digest,
-                build_hooks_dir=build_hooks_directory,
-                runtime=runtime,
-                env=environ,
-            )
+        with _optional_helper_phase(
+            event_sink,
+            ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL,
+            enabled=bool(node.pre_install_hooks),
+        ):
+            for hook in node.pre_install_hooks:
+                observations.invalidate_mutation()
+                run_hook(
+                    hook.relative_path,
+                    expected_digest=hook.digest,
+                    build_hooks_dir=build_hooks_directory,
+                    runtime=runtime,
+                    env=environ,
+                )
+                _verify_boundary(
+                    custom_nodes_root,
+                    admitted,
+                    future,
+                    application=application,
+                    runtime=runtime,
+                    manager_authority=manager_authority,
+                    has_registry=has_registry,
+                    git_path=git_path,
+                    git_environment=git_environment,
+                    observations=observations,
+                    uv_path=uv_path,
+                    constraints_path=constraints_path,
+                    environ=environ,
+                    application_authority=application_authority,
+                )
+            # The complete pre phase is a proof boundary even when it was empty.
             _verify_boundary(
                 custom_nodes_root,
                 admitted,
@@ -239,74 +285,33 @@ def _install_custom_nodes(
                 environ=environ,
                 application_authority=application_authority,
             )
-        # The complete pre phase is a proof boundary even when it was empty.
-        _verify_boundary(
-            custom_nodes_root,
-            admitted,
-            future,
-            application=application,
-            runtime=runtime,
-            manager_authority=manager_authority,
-            has_registry=has_registry,
-            git_path=git_path,
-            git_environment=git_environment,
-            observations=observations,
-            uv_path=uv_path,
-            constraints_path=constraints_path,
-            environ=environ,
-            application_authority=application_authority,
-        )
 
-        observations.invalidate_mutation()
-        if isinstance(node, RegistryNodePlan):
-            _install_registry_node(
-                node,
-                custom_nodes,
-                application,
-                runtime,
-                manager_authority,
-                custom_node_python_environment,
-            )
-        else:
-            _install_git_node(
-                node,
-                custom_nodes_root,
-                application,
-                runtime,
-                git_path,
-                uv_path,
-                constraints_path,
-                git_environment,
-                custom_node_python_environment,
-            )
-
-        admitted.append(node)
-        remaining = nodes[index + 1 :]
-        _verify_boundary(
-            custom_nodes_root,
-            admitted,
-            remaining,
-            application=application,
-            runtime=runtime,
-            manager_authority=manager_authority,
-            has_registry=has_registry,
-            git_path=git_path,
-            git_environment=git_environment,
-            observations=observations,
-            uv_path=uv_path,
-            constraints_path=constraints_path,
-            environ=environ,
-            application_authority=application_authority,
-        )
-        for hook in node.post_install_hooks:
+        with _helper_phase(event_sink, ContainerHelperPhase.CUSTOM_NODE_INSTALLATION):
             observations.invalidate_mutation()
-            run_hook(
-                hook.relative_path,
-                expected_digest=hook.digest,
-                build_hooks_dir=build_hooks_directory,
-                runtime=runtime,
-                env=environ,
-            )
+            if isinstance(node, RegistryNodePlan):
+                _install_registry_node(
+                    node,
+                    custom_nodes,
+                    application,
+                    runtime,
+                    manager_authority,
+                    custom_node_python_environment,
+                )
+            else:
+                _install_git_node(
+                    node,
+                    custom_nodes_root,
+                    application,
+                    runtime,
+                    git_path,
+                    uv_path,
+                    constraints_path,
+                    git_environment,
+                    custom_node_python_environment,
+                )
+
+            admitted.append(node)
+            remaining = nodes[index + 1 :]
             _verify_boundary(
                 custom_nodes_root,
                 admitted,
@@ -323,11 +328,66 @@ def _install_custom_nodes(
                 environ=environ,
                 application_authority=application_authority,
             )
-        # The complete post phase is a proof boundary even when it was empty.
+
+        with _optional_helper_phase(
+            event_sink,
+            ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL,
+            enabled=bool(node.post_install_hooks),
+        ):
+            for hook in node.post_install_hooks:
+                observations.invalidate_mutation()
+                run_hook(
+                    hook.relative_path,
+                    expected_digest=hook.digest,
+                    build_hooks_dir=build_hooks_directory,
+                    runtime=runtime,
+                    env=environ,
+                )
+                _verify_boundary(
+                    custom_nodes_root,
+                    admitted,
+                    remaining,
+                    application=application,
+                    runtime=runtime,
+                    manager_authority=manager_authority,
+                    has_registry=has_registry,
+                    git_path=git_path,
+                    git_environment=git_environment,
+                    observations=observations,
+                    uv_path=uv_path,
+                    constraints_path=constraints_path,
+                    environ=environ,
+                    application_authority=application_authority,
+                )
+            # The complete post phase is a proof boundary even when it was empty.
+            _verify_boundary(
+                custom_nodes_root,
+                admitted,
+                remaining,
+                application=application,
+                runtime=runtime,
+                manager_authority=manager_authority,
+                has_registry=has_registry,
+                git_path=git_path,
+                git_environment=git_environment,
+                observations=observations,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+                application_authority=application_authority,
+            )
+        _emit_helper_event(
+            event_sink,
+            CustomNodeCompleted(index=position, total=len(nodes)),
+        )
+
+    with _helper_phase(
+        event_sink, ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION
+    ):
         _verify_boundary(
             custom_nodes_root,
             admitted,
-            remaining,
+            (),
             application=application,
             runtime=runtime,
             manager_authority=manager_authority,
@@ -339,38 +399,83 @@ def _install_custom_nodes(
             constraints_path=constraints_path,
             environ=environ,
             application_authority=application_authority,
+            force_manager=True,
+            observe_application=False,
         )
+        observations.application.observe(
+            lambda: observe_application_state(
+                application,
+                runtime,
+                application_authority,
+                git_path=git_path,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+            ),
+            force=True,
+        )
+    _emit_helper_event(event_sink, CustomNodesInstallCompleted(node_count=len(nodes)))
 
-    _verify_boundary(
-        custom_nodes_root,
-        admitted,
-        (),
-        application=application,
-        runtime=runtime,
-        manager_authority=manager_authority,
-        has_registry=has_registry,
-        git_path=git_path,
-        git_environment=git_environment,
-        observations=observations,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-        application_authority=application_authority,
-        force_manager=True,
-        observe_application=False,
-    )
-    observations.application.observe(
-        lambda: observe_application_state(
-            application,
-            runtime,
-            application_authority,
-            git_path=git_path,
-            uv_path=uv_path,
-            constraints_path=constraints_path,
-            environ=environ,
-        ),
-        force=True,
-    )
+
+@contextmanager
+def _helper_phase(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    phase: ContainerHelperPhase,
+) -> Iterator[None]:
+    _emit_helper_event(event_sink, ContainerHelperPhaseStarted(phase))
+    yield
+    _emit_helper_event(event_sink, ContainerHelperPhaseCompleted(phase))
+
+
+@contextmanager
+def _optional_helper_phase(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    phase: ContainerHelperPhase,
+    *,
+    enabled: bool,
+) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+    with _helper_phase(event_sink, phase):
+        yield
+
+
+def _emit_custom_node_started(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    node: CustomNodePlan,
+    *,
+    index: int,
+    total: int,
+) -> None:
+    pre_hook_count = len(node.pre_install_hooks)
+    post_hook_count = len(node.post_install_hooks)
+    if isinstance(node, RegistryNodePlan):
+        event: ContainerHelperEvent = RegistryCustomNodeStarted(
+            index=index,
+            total=total,
+            id=node.id,
+            version=node.version,
+            pre_hook_count=pre_hook_count,
+            post_hook_count=post_hook_count,
+        )
+    else:
+        event = GitCustomNodeStarted(
+            index=index,
+            total=total,
+            target_name=Path(node.target).name,
+            pre_hook_count=pre_hook_count,
+            post_hook_count=post_hook_count,
+        )
+    _emit_helper_event(event_sink, event)
+
+
+def _emit_helper_event(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    event: ContainerHelperEvent,
+) -> None:
+    if event_sink is not None:
+        event_sink.emit(event)
 
 
 def _git_environment(

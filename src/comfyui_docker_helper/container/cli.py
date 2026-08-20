@@ -33,6 +33,7 @@ if sys.platform == "linux":
     from comfyui_docker_helper.container.final_manifest import emit_final_manifest
     from comfyui_docker_helper.container.presentation import (
         default_container_download_invocation,
+        default_container_helper_display,
     )
     from comfyui_docker_helper.container.runners import (
         ContainerCommandError,
@@ -102,6 +103,7 @@ def download_files_command(
 
 @app.command("install-comfyui", context_settings=HELP_CONTEXT_SETTINGS)
 def install_comfyui_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -116,16 +118,20 @@ def install_comfyui_command(
 ) -> None:
     """Install exact official ComfyUI and its complete requirements."""
     application, toolchain = _admission(build_plan_digest).comfyui_install()
+    runtime = ContainerRuntime.from_env()
+    display = default_container_helper_display(require_output_settings(ctx))
     install_comfyui(
         application,
         toolchain,
-        runtime=ContainerRuntime.from_env(),
+        runtime=runtime,
         constraints_path=constraints,
+        event_sink=display,
     )
 
 
 @app.command("install-custom-nodes", context_settings=HELP_CONTEXT_SETTINGS)
 def install_custom_nodes_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -147,18 +153,22 @@ def install_custom_nodes_command(
 ) -> None:
     """Install the exact ordered Registry and direct-Git custom nodes."""
     custom_nodes, application = _admission(build_plan_digest).custom_node_install()
+    runtime = ContainerRuntime.from_env()
+    display = default_container_helper_display(require_output_settings(ctx))
     install_custom_nodes(
         custom_nodes,
         application,
-        runtime=ContainerRuntime.from_env(),
+        runtime=runtime,
         constraints_path=constraints,
         build_hooks_directory=build_hooks_directory,
         build_plan_digest=build_plan_digest,
+        event_sink=display,
     )
 
 
 @app.command("emit-final-manifest", context_settings=HELP_CONTEXT_SETTINGS)
 def emit_final_manifest_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -169,7 +179,9 @@ def emit_final_manifest_command(
 ) -> None:
     """Verify final image state and emit its observational manifest."""
     projection = _admission(build_plan_digest).final_manifest()
-    emit_final_manifest(projection, runtime=ContainerRuntime.from_env())
+    runtime = ContainerRuntime.from_env()
+    display = default_container_helper_display(require_output_settings(ctx))
+    emit_final_manifest(projection, runtime=runtime, event_sink=display)
 
 
 @runtime_app.command("serve", context_settings=HELP_CONTEXT_SETTINGS)

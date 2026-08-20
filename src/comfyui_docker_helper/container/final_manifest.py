@@ -15,6 +15,7 @@ from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
+from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.build_plan import ProtectedRequirementPlan
 from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
 from comfyui_docker_helper.config.final_manifest import (
@@ -63,6 +64,13 @@ from comfyui_docker_helper.container.final_manifest_writer import (
     FinalManifestWriteError,
     write_final_manifest_file,
 )
+from comfyui_docker_helper.container.helper_events import (
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    FinalManifestCompleted,
+)
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.container.transfer_core import verify_required_final
 from comfyui_docker_helper.errors import ApplicationError
@@ -91,14 +99,40 @@ def emit_final_manifest(
     projection: FinalManifestInput,
     *,
     runtime: ContainerRuntime,
+    event_sink: EventSink[ContainerHelperEvent] | None = None,
 ) -> FinalManifest:
     """Publish the canonical manifest only after every final observation passes."""
+    _emit_helper_event(
+        event_sink,
+        ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_STATE_VERIFICATION),
+    )
     manifest = _observe_final_manifest(projection, runtime=runtime)
+    _emit_helper_event(
+        event_sink,
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.FINAL_STATE_VERIFICATION),
+    )
+    _emit_helper_event(
+        event_sink,
+        ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_MANIFEST_WRITE),
+    )
     try:
         write_final_manifest_file(_MANIFEST_PATH, dump_final_manifest(manifest))
     except FinalManifestWriteError as error:
         raise FinalManifestError(str(error)) from error
+    _emit_helper_event(
+        event_sink,
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.FINAL_MANIFEST_WRITE),
+    )
+    _emit_helper_event(event_sink, FinalManifestCompleted())
     return manifest
+
+
+def _emit_helper_event(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    event: ContainerHelperEvent,
+) -> None:
+    if event_sink is not None:
+        event_sink.emit(event)
 
 
 def _observe_final_manifest(
@@ -612,7 +646,7 @@ def _environment_inventory(python: Path) -> tuple[tuple[str, str], ...]:
     output = _capture(
         (python, "-I", "-c", script),
         cwd=_BUILD_DIRECTORY,
-        description=f"{python} inventory observation",
+        description="environment inventory observation",
     )
     try:
         raw = json.loads(output)

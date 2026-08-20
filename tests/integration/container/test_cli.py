@@ -1,7 +1,9 @@
 """Linux image-helper CLI execution contracts."""
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rich.text import Text
@@ -29,6 +31,15 @@ from comfyui_docker_helper.container.download_events import (
     DownloadVerificationCompleted,
     DownloadVerificationStarted,
 )
+from comfyui_docker_helper.container.helper_events import (
+    ComfyUIInstallCompleted,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    CustomNodesInstallCompleted,
+    RegistryCustomNodeStarted,
+)
+from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.transfer_core import DownloadFilesError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
@@ -95,6 +106,13 @@ def _emit_download_success(event_sink, *, retry: bool = False) -> None:
     event_sink.emit(DownloadFinalVerificationStarted(item_count=1, checksum_count=1))
     event_sink.emit(DownloadFinalVerificationCompleted())
     event_sink.emit(DownloadBatchCompleted(item_count=1, checksum_verified_count=1))
+
+
+def _emit_comfyui_success(event_sink) -> None:
+    phase = ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT
+    event_sink.emit(ContainerHelperPhaseStarted(phase))
+    event_sink.emit(ContainerHelperPhaseCompleted(phase))
+    event_sink.emit(ComfyUIInstallCompleted())
 
 
 @pytest.mark.parametrize(
@@ -269,6 +287,155 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
             ],
         }[command]
     )
+
+
+def test_install_comfyui_constructs_display_after_admission_and_runtime(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wire one admitted invocation to a display after runtime validation."""
+    plan = build_plan(final_config(), accepted_resolution())
+    expected_runtime = ContainerRuntime(
+        workspace=Path(plan.application.paths.workspace),
+        comfyui_path=Path(plan.application.paths.comfyui),
+        virtual_env=Path(plan.application.paths.venv),
+    )
+    display = SimpleNamespace(emit=lambda _event: None)
+    order: list[str] = []
+
+    class Admission:
+        def comfyui_install(self):
+            order.append("projection")
+            return plan.application, plan.toolchain
+
+    def admit(_digest: str) -> Admission:
+        order.append("admission")
+        return Admission()
+
+    def runtime_from_env() -> ContainerRuntime:
+        order.append("runtime")
+        return expected_runtime
+
+    def display_factory(_settings):
+        order.append("display")
+        return display
+
+    def install(application, toolchain, *, runtime, event_sink, **_kwargs) -> None:
+        order.append("service")
+        assert application is plan.application
+        assert toolchain is plan.toolchain
+        assert runtime is expected_runtime
+        assert event_sink is display
+
+    monkeypatch.setattr(container_cli, "_admission", admit)
+    monkeypatch.setattr(container_cli.ContainerRuntime, "from_env", runtime_from_env)
+    monkeypatch.setattr(
+        container_cli,
+        "default_container_helper_display",
+        display_factory,
+    )
+    monkeypatch.setattr(container_cli, "install_comfyui", install)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "install-comfyui",
+            "--build-plan-digest",
+            "sha256:" + "a" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert order == ["admission", "projection", "runtime", "display", "service"]
+
+
+def test_install_comfyui_cli_renders_normal_and_suppresses_quiet_lifecycle(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_install(_application, _toolchain, *, event_sink, **_kwargs) -> None:
+        _emit_comfyui_success(event_sink)
+
+    monkeypatch.setattr(container_cli, "install_comfyui", fake_install)
+    monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
+    monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
+    monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
+    command = [
+        "container",
+        "install-comfyui",
+        "--build-plan-digest",
+        build_plan_digest(plan),
+    ]
+
+    normal = cli_runner.invoke(app, command)
+    quiet = cli_runner.invoke(app, ["--quiet", *command])
+
+    assert normal.exit_code == 0, normal.output
+    assert normal.stdout == ""
+    assert "Checking out ComfyUI source" in normal.stderr
+    assert "ComfyUI installation complete" in normal.stderr
+    assert quiet.exit_code == 0, quiet.output
+    assert quiet.stdout == ""
+    assert quiet.stderr == ""
+
+
+def test_install_custom_nodes_detail_controls_do_not_own_child_streams(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_install(_custom_nodes, _application, *, event_sink, **_kwargs) -> None:
+        print("manager-child-stdout")
+        print("manager-child-stderr", file=sys.stderr)
+        event_sink.emit(
+            RegistryCustomNodeStarted(
+                index=1,
+                total=1,
+                id="example-node",
+                version="1.0.0",
+                pre_hook_count=1,
+                post_hook_count=2,
+            )
+        )
+        phase = ContainerHelperPhase.CUSTOM_NODE_INSTALLATION
+        event_sink.emit(ContainerHelperPhaseStarted(phase))
+        event_sink.emit(ContainerHelperPhaseCompleted(phase))
+        event_sink.emit(CustomNodesInstallCompleted(node_count=1))
+
+    monkeypatch.setattr(container_cli, "install_custom_nodes", fake_install)
+    monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
+    monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
+    monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
+
+    command = [
+        "container",
+        "install-custom-nodes",
+        "--build-plan-digest",
+        build_plan_digest(plan),
+    ]
+    result = cli_runner.invoke(app, ["-v", *command])
+    quiet = cli_runner.invoke(app, ["--quiet", *command])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "manager-child-stdout\n"
+    assert "manager-child-stderr" in result.stderr.splitlines()
+    assert "[1/1] Custom node: example-node 1.0.0" in result.stderr
+    assert "pre-install hooks=1" in result.stderr
+    assert "post-install hooks=2" in result.stderr
+    assert "Custom-node installation complete: 1 node" in result.stderr
+    assert quiet.exit_code == 0, quiet.output
+    assert quiet.stdout == "manager-child-stdout\n"
+    assert "manager-child-stderr" in quiet.stderr.splitlines()
+    assert "example-node" not in quiet.stderr
+    assert "Installing the custom node" not in quiet.stderr
+    assert "Phase complete" not in quiet.stderr
+    assert "Custom-node installation complete" not in quiet.stderr
 
 
 def test_download_files_executes_authenticated_plan_with_custom_root(

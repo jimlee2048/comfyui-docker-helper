@@ -63,4 +63,9 @@ def test_probe_failure_publishes_no_final_or_partial_manifest(
     )
 
     assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "Verifying final image state" in result.stderr
+    assert "Error:" in result.stderr
+    assert "Final manifest complete" not in result.stderr
+    assert "Traceback" not in result.stderr
     assert tuple(build_directory.iterdir()) == ()

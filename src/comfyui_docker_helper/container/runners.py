@@ -117,20 +117,13 @@ def run_argv(
         if pass_fds:
             run_kwargs["pass_fds"] = pass_fds
         result = subprocess.run(command, **run_kwargs)
-    except FileNotFoundError as error:
-        raise ContainerCommandError(
-            f"{description} executable not found: {command[0]}"
-        ) from error
     except OSError as error:
-        raise ContainerCommandError(
-            f"{description} failed to start: {error}"
-        ) from error
+        raise ContainerCommandError(f"{description} failed to start") from error
 
     if result.returncode != 0:
         exit_code = result.returncode if result.returncode > 0 else 1
         raise ContainerCommandError(
-            f"{description} failed with exit code {result.returncode}: "
-            f"{_format_argv(command)}",
+            f"{description} failed with exit code {result.returncode}",
             exit_code=exit_code,
         )
     return result
@@ -159,14 +152,8 @@ def start_argv(
         if start_new_session:
             popen_kwargs["start_new_session"] = True
         return subprocess.Popen(command, **popen_kwargs)
-    except FileNotFoundError as error:
-        raise ContainerCommandError(
-            f"{description} executable not found: {command[0]}"
-        ) from error
     except OSError as error:
-        raise ContainerCommandError(
-            f"{description} failed to start: {error}"
-        ) from error
+        raise ContainerCommandError(f"{description} failed to start") from error
 
 
 def run_hook(
@@ -374,15 +361,3 @@ def _write_all(fd: int, content: bytes) -> None:
         if written <= 0:
             raise OSError("short memfd write")
         offset += written
-
-
-def _format_argv(argv: Sequence[str]) -> str:
-    return " ".join(map(_quote_for_message, argv))
-
-
-def _quote_for_message(argument: str) -> str:
-    if not argument:
-        return "''"
-    if any(character.isspace() for character in argument):
-        return repr(argument)
-    return argument

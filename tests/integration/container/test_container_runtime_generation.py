@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import httpx
@@ -11,7 +12,10 @@ from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_secret_session import (
     RuntimeDownloaderCredentialPolicy,
 )
-from comfyui_docker_helper.container.runtime_serve import RuntimeGenerationFactory
+from comfyui_docker_helper.container.runtime_serve import (
+    RuntimeGenerationFactory,
+    capture_runtime_environment,
+)
 from tests.runtime_event_support import RecordingRuntimeEventSink
 
 
@@ -58,7 +62,7 @@ def test_generation_factory_rereads_inputs_and_creates_fresh_owners(
         mounted_config_path=mounted_config,
         baked_hooks_path=baked_hooks,
         mounted_hooks_path=mounted_hooks,
-        environ=source_env,
+        environment=capture_runtime_environment(source_env),
         runtime_state_path=tmp_path / "state.json",
     )
     first = factory.create_generation()
@@ -95,6 +99,12 @@ def test_generation_factory_rereads_inputs_and_creates_fresh_owners(
     ]
     assert first.source_env["STATIC_VALUE"] == "captured"
     assert second.source_env["STATIC_VALUE"] == "captured"
+    assert first.source_env is second.source_env
+    assert first.source_env_bytes is second.source_env_bytes
+    assert first.source_env_bytes[b"STATIC_VALUE"] == b"captured"
+    assert first.environment is second.environment
+    assert "captured" not in repr(first.environment)
+    assert "captured" not in repr(first)
     assert first.downloads is not second.downloads
     assert first.ssh_service is not second.ssh_service
     assert first_diagnostics.err.count("Runtime hook warnings:") == 1
@@ -173,7 +183,9 @@ download_mode = "async"
         mounted_config_path=tmp_path / "missing-mounted.toml",
         baked_hooks_path=tmp_path / "missing-baked-hooks",
         mounted_hooks_path=tmp_path / "missing-mounted-hooks",
-        environ={"RUNTIME_TOKEN": "runtime-test-token"},
+        environment=capture_runtime_environment(
+            {"RUNTIME_TOKEN": "runtime-test-token"}
+        ),
         runtime_downloader=downloader,
         runtime_async_queue_starter=async_starter,
         runtime_state_path=tmp_path / "state.json",
@@ -191,3 +203,35 @@ download_mode = "async"
         policy.authorization_for(httpx.URL("https://example.test/private/model.bin"))
         for policy in sync_policies
     ] == [b"Bearer runtime-test-token", b"Bearer runtime-test-token"]
+
+
+def test_runtime_environment_capture_preserves_production_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = b"CDH_RAW_ENVIRONMENT_TEST"
+    value = b"raw-\xff-value"
+    monkeypatch.setitem(os.environb, name, value)
+
+    snapshot = capture_runtime_environment()
+
+    assert snapshot.raw[name] == value
+    assert os.fsencode(snapshot.text[os.fsdecode(name)]) == value
+    assert "raw-" not in repr(snapshot)
+
+
+def test_runtime_environment_capture_derives_immutable_bytes_from_text_seam() -> None:
+    raw_name = b"RAW_\xff_NAME"
+    raw_value = b"captured-\xfe-value"
+    text_name = os.fsdecode(raw_name)
+    text_value = os.fsdecode(raw_value)
+    source_env = {text_name: text_value}
+
+    snapshot = capture_runtime_environment(source_env)
+    source_env[text_name] = "changed"
+
+    assert snapshot.text[text_name] == text_value
+    assert snapshot.raw[raw_name] == raw_value
+    with pytest.raises(TypeError):
+        snapshot.text[text_name] = "mutation"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        snapshot.raw[raw_name] = b"mutation"  # type: ignore[index]

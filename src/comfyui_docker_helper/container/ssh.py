@@ -7,7 +7,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -23,6 +23,26 @@ from comfyui_docker_helper.errors import ApplicationError
 
 _ROOT_UID = 0
 _ROOT_GID = 0
+# OpenSSH reserves the final pointer slot for the environment's null terminator.
+_OPENSSH_CHILD_ENVIRONMENT_NAME_LIMIT = 999
+# These are the names the supported built-in sshd configuration may add itself.
+_SSH_SESSION_ENVIRONMENT_NAMES = frozenset(
+    {
+        b"HOME",
+        b"LOGNAME",
+        b"MAIL",
+        b"PATH",
+        b"SHELL",
+        b"SSH_AUTH_SOCK",
+        b"SSH_CLIENT",
+        b"SSH_CONNECTION",
+        b"SSH_TTY",
+        b"TERM",
+        b"USER",
+    }
+)
+_SSH_ENVIRONMENT_PROJECTION_ERROR = "SSH environment cannot be projected"
+_SSH_ENVIRONMENT_RESERVED_NAMES = frozenset({b"SSH_AUTH_SOCK", b"TERM"})
 type Chown = Callable[
     [str | bytes | os.PathLike[str] | os.PathLike[bytes], int, int],
     None,
@@ -49,6 +69,10 @@ class SshCredentialPreparationError(ApplicationError):
 
 class SshdStartupError(ApplicationError):
     """A user-facing sshd startup failure."""
+
+
+class SshEnvironmentProjectionError(ApplicationError):
+    """The runtime environment cannot be represented for an SSH session."""
 
 
 class SensitiveCommandRunner(Protocol):
@@ -108,6 +132,42 @@ class RootSshCredentialPreparationStatus:
     def has_credentials(self) -> bool:
         """Return whether SSH has at least one effective credential."""
         return self.public_key_count > 0 or self.password_configured
+
+
+def serialize_sshd_set_env(environment: Mapping[bytes, bytes]) -> bytes:
+    """Serialize the representable environment as one OpenSSH SetEnv line."""
+    assignments: list[tuple[bytes, bytes]] = []
+    for name, value in environment.items():
+        if name in _SSH_ENVIRONMENT_RESERVED_NAMES:
+            continue
+        if (
+            b"\x00" in name
+            or b"\n" in name
+            or b"=" in name
+            or b"\x00" in value
+            or b"\n" in value
+        ):
+            raise SshEnvironmentProjectionError(_SSH_ENVIRONMENT_PROJECTION_ERROR)
+        assignments.append((name, value))
+
+    projected_names = {name for name, _value in assignments}
+    if (
+        len(projected_names | _SSH_SESSION_ENVIRONMENT_NAMES)
+        > _OPENSSH_CHILD_ENVIRONMENT_NAME_LIMIT
+    ):
+        raise SshEnvironmentProjectionError(_SSH_ENVIRONMENT_PROJECTION_ERROR)
+
+    if not assignments:
+        return b""
+    tokens = [
+        b'"' + _escape_sshd_config_token(name + b"=" + value) + b'"'
+        for name, value in sorted(assignments)
+    ]
+    return b"SetEnv " + b" ".join(tokens) + b"\n"
+
+
+def _escape_sshd_config_token(value: bytes) -> bytes:
+    return value.replace(b"\\", b"\\\\").replace(b'"', b'\\"')
 
 
 def start_sshd_if_enabled(

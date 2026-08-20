@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -15,6 +17,10 @@ import httpx
 import pytest
 
 from comfyui_docker_helper.container import download_files as download_files_module
+from comfyui_docker_helper.container.download_events import (
+    DownloadRetryReason,
+    DownloadTransferProgress,
+)
 from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
@@ -59,6 +65,14 @@ class PathSink:
         return self.display_path.open("wb")
 
 
+class ProgressSink:
+    def __init__(self) -> None:
+        self.events: list[DownloadTransferProgress] = []
+
+    def emit(self, event: DownloadTransferProgress, /) -> None:
+        self.events.append(event)
+
+
 def _settings() -> DownloaderSettings:
     return DownloaderSettings(
         default="httpx",
@@ -74,23 +88,28 @@ def _settings() -> DownloaderSettings:
 
 
 def _request(
-    tmp_path: Path, *, url: str = "https://example.test/file.bin"
+    tmp_path: Path,
+    *,
+    url: str = "https://example.test/file.bin",
+    progress_sink: ProgressSink | None = None,
 ) -> TransportRequest:
     staging = tmp_path / "models" / ".cdh-staging" / "cdh-test.part"
     staging.parent.mkdir(parents=True)
-    return TransportRequest(url=url, sink=PathSink(staging))
+    return TransportRequest(
+        url=url,
+        sink=PathSink(staging),
+        progress_sink=progress_sink,
+    )
 
 
 def _downloader(
     transport: httpx.MockTransport,
     *,
-    logs: list[str] | None = None,
     monotonic: Callable[[], float] | None = None,
     wall_clock: Callable[[], float] | None = None,
 ) -> HttpxDownloader:
     return HttpxDownloader(
         transport=transport,
-        log=(logs if logs is not None else []).append,
         monotonic=monotonic or (lambda: 0.0),
         wall_clock=wall_clock or time.time,
     )
@@ -124,6 +143,179 @@ def test_httpx_writes_only_supplied_staging_and_reports_length(tmp_path: Path) -
     assert request.sink.display_path.read_bytes() == b"downloaded"
     assert not final.exists()
     assert not request.sink.display_path.with_suffix(".tmp").exists()
+
+
+def test_httpx_progress_separates_encoded_transfer_from_decoded_storage(
+    tmp_path: Path,
+) -> None:
+    decoded = b"decoded payload " * 100
+    encoded = gzip.compress(decoded)
+    progress = ProgressSink()
+    clock = iter([0.0, 2.0, 4.0])
+    request = _request(tmp_path, progress_sink=progress)
+    downloader = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                headers={
+                    "Content-Encoding": "gzip",
+                    "Content-Length": str(len(encoded)),
+                },
+                stream=IteratorStream(lambda: iter([encoded])),
+            )
+        ),
+        monotonic=lambda: next(clock),
+    )
+    downloader.chunk_size = len(decoded) * 2
+
+    result = downloader.download(request, _settings())
+
+    assert isinstance(result, TransportSuccess)
+    assert result.length == len(decoded)
+    assert request.sink.display_path.read_bytes() == decoded
+    assert progress.events[0] == DownloadTransferProgress(
+        transferred_bytes=0,
+        total_bytes=len(encoded),
+        stored_bytes=0,
+        reported_rate=None,
+    )
+    assert progress.events[-1].transferred_bytes == len(encoded)
+    assert progress.events[-1].total_bytes == len(encoded)
+    assert progress.events[-1].stored_bytes == len(decoded)
+    assert progress.events[-1].reported_rate == pytest.approx(len(encoded) / 4)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [("Content-Length", "3"), ("Content-Length", "3")],
+        {"Content-Length": "3, 3"},
+        {"Content-Length": "-1"},
+        {"Content-Length": "invalid"},
+    ],
+)
+def test_httpx_invalid_or_duplicate_content_length_is_unknown_but_succeeds(
+    tmp_path: Path,
+    headers: list[tuple[str, str]] | dict[str, str],
+) -> None:
+    progress = ProgressSink()
+    result = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, headers=headers, content=b"abc")
+        )
+    ).download(
+        _request(tmp_path, progress_sink=progress),
+        _settings(),
+    )
+
+    assert isinstance(result, TransportSuccess)
+    assert result.length == 3
+    assert progress.events
+    assert all(event.total_bytes is None for event in progress.events)
+
+
+def test_httpx_oversized_content_length_is_unknown_but_succeeds(
+    tmp_path: Path,
+) -> None:
+    progress = ProgressSink()
+    oversized = f"{sys.maxsize}0"
+    result = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Length": oversized},
+                stream=IteratorStream(lambda: iter([b"x"])),
+            )
+        )
+    ).download(_request(tmp_path, progress_sink=progress), _settings())
+
+    assert isinstance(result, TransportSuccess)
+    assert result.length == 1
+    assert all(event.total_bytes is None for event in progress.events)
+
+
+def test_httpx_content_length_ignores_leading_zeroes(tmp_path: Path) -> None:
+    progress = ProgressSink()
+    result = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Length": f"{'0' * 5_000}1"},
+                stream=IteratorStream(lambda: iter([b"x"])),
+            )
+        )
+    ).download(_request(tmp_path, progress_sink=progress), _settings())
+
+    assert isinstance(result, TransportSuccess)
+    assert result.length == 1
+    assert all(event.total_bytes == 1 for event in progress.events)
+
+
+def test_httpx_empty_stream_emits_initial_and_eof_progress(tmp_path: Path) -> None:
+    progress = ProgressSink()
+    clock = iter([0.0, 1.0])
+    result = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Length": "0"},
+                stream=IteratorStream(lambda: iter([])),
+            )
+        ),
+        monotonic=lambda: next(clock),
+    ).download(_request(tmp_path, progress_sink=progress), _settings())
+
+    assert isinstance(result, TransportSuccess)
+    assert result.length == 0
+    assert len(progress.events) == 2
+    assert progress.events[0].transferred_bytes == 0
+    assert progress.events[0].total_bytes == 0
+    assert progress.events[0].stored_bytes == 0
+    assert progress.events[-1].transferred_bytes == 0
+    assert progress.events[-1].total_bytes == 0
+    assert progress.events[-1].stored_bytes == 0
+
+
+def test_httpx_progress_sink_failure_cleans_partial_core_staging(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    request = _core_request(root)
+
+    class FailingProgressSink:
+        def __init__(self) -> None:
+            self.events: list[DownloadTransferProgress] = []
+
+        def emit(self, event: DownloadTransferProgress, /) -> None:
+            self.events.append(event)
+            if event.stored_bytes == 3:
+                raise OSError("display-progress-sentinel")
+
+    progress = FailingProgressSink()
+    backend = _downloader(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                headers={"Content-Length": "6"},
+                stream=IteratorStream(lambda: iter([b"abc", b"def"])),
+            )
+        )
+    )
+    backend.chunk_size = 3
+
+    with pytest.raises(OSError, match="display-progress-sentinel"):
+        transfer_file(
+            request,
+            backend=backend,
+            settings=_settings(),
+            event_sink=progress,
+        )
+
+    assert progress.events[-1].stored_bytes == 3
+    assert all(event.stored_bytes != 6 for event in progress.events)
+    assert not request.target.exists()
+    assert not transfer_staging_target(request).exists()
 
 
 def test_httpx_follows_redirects_without_changing_supplied_target(
@@ -176,7 +368,6 @@ def test_httpx_reselects_cdh_authorization_for_every_redirect(
     result = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_PathCredentialPolicy(),
-        log=lambda _: None,
     ).download(
         _request(
             tmp_path,
@@ -214,7 +405,6 @@ def test_httpx_preserves_unowned_authorization_until_a_route_matches(
     result = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_PathCredentialPolicy(),
-        log=lambda _: None,
     ).download(
         _request(tmp_path, url="https://user:password@example.test/public"),
         _settings(),
@@ -244,7 +434,6 @@ def test_httpx_reports_initial_credential_failure_before_network(
     downloader = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_FailingCredentialPolicy(),
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloaderCredentialError) as caught:
@@ -270,7 +459,6 @@ def test_httpx_retains_network_attempt_when_redirect_enters_failing_route(
     downloader = HttpxDownloader(
         transport=httpx.MockTransport(handler),
         credential_policy=_FailingCredentialPolicy(),
-        log=lambda _: None,
     )
 
     with pytest.raises(DownloaderCredentialError) as caught:
@@ -300,10 +488,19 @@ def test_httpx_preserves_terminal_status_after_redirect(tmp_path: Path) -> None:
     assert result.http_status == 404
 
 
-@pytest.mark.parametrize("status", [408, 429, 500, 503])
+@pytest.mark.parametrize(
+    ("status", "expected_reason"),
+    [
+        (408, DownloadRetryReason.TIMEOUT),
+        (429, DownloadRetryReason.RATE_LIMITED),
+        (500, DownloadRetryReason.TEMPORARY_SERVER),
+        (503, DownloadRetryReason.TEMPORARY_SERVER),
+    ],
+)
 def test_httpx_retryable_response_is_one_adapter_attempt(
     tmp_path: Path,
     status: int,
+    expected_reason: DownloadRetryReason,
 ) -> None:
     request = _request(tmp_path)
     calls = 0
@@ -318,6 +515,7 @@ def test_httpx_retryable_response_is_one_adapter_attempt(
     assert calls == 1
     assert isinstance(result, TransportRetryable)
     assert result.http_status == status
+    assert result.reason is expected_reason
 
 
 # Retry-After is normalized only from the exact retryable response boundary.
@@ -540,7 +738,7 @@ def test_httpx_stalled_response_body_cancels_within_a_fixed_bound(
 
     server = threading.Thread(target=serve, name="httpx-test-server")
     server.start()
-    downloader = HttpxDownloader(log=lambda _: None)
+    downloader = HttpxDownloader()
     results: list[object] = []
     worker = threading.Thread(
         target=lambda: results.append(
@@ -605,16 +803,17 @@ def test_httpx_completed_result_precedes_later_repeated_cancel(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected_reason"),
     [
-        httpx.ReadTimeout("timed out"),
-        httpx.ConnectError("connection refused"),
-        httpx.ConnectError("name resolution failed"),
+        (httpx.ReadTimeout("timed out"), DownloadRetryReason.TIMEOUT),
+        (httpx.ConnectError("connection refused"), DownloadRetryReason.NETWORK),
+        (httpx.ConnectError("name resolution failed"), DownloadRetryReason.NETWORK),
     ],
 )
 def test_httpx_timeout_connection_and_dns_failures_are_retryable(
     tmp_path: Path,
     error: httpx.RequestError,
+    expected_reason: DownloadRetryReason,
 ) -> None:
     """Observable transient transport failures stay policy-eligible."""
 
@@ -627,6 +826,7 @@ def test_httpx_timeout_connection_and_dns_failures_are_retryable(
 
     assert isinstance(result, TransportRetryable)
     assert result.http_status is None
+    assert result.reason is expected_reason
 
 
 def test_httpx_too_many_redirects_is_ordinary_terminal(tmp_path: Path) -> None:
@@ -653,20 +853,33 @@ def test_httpx_decoding_failure_fails_closed(tmp_path: Path) -> None:
         )
 
 
-def test_httpx_progress_logs_name_supplied_staging(tmp_path: Path) -> None:
-    request = _request(tmp_path)
-    logs: list[str] = []
-    clock_values = iter([0.0, 1.0, 4.0, 6.0])
-    downloader = _downloader(
-        httpx.MockTransport(lambda _: httpx.Response(200, content=b"abc")),
-        logs=logs,
-        monotonic=lambda: next(clock_values),
-    )
-    downloader.chunk_size = 1
+def test_httpx_controlled_error_hides_url_credentials_and_raw_exception(
+    tmp_path: Path,
+) -> None:
+    sentinel = "raw-exception-sentinel"
 
-    downloader.download(request, _settings())
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError(
+            f"{sentinel} https://user:credential-sentinel@example.test/private"
+        )
 
-    assert logs == [f"Downloaded 3 bytes to {request.sink.display_path}"]
+    with pytest.raises(DownloadFilesError) as raised:
+        _downloader(httpx.MockTransport(handler)).download(
+            _request(
+                tmp_path,
+                url=(
+                    "https://user:credential-sentinel@example.test/private"
+                    "?token=url-sentinel"
+                ),
+            ),
+            _settings(),
+        )
+
+    visible = str(raised.value)
+    assert sentinel not in visible
+    assert "credential-sentinel" not in visible
+    assert "url-sentinel" not in visible
+    assert isinstance(raised.value.__cause__, httpx.LocalProtocolError)
 
 
 def test_httpx_write_failure_is_local_and_does_not_place_a_final(

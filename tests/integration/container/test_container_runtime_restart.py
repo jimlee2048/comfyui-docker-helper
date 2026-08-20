@@ -6,11 +6,13 @@ import signal
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
+from comfyui_docker_helper.container import runtime_serve as runtime_serve_module
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_control import (
     RuntimeAcceptedResponse,
@@ -29,7 +31,21 @@ from comfyui_docker_helper.container.runtime_controller import (
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncDownloadQueueHandle,
 )
-from comfyui_docker_helper.container.runtime_files import Logger, RuntimeFilePlan
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeGenerationAdmitted,
+    RuntimeGenerationOperation,
+    RuntimeGenerationReady,
+    RuntimeGenerationStopCause,
+    RuntimeGenerationStopped,
+    RuntimeGenerationStopping,
+    RuntimePhase,
+    RuntimePhaseCompleted,
+    RuntimePhaseFailed,
+    RuntimePhaseStarted,
+    RuntimeSshOutcome,
+    RuntimeSshStatus,
+)
+from comfyui_docker_helper.container.runtime_files import RuntimeFilePlan
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     RuntimeHookPlan,
@@ -102,6 +118,7 @@ def _hook_names(plan: RuntimeHookPlan, phase: str) -> list[str]:
 # A controller-lifetime logging failure wakes the runtime and uses normal cleanup.
 def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     config = tmp_path / "runtime.toml"
@@ -111,6 +128,13 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
     events: list[str] = []
     child = _RestartChild(events, "only")
     failure_observer: list[Callable[[str], object]] = []
+    semantic_events: list[object] = []
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: Mock(emit=semantic_events.append),
+    )
 
     class InjectedLogging:
         def __enter__(self) -> InjectedLogging:
@@ -166,11 +190,410 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
         "only:reap",
         "logging:close",
     ]
+    stopped = [
+        event
+        for event in semantic_events
+        if isinstance(event, RuntimeGenerationStopped)
+    ]
+    assert [(event.generation, event.cause) for event in stopped] == [
+        ("gen-1", RuntimeGenerationStopCause.CONTROLLER_FAILURE)
+    ]
+
+
+def test_runtime_display_is_constructed_inside_logging_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeline: list[str] = []
+
+    class InjectedLogging:
+        active = False
+
+        def __enter__(self) -> InjectedLogging:
+            self.active = True
+            timeline.append("logging:enter")
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            self.active = False
+            timeline.append("logging:exit")
+
+    logging = InjectedLogging()
+    deliveries: list[object] = []
+
+    class InjectedDelivery:
+        def __init__(self, _sink: object, **_kwargs: object) -> None:
+            deliveries.append(self)
+
+        def __enter__(self) -> InjectedDelivery:
+            assert logging.active is True
+            timeline.append("delivery:enter")
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            assert logging.active is True
+            timeline.append("delivery:exit")
+
+    def display_factory(_settings: object) -> object:
+        assert logging.active is True
+        timeline.append("display:create")
+        return object()
+
+    def run_serve(**kwargs: object) -> int:
+        assert logging.active is True
+        assert kwargs["event_sink"] is not None
+        assert kwargs["background_event_sink"] is deliveries[0]
+        timeline.append("serve:run")
+        return 0
+
+    monkeypatch.setattr(
+        runtime_serve_module, "default_runtime_display", display_factory
+    )
+    monkeypatch.setattr(runtime_serve_module, "_run_runtime_serve", run_serve)
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "RuntimeEventDelivery",
+        InjectedDelivery,
+    )
+
+    assert (
+        run_runtime_serve(
+            runtime_logging_factory=lambda _observer: logging,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+    assert timeline == [
+        "logging:enter",
+        "display:create",
+        "delivery:enter",
+        "serve:run",
+        "delivery:exit",
+        "logging:exit",
+    ]
+
+
+def test_pre_lifecycle_primary_failure_closes_admitted_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    semantic_events: list[object] = []
+    failure_observers: list[Callable[[str], object]] = []
+
+    class InjectedLogging:
+        def __enter__(self) -> InjectedLogging:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    def logging_factory(observer: Callable[[str], object]) -> InjectedLogging:
+        failure_observers.append(observer)
+        return InjectedLogging()
+
+    class FailingAfterAdmissionDisplay:
+        def emit(self, event: object) -> None:
+            semantic_events.append(event)
+            if isinstance(event, RuntimeGenerationAdmitted):
+                assert len(failure_observers) == 1
+                failure_observers[0]("primary output failed before lifecycle ownership")
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: FailingAfterAdmissionDisplay(),
+    )
+
+    with pytest.raises(RuntimeExecutionError, match="runtime logging failed"):
+        run_runtime_serve(
+            runtime=_runtime(tmp_path),
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={"PATH": "/usr/bin"},
+            runner=lambda *_args, **_kwargs: pytest.fail("must not start"),
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+            runtime_logging_factory=logging_factory,  # type: ignore[arg-type]
+        )
+
+    assert (
+        RuntimeGenerationAdmitted("gen-1", RuntimeGenerationOperation.INITIAL_START)
+        in semantic_events
+    )
+    assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.CONTROLLER_FAILURE
+            )
+        )
+        == 1
+    )
+
+
+def test_pre_lifecycle_signal_closes_admitted_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers: dict[signal.Signals, object] = {}
+    semantic_events: list[object] = []
+
+    monkeypatch.setattr(
+        signal,
+        "getsignal",
+        lambda sig: handlers.get(sig, signal.SIG_DFL),
+    )
+
+    def install_handler(sig: signal.Signals, handler: object) -> object:
+        previous = handlers.get(sig, signal.SIG_DFL)
+        handlers[sig] = handler
+        return previous
+
+    monkeypatch.setattr(signal, "signal", install_handler)
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: Mock(emit=semantic_events.append),
+    )
+
+    def interrupt_factory(_factory: object) -> object:
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        raise AssertionError("signal handler must interrupt generation creation")
+
+    monkeypatch.setattr(
+        runtime_serve_module.RuntimeGenerationFactory,
+        "create_generation",
+        interrupt_factory,
+    )
+
+    assert (
+        run_runtime_serve(
+            runtime=_runtime(tmp_path),
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={"PATH": "/usr/bin"},
+            runner=lambda *_args, **_kwargs: pytest.fail("must not start"),
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+        )
+        == 143
+    )
+    assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
+        )
+        == 1
+    )
+
+
+def test_signal_during_serve_stopping_finishes_terminal_event_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers: dict[signal.Signals, object] = {}
+    semantic_events: list[object] = []
+    invalid_config = tmp_path / "invalid.toml"
+    invalid_config.write_text("[comfyui\ninvalid", encoding="utf-8")
+
+    monkeypatch.setattr(
+        signal,
+        "getsignal",
+        lambda sig: handlers.get(sig, signal.SIG_DFL),
+    )
+
+    def install_handler(sig: signal.Signals, handler: object) -> object:
+        previous = handlers.get(sig, signal.SIG_DFL)
+        handlers[sig] = handler
+        return previous
+
+    monkeypatch.setattr(signal, "signal", install_handler)
+
+    class SignalOnStoppingDisplay:
+        def emit(self, event: object) -> None:
+            semantic_events.append(event)
+            if isinstance(event, RuntimeGenerationStopping):
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: SignalOnStoppingDisplay(),
+    )
+
+    assert (
+        run_runtime_serve(
+            runtime=_runtime(tmp_path),
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=invalid_config,
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={"PATH": "/usr/bin"},
+            runner=lambda *_args, **_kwargs: pytest.fail("must not start"),
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+        )
+        == 143
+    )
+    assert (
+        semantic_events.count(
+            RuntimeGenerationAdmitted("gen-1", RuntimeGenerationOperation.INITIAL_START)
+        )
+        == 1
+    )
+    assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
+        )
+        == 1
+    )
+
+
+def test_signal_at_lifecycle_handoff_closes_generation_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers: dict[signal.Signals, object] = {}
+    installs: dict[signal.Signals, int] = {}
+    semantic_events: list[object] = []
+
+    monkeypatch.setattr(
+        signal,
+        "getsignal",
+        lambda sig: handlers.get(sig, signal.SIG_DFL),
+    )
+
+    def install_handler(sig: signal.Signals, handler: object) -> object:
+        previous = handlers.get(sig, signal.SIG_DFL)
+        handlers[sig] = handler
+        installs[sig] = installs.get(sig, 0) + 1
+        if sig is signal.SIGTERM and installs[sig] == 2:
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+        return previous
+
+    monkeypatch.setattr(signal, "signal", install_handler)
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: Mock(emit=semantic_events.append),
+    )
+
+    assert (
+        run_runtime_serve(
+            runtime=_runtime(tmp_path),
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={"PATH": "/usr/bin"},
+            runner=lambda *_args, **_kwargs: pytest.fail("must not start"),
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+        )
+        == 143
+    )
+    assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
+        )
+        == 1
+    )
+
+
+def test_late_inner_signal_is_forwarded_after_lifecycle_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers: dict[signal.Signals, object] = {}
+    observed: list[signal.Signals] = []
+    semantic_events: list[object] = []
+
+    monkeypatch.setattr(
+        signal,
+        "getsignal",
+        lambda sig: handlers.get(sig, signal.SIG_DFL),
+    )
+
+    def install_handler(sig: signal.Signals, handler: object) -> object:
+        previous = handlers.get(sig, signal.SIG_DFL)
+        handlers[sig] = handler
+        return previous
+
+    monkeypatch.setattr(signal, "signal", install_handler)
+    original_observe = RuntimeController.observe_external_signal
+
+    def observe(controller: RuntimeController, sig: signal.Signals) -> None:
+        observed.append(sig)
+        original_observe(controller, sig)
+
+    monkeypatch.setattr(RuntimeController, "observe_external_signal", observe)
+
+    class SignalOnStoppedDisplay:
+        def emit(self, event: object) -> None:
+            semantic_events.append(event)
+            if isinstance(event, RuntimeGenerationStopped):
+                handler = handlers[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+
+    class NaturalChild:
+        returncode = 0
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: SignalOnStoppedDisplay(),
+    )
+
+    assert (
+        run_runtime_serve(
+            runtime=_runtime(tmp_path),
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=tmp_path / "missing-mounted.toml",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={"PATH": "/usr/bin"},
+            runner=lambda *_args, **_kwargs: NaturalChild(),  # type: ignore[arg-type]
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+        )
+        == 0
+    )
+    assert observed == [signal.SIGTERM]
+    assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped("gen-1", RuntimeGenerationStopCause.NATURAL_EXIT)
+        )
+        == 1
+    )
 
 
 # Restart arbitration must fully stop the current instance before replacement.
 def test_restart_replaces_the_complete_generation_without_owner_overlap(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     config = tmp_path / "runtime.toml"
@@ -184,6 +607,17 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
     events: list[str] = []
     children: list[_RestartChild] = []
     submission: RuntimeRestartSubmission | None = None
+    semantic_events: list[object] = []
+
+    class RecordingDisplay:
+        def emit(self, event: object) -> None:
+            semantic_events.append(event)
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: RecordingDisplay(),
+    )
 
     def runner(
         argv: Sequence[str],
@@ -205,10 +639,10 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log, cancel_requested
+        del runtime, env, cancel_requested, event_sink
         events.append(f"{phase}:{','.join(_hook_names(plan, phase))}")
         return ()
 
@@ -257,6 +691,49 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
     assert children[0].signals == [signal.SIGTERM]
     assert submission is not None and submission.ticket is not None
     assert submission.ticket.snapshot().state == "succeeded"
+    admitted = [
+        event
+        for event in semantic_events
+        if isinstance(event, RuntimeGenerationAdmitted)
+    ]
+    assert [(event.generation, event.operation) for event in admitted] == [
+        ("gen-1", RuntimeGenerationOperation.INITIAL_START),
+        ("gen-2", RuntimeGenerationOperation.OPERATOR_RESTART),
+    ]
+    ready = [
+        event for event in semantic_events if isinstance(event, RuntimeGenerationReady)
+    ]
+    assert [event.generation for event in ready] == ["gen-1", "gen-2"]
+    assert semantic_events.index(ready[0]) < semantic_events.index(admitted[1])
+    assert [
+        event.status
+        for event in semantic_events
+        if isinstance(event, RuntimeSshOutcome)
+    ] == [RuntimeSshStatus.DISABLED, RuntimeSshStatus.DISABLED]
+    stopping = [
+        event
+        for event in semantic_events
+        if isinstance(event, RuntimeGenerationStopping)
+    ]
+    stopped = [
+        event
+        for event in semantic_events
+        if isinstance(event, RuntimeGenerationStopped)
+    ]
+    assert [event.generation for event in stopping] == ["gen-1", "gen-2"]
+    assert [(event.generation, event.cause) for event in stopped] == [
+        ("gen-1", RuntimeGenerationStopCause.OPERATOR_RESTART),
+        ("gen-2", RuntimeGenerationStopCause.NATURAL_EXIT),
+    ]
+    assert (
+        semantic_events.index(ready[0])
+        < semantic_events.index(stopping[0])
+        < semantic_events.index(stopped[0])
+        < semantic_events.index(admitted[1])
+        < semantic_events.index(ready[1])
+        < semantic_events.index(stopping[1])
+        < semantic_events.index(stopped[1])
+    )
     assert events == [
         "pre-start:10-old-pre.sh",
         "old:spawn",
@@ -276,12 +753,20 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
 
 def test_successor_admission_failure_exits_without_starting_a_second_owner(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     config = tmp_path / "runtime.toml"
     _write_config(config, "old")
     children: list[_RestartChild] = []
     submission: RuntimeRestartSubmission | None = None
+    semantic_events: list[object] = []
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: Mock(emit=semantic_events.append),
+    )
 
     def runner(
         _argv: Sequence[str],
@@ -316,16 +801,43 @@ def test_successor_admission_failure_exits_without_starting_a_second_owner(
     ticket = submission.ticket.snapshot()
     assert ticket.state == "failed"
     assert ticket.operation == "op-1"
+    admitted = [
+        event
+        for event in semantic_events
+        if isinstance(event, RuntimeGenerationAdmitted)
+    ]
+    assert [event.generation for event in admitted] == ["gen-1", "gen-2"]
+    assert semantic_events.count(RuntimeGenerationStopping("gen-2")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped(
+                "gen-2", RuntimeGenerationStopCause.STARTUP_FAILURE
+            )
+        )
+        == 1
+    )
 
 
 def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     hooks = tmp_path / "hooks"
     _write_hook(hooks, "stop", "30-stop.sh")
     children: list[_RestartChild] = []
     submission: RuntimeRestartSubmission | None = None
+    semantic_events: list[object] = []
+
+    class RecordingDisplay:
+        def emit(self, event: object) -> None:
+            semantic_events.append(event)
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: RecordingDisplay(),
+    )
 
     def runner(
         _argv: Sequence[str],
@@ -372,6 +884,27 @@ def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(
     assert children[0].returncode == -int(signal.SIGTERM)
     assert submission is not None and submission.ticket is not None
     assert submission.ticket.snapshot().state == "failed"
+    stop_started = RuntimePhaseStarted(RuntimePhase.STOP_HOOKS)
+    stop_failed = RuntimePhaseFailed(RuntimePhase.STOP_HOOKS)
+    cleanup_started = RuntimePhaseStarted(RuntimePhase.GENERATION_CLEANUP)
+    cleanup_completed = RuntimePhaseCompleted(RuntimePhase.GENERATION_CLEANUP)
+    assert stop_started in semantic_events
+    assert stop_failed in semantic_events
+    assert RuntimePhaseCompleted(RuntimePhase.STOP_HOOKS) not in semantic_events
+    assert cleanup_started in semantic_events
+    assert cleanup_completed in semantic_events
+    stopped = next(
+        event
+        for event in semantic_events
+        if isinstance(event, RuntimeGenerationStopped)
+    )
+    assert (
+        semantic_events.index(stop_started)
+        < semantic_events.index(stop_failed)
+        < semantic_events.index(cleanup_started)
+        < semantic_events.index(cleanup_completed)
+        < semantic_events.index(stopped)
+    )
 
 
 # Container shutdown always wins if it arrives between current and replacement.

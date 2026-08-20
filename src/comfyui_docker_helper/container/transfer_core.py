@@ -14,14 +14,25 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from types import TracebackType
 from typing import BinaryIO, Literal, Protocol, runtime_checkable
 
+from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.file_checksum import (
     validate_canonical_file_checksum,
 )
 from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
     is_reserved_file_target_name,
+)
+from comfyui_docker_helper.container.download_events import (
+    DownloadEvent,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadTransferProgress,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
 )
 from comfyui_docker_helper.errors import ApplicationError
 
@@ -39,14 +50,26 @@ class TransferDownloadFilesError(DownloadFilesError):
         *,
         retry_after_seconds: float | None = None,
         resume_authority: ResumeAuthority | None = None,
+        reason: DownloadRetryReason = DownloadRetryReason.UNKNOWN,
+        http_status: int | None = None,
     ) -> None:
+        if not isinstance(reason, DownloadRetryReason):
+            raise ValueError("download retry reason must be an admitted category")
+        _validate_transport_http_status(http_status)
         self.retry_after_seconds = retry_after_seconds
         self.resume_authority = resume_authority
+        self.reason = reason
+        self.http_status = http_status
         super().__init__(message)
 
 
 class TerminalTransferDownloadFilesError(DownloadFilesError):
     """An ordinary item failure that must not consume another attempt."""
+
+    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+        _validate_transport_http_status(http_status)
+        self.http_status = http_status
+        super().__init__(message)
 
 
 class DownloadCancelled(DownloadFilesError):
@@ -76,6 +99,27 @@ class PreservedTransferCleanupError(DownloadFilesError):
 
 class _PlacementCommittedError(DownloadFilesError):
     """Placement committed before a fatal post-commit failure."""
+
+
+class _BackendOSErrorObserved(Exception):
+    """Keep an adapter/display OSError distinct from core filesystem failures."""
+
+    def __init__(self, error: OSError) -> None:
+        self.error = error
+        super().__init__("backend OSError observed")
+
+
+class _EventDeliveryObserved(Exception):
+    """Carry one event-sink BaseException across core cleanup boundaries."""
+
+    def __init__(
+        self,
+        error: BaseException,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.error = error
+        self.traceback = traceback
+        super().__init__("download event delivery failure observed")
 
 
 class DownloadStatus(StrEnum):
@@ -242,9 +286,7 @@ class TransportSink:
         _require_safe_staging_metadata(current, self._display_path)
         target = _stat_leaf(self._target_fd, self._target_name)
         if target is not None and _same_inode(target, current):
-            raise DownloadFilesError(
-                f"download staging aliases the final target: {self._display_path}"
-            )
+            raise DownloadFilesError("download staging aliases the final target")
         duplicate = os.dup(self._fd)
         try:
             os.lseek(duplicate, 0, os.SEEK_SET)
@@ -266,6 +308,7 @@ class TransportRequest:
 
     url: str
     sink: TransportSink
+    progress_sink: EventSink[DownloadTransferProgress] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,10 +354,13 @@ class TransportRetryable:
     diagnostic: TransportDiagnostic
     http_status: int | None = None
     retry_after_seconds: float | None = None
+    reason: DownloadRetryReason = DownloadRetryReason.UNKNOWN
 
     def __post_init__(self) -> None:
         _validate_transport_diagnostic(self.diagnostic)
         _validate_transport_http_status(self.http_status)
+        if not isinstance(self.reason, DownloadRetryReason):
+            raise ValueError("transport retry reason must be an admitted category")
         if self.retry_after_seconds is not None:
             if (
                 isinstance(self.retry_after_seconds, bool)
@@ -471,12 +517,6 @@ class FileTransferOutcome:
     verification: VerificationStatus
 
 
-class Logger(Protocol):
-    """Minimal logger protocol used by transfer orchestration."""
-
-    def __call__(self, message: str) -> None: ...
-
-
 @dataclass(slots=True)
 class _DirectoryAnchor:
     path: Path
@@ -551,8 +591,7 @@ class _TargetAnchor:
                 os.fsync(created.parent_fd)
             except OSError as error:
                 raise DownloadFilesError(
-                    "download target directory could not be made durable: "
-                    f"{created.display_path}: {error}"
+                    "download target directory could not be made durable"
                 ) from error
         self.created_directories.clear()
 
@@ -562,14 +601,12 @@ class _TargetAnchor:
                 observed = anchor.path.lstat()
             except OSError as error:
                 raise DownloadFilesError(
-                    f"download directory changed during transfer: {anchor.path}"
+                    "download directory changed during transfer"
                 ) from error
             if not stat.S_ISDIR(observed.st_mode) or not _same_inode(
                 anchor.metadata, observed
             ):
-                raise DownloadFilesError(
-                    f"download directory changed during transfer: {anchor.path}"
-                )
+                raise DownloadFilesError("download directory changed during transfer")
 
     def close(self) -> None:
         for anchor in reversed(self.directories):
@@ -596,6 +633,7 @@ def transfer_file(
     *,
     backend: DownloadBackend,
     settings: DownloaderSettings,
+    event_sink: EventSink[DownloadEvent] | None = None,
 ) -> FileTransferOutcome:
     """Perform one descriptor-anchored transfer, verification, and placement."""
     identity = project_transfer_identity(
@@ -627,8 +665,15 @@ def transfer_file(
                 try:
                     discard_preserved_transfer(request)
                 except DownloadFilesError as error:
+                    # discard_preserved_transfer and its private helpers expose only
+                    # core-owned, controlled messages; preserve that useful category
+                    # while keeping the raw cause chain out of visible text.
+                    controlled_message = error.args[0]
+                    if type(controlled_message) is not str:
+                        controlled_message = "preserved download cleanup failed"
                     raise PreservedTransferCleanupError(
-                        str(error), resume_authority=request.resume_authority
+                        controlled_message,
+                        resume_authority=request.resume_authority,
                     ) from error
             _require_same_safe_final_leaf(
                 anchor.parent.fd,
@@ -660,10 +705,17 @@ def transfer_file(
             target_name=anchor.target_name,
             resume_allowed=request.resume_authority is not None,
         )
-        transport_request = TransportRequest(url=request.url, sink=sink)
+        transport_request = TransportRequest(
+            url=request.url,
+            sink=sink,
+            progress_sink=event_sink,
+        )
         try:
             raw_transport = backend.download(transport_request, settings)
             validated_transport = _validate_transport_outcome(raw_transport)
+        except OSError as error:
+            _cleanup_after_unquiescent_transport_failure(staging, control)
+            raise _BackendOSErrorObserved(error) from error
         except Exception:
             _cleanup_after_unquiescent_transport_failure(staging, control)
             raise
@@ -689,8 +741,15 @@ def transfer_file(
                 anchor=anchor,
                 staging=staging,
                 initial=initial,
+                event_sink=event_sink,
             )
         except _PlacementCommittedError:
+            raise
+        except _EventDeliveryObserved:
+            # Event delivery is the primary failure at this boundary. Cleanup is
+            # still attempted, but cannot replace its identity or traceback.
+            with suppress(BaseException):
+                _cleanup_owned_transfer(staging, control)
             raise
         except _TransportRetryableObserved as observed:
             authority = None
@@ -705,11 +764,13 @@ def transfer_file(
             else:
                 _cleanup_owned_transfer(staging, control)
             raise TransferDownloadFilesError(
-                observed.outcome.diagnostic.summary,
+                "file transfer failed temporarily",
                 retry_after_seconds=observed.outcome.retry_after_seconds,
                 resume_authority=authority,
+                reason=observed.outcome.reason,
+                http_status=observed.outcome.http_status,
             ) from None
-        except _TransportCancelledObserved as observed:
+        except _TransportCancelledObserved:
             authority = None
             if request.preserve_on_cancellation:
                 _require_owned_leaf_visible(staging)
@@ -722,10 +783,10 @@ def transfer_file(
             else:
                 _cleanup_owned_transfer(staging, control)
             raise DownloadCancelled(
-                observed.outcome.diagnostic.summary,
+                "file transfer was cancelled",
                 resume_authority=authority,
             ) from None
-        except _TransportResumeRejectedObserved as observed:
+        except _TransportResumeRejectedObserved:
             if request.resume_authority is None or not sink.resume_allowed:
                 _cleanup_owned_transfer(staging, control)
                 raise DownloadFilesError(
@@ -733,13 +794,17 @@ def transfer_file(
                 ) from None
             _cleanup_owned_transfer(staging, control)
             raise ResumeRejectedDownloadFilesError(
-                observed.outcome.diagnostic.summary
+                "resumed file transfer was rejected"
             ) from None
         except _ChecksumMismatch:
             _cleanup_owned_transfer(staging, control)
             raise TransferDownloadFilesError(
-                f"download checksum does not match expected identity: {request.target}"
+                "download checksum does not match expected identity",
+                reason=DownloadRetryReason.CHECKSUM_MISMATCH,
             ) from None
+        except OSError as error:
+            _cleanup_owned_transfer(staging, control)
+            raise DownloadFilesError("download staging verification failed") from error
         except Exception:
             _cleanup_owned_transfer(staging, control)
             raise
@@ -750,9 +815,16 @@ def transfer_file(
                 os.fsync(control.directory_fd)
             except OSError as error:
                 raise DownloadFilesError(
-                    f"aria2 control cleanup could not be made durable: {error}"
+                    "aria2 control cleanup could not be made durable"
                 ) from error
+        _emit_download_event(event_sink, DownloadPlacementCompleted())
         return outcome
+    except _BackendOSErrorObserved as observed:
+        raise observed.error.with_traceback(observed.error.__traceback__) from None
+    except _EventDeliveryObserved as observed:
+        raise observed.error.with_traceback(observed.traceback) from None
+    except OSError as error:
+        raise DownloadFilesError("download filesystem operation failed") from error
     finally:
         if control is not None:
             control.close()
@@ -807,7 +879,7 @@ def discard_preserved_transfer(request: FileTransferRequest) -> None:
                 os.fsync(anchor.parent.fd)
             except OSError as error:
                 raise DownloadFilesError(
-                    f"download staging absence could not be made durable: {error}"
+                    "download staging absence could not be made durable"
                 ) from error
             anchor.verify_visible()
             if _stat_leaf(anchor.parent.fd, ".cdh-staging") is not None:
@@ -818,10 +890,7 @@ def discard_preserved_transfer(request: FileTransferRequest) -> None:
         anchor.verify_visible()
         temp_name = f"{identity.staging_name}.aria2__temp"
         if _stat_leaf(staging_anchor.fd, temp_name) is not None:
-            raise DownloadFilesError(
-                "foreign aria2 temporary control artifact exists: "
-                f"{identity.staging_target}.aria2__temp"
-            )
+            raise DownloadFilesError("foreign aria2 temporary control artifact exists")
         staging = _admit_cleanup_leaf(
             staging_anchor.fd,
             identity.staging_name,
@@ -886,10 +955,7 @@ def _admit_preserved_transfer(
         anchor.verify_visible()
         temp_name = f"{identity.staging_name}.aria2__temp"
         if _stat_leaf(staging_anchor.fd, temp_name) is not None:
-            raise DownloadFilesError(
-                "foreign aria2 temporary control artifact exists: "
-                f"{identity.staging_target}.aria2__temp"
-            )
+            raise DownloadFilesError("foreign aria2 temporary control artifact exists")
         staging = _admit_cleanup_leaf(
             staging_anchor.fd,
             identity.staging_name,
@@ -931,8 +997,7 @@ def _admit_cleanup_leaf(
         return None
     if expected_device is None or expected_inode is None:
         raise DownloadFilesError(
-            "preserved download cleanup lacks authority for existing artifact: "
-            f"{display}"
+            "preserved download cleanup lacks authority for existing artifact"
         )
     leaf = _open_owned_leaf(directory_fd, name, display)
     if (leaf.metadata.st_dev, leaf.metadata.st_ino) != (
@@ -941,7 +1006,7 @@ def _admit_cleanup_leaf(
     ):
         leaf.close()
         raise DownloadFilesError(
-            f"preserved download cleanup identity does not match authority: {display}"
+            "preserved download cleanup identity does not match authority"
         )
     return leaf
 
@@ -956,7 +1021,7 @@ def _cleanup_owned_artifacts(
         os.fsync(directory_fd)
     except OSError as error:
         raise DownloadFilesError(
-            f"download staging cleanup could not be made durable: {error}"
+            "download staging cleanup could not be made durable"
         ) from error
 
 
@@ -984,7 +1049,7 @@ def confirm_indexed_transfer_artifacts_absent(
                 os.fsync(anchor.parent.fd)
             except OSError as error:
                 raise DownloadFilesError(
-                    f"download staging absence could not be made durable: {error}"
+                    "download staging absence could not be made durable"
                 ) from error
             anchor.verify_visible()
             return _stat_leaf(anchor.parent.fd, ".cdh-staging") is None
@@ -995,7 +1060,7 @@ def confirm_indexed_transfer_artifacts_absent(
             os.fsync(staging_anchor.fd)
         except OSError as error:
             raise DownloadFilesError(
-                f"download staging absence could not be made durable: {error}"
+                "download staging absence could not be made durable"
             ) from error
         anchor.verify_visible()
         return not any(
@@ -1035,16 +1100,15 @@ def verify_required_final(
     expected_checksum: str | None,
 ) -> None:
     """Prove a required final through a fresh descriptor-anchored admission."""
+    anchor: _TargetAnchor | None = None
     try:
-        anchor = _TargetAnchor(root=root, target=target, create=False)
-    except _MissingDirectory as error:
-        raise DownloadFilesError(
-            f"required download target is missing: {target}"
-        ) from error
-    try:
+        try:
+            anchor = _TargetAnchor(root=root, target=target, create=False)
+        except _MissingDirectory as error:
+            raise DownloadFilesError("required download target is missing") from error
         observed = _stat_leaf(anchor.parent.fd, anchor.target_name)
         if observed is None:
-            raise DownloadFilesError(f"required download target is missing: {target}")
+            raise DownloadFilesError("required download target is missing")
         _require_safe_final_metadata(
             observed,
             target,
@@ -1054,7 +1118,7 @@ def verify_required_final(
             digest, _, metadata = _hash_leaf(anchor.parent.fd, anchor.target_name)
             if digest != expected_checksum:
                 raise DownloadFilesError(
-                    f"required download target checksum does not match: {target}"
+                    "required download target checksum does not match"
                 )
             observed = metadata
         _require_same_safe_final_leaf(
@@ -1065,8 +1129,15 @@ def verify_required_final(
             label="required download target",
         )
         anchor.verify_visible()
+    except DownloadFilesError:
+        raise
+    except OSError as error:
+        raise DownloadFilesError(
+            "required download target could not be verified"
+        ) from error
     finally:
-        anchor.close()
+        if anchor is not None:
+            anchor.close()
 
 
 def _existing_target_outcome(
@@ -1114,7 +1185,7 @@ def _existing_target_outcome(
         )
     if not request.overwrite:
         raise TerminalTransferDownloadFilesError(
-            f"existing download target checksum does not match: {request.target}"
+            "existing download target checksum does not match"
         )
     return None
 
@@ -1131,10 +1202,7 @@ def _admit_staging(
     control_name = f"{identity.staging_name}.aria2"
     temp_name = f"{control_name}__temp"
     if _stat_leaf(staging_anchor.fd, temp_name) is not None:
-        raise DownloadFilesError(
-            "foreign aria2 temporary control artifact exists: "
-            f"{identity.staging_target}.aria2__temp"
-        )
+        raise DownloadFilesError("foreign aria2 temporary control artifact exists")
     if request.staging_disposition is StagingDisposition.PRESERVE:
         authority = request.resume_authority
         if authority is None or authority.identity_digest != identity.digest:
@@ -1184,14 +1252,9 @@ def _admit_staging(
         if request.resume_authority is not None:
             raise DownloadFilesError("resume authority requires preserve disposition")
         if _stat_leaf(staging_anchor.fd, identity.staging_name) is not None:
-            raise DownloadFilesError(
-                f"foreign download staging artifact exists: {identity.staging_target}"
-            )
+            raise DownloadFilesError("foreign download staging artifact exists")
         if _stat_leaf(staging_anchor.fd, control_name) is not None:
-            raise DownloadFilesError(
-                "foreign aria2 control artifact exists: "
-                f"{identity.staging_target}.aria2"
-            )
+            raise DownloadFilesError("foreign aria2 control artifact exists")
         flags = (
             os.O_RDWR
             | os.O_CREAT
@@ -1203,8 +1266,7 @@ def _admit_staging(
             fd = os.open(identity.staging_name, flags, 0o600, dir_fd=staging_anchor.fd)
         except OSError as error:
             raise DownloadFilesError(
-                "download staging could not be created safely: "
-                f"{identity.staging_target}"
+                "download staging could not be created safely"
             ) from error
         metadata = os.fstat(fd)
         try:
@@ -1225,9 +1287,7 @@ def _admit_staging(
         staging.close()
         if control is not None:
             control.close()
-        raise DownloadFilesError(
-            f"download staging aliases the final target: {identity.staging_target}"
-        )
+        raise DownloadFilesError("download staging aliases the final target")
     return staging, control
 
 
@@ -1269,7 +1329,10 @@ def _require_transport_success(outcome: TransportOutcome) -> TransportSuccess:
     if isinstance(outcome, TransportRetryable):
         raise _TransportRetryableObserved(outcome)
     if isinstance(outcome, TransportOrdinaryTerminal):
-        raise TerminalTransferDownloadFilesError(outcome.diagnostic.summary)
+        raise TerminalTransferDownloadFilesError(
+            "file transfer was rejected by the remote service",
+            http_status=outcome.http_status,
+        )
     if isinstance(outcome, TransportCancelled):
         raise _TransportCancelledObserved(outcome)
     if isinstance(outcome, TransportResumeRejected):
@@ -1282,7 +1345,7 @@ class _TransportRetryableObserved(Exception):
 
     def __init__(self, outcome: TransportRetryable) -> None:
         self.outcome = outcome
-        super().__init__(outcome.diagnostic.summary)
+        super().__init__("retryable transport outcome observed")
 
 
 class _TransportCancelledObserved(Exception):
@@ -1290,7 +1353,7 @@ class _TransportCancelledObserved(Exception):
 
     def __init__(self, outcome: TransportCancelled) -> None:
         self.outcome = outcome
-        super().__init__(outcome.diagnostic.summary)
+        super().__init__("cancelled transport outcome observed")
 
 
 class _TransportResumeRejectedObserved(Exception):
@@ -1298,7 +1361,7 @@ class _TransportResumeRejectedObserved(Exception):
 
     def __init__(self, outcome: TransportResumeRejected) -> None:
         self.outcome = outcome
-        super().__init__(outcome.diagnostic.summary)
+        super().__init__("resume-rejected transport outcome observed")
 
 
 def _resume_authority(
@@ -1322,20 +1385,23 @@ def _verify_and_place(
     anchor: _TargetAnchor,
     staging: _OwnedLeaf,
     initial: os.stat_result | None,
+    event_sink: EventSink[DownloadEvent] | None,
 ) -> FileTransferOutcome:
+    _emit_download_event(event_sink, DownloadVerificationStarted())
     observed_checksum, observed_length, staged_stat = _inspect_staged_file(
         staging,
         expected_checksum=request.expected_checksum,
     )
     if transport.length < 0 or transport.length != observed_length:
         raise TransferDownloadFilesError(
-            f"download transport length does not match staged bytes: {request.target}"
+            "download transport length does not match staged bytes"
         )
     if (
         request.expected_checksum is not None
         and observed_checksum != request.expected_checksum
     ):
         raise _ChecksumMismatch
+    _emit_download_event(event_sink, DownloadVerificationCompleted())
     outcome = FileTransferOutcome(
         status=DownloadStatus.DOWNLOADED,
         target=request.target,
@@ -1350,12 +1416,11 @@ def _verify_and_place(
         ),
     )
 
+    _emit_download_event(event_sink, DownloadPlacementStarted())
     anchor.verify_visible()
     current = _stat_leaf(anchor.parent.fd, anchor.target_name)
     if not _same_optional_stat(initial, current):
-        raise DownloadFilesError(
-            f"download target changed before atomic placement: {request.target}"
-        )
+        raise DownloadFilesError("download target changed before atomic placement")
     _require_staged_file_unchanged(staging, staged_stat)
     try:
         if initial is None:
@@ -1368,9 +1433,7 @@ def _verify_and_place(
                 dst_dir_fd=anchor.parent.fd,
             )
     except OSError as error:
-        raise DownloadFilesError(
-            f"atomic download placement failed: {request.target}: {error}"
-        ) from error
+        raise DownloadFilesError("atomic download placement failed") from error
 
     try:
         os.fsync(staging.directory_fd)
@@ -1379,11 +1442,22 @@ def _verify_and_place(
         anchor.verify_visible()
     except Exception as error:
         raise _PlacementCommittedError(
-            f"download placement committed before postcondition failure: "
-            f"{request.target}: {error}"
+            "download placement committed before postcondition failure"
         ) from error
 
     return outcome
+
+
+def _emit_download_event(
+    event_sink: EventSink[DownloadEvent] | None,
+    event: DownloadEvent,
+) -> None:
+    if event_sink is None:
+        return
+    try:
+        event_sink.emit(event)
+    except BaseException as error:
+        raise _EventDeliveryObserved(error, error.__traceback__) from None
 
 
 def _require_staged_file_unchanged(
@@ -1398,9 +1472,7 @@ def _require_staged_file_unchanged(
         or not _same_complete_metadata(expected, current)
         or not _same_complete_metadata(expected, observed)
     ):
-        raise DownloadFilesError(
-            f"download staging changed before atomic placement: {staging.display_path}"
-        )
+        raise DownloadFilesError("download staging changed before atomic placement")
 
 
 def _place_missing_target(
@@ -1416,12 +1488,10 @@ def _place_missing_target(
         )
     except FileExistsError as error:
         raise DownloadFilesError(
-            f"download target appeared before atomic placement: {anchor.target}"
+            "download target appeared before atomic placement"
         ) from error
     except OSError as error:
-        raise DownloadFilesError(
-            f"atomic download placement failed: {anchor.target}: {error}"
-        ) from error
+        raise DownloadFilesError("atomic download placement failed") from error
 
 
 def _require_final_matches_staging(
@@ -1436,9 +1506,7 @@ def _require_final_matches_staging(
     try:
         current = os.fstat(fd)
         if not _same_stat(expected, current):
-            raise DownloadFilesError(
-                f"placed download target identity changed: {anchor.target}"
-            )
+            raise DownloadFilesError("placed download target identity changed")
         _require_same_safe_final_leaf(
             anchor.parent.fd,
             anchor.target_name,
@@ -1462,9 +1530,7 @@ def _inspect_staged_file(
     digest = _hash_fd(staging.fd) if expected_checksum is not None else None
     after = os.fstat(staging.fd)
     if not _same_stat(metadata, after):
-        raise DownloadFilesError(
-            f"download staging changed during verification: {staging.display_path}"
-        )
+        raise DownloadFilesError("download staging changed during verification")
     os.fsync(staging.fd)
     _require_owned_leaf_visible(staging)
     return digest, after.st_size, after
@@ -1549,7 +1615,7 @@ def _reconcile_control_after_transport(
             os.fsync(temp.directory_fd)
         except OSError as error:
             raise DownloadFilesError(
-                f"aria2 temporary control cleanup is not durable: {error}"
+                "aria2 temporary control cleanup is not durable"
             ) from error
         finally:
             temp.close()
@@ -1673,21 +1739,13 @@ def _stabilize_managed_control_leaf(
 ) -> None:
     before = os.fstat(leaf.fd)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-        raise DownloadFilesError(
-            f"aria2 control is not an unaliased regular file: {leaf.display_path}"
-        )
+        raise DownloadFilesError("aria2 control is not an unaliased regular file")
     if before.st_uid != os.geteuid():
-        raise DownloadFilesError(
-            f"aria2 control is not owned by the effective user: {leaf.display_path}"
-        )
+        raise DownloadFilesError("aria2 control is not owned by the effective user")
     if expected is not None and not _same_complete_metadata(expected, before):
-        raise DownloadFilesError(
-            f"aria2 held control changed during transport: {leaf.display_path}"
-        )
+        raise DownloadFilesError("aria2 held control changed during transport")
     if any(_same_inode(before, metadata) for metadata in protected):
-        raise DownloadFilesError(
-            f"aria2 control aliases protected data: {leaf.display_path}"
-        )
+        raise DownloadFilesError("aria2 control aliases protected data")
     _require_transfer_path_stable(
         anchor,
         staging,
@@ -1698,9 +1756,7 @@ def _stabilize_managed_control_leaf(
     try:
         os.fsync(leaf.directory_fd)
     except OSError as error:
-        raise DownloadFilesError(
-            f"aria2 control generation is not durable: {leaf.display_path}: {error}"
-        ) from error
+        raise DownloadFilesError("aria2 control generation is not durable") from error
     after = os.fstat(leaf.fd)
     observed = _stat_leaf(leaf.directory_fd, leaf.name)
     if (
@@ -1710,9 +1766,7 @@ def _stabilize_managed_control_leaf(
         or after.st_uid != os.geteuid()
         or observed.st_uid != os.geteuid()
     ):
-        raise DownloadFilesError(
-            f"aria2 control changed during generation admission: {leaf.display_path}"
-        )
+        raise DownloadFilesError("aria2 control changed during generation admission")
     _require_transfer_path_stable(
         anchor,
         staging,
@@ -1767,9 +1821,7 @@ def _require_transfer_path_stable(
     current_staging = os.fstat(staging.fd)
     _require_safe_staging_metadata(current_staging, staging.display_path)
     if not _same_optional_stat(initial, target):
-        raise DownloadFilesError(
-            f"download target changed during transport: {anchor.target}"
-        )
+        raise DownloadFilesError("download target changed during transport")
 
 
 def _open_owned_leaf(directory_fd: int, name: str, display: Path) -> _OwnedLeaf:
@@ -1782,9 +1834,7 @@ def _open_owned_leaf(directory_fd: int, name: str, display: Path) -> _OwnedLeaf:
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
     except OSError as error:
-        raise DownloadFilesError(
-            f"download staging cannot be opened safely: {name}"
-        ) from error
+        raise DownloadFilesError("download staging cannot be opened safely") from error
     metadata = os.fstat(fd)
     try:
         _require_safe_staging_metadata(metadata, display)
@@ -1805,14 +1855,14 @@ def _open_regular_leaf(directory_fd: int, name: str, label: str) -> int:
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
     except OSError as error:
-        raise DownloadFilesError(f"{label} cannot be opened safely: {name}") from error
+        raise DownloadFilesError(f"{label} cannot be opened safely") from error
     metadata = os.fstat(fd)
     if not stat.S_ISREG(metadata.st_mode):
         os.close(fd)
-        raise DownloadFilesError(f"{label} is not a regular file: {name}")
+        raise DownloadFilesError(f"{label} is not a regular file")
     if metadata.st_nlink != 1:
         os.close(fd)
-        raise DownloadFilesError(f"{label} is not an unaliased regular file: {name}")
+        raise DownloadFilesError(f"{label} is not an unaliased regular file")
     return fd
 
 
@@ -1827,7 +1877,7 @@ def _cleanup_owned_transfer(
         os.fsync(staging.directory_fd)
     except OSError as error:
         raise DownloadFilesError(
-            f"download staging cleanup could not be made durable: {error}"
+            "download staging cleanup could not be made durable"
         ) from error
 
 
@@ -1835,19 +1885,15 @@ def _unlink_owned_leaf(leaf: _OwnedLeaf) -> None:
     expected = os.fstat(leaf.fd)
     observed = _stat_leaf(leaf.directory_fd, leaf.name)
     if observed is None or not _same_inode(expected, observed):
-        raise DownloadFilesError(
-            f"owned download artifact identity changed: {leaf.display_path}"
-        )
+        raise DownloadFilesError("owned download artifact identity changed")
     _require_safe_staging_metadata(expected, leaf.display_path)
     if not _same_complete_metadata(expected, observed):
-        raise DownloadFilesError(
-            f"owned download artifact identity changed: {leaf.display_path}"
-        )
+        raise DownloadFilesError("owned download artifact identity changed")
     try:
         os.unlink(leaf.name, dir_fd=leaf.directory_fd)
     except OSError as error:
         raise DownloadFilesError(
-            f"owned download artifact could not be cleaned: {leaf.display_path}"
+            "owned download artifact could not be cleaned"
         ) from error
 
 
@@ -1855,18 +1901,14 @@ def _require_owned_leaf_visible(leaf: _OwnedLeaf) -> None:
     observed = _stat_leaf(leaf.directory_fd, leaf.name)
     current = os.fstat(leaf.fd)
     if observed is None or not _same_inode(observed, current):
-        raise DownloadFilesError(
-            f"owned download artifact identity changed: {leaf.display_path}"
-        )
+        raise DownloadFilesError("owned download artifact identity changed")
 
 
 def _require_safe_staging_metadata(metadata: os.stat_result, display: Path) -> None:
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise DownloadFilesError(
-            f"download staging is not an unaliased regular file: {display}"
-        )
+        raise DownloadFilesError("download staging is not an unaliased regular file")
     if metadata.st_uid != os.geteuid():
-        raise DownloadFilesError(f"download staging has an unexpected owner: {display}")
+        raise DownloadFilesError("download staging has an unexpected owner")
 
 
 def _require_safe_final_metadata(
@@ -1876,9 +1918,9 @@ def _require_safe_final_metadata(
     label: str = "download target",
 ) -> None:
     if not stat.S_ISREG(metadata.st_mode):
-        raise DownloadFilesError(f"{label} is not a regular file: {display}")
+        raise DownloadFilesError(f"{label} is not a regular file")
     if metadata.st_nlink != 1:
-        raise DownloadFilesError(f"{label} is not an unaliased regular file: {display}")
+        raise DownloadFilesError(f"{label} is not an unaliased regular file")
 
 
 def _relative_target(root: Path, target: Path) -> Path:
@@ -1887,17 +1929,13 @@ def _relative_target(root: Path, target: Path) -> Path:
     try:
         relative = target.relative_to(root)
     except ValueError as error:
-        raise DownloadFilesError(
-            f"download target escapes COMFYUI_PATH: {target}"
-        ) from error
+        raise DownloadFilesError("download target escapes COMFYUI_PATH") from error
     if not relative.parts or ".." in relative.parts:
         raise DownloadFilesError(
-            f"download target must be a strict descendant of COMFYUI_PATH: {target}"
+            "download target must be a strict descendant of COMFYUI_PATH"
         )
     if is_reserved_file_target_name(relative.name):
-        raise DownloadFilesError(
-            f"download target uses the reserved staging filename: {target}"
-        )
+        raise DownloadFilesError("download target uses the reserved staging filename")
     return relative
 
 
@@ -1908,7 +1946,7 @@ def _open_directory_path(path: Path, label: str) -> int:
         return os.open(path, flags)
     except OSError as error:
         raise DownloadFilesError(
-            f"{label} must be an existing real directory: {path}"
+            f"{label} must be an existing real directory"
         ) from error
 
 
@@ -1927,7 +1965,7 @@ def _open_child_directory(
             raise _MissingDirectory from None
     except OSError as error:
         raise DownloadFilesError(
-            f"download target parent is not a real directory: {name}"
+            "download target parent is not a real directory"
         ) from error
     created = False
     try:
@@ -1936,14 +1974,12 @@ def _open_child_directory(
     except FileExistsError:
         pass
     except OSError as error:
-        raise DownloadFilesError(
-            f"download target parent cannot be created: {name}"
-        ) from error
+        raise DownloadFilesError("download target parent cannot be created") from error
     try:
         return os.open(name, flags, dir_fd=parent_fd), created
     except OSError as error:
         raise DownloadFilesError(
-            f"download target parent is not a real directory: {name}"
+            "download target parent is not a real directory"
         ) from error
 
 
@@ -1953,15 +1989,13 @@ def _stat_leaf(directory_fd: int, name: str) -> os.stat_result | None:
     except FileNotFoundError:
         return None
     except OSError as error:
-        raise DownloadFilesError(
-            f"download path cannot be inspected safely: {name}"
-        ) from error
+        raise DownloadFilesError("download path cannot be inspected safely") from error
 
 
 def _require_same_leaf(directory_fd: int, name: str, expected: os.stat_result) -> None:
     observed = _stat_leaf(directory_fd, name)
     if observed is None or not _same_inode(expected, observed):
-        raise DownloadFilesError(f"download path changed during operation: {name}")
+        raise DownloadFilesError("download path changed during operation")
 
 
 def _require_same_safe_final_leaf(
@@ -1974,7 +2008,7 @@ def _require_same_safe_final_leaf(
 ) -> None:
     observed = _stat_leaf(directory_fd, name)
     if observed is None or not _same_inode(expected, observed):
-        raise DownloadFilesError(f"download path changed during operation: {name}")
+        raise DownloadFilesError("download path changed during operation")
     _require_safe_final_metadata(observed, display, label=label)
 
 

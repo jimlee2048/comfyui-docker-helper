@@ -11,11 +11,11 @@ import pytest
 
 import comfyui_docker_helper.container.ssh as ssh_module
 from comfyui_docker_helper.config import RuntimeConfig, RuntimeSystemSshConfig
-from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.ssh import (
     RootSshCredentialPreparationStatus,
     SshCredentialPreparationError,
     SshdStartupError,
+    SshPreparationWarningKind,
     build_sshd_argv,
     prepare_root_ssh_credentials,
     start_sshd_if_enabled,
@@ -230,12 +230,10 @@ def test_enabled_ssh_without_credentials_reports_no_credentials_no_side_effects(
     assert not (tmp_path / "root").exists()
 
 
-def test_start_sshd_logs_credential_path_mode_warnings(
+def test_start_sshd_observes_controlled_credential_path_mode_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    warning = "WARNING: existing root SSH directory mode is nonstandard"
-
     def prepare_with_warning(
         _config: RuntimeSystemSshConfig,
         **_kwargs: object,
@@ -245,7 +243,7 @@ def test_start_sshd_logs_credential_path_mode_warnings(
             public_key_count=1,
             password_configured=False,
             authorized_keys_path=tmp_path / "root" / ".ssh" / "authorized_keys",
-            warnings=(warning,),
+            warnings=(SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD,),
         )
 
     monkeypatch.setattr(
@@ -255,22 +253,20 @@ def test_start_sshd_logs_credential_path_mode_warnings(
     )
     command_runner = RecordingCommandRunner()
     process_starter = RecordingProcessStarter()
-    messages: list[str] = []
+    warnings: list[SshPreparationWarningKind] = []
 
     result = start_sshd_if_enabled(
         RuntimeConfig.model_validate(
             {"system": {"ssh": {"enable": True, "pub_keys": [VALID_SSH_KEY]}}}
         ),
-        runtime=ContainerRuntime(),
         runtime_dir=tmp_path / "run" / "sshd",
         command_runner=command_runner,
         process_starter=process_starter,
-        log=messages.append,
+        preparation_warning_observer=warnings.append,
     )
 
     assert result is process_starter.process
-    assert messages == [warning]
-    assert VALID_SSH_KEY not in "\n".join(messages)
+    assert warnings == [SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD]
 
 
 def test_public_keys_prepare_authorized_keys_permissions_and_ownership(
@@ -456,6 +452,7 @@ def test_password_command_failure_does_not_leak_credential_material(
         )
 
     assert "top-secret-password" not in str(raised.value)
+    assert "chpasswd" not in str(raised.value)
     assert "top-secret-password" not in runner.calls[0].description
     assert "top-secret-password" not in " ".join(runner.calls[0].argv)
     assert runner.calls[0].input_data == b"root:top-secret-password\n"
@@ -680,18 +677,10 @@ def test_safe_noncanonical_ssh_modes_warn_and_are_not_rejected(
         owner_gid=os.getgid(),
     )
 
-    assert len(status.warnings) == 2
-    directory_warning, file_warning = status.warnings
-    assert "directory" in directory_warning.lower()
-    assert "preserving" in directory_warning.lower()
-    assert "not writable by group or other" in directory_warning.lower()
-    assert "authorized keys" in file_warning.lower()
-    assert "replacing" in file_warning.lower()
-    assert "atomically" in file_warning.lower()
-    assert "0600" in file_warning
-    warning_text = "\n".join(status.warnings)
-    for sensitive_value in (*VALID_SSH_KEY.split(), "old key material"):
-        assert sensitive_value not in warning_text
+    assert status.warnings == (
+        SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD,
+        SshPreparationWarningKind.AUTHORIZED_KEYS_MODE_NONSTANDARD,
+    )
     assert stat.S_IMODE(ssh_dir.stat().st_mode) == 0o755
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert target.stat().st_ino != old_inode
@@ -913,27 +902,22 @@ def test_build_sshd_argv_enforces_effective_config_without_credentials() -> None
 
 
 # Startup tests protect host-key generation, foreground argv, and redaction.
-def test_start_sshd_if_enabled_with_no_credentials_warns_without_start(
+def test_start_sshd_if_enabled_with_no_credentials_does_not_start(
     tmp_path: Path,
 ) -> None:
-    messages: list[str] = []
     command_runner = RecordingCommandRunner()
     process_starter = RecordingProcessStarter()
 
     result = start_sshd_if_enabled(
         RuntimeConfig.model_validate({"system": {"ssh": {"enable": True}}}),
-        runtime=ContainerRuntime(),
         root_home=tmp_path / "root",
         runtime_dir=tmp_path / "run" / "sshd",
         command_runner=command_runner,
         process_starter=process_starter,
-        log=messages.append,
+        preparation_warning_observer=lambda _warning: None,
     )
 
     assert result is None
-    assert messages == [
-        "WARNING: SSH is enabled but no root SSH credentials are configured"
-    ]
     assert command_runner.calls == []
     assert process_starter.calls == []
     assert not (tmp_path / "run" / "sshd").exists()
@@ -961,13 +945,12 @@ def test_start_sshd_if_enabled_generates_host_keys_runtime_dir_and_foreground_ar
                 }
             }
         ),
-        runtime=ContainerRuntime(),
         root_home=root_home,
         runtime_dir=runtime_dir,
         credential_command_runner=credential_runner,
         command_runner=command_runner,
         process_starter=process_starter,
-        log=lambda message: None,
+        preparation_warning_observer=lambda _warning: None,
     )
 
     assert result is process
@@ -1014,7 +997,6 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
     process = FakeSshdProcess()
     process_starter = RecordingProcessStarter(process)
     ownership = OwnershipRecorder()
-    messages: list[str] = []
     root_home = _create_root_home(tmp_path)
     runtime_dir = tmp_path / "run" / "sshd"
 
@@ -1030,7 +1012,6 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
                 }
             }
         ),
-        runtime=ContainerRuntime(),
         root_home=root_home,
         runtime_dir=runtime_dir,
         credential_command_runner=credential_runner,
@@ -1042,7 +1023,7 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
         credential_owner_gid=os.getgid(),
         command_runner=command_runner,
         process_starter=process_starter,
-        log=messages.append,
+        preparation_warning_observer=lambda _warning: None,
     )
 
     authorized_keys = root_home / ".ssh" / "authorized_keys"
@@ -1086,7 +1067,6 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
         )
     ]
     assert VALID_SSH_KEY not in " ".join(process_starter.calls[0].argv)
-    assert VALID_SSH_KEY not in "\n".join(messages)
 
 
 def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
@@ -1113,7 +1093,6 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
                     }
                 }
             ),
-            runtime=ContainerRuntime(),
             root_home=root_home,
             runtime_dir=runtime_dir,
             credential_command_runner=credential_runner,
@@ -1125,11 +1104,12 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
             credential_owner_gid=os.getgid(),
             command_runner=command_runner,
             process_starter=process_starter,
-            log=lambda message: None,
+            preparation_warning_observer=lambda _warning: None,
         )
 
     error = str(raised.value)
     assert "generate OpenSSH host keys failed with exit code 19" in error
+    assert "/usr/bin/ssh-keygen" not in error
     assert password not in error
     assert VALID_SSH_KEY not in error
     assert command_runner.calls == [
@@ -1137,6 +1117,39 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
     ]
     assert process_starter.calls == []
     assert not runtime_dir.exists()
+
+
+def test_ssh_default_runner_missing_executables_are_not_disclosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing = FileNotFoundError("raw-missing-executable-sentinel")
+
+    def fail_popen(*_args: object, **_kwargs: object) -> None:
+        raise missing
+
+    monkeypatch.setattr(ssh_module.subprocess, "Popen", fail_popen)
+
+    with pytest.raises(SshdStartupError) as command_error:
+        ssh_module._run_command(
+            ["/credential-url/ssh-keygen"],
+            description="generate OpenSSH host keys",
+        )
+    with pytest.raises(SshCredentialPreparationError) as sensitive_error:
+        ssh_module._run_sensitive_command(
+            ["credential-bearing-command"],
+            input_data=b"secret",
+            description="set root SSH password",
+        )
+    with pytest.raises(SshdStartupError) as start_error:
+        ssh_module._start_process(
+            ["/credential-url/sshd"],
+            description="start sshd",
+        )
+
+    for error in (command_error.value, sensitive_error.value, start_error.value):
+        assert isinstance(error.__cause__, FileNotFoundError)
+        assert "raw-missing-executable-sentinel" not in str(error)
+        assert "credential" not in str(error)
 
 
 @pytest.mark.parametrize(
@@ -1185,13 +1198,12 @@ def test_start_sshd_if_enabled_fails_when_sshd_exits_during_startup(
             RuntimeConfig.model_validate(
                 {"system": {"ssh": {"enable": True, "password": "secret"}}}
             ),
-            runtime=ContainerRuntime(),
             root_home=tmp_path / "root",
             runtime_dir=tmp_path / "run" / "sshd",
             credential_command_runner=RecordingRunner(),
             command_runner=RecordingCommandRunner(),
             process_starter=RecordingProcessStarter(FakeSshdProcess(returncode=255)),
-            log=lambda message: None,
+            preparation_warning_observer=lambda _warning: None,
         )
 
     assert "sshd exited during startup with code 255" in str(raised.value)

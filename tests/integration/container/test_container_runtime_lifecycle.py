@@ -18,8 +18,18 @@ from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
 )
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeGenerationStopCause,
+    RuntimeGenerationStopped,
+    RuntimeGenerationStopping,
+    RuntimePhase,
+    RuntimePhaseCompleted,
+    RuntimePhaseFailed,
+    RuntimePhaseStarted,
+    RuntimeSshOutcome,
+    RuntimeSshStatus,
+)
 from comfyui_docker_helper.container.runtime_files import (
-    Logger,
     RuntimeDownloadStateObserver,
     RuntimeFileDownloadError,
     RuntimeFileDownloadResult,
@@ -34,11 +44,21 @@ from comfyui_docker_helper.container.runtime_hooks import (
 )
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
-    run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import RuntimeSshService
+from comfyui_docker_helper.container.ssh import SshPreparationWarningKind
+from tests.runtime_event_support import (
+    RecordingRuntimeEventSink,
+)
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
+)
 
 _WORKER_CLEANUP_TIMEOUT_SECONDS = 10
+
+
+def _lifecycle_events() -> lifecycle_module._RuntimeLifecycleEvents:
+    return lifecycle_module._RuntimeLifecycleEvents(RecordingRuntimeEventSink(), None)
 
 
 class FakeChild:
@@ -87,6 +107,89 @@ class FakeChild:
         if self._events is not None:
             self._events.append("kill")
         self.returncode = -int(signal.SIGKILL)
+
+
+@pytest.mark.parametrize(
+    ("ready", "expected_status"),
+    [
+        pytest.param(
+            False,
+            RuntimeSshStatus.ENABLED_WITHOUT_CREDENTIALS,
+            id="no-credentials",
+        ),
+        pytest.param(True, RuntimeSshStatus.READY, id="ready"),
+    ],
+)
+def test_managed_ssh_lifecycle_emits_one_typed_outcome(
+    tmp_path: Path,
+    ready: bool,
+    expected_status: RuntimeSshStatus,
+) -> None:
+    runtime = _runtime(tmp_path)
+    ssh_config: dict[str, object] = {"enable": True}
+    if ready:
+        ssh_config["password"] = "configured"
+    config = RuntimeConfig.model_validate({"system": {"ssh": ssh_config}})
+    semantic_events: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            semantic_events.append(event)
+
+    class OwnedSshd:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self._terminal = threading.Event()
+
+        def wait(self) -> int:
+            assert self._terminal.wait(timeout=1)
+            assert self.returncode is not None
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+            self._terminal.set()
+
+        def kill(self) -> None:
+            self.terminate()
+
+    def starter(
+        _config: RuntimeConfig,
+        *,
+        preparation_process_observer: Callable[[object | None], None],
+        preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
+    ) -> OwnedSshd | None:
+        del preparation_process_observer, preparation_warning_observer
+        return OwnedSshd() if ready else None
+
+    downloads = Mock()
+    downloads.is_stopped.return_value = True
+    recorder = Recorder()
+    result = lifecycle_module.run_runtime_lifecycle(
+        config,
+        RuntimeHookPlan(hooks=()),
+        runtime=runtime,
+        source_env={"PATH": "/usr/bin"},
+        downloads=downloads,
+        ssh_service=RuntimeSshService(
+            config,
+            starter=starter,
+            background_event_sink=recorder,  # type: ignore[arg-type]
+            event_sink=recorder,
+        ),
+        runner=lambda *_args, **_kwargs: FakeChild(0),
+        event_sink=recorder,
+    )
+
+    assert result.returncode == 0
+    assert [
+        event.status
+        for event in semantic_events
+        if isinstance(event, RuntimeSshOutcome)
+    ] == [expected_status]
 
 
 # Generation admission keeps ordinary non-hook content nonfatal and reports only
@@ -339,12 +442,13 @@ def test_controller_failure_wins_before_restart_and_cleans_running_generation(
             downloads=StoppedOwner("downloads"),  # type: ignore[arg-type]
             ssh_service=StoppedOwner("ssh"),  # type: ignore[arg-type]
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             restart_acceptor=restart,
             runtime_health=FailedRuntimeHealth("stdout failed"),
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.CONTROLLER_FAILURE,
+        cause=RuntimeGenerationStopCause.CONTROLLER_FAILURE,
         returncode=-int(signal.SIGTERM),
     )
     assert restart.accepted is False
@@ -450,11 +554,10 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         plan: RuntimeFilePlan,
         *,
         config: RuntimeConfig,
-        log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
         **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log, state_observer
+        del config, state_observer
         assert len(plan.items) == 1
         assert plan.items[0].target == (
             runtime.comfyui_path / "models" / "checkpoints" / "model.bin"
@@ -468,10 +571,10 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log
+        del runtime, env, event_sink
         assert cancel_requested() is False
         if phase == "pre-start":
             assert events == ["download"]
@@ -510,13 +613,13 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
         deadline: float | None,
         monotonic: Callable[[], float],
         sleep: Callable[[float], object],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, cancel_requested, deadline, monotonic, sleep
+        del plan, runtime, env, cancel_requested, deadline, monotonic, sleep, event_sink
         events.append("stop")
         return ()
 
@@ -546,6 +649,70 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
         "post-start",
         "wait",
     ]
+
+
+def test_runtime_file_phase_does_not_complete_after_cancellation_or_health_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+
+    def run_case(*, primary_failure: bool) -> tuple[list[object], object]:
+        health = ControllableRuntimeHealth()
+        semantic_events: list[object] = []
+        downloads = Mock()
+        ssh_service = Mock()
+        downloads.is_stopped.return_value = True
+        ssh_service.is_stopped.return_value = True
+
+        def activate(**_kwargs: object) -> None:
+            if primary_failure:
+                health.fail("stdout failed during runtime file preparation")
+                return
+            handler = handlers[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+
+        downloads.activate.side_effect = activate
+        try:
+            result = lifecycle_module.run_runtime_lifecycle(
+                RuntimeConfig(),
+                RuntimeHookPlan(hooks=()),
+                runtime=runtime,
+                source_env={"PATH": "/usr/bin"},
+                downloads=downloads,
+                ssh_service=ssh_service,
+                runner=lambda *_args, **_kwargs: pytest.fail("ComfyUI must not start"),
+                runtime_health=health,
+                event_sink=Mock(emit=semantic_events.append),
+            )
+        except RuntimeExecutionError as error:
+            result = error
+        return semantic_events, result
+
+    cancelled_events, cancelled_result = run_case(primary_failure=False)
+    failed_events, failed_result = run_case(primary_failure=True)
+
+    for semantic_events in (cancelled_events, failed_events):
+        assert (
+            RuntimePhaseStarted(RuntimePhase.RUNTIME_FILES_PREPARATION)
+            in semantic_events
+        )
+        assert (
+            RuntimePhaseCompleted(RuntimePhase.RUNTIME_FILES_PREPARATION)
+            not in semantic_events
+        )
+        assert (
+            RuntimePhaseFailed(RuntimePhase.RUNTIME_FILES_PREPARATION)
+            in semantic_events
+        )
+    assert cancelled_result == lifecycle_module.RuntimeGenerationResult(
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        returncode=-int(signal.SIGTERM),
+    )
+    assert isinstance(failed_result, RuntimeExecutionError)
+    assert "runtime logging failed" in str(failed_result)
 
 
 @pytest.mark.parametrize(
@@ -646,10 +813,11 @@ def test_operator_restart_is_accepted_after_startup_and_uses_fixed_sigterm(
         restart_acceptor=restart,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
+        event_sink=RecordingRuntimeEventSink(),
     )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.OPERATOR_RESTART,
+        cause=RuntimeGenerationStopCause.OPERATOR_RESTART,
         returncode=-int(signal.SIGTERM),
     )
     assert events.index("restart:accept") > events.index("post-start")
@@ -687,11 +855,12 @@ def test_pending_restart_loses_to_observed_natural_exit(tmp_path: Path) -> None:
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             restart_acceptor=restart,
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.NATURAL_EXIT,
+        cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=31,
     )
     assert restart.accepted is False
@@ -724,13 +893,14 @@ def test_pending_restart_loses_to_admitted_external_signal(tmp_path: Path) -> No
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             restart_acceptor=restart,
             monotonic=lambda: 0.0,
             sleep=lambda _seconds: None,
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGINT),
     )
     assert restart.accepted is False
@@ -764,6 +934,11 @@ def test_first_external_signal_during_restart_preserves_original_signal(
     ssh_service = Mock()
     ssh_service.request_stop.side_effect = lambda: events.append("ssh:request")
     ssh_service.is_stopped.return_value = True
+    semantic_events: list[object] = []
+    lifecycle_events = lifecycle_module._RuntimeLifecycleEvents(
+        Mock(emit=semantic_events.append),
+        "gen-1",
+    )
 
     def stop_hooks(
         _plan: RuntimeHookPlan,
@@ -794,13 +969,14 @@ def test_first_external_signal_during_restart_preserves_original_signal(
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=lifecycle_events,
             restart_acceptor=restart,
             monotonic=lambda: 0.0,
             sleep=lambda _seconds: None,
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGINT),
     )
     assert child.signals == [signal.SIGINT]
@@ -813,6 +989,59 @@ def test_first_external_signal_during_restart_preserves_original_signal(
         "forward:SIGINT",
         "child:reap",
     ]
+    assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
+        )
+        == 1
+    )
+
+
+def test_presentation_failure_does_not_replace_startup_failure_or_cleanup(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    health = ControllableRuntimeHealth()
+    downloads = Mock()
+
+    def fail_primary_health(**_kwargs: object) -> None:
+        health.fail("primary output failed during runtime file activation")
+
+    downloads.activate.side_effect = fail_primary_health
+    downloads.is_stopped.return_value = True
+    ssh_service = Mock()
+    ssh_service.is_stopped.return_value = True
+
+    class FailingSink:
+        def emit(self, _event: object) -> None:
+            raise OSError("presentation sentinel")
+
+    with pytest.raises(RuntimeExecutionError, match="runtime logging failed") as caught:
+        lifecycle_module.run_runtime_lifecycle(
+            RuntimeConfig(),
+            RuntimeHookPlan(hooks=()),
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            downloads=downloads,
+            ssh_service=ssh_service,
+            runner=lambda *_args, **_kwargs: pytest.fail("ComfyUI must not start"),
+            runtime_health=health,
+            event_sink=FailingSink(),  # type: ignore[arg-type]
+            generation="gen-1",
+        )
+
+    assert "presentation sentinel" not in str(caught.value)
+    assert str(caught.value) == (
+        "runtime logging failed while preserving primary output"
+    )
+    assert "primary output failed during runtime file activation" not in str(
+        caught.value
+    )
+    downloads.stop.assert_called_once()
+    ssh_service.stop.assert_called_once()
 
 
 def test_second_external_signal_during_restart_forces_exact_owners(
@@ -890,13 +1119,14 @@ def test_second_external_signal_during_restart_forces_exact_owners(
             downloads=downloads,  # type: ignore[arg-type]
             ssh_service=ssh_service,  # type: ignore[arg-type]
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             restart_acceptor=restart,
             monotonic=lambda: 0.0,
             sleep=lambda _seconds: None,
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
     assert child.signals == []
@@ -959,13 +1189,14 @@ def test_repeated_external_signal_at_send_decision_skips_ordinary_signal(
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             restart_acceptor=restart,
             monotonic=lambda: 0.0,
             sleep=lambda _seconds: None,
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
     assert child.signals == []
@@ -1044,6 +1275,7 @@ def test_operator_restart_stop_hook_failure_cleans_exact_owners_before_error(
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             restart_acceptor=restart,
         )
 
@@ -1094,10 +1326,11 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.NATURAL_EXIT,
+        cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=19,
     )
     stop_hook_runner.assert_not_called()
@@ -1156,10 +1389,11 @@ def test_terminal_child_signal_race_preserves_natural_exit(
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.NATURAL_EXIT,
+        cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=29,
     )
     stop_hook_runner.assert_not_called()
@@ -1184,11 +1418,10 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         plan: RuntimeFilePlan,
         *,
         config: RuntimeConfig,
-        log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
         **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del plan, config, log, state_observer
+        del plan, config, state_observer
         events.append("download")
         return ()
 
@@ -1198,10 +1431,10 @@ def test_pre_start_failure_after_download_prevents_spawn_and_later_phases(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log, cancel_requested
+        del runtime, env, cancel_requested, event_sink
         assert phase == "pre-start"
         assert _hook_names(plan, "pre-start") == ["10-fail.sh"]
         events.append("pre-start")
@@ -1282,11 +1515,10 @@ filename = "model.bin"
         plan: RuntimeFilePlan,
         *,
         config: RuntimeConfig,
-        log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
         **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log, state_observer
+        del config, state_observer
         assert len(plan.items) == 1
         events.append("sync-download")
         raise RuntimeFileDownloadError(
@@ -1459,10 +1691,10 @@ filename = "model.bin"
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, cancel_requested
+        del plan, runtime, env, cancel_requested, event_sink
         assert phase == "post-start"
         events.append("post-start")
         if failure_point == "post-start":
@@ -1662,10 +1894,10 @@ def test_readiness_failure_after_spawn_prevents_post_start_and_is_startup_failur
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, phase, runtime, env, log, cancel_requested
+        del plan, phase, runtime, env, cancel_requested, event_sink
         events.append("post-start")
         return ()
 
@@ -1719,10 +1951,10 @@ def test_post_start_failure_after_readiness_terminates_child_as_startup_failure(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log, cancel_requested
+        del runtime, env, cancel_requested, event_sink
         assert phase == "post-start"
         assert _hook_names(plan, "post-start") == ["10-fail.sh"]
         events.append("post-start")
@@ -1793,10 +2025,10 @@ def test_startup_shutdown_during_pre_start_hook_prevents_spawn_and_stop_hooks(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log
+        del runtime, env, event_sink
         assert phase == "pre-start"
         assert cancel_requested() is False
         assert _hook_names(plan, "pre-start") == ["10-pre.sh", "20-skip.sh"]
@@ -1868,10 +2100,10 @@ def test_startup_shutdown_during_readiness_runs_stop_hooks_before_forwarding(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, phase, runtime, env, log, cancel_requested
+        del plan, phase, runtime, env, cancel_requested, event_sink
         events.append("post-start")
         return ()
 
@@ -2001,10 +2233,10 @@ def test_startup_shutdown_during_post_start_hook_runs_stop_hooks_before_forwardi
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log
+        del runtime, env, event_sink
         assert phase == "post-start"
         assert cancel_requested() is False
         assert _hook_names(plan, "post-start") == ["10-post.sh", "20-skip.sh"]
@@ -2091,13 +2323,13 @@ def test_repeated_shutdown_signal_forces_stop_hook_cancellation(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
         deadline: float | None,
         monotonic: Callable[[], float],
         sleep: Callable[[float], object],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log, deadline, monotonic, sleep
+        del runtime, env, deadline, monotonic, sleep, event_sink
         assert _hook_names(plan, "stop") == ["10-hang.sh", "20-skip.sh"]
         assert cancel_requested() is False
         events.append("stop:10-hang.sh")
@@ -2217,10 +2449,11 @@ def test_repeated_signal_force_stops_downloads_ssh_and_comfyui(
             downloads=downloads,  # type: ignore[arg-type]
             ssh_service=ssh,  # type: ignore[arg-type]
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
 
@@ -2354,12 +2587,13 @@ def test_shutdown_kills_child_at_outer_deadline_after_two_second_reserve(
             downloads=downloads,  # type: ignore[arg-type]
             ssh_service=ssh_service,  # type: ignore[arg-type]
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             monotonic=clock.monotonic,
             sleep=clock.sleep,
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
 
@@ -2406,13 +2640,13 @@ def test_shutdown_hooks_receive_one_pre_stop_deadline(
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
         deadline: float | None,
         monotonic: Callable[[], float],
         sleep: Callable[[float], object],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, cancel_requested, monotonic
+        del plan, runtime, env, cancel_requested, monotonic, event_sink
         assert deadline == pytest.approx(6.0)
         events.append("hooks")
         sleep(6.0)
@@ -2439,12 +2673,13 @@ def test_shutdown_hooks_receive_one_pre_stop_deadline(
             downloads=auxiliary,  # type: ignore[arg-type]
             ssh_service=auxiliary,  # type: ignore[arg-type]
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
             monotonic=clock.monotonic,
             sleep=clock.sleep,
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=23,
     )
 
@@ -2506,10 +2741,11 @@ def test_shutdown_timeout_minus_one_disables_outer_and_hook_deadlines(
             downloads=auxiliary,  # type: ignore[arg-type]
             ssh_service=auxiliary,  # type: ignore[arg-type]
             startup_shutdown=startup_shutdown,
+            lifecycle_events=_lifecycle_events(),
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGINT),
     )
 
@@ -2552,13 +2788,13 @@ def test_graceful_shutdown_runs_stop_hooks_before_forwarding_and_child_result_wi
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
         deadline: float | None,
         monotonic: Callable[[], float],
         sleep: Callable[[float], object],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del runtime, env, log, deadline, monotonic, sleep
+        del runtime, env, deadline, monotonic, sleep, event_sink
         assert cancel_requested() is False
         assert _hook_names(plan, "stop") == ["90-stop.sh"]
         events.append("stop:90-stop.sh")

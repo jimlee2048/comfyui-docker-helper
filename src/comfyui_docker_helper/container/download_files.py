@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import email.utils
+import math
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -19,6 +21,7 @@ from typing import Literal, Protocol, runtime_checkable
 import aria2p
 import httpx
 
+from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.build_plan import FilesPhase, HttpFilePlan
 from comfyui_docker_helper.config.url_validation import (
     DownloaderName,
@@ -31,6 +34,18 @@ from comfyui_docker_helper.container.attempt_coordinator import (
     AttemptOrdinaryTerminal,
     AttemptSucceeded,
     coordinate_transfer_attempts,
+)
+from comfyui_docker_helper.container.download_events import (
+    DownloadBackendName,
+    DownloadBatchCompleted,
+    DownloadEvent,
+    DownloadFinalVerificationCompleted,
+    DownloadFinalVerificationStarted,
+    DownloadItemCompleted,
+    DownloadItemStarted,
+    DownloadItemStatus,
+    DownloadRetryReason,
+    DownloadTransferProgress,
 )
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialError,
@@ -47,8 +62,9 @@ from comfyui_docker_helper.container.transfer_core import (
     FileTransferOutcome,
     FileTransferRequest,
     HttpxDownloadSettings,
-    Logger,
     StagingDisposition,
+    TerminalTransferDownloadFilesError,
+    TransferDownloadFilesError,
     TransportCancelled,
     TransportDiagnostic,
     TransportOrdinaryTerminal,
@@ -56,10 +72,13 @@ from comfyui_docker_helper.container.transfer_core import (
     TransportRequest,
     TransportResumeRejected,
     TransportRetryable,
-    TransportSink,
     TransportSuccess,
+    VerificationStatus,
     verify_required_final,
 )
+
+# Bound external counters to the process-sized byte range used by local I/O.
+_MAX_TRANSFER_BYTES = sys.maxsize
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +126,6 @@ class HttpxDownloader:
     """HTTPX adapter that writes one response to supplied staging."""
 
     chunk_size = 1024 * 1024
-    progress_interval_seconds = 5.0
 
     def __init__(
         self,
@@ -115,13 +133,11 @@ class HttpxDownloader:
         transport: httpx.AsyncBaseTransport | None = None,
         monotonic: Monotonic = time.monotonic,
         wall_clock: Monotonic = time.time,
-        log: Logger = print,
         credential_policy: DownloaderCredentialPolicy | None = None,
     ) -> None:
         self._transport = transport
         self._monotonic = monotonic
         self._wall_clock = wall_clock
-        self._log = log
         self._credential_policy = credential_policy
         self._cancel_requested = threading.Event()
         self._active_lock = threading.Lock()
@@ -155,13 +171,7 @@ class HttpxDownloader:
                 return _transport_cancelled("httpx")
             self._active = (loop, task)
         try:
-            try:
-                outcome = await self._download_once(request, settings)
-            except OSError as error:
-                raise DownloadFilesError(
-                    "HTTP download failed while writing supplied staging "
-                    f"{request.sink.display_path}: {error}"
-                ) from error
+            outcome = await self._download_once(request, settings)
             # This lock acquisition is the terminal linearization point. A cancel
             # observed first wins; after this point the task does not suspend again.
             with self._active_lock:
@@ -204,7 +214,7 @@ class HttpxDownloader:
                 )
                 if failure is not None:
                     return failure
-                length = await self._write_response(response, request.sink)
+                length = await self._write_response(response, request)
                 return TransportSuccess(
                     length=length,
                     namespace="httpx",
@@ -214,28 +224,36 @@ class HttpxDownloader:
             return TransportOrdinaryTerminal(
                 diagnostic=TransportDiagnostic(
                     namespace="httpx",
-                    summary=f"HTTP download exceeded redirect limits: {request.url}",
+                    summary="HTTP download exceeded redirect limits",
                 ),
                 http_status=None,
             )
-        except (
-            httpx.TimeoutException,
-            httpx.NetworkError,
-            httpx.ProxyError,
-            httpx.RemoteProtocolError,
-        ) as error:
+        except httpx.TimeoutException:
             if self._cancel_requested.is_set():
                 return _transport_cancelled("httpx")
             return TransportRetryable(
                 diagnostic=TransportDiagnostic(
                     namespace="httpx",
-                    summary=f"HTTP transport failed for {request.url}: {error}",
-                )
+                    summary="HTTP transfer timed out",
+                ),
+                reason=DownloadRetryReason.TIMEOUT,
+            )
+        except (
+            httpx.NetworkError,
+            httpx.ProxyError,
+            httpx.RemoteProtocolError,
+        ):
+            if self._cancel_requested.is_set():
+                return _transport_cancelled("httpx")
+            return TransportRetryable(
+                diagnostic=TransportDiagnostic(
+                    namespace="httpx",
+                    summary="HTTP network transfer failed",
+                ),
+                reason=DownloadRetryReason.NETWORK,
             )
         except (httpx.TransportError, httpx.RequestError) as error:
-            raise DownloadFilesError(
-                f"HTTP transport invariant failed for {request.url}: {error}"
-            ) from error
+            raise DownloadFilesError("HTTP transport invariant failed") from error
 
     async def _apply_credential(self, request: httpx.Request) -> None:
         policy = self._credential_policy
@@ -263,23 +281,77 @@ class HttpxDownloader:
     async def _write_response(
         self,
         response: httpx.Response,
-        sink: TransportSink,
+        request: TransportRequest,
     ) -> int:
-        downloaded = 0
-        last_log = self._monotonic()
-        with sink.open_for_write() as output:
+        stored_bytes = 0
+        total_bytes = _http_content_length(response)
+        started_at = self._monotonic()
+        _emit_transfer_progress(
+            request,
+            transferred_bytes=0,
+            total_bytes=total_bytes,
+            stored_bytes=0,
+            reported_rate=None,
+        )
+        try:
+            output = request.sink.open_for_write()
+        except OSError as error:
+            raise DownloadFilesError(
+                "HTTP download failed while writing supplied staging"
+            ) from error
+        try:
             async for chunk in response.aiter_bytes(chunk_size=self.chunk_size):
                 if self._cancel_requested.is_set():
                     raise asyncio.CancelledError
                 if not chunk:
                     continue
-                output.write(chunk)
-                downloaded += len(chunk)
-                now = self._monotonic()
-                if now - last_log >= self.progress_interval_seconds:
-                    self._log(f"Downloaded {downloaded} bytes to {sink.display_path}")
-                    last_log = now
-        return downloaded
+                try:
+                    output.write(chunk)
+                except OSError as error:
+                    raise DownloadFilesError(
+                        "HTTP download failed while writing supplied staging"
+                    ) from error
+                stored_bytes += len(chunk)
+                transferred_bytes = response.num_bytes_downloaded
+                if total_bytes is not None and transferred_bytes > total_bytes:
+                    total_bytes = None
+                _emit_transfer_progress(
+                    request,
+                    transferred_bytes=transferred_bytes,
+                    total_bytes=total_bytes,
+                    stored_bytes=stored_bytes,
+                    reported_rate=_average_transfer_rate(
+                        transferred_bytes,
+                        started_at=started_at,
+                        now=self._monotonic(),
+                    ),
+                )
+        except BaseException:
+            with suppress(OSError):
+                output.close()
+            raise
+        else:
+            try:
+                output.close()
+            except OSError as error:
+                raise DownloadFilesError(
+                    "HTTP download failed while writing supplied staging"
+                ) from error
+        transferred_bytes = response.num_bytes_downloaded
+        if total_bytes is not None and transferred_bytes > total_bytes:
+            total_bytes = None
+        _emit_transfer_progress(
+            request,
+            transferred_bytes=transferred_bytes,
+            total_bytes=total_bytes,
+            stored_bytes=stored_bytes,
+            reported_rate=_average_transfer_rate(
+                transferred_bytes,
+                started_at=started_at,
+                now=self._monotonic(),
+            ),
+        )
+        return stored_bytes
 
     def cancel(self, *, deadline: float | None = None) -> None:
         del deadline
@@ -303,6 +375,109 @@ def _authorization_value(request: httpx.Request) -> bytes | None:
         value for name, value in request.headers.raw if name.lower() == b"authorization"
     ]
     return values[0] if len(values) == 1 else None
+
+
+def _http_content_length(response: httpx.Response) -> int | None:
+    values = [
+        value
+        for name, value in response.headers.raw
+        if name.lower() == b"content-length"
+    ]
+    if len(values) != 1:
+        return None
+    value = values[0].strip(b" \t")
+    if not value or any(byte < ord("0") or byte > ord("9") for byte in value):
+        return None
+    comparable_value = value.lstrip(b"0") or b"0"
+    if len(comparable_value) > len(str(_MAX_TRANSFER_BYTES)):
+        return None
+    try:
+        parsed = int(comparable_value)
+    except (ValueError, OverflowError):
+        return None
+    return parsed if parsed <= _MAX_TRANSFER_BYTES else None
+
+
+def _average_transfer_rate(
+    transferred_bytes: int,
+    *,
+    started_at: float,
+    now: float,
+) -> float | None:
+    elapsed = now - started_at
+    if not math.isfinite(elapsed) or elapsed <= 0:
+        return None
+    rate = transferred_bytes / elapsed
+    return rate if math.isfinite(rate) else None
+
+
+def _emit_transfer_progress(
+    request: TransportRequest,
+    *,
+    transferred_bytes: int,
+    total_bytes: int | None,
+    stored_bytes: int | None,
+    reported_rate: int | float | None,
+) -> None:
+    if request.progress_sink is not None:
+        request.progress_sink.emit(
+            DownloadTransferProgress(
+                transferred_bytes=transferred_bytes,
+                total_bytes=total_bytes,
+                stored_bytes=stored_bytes,
+                reported_rate=reported_rate,
+            )
+        )
+
+
+def _aria2_transfer_progress(
+    download: Aria2Download,
+) -> DownloadTransferProgress | None:
+    completed = _aria2_non_negative_integer(download, "completed_length")
+    if completed is None:
+        return None
+    total = _aria2_non_negative_integer(download, "total_length")
+    if total is not None and (total <= 0 or total < completed):
+        total = None
+    rate = _aria2_non_negative_number(download, "download_speed")
+    return DownloadTransferProgress(
+        transferred_bytes=completed,
+        total_bytes=total,
+        stored_bytes=None,
+        reported_rate=rate,
+    )
+
+
+def _aria2_non_negative_integer(
+    download: Aria2Download,
+    attribute: str,
+) -> int | None:
+    try:
+        value = getattr(download, attribute)
+    except Exception:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value if value <= _MAX_TRANSFER_BYTES else None
+
+
+def _aria2_non_negative_number(
+    download: Aria2Download,
+    attribute: str,
+) -> int | float | None:
+    try:
+        value = getattr(download, attribute)
+    except Exception:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= _MAX_TRANSFER_BYTES else None
+    if not isinstance(value, float):
+        return None
+    if not math.isfinite(value) or value < 0 or value > _MAX_TRANSFER_BYTES:
+        return None
+    return value
 
 
 class _Aria2LifecycleState(Enum):
@@ -331,14 +506,12 @@ class Aria2Downloader:
         secret_factory: SecretFactory = lambda: secrets.token_urlsafe(32),
         cancel_wait: CancellationWait | None = None,
         monotonic: Monotonic = time.monotonic,
-        log: Logger = print,
     ) -> None:
         self._process_factory = process_factory
         self._client_factory = client_factory
         self._api_factory = api_factory
         self._secret_factory = secret_factory
         self._monotonic = monotonic
-        self._log = log
         self._process: Aria2Process | None = None
         self._client: Aria2Client | None = None
         self._api: Aria2Api | None = None
@@ -389,9 +562,7 @@ class Aria2Downloader:
                 self._require_cancelled_daemon_quiescence()
                 return _transport_cancelled("aria2")
             self._reap_unquiescent_item(error)
-            raise DownloadFilesError(
-                f"aria2 RPC submit failed for {request.url}: {error}"
-            ) from error
+            raise DownloadFilesError("aria2 RPC submit failed") from error
         try:
             transport = self._wait_for_download(
                 download,
@@ -413,7 +584,7 @@ class Aria2Downloader:
             raise
         except OSError as error:
             raise DownloadFilesError(
-                f"aria2 supplied staging cannot be inspected: {error}"
+                "aria2 supplied staging cannot be inspected"
             ) from error
         return TransportSuccess(length=length, namespace="aria2", http_status=None)
 
@@ -460,7 +631,12 @@ class Aria2Downloader:
 
         cleanup_error: BaseException | None = None
         try:
-            self._shutdown_process(client, process, deadline=deadline)
+            try:
+                self._shutdown_process(client, process, deadline=deadline)
+            except DownloadFilesError:
+                raise
+            except Exception as error:
+                raise DownloadFilesError("aria2 daemon shutdown failed") from error
         except BaseException as error:
             cleanup_error = error
         finally:
@@ -566,7 +742,7 @@ class Aria2Downloader:
             if isinstance(error, FileNotFoundError):
                 raise DownloadFilesError("aria2c executable not found") from error
             if isinstance(error, OSError):
-                raise DownloadFilesError(f"aria2c failed to start: {error}") from error
+                raise DownloadFilesError("aria2c failed to start") from error
             if isinstance(error, DownloadFilesError):
                 raise
             if isinstance(error, Exception):
@@ -606,7 +782,6 @@ class Aria2Downloader:
             if isinstance(error, Exception):
                 raise DownloadFilesError("aria2 daemon startup failed") from error
             raise
-        self._log(f"aria2 RPC daemon started on port {settings.aria2.rpc_port}")
         return api
 
     def _wait_until_ready(self, client: Aria2Client, port: int) -> None:
@@ -638,7 +813,7 @@ class Aria2Downloader:
             with self._lifecycle:
                 if self._cancel_requested.is_set():
                     return _transport_cancelled("aria2")
-                self._fail_if_daemon_exited_locked(f"while downloading {request.url}")
+                self._fail_if_daemon_exited_locked("during active download")
             try:
                 download.update()
             except Exception as error:
@@ -646,8 +821,7 @@ class Aria2Downloader:
                     if self._cancel_requested.is_set():
                         return _transport_cancelled("aria2")
                     raise DownloadFilesError(
-                        "aria2 RPC disconnected while downloading "
-                        f"{request.url}: {error}"
+                        "aria2 RPC disconnected during an active download"
                     ) from error
             try:
                 status = download.status
@@ -665,9 +839,6 @@ class Aria2Downloader:
                     raise DownloadFilesError(
                         "aria2 RPC returned a malformed download status"
                     )
-                if status == "complete":
-                    self._log(f"aria2 download complete: {request.sink.display_path}")
-                    return None
                 if status == "removed":
                     raise DownloadFilesError(
                         "aria2 unexpectedly removed an active download"
@@ -677,10 +848,15 @@ class Aria2Downloader:
                         download,
                         resumed=resumed,
                     )
-                if status not in {"active", "waiting"}:
+                if status not in {"active", "waiting"} and status != "complete":
                     raise DownloadFilesError(
                         "aria2 RPC returned an unexpected download status"
                     )
+            progress = _aria2_transfer_progress(download)
+            if progress is not None and request.progress_sink is not None:
+                request.progress_sink.emit(progress)
+            if status == "complete":
+                return None
             if self._cancel_wait(self.poll_interval_seconds):
                 return _transport_cancelled("aria2")
 
@@ -860,28 +1036,72 @@ def process_file_downloads(
     plan: FileDownloadPlan,
     *,
     backends: Mapping[str, DownloadBackend],
-    log: Logger = print,
+    event_sink: EventSink[DownloadEvent] | None = None,
 ) -> tuple[DownloadResult, ...]:
     """Process required build files serially; every failure remains fatal."""
     _validate_download_plan(plan)
     results: list[DownloadResult] = []
     for index, item in enumerate(plan.items, 1):
-        log(f"Processing required build file {index}/{len(plan.items)}: {item.target}")
+        target = _download_target(plan, item)
+        if event_sink is not None:
+            event_sink.emit(
+                DownloadItemStarted(
+                    index=index,
+                    total=len(plan.items),
+                    target=target,
+                    backend=DownloadBackendName(item.downloader),
+                    max_attempts=plan.download_max_attempts,
+                    checksum_expected=item.checksum is not None,
+                )
+            )
         try:
             backend = backends[item.downloader]
         except KeyError as error:
             raise DownloadFilesError(
-                f"download backend is not configured: {item.downloader}"
+                f"download backend is not configured for {target}"
             ) from error
-        outcome = _download_with_policy(item, backend, plan, log=log)
-        if outcome.status is DownloadStatus.SKIPPED:
-            log(f"Required build file already present: {item.target}")
-        else:
-            log(f"Required build file placed: {item.target}")
+        outcome = _download_with_policy(
+            item,
+            backend,
+            plan,
+            event_sink=event_sink,
+        )
         _verify_build_file_postcondition(plan, item)
+        if event_sink is not None:
+            status = (
+                DownloadItemStatus.DOWNLOADED
+                if outcome.status is DownloadStatus.DOWNLOADED
+                else DownloadItemStatus.SKIPPED
+            )
+            event_sink.emit(
+                DownloadItemCompleted(
+                    status=status,
+                    observed_bytes=outcome.observed_length,
+                    checksum_verified=(
+                        outcome.verification is VerificationStatus.VERIFIED
+                    ),
+                )
+            )
         results.append(DownloadResult(item=item, outcome=outcome))
+
+    checksum_count = sum(item.checksum is not None for item in plan.items)
+    if event_sink is not None:
+        event_sink.emit(
+            DownloadFinalVerificationStarted(
+                item_count=len(plan.items),
+                checksum_count=checksum_count,
+            )
+        )
     for item in plan.items:
         _verify_build_file_postcondition(plan, item)
+    if event_sink is not None:
+        event_sink.emit(DownloadFinalVerificationCompleted())
+        event_sink.emit(
+            DownloadBatchCompleted(
+                item_count=len(plan.items),
+                checksum_verified_count=checksum_count,
+            )
+        )
     return tuple(results)
 
 
@@ -889,11 +1109,17 @@ def _verify_build_file_postcondition(
     plan: FileDownloadPlan,
     item: FileDownloadItem,
 ) -> None:
-    verify_required_final(
-        root=plan.comfyui_root,
-        target=item.target,
-        expected_checksum=item.checksum,
-    )
+    target = _download_target(plan, item)
+    try:
+        verify_required_final(
+            root=plan.comfyui_root,
+            target=item.target,
+            expected_checksum=item.checksum,
+        )
+    except DownloadFilesError as error:
+        raise DownloadFilesError(
+            f"required download file verification failed for {target}"
+        ) from error
 
 
 def download_files(
@@ -902,22 +1128,29 @@ def download_files(
     *,
     httpx_downloader: DownloadBackend | None = None,
     aria2_downloader_factory: Aria2DownloaderFactory = Aria2Downloader,
-    log: Logger = print,
+    event_sink: EventSink[DownloadEvent],
 ) -> tuple[DownloadResult, ...]:
     """Download required build files from one admitted BuildPlan phase."""
     plan = file_download_plan(files, comfyui_root)
     httpx_backend = httpx_downloader or HttpxDownloader(
-        log=log,
         credential_policy=MountedDownloaderCredentialPolicy.from_routes(
             files.credentials
         ),
     )
     backends: dict[str, DownloadBackend] = {"httpx": httpx_backend}
     if not any(item.downloader == "aria2" for item in plan.items):
-        return process_file_downloads(plan, backends=backends, log=log)
-    with aria2_downloader_factory(log=log) as aria2_backend:
+        return process_file_downloads(
+            plan,
+            backends=backends,
+            event_sink=event_sink,
+        )
+    with aria2_downloader_factory() as aria2_backend:
         backends["aria2"] = aria2_backend
-        return process_file_downloads(plan, backends=backends, log=log)
+        return process_file_downloads(
+            plan,
+            backends=backends,
+            event_sink=event_sink,
+        )
 
 
 def _download_with_policy(
@@ -925,9 +1158,10 @@ def _download_with_policy(
     backend: DownloadBackend,
     plan: FileDownloadPlan,
     *,
-    log: Logger,
+    event_sink: EventSink[DownloadEvent] | None = None,
 ) -> FileTransferOutcome:
     settings = plan.downloader
+    target = _download_target(plan, item)
     request = FileTransferRequest(
         root=plan.comfyui_root,
         url=item.url,
@@ -942,19 +1176,58 @@ def _download_with_policy(
         backend=backend,
         settings=settings,
         max_attempts=plan.download_max_attempts,
-        log=log,
+        event_sink=event_sink,
     )
     if isinstance(result, AttemptSucceeded):
         return result.outcome
     if isinstance(result, AttemptOrdinaryTerminal):
-        raise result.error
+        status = _http_status_detail(result.error.http_status)
+        raise TerminalTransferDownloadFilesError(
+            f"download failed for {target}{status}",
+            http_status=result.error.http_status,
+        ) from result.error
     if isinstance(result, AttemptExhausted):
-        raise result.error
+        status = _http_status_detail(result.error.http_status)
+        reason = _download_retry_reason_detail(result.error.reason)
+        attempt_noun = "attempt" if result.attempts == 1 else "attempts"
+        raise TransferDownloadFilesError(
+            f"download failed for {target} after {result.attempts} {attempt_noun}: "
+            f"{reason}{status}",
+            retry_after_seconds=result.error.retry_after_seconds,
+            resume_authority=result.error.resume_authority,
+            reason=result.error.reason,
+            http_status=result.error.http_status,
+        ) from result.error
     if isinstance(result, AttemptLocalFailure):
-        raise result.error
+        raise DownloadFilesError(
+            f"download credentials could not be used for {target}"
+        ) from result.error
     if isinstance(result, AttemptCancelled):
-        raise DownloadCancelled("required build file download was cancelled")
+        raise DownloadCancelled(
+            f"download cancelled for {target}",
+            resume_authority=result.resume_authority,
+        )
     raise AssertionError("attempt coordinator returned an unknown result")
+
+
+def _download_retry_reason_detail(reason: DownloadRetryReason) -> str:
+    return {
+        DownloadRetryReason.TIMEOUT: "transfer timed out",
+        DownloadRetryReason.NETWORK: "network transfer failed",
+        DownloadRetryReason.TEMPORARY_SERVER: "temporary remote service failure",
+        DownloadRetryReason.RATE_LIMITED: "remote service rate limited the request",
+        DownloadRetryReason.RESUME_REJECTED: "remote service rejected transfer resume",
+        DownloadRetryReason.CHECKSUM_MISMATCH: "checksum verification failed",
+        DownloadRetryReason.UNKNOWN: "temporary transfer failure",
+    }[reason]
+
+
+def _http_status_detail(status: int | None) -> str:
+    return "" if status is None else f" (HTTP {status})"
+
+
+def _download_target(plan: FileDownloadPlan, item: FileDownloadItem) -> str:
+    return item.target.relative_to(plan.comfyui_root).as_posix()
 
 
 def _validate_download_plan(plan: FileDownloadPlan) -> None:
@@ -966,13 +1239,10 @@ def _validate_download_plan(plan: FileDownloadPlan) -> None:
         try:
             relative = item.target.relative_to(plan.comfyui_root)
         except ValueError as error:
-            raise DownloadFilesError(
-                f"download target escapes COMFYUI_PATH: {item.target}"
-            ) from error
+            raise DownloadFilesError("download target escapes COMFYUI_PATH") from error
         if not relative.parts or ".." in relative.parts:
             raise DownloadFilesError(
-                "download target must be a strict descendant of COMFYUI_PATH: "
-                f"{item.target}"
+                "download target must be a strict descendant of COMFYUI_PATH"
             )
 
 
@@ -1018,6 +1288,9 @@ class Aria2ClientFactory(Protocol):
 class Aria2Download(Protocol):
     status: str
     error_code: str | None
+    completed_length: int
+    total_length: int
+    download_speed: int
 
     def update(self) -> None: ...
 
@@ -1045,7 +1318,7 @@ class ManagedDownloadBackend(DownloadBackend, Protocol):
 
 
 class Aria2DownloaderFactory(Protocol):
-    def __call__(self, *, log: Logger) -> ManagedDownloadBackend: ...
+    def __call__(self) -> ManagedDownloadBackend: ...
 
 
 def _http_failure_outcome(
@@ -1055,26 +1328,32 @@ def _http_failure_outcome(
 ) -> TransportRetryable | TransportOrdinaryTerminal | None:
     status = response.status_code
     if status in {408, 429} or 500 <= status <= 599:
+        reason = (
+            DownloadRetryReason.TIMEOUT
+            if status == 408
+            else (
+                DownloadRetryReason.RATE_LIMITED
+                if status == 429
+                else DownloadRetryReason.TEMPORARY_SERVER
+            )
+        )
         return TransportRetryable(
             diagnostic=TransportDiagnostic(
                 namespace="httpx",
-                summary=(
-                    f"HTTP download got retryable status {status}: {response.url}"
-                ),
+                summary=f"HTTP download got retryable status {status}",
             ),
             http_status=status,
             retry_after_seconds=_normalized_retry_after(
                 response,
                 wall_clock=wall_clock,
             ),
+            reason=reason,
         )
     if 400 <= status <= 599:
         return TransportOrdinaryTerminal(
             diagnostic=TransportDiagnostic(
                 namespace="httpx",
-                summary=(
-                    f"HTTP download got non-retryable status {status}: {response.url}"
-                ),
+                summary=f"HTTP download got non-retryable status {status}",
             ),
             http_status=status,
         )
@@ -1149,11 +1428,17 @@ def _classify_aria2_error(
             )
         )
 
-    retryable_summaries = {
-        "2": "aria2 reported a timeout",
-        "6": "aria2 reported a network failure",
-        "19": "aria2 reported a name-resolution failure",
-        "29": "aria2 reported temporary server unavailability",
+    retryable_facts = {
+        "2": ("aria2 reported a timeout", DownloadRetryReason.TIMEOUT),
+        "6": ("aria2 reported a network failure", DownloadRetryReason.NETWORK),
+        "19": (
+            "aria2 reported a name-resolution failure",
+            DownloadRetryReason.NETWORK,
+        ),
+        "29": (
+            "aria2 reported temporary server unavailability",
+            DownloadRetryReason.TEMPORARY_SERVER,
+        ),
     }
     terminal_summaries = {
         "3": "aria2 reported that the remote resource was not found",
@@ -1162,13 +1447,15 @@ def _classify_aria2_error(
         "24": "aria2 reported an HTTP authorization failure",
         "22": "aria2 reported an indeterminate HTTP failure",
     }
-    if code in retryable_summaries:
+    if code in retryable_facts:
+        summary, reason = retryable_facts[code]
         return TransportRetryable(
             diagnostic=TransportDiagnostic(
                 namespace="aria2",
-                summary=retryable_summaries[code],
+                summary=summary,
             ),
             http_status=None,
+            reason=reason,
         )
     if code in terminal_summaries:
         return TransportOrdinaryTerminal(
@@ -1238,7 +1525,7 @@ def _aria2_daemon_argv(settings: Aria2DownloadSettings, secret: str) -> list[str
         f"--rpc-secret={secret}",
         "--disable-ipv6=true",
         "--auto-save-interval=0",
-        "--console-log-level=notice",
+        "--quiet=true",
     ]
 
 

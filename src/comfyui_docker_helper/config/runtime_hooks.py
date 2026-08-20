@@ -21,6 +21,7 @@ RUNTIME_HOOK_PHASE_DIRECTORY_NAMES = frozenset(
     dirname for _, dirname in RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS
 )
 RUNTIME_HOOK_SUPPORTED_SUFFIXES = frozenset({".sh", ".py"})
+RUNTIME_HOOK_SOURCE_NAMES = frozenset({"baked", "mounted"})
 RUNTIME_HOOK_LOCK_PREFIX = "runtime-hooks"
 BUILD_HOOK_LOCK_PREFIX = "build-hooks"
 

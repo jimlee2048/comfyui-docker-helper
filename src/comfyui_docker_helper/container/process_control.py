@@ -63,10 +63,9 @@ class ProcessStartError(RuntimeError):
 class ProcessGroupSignalError(RuntimeError):
     """A cdh-owned process group could not be signaled."""
 
-    def __init__(self, sig: signal.Signals, error: OSError) -> None:
+    def __init__(self, sig: signal.Signals) -> None:
         self.sig = sig
-        self.error = error
-        super().__init__(f"{sig.name}: {error}")
+        super().__init__(f"owned process group could not be signaled with {sig.name}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,11 +95,9 @@ def start_direct_process(
     try:
         return starter(argv, cwd=cwd, env=env, shell=False)
     except FileNotFoundError as error:
-        raise ProcessStartError(
-            f"{description} executable not found: {argv[0]}"
-        ) from error
+        raise ProcessStartError(f"{description} executable was not found") from error
     except OSError as error:
-        raise ProcessStartError(f"{description} failed to start: {error}") from error
+        raise ProcessStartError(f"{description} failed to start") from error
 
 
 def reap_process_if_exited(process: WaitableProcess) -> int | None:
@@ -295,7 +292,7 @@ def _send_process_group_signal(
     except ProcessLookupError:
         return False
     except OSError as error:
-        raise ProcessGroupSignalError(sig, error) from error
+        raise ProcessGroupSignalError(sig) from error
     return True
 
 

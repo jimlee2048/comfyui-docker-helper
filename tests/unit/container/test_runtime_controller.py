@@ -258,14 +258,15 @@ def test_runtime_failure_wakes_owner_and_rejects_restart_admission() -> None:
     pending = controller.submit_restart(delivery_expected=False)
     assert pending.ticket is not None
 
-    controller.observe_runtime_failure("stdout failed")
-    controller.observe_runtime_failure("stderr failed later")
+    controller.observe_runtime_failure("raw-controller-credential-sentinel\n")
+    controller.observe_runtime_failure("raw-controller-later-sentinel")
 
-    assert controller.runtime_failure_message() == "stdout failed"
+    safe_failure = "Runtime primary output is unavailable."
+    assert controller.runtime_failure_message() == safe_failure
     assert controller.wait(0) is True
     assert controller.accept_if_requested(accepted_at=0.0) is False
     assert pending.ticket.snapshot().state == "rejected"
-    assert pending.ticket.snapshot().message == "stdout failed"
+    assert pending.ticket.snapshot().message == safe_failure
     assert controller.submit_restart().disposition == "busy"
 
 
@@ -279,7 +280,9 @@ def test_runtime_failure_after_restart_cleanup_blocks_successor() -> None:
 
     assert controller.allocate_restart_successor() is None
     assert submission.ticket.snapshot().state == "failed"
-    assert submission.ticket.snapshot().message == "stderr failed"
+    assert submission.ticket.snapshot().message == (
+        "Runtime primary output is unavailable."
+    )
     assert controller.snapshot().last_restart is not None
     assert controller.snapshot().last_restart.result == "failed"
 
@@ -295,7 +298,9 @@ def test_runtime_failure_before_success_checkpoint_publishes_failure() -> None:
     controller.publish_restart_terminal("succeeded")
 
     assert submission.ticket.snapshot().state == "failed"
-    assert submission.ticket.snapshot().message == "stdout failed at checkpoint"
+    assert submission.ticket.snapshot().message == (
+        "Runtime primary output is unavailable."
+    )
     assert controller.snapshot().last_restart is not None
     assert controller.snapshot().last_restart.result == "failed"
     with pytest.raises(RuntimeControllerError, match="No successful restart"):

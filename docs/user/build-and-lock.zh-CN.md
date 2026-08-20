@@ -16,6 +16,22 @@ Windows 自动化验证覆盖原生 CLI、文件系统、Git、渲染、打包�
 
 ## 验证、渲染和构建
 
+### 输出详细度与输出流
+
+输出详细度属于根命令，因此相关选项应写在 `host` 之前：
+
+```bash
+cdh -q host render -f cdh.toml -o .cdh/build/current
+cdh -v host render -f cdh.toml -o .cdh/build/current
+cdh -vv host render -f cdh.toml -o .cdh/build/current
+```
+
+普通输出显示完成操作所需的最少有用状态。`-q/--quiet` 隐藏由 cdh 生成的信息性进度与成功摘要；`-v/--verbose` 显示更多操作细节，`-vv` 增加调试细节。quiet 与 verbose 不能组合使用。即使启用 quiet，dry-run 计划等必需数据、警告和错误仍会显示。
+
+cdh 会独立判断 stdout 与 stderr。成功结果和显式数据写入 stdout；准备阶段、警告和错误写入 stderr。在能力足够的终端中，渲染和构建准备过程可以更新一份临时阶段显示。重定向或非交互输出使用不含终端控制符、只追加不改写的纯文本行；每个主要阶段开始时都会输出一行，使耗时较长的准备过程保持可观察。verbose 输出会增加子阶段和耗时信息。对于本地上下文准备等没有有效字节总量的工作，cdh 会显示状态变化，而不会虚构百分比。
+
+验证成功时，如果 stdout 是交互终端，cdh 会按合并顺序汇总配置层；普通非交互验证仍保持静默，verbose 模式则会显示纯文本摘要。渲染成功时会在 stdout 报告上下文与锁定结果。BuildKit 开始输出前，cdh 会清除构建准备过程中的临时显示。BuildKit 输出不带 cdh 前缀，并始终写入 stdout；quiet 不会隐藏它。如需保存构建日志，请重定向 stdout。构建成功后，cdh 会在 stdout 输出结果。
+
 在解析或构建任何内容之前验证配置：
 
 ```bash

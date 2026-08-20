@@ -24,10 +24,21 @@ from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncDownloadQueueHandle,
     RuntimeAsyncQueueStarter,
+    RuntimeAsyncQueueStartupError,
     start_runtime_async_download_queue,
+    stop_runtime_async_download_queue,
+)
+from comfyui_docker_helper.container.runtime_event_delivery import (
+    RuntimeBackgroundEventSink,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeDownloadItemCompleted,
+    RuntimeDownloadQueueState,
+    RuntimeDownloadQueueSummary,
+    RuntimeDownloadQueueWarning,
+    RuntimeDownloadQueueWarningKind,
 )
 from comfyui_docker_helper.container.runtime_files import (
-    Logger,
     RuntimeFilePlan,
     RuntimeFilePlanItem,
 )
@@ -40,7 +51,6 @@ from comfyui_docker_helper.container.runtime_lifecycle import (
     RuntimeExecutionError,
     RuntimeHookRunner,
 )
-from comfyui_docker_helper.container.runtime_serve import run_runtime_generation_once
 from comfyui_docker_helper.container.runtime_state import (
     RuntimeState,
     RuntimeStateError,
@@ -48,6 +58,12 @@ from comfyui_docker_helper.container.runtime_state import (
     write_runtime_state,
 )
 from comfyui_docker_helper.container.transfer_core import TransferDownloadFilesError
+from tests.runtime_event_support import (
+    RecordingRuntimeEventSink,
+)
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
+)
 
 
 class FakeChild:
@@ -144,7 +160,7 @@ def _install_async_backend(
     monkeypatch.setattr(
         runtime_files_module,
         "HttpxDownloader",
-        lambda *, log: backend,
+        lambda: backend,
     )
 
 
@@ -213,6 +229,7 @@ def _run_with_real_async_queue(
     runtime_async_queue_starter: RuntimeAsyncQueueStarter | None = None,
     runtime_hook_runner: RuntimeHookRunner | None = None,
     readiness_waiter: ReadinessWaiter | None = None,
+    background_event_sink: object | None = None,
 ) -> int:
     kwargs: dict[str, object] = {}
     if runtime_async_queue_starter is not None:
@@ -221,6 +238,8 @@ def _run_with_real_async_queue(
         kwargs["runtime_hook_runner"] = runtime_hook_runner
     if readiness_waiter is not None:
         kwargs["readiness_waiter"] = readiness_waiter
+    if background_event_sink is not None:
+        kwargs["background_event_sink"] = background_event_sink
     return run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=config,
@@ -230,6 +249,51 @@ def _run_with_real_async_queue(
         runtime_state_path=state_path,
         **kwargs,
     )
+
+
+# The main-thread queue owner reports force escalation without raw timing or
+# backend detail when semantic Runtime presentation is active.
+def test_forced_async_queue_stop_emits_one_controlled_warning() -> None:
+    events: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            events.append(event)
+
+    class ActiveQueue:
+        alive = True
+
+        def request_stop(self) -> None:
+            return
+
+        def request_backend_termination(self, *, deadline: float | None) -> None:
+            del deadline
+
+        def terminate_backends(self) -> None:
+            self.alive = False
+
+        def backend_termination_is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    assert (
+        stop_runtime_async_download_queue(
+            ActiveQueue(),
+            cancel_requested=lambda: True,
+            event_sink=Recorder(),
+        )
+        is False
+    )
+    assert events == [
+        RuntimeDownloadQueueWarning(
+            RuntimeDownloadQueueWarningKind.FORCE_TERMINATION_REQUIRED
+        )
+    ]
 
 
 # State polling retries only the expected atomic-replacement observation.
@@ -384,6 +448,7 @@ filename = "model.bin"
     backend.payloads["model.bin"] = b"async-bytes"
     _install_async_backend(monkeypatch, backend)
     events: list[str] = []
+    presentation = RecordingRuntimeEventSink()
 
     def runner(
         argv: Sequence[str],
@@ -417,10 +482,10 @@ filename = "model.bin"
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del env, log
+        del env, event_sink
         assert cancel_requested() is False
         assert [hook.filename for hook in plan.for_phase(phase)] == ["10-post.sh"]
         assert phase == "post-start"
@@ -441,6 +506,7 @@ filename = "model.bin"
             runtime_state_path=state_path,
             runtime_hook_runner=runtime_hook_runner,
             readiness_waiter=readiness_waiter,
+            background_event_sink=presentation,
         )
         == 0
     )
@@ -450,6 +516,18 @@ filename = "model.bin"
         b"async-bytes"
     )
     assert _state_by_target(state_path)["models/model.bin"].status == "completed"
+    queue_states = [
+        event.state
+        for event in presentation.events
+        if isinstance(event, RuntimeDownloadQueueSummary)
+    ]
+    assert queue_states == [
+        RuntimeDownloadQueueState.ACCEPTED,
+        RuntimeDownloadQueueState.COMPLETED,
+    ]
+    assert any(
+        isinstance(event, RuntimeDownloadItemCompleted) for event in presentation.events
+    )
 
 
 def test_async_queue_rejects_replaced_start_generation_before_thread(
@@ -480,9 +558,9 @@ filename = "model.bin"
         runtime: ContainerRuntime,
         runtime_state_path: Path,
         expected_run_id: str,
-        log: Logger,
         handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
         cancel_requested: Callable[[], bool],
+        event_sink: RuntimeBackgroundEventSink,
     ):
         nonlocal starter_calls
         starter_calls += 1
@@ -501,15 +579,12 @@ filename = "model.bin"
             runtime=runtime,
             runtime_state_path=runtime_state_path,
             expected_run_id=expected_run_id,
-            log=log,
             handle_observer=handle_observer,
             cancel_requested=cancel_requested,
+            event_sink=event_sink,
         )
 
-    with pytest.raises(
-        RuntimeExecutionError,
-        match="async runtime download queue failed to start",
-    ):
+    with pytest.raises(RuntimeExecutionError) as raised:
         _run_with_real_async_queue(
             runtime=runtime,
             config=config,
@@ -518,6 +593,10 @@ filename = "model.bin"
             runtime_async_queue_starter=replace_generation_then_start,
         )
 
+    assert str(raised.value) == "async runtime download queue failed to start"
+    startup_error = raised.value.__cause__
+    assert isinstance(startup_error, RuntimeAsyncQueueStartupError)
+    assert isinstance(startup_error.__cause__, RuntimeStateError)
     assert starter_calls == 1
 
 
@@ -742,9 +821,9 @@ filename = "model.bin"
         runtime: ContainerRuntime,
         runtime_state_path: Path,
         expected_run_id: str,
-        log: Logger,
         handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
         cancel_requested: Callable[[], bool],
+        event_sink: RuntimeBackgroundEventSink,
     ) -> RuntimeAsyncDownloadQueueHandle:
         return start_runtime_async_download_queue(
             plan,
@@ -752,9 +831,9 @@ filename = "model.bin"
             runtime=runtime,
             runtime_state_path=runtime_state_path,
             expected_run_id=expected_run_id,
-            log=log,
             handle_observer=handle_observer,
             cancel_requested=cancel_requested,
+            event_sink=event_sink,
         )
 
     class ShutdownChild(FakeChild):
@@ -969,6 +1048,7 @@ filename = "b.bin"
     backend.payloads["b.bin"] = b"later"
     _install_async_backend(monkeypatch, backend)
     events: list[str] = []
+    presentation = RecordingRuntimeEventSink()
 
     def runner(
         argv: Sequence[str],
@@ -1002,6 +1082,7 @@ filename = "b.bin"
             config=config,
             state_path=state_path,
             runner=runner,
+            background_event_sink=presentation,
         )
         == 0
     )
@@ -1035,6 +1116,16 @@ filename = "b.bin"
         assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
     else:
         assert not (runtime.comfyui_path / "models" / "b.bin").exists()
+    queue_warnings = [
+        event.kind
+        for event in presentation.events
+        if isinstance(event, RuntimeDownloadQueueWarning)
+    ]
+    assert queue_warnings == (
+        [RuntimeDownloadQueueWarningKind.STOPPED_AFTER_FAILURE]
+        if policy == "fail"
+        else []
+    )
 
 
 # Backend teardown may be slow, but the first signal must still reach stop hooks

@@ -13,6 +13,7 @@ from comfyui_docker_helper.container.runtime_logging import (
     RuntimeLogChunk,
     RuntimeLoggingBroker,
     RuntimeLoggingError,
+    RuntimeLoggingFailureKind,
     RuntimeLoggingFollowerLimitError,
     _write_all,
 )
@@ -47,15 +48,16 @@ def test_broker_reports_only_the_first_primary_failure() -> None:
     observed: list[str] = []
     broker = RuntimeLoggingBroker(failure_observer=observed.append)
 
-    broker._record_failure("stdout", "stdout failed")
-    broker._record_failure("stderr", "stderr failed")
+    broker._record_failure("stdout", RuntimeLoggingFailureKind.PRIMARY_OUTPUT_FAILED)
+    broker._record_failure("stderr", RuntimeLoggingFailureKind.DRAIN_FAILED)
 
     failure = broker.failure()
     assert failure is not None
     assert failure.stream == "stdout"
-    assert failure.message == "stdout failed"
+    assert failure.kind is RuntimeLoggingFailureKind.PRIMARY_OUTPUT_FAILED
+    assert failure.message == "Runtime stdout primary output failed."
     assert broker.wait_for_failure(0) is True
-    assert observed == ["stdout failed"]
+    assert observed == ["Runtime stdout primary output failed."]
 
 
 def test_broker_start_rejects_unflushed_language_output(

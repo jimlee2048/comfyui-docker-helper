@@ -9,6 +9,7 @@ import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -18,19 +19,10 @@ from comfyui_docker_helper.container.process_control import (
     DirectProcess,
     terminate_direct_process_until,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.errors import ApplicationError
 
 _ROOT_UID = 0
 _ROOT_GID = 0
-_SSH_DIRECTORY_MODE_WARNING = (
-    "WARNING: existing root SSH directory mode is nonstandard; preserving it "
-    "because it is not writable by group or other"
-)
-_AUTHORIZED_KEYS_MODE_WARNING = (
-    "WARNING: existing root SSH authorized keys mode is nonstandard; replacing "
-    "it atomically with mode 0600"
-)
 type Chown = Callable[
     [str | bytes | os.PathLike[str] | os.PathLike[bytes], int, int],
     None,
@@ -39,6 +31,16 @@ type Chmod = Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes], int]
 type Fchown = Callable[[int, int, int], None]
 type Fchmod = Callable[[int, int], None]
 type PreparationProcessObserver = Callable[[DirectProcess | None], object]
+
+
+class SshPreparationWarningKind(StrEnum):
+    """Controlled SSH credential-preparation warning outcomes."""
+
+    DIRECTORY_MODE_NONSTANDARD = "directory-mode-nonstandard"
+    AUTHORIZED_KEYS_MODE_NONSTANDARD = "authorized-keys-mode-nonstandard"
+
+
+type SshPreparationWarningObserver = Callable[[SshPreparationWarningKind], object]
 
 
 class SshCredentialPreparationError(ApplicationError):
@@ -100,7 +102,7 @@ class RootSshCredentialPreparationStatus:
     authorized_keys_path: Path | None = None
     root_password_set: bool = False
     root_unlocked: bool = False
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[SshPreparationWarningKind, ...] = ()
 
     @property
     def has_credentials(self) -> bool:
@@ -111,8 +113,6 @@ class RootSshCredentialPreparationStatus:
 def start_sshd_if_enabled(
     config: RuntimeConfig,
     *,
-    runtime: ContainerRuntime,
-    log: Callable[[str], object] = print,
     root_home: Path = Path("/root"),
     runtime_dir: Path = Path("/run/sshd"),
     credential_command_runner: SensitiveCommandRunner | None = None,
@@ -125,9 +125,9 @@ def start_sshd_if_enabled(
     command_runner: CommandRunner | None = None,
     process_starter: SshdProcessStarter | None = None,
     preparation_process_observer: PreparationProcessObserver = lambda _process: None,
+    preparation_warning_observer: SshPreparationWarningObserver,
 ) -> SshdProcess | None:
     """Prepare and start foreground sshd when effective SSH is active."""
-    del runtime
     ssh = config.system.ssh
     if not ssh.enable:
         return None
@@ -146,13 +146,12 @@ def start_sshd_if_enabled(
             process_observer=preparation_process_observer,
         )
     except SshCredentialPreparationError as error:
-        raise SshdStartupError(f"SSH credential preparation failed: {error}") from error
+        raise SshdStartupError("SSH credential preparation failed") from error
 
     for warning in status.warnings:
-        log(warning)
+        preparation_warning_observer(warning)
 
     if not status.has_credentials:
-        log("WARNING: SSH is enabled but no root SSH credentials are configured")
         return None
 
     run_command = (
@@ -243,7 +242,7 @@ def prepare_root_ssh_credentials(
 
     public_keys = _normalize_runtime_public_keys(ssh.pub_keys)
     authorized_keys_path = None
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[SshPreparationWarningKind, ...] = ()
     if public_keys:
         authorized_keys_path, warnings = _write_authorized_keys(
             public_keys,
@@ -328,7 +327,7 @@ def _run_checked_command(
     if returncode != 0:
         exit_code = returncode if returncode > 0 else 1
         raise SshdStartupError(
-            f"{description} failed with exit code {returncode}: {_format_argv(argv)}",
+            f"{description} failed with exit code {returncode}",
             exit_code=exit_code,
         )
 
@@ -341,16 +340,14 @@ def _run_command(
 ) -> int:
     command = list(argv)
     if not command:
-        raise SshdStartupError(f"{description} argv must not be empty")
+        raise SshdStartupError(f"{description} command is missing")
     try:
         process = subprocess.Popen(
             command,
             shell=False,
         )
     except FileNotFoundError as error:
-        raise SshdStartupError(
-            f"{description} executable not found: {command[0]}"
-        ) from error
+        raise SshdStartupError(f"{description} executable was not found") from error
     except OSError as error:
         raise SshdStartupError(f"{description} failed to start") from error
     process_observer(process)
@@ -370,13 +367,11 @@ def _run_command(
 def _start_process(argv: Sequence[str], *, description: str) -> SshdProcess:
     command = list(argv)
     if not command:
-        raise SshdStartupError(f"{description} argv must not be empty")
+        raise SshdStartupError(f"{description} command is missing")
     try:
         return subprocess.Popen(command, shell=False)
     except FileNotFoundError as error:
-        raise SshdStartupError(
-            f"{description} executable not found: {command[0]}"
-        ) from error
+        raise SshdStartupError(f"{description} executable was not found") from error
     except OSError as error:
         raise SshdStartupError(f"{description} failed to start") from error
 
@@ -391,7 +386,7 @@ def _write_authorized_keys(
     fchmod: Fchmod,
     owner_uid: int,
     owner_gid: int,
-) -> tuple[Path, tuple[str, ...]]:
+) -> tuple[Path, tuple[SshPreparationWarningKind, ...]]:
     ssh_dir = root_home / ".ssh"
     authorized_keys = ssh_dir / "authorized_keys"
     try:
@@ -454,7 +449,7 @@ def _ensure_root_ssh_directory(
     chmod: Chmod,
     owner_uid: int,
     owner_gid: int,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, SshPreparationWarningKind | None]:
     created = False
     try:
         metadata = path.lstat()
@@ -473,7 +468,9 @@ def _ensure_root_ssh_directory(
         raise SshCredentialPreparationError(
             "root SSH directory must be root-owned and not writable by group or other"
         )
-    warning = None if mode == 0o700 else _SSH_DIRECTORY_MODE_WARNING
+    warning = (
+        None if mode == 0o700 else SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
+    )
     return created, warning
 
 
@@ -481,7 +478,7 @@ def _validate_authorized_keys_target(
     path: Path,
     *,
     owner_uid: int,
-) -> str | None:
+) -> SshPreparationWarningKind | None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -496,7 +493,11 @@ def _validate_authorized_keys_target(
             "root SSH authorized keys must be a root-owned regular file that is "
             "not writable by group or other"
         )
-    return None if mode == 0o600 else _AUTHORIZED_KEYS_MODE_WARNING
+    return (
+        None
+        if mode == 0o600
+        else SshPreparationWarningKind.AUTHORIZED_KEYS_MODE_NONSTANDARD
+    )
 
 
 def _atomic_replace_authorized_keys(
@@ -600,7 +601,7 @@ def _run_checked_sensitive_command(
     if returncode != 0:
         exit_code = returncode if returncode > 0 else 1
         raise SshCredentialPreparationError(
-            f"{description} failed with exit code {returncode}: {_format_argv(argv)}",
+            f"{description} failed with exit code {returncode}",
             exit_code=exit_code,
         )
 
@@ -614,7 +615,7 @@ def _run_sensitive_command(
 ) -> int:
     command = list(argv)
     if not command:
-        raise SshCredentialPreparationError(f"{description} argv must not be empty")
+        raise SshCredentialPreparationError(f"{description} command is missing")
     try:
         process = subprocess.Popen(
             command,
@@ -623,7 +624,7 @@ def _run_sensitive_command(
         )
     except FileNotFoundError as error:
         raise SshCredentialPreparationError(
-            f"{description} executable not found: {command[0]}"
+            f"{description} executable was not found"
         ) from error
     except OSError as error:
         raise SshCredentialPreparationError(f"{description} failed to start") from error
@@ -641,7 +642,3 @@ def _run_sensitive_command(
         raise
     finally:
         process_observer(None)
-
-
-def _format_argv(argv: Sequence[str]) -> str:
-    return " ".join(argv)

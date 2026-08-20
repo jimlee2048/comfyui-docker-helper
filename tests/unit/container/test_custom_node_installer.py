@@ -24,6 +24,16 @@ from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallErro
 from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,
 )
+from comfyui_docker_helper.container.helper_events import (
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    CustomNodeCompleted,
+    CustomNodesInstallCompleted,
+    GitCustomNodeStarted,
+    RegistryCustomNodeStarted,
+)
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
@@ -94,6 +104,40 @@ def _write_project(root: Path, directory: str, name: str, version: str) -> Path:
 
 def _hook_digest(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def _semantic_operation_signature(operation: tuple[object, ...]) -> tuple[object, ...]:
+    kind, value, *_details = operation
+    if kind != "event":
+        return (kind, value)
+    if isinstance(value, ContainerHelperPhaseStarted):
+        return ("phase-started", value.phase)
+    if isinstance(value, ContainerHelperPhaseCompleted):
+        return ("phase-completed", value.phase)
+    if isinstance(value, RegistryCustomNodeStarted):
+        return (
+            "registry-started",
+            value.index,
+            value.total,
+            value.id,
+            value.version,
+            value.pre_hook_count,
+            value.post_hook_count,
+        )
+    if isinstance(value, GitCustomNodeStarted):
+        return (
+            "git-started",
+            value.index,
+            value.total,
+            value.target_name,
+            value.pre_hook_count,
+            value.post_hook_count,
+        )
+    if isinstance(value, CustomNodeCompleted):
+        return ("node-completed", value.index, value.total)
+    if isinstance(value, CustomNodesInstallCompleted):
+        return ("install-completed", value.node_count)
+    raise AssertionError(f"unexpected semantic event: {value!r}")
 
 
 def _local_manager_application(
@@ -373,6 +417,7 @@ def test_empty_plan_checks_application_without_node_processes(
     unrelated.mkdir()
     unrelated.joinpath("pyproject.toml").write_text("not valid toml =")
     events: list[object] = []
+    helper_events: list[ContainerHelperEvent] = []
     monkeypatch.setattr(
         custom_node_installer,
         "capture_manager_authority",
@@ -420,11 +465,23 @@ def test_empty_plan_checks_application_without_node_processes(
         custom_nodes,
         application,
         runtime=runtime,
+        event_sink=SimpleNamespace(emit=helper_events.append),
     )
 
     assert events == [
         ("final-typed-boundary",),
         ("application",),
+    ]
+    assert helper_events == [
+        ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
+        ContainerHelperPhaseStarted(
+            ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION
+        ),
+        ContainerHelperPhaseCompleted(
+            ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION
+        ),
+        CustomNodesInstallCompleted(node_count=0),
     ]
 
 
@@ -1000,6 +1057,7 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         runtime=runtime,
         constraints_path=constraints,
         environ=source_environment,
+        event_sink=SimpleNamespace(emit=lambda event: events.append(("event", event))),
     )
 
     assert [event for event in events if event[0] == "install"] == [
@@ -1039,11 +1097,50 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         ("proof", names(nodes[:2]), names(nodes[2:])),
         ("hook", "git-post.py", f"sha256:{'d' * 64}"),
     ]
-    assert events[-3:] == [
+    business_events = [event for event in events if event[0] != "event"]
+    assert business_events[-3:] == [
         ("proof", names(nodes), ()),
         ("manager-check",),
         ("application-check",),
     ]
+    semantic_events = [
+        event for event in events if event[0] in {"event", "hook", "install"}
+    ]
+    assert [_semantic_operation_signature(event) for event in semantic_events] == [
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
+        ("registry-started", 1, 3, "first", "1.0.0", 0, 1),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("install", "first"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("hook", "first-post.py"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("node-completed", 1, 3),
+        ("git-started", 2, 3, "direct", 1, 1),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
+        ("hook", "git-pre.py"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("install", "direct"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("hook", "git-post.py"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
+        ("node-completed", 2, 3),
+        ("registry-started", 3, 3, "last", "2.0.0", 0, 0),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("install", "last"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_INSTALLATION),
+        ("node-completed", 3, 3),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODES_FINAL_VERIFICATION),
+        ("install-completed", 3),
+    ]
+    emitted = [event[1] for event in semantic_events if event[0] == "event"]
+    assert "https://example.invalid" not in repr(emitted)
+    assert "c" * 40 not in repr(emitted)
+    assert "sha256:" not in repr(emitted)
     assert len([event for event in events if event[0] == "proof"]) == 16
     assert events.count(("application-check",)) == 8
     assert events.count(("manager-check",)) == 7
@@ -1327,6 +1424,7 @@ def test_false_zero_stops_before_later_registry_node(
     )
     _patch_phases(monkeypatch, application, custom_nodes)
     commands: list[tuple[str, ...]] = []
+    helper_events: list[ContainerHelperEvent] = []
 
     def false_zero(argv, **_kwargs):
         commands.append(tuple(str(item) for item in argv))
@@ -1342,9 +1440,15 @@ def test_false_zero_stops_before_later_registry_node(
             custom_nodes,
             application,
             runtime=runtime,
+            event_sink=SimpleNamespace(emit=helper_events.append),
         )
 
     assert [command[2] for command in commands] == ["missing@1.0.0"]
+    assert helper_events[-1] == ContainerHelperPhaseStarted(
+        ContainerHelperPhase.CUSTOM_NODE_INSTALLATION
+    )
+    assert CustomNodeCompleted(index=1, total=2) not in helper_events
+    assert CustomNodesInstallCompleted(node_count=2) not in helper_events
 
 
 def test_future_registry_identity_is_rejected_before_admission(

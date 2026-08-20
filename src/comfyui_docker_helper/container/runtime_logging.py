@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, Protocol
 
 from comfyui_docker_helper.errors import ApplicationError
@@ -18,6 +19,9 @@ RUNTIME_LOG_READ_CHUNK_BYTES = 16 * 1024
 RUNTIME_LOG_CLOSE_JOIN_SECONDS = 0.5
 RUNTIME_LOG_FOLLOWER_QUEUE_BYTES = 256 * 1024
 RUNTIME_LOG_MAX_FOLLOWERS = 8
+RUNTIME_LOGGING_UNAVAILABLE_MESSAGE = (
+    "runtime logging failed while preserving primary output"
+)
 _RUNTIME_LOG_DIAGNOSTIC_MAX_BYTES = 1024
 
 type RuntimeLogStream = Literal["stdout", "stderr"]
@@ -34,10 +38,27 @@ class RuntimeLoggingFollowerLimitError(RuntimeError):
     """The fixed live follower capacity is already in use."""
 
 
+class RuntimeLoggingFailureKind(StrEnum):
+    """Controlled primary Runtime logging failure category."""
+
+    DRAIN_FAILED = "drain-failed"
+    DRAIN_CLOSED = "drain-closed"
+    PRIMARY_OUTPUT_FAILED = "primary-output-failed"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeLoggingFailure:
     stream: RuntimeLogStream
-    message: str
+    kind: RuntimeLoggingFailureKind
+
+    @property
+    def message(self) -> str:
+        """Return the fixed user-facing failure message."""
+        if self.kind is RuntimeLoggingFailureKind.DRAIN_FAILED:
+            return f"Runtime {self.stream} drain failed."
+        if self.kind is RuntimeLoggingFailureKind.DRAIN_CLOSED:
+            return f"Runtime {self.stream} drain closed unexpectedly."
+        return f"Runtime {self.stream} primary output failed."
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,29 +298,29 @@ class RuntimeLoggingBroker:
                     chunk = os.read(pipe.read_fd, RUNTIME_LOG_READ_CHUNK_BYTES)
                 except InterruptedError:
                     continue
-                except OSError as error:
+                except OSError:
                     if not self._closing.is_set():
                         self._record_failure(
                             pipe.stream,
-                            f"Runtime {pipe.stream} drain failed: {error}.",
+                            RuntimeLoggingFailureKind.DRAIN_FAILED,
                         )
                     return
                 if not chunk:
                     if not self._closing.is_set():
                         self._record_failure(
                             pipe.stream,
-                            f"Runtime {pipe.stream} drain closed unexpectedly.",
+                            RuntimeLoggingFailureKind.DRAIN_CLOSED,
                         )
                     return
                 if primary_failed:
                     continue
                 try:
                     _write_all(pipe.writer_fd, chunk, writer=self._writer)
-                except OSError as error:
+                except OSError:
                     primary_failed = True
                     self._record_failure(
                         pipe.stream,
-                        f"Runtime {pipe.stream} primary output failed: {error}.",
+                        RuntimeLoggingFailureKind.PRIMARY_OUTPUT_FAILED,
                     )
                     continue
                 self._publish(RuntimeLogChunk(stream=pipe.stream, data=chunk))
@@ -309,12 +330,18 @@ class RuntimeLoggingBroker:
             with suppress(OSError):
                 os.close(pipe.writer_fd)
 
-    def _record_failure(self, stream: RuntimeLogStream, message: str) -> None:
+    def _record_failure(
+        self,
+        stream: RuntimeLogStream,
+        kind: RuntimeLoggingFailureKind,
+    ) -> None:
         with self._failure_lock:
             if self._failure is not None or self._closing.is_set():
                 return
-            self._failure = RuntimeLoggingFailure(stream=stream, message=message)
+            failure = RuntimeLoggingFailure(stream=stream, kind=kind)
+            self._failure = failure
             self._failure_event.set()
+        message = failure.message
         self._failure_observer(message)
         self._write_fatal_diagnostic(stream, message)
 

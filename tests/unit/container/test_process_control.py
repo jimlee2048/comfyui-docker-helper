@@ -104,12 +104,9 @@ def test_start_direct_process_preserves_inputs_and_maps_expected_errors() -> Non
 
     def missing(*args: object, **kwargs: object) -> FakeProcess:
         del args, kwargs
-        raise FileNotFoundError
+        raise FileNotFoundError("raw-missing-sentinel\n/missing/python")
 
-    with pytest.raises(
-        ProcessStartError,
-        match=r"^ComfyUI executable not found: /missing/python$",
-    ):
+    with pytest.raises(ProcessStartError) as missing_error:
         start_direct_process(
             ["/missing/python"],
             cwd="/workspace/ComfyUI",
@@ -117,15 +114,16 @@ def test_start_direct_process_preserves_inputs_and_maps_expected_errors() -> Non
             description="ComfyUI",
             starter=missing,
         )
+    assert str(missing_error.value) == "ComfyUI executable was not found"
+    assert isinstance(missing_error.value.__cause__, FileNotFoundError)
+    assert "raw-missing-sentinel" not in str(missing_error.value)
+    assert "/missing/python" not in str(missing_error.value)
 
     def denied(*args: object, **kwargs: object) -> FakeProcess:
         del args, kwargs
-        raise PermissionError("denied")
+        raise PermissionError("raw-denied-sentinel")
 
-    with pytest.raises(
-        ProcessStartError,
-        match=r"^ComfyUI failed to start: denied$",
-    ):
+    with pytest.raises(ProcessStartError) as denied_error:
         start_direct_process(
             ["/opt/venv/bin/python"],
             cwd="/workspace/ComfyUI",
@@ -133,6 +131,9 @@ def test_start_direct_process_preserves_inputs_and_maps_expected_errors() -> Non
             description="ComfyUI",
             starter=denied,
         )
+    assert str(denied_error.value) == "ComfyUI failed to start"
+    assert isinstance(denied_error.value.__cause__, PermissionError)
+    assert "raw-denied-sentinel" not in str(denied_error.value)
 
 
 # Direct children preserve separate cooperative-signal and force/reap mechanics
@@ -254,7 +255,8 @@ def test_process_group_escalation_and_signal_failure_are_typed() -> None:
             signaler=fail_signal,
         )
     assert error.value.sig == signal.SIGTERM
-    assert isinstance(error.value.error, PermissionError)
+    assert isinstance(error.value.__cause__, PermissionError)
+    assert "not permitted" not in str(error.value)
 
 
 # A caller-owned force request interrupts the TERM grace and applies SIGKILL

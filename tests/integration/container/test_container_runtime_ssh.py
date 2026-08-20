@@ -10,17 +10,20 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 
 import pytest
 
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container import runtime_ssh_service as ssh_service_module
 from comfyui_docker_helper.container import ssh as ssh_module
 from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeSshOutcome,
+    RuntimeSshStatus,
+    RuntimeSshWarning,
+    RuntimeSshWarningKind,
+)
 from comfyui_docker_helper.container.runtime_files import (
-    Logger,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
@@ -30,13 +33,23 @@ from comfyui_docker_helper.container.runtime_hooks import (
 )
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
-    run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import (
     RuntimeSshService,
+    RuntimeSshServiceError,
     stop_runtime_ssh_service,
 )
-from comfyui_docker_helper.container.ssh import SshdStartupError, start_sshd_if_enabled
+from comfyui_docker_helper.container.ssh import (
+    SshdStartupError,
+    SshPreparationWarningKind,
+    start_sshd_if_enabled,
+)
+from tests.runtime_event_support import (
+    RecordingRuntimeEventSink,
+)
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
+)
 
 VALID_SSH_KEY = (
     "ssh-ed25519 "
@@ -300,19 +313,6 @@ class OwnershipRecorder:
         os.fchmod(descriptor, mode)
 
 
-class EventStderr(StringIO):
-    def __init__(self, pattern: str) -> None:
-        super().__init__()
-        self._pattern = pattern
-        self.observed = threading.Event()
-
-    def write(self, value: str) -> int:
-        written = super().write(value)
-        if self._pattern in self.getvalue():
-            self.observed.set()
-        return written
-
-
 def _runtime(tmp_path: Path) -> ContainerRuntime:
     runtime = ContainerRuntime(
         workspace=tmp_path / "workspace",
@@ -377,12 +377,9 @@ def test_default_inactive_ssh_does_not_call_starter_and_spawns(
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del config, runtime, log
+        del config
         events.append("ssh-start")
         return FakeSshdProcess()
 
@@ -439,10 +436,9 @@ download_mode = "async"
         plan: RuntimeFilePlan,
         *,
         config: RuntimeConfig,
-        log: Logger,
         **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del config, log
+        del config
         assert [item.filename for item in plan.items] == ["sync.bin"]
         events.append("sync-download")
         return ()
@@ -453,10 +449,10 @@ download_mode = "async"
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log
+        del plan, runtime, env, event_sink
         assert phase == "pre-start"
         assert cancel_requested() is False
         assert events == ["sync-download"]
@@ -465,12 +461,8 @@ download_mode = "async"
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del runtime, log
         assert config.system.ssh.enable is True
         assert config.system.ssh.password == "baked-secret"
         assert config.system.ssh.pub_keys == [VALID_SSH_KEY]
@@ -485,11 +477,11 @@ download_mode = "async"
         runtime: ContainerRuntime,
         runtime_state_path: Path,
         expected_run_id: str,
-        log: Logger,
         handle_observer: Callable[[FakeAsyncHandle], None],
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> FakeAsyncHandle:
-        del config, runtime, runtime_state_path, expected_run_id, log
+        del config, runtime, runtime_state_path, expected_run_id, event_sink
         assert cancel_requested() is False
         assert [item.filename for item in plan.items] == ["async.bin"]
         assert events == ["sync-download", "pre-start", "ssh-start"]
@@ -560,15 +552,12 @@ pub_keys = ["{VALID_SSH_KEY}"]
     def runtime_ssh_starter(
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
-        log: Logger,
-        **_kwargs: object,
+        preparation_process_observer: Callable[[object | None], None],
+        preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> FakeSshdProcess | None:
         events.append("ssh-start")
         return start_sshd_if_enabled(
             config,
-            runtime=runtime,
-            log=log,
             root_home=root_home,
             runtime_dir=runtime_dir,
             credential_command_runner=credential_runner,
@@ -580,6 +569,8 @@ pub_keys = ["{VALID_SSH_KEY}"]
             credential_owner_gid=os.getgid(),
             command_runner=command_runner,
             process_starter=process_starter,
+            preparation_process_observer=preparation_process_observer,
+            preparation_warning_observer=preparation_warning_observer,
         )
 
     def runner(
@@ -690,12 +681,8 @@ pub_keys = ["{VALID_SSH_KEY}"]
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del runtime, log
         seen.append(config)
         return FakeSshdProcess()
 
@@ -763,12 +750,9 @@ def test_disabled_ssh_does_not_start_even_with_credentials(
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del config, runtime, log
+        del config
         events.append("ssh-start")
         return FakeSshdProcess()
 
@@ -791,7 +775,6 @@ def test_disabled_ssh_does_not_start_even_with_credentials(
 
 def test_enabled_ssh_without_credentials_warns_and_continues(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
@@ -802,6 +785,7 @@ enable = true
 """,
     )
     events: list[str] = []
+    runtime_events = RecordingRuntimeEventSink()
 
     assert (
         run_runtime_generation_once(
@@ -812,15 +796,92 @@ enable = true
             mounted_hooks_path=_missing_path(tmp_path, "mounted-hooks"),
             environ={"PATH": "/usr/bin"},
             runner=lambda *_args, **_kwargs: events.append("spawn") or FakeChild(0),
+            event_sink=runtime_events,
         )
         == 0
     )
 
-    captured = capsys.readouterr()
     assert events == ["spawn"]
-    assert "WARNING: SSH is enabled but no root SSH credentials are configured" in (
-        captured.out
+    assert [
+        event for event in runtime_events.events if isinstance(event, RuntimeSshOutcome)
+    ] == [RuntimeSshOutcome(RuntimeSshStatus.ENABLED_WITHOUT_CREDENTIALS)]
+
+
+def test_managed_ssh_preparation_warning_is_emitted_directly_after_join() -> None:
+    config = RuntimeConfig.model_validate(
+        {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
+    events: list[tuple[object, str]] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            events.append((event, threading.current_thread().name))
+
+    def managed_starter(
+        _config: RuntimeConfig,
+        *,
+        preparation_process_observer: Callable[[object | None], None],
+        preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
+    ) -> None:
+        del preparation_process_observer
+        assert threading.current_thread().name == "cdh-ssh-startup"
+        preparation_warning_observer(
+            SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
+        )
+        return None
+
+    service = RuntimeSshService(
+        config,
+        starter=managed_starter,
+        background_event_sink=RecordingRuntimeEventSink(),
+        event_sink=Recorder(),
+    )
+    service.start()
+
+    assert events == [
+        (
+            RuntimeSshWarning(RuntimeSshWarningKind.DIRECTORY_MODE_NONSTANDARD),
+            threading.current_thread().name,
+        )
+    ]
+
+
+def test_managed_ssh_direct_reap_warning_is_deduplicated() -> None:
+    config = RuntimeConfig.model_validate(
+        {"system": {"ssh": {"enable": True, "password": "secret"}}}
+    )
+    events: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            events.append(event)
+
+    class ReapFailureSshd:
+        returncode = 0
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self) -> int:
+            raise OSError("raw-reap-sentinel")
+
+        def terminate(self) -> None:
+            pytest.fail("terminal sshd must not be terminated")
+
+        def kill(self) -> None:
+            pytest.fail("terminal sshd must not be killed")
+
+    service = RuntimeSshService(
+        config,
+        starter=lambda *_args, **_kwargs: ReapFailureSshd(),
+        background_event_sink=RecordingRuntimeEventSink(),
+        event_sink=Recorder(),
+    )
+    service.start()
+
+    assert service.is_stopped() is False
+    assert service.is_stopped() is False
+    assert events == [RuntimeSshWarning(RuntimeSshWarningKind.SERVICE_REAP_FAILED)]
 
 
 # Failure coverage protects pre-spawn abort behavior and credential redaction.
@@ -843,15 +904,11 @@ pub_keys = ["{VALID_SSH_KEY}"]
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
-        *,
-        runtime: ContainerRuntime,
-        log: Logger,
         **_kwargs: object,
     ) -> FakeSshdProcess:
-        del runtime, log
         assert config.system.ssh.password == secret
         events.append("ssh-start")
-        raise SshdStartupError("host key generation unavailable")
+        raise SshdStartupError("raw-host-key-sentinel\ncredential-url")
 
     def runner(
         argv: Sequence[str],
@@ -879,8 +936,12 @@ pub_keys = ["{VALID_SSH_KEY}"]
     captured = capsys.readouterr()
     payload = f"{raised.value}\n{captured.out}\n{captured.err}"
     assert events == ["ssh-start"]
-    assert "SSH runtime service failed to start" in str(raised.value)
-    assert "host key generation unavailable" in str(raised.value)
+    assert str(raised.value) == "SSH runtime service failed to start"
+    service_error = raised.value.__cause__
+    assert isinstance(service_error, RuntimeSshServiceError)
+    assert isinstance(service_error.__cause__, SshdStartupError)
+    assert "raw-host-key-sentinel" not in payload
+    assert "credential-url" not in payload
     assert secret not in payload
     assert VALID_SSH_KEY not in payload
 
@@ -912,17 +973,20 @@ password = "line1\\nline2"
 
     captured = capsys.readouterr()
     payload = f"{raised.value}\n{captured.out}\n{captured.err}"
-    assert "SSH runtime service failed to start" in str(raised.value)
-    assert "SSH password must not contain line breaks or NUL bytes" in str(raised.value)
+    assert str(raised.value) == "SSH runtime service failed to start"
+    service_error = raised.value.__cause__
+    assert isinstance(service_error, RuntimeSshServiceError)
+    assert isinstance(service_error.__cause__, SshdStartupError)
+    assert "SSH password must not contain line breaks or NUL bytes" not in payload
     assert "line1" not in payload
     assert "line2" not in payload
 
 
 # A failed direct reap is not terminal evidence, so the SSH owner must report
 # incomplete shutdown instead of accepting a successful poll result.
-def test_cooperative_sshd_stop_fails_closed_on_wait_error(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_cooperative_sshd_stop_fails_closed_on_wait_error() -> None:
+    warnings: list[RuntimeSshWarningKind] = []
+
     class WaitErrorSshd:
         returncode: int | None = None
 
@@ -943,17 +1007,15 @@ def test_cooperative_sshd_stop_fails_closed_on_wait_error(
             WaitErrorSshd(),
             cancel_requested=lambda: False,
             shutdown_requested=threading.Event(),
+            warning_observer=warnings.append,
         )
         is False
     )
-    captured = capsys.readouterr()
-    assert "SSH runtime service stopped" not in captured.out
-    assert "SSH runtime service shutdown failed" in captured.err
+    assert warnings == [RuntimeSshWarningKind.SERVICE_SHUTDOWN_FAILED]
 
 
 def test_unexpected_post_start_sshd_exit_warns_without_changing_comfyui_exit(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime(tmp_path)
     mounted = _write(
@@ -965,10 +1027,18 @@ password = "secret"
 """,
     )
     sshd = FakeSshdProcess(wait_returncode=23)
-    stderr = EventStderr(
-        "WARNING: SSH runtime service exited unexpectedly: returncode=23"
-    )
-    monkeypatch.setattr(ssh_service_module.sys, "stderr", stderr)
+    warning_observed = threading.Event()
+
+    class WarningRecorder(RecordingRuntimeEventSink):
+        def emit(self, event: object, /) -> None:
+            super().emit(event)
+            if event == RuntimeSshWarning(
+                RuntimeSshWarningKind.EXITED_UNEXPECTEDLY,
+                23,
+            ):
+                warning_observed.set()
+
+    runtime_events = WarningRecorder()
 
     assert (
         run_runtime_generation_once(
@@ -979,18 +1049,23 @@ password = "secret"
             mounted_hooks_path=_missing_path(tmp_path, "mounted-hooks"),
             environ={"PATH": "/usr/bin"},
             runner=lambda *_args, **_kwargs: WaitForEventChild(
-                stderr.observed,
+                warning_observed,
                 returncode=7,
             ),
             runtime_ssh_starter=lambda *_args, **_kwargs: sshd,
+            background_event_sink=runtime_events,
         )
         == 7
     )
 
     assert sshd.waited.wait(timeout=1)
-    assert stderr.observed.is_set()
-    assert "WARNING: SSH runtime service exited unexpectedly: returncode=23" in (
-        stderr.getvalue()
+    assert warning_observed.is_set()
+    assert (
+        RuntimeSshWarning(
+            RuntimeSshWarningKind.EXITED_UNEXPECTEDLY,
+            23,
+        )
+        in runtime_events.events
     )
 
 
@@ -1028,11 +1103,11 @@ filename = "async.bin"
         runtime: ContainerRuntime,
         runtime_state_path: Path,
         expected_run_id: str,
-        log: Logger,
         handle_observer: Callable[[FakeAsyncHandle], None],
         cancel_requested: Callable[[], bool],
+        event_sink: object,
     ) -> FakeAsyncHandle:
-        del config, runtime, runtime_state_path, expected_run_id, log
+        del config, runtime, runtime_state_path, expected_run_id, event_sink
         assert cancel_requested() is False
         assert [item.filename for item in plan.items] == ["async.bin"]
         events.append("async-start")
@@ -1045,13 +1120,13 @@ filename = "async.bin"
         *,
         runtime: ContainerRuntime,
         env: Mapping[str, str] | None = None,
-        log: Logger,
         cancel_requested: Callable[[], bool],
         deadline: float | None,
         monotonic: Callable[[], float],
         sleep: Callable[[float], object],
+        event_sink: object,
     ) -> tuple[RuntimeHookResult, ...]:
-        del plan, runtime, env, log, deadline, monotonic, sleep
+        del plan, runtime, env, deadline, monotonic, sleep, event_sink
         assert cancel_requested() is False
         events.append("stop-hook")
         return ()
@@ -1091,7 +1166,7 @@ filename = "async.bin"
         == 143
     )
 
-    assert events == [
+    assert events[:7] == [
         "async-start",
         "spawn",
         "async-stop",
@@ -1099,18 +1174,18 @@ filename = "async.bin"
         "ssh-stop",
         "stop-hook",
         "signal:SIGTERM",
-        "wait",
-        "async-join",
     ]
+    cleanup_tail = events[7:]
+    assert cleanup_tail[0] == "wait"
+    assert cleanup_tail.count("async-join") == 1
+    assert set(cleanup_tail) == {"wait", "async-join"}
 
 
 # SSH startup publishes each exact preparation child to the service owner, so
 # cancellation terminates and reaps it before startup can return.
 def test_ssh_startup_operation_cancels_and_reaps_published_process(
-    tmp_path: Path,
     owned_preparation_processes: list[subprocess.Popen[bytes]],
 ) -> None:
-    runtime = _runtime(tmp_path)
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
@@ -1120,12 +1195,11 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
     def starter(
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
-        log: Logger,
         preparation_process_observer: Callable[[object | None], None],
+        preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> None:
         nonlocal process
-        del config, runtime, log
+        del config, preparation_warning_observer
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"]
         )
@@ -1143,9 +1217,13 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
         def force_requested(self) -> bool:
             return False
 
-    RuntimeSshService(config, runtime=runtime, starter=starter).start(
-        cancel_requested=Cancellation()
-    )
+    runtime_events = RecordingRuntimeEventSink()
+    RuntimeSshService(
+        config,
+        starter=starter,
+        background_event_sink=runtime_events,
+        event_sink=runtime_events,
+    ).start(cancel_requested=Cancellation())
 
     assert process is not None
     assert process.returncode is not None
@@ -1155,11 +1233,7 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
 
 # A monitor wait exception does not manufacture reap evidence; the SSH owner
 # retains the handle and continues to report non-quiescence.
-def test_ssh_monitor_wait_failure_retains_unreaped_owner(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime = _runtime(tmp_path)
+def test_ssh_monitor_wait_failure_retains_unreaped_owner() -> None:
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
@@ -1182,17 +1256,88 @@ def test_ssh_monitor_wait_failure_retains_unreaped_owner(
             raise AssertionError("terminal-looking owner must not be signaled")
 
     sshd = WaitFailureSshd()
+    runtime_events = RecordingRuntimeEventSink()
     service = RuntimeSshService(
         config,
-        runtime=runtime,
         starter=lambda *_args, **_kwargs: sshd,
+        background_event_sink=runtime_events,
+        event_sink=runtime_events,
     )
     service.start()
     service.monitor_after_comfyui_start()
 
     assert waited.wait(timeout=1)
     assert service.is_stopped() is False
-    assert "SSH runtime service monitor failed" in capsys.readouterr().err
+    assert RuntimeSshWarning(RuntimeSshWarningKind.MONITOR_FAILED) in (
+        runtime_events.events
+    )
+
+
+def test_ssh_stop_waits_for_inflight_monitor_warning_delivery() -> None:
+    config = RuntimeConfig.model_validate(
+        {"system": {"ssh": {"enable": True, "password": "secret"}}}
+    )
+    warning_entered = threading.Event()
+    release_warning = threading.Event()
+    stop_reap_entered = threading.Event()
+    warnings: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            warning_entered.set()
+            release_warning.wait(timeout=1)
+            warnings.append(event)
+
+        def emit_progress(self, _scope: object, _event: object) -> None:
+            return
+
+        def close_progress(self, _scope: object) -> None:
+            return
+
+    class TerminalSshd:
+        returncode = 7
+
+        def poll(self) -> int:
+            if threading.current_thread().name == "test-ssh-stopper":
+                stop_reap_entered.set()
+            return self.returncode
+
+        def wait(self) -> int:
+            return self.returncode
+
+        def terminate(self) -> None:
+            pytest.fail("a terminal sshd must not be terminated")
+
+        def kill(self) -> None:
+            pytest.fail("a terminal sshd must not be killed")
+
+    sshd = TerminalSshd()
+    service = RuntimeSshService(
+        config,
+        starter=lambda *_args, **_kwargs: sshd,
+        background_event_sink=Recorder(),
+        event_sink=RecordingRuntimeEventSink(),
+    )
+    service.start()
+    service.monitor_after_comfyui_start()
+    assert warning_entered.wait(timeout=1)
+
+    results: list[bool] = []
+    stopping = threading.Thread(
+        target=lambda: results.append(
+            service.stop(cancel_requested=lambda: False, timeout=1)
+        ),
+        name="test-ssh-stopper",
+    )
+    stopping.start()
+    assert stop_reap_entered.wait(timeout=1)
+    stopping.join(timeout=0.05)
+    assert stopping.is_alive() is True
+    release_warning.set()
+    stopping.join(timeout=1)
+
+    assert results == [True]
+    assert warnings == [RuntimeSshWarning(RuntimeSshWarningKind.EXITED_UNEXPECTEDLY, 7)]
 
 
 # Password bytes stay on stdin and never enter the preparation process argv.

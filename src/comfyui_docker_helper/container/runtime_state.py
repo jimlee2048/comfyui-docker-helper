@@ -27,7 +27,6 @@ from comfyui_docker_helper.config.url_validation import (
 )
 from comfyui_docker_helper.config.value_validation import (
     has_control_characters,
-    replace_control_characters,
 )
 from comfyui_docker_helper.container.transfer_core import ResumeAuthority
 
@@ -450,19 +449,6 @@ def prepare_runtime_state_for_start(
         run_id=run_id,
         downloads=state.downloads,
     )
-
-
-def summarize_runtime_error(value: object, *, max_length: int = 512) -> str:
-    """Return bounded, single-line runtime error text without classifying it."""
-    text = "" if value is None else str(value)
-    text = replace_control_characters(text)
-    text = " ".join(text.split())
-
-    if max_length < 3:
-        return text[:max_length]
-    if len(text) > max_length:
-        return f"{text[: max_length - 3]}..."
-    return text
 
 
 def _runtime_state_json(state: RuntimeState) -> str:

@@ -7,11 +7,12 @@ import json
 import os
 import shutil
 import stat
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     LocalFilePlan,
@@ -56,6 +57,15 @@ from comfyui_docker_helper.file_admission import (
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
 from comfyui_docker_helper.host.canonical_acquisition import (
     LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
+)
+from comfyui_docker_helper.host.events import (
+    HostPhase,
+    HostPhaseCompleted,
+    HostPhaseStarted,
+    HostSubphase,
+    HostSubphaseCompleted,
+    HostSubphaseStarted,
+    HostWorkflowEvent,
 )
 from comfyui_docker_helper.host.hook_paths import (
     lexical_hook_source_root,
@@ -161,8 +171,15 @@ def prepare_render_context(
     options: PlanningOptions | None = None,
     overwrite: bool = False,
     working_directory: str | Path | None = None,
+    event_sink: EventSink[HostWorkflowEvent] | None = None,
 ) -> PreparedContext:
-    """Resolve one canonical lock, construct once, then render or compare."""
+    """Advance from caller-started input, leaving the final phase active.
+
+    With an event sink, a successful dry run returns with BuildPlan preparation
+    active; every other successful mode returns with context render/check active.
+    The caller completes that phase only after its caller-owned preparation
+    finalization succeeds.
+    """
     selected = options or PlanningOptions()
     result = configuration_result
     output = _output_path(output_dir, working_directory)
@@ -199,16 +216,29 @@ def prepare_render_context(
         local_file_sources, local_file_requests = _local_file_inputs(
             result, graph.files, output
         )
-        accepted = reconcile_canonical_lock(
-            graph.desired,
-            local_requests=local_requests,
-            local_acquirer=local_acquirer,
-            local_file_requests=local_file_requests,
-            local_file_acquirer=FilesystemLocalFileEntryAcquirer(),
-            existing=existing,
-            acquirer=acquirer,
-            policy=selected.policy,
-            purpose=selected.purpose,
+        _advance_phase(
+            event_sink,
+            completed=HostPhase.BUILD_INPUT_RESOLUTION,
+            started=HostPhase.LOCK_RECONCILIATION,
+        )
+        with _observed_subphase(
+            event_sink, HostSubphase.CANONICAL_IDENTITY_RECONCILIATION
+        ):
+            accepted = reconcile_canonical_lock(
+                graph.desired,
+                local_requests=local_requests,
+                local_acquirer=local_acquirer,
+                local_file_requests=local_file_requests,
+                local_file_acquirer=FilesystemLocalFileEntryAcquirer(),
+                existing=existing,
+                acquirer=acquirer,
+                policy=selected.policy,
+                purpose=selected.purpose,
+            )
+        _advance_phase(
+            event_sink,
+            completed=HostPhase.LOCK_RECONCILIATION,
+            started=HostPhase.BUILD_PLAN_PREPARATION,
         )
         plan = construct_build_plan(
             graph,
@@ -219,6 +249,15 @@ def prepare_render_context(
             tag_templates,
             output=output_mode,
             plan=plan,
+        )
+        sources = (
+            tuple(
+                LocalMaterializationSource(
+                    request.canonical_path, request.root / request.relative_path
+                )
+                for request in local_requests
+            )
+            + local_file_sources
         )
     except RuntimeHookInputError as error:
         raise HostRenderServiceError(error.diagnostics) from error
@@ -234,15 +273,12 @@ def prepare_render_context(
             )
         ) from error
 
-    sources = (
-        tuple(
-            LocalMaterializationSource(
-                request.canonical_path, request.root / request.relative_path
-            )
-            for request in local_requests
+    if not selected.dry_run:
+        _advance_phase(
+            event_sink,
+            completed=HostPhase.BUILD_PLAN_PREPARATION,
+            started=HostPhase.CONTEXT_RENDER_CHECK,
         )
-        + local_file_sources
-    )
     if selected.check or (selected.locked and not selected.dry_run):
         _check_context(
             output,
@@ -269,6 +305,34 @@ def prepare_render_context(
         output_plan=output_plan,
         warnings=runtime_hooks.warnings,
     )
+
+
+def _emit(
+    event_sink: EventSink[HostWorkflowEvent] | None,
+    event: HostWorkflowEvent,
+) -> None:
+    if event_sink is not None:
+        event_sink.emit(event)
+
+
+def _advance_phase(
+    event_sink: EventSink[HostWorkflowEvent] | None,
+    *,
+    completed: HostPhase,
+    started: HostPhase,
+) -> None:
+    _emit(event_sink, HostPhaseCompleted(completed))
+    _emit(event_sink, HostPhaseStarted(started))
+
+
+@contextmanager
+def _observed_subphase(
+    event_sink: EventSink[HostWorkflowEvent] | None,
+    subphase: HostSubphase,
+) -> Iterator[None]:
+    _emit(event_sink, HostSubphaseStarted(subphase))
+    yield
+    _emit(event_sink, HostSubphaseCompleted(subphase))
 
 
 def _local_file_inputs(

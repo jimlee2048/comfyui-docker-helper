@@ -32,6 +32,13 @@ from comfyui_docker_helper.container.final_manifest import FinalManifestError
 from comfyui_docker_helper.container.final_manifest_writer import (
     FinalManifestWriteError,
 )
+from comfyui_docker_helper.container.helper_events import (
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    FinalManifestCompleted,
+)
 from tests.build_plan_support import accepted_resolution, build_plan, final_config
 from tests.final_manifest_support import manifest_for_plan
 
@@ -382,39 +389,71 @@ def test_manifest_service_publishes_only_after_successful_observation(
     projection = BuildPlanInputAdmission(plan).final_manifest()
     expected = manifest_for_plan(plan)
     published: list[tuple[Path, bytes]] = []
+    events: list[str | ContainerHelperEvent] = []
+
+    def observe(*_args, **_kwargs):
+        events.append("observe")
+        return expected
+
+    def publish(path: Path, content: bytes) -> None:
+        events.append("write")
+        published.append((path, content))
+
     monkeypatch.setattr(
         final_manifest_service,
         "_observe_final_manifest",
-        lambda *_args, **_kwargs: expected,
+        observe,
     )
     monkeypatch.setattr(
         final_manifest_service,
         "write_final_manifest_file",
-        lambda path, content: published.append((path, content)),
+        publish,
     )
 
     assert (
         final_manifest_service.emit_final_manifest(
             projection,
             runtime=object(),
+            event_sink=SimpleNamespace(emit=events.append),
         )
         == expected
     )
     assert published == [
         (final_manifest_service._MANIFEST_PATH, dump_final_manifest(expected))
     ]
+    assert events == [
+        ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_STATE_VERIFICATION),
+        "observe",
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.FINAL_STATE_VERIFICATION),
+        ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_MANIFEST_WRITE),
+        "write",
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.FINAL_MANIFEST_WRITE),
+        FinalManifestCompleted(),
+    ]
 
     published.clear()
+    events.clear()
+
+    def fail_observation(*_args, **_kwargs):
+        events.append("observe")
+        raise FinalManifestError("observation failed")
+
     monkeypatch.setattr(
         final_manifest_service,
         "_observe_final_manifest",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            FinalManifestError("observation failed")
-        ),
+        fail_observation,
     )
     with pytest.raises(FinalManifestError, match="observation failed"):
-        final_manifest_service.emit_final_manifest(projection, runtime=object())
+        final_manifest_service.emit_final_manifest(
+            projection,
+            runtime=object(),
+            event_sink=SimpleNamespace(emit=events.append),
+        )
     assert published == []
+    assert events == [
+        ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_STATE_VERIFICATION),
+        "observe",
+    ]
 
 
 def test_manifest_service_projects_writer_failure(
@@ -423,22 +462,32 @@ def test_manifest_service_projects_writer_failure(
     plan = build_plan(final_config(), accepted_resolution())
     projection = BuildPlanInputAdmission(plan).final_manifest()
     expected = manifest_for_plan(plan)
+    events: list[str | ContainerHelperEvent] = []
     monkeypatch.setattr(
         final_manifest_service,
         "_observe_final_manifest",
         lambda *_args, **_kwargs: expected,
     )
-    monkeypatch.setattr(
-        final_manifest_service,
-        "write_final_manifest_file",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            FinalManifestWriteError("final manifest target already exists")
-        ),
-    )
+
+    def fail_write(*_args, **_kwargs) -> None:
+        events.append("write")
+        raise FinalManifestWriteError("final manifest target already exists")
+
+    monkeypatch.setattr(final_manifest_service, "write_final_manifest_file", fail_write)
 
     with pytest.raises(FinalManifestError) as error:
-        final_manifest_service.emit_final_manifest(projection, runtime=object())
+        final_manifest_service.emit_final_manifest(
+            projection,
+            runtime=object(),
+            event_sink=SimpleNamespace(emit=events.append),
+        )
     assert str(error.value) == "final manifest target already exists"
+    assert events == [
+        ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_STATE_VERIFICATION),
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.FINAL_STATE_VERIFICATION),
+        ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_MANIFEST_WRITE),
+        "write",
+    ]
 
 
 # Final probes use authenticated inputs and reject untruthful success evidence.

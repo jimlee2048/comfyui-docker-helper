@@ -1,12 +1,11 @@
-"""Bounded presentation for operator-facing host commands."""
+"""Bounded results and diagnostics for operator-facing Host commands."""
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TextIO
 
 from rich import box
@@ -14,7 +13,18 @@ from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
+from comfyui_docker_helper.cli_output.policy import (
+    CliOutputSettings,
+    OutputContextKind,
+    OutputDetail,
+    OutputPolicy,
+    OutputStream,
+    StreamCapabilities,
+    detect_stream_capabilities,
+)
+from comfyui_docker_helper.cli_output.text import control_safe_text
 from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.diagnostics import (
@@ -26,7 +36,13 @@ from comfyui_docker_helper.config.diagnostics import (
     SourceLocation,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
+from comfyui_docker_helper.host.path_display import display_host_path
 from comfyui_docker_helper.host.render_service import PlanningOptions
+from comfyui_docker_helper.host.workflow_display import (
+    HostWorkflowDisplay,
+    HostWorkflowSummary,
+    host_phase_label,
+)
 
 _WIDE_COMPARISON_MIN_WIDTH = 100
 
@@ -37,6 +53,8 @@ class HostPresenter:
 
     stdout: Console
     stderr: Console
+    policy: OutputPolicy
+    working_directory: PurePath
 
     def diagnostics(
         self,
@@ -81,18 +99,43 @@ class HostPresenter:
         )
         self.stderr.print(Text(f"  {_safe_text(message)}"), soft_wrap=True)
 
+    def workflow(self, title: str) -> HostWorkflowDisplay:
+        """Create one command-scoped workflow display on the owned stderr."""
+        return HostWorkflowDisplay(
+            title=title,
+            stderr=self.stderr,
+            policy=self.policy,
+        )
+
     def validate_success(self, config_files: Sequence[str | Path]) -> None:
-        """Render the interactive-only successful validation summary."""
-        if not self.stdout.is_terminal:
+        """Render ordered configuration layers in the admitted output modes."""
+        if not self.policy.includes(OutputDetail.NORMAL):
             return
-        self.stdout.print(Text("Configuration valid", style="bold green"))
-        if len(config_files) == 1:
-            self.stdout.print(
-                Text(f"  File: {_safe_text(str(config_files[0]))}"),
-                soft_wrap=True,
+        capabilities = self.policy.capabilities(OutputStream.STDOUT)
+        if not capabilities.is_terminal and not self.policy.includes(
+            OutputDetail.VERBOSE
+        ):
+            return
+
+        paths = tuple(self._display_path(path) for path in config_files)
+        if capabilities.supports_unicode:
+            root = Tree(self._stdout_text("Configuration valid", "bold green"))
+            layers = root.add(
+                self._stdout_text(
+                    f"Configuration layers ({len(paths)}, merge order)",
+                    "bold",
+                )
             )
-        else:
-            self.stdout.print(Text(f"  Files: {len(config_files)}"))
+            for index, path in enumerate(paths, start=1):
+                layers.add(Text(f"[{index}/{len(paths)}] {path}"))
+            self.stdout.print(root, soft_wrap=True)
+            return
+
+        self.stdout.print(self._stdout_text("Configuration valid", "bold green"))
+        self.stdout.print(Text(f"`-- Configuration layers ({len(paths)}, merge order)"))
+        for index, path in enumerate(paths, start=1):
+            branch = "`--" if index == len(paths) else "|--"
+            self.stdout.print(Text(f"    {branch} [{index}/{len(paths)}] {path}"))
 
     def render_success(
         self,
@@ -100,9 +143,10 @@ class HostPresenter:
         *,
         options: PlanningOptions,
         lock_changed: bool,
+        workflow_summary: HostWorkflowSummary | None = None,
     ) -> None:
-        """Render the interactive-only context result, excluding dry runs."""
-        if not self.stdout.is_terminal or options.dry_run:
+        """Render the optional context result, excluding dry runs."""
+        if options.dry_run or not self.policy.includes(OutputDetail.NORMAL):
             return
         if options.check:
             title = "Build context is up to date"
@@ -110,12 +154,39 @@ class HostPresenter:
             title = "Build context verified"
         else:
             title = "Build context rendered"
-        self.stdout.print(Text(title, style="bold green"))
-        self.stdout.print(
-            Text(f"  Context: {_safe_text(str(output_dir))}"),
-            soft_wrap=True,
-        )
-        self.stdout.print(Text(f"  Lock: {'updated' if lock_changed else 'unchanged'}"))
+        context = self._display_path(output_dir)
+        lock = "updated" if lock_changed else "unchanged"
+        if not self.policy.capabilities(OutputStream.STDOUT).is_terminal:
+            self.stdout.print(Text(f"{title}: {context} (lock {lock})"), soft_wrap=True)
+            return
+        summary = workflow_summary or HostWorkflowSummary(())
+        capabilities = self.policy.capabilities(OutputStream.STDOUT)
+        if not capabilities.supports_unicode:
+            lines: list[RenderableType] = [self._stdout_text(title, "bold green")]
+            if summary.phases:
+                lines.append(Text("|-- Preparation"))
+                for index, completed in enumerate(summary.phases):
+                    branch = "`--" if index == len(summary.phases) - 1 else "|--"
+                    value = f"Completed: {host_phase_label(completed.phase)}"
+                    if self.policy.includes(OutputDetail.VERBOSE):
+                        value += f" ({completed.duration:.2f}s)"
+                    lines.append(Text(f"|   {branch} {value}"))
+            lines.append(Text(f"|-- Context: {context}"))
+            lines.append(Text(f"`-- Lock: {lock}"))
+            self.stdout.print(Group(*lines), soft_wrap=True)
+            return
+
+        tree = Tree(self._stdout_text(title, "bold green"))
+        if summary.phases:
+            preparation = tree.add(self._stdout_text("Preparation", "bold"))
+            for completed in summary.phases:
+                value = f"Completed: {host_phase_label(completed.phase)}"
+                if self.policy.includes(OutputDetail.VERBOSE):
+                    value += f" ({completed.duration:.2f}s)"
+                preparation.add(self._stdout_text(value, "green"))
+        tree.add(Text(f"Context: {context}"))
+        tree.add(Text(f"Lock: {lock}"))
+        self.stdout.print(tree, soft_wrap=True)
 
     def plan_preview(
         self,
@@ -172,14 +243,23 @@ class HostPresenter:
         platforms: Sequence[str],
     ) -> None:
         """Render the host-owned summary before the external BuildKit stream."""
-        self._stdout_heading("Starting image build")
-        self._stdout_row("Context", str(context_dir))
-        self._stdout_row("Output", output_plan.output)
-        self._stdout_row("Platforms", ", ".join(platforms))
-        self._stdout_row("Tags", ", ".join(output_plan.tags))
+        if not self.policy.includes(OutputDetail.NORMAL):
+            return
+        self.stderr.print(
+            self._stderr_text("Starting image build", "bold cyan"),
+            soft_wrap=True,
+        )
+        if not self.policy.includes(OutputDetail.VERBOSE):
+            return
+        self._stderr_row("Context", self._display_path(context_dir), safe=True)
+        self._stderr_row("Output", output_plan.output)
+        self._stderr_row("Platforms", ", ".join(platforms))
+        self._stderr_row("Tags", ", ".join(output_plan.tags))
 
     def build_complete(self, *, output_plan: BuildxOutputPlan) -> None:
         """Render the host-owned summary after a successful BuildKit stream."""
+        if not self.policy.includes(OutputDetail.NORMAL):
+            return
         self._stdout_heading("Image build complete", style="bold green")
         self._stdout_row(
             "Pushed" if output_plan.output == "push" else "Loaded",
@@ -203,6 +283,11 @@ class HostPresenter:
             Text(f"Field: {_format_path(diagnostic.path)}", style="bold"),
             soft_wrap=True,
         )
+        if self.policy.includes(OutputDetail.DEBUG):
+            self.stderr.print(
+                Text(f"Code: {_safe_text(diagnostic.code)}"),
+                soft_wrap=True,
+            )
         self.stderr.print(Text(f"  {_safe_text(diagnostic.message)}"), soft_wrap=True)
         context = diagnostic.source_context
         if isinstance(context, SourceLocation):
@@ -211,7 +296,7 @@ class HostPresenter:
                 DiagnosticComparisonSite(location=context),
             )
         elif isinstance(context, DiagnosticComparison):
-            if self.stderr.is_terminal:
+            if self.policy.capabilities(OutputStream.STDERR).supports_unicode:
                 self.stderr.print(self._comparison_card(context))
             else:
                 self._render_plain_site("Earlier", context.earlier)
@@ -228,14 +313,14 @@ class HostPresenter:
             layout.add_column(ratio=1)
             layout.add_column(ratio=1)
             layout.add_row(
-                _site_renderable("Earlier", context.earlier),
-                _site_renderable("Later", context.later),
+                self._site_renderable("Earlier", context.earlier),
+                self._site_renderable("Later", context.later),
             )
         else:
             layout.add_column(ratio=1)
-            layout.add_row(_site_renderable("Earlier", context.earlier))
+            layout.add_row(self._site_renderable("Earlier", context.earlier))
             layout.add_row(Text())
-            layout.add_row(_site_renderable("Later", context.later))
+            layout.add_row(self._site_renderable("Later", context.later))
         return Panel(
             layout,
             box=box.ROUNDED,
@@ -244,6 +329,23 @@ class HostPresenter:
             safe_box=True,
         )
 
+    def _site_renderable(
+        self,
+        label: str,
+        site: DiagnosticComparisonSite,
+    ) -> RenderableType:
+        rows: list[RenderableType] = [Text(label, style="bold")]
+        rows.append(
+            _labelled_safe_text(
+                "File",
+                self._display_path(site.location.source.label),
+            )
+        )
+        rows.append(_labelled_text("Field", _raw_path(site.location.path)))
+        if site.display_value is not None:
+            rows.append(_labelled_text("Value", site.display_value))
+        return Group(*rows)
+
     def _render_plain_site(
         self,
         label: str,
@@ -251,7 +353,7 @@ class HostPresenter:
     ) -> None:
         self.stderr.print(Text(f"{label}:", style="bold"))
         self.stderr.print(
-            Text(f"  File: {_safe_text(site.location.source.label)}"),
+            Text(f"  File: {self._display_path(site.location.source.label)}"),
             soft_wrap=True,
         )
         self.stderr.print(
@@ -265,51 +367,76 @@ class HostPresenter:
             )
 
     def _stdout_heading(self, value: str, *, style: str = "bold cyan") -> None:
-        self.stdout.print(Text(_safe_text(value), style=style), soft_wrap=True)
+        self.stdout.print(self._stdout_text(_safe_text(value), style), soft_wrap=True)
 
-    def _stdout_row(self, label: str, value: str) -> None:
+    def _stdout_row(self, label: str, value: str, *, safe: bool = False) -> None:
         self.stdout.print(
-            Text(f"  {label}: {_safe_text(value)}"),
+            Text(f"  {label}: {value if safe else _safe_text(value)}"),
             soft_wrap=True,
         )
 
+    def _stdout_text(self, value: str, style: str) -> Text:
+        capabilities = self.policy.capabilities(OutputStream.STDOUT)
+        return Text(value, style=style if capabilities.supports_color else None)
 
-def default_host_presenter() -> HostPresenter:
+    def _stderr_row(self, label: str, value: str, *, safe: bool = False) -> None:
+        self.stderr.print(
+            Text(f"  {label}: {value if safe else _safe_text(value)}"),
+            soft_wrap=True,
+        )
+
+    def _stderr_text(self, value: str, style: str) -> Text:
+        capabilities = self.policy.capabilities(OutputStream.STDERR)
+        return Text(value, style=style if capabilities.supports_color else None)
+
+    def _display_path(self, path: str | PurePath) -> str:
+        return display_host_path(path, working_directory=self.working_directory)
+
+
+def default_host_presenter(
+    settings: CliOutputSettings | None = None,
+) -> HostPresenter:
     """Bind one presenter to the command's current process streams."""
+    settings = CliOutputSettings() if settings is None else settings
+    stdout_capabilities = detect_stream_capabilities(sys.stdout)
+    stderr_capabilities = detect_stream_capabilities(sys.stderr)
+    policy = OutputPolicy(
+        settings=settings,
+        stdout=stdout_capabilities,
+        stderr=stderr_capabilities,
+        context=OutputContextKind.ONE_SHOT,
+    )
     return HostPresenter(
-        stdout=_default_console(sys.stdout),
-        stderr=_default_console(sys.stderr),
+        stdout=_default_console(sys.stdout, stdout_capabilities),
+        stderr=_default_console(sys.stderr, stderr_capabilities),
+        policy=policy,
+        working_directory=Path.cwd(),
     )
 
 
-def _default_console(stream: TextIO) -> Console:
-    is_terminal = stream.isatty()
-    no_color = "NO_COLOR" in os.environ
+def _default_console(
+    stream: TextIO,
+    capabilities: StreamCapabilities,
+) -> Console:
     return Console(
         file=stream,
-        force_terminal=is_terminal,
-        color_system=None if no_color or not is_terminal else "auto",
-        no_color=no_color,
+        force_terminal=capabilities.is_terminal,
+        color_system="auto" if capabilities.supports_color else None,
+        no_color=not capabilities.supports_color,
         highlight=False,
         markup=False,
     )
 
 
-def _site_renderable(
-    label: str,
-    site: DiagnosticComparisonSite,
-) -> RenderableType:
-    rows: list[RenderableType] = [Text(label, style="bold")]
-    rows.append(_labelled_text("File", site.location.source.label))
-    rows.append(_labelled_text("Field", _raw_path(site.location.path)))
-    if site.display_value is not None:
-        rows.append(_labelled_text("Value", site.display_value))
-    return Group(*rows)
-
-
 def _labelled_text(label: str, value: str) -> Text:
     result = Text(f"{label}: ", style="bold")
     result.append(_safe_text(value))
+    return result
+
+
+def _labelled_safe_text(label: str, value: str) -> Text:
+    result = Text(f"{label}: ", style="bold")
+    result.append(value)
     return result
 
 
@@ -323,26 +450,4 @@ def _raw_path(path: DiagnosticPath) -> str:
     return ".".join(str(part) for part in path)
 
 
-def _safe_text(value: str) -> str:
-    escaped: list[str] = []
-    for character in value:
-        if character == "\\":
-            escaped.append("\\\\")
-            continue
-        if character.isprintable():
-            escaped.append(character)
-            continue
-        codepoint = ord(character)
-        if character == "\n":
-            escaped.append("\\n")
-        elif character == "\r":
-            escaped.append("\\r")
-        elif character == "\t":
-            escaped.append("\\t")
-        elif codepoint <= 0xFF:
-            escaped.append(f"\\x{codepoint:02x}")
-        elif codepoint <= 0xFFFF:
-            escaped.append(f"\\u{codepoint:04x}")
-        else:
-            escaped.append(f"\\U{codepoint:08x}")
-    return "".join(escaped)
+_safe_text = control_safe_text

@@ -16,14 +16,16 @@ from comfyui_docker_helper.config import (
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_files import (
-    Logger,
     RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
-    run_runtime_generation_once,
+)
+from comfyui_docker_helper.container.runtime_state import RuntimeStateError
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
 )
 
 
@@ -262,13 +264,15 @@ def test_empty_file_plan_rejects_invalid_existing_runtime_state(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)
-    state_path = _write(tmp_path / "state.json", "{not-json")
+    path_sentinel = "credential-path-sentinel"
+    content_sentinel = "raw-state-content-sentinel"
+    state_path = _write(
+        tmp_path / f"{path_sentinel}.json",
+        content_sentinel,
+    )
     calls: list[SpawnCall] = []
 
-    with pytest.raises(
-        RuntimeExecutionError,
-        match=r"runtime state failed: runtime state is invalid; remove .* and restart",
-    ):
+    with pytest.raises(RuntimeExecutionError) as raised:
         run_runtime_generation_once(
             runtime=runtime,
             runtime_state_path=state_path,
@@ -280,8 +284,15 @@ def test_empty_file_plan_rejects_invalid_existing_runtime_state(
             runner=_recording_runner(calls),
         )
 
+    assert str(raised.value) == (
+        "runtime state is invalid or unavailable; remove the runtime state file "
+        "and restart"
+    )
+    assert path_sentinel not in str(raised.value)
+    assert content_sentinel not in str(raised.value)
+    assert isinstance(raised.value.__cause__, RuntimeStateError)
     assert calls == []
-    assert state_path.read_text(encoding="utf-8") == "{not-json"
+    assert state_path.read_text(encoding="utf-8") == content_sentinel
 
 
 def test_baked_runtime_config_feeds_runtime_argv(tmp_path: Path) -> None:
@@ -424,11 +435,10 @@ extra_args = ["--preview-method", "auto"]
         plan: RuntimeFilePlan,
         *,
         config: RuntimeConfig,
-        log: Logger,
         state_observer: RuntimeDownloadStateObserver | None = None,
         **_kwargs: object,
     ) -> tuple[RuntimeFileDownloadResult, ...]:
-        del log, state_observer
+        del state_observer
         events.append("download")
         downloader_plans.append(plan)
         downloader_configs.append(config)

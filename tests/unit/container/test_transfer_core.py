@@ -13,6 +13,14 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.container import transfer_core
+from comfyui_docker_helper.container.download_events import (
+    DownloadEvent,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
+)
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
     DownloadCancelled,
@@ -73,6 +81,14 @@ class BytesBackend:
         return TransportSuccess(
             length=len(self.content), namespace="httpx", http_status=200
         )
+
+
+class RecordingEventSink:
+    def __init__(self) -> None:
+        self.events: list[DownloadEvent] = []
+
+    def emit(self, event: DownloadEvent, /) -> None:
+        self.events.append(event)
 
 
 def _settings() -> DownloaderSettings:
@@ -185,6 +201,126 @@ def test_transfer_core_applies_existing_target_matrix(
     assert request.target.read_bytes() == (b"new" if calls else existing)
     assert len(backend.calls) == calls
     assert not outcome.staging_target.exists()
+
+
+def test_success_events_follow_verified_and_durable_placement_boundaries(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    request = _request(root, overwrite=True)
+    request.target.parent.mkdir(parents=True)
+    request.target.write_bytes(b"old")
+    staging = transfer_staging_target(request)
+    control = Path(f"{staging}.aria2")
+
+    class ControlBackend(BytesBackend):
+        def download(self, transport, settings):
+            outcome = super().download(transport, settings)
+            control.write_bytes(b"control")
+            return TransportSuccess(length=outcome.length, namespace="aria2")
+
+    class ProbingSink(RecordingEventSink):
+        def emit(self, event: DownloadEvent, /) -> None:
+            if isinstance(
+                event,
+                (
+                    DownloadVerificationStarted,
+                    DownloadVerificationCompleted,
+                    DownloadPlacementStarted,
+                ),
+            ):
+                assert staging.read_bytes() == b"new"
+                assert request.target.read_bytes() == b"old"
+            elif isinstance(event, DownloadPlacementCompleted):
+                assert not staging.exists()
+                assert not control.exists()
+                assert request.target.read_bytes() == b"new"
+            super().emit(event)
+
+    events = ProbingSink()
+    outcome = transfer_file(
+        request,
+        backend=ControlBackend(b"new"),
+        settings=_settings(),
+        event_sink=events,
+    )
+
+    assert outcome.status is DownloadStatus.DOWNLOADED
+    assert events.events == [
+        DownloadVerificationStarted(),
+        DownloadVerificationCompleted(),
+        DownloadPlacementStarted(),
+        DownloadPlacementCompleted(),
+    ]
+
+
+def test_precommit_event_failure_preserves_original_and_cleans_owned_artifacts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    request = _request(root, overwrite=True)
+    request.target.parent.mkdir(parents=True)
+    request.target.write_bytes(b"old")
+    staging = transfer_staging_target(request)
+    control = Path(f"{staging}.aria2")
+    failure = KeyboardInterrupt("event-sink-sentinel")
+
+    class ControlBackend(BytesBackend):
+        def download(self, transport, settings):
+            outcome = super().download(transport, settings)
+            control.write_bytes(b"control")
+            return TransportSuccess(length=outcome.length, namespace="aria2")
+
+    class FailingSink(RecordingEventSink):
+        def emit(self, event: DownloadEvent, /) -> None:
+            super().emit(event)
+            if isinstance(event, DownloadPlacementStarted):
+                raise failure
+
+    events = FailingSink()
+    with pytest.raises(KeyboardInterrupt) as raised:
+        transfer_file(
+            request,
+            backend=ControlBackend(b"new"),
+            settings=_settings(),
+            event_sink=events,
+        )
+
+    assert raised.value is failure
+    assert events.events[-1] == DownloadPlacementStarted()
+    assert request.target.read_bytes() == b"old"
+    assert not staging.exists()
+    assert not control.exists()
+
+
+def test_placement_completed_event_failure_keeps_committed_final(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    request = _request(root)
+    staging = transfer_staging_target(request)
+    failure = OSError("event-sink-sentinel")
+
+    class FailingSink(RecordingEventSink):
+        def emit(self, event: DownloadEvent, /) -> None:
+            super().emit(event)
+            if isinstance(event, DownloadPlacementCompleted):
+                raise failure
+
+    events = FailingSink()
+    with pytest.raises(OSError) as raised:
+        transfer_file(
+            request,
+            backend=BytesBackend(b"new"),
+            settings=_settings(),
+            event_sink=events,
+        )
+
+    assert raised.value is failure
+    assert events.events[-1] == DownloadPlacementCompleted()
+    assert request.target.read_bytes() == b"new"
+    assert not staging.exists()
 
 
 def test_existing_checksum_mismatch_without_overwrite_is_terminal_and_untouched(
@@ -410,8 +546,9 @@ def test_checksum_mismatch_always_discards_invalid_preserved_staging(
     root = tmp_path / "ComfyUI"
     root.mkdir()
     request = _preserved_request(root, checksum=_checksum(b"expected"))
+    events = RecordingEventSink()
 
-    with pytest.raises(TransferDownloadFilesError, match="checksum"):
+    with pytest.raises(TransferDownloadFilesError, match="checksum") as raised:
         transfer_file(
             request,
             backend=BytesBackend(
@@ -419,8 +556,11 @@ def test_checksum_mismatch_always_discards_invalid_preserved_staging(
                 outcome=TransportSuccess(length=7, namespace="aria2"),
             ),
             settings=_settings(),
+            event_sink=events,
         )
 
+    assert raised.value.reason is DownloadRetryReason.CHECKSUM_MISMATCH
+    assert events.events == [DownloadVerificationStarted()]
     assert not request.target.exists()
     assert not transfer_staging_target(request).exists()
 
@@ -465,7 +605,7 @@ def test_resume_rejection_cleans_exact_admitted_partial_before_projection(
                 TransportDiagnostic("aria2", "resume rejected")
             )
 
-    with pytest.raises(DownloadFilesError, match="resume rejected"):
+    with pytest.raises(DownloadFilesError, match="transfer was rejected"):
         transfer_file(request, backend=RejectedBackend(), settings=_settings())
 
     assert not transfer_staging_target(request).exists()
@@ -1422,6 +1562,7 @@ def test_existing_target_replace_failure_preserves_precommit_state(
     foreign = request.target.parent / "foreign.part"
     foreign.write_bytes(b"foreign")
     staging = transfer_staging_target(request)
+    events = RecordingEventSink()
 
     def fail_replace(*_args, **_kwargs) -> None:
         raise OSError("replacement denied")
@@ -1431,13 +1572,24 @@ def test_existing_target_replace_failure_preserves_precommit_state(
     with pytest.raises(
         DownloadFilesError, match="atomic download placement failed"
     ) as raised:
-        transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
+        transfer_file(
+            request,
+            backend=BytesBackend(b"new"),
+            settings=_settings(),
+            event_sink=events,
+        )
 
     assert isinstance(raised.value.__cause__, OSError)
     assert str(raised.value.__cause__) == "replacement denied"
+    assert "replacement denied" not in str(raised.value)
     assert request.target.read_bytes() == b"old"
     assert foreign.read_bytes() == b"foreign"
     assert not staging.exists()
+    assert events.events == [
+        DownloadVerificationStarted(),
+        DownloadVerificationCompleted(),
+        DownloadPlacementStarted(),
+    ]
 
 
 def test_staging_leaf_drift_before_placement_never_commits_foreign_inode(
@@ -1502,11 +1654,40 @@ def test_staging_file_durability_failure_preserves_old_target(
 
     monkeypatch.setattr(transfer_core.os, "fsync", fail_staging_file_barrier)
 
-    with pytest.raises(OSError, match="staging file durability unavailable"):
+    with pytest.raises(DownloadFilesError, match="staging verification") as raised:
         transfer_file(request, backend=BytesBackend(b"new"), settings=_settings())
 
+    assert "staging file durability unavailable" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert str(raised.value.__cause__) == "staging file durability unavailable"
     assert request.target.read_bytes() == b"old"
     assert not transfer_staging_target(request).exists()
+
+
+def test_required_final_read_failure_is_controlled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    target = root / "models" / "model.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"content")
+
+    def fail_hash(_fd: int) -> str:
+        raise OSError("required-final-read-sentinel")
+
+    monkeypatch.setattr(transfer_core, "_hash_fd", fail_hash)
+
+    with pytest.raises(DownloadFilesError, match="could not be verified") as raised:
+        verify_required_final(
+            root=root,
+            target=target,
+            expected_checksum=_checksum(b"content"),
+        )
+
+    assert "required-final-read-sentinel" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert str(raised.value.__cause__) == "required-final-read-sentinel"
 
 
 @pytest.mark.parametrize("barrier", ["staging", "target"])
@@ -1631,6 +1812,7 @@ def test_postcommit_control_cleanup_durability_failure_keeps_complete_new_target
     request.target.write_bytes(b"old")
     staging = transfer_staging_target(request)
     control = Path(f"{staging}.aria2")
+    events = RecordingEventSink()
     original_fsync = transfer_core.os.fsync
     failed = False
 
@@ -1660,11 +1842,21 @@ def test_postcommit_control_cleanup_durability_failure_keeps_complete_new_target
     )
 
     with pytest.raises(DownloadFilesError, match="control cleanup"):
-        transfer_file(request, backend=ControlBackend(b"new"), settings=_settings())
+        transfer_file(
+            request,
+            backend=ControlBackend(b"new"),
+            settings=_settings(),
+            event_sink=events,
+        )
 
     assert request.target.read_bytes() == b"new"
     assert not staging.exists()
     assert not control.exists()
+    assert events.events == [
+        DownloadVerificationStarted(),
+        DownloadVerificationCompleted(),
+        DownloadPlacementStarted(),
+    ]
 
 
 # New nested directory entries are persisted deepest-first before transport starts.

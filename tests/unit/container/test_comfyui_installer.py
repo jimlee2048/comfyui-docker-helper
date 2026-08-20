@@ -24,6 +24,13 @@ from comfyui_docker_helper.container.comfyui_installer import (
     _verify_floor_ancestry,
     observe_application_state,
 )
+from comfyui_docker_helper.container.helper_events import (
+    ComfyUIInstallCompleted,
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+)
 from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
@@ -33,6 +40,16 @@ from tests.build_plan_support import accepted_resolution, build_plan, final_conf
 _REQUIREMENTS = b"torch\ntorchvision\ntorchaudio\nnumpy>=1.25\n"
 _MANAGER_REQUIREMENTS = b"comfyui_manager==4.0.5\n"
 _LOCAL_GIT_TIMEOUT_SECONDS = 30
+
+
+def _helper_event_signature(event: object) -> object:
+    if isinstance(event, ContainerHelperPhaseStarted):
+        return ("phase-started", event.phase)
+    if isinstance(event, ContainerHelperPhaseCompleted):
+        return ("phase-completed", event.phase)
+    if isinstance(event, ComfyUIInstallCompleted):
+        return ("install-completed",)
+    return event
 
 
 @pytest.fixture(autouse=True)
@@ -320,7 +337,7 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
-    events: list[str] = []
+    events: list[str | ContainerHelperEvent] = []
     parsed = parse_comfyui_requirements(
         _REQUIREMENTS,
         python_version="3.13.14",
@@ -377,36 +394,61 @@ def test_orchestration_verifies_checkout_before_any_package_mutation(
         plan.application,
         plan.toolchain,
         runtime=runtime,
+        event_sink=SimpleNamespace(emit=events.append),
     )
 
-    assert events == [
+    assert [_helper_event_signature(event) for event in events] == [
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
         "checkout",
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
         "verify",
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
+        ("phase-started", ContainerHelperPhase.PYTORCH_INSTALLATION),
         "inference",
+        ("phase-completed", ContainerHelperPhase.PYTORCH_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.PYTHON_EXTRAS_INSTALLATION),
         "extras",
         "health",
+        ("phase-completed", ContainerHelperPhase.PYTHON_EXTRAS_INSTALLATION),
+        (
+            "phase-started",
+            ContainerHelperPhase.COMFYUI_REQUIREMENTS_INSTALLATION,
+        ),
         "ordinary",
         "health",
+        (
+            "phase-completed",
+            ContainerHelperPhase.COMFYUI_REQUIREMENTS_INSTALLATION,
+        ),
+        ("phase-started", ContainerHelperPhase.MANAGER_INSTALLATION),
         "manager",
+        ("phase-completed", ContainerHelperPhase.MANAGER_INSTALLATION),
+        ("phase-started", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
         "health",
+        ("phase-completed", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
+        ("install-completed",),
     ]
 
 
-def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
+def test_orchestration_skips_disabled_optional_phases_and_checks_manager_absence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plan = build_plan(final_config(), accepted_resolution())
     document = plan.application.model_dump(mode="python")
     document["comfyui"]["manager"] = None
+    assert document["python_extras"] is not None
+    document["python_extras"]["packages"] = ()
     application = ApplicationPhase.model_validate(document)
     parsed = parse_comfyui_requirements(
-        _REQUIREMENTS,
+        b"torch\ntorchvision\ntorchaudio\n",
         python_version="3.13.14",
         platform="linux/amd64",
         machine="x86_64",
         protected_names=CUDA_PROTECTED_REQUIREMENTS,
     )
-    events: list[str] = []
+    assert not parsed.ordinary
+    events: list[str | ContainerHelperEvent] = []
     monkeypatch.setattr(
         comfyui_installer, "_checkout_exact", lambda *_args: events.append("checkout")
     )
@@ -450,19 +492,82 @@ def test_orchestration_disabled_manager_skips_mutation_and_checks_absence(
         application,
         plan.toolchain,
         runtime=runtime,
+        event_sink=SimpleNamespace(emit=events.append),
     )
 
-    assert events == [
+    assert [_helper_event_signature(event) for event in events] == [
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
         "checkout",
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT),
+        ("phase-started", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
         "verify",
+        ("phase-completed", ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION),
+        ("phase-started", ContainerHelperPhase.PYTORCH_INSTALLATION),
         "inference",
         "extras",
         "health",
+        ("phase-completed", ContainerHelperPhase.PYTORCH_INSTALLATION),
         "ordinary",
         "health",
         "manager absent",
+        ("phase-started", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
         "health",
+        ("phase-completed", ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION),
+        ("install-completed",),
     ]
+
+
+def test_orchestration_failure_does_not_complete_active_phase_or_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    parsed = parse_comfyui_requirements(
+        _REQUIREMENTS,
+        python_version="3.13.14",
+        platform="linux/amd64",
+        machine="x86_64",
+        protected_names=CUDA_PROTECTED_REQUIREMENTS,
+    )
+    events: list[ContainerHelperEvent] = []
+    failure = ComfyUIInstallError("inference install failed")
+    monkeypatch.setattr(comfyui_installer, "_checkout_exact", lambda *_args: None)
+    monkeypatch.setattr(
+        comfyui_installer,
+        "_verify_checkout",
+        lambda *_args: (parsed, None),
+    )
+
+    def fail_inference(*_args, **_kwargs) -> None:
+        raise failure
+
+    monkeypatch.setattr(
+        comfyui_installer,
+        "install_inference_group",
+        fail_inference,
+    )
+    runtime = ContainerRuntime(
+        workspace=Path(plan.application.paths.workspace),
+        comfyui_path=Path(plan.application.paths.comfyui),
+        virtual_env=Path(plan.application.paths.venv),
+    )
+
+    with pytest.raises(ComfyUIInstallError) as raised:
+        comfyui_installer.install_comfyui(
+            plan.application,
+            plan.toolchain,
+            runtime=runtime,
+            event_sink=SimpleNamespace(emit=events.append),
+        )
+
+    assert raised.value is failure
+    assert events[-1] == ContainerHelperPhaseStarted(
+        ContainerHelperPhase.PYTORCH_INSTALLATION
+    )
+    assert (
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.PYTORCH_INSTALLATION)
+        not in events
+    )
+    assert ComfyUIInstallCompleted() not in events
 
 
 def test_disabled_manager_state_rejects_installed_distribution_metadata(

@@ -15,6 +15,7 @@ from pathlib import Path
 from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 
+from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.comfyui_requirements import (
     ComfyUIRequirementsError,
     ParsedComfyUIRequirements,
@@ -33,6 +34,13 @@ from comfyui_docker_helper.container.application_installer import (
     install_inference_group,
     install_python_extras,
     verify_application_environment,
+)
+from comfyui_docker_helper.container.helper_events import (
+    ComfyUIInstallCompleted,
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.errors import ApplicationError
@@ -59,71 +67,102 @@ def install_comfyui(
     uv_path: Path = _UV_PATH,
     constraints_path: Path = _CONSTRAINTS_PATH,
     environ: Mapping[str, str] | None = None,
+    event_sink: EventSink[ContainerHelperEvent] | None = None,
 ) -> None:
     """Verify exact source before installing protected and ordinary requirements."""
     _validate_paths(application, runtime)
-    _checkout_exact(application, runtime, git_path, environ)
+    with _helper_phase(event_sink, ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT):
+        _checkout_exact(application, runtime, git_path, environ)
     # Repeat verification immediately before the first package mutation.
-    parsed, parsed_manager = _verify_checkout(application, runtime)
-    install_inference_group(
-        application,
-        toolchain,
-        runtime=runtime,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-    )
-    install_python_extras(
-        application,
-        runtime,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-    )
-    verify_application_environment(
-        application,
-        runtime,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-    )
-    _install_ordinary_requirements(
-        application,
-        parsed.ordinary,
-        runtime,
-        uv_path,
-        constraints_path,
-        environ,
-    )
-    verify_application_environment(
-        application,
-        runtime,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-        ordinary_requirements=parsed.ordinary,
-    )
-    manager = application.comfyui.manager
-    if manager is None:
-        _verify_manager_absent(application, runtime)
-    else:
-        _install_manager_capability(
+    with _helper_phase(event_sink, ContainerHelperPhase.COMFYUI_SOURCE_VERIFICATION):
+        parsed, parsed_manager = _verify_checkout(application, runtime)
+    extras = application.python_extras
+    has_python_extras = extras is not None and bool(extras.packages)
+    with _helper_phase(event_sink, ContainerHelperPhase.PYTORCH_INSTALLATION):
+        install_inference_group(
             application,
-            manager,
-            parsed_manager,
+            toolchain,
+            runtime=runtime,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+        )
+        if not has_python_extras:
+            install_python_extras(
+                application,
+                runtime,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+            )
+            verify_application_environment(
+                application,
+                runtime,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+            )
+    if has_python_extras:
+        with _helper_phase(event_sink, ContainerHelperPhase.PYTHON_EXTRAS_INSTALLATION):
+            install_python_extras(
+                application,
+                runtime,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+            )
+            verify_application_environment(
+                application,
+                runtime,
+                uv_path=uv_path,
+                constraints_path=constraints_path,
+                environ=environ,
+            )
+    with _optional_helper_phase(
+        event_sink,
+        ContainerHelperPhase.COMFYUI_REQUIREMENTS_INSTALLATION,
+        enabled=bool(parsed.ordinary),
+    ):
+        _install_ordinary_requirements(
+            application,
+            parsed.ordinary,
             runtime,
             uv_path,
             constraints_path,
             environ,
         )
-    verify_application_environment(
-        application,
-        runtime,
-        uv_path=uv_path,
-        constraints_path=constraints_path,
-        environ=environ,
-        ordinary_requirements=parsed.ordinary,
-    )
+        verify_application_environment(
+            application,
+            runtime,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+            ordinary_requirements=parsed.ordinary,
+        )
+    manager = application.comfyui.manager
+    if manager is None:
+        _verify_manager_absent(application, runtime)
+    else:
+        with _helper_phase(event_sink, ContainerHelperPhase.MANAGER_INSTALLATION):
+            _install_manager_capability(
+                application,
+                manager,
+                parsed_manager,
+                runtime,
+                uv_path,
+                constraints_path,
+                environ,
+            )
+    with _helper_phase(event_sink, ContainerHelperPhase.COMFYUI_FINAL_VERIFICATION):
+        verify_application_environment(
+            application,
+            runtime,
+            uv_path=uv_path,
+            constraints_path=constraints_path,
+            environ=environ,
+            ordinary_requirements=parsed.ordinary,
+        )
+    _emit_helper_event(event_sink, ComfyUIInstallCompleted())
 
 
 def observe_application_state(
@@ -164,6 +203,38 @@ def capture_application_requirements(
     _validate_paths(application, runtime)
     parsed, _parsed_manager = _verify_checkout(application, runtime)
     return parsed
+
+
+@contextmanager
+def _helper_phase(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    phase: ContainerHelperPhase,
+) -> Iterator[None]:
+    _emit_helper_event(event_sink, ContainerHelperPhaseStarted(phase))
+    yield
+    _emit_helper_event(event_sink, ContainerHelperPhaseCompleted(phase))
+
+
+@contextmanager
+def _optional_helper_phase(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    phase: ContainerHelperPhase,
+    *,
+    enabled: bool,
+) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+    with _helper_phase(event_sink, phase):
+        yield
+
+
+def _emit_helper_event(
+    event_sink: EventSink[ContainerHelperEvent] | None,
+    event: ContainerHelperEvent,
+) -> None:
+    if event_sink is not None:
+        event_sink.emit(event)
 
 
 def _validate_paths(application: ApplicationPhase, runtime: ContainerRuntime) -> None:

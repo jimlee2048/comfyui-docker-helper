@@ -16,6 +16,17 @@ from comfyui_docker_helper.container.attempt_coordinator import (
     AttemptSucceeded,
     coordinate_transfer_attempts,
 )
+from comfyui_docker_helper.container.download_events import (
+    DownloadAttemptStarted,
+    DownloadEvent,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadTransferProgress,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
+)
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,
     DownloaderSettings,
@@ -87,6 +98,16 @@ class ScriptedBackend:
         return len(content)
 
 
+class RecordingEventSink:
+    """Record typed download events without adding presentation behavior."""
+
+    def __init__(self) -> None:
+        self.events: list[DownloadEvent] = []
+
+    def emit(self, event: DownloadEvent, /) -> None:
+        self.events.append(event)
+
+
 def _settings(*, resume: bool = False) -> DownloaderSettings:
     return DownloaderSettings(
         default="aria2" if resume else "httpx",
@@ -118,6 +139,7 @@ def _retryable(*, retry_after: float | None = None) -> TransportRetryable:
         TransportDiagnostic("httpx", "temporary failure"),
         http_status=503 if retry_after is not None else None,
         retry_after_seconds=retry_after,
+        reason=DownloadRetryReason.TEMPORARY_SERVER,
     )
 
 
@@ -132,6 +154,7 @@ def test_total_budget_counts_only_backend_calls_and_uses_one_two_backoff(
 ) -> None:
     backend = ScriptedBackend([_retryable(), _retryable(), _success()])
     waits: list[float] = []
+    events = RecordingEventSink()
 
     result = coordinate_transfer_attempts(
         _request(tmp_path / "ComfyUI"),
@@ -140,13 +163,80 @@ def test_total_budget_counts_only_backend_calls_and_uses_one_two_backoff(
         settings=_settings(),
         max_attempts=3,
         wait=lambda delay, _: waits.append(delay) or False,
-        log=lambda _: None,
+        event_sink=events,
     )
 
     assert isinstance(result, AttemptSucceeded)
     assert result.attempts == backend.calls == 3
     assert waits == [1.0, 2.0]
+    assert events.events == [
+        DownloadAttemptStarted(1),
+        DownloadRetryScheduled(
+            failed_attempt=1,
+            next_attempt=2,
+            delay_seconds=1.0,
+            reason=DownloadRetryReason.TEMPORARY_SERVER,
+        ),
+        DownloadAttemptStarted(2),
+        DownloadRetryScheduled(
+            failed_attempt=2,
+            next_attempt=3,
+            delay_seconds=2.0,
+            reason=DownloadRetryReason.TEMPORARY_SERVER,
+        ),
+        DownloadAttemptStarted(3),
+        DownloadVerificationStarted(),
+        DownloadVerificationCompleted(),
+        DownloadPlacementStarted(),
+        DownloadPlacementCompleted(),
+    ]
     assert result.outcome.target.read_bytes() == b"attempt-3"
+
+
+def test_event_sink_is_projected_as_narrow_adapter_progress_sink(
+    tmp_path: Path,
+) -> None:
+    events = RecordingEventSink()
+
+    class ProgressBackend:
+        def download(self, request: TransportRequest, settings: DownloaderSettings):
+            del settings
+            assert request.progress_sink is events
+            with request.sink.open_for_write() as output:
+                output.write(b"data")
+            request.progress_sink.emit(
+                DownloadTransferProgress(
+                    transferred_bytes=4,
+                    total_bytes=4,
+                    stored_bytes=4,
+                    reported_rate=None,
+                )
+            )
+            return TransportSuccess(length=4, namespace="httpx", http_status=200)
+
+    result = coordinate_transfer_attempts(
+        _request(tmp_path / "ComfyUI"),
+        backend_name="httpx",
+        backend=ProgressBackend(),
+        settings=_settings(),
+        max_attempts=1,
+        event_sink=events,
+    )
+
+    assert isinstance(result, AttemptSucceeded)
+    assert events.events == [
+        DownloadAttemptStarted(1),
+        DownloadTransferProgress(
+            transferred_bytes=4,
+            total_bytes=4,
+            stored_bytes=4,
+            reported_rate=None,
+        ),
+        DownloadVerificationStarted(),
+        DownloadVerificationCompleted(),
+        DownloadPlacementStarted(),
+        DownloadPlacementCompleted(),
+    ]
 
 
 def test_terminal_stops_without_spending_remaining_budget(tmp_path: Path) -> None:
@@ -168,7 +258,6 @@ def test_terminal_stops_without_spending_remaining_budget(tmp_path: Path) -> Non
         settings=_settings(),
         max_attempts=3,
         wait=lambda delay, _: waits.append(delay) or False,
-        log=lambda _: None,
     )
 
     assert isinstance(result, AttemptOrdinaryTerminal)
@@ -179,6 +268,7 @@ def test_terminal_stops_without_spending_remaining_budget(tmp_path: Path) -> Non
 def test_one_attempt_exhausts_without_wait(tmp_path: Path) -> None:
     backend = ScriptedBackend([_retryable()])
     waits: list[float] = []
+    events = RecordingEventSink()
 
     result = coordinate_transfer_attempts(
         _request(tmp_path / "ComfyUI"),
@@ -187,12 +277,13 @@ def test_one_attempt_exhausts_without_wait(tmp_path: Path) -> None:
         settings=_settings(),
         max_attempts=1,
         wait=lambda delay, _: waits.append(delay) or False,
-        log=lambda _: None,
+        event_sink=events,
     )
 
     assert isinstance(result, AttemptExhausted)
     assert result.attempts == backend.calls == 1
     assert waits == []
+    assert events.events == [DownloadAttemptStarted(1)]
 
 
 @pytest.mark.parametrize(
@@ -206,6 +297,7 @@ def test_retry_after_cannot_shorten_or_exceed_private_backoff(
 ) -> None:
     backend = ScriptedBackend([_retryable(retry_after=retry_after), _success()])
     waits: list[float] = []
+    events = RecordingEventSink()
 
     coordinate_transfer_attempts(
         _request(tmp_path / "ComfyUI"),
@@ -214,10 +306,15 @@ def test_retry_after_cannot_shorten_or_exceed_private_backoff(
         settings=_settings(),
         max_attempts=2,
         wait=lambda delay, _: waits.append(delay) or False,
-        log=lambda _: None,
+        event_sink=events,
     )
 
     assert waits == [expected]
+    retry = next(
+        event for event in events.events if isinstance(event, DownloadRetryScheduled)
+    )
+    assert retry.reason is DownloadRetryReason.TEMPORARY_SERVER
+    assert retry.http_status == (503 if retry_after is not None else None)
 
 
 def test_cancellation_during_wait_prevents_following_call(tmp_path: Path) -> None:
@@ -230,7 +327,6 @@ def test_cancellation_during_wait_prevents_following_call(tmp_path: Path) -> Non
         settings=_settings(),
         max_attempts=2,
         wait=lambda _delay, _cancel: True,
-        log=lambda _: None,
     )
 
     assert isinstance(result, AttemptCancelled)
@@ -251,7 +347,6 @@ def test_local_failure_is_not_policy_eligible(tmp_path: Path) -> None:
             settings=_settings(),
             max_attempts=3,
             wait=lambda _delay, _cancel: False,
-            log=lambda _: None,
         )
 
 
@@ -268,6 +363,7 @@ def test_existing_target_skip_consumes_zero_transport_attempts(tmp_path: Path) -
         staging_disposition=StagingDisposition.CLEAN,
     )
     backend = ScriptedBackend([_success()])
+    events = RecordingEventSink()
 
     result = coordinate_transfer_attempts(
         request,
@@ -276,11 +372,12 @@ def test_existing_target_skip_consumes_zero_transport_attempts(tmp_path: Path) -
         settings=_settings(),
         max_attempts=3,
         wait=lambda _delay, _cancel: False,
-        log=lambda _: None,
+        event_sink=events,
     )
 
     assert isinstance(result, AttemptSucceeded)
     assert result.attempts == backend.calls == 0
+    assert events.events == []
 
 
 # Resumable retries may reuse only the exact staging artifact whose identity
@@ -312,7 +409,6 @@ def test_aria2_resume_reuses_only_authority_proven_partial(tmp_path: Path) -> No
         settings=_settings(resume=True),
         max_attempts=2,
         wait=lambda _delay, _cancel: False,
-        log=lambda _: None,
     )
 
     assert isinstance(result, AttemptSucceeded)
@@ -335,7 +431,6 @@ def test_cancelled_aria2_backoff_discards_exact_preserved_partial(
         settings=_settings(resume=True),
         max_attempts=2,
         wait=lambda _delay, _cancel: True,
-        log=lambda _: None,
     )
 
     assert isinstance(result, AttemptCancelled)
@@ -368,7 +463,6 @@ def test_aria2_resume_authority_drift_fails_closed_without_touching_foreign_leaf
             settings=_settings(resume=True),
             max_attempts=2,
             wait=replace_before_resume,
-            log=lambda _: None,
         )
 
     assert backend.calls == 1
@@ -404,6 +498,7 @@ def test_resume_rejection_counts_and_uses_one_immediate_clean_fallback(
     waits: list[float] = []
     starts: list[int] = []
     failed_attempts: list[int] = []
+    events = RecordingEventSink()
 
     result = coordinate_transfer_attempts(
         request,
@@ -414,7 +509,7 @@ def test_resume_rejection_counts_and_uses_one_immediate_clean_fallback(
         wait=lambda delay, _: waits.append(delay) or False,
         attempt_start_observer=starts.append,
         retry_observer=lambda attempt, _error: failed_attempts.append(attempt),
-        log=lambda _: None,
+        event_sink=events,
     )
 
     assert isinstance(result, AttemptSucceeded)
@@ -423,6 +518,23 @@ def test_resume_rejection_counts_and_uses_one_immediate_clean_fallback(
     assert starts == [1, 2, 3]
     assert failed_attempts == [1, 2]
     assert waits == [1.0]
+    retries = [
+        event for event in events.events if isinstance(event, DownloadRetryScheduled)
+    ]
+    assert retries == [
+        DownloadRetryScheduled(
+            failed_attempt=1,
+            next_attempt=2,
+            delay_seconds=1.0,
+            reason=DownloadRetryReason.UNKNOWN,
+        ),
+        DownloadRetryScheduled(
+            failed_attempt=2,
+            next_attempt=3,
+            delay_seconds=0,
+            reason=DownloadRetryReason.RESUME_REJECTED,
+        ),
+    ]
     assert request.target.read_bytes() == b"clean-success"
     assert not transfer_staging_target(request).exists()
     assert not Path(f"{transfer_staging_target(request)}.aria2").exists()
@@ -447,7 +559,6 @@ def test_resume_rejection_exhausts_two_attempt_budget_without_fallback(
         settings=_settings(resume=True),
         max_attempts=2,
         wait=lambda _delay, _cancel: False,
-        log=lambda _: None,
     )
 
     assert isinstance(result, AttemptExhausted)
@@ -477,7 +588,6 @@ def test_cancellation_after_resume_rejection_prevents_clean_fallback(
         max_attempts=3,
         cancel_requested=lambda: backend.calls >= 2,
         wait=lambda _delay, _cancel: False,
-        log=lambda _: None,
     )
 
     assert isinstance(result, AttemptCancelled)
@@ -517,7 +627,6 @@ def test_resume_rejection_cleanup_drift_fails_closed_and_preserves_foreign_leaf(
             settings=_settings(resume=True),
             max_attempts=3,
             wait=lambda _delay, _cancel: False,
-            log=lambda _: None,
         )
 
     assert backend.calls == 2
@@ -566,7 +675,6 @@ def test_resume_rejection_cleanup_durability_failure_prevents_fallback(
             settings=_settings(resume=True),
             max_attempts=3,
             wait=lambda _delay, _cancel: False,
-            log=lambda _: None,
         )
 
     assert backend.calls == 2
@@ -593,7 +701,6 @@ def test_rejected_resume_allows_only_one_clean_fallback_call(tmp_path: Path) -> 
         settings=_settings(resume=True),
         max_attempts=4,
         wait=lambda delay, _cancel: waits.append(delay) or False,
-        log=lambda _: None,
     )
 
     assert isinstance(result, AttemptExhausted)
@@ -602,7 +709,7 @@ def test_rejected_resume_allows_only_one_clean_fallback_call(tmp_path: Path) -> 
     assert not transfer_staging_target(request).exists()
 
 
-# Observer, logging, or wait failures cannot invent attempts or strand resumable
+# Observer or wait failures cannot invent attempts or strand resumable
 # data without a continuation owner.
 def test_start_observer_failure_does_not_count_or_call_adapter(tmp_path: Path) -> None:
     """An observer failure before dispatch cannot manufacture a transport attempt."""
@@ -620,14 +727,13 @@ def test_start_observer_failure_does_not_count_or_call_adapter(tmp_path: Path) -
             settings=_settings(),
             max_attempts=2,
             attempt_start_observer=fail_start,
-            log=lambda _: None,
         )
 
     assert backend.calls == 0
     assert not transfer_staging_target(request).exists()
 
 
-@pytest.mark.parametrize("failure_point", ["retry_observer", "log", "wait"])
+@pytest.mark.parametrize("failure_point", ["retry_observer", "event_sink", "wait"])
 def test_retry_side_effect_failure_discards_unowned_resume_authority(
     tmp_path: Path,
     failure_point: str,
@@ -646,6 +752,13 @@ def test_retry_side_effect_failure_discards_unowned_resume_authority(
 
         return raise_failure
 
+    class FailingRetryEventSink:
+        def emit(self, event: DownloadEvent, /) -> None:
+            if failure_point == "event_sink" and isinstance(
+                event, DownloadRetryScheduled
+            ):
+                raise RuntimeError("event_sink failed")
+
     with pytest.raises(RuntimeError, match=f"{failure_point} failed"):
         coordinate_transfer_attempts(
             request,
@@ -654,7 +767,7 @@ def test_retry_side_effect_failure_discards_unowned_resume_authority(
             settings=_settings(resume=True),
             max_attempts=2,
             retry_observer=fail("retry_observer"),
-            log=fail("log"),
+            event_sink=FailingRetryEventSink(),
             wait=fail("wait"),
         )
 

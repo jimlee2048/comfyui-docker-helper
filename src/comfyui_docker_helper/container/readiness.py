@@ -64,7 +64,6 @@ class ReadinessProbeResult:
     """One HTTP readiness probe result."""
 
     ready: bool
-    reason: str = ""
 
 
 def probe_comfyui_readiness(
@@ -84,39 +83,22 @@ def probe_comfyui_readiness(
     )
     try:
         response = http_get(url, timeout=timeout)
-    except httpx.HTTPError as error:
-        return ReadinessProbeResult(
-            ready=False,
-            reason=f"readiness probe request failed: {error}",
-        )
+    except httpx.HTTPError:
+        return ReadinessProbeResult(ready=False)
 
     if response.status_code != 200:
-        return ReadinessProbeResult(
-            ready=False,
-            reason=f"readiness probe returned HTTP {response.status_code}",
-        )
+        return ReadinessProbeResult(ready=False)
 
     try:
         payload = response.json()
     except ValueError:
-        return ReadinessProbeResult(
-            ready=False,
-            reason="readiness probe returned invalid JSON",
-        )
+        return ReadinessProbeResult(ready=False)
 
     if not isinstance(payload, dict):
-        return ReadinessProbeResult(
-            ready=False,
-            reason="readiness probe JSON payload must be an object",
-        )
+        return ReadinessProbeResult(ready=False)
 
-    missing = [field for field in ("system", "devices") if field not in payload]
-    if missing:
-        names = ", ".join(missing)
-        return ReadinessProbeResult(
-            ready=False,
-            reason=f"readiness probe JSON payload is missing: {names}",
-        )
+    if "system" not in payload or "devices" not in payload:
+        return ReadinessProbeResult(ready=False)
 
     return ReadinessProbeResult(ready=True)
 
@@ -138,15 +120,11 @@ def wait_for_comfyui_readiness(
         raise ValueError("readiness poll interval must be positive")
 
     deadline = monotonic() + timeout_seconds
-    last_result = ReadinessProbeResult(ready=False, reason="not checked")
-
     while True:
         _raise_if_child_exited(child)
         result = probe(port)
         if result.ready:
             return result
-        last_result = result
-
         now = monotonic()
         if now >= deadline:
             raise ReadinessError(
@@ -154,9 +132,9 @@ def wait_for_comfyui_readiness(
                     Diagnostic(
                         path=("readiness",),
                         code="readiness.timeout",
-                        message=(
-                            "ComfyUI did not become ready before timeout: "
-                            f"{last_result.reason}"
+                        message="ComfyUI did not become ready before timeout",
+                        hint=(
+                            "Inspect ComfyUI startup output and verify its listen port"
                         ),
                     ),
                 )

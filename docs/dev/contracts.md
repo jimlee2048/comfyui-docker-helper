@@ -186,6 +186,14 @@ cdh verifies selected direct identities and their typed consumers and records th
 
 Accordingly, the contract is not an offline-build, byte-identical-build, complete software-bill-of-materials, artifact-attestation, deterministic opaque-code, or production-health guarantee. The final manifest observes accepted outcomes; it must never feed resolution or retroactively promote an observed value into a replay identity.
 
+## CLI observation and stream ownership
+
+Workflow, progress, and lifecycle presentation that crosses an event boundary uses immutable typed facts. A producer owns the truthful phase, item, outcome, and approved dynamic identity; the receiving Host, helper, download, or Runtime event presenter owns detail filtering, stream selection, terminal form, and wording. An event renderer must not become a business-state authority, and a detail setting must not reconstruct fields from raw configuration, arbitrary exceptions, provider payloads, or command arguments. Dynamic fields that cross this boundary are admitted by domain validators or fixed controlled categories and are rendered control-safely. Explicit command results, direct diagnostics, and Typer output retain their established owners rather than being routed through this event boundary.
+
+Quiet suppresses informational cdh presentation, not explicit command results, warnings, expected diagnostics, or controlled failures. Stdout and stderr are independent capabilities and ownership domains: cdh may use transient terminal presentation only on a destination that admits it, while a non-terminal destination receives flushed plain text. Presentation teardown or delivery failure must not replace an existing business failure or prevent owned cleanup.
+
+BuildKit output is a library-yielded line stream rather than a byte-preserving child stream. The Host stops transient preparation before the first yielded line, removes trailing newline characters supplied by the library, and writes each message to stdout with one newline, without a cdh prefix, style, or detail filter. An inherited child stream instead remains producer-owned byte output on its established channel; cdh does not parse, prefix, restyle, or sanitize ComfyUI, hook, SSH, or other child bytes. Neither boundary permits cdh-owned diagnostics to copy arbitrary subprocess arguments, URLs, exception text, source locators, or Secret values; adapters and domain producers must instead project controlled facts.
+
 ## Runtime, transfer, and process boundaries
 
 The [runtime and lifecycle guide](../user/runtime.md) owns deployment instructions, supported overrides, file outcomes, and operator-visible timing. This section defines the cross-module ownership rules that implementations must preserve.
@@ -215,6 +223,8 @@ An old-generation stop-hook failure prevents successor admission after exact own
 [`runtime_logging.py`](../../src/comfyui_docker_helper/container/runtime_logging.py) owns a controller-lifetime byte-preserving tee for stdout and stderr. It writes each stream to the saved original container descriptor before publishing it to live followers, so the original descriptors and the deployment logging backend remain the primary log authority. The broker and its pipe drains do not end at a generation boundary: a released hook or SSH descendant may retain a standard-output descriptor and continue producing unattributed output, as it could through ordinary container logs.
 
 Followers receive only bytes published after subscription, with no replay, persistence, generation attribution, or runtime-state coupling. Each follower has bounded independent buffering and may be disconnected when it falls behind; no follower may backpressure primary output or change lifecycle policy. Failure of a primary drain is instead controller-fatal: it wakes the sole runtime owner, triggers exact managed cleanup, and ends cdh nonzero rather than silently discarding authoritative output.
+
+Runtime semantic presentation lives inside the same broker lifetime and writes complete plain lines to its owned stderr. The main lifecycle emits directly on its serial owner. Genuine background download and SSH producers only offer typed facts to one controller-scoped delivery owner; offering is bounded and non-blocking, progress is coalesced by private scope, and informational saturation becomes one controlled aggregate after recovery. Controlled warning categories retain their existence under bounded pressure. Presentation or delivery failure remains secondary to lifecycle cleanup and primary-output authority, and all producer owners quiesce before delivery and the broker close.
 
 ### Transfer policy, mechanism, and state have different owners
 

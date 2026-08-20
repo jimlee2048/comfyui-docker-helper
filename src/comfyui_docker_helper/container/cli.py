@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from comfyui_docker_helper.cli_settings import HELP_CONTEXT_SETTINGS
+from comfyui_docker_helper.cli_settings import (
+    HELP_CONTEXT_SETTINGS,
+    require_output_settings,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 if TYPE_CHECKING:
@@ -28,6 +31,10 @@ if sys.platform == "linux":
     )
     from comfyui_docker_helper.container.download_files import download_files
     from comfyui_docker_helper.container.final_manifest import emit_final_manifest
+    from comfyui_docker_helper.container.presentation import (
+        default_container_download_invocation,
+        default_container_helper_display,
+    )
     from comfyui_docker_helper.container.runners import (
         ContainerCommandError,
         ContainerRuntime,
@@ -67,6 +74,7 @@ app.add_typer(runtime_app)
 @app.callback()
 def container(ctx: typer.Context) -> None:
     """Run container-side helper commands."""
+    ctx.obj = require_output_settings(ctx)
     if (
         sys.platform != "linux"
         and ctx.invoked_subcommand is not None
@@ -77,6 +85,7 @@ def container(ctx: typer.Context) -> None:
 
 @app.command("download-files", context_settings=HELP_CONTEXT_SETTINGS)
 def download_files_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -87,11 +96,14 @@ def download_files_command(
 ) -> None:
     """Download files declared by the canonical BuildPlan."""
     files, comfyui_root = _admission(build_plan_digest).file_downloads()
-    download_files(files, comfyui_root)
+    settings = require_output_settings(ctx)
+    with default_container_download_invocation(settings) as invocation:
+        download_files(files, comfyui_root, event_sink=invocation)
 
 
 @app.command("install-comfyui", context_settings=HELP_CONTEXT_SETTINGS)
 def install_comfyui_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -106,16 +118,20 @@ def install_comfyui_command(
 ) -> None:
     """Install exact official ComfyUI and its complete requirements."""
     application, toolchain = _admission(build_plan_digest).comfyui_install()
+    runtime = ContainerRuntime.from_env()
+    display = default_container_helper_display(require_output_settings(ctx))
     install_comfyui(
         application,
         toolchain,
-        runtime=ContainerRuntime.from_env(),
+        runtime=runtime,
         constraints_path=constraints,
+        event_sink=display,
     )
 
 
 @app.command("install-custom-nodes", context_settings=HELP_CONTEXT_SETTINGS)
 def install_custom_nodes_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -137,18 +153,22 @@ def install_custom_nodes_command(
 ) -> None:
     """Install the exact ordered Registry and direct-Git custom nodes."""
     custom_nodes, application = _admission(build_plan_digest).custom_node_install()
+    runtime = ContainerRuntime.from_env()
+    display = default_container_helper_display(require_output_settings(ctx))
     install_custom_nodes(
         custom_nodes,
         application,
-        runtime=ContainerRuntime.from_env(),
+        runtime=runtime,
         constraints_path=constraints,
         build_hooks_directory=build_hooks_directory,
         build_plan_digest=build_plan_digest,
+        event_sink=display,
     )
 
 
 @app.command("emit-final-manifest", context_settings=HELP_CONTEXT_SETTINGS)
 def emit_final_manifest_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -159,14 +179,16 @@ def emit_final_manifest_command(
 ) -> None:
     """Verify final image state and emit its observational manifest."""
     projection = _admission(build_plan_digest).final_manifest()
-    emit_final_manifest(projection, runtime=ContainerRuntime.from_env())
+    runtime = ContainerRuntime.from_env()
+    display = default_container_helper_display(require_output_settings(ctx))
+    emit_final_manifest(projection, runtime=runtime, event_sink=display)
 
 
 @runtime_app.command("serve", context_settings=HELP_CONTEXT_SETTINGS)
-def runtime_serve_command() -> None:
+def runtime_serve_command(ctx: typer.Context) -> None:
     """Run the managed ComfyUI container runtime."""
     _require_linux_container()
-    raise typer.Exit(code=run_runtime_serve())
+    raise typer.Exit(code=run_runtime_serve(require_output_settings(ctx)))
 
 
 @runtime_app.command("restart", context_settings=HELP_CONTEXT_SETTINGS)

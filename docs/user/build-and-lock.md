@@ -16,6 +16,22 @@ cdh validates the file type and lexical path shape it observes while reading loc
 
 ## Validate, render, and build
 
+### Output detail and streams
+
+Output detail is selected at the root of the command and therefore appears before `host`:
+
+```bash
+cdh -q host render -f cdh.toml -o .cdh/build/current
+cdh -v host render -f cdh.toml -o .cdh/build/current
+cdh -vv host render -f cdh.toml -o .cdh/build/current
+```
+
+Normal output shows the minimum useful state. `-q/--quiet` hides cdh-owned informational progress and success summaries; `-v/--verbose` shows additional operational detail, and `-vv` adds debug detail. Quiet and verbose cannot be combined. Required data such as a dry-run plan, warnings, and errors remains visible under quiet.
+
+cdh treats stdout and stderr independently. Successful results and explicit data use stdout; preparation phases, warnings, and errors use stderr. On a capable terminal, render and build preparation may update one transient phase display. Redirected or non-interactive output uses plain, append-only lines without terminal controls, including a line when each major phase begins so a long preparation remains observable. Verbose output adds subphase and duration information. Work without a meaningful byte total, such as local context preparation, is shown through state changes rather than an invented percentage.
+
+Successful validation summarizes the ordered configuration layers when stdout is an interactive terminal; ordinary non-interactive validation remains silent, while verbose mode requests the plain summary. A successful render reports the context and lock result on stdout. cdh clears any transient build-preparation display before BuildKit output begins. BuildKit output remains unprefixed on stdout and is not hidden by quiet; redirect stdout when it needs to be captured. A successful build then prints its cdh result on stdout.
+
 Validate configuration before resolving or building anything:
 
 ```bash

@@ -21,6 +21,8 @@ type RuntimeRestartTicketState = Literal[
 ]
 type RuntimeRestartSubmissionDisposition = Literal["submitted", "busy"]
 
+_RUNTIME_OUTPUT_FAILURE_MESSAGE = "Runtime primary output is unavailable."
+
 
 class RuntimeControllerError(RuntimeError):
     """An invalid internal controller transition."""
@@ -360,10 +362,11 @@ class RuntimeController:
 
     def observe_runtime_failure(self, message: str) -> None:
         """Latch the first controller-fatal runtime failure and wake the owner."""
+        del message
         with self._lock:
             if self._runtime_failure is not None:
                 return
-            self._runtime_failure = message
+            self._runtime_failure = _RUNTIME_OUTPUT_FAILURE_MESSAGE
             self._restart_wakeup.set()
 
     def runtime_failure_message(self) -> str | None:

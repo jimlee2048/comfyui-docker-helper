@@ -11,6 +11,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
+from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE,
@@ -31,6 +32,14 @@ from comfyui_docker_helper.container.runners import (
     ContainerCommandError,
     ContainerRuntime,
     start_argv,
+)
+from comfyui_docker_helper.container.runtime_event_delivery import (
+    safe_runtime_event_sink,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeEvent,
+    RuntimeHookCompleted,
+    RuntimeHookStarted,
 )
 
 BAKED_RUNTIME_HOOKS_PATH = Path("/opt/cdh/runtime/hooks")
@@ -169,12 +178,12 @@ def discover_runtime_hooks(
             root_entries = tuple(
                 sorted(hook_root.root.iterdir(), key=lambda item: item.name)
             )
-        except OSError as error:
+        except OSError:
             diagnostics.append(
                 Diagnostic(
                     path=("hooks", hook_root.source),
                     code="runtime_hook.root_read_failed",
-                    message=f"runtime hook root could not be read: {error}",
+                    message="runtime hook root could not be read",
                 )
             )
             continue
@@ -254,7 +263,6 @@ def run_runtime_startup_hooks(
     *,
     runtime: ContainerRuntime,
     env: Mapping[str, str] | None = None,
-    log: Callable[[str], object] = print,
     runner: RuntimeHookProcessRunner = start_argv,
     cancel_requested: CancelRequested = lambda: False,
     termination_grace_seconds: float = STOP_HOOK_TERMINATION_GRACE_SECONDS,
@@ -262,8 +270,10 @@ def run_runtime_startup_hooks(
     monotonic: Monotonic = time.monotonic,
     sleep: Sleep = time.sleep,
     process_group_signaler: ProcessGroupSignaler | None = None,
+    event_sink: EventSink[RuntimeEvent],
 ) -> tuple[RuntimeHookResult, ...]:
     """Run startup hooks with shutdown cancellation and process-group cleanup."""
+    event_sink = safe_runtime_event_sink(event_sink)
     _validate_hook_process_bounds(
         termination_grace_seconds=termination_grace_seconds,
         poll_interval_seconds=poll_interval_seconds,
@@ -271,12 +281,13 @@ def run_runtime_startup_hooks(
     hook_env = runtime.env(env)
     results: list[RuntimeHookResult] = []
 
-    for hook in plan.for_phase(phase):
+    phase_hooks = plan.for_phase(phase)
+    total = len(phase_hooks)
+    for index, hook in enumerate(phase_hooks, start=1):
         _raise_if_hook_cancelled(hook, cancel_requested)
         argv = _hook_argv(hook, runtime)
-        log(
-            "Running runtime hook "
-            f"source={hook.source} phase={hook.phase} filename={hook.filename}"
+        event_sink.emit(
+            RuntimeHookStarted(index, total, hook.phase, hook.source, hook.filename)
         )
         try:
             process = runner(
@@ -306,7 +317,7 @@ def run_runtime_startup_hooks(
                     Diagnostic(
                         path=_hook_path(hook),
                         code="runtime_hook.execution_failed",
-                        message=str(error),
+                        message="runtime hook could not be started",
                     ),
                 )
             ) from error
@@ -317,13 +328,13 @@ def run_runtime_startup_hooks(
                     Diagnostic(
                         path=_hook_path(hook),
                         code="runtime_hook.execution_failed",
-                        message=(
-                            "runtime hook failed with exit code "
-                            f"{returncode}: {_format_hook_argv(argv)}"
-                        ),
+                        message=(f"runtime hook failed with exit code {returncode}"),
                     ),
                 )
             )
+        event_sink.emit(
+            RuntimeHookCompleted(index, total, hook.phase, hook.source, hook.filename)
+        )
         results.append(
             RuntimeHookResult(
                 hook=hook,
@@ -340,7 +351,6 @@ def run_runtime_stop_hooks(
     *,
     runtime: ContainerRuntime,
     env: Mapping[str, str] | None = None,
-    log: Callable[[str], object] = print,
     runner: RuntimeHookProcessRunner = start_argv,
     cancel_requested: CancelRequested = lambda: False,
     deadline: float | None = None,
@@ -349,8 +359,10 @@ def run_runtime_stop_hooks(
     monotonic: Monotonic = time.monotonic,
     sleep: Sleep = time.sleep,
     process_group_signaler: ProcessGroupSignaler | None = None,
+    event_sink: EventSink[RuntimeEvent],
 ) -> tuple[RuntimeHookResult, ...]:
     """Run stop hooks within the lifecycle owner's absolute deadline."""
+    event_sink = safe_runtime_event_sink(event_sink)
     _validate_hook_process_bounds(
         termination_grace_seconds=termination_grace_seconds,
         poll_interval_seconds=poll_interval_seconds,
@@ -358,14 +370,15 @@ def run_runtime_stop_hooks(
     hook_env = runtime.env(env)
     results: list[RuntimeHookResult] = []
 
-    for hook in plan.for_phase("stop"):
+    phase_hooks = plan.for_phase("stop")
+    total = len(phase_hooks)
+    for index, hook in enumerate(phase_hooks, start=1):
         if deadline is not None and monotonic() >= deadline:
             break
         _raise_if_stop_cancelled(hook, cancel_requested)
         argv = _hook_argv(hook, runtime)
-        log(
-            "Running runtime hook "
-            f"source={hook.source} phase={hook.phase} filename={hook.filename}"
+        event_sink.emit(
+            RuntimeHookStarted(index, total, hook.phase, hook.source, hook.filename)
         )
         try:
             process = runner(
@@ -396,7 +409,7 @@ def run_runtime_stop_hooks(
                     Diagnostic(
                         path=_hook_path(hook),
                         code="runtime_hook.execution_failed",
-                        message=str(error),
+                        message="runtime hook could not be started",
                     ),
                 )
             ) from error
@@ -407,13 +420,13 @@ def run_runtime_stop_hooks(
                     Diagnostic(
                         path=_hook_path(hook),
                         code="runtime_hook.execution_failed",
-                        message=(
-                            "runtime hook failed with exit code "
-                            f"{returncode}: {_format_hook_argv(argv)}"
-                        ),
+                        message=(f"runtime hook failed with exit code {returncode}"),
                     ),
                 )
             )
+        event_sink.emit(
+            RuntimeHookCompleted(index, total, hook.phase, hook.source, hook.filename)
+        )
         results.append(
             RuntimeHookResult(
                 hook=hook,
@@ -435,12 +448,12 @@ def _discover_phase_hooks(
     hooks: list[RuntimeHook] = []
     try:
         entries = tuple(sorted(phase_dir.iterdir(), key=lambda item: item.name))
-    except OSError as error:
+    except OSError:
         diagnostics.append(
             Diagnostic(
                 path=("hooks", hook_root.source, phase),
                 code="runtime_hook.phase_read_failed",
-                message=f"runtime hook phase directory could not be read: {error}",
+                message="runtime hook phase directory could not be read",
             )
         )
         return ()
@@ -492,12 +505,12 @@ def _root_entry_mode(
 ) -> int | None:
     try:
         return path.lstat().st_mode
-    except OSError as error:
+    except OSError:
         diagnostics.append(
             Diagnostic(
                 path=("hooks", hook_root.source, path.name),
                 code="runtime_hook.inspect_failed",
-                message=f"runtime hook entry could not be inspected: {error}",
+                message="runtime hook entry could not be inspected",
             )
         )
         return None
@@ -506,11 +519,11 @@ def _root_entry_mode(
 def _validate_root(hook_root: RuntimeHookRoot) -> Diagnostic | None:
     try:
         mode = hook_root.root.lstat().st_mode
-    except OSError as error:
+    except OSError:
         return Diagnostic(
             path=("hooks", hook_root.source),
             code="runtime_hook.root_inspect_failed",
-            message=f"runtime hook root could not be inspected: {error}",
+            message="runtime hook root could not be inspected",
         )
     if not stat.S_ISDIR(mode):
         return Diagnostic(
@@ -530,12 +543,12 @@ def _inspect_hook_file(
     diagnostic_path = ("hooks", hook_root.source, phase, path.name)
     try:
         mode = path.lstat().st_mode
-    except OSError as error:
+    except OSError:
         diagnostics.append(
             Diagnostic(
                 path=diagnostic_path,
                 code="runtime_hook.inspect_failed",
-                message=f"runtime hook file could not be inspected: {error}",
+                message="runtime hook file could not be inspected",
             )
         )
         return None
@@ -706,7 +719,7 @@ def _request_force_hook_process_group(
                     code="runtime_hook.termination_failed",
                     message=(
                         "runtime hook process group could not be signaled with "
-                        f"{error.sig.name}: {error.error}"
+                        f"{error.sig.name}"
                     ),
                 ),
             ),
@@ -751,7 +764,7 @@ def _terminate_hook_process_group(
                     code="runtime_hook.termination_failed",
                     message=(
                         "runtime hook process group could not be signaled with "
-                        f"{error.sig.name}: {error.error}"
+                        f"{error.sig.name}"
                     ),
                 ),
             ),
@@ -817,7 +830,3 @@ def _root_exists(path: Path) -> bool:
 
 def _hook_path(hook: RuntimeHook) -> tuple[str, str, str, str]:
     return ("hooks", hook.source, hook.phase, hook.filename)
-
-
-def _format_hook_argv(argv: Sequence[str | os.PathLike[str]]) -> str:
-    return " ".join(os.fspath(argument) for argument in argv)

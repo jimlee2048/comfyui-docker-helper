@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from collections.abc import Callable
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
+from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container.process_control import (
     DirectProcess,
@@ -16,11 +16,19 @@ from comfyui_docker_helper.container.process_control import (
     request_terminate_direct_process,
     terminate_direct_process_until,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
-from comfyui_docker_helper.container.runtime_diagnostics import runtime_error_reason
+from comfyui_docker_helper.container.runtime_event_delivery import (
+    RuntimeBackgroundEventSink,
+    safe_runtime_event_sink,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeEvent,
+    RuntimeSshWarning,
+    RuntimeSshWarningKind,
+)
 from comfyui_docker_helper.container.ssh import (
     SshdProcess,
     SshdStartupError,
+    SshPreparationWarningKind,
     start_sshd_if_enabled,
 )
 from comfyui_docker_helper.errors import ApplicationError
@@ -36,9 +44,8 @@ class RuntimeSshStarter(Protocol):
         self,
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
-        log: Callable[[str], object],
         preparation_process_observer: Callable[[DirectProcess | None], None],
+        preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> SshdProcess | None: ...
 
 
@@ -94,20 +101,22 @@ class RuntimeSshService:
         self,
         config: RuntimeConfig,
         *,
-        runtime: ContainerRuntime,
+        background_event_sink: RuntimeBackgroundEventSink,
+        event_sink: EventSink[RuntimeEvent],
         starter: RuntimeSshStarter = start_sshd_if_enabled,
-        log: Callable[[str], object] = print,
     ) -> None:
         self._config = config
-        self._runtime = runtime
         self._starter = starter
-        self._log = log
+        self._background_event_sink = background_event_sink
+        self._event_sink = safe_runtime_event_sink(event_sink)
+        self._reported_direct_warnings: set[RuntimeSshWarningKind] = set()
         self._handle: SshdProcess | None = None
         self._shutdown_requested = threading.Event()
         self._startup_thread: threading.Thread | None = None
         self._startup_process: DirectProcess | None = None
         self._startup_lock = threading.Lock()
         self._handle_reaped = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
 
     def start(
         self,
@@ -120,6 +129,7 @@ class RuntimeSshService:
             return
         result: list[SshdProcess | None] = []
         errors: list[BaseException] = []
+        preparation_warnings: list[SshPreparationWarningKind] = []
 
         def observe_preparation_process(process: DirectProcess | None) -> None:
             with self._startup_lock:
@@ -128,20 +138,17 @@ class RuntimeSshService:
             if process is not None and cancellation_requested:
                 try:
                     request_terminate_direct_process(process)
-                except Exception as error:
-                    print(
-                        "WARNING: SSH startup terminate failed: "
-                        f"reason={runtime_error_reason(error)}",
-                        file=sys.stderr,
+                except Exception:
+                    self._emit_background_warning(
+                        RuntimeSshWarningKind.STARTUP_TERMINATION_FAILED,
                     )
 
         def start() -> None:
             try:
                 handle = self._starter(
                     self._config,
-                    runtime=self._runtime,
-                    log=self._log,
                     preparation_process_observer=observe_preparation_process,
+                    preparation_warning_observer=preparation_warnings.append,
                 )
                 result.append(handle)
             except BaseException as error:
@@ -179,6 +186,8 @@ class RuntimeSshService:
                     thread.join(timeout=delay)
             else:
                 thread.join(timeout=SSHD_STOP_POLL_INTERVAL_SECONDS)
+        for warning in preparation_warnings:
+            self._emit_direct_warning(RuntimeSshWarningKind(warning.value))
         if cancel_requested():
             if result and result[0] is not None:
                 self._handle = result[0]
@@ -193,7 +202,7 @@ class RuntimeSshService:
             error = errors[0]
             if isinstance(error, (SshdStartupError, ApplicationError)):
                 raise RuntimeSshServiceError(
-                    f"SSH runtime service failed to start: {error}"
+                    "SSH runtime service failed to start"
                 ) from error
             raise error
         if len(result) != 1:
@@ -210,6 +219,16 @@ class RuntimeSshService:
                 f"SSH runtime service exited before ComfyUI: {returncode}"
             )
 
+    def startup_outcome(
+        self,
+    ) -> Literal["disabled", "enabled-without-credentials", "ready"]:
+        """Return the controlled outcome after successful startup validation."""
+        if not self._config.system.ssh.enable:
+            return "disabled"
+        if self._handle is None:
+            return "enabled-without-credentials"
+        return "ready"
+
     def monitor_after_comfyui_start(self) -> None:
         """Report unexpected sshd exit without changing ComfyUI ownership."""
         if self._handle is None:
@@ -219,30 +238,29 @@ class RuntimeSshService:
             assert self._handle is not None
             try:
                 returncode = self._handle.wait()
-            except Exception as error:
+            except Exception:
                 if self._shutdown_requested.is_set():
                     return
-                print(
-                    "WARNING: SSH runtime service monitor failed: "
-                    f"reason={runtime_error_reason(error)}",
-                    file=sys.stderr,
+                self._emit_background_warning(
+                    RuntimeSshWarningKind.MONITOR_FAILED,
                 )
                 return
-            else:
-                self._handle_reaped.set()
             if self._shutdown_requested.is_set():
+                self._handle_reaped.set()
                 return
-            print(
-                "WARNING: SSH runtime service exited unexpectedly: "
-                f"returncode={returncode}",
-                file=sys.stderr,
+            self._emit_background_warning(
+                RuntimeSshWarningKind.EXITED_UNEXPECTEDLY,
+                returncode=returncode,
             )
+            self._handle_reaped.set()
 
-        threading.Thread(
+        thread = threading.Thread(
             target=wait_for_exit,
             name="cdh-sshd-monitor",
             daemon=True,
-        ).start()
+        )
+        self._monitor_thread = thread
+        thread.start()
 
     def stop(
         self,
@@ -254,6 +272,7 @@ class RuntimeSshService:
         sleep: Callable[[float], object] = time.sleep,
     ) -> bool:
         """Terminate, bound, and reap the owned sshd child."""
+        deadline = monotonic() + timeout
         stopped = stop_runtime_ssh_service(
             self._handle,
             cancel_requested=cancel_requested,
@@ -262,11 +281,15 @@ class RuntimeSshService:
             poll_interval=poll_interval,
             monotonic=monotonic,
             sleep=sleep,
-            log=self._log,
+            warning_observer=self._emit_direct_warning,
         )
         if stopped:
             self._handle_reaped.set()
-        return stopped
+        monitor_stopped = self._wait_for_monitor(
+            deadline=deadline,
+            monotonic=monotonic,
+        )
+        return stopped and monitor_stopped
 
     def request_stop(self) -> None:
         """Promptly start cooperative cancellation without waiting."""
@@ -275,15 +298,10 @@ class RuntimeSshService:
         handle = self._handle
         if handle is None or handle.poll() is not None:
             return
-        self._log("SSH runtime service stop requested")
         try:
             request_terminate_direct_process(handle)
-        except Exception as error:
-            print(
-                "WARNING: SSH runtime service terminate failed: "
-                f"reason={runtime_error_reason(error)}",
-                file=sys.stderr,
-            )
+        except Exception:
+            self._emit_direct_warning(RuntimeSshWarningKind.SERVICE_TERMINATION_FAILED)
 
     def is_stopped(self) -> bool:
         """Reap and report all owned startup and sshd operations."""
@@ -294,21 +312,17 @@ class RuntimeSshService:
                 return False
         handle = self._handle
         if handle is None:
-            return True
+            return self._monitor_is_stopped()
         if self._handle_reaped.is_set():
-            return True
+            return self._monitor_is_stopped()
         try:
             terminal = reap_process_terminal(handle)
-        except Exception as error:
-            print(
-                "WARNING: SSH runtime service reap failed: "
-                f"reason={runtime_error_reason(error)}",
-                file=sys.stderr,
-            )
+        except Exception:
+            self._emit_direct_warning(RuntimeSshWarningKind.SERVICE_REAP_FAILED)
             return False
         if terminal is not None:
             self._handle_reaped.set()
-            return True
+            return self._monitor_is_stopped()
         return False
 
     def request_force_stop(self) -> None:
@@ -329,12 +343,43 @@ class RuntimeSshService:
                 request_force_direct_process(process)
             else:
                 request_terminate_direct_process(process)
-        except Exception as error:
-            print(
-                "WARNING: SSH startup process signal failed: "
-                f"reason={runtime_error_reason(error)}",
-                file=sys.stderr,
+        except Exception:
+            self._emit_direct_warning(
+                RuntimeSshWarningKind.STARTUP_PROCESS_SIGNAL_FAILED
             )
+
+    def _monitor_is_stopped(self) -> bool:
+        monitor = self._monitor_thread
+        if monitor is None:
+            return True
+        monitor.join(timeout=0.0)
+        return not monitor.is_alive()
+
+    def _wait_for_monitor(
+        self,
+        *,
+        deadline: float,
+        monotonic: Callable[[], float],
+    ) -> bool:
+        monitor = self._monitor_thread
+        if monitor is None:
+            return True
+        monitor.join(timeout=max(0.0, deadline - monotonic()))
+        return not monitor.is_alive()
+
+    def _emit_background_warning(
+        self,
+        kind: RuntimeSshWarningKind,
+        *,
+        returncode: int | None = None,
+    ) -> None:
+        self._background_event_sink.emit(RuntimeSshWarning(kind, returncode))
+
+    def _emit_direct_warning(self, kind: RuntimeSshWarningKind) -> None:
+        if kind in self._reported_direct_warnings:
+            return
+        self._reported_direct_warnings.add(kind)
+        self._event_sink.emit(RuntimeSshWarning(kind))
 
 
 def stop_runtime_ssh_service(
@@ -346,25 +391,20 @@ def stop_runtime_ssh_service(
     poll_interval: float = SSHD_STOP_POLL_INTERVAL_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
-    log: Callable[[str], object] = print,
+    warning_observer: Callable[[RuntimeSshWarningKind], object],
 ) -> bool:
     """Terminate, bound, and reap one cdh-owned sshd child."""
     if handle is None:
         return True
     try:
         terminal = reap_process_terminal(handle)
-    except Exception as error:
-        print(
-            "WARNING: SSH runtime service reap failed: "
-            f"reason={runtime_error_reason(error)}",
-            file=sys.stderr,
-        )
+    except Exception:
+        warning_observer(RuntimeSshWarningKind.SERVICE_REAP_FAILED)
         return False
     if terminal is not None:
         return True
 
     shutdown_requested.set()
-    log("SSH runtime service stop requested")
     try:
         result = terminate_direct_process_until(
             handle,
@@ -374,18 +414,10 @@ def stop_runtime_ssh_service(
             monotonic=monotonic,
             sleep=sleep,
         )
-    except Exception as error:
-        print(
-            "WARNING: SSH runtime service shutdown failed: "
-            f"reason={runtime_error_reason(error)}",
-            file=sys.stderr,
-        )
+    except Exception:
+        warning_observer(RuntimeSshWarningKind.SERVICE_SHUTDOWN_FAILED)
         return False
     if result.forced:
-        print(
-            "WARNING: SSH runtime service required force termination",
-            file=sys.stderr,
-        )
+        warning_observer(RuntimeSshWarningKind.FORCE_TERMINATION_REQUIRED)
         return False
-    log("SSH runtime service stopped")
     return True

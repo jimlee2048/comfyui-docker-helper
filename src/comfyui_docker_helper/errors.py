@@ -5,6 +5,8 @@ from typing import Any
 import typer
 from typer.core import TyperGroup
 
+from comfyui_docker_helper.cli_output.text import control_safe_text
+
 
 class ApplicationError(Exception):
     """A user-facing failure raised by application services or commands."""
@@ -23,5 +25,5 @@ class ApplicationGroup(TyperGroup):
         try:
             return super().invoke(ctx)
         except ApplicationError as error:
-            typer.echo(f"Error: {error}", err=True)
+            typer.echo(f"Error: {control_safe_text(str(error))}", err=True)
             raise typer.Exit(code=error.exit_code) from error

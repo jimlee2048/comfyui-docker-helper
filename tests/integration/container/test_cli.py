@@ -1,18 +1,47 @@
 """Linux image-helper CLI execution contracts."""
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rich.text import Text
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
+from comfyui_docker_helper.cli_output import CliOutputSettings, OutputDetail
 from comfyui_docker_helper.config.build_plan import HttpFilePlan, build_plan_digest
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
+from comfyui_docker_helper.container.download_events import (
+    DownloadAttemptStarted,
+    DownloadBackendName,
+    DownloadBatchCompleted,
+    DownloadFinalVerificationCompleted,
+    DownloadFinalVerificationStarted,
+    DownloadItemCompleted,
+    DownloadItemStarted,
+    DownloadItemStatus,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
+)
+from comfyui_docker_helper.container.helper_events import (
+    ComfyUIInstallCompleted,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    CustomNodesInstallCompleted,
+    RegistryCustomNodeStarted,
+)
+from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.transfer_core import DownloadFilesError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
 )
@@ -26,6 +55,65 @@ from tests.build_plan_support import (
 
 def _plain_output(output: str) -> str:
     return Text.from_ansi(output).plain
+
+
+def _materialized_download_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    plan = build_plan(final_config(), accepted_resolution())
+    context = tmp_path / "download-context"
+    context.mkdir(mode=0o700)
+    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
+    monkeypatch.setattr(
+        container_cli,
+        "MATERIALIZED_BUILD_PLAN_PATH",
+        context / "build-plan.json",
+    )
+    return plan
+
+
+def _emit_download_success(event_sink, *, retry: bool = False) -> None:
+    event_sink.emit(
+        DownloadItemStarted(
+            index=1,
+            total=1,
+            target="models/checkpoints/model.safetensors",
+            backend=DownloadBackendName.HTTPX,
+            max_attempts=3,
+            checksum_expected=True,
+        )
+    )
+    event_sink.emit(DownloadAttemptStarted(1))
+    if retry:
+        event_sink.emit(
+            DownloadRetryScheduled(
+                failed_attempt=1,
+                next_attempt=2,
+                delay_seconds=1,
+                reason=DownloadRetryReason.TEMPORARY_SERVER,
+                http_status=503,
+            )
+        )
+        event_sink.emit(DownloadAttemptStarted(2))
+    event_sink.emit(DownloadVerificationStarted())
+    event_sink.emit(DownloadVerificationCompleted())
+    event_sink.emit(DownloadPlacementStarted())
+    event_sink.emit(DownloadPlacementCompleted())
+    event_sink.emit(
+        DownloadItemCompleted(
+            status=DownloadItemStatus.DOWNLOADED,
+            observed_bytes=1024,
+            checksum_verified=True,
+        )
+    )
+    event_sink.emit(DownloadFinalVerificationStarted(item_count=1, checksum_count=1))
+    event_sink.emit(DownloadFinalVerificationCompleted())
+    event_sink.emit(DownloadBatchCompleted(item_count=1, checksum_verified_count=1))
+
+
+def _emit_comfyui_success(event_sink) -> None:
+    phase = ContainerHelperPhase.COMFYUI_SOURCE_CHECKOUT
+    event_sink.emit(ContainerHelperPhaseStarted(phase))
+    event_sink.emit(ContainerHelperPhaseCompleted(phase))
+    event_sink.emit(ComfyUIInstallCompleted())
 
 
 @pytest.mark.parametrize(
@@ -120,7 +208,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
     monkeypatch.setattr(
         container_cli,
         "download_files",
-        lambda files, root: observed.append((files, root)),
+        lambda files, root, *, event_sink: observed.append((files, root)),
     )
     monkeypatch.setattr(
         container_cli,
@@ -202,6 +290,155 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
     )
 
 
+def test_install_comfyui_constructs_display_after_admission_and_runtime(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wire one admitted invocation to a display after runtime validation."""
+    plan = build_plan(final_config(), accepted_resolution())
+    expected_runtime = ContainerRuntime(
+        workspace=Path(plan.application.paths.workspace),
+        comfyui_path=Path(plan.application.paths.comfyui),
+        virtual_env=Path(plan.application.paths.venv),
+    )
+    display = SimpleNamespace(emit=lambda _event: None)
+    order: list[str] = []
+
+    class Admission:
+        def comfyui_install(self):
+            order.append("projection")
+            return plan.application, plan.toolchain
+
+    def admit(_digest: str) -> Admission:
+        order.append("admission")
+        return Admission()
+
+    def runtime_from_env() -> ContainerRuntime:
+        order.append("runtime")
+        return expected_runtime
+
+    def display_factory(_settings):
+        order.append("display")
+        return display
+
+    def install(application, toolchain, *, runtime, event_sink, **_kwargs) -> None:
+        order.append("service")
+        assert application is plan.application
+        assert toolchain is plan.toolchain
+        assert runtime is expected_runtime
+        assert event_sink is display
+
+    monkeypatch.setattr(container_cli, "_admission", admit)
+    monkeypatch.setattr(container_cli.ContainerRuntime, "from_env", runtime_from_env)
+    monkeypatch.setattr(
+        container_cli,
+        "default_container_helper_display",
+        display_factory,
+    )
+    monkeypatch.setattr(container_cli, "install_comfyui", install)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "install-comfyui",
+            "--build-plan-digest",
+            "sha256:" + "a" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert order == ["admission", "projection", "runtime", "display", "service"]
+
+
+def test_install_comfyui_cli_renders_normal_and_suppresses_quiet_lifecycle(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_install(_application, _toolchain, *, event_sink, **_kwargs) -> None:
+        _emit_comfyui_success(event_sink)
+
+    monkeypatch.setattr(container_cli, "install_comfyui", fake_install)
+    monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
+    monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
+    monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
+    command = [
+        "container",
+        "install-comfyui",
+        "--build-plan-digest",
+        build_plan_digest(plan),
+    ]
+
+    normal = cli_runner.invoke(app, command)
+    quiet = cli_runner.invoke(app, ["--quiet", *command])
+
+    assert normal.exit_code == 0, normal.output
+    assert normal.stdout == ""
+    assert "Checking out ComfyUI source" in normal.stderr
+    assert "ComfyUI installation complete" in normal.stderr
+    assert quiet.exit_code == 0, quiet.output
+    assert quiet.stdout == ""
+    assert quiet.stderr == ""
+
+
+def test_install_custom_nodes_detail_controls_do_not_own_child_streams(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_install(_custom_nodes, _application, *, event_sink, **_kwargs) -> None:
+        print("manager-child-stdout")
+        print("manager-child-stderr", file=sys.stderr)
+        event_sink.emit(
+            RegistryCustomNodeStarted(
+                index=1,
+                total=1,
+                id="example-node",
+                version="1.0.0",
+                pre_hook_count=1,
+                post_hook_count=2,
+            )
+        )
+        phase = ContainerHelperPhase.CUSTOM_NODE_INSTALLATION
+        event_sink.emit(ContainerHelperPhaseStarted(phase))
+        event_sink.emit(ContainerHelperPhaseCompleted(phase))
+        event_sink.emit(CustomNodesInstallCompleted(node_count=1))
+
+    monkeypatch.setattr(container_cli, "install_custom_nodes", fake_install)
+    monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
+    monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
+    monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
+
+    command = [
+        "container",
+        "install-custom-nodes",
+        "--build-plan-digest",
+        build_plan_digest(plan),
+    ]
+    result = cli_runner.invoke(app, ["-v", *command])
+    quiet = cli_runner.invoke(app, ["--quiet", *command])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "manager-child-stdout\n"
+    assert "manager-child-stderr" in result.stderr.splitlines()
+    assert "[1/1] Custom node: example-node 1.0.0" in result.stderr
+    assert "pre-install hooks=1" in result.stderr
+    assert "post-install hooks=2" in result.stderr
+    assert "Custom-node installation complete: 1 node" in result.stderr
+    assert quiet.exit_code == 0, quiet.output
+    assert quiet.stdout == "manager-child-stdout\n"
+    assert "manager-child-stderr" in quiet.stderr.splitlines()
+    assert "example-node" not in quiet.stderr
+    assert "Installing the custom node" not in quiet.stderr
+    assert "Phase complete" not in quiet.stderr
+    assert "Custom-node installation complete" not in quiet.stderr
+
+
 def test_download_files_executes_authenticated_plan_with_custom_root(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -255,6 +492,124 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
     assert target.read_bytes() == b"authenticated-plan"
 
 
+def test_download_files_cli_renders_normal_and_suppresses_quiet_lifecycle(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_download(_files, _root, *, event_sink) -> None:
+        _emit_download_success(event_sink)
+
+    monkeypatch.setattr(container_cli, "download_files", fake_download)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+    quiet = cli_runner.invoke(
+        app,
+        [
+            "--quiet",
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Required file: models/checkpoints/model.safetensors" in result.stderr
+    assert "Attempt [1/3] started" in result.stderr
+    assert "Verifying downloaded bytes" in result.stderr
+    assert "Placing required file" in result.stderr
+    assert "Downloads complete: 1 required file" in result.stderr
+    assert "backend=" not in result.stderr
+    assert quiet.exit_code == 0
+    assert quiet.stdout == ""
+    assert quiet.stderr == ""
+
+
+def test_download_files_cli_verbose_retry_is_human_oriented(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_download(_files, _root, *, event_sink) -> None:
+        _emit_download_success(event_sink, retry=True)
+
+    monkeypatch.setattr(container_cli, "download_files", fake_download)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "-v",
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "[1/3] failed; retrying as [2/3] in 1s" in result.stderr
+    assert "server is temporarily unavailable" in result.stderr
+    assert "backend=" not in result.stderr
+    assert "http_status=" not in result.stderr
+
+
+def test_download_files_cli_controlled_failure_stops_without_success(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fail_download(_files, _root, *, event_sink) -> None:
+        event_sink.emit(
+            DownloadItemStarted(
+                index=1,
+                total=1,
+                target="models/checkpoints/model.safetensors",
+                backend=DownloadBackendName.HTTPX,
+                max_attempts=3,
+                checksum_expected=True,
+            )
+        )
+        event_sink.emit(DownloadAttemptStarted(1))
+        raise DownloadFilesError(
+            "required download failed for models/checkpoints/model.safetensors"
+        )
+
+    monkeypatch.setattr(container_cli, "download_files", fail_download)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Error: required download failed" in result.stderr
+    assert "Downloads complete" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_container_plan_admission_hides_invalid_plan_secret_values(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -270,6 +625,13 @@ def test_container_plan_admission_hides_invalid_plan_secret_values(
     document["runtime"]["ssh"]["password"] = f"{sentinel}\n"
     plan_path.write_text(json.dumps(document))
     monkeypatch.setattr(container_cli, "MATERIALIZED_BUILD_PLAN_PATH", plan_path)
+    monkeypatch.setattr(
+        container_cli,
+        "default_container_download_invocation",
+        lambda *_args, **_kwargs: pytest.fail(
+            "presentation must not start before BuildPlan admission"
+        ),
+    )
 
     result = cli_runner.invoke(
         app,
@@ -322,10 +684,10 @@ def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep the serve command wired to the runtime lifecycle service."""
-    calls: list[str] = []
+    calls: list[CliOutputSettings] = []
 
-    def fake_run_runtime_serve() -> int:
-        calls.append("serve")
+    def fake_run_runtime_serve(settings: CliOutputSettings) -> int:
+        calls.append(settings)
         return 17
 
     monkeypatch.setattr(
@@ -333,10 +695,10 @@ def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
         "run_runtime_serve",
         fake_run_runtime_serve,
     )
-    result = cli_runner.invoke(app, ["container", "runtime", "serve"])
+    result = cli_runner.invoke(app, ["-vv", "container", "runtime", "serve"])
 
     assert result.exit_code == 17
-    assert calls == ["serve"]
+    assert calls == [CliOutputSettings(detail=OutputDetail.DEBUG)]
 
 
 def test_container_runtime_restart_waits_without_detach_options(
@@ -352,6 +714,10 @@ def test_container_runtime_restart_waits_without_detach_options(
     monkeypatch.setattr(container_cli, "restart_runtime", fake_restart_runtime)
 
     result = cli_runner.invoke(app, ["container", "runtime", "restart"])
+    quiet = cli_runner.invoke(
+        app,
+        ["--quiet", "container", "runtime", "restart"],
+    )
     help_result = cli_runner.invoke(
         app,
         ["container", "runtime", "restart", "--help"],
@@ -362,7 +728,10 @@ def test_container_runtime_restart_waits_without_detach_options(
     assert "restart" in output
     assert "completed" in output
     assert "op-7" in output
-    assert calls == ["restart"]
+    assert quiet.exit_code == 0
+    assert quiet.stdout == result.stdout
+    assert quiet.stderr == result.stderr == ""
+    assert calls == ["restart", "restart"]
     help_output = _plain_output(help_result.output)
     assert "Restart the managed ComfyUI runtime." in help_output
     assert "generation" not in help_output
@@ -379,19 +748,26 @@ def test_container_runtime_follow_is_output_only(
 
     def fake_follow_runtime() -> int:
         calls.append("follow")
+        sys.stdout.write("runtime-stdout\n")
+        sys.stderr.write("runtime-stderr\n")
         return 129
 
     monkeypatch.setattr(container_cli, "follow_runtime", fake_follow_runtime)
 
-    result = cli_runner.invoke(app, ["container", "runtime", "follow"])
+    normal = cli_runner.invoke(app, ["container", "runtime", "follow"])
+    quiet = cli_runner.invoke(
+        app,
+        ["--quiet", "container", "runtime", "follow"],
+    )
     help_result = cli_runner.invoke(
         app,
         ["container", "runtime", "follow", "--help"],
     )
 
-    assert result.exit_code == 129
-    assert result.output == ""
-    assert calls == ["follow"]
+    assert normal.exit_code == quiet.exit_code == 129
+    assert normal.stdout == quiet.stdout == "runtime-stdout\n"
+    assert normal.stderr == quiet.stderr == "runtime-stderr\n"
+    assert calls == ["follow", "follow"]
     plain_help = _plain_output(help_result.output)
     assert "live stdout and stderr" in plain_help
     assert "--detach" not in plain_help
@@ -425,8 +801,12 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
         args.append("--json")
 
     result = cli_runner.invoke(app, args)
+    quiet = cli_runner.invoke(app, ["--quiet", *args])
 
     assert result.exit_code == 0
+    assert quiet.exit_code == 0
+    assert quiet.stdout == result.stdout
+    assert quiet.stderr == result.stderr == ""
     if json_output:
         assert json.loads(result.output) == {
             "state": "running",

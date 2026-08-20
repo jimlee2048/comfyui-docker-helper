@@ -99,8 +99,8 @@ def test_run_argv_uses_cwd_env_and_inherited_output(
     )
 
     captured = capfd.readouterr()
-    assert "stdout-ok" in captured.out
-    assert "stderr-ok" in captured.err
+    assert captured.out == "stdout-ok\n"
+    assert captured.err == "stderr-ok\n"
     assert output.read_text(encoding="utf-8") == f"{tmp_path}|/workspace/ComfyUI"
 
 
@@ -193,28 +193,117 @@ def test_run_argv_rejects_empty_argv(tmp_path: Path) -> None:
         run_argv([], cwd=tmp_path, env={}, description="empty")
 
 
-def test_run_argv_reports_nonzero_exit(tmp_path: Path) -> None:
-    """Nonzero subprocess return codes are fatal."""
-    with pytest.raises(ContainerCommandError, match="failed with exit code 7") as error:
+@pytest.mark.parametrize(("returncode", "exit_code"), [(7, 7), (-15, 1)])
+def test_run_argv_reports_only_controlled_nonzero_exit_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    exit_code: int,
+) -> None:
+    """Preserve exit semantics without exposing arbitrary command arguments."""
+    sensitive_argument = (
+        "https://user:credential-sentinel@example.invalid/repository"
+        "\n\x1b[31mcontrol-sentinel"
+    )
+    executable = tmp_path / "private-executable-sentinel"
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, returncode)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ContainerCommandError) as raised:
         run_argv(
-            [sys.executable, "-c", "raise SystemExit(7)"],
+            [executable, sensitive_argument],
             cwd=tmp_path,
             env={},
-            description="failing command",
+            description="controlled command",
         )
 
-    assert error.value.exit_code == 7
+    message = str(raised.value)
+    assert "controlled command" in message
+    assert f"exit code {returncode}" in message
+    assert raised.value.exit_code == exit_code
+    assert str(executable) not in message
+    assert "credential-sentinel" not in message
+    assert "control-sentinel" not in message
+    assert "\n" not in message
+    assert "\x1b" not in message
 
 
-def test_run_argv_reports_missing_executable(tmp_path: Path) -> None:
-    """Missing executables become user-facing helper errors."""
-    with pytest.raises(ContainerCommandError, match="executable not found"):
+def test_run_argv_hides_missing_executable_details_but_retains_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep missing-executable details in the chain, not user-facing text."""
+    executable = tmp_path / "private-executable-sentinel"
+    failure = FileNotFoundError(
+        errno.ENOENT,
+        "credential-sentinel\n\x1b[31mcontrol-sentinel",
+        str(executable),
+    )
+
+    def fake_run(_command: list[str], **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ContainerCommandError) as raised:
         run_argv(
-            [str(tmp_path / "missing-executable")],
+            [executable],
             cwd=tmp_path,
             env={},
-            description="missing",
+            description="controlled command",
         )
+
+    message = str(raised.value)
+    assert "controlled command" in message
+    assert "failed to start" in message
+    assert raised.value.__cause__ is failure
+    assert "credential-sentinel" not in message
+    assert "control-sentinel" not in message
+    assert str(executable) not in message
+    assert "\n" not in message
+    assert "\x1b" not in message
+
+
+def test_start_argv_hides_missing_executable_details_but_retains_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply the safe missing-executable contract in the separate runner."""
+    executable = tmp_path / "private-executable-sentinel"
+    failure = FileNotFoundError(
+        errno.ENOENT,
+        "credential-sentinel\n\x1b[31mcontrol-sentinel",
+        str(executable),
+    )
+
+    def fake_popen(_command: list[str], **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    with pytest.raises(ContainerCommandError) as raised:
+        start_argv(
+            [executable],
+            cwd=tmp_path,
+            env={},
+            description="controlled command",
+        )
+
+    message = str(raised.value)
+    assert "controlled command" in message
+    assert "failed to start" in message
+    assert raised.value.__cause__ is failure
+    assert "credential-sentinel" not in message
+    assert "control-sentinel" not in message
+    assert str(executable) not in message
+    assert "\n" not in message
+    assert "\x1b" not in message
 
 
 # Hook execution binds the locked bytes to an immutable inherited descriptor.

@@ -29,6 +29,14 @@ from comfyui_docker_helper.host.buildx import (
     BuildxOutputPlan,
     FileSecretBinding,
 )
+from comfyui_docker_helper.host.events import (
+    HostPhase,
+    HostPhaseCompleted,
+    HostPhaseStarted,
+    HostSubphase,
+    HostSubphaseCompleted,
+    HostSubphaseStarted,
+)
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.host.secret_session import (
     GIT_CREDENTIAL_SESSION_ENV,
@@ -48,10 +56,6 @@ from tests.build_plan_support import (
 
 def _plain_output(output: str) -> str:
     return Text.from_ansi(output).plain
-
-
-def _diagnostic_path(path: Path) -> str:
-    return str(path).replace("\\", "\\\\")
 
 
 def _write_minimal_config(path: Path) -> None:
@@ -150,6 +154,36 @@ def _prepared_build() -> SimpleNamespace:
     )
 
 
+def _complete_stubbed_preparation(kwargs: dict[str, object]) -> None:
+    """Honor the render-service observer contract in successful CLI stubs."""
+    event_sink = kwargs["event_sink"]
+    options = kwargs["options"]
+    event_sink.emit(HostPhaseCompleted(HostPhase.BUILD_INPUT_RESOLUTION))
+    event_sink.emit(HostPhaseStarted(HostPhase.LOCK_RECONCILIATION))
+    event_sink.emit(HostSubphaseStarted(HostSubphase.CANONICAL_IDENTITY_RECONCILIATION))
+    event_sink.emit(
+        HostSubphaseCompleted(HostSubphase.CANONICAL_IDENTITY_RECONCILIATION)
+    )
+    event_sink.emit(HostPhaseCompleted(HostPhase.LOCK_RECONCILIATION))
+    event_sink.emit(HostPhaseStarted(HostPhase.BUILD_PLAN_PREPARATION))
+    if not options.dry_run:
+        event_sink.emit(HostPhaseCompleted(HostPhase.BUILD_PLAN_PREPARATION))
+        event_sink.emit(HostPhaseStarted(HostPhase.CONTEXT_RENDER_CHECK))
+
+
+def _prepared_build_with_events(*_args, **kwargs) -> SimpleNamespace:
+    _complete_stubbed_preparation(kwargs)
+    return _prepared_build()
+
+
+def _prepared_render_with_events(*_args, **kwargs) -> SimpleNamespace:
+    _complete_stubbed_preparation(kwargs)
+    return SimpleNamespace(
+        lock_result=accepted_resolution(),
+        warnings=(),
+    )
+
+
 def _credential_build_plan(*, downloader: bool = False):
     plan = build_plan(final_config(), accepted_resolution())
     updates = {
@@ -230,9 +264,48 @@ def test_version_option_reports_installed_distribution_version(
 ) -> None:
     """Expose the installed package version at the root command."""
     result = cli_runner.invoke(app, ["--version"])
+    quiet = cli_runner.invoke(app, ["--quiet", "--version"])
 
     assert result.exit_code == 0
     assert result.output == f"cdh {version('comfyui-docker-helper')}\n"
+    assert quiet.exit_code == 0
+    assert quiet.stdout == result.stdout
+    assert quiet.stderr == result.stderr == ""
+
+
+def test_root_help_owns_output_detail_options_once(cli_runner: CliRunner) -> None:
+    root = _plain_output(cli_runner.invoke(app, ["--help"]).output)
+    host = _plain_output(cli_runner.invoke(app, ["host", "--help"]).output)
+    leaf = _plain_output(cli_runner.invoke(app, ["host", "validate", "--help"]).output)
+
+    assert root.count("--quiet") == 1
+    assert root.count("--verbose") == 1
+    assert "Show additional operational detail; repeat for debug" in root
+    assert "--quiet" not in host
+    assert "--verbose" not in host
+    assert "--quiet" not in leaf
+    assert "--verbose" not in leaf
+
+
+def test_quiet_and_verbose_fail_as_root_parameter_conflict(
+    cli_runner: CliRunner,
+) -> None:
+    result = cli_runner.invoke(app, ["--quiet", "--verbose", "host", "validate"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    output = _plain_output(result.stderr)
+    assert "Usage: cdh" in output
+    assert "--quiet" in output
+    assert "--verbose" in output
+    assert "used together" in output
+
+
+def test_output_detail_options_are_root_only(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(app, ["host", "validate", "--quiet"])
+
+    assert result.exit_code == 2
+    assert "No such option" in _plain_output(result.stderr)
 
 
 def test_root_command_exposes_current_groups() -> None:
@@ -576,8 +649,9 @@ def test_relative_build_hook_root_is_resolved_from_invocation_directory(
             canonical_wheel=object(),
         )
 
-    def prepare(_output_dir, *, build_hook_source_root, **_kwargs):
+    def prepare(_output_dir, *, build_hook_source_root, **kwargs):
         observed.append(build_hook_source_root)
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(lock_result=accepted_resolution(), warnings=())
 
     monkeypatch.chdir(invocation)
@@ -604,8 +678,9 @@ def test_relative_build_hook_root_is_resolved_from_invocation_directory(
     )
 
     assert result.exit_code == 0
-    assert result.stdout == ""
-    assert result.stderr == ""
+    assert result.stdout == "Build context rendered: context (lock unchanged)\n"
+    assert "In progress: Validating configuration" in result.stderr
+    assert "In progress: Resolving build inputs" in result.stderr
     assert observed == [(invocation / "build-hooks").resolve()]
 
 
@@ -690,14 +765,14 @@ def test_host_validate_renders_both_sources_for_layered_requirement_conflict(
     assert "package demo has conflicting requirements" in output
     assert "python.conflicting_package_requirement" not in output
     assert "Earlier:" in output and "Later:" in output
-    assert _diagnostic_path(base) in output.replace("\n", "")
-    assert _diagnostic_path(override) in output.replace("\n", "")
+    assert str(base) in output.replace("\n", "")
+    assert str(override) in output.replace("\n", "")
     assert "Value: demo>=1,<2" in output
     assert "Value: Demo>=2,<3" in output
     assert "\x1b" not in result.stderr
 
 
-def test_host_validate_warns_for_redundant_default_os_package(
+def test_quiet_host_validate_preserves_redundant_default_os_package_warning(
     cli_runner: CliRunner,
     tmp_path: Path,
 ) -> None:
@@ -708,15 +783,16 @@ def test_host_validate_warns_for_redundant_default_os_package(
 
     result = cli_runner.invoke(
         app,
-        ["host", "validate", "-f", str(config)],
+        ["--quiet", "host", "validate", "-f", str(config)],
     )
     output = _plain_output(result.stderr)
 
     assert result.exit_code == 0
     assert result.stdout == ""
-    assert output.count("bash is already installed by cdh and is ignored") == 1
+    assert output.count("already installed") == 1
+    assert "bash" in output
     assert "Field: system.extra_packages.0" in output
-    assert _diagnostic_path(config) in output.replace("\n", "")
+    assert str(config) in output.replace("\n", "")
 
 
 def test_host_validate_displays_http_credential_warning_offline(
@@ -926,6 +1002,8 @@ def test_cli_tags_use_shared_static_validation_before_provider_construction(
     assert result.stdout == ""
     plain = _plain_output(result.stderr)
     assert "Usage: cdh host build" in plain
+    assert "Failed: Resolving build inputs" in plain
+    assert "Failed: Validating configuration" not in plain
     assert expected_message in " ".join(plain.replace("│", " ").split())
     assert "build.invalid_tag_expression" not in plain
 
@@ -989,6 +1067,7 @@ def test_dry_run_renders_an_independent_buildx_output_section(
     def prepare(*args, **kwargs):
         del args
         assert tuple(kwargs["tag_templates"]) == tag_templates
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=plan,
             lock_result=resolution,
@@ -1015,7 +1094,9 @@ def test_dry_run_renders_an_independent_buildx_output_section(
 
     plain = _plain_output(result.stdout)
     assert result.exit_code == 0
-    assert result.stderr == ""
+    assert "In progress: Validating configuration" in result.stderr
+    assert "In progress: Resolving build inputs" in result.stderr
+    assert "Rendering or checking build context" not in result.stderr
     buildx_index = plain.index("Buildx output")
     assert plain.index("Custom nodes:") < buildx_index
     buildx_section = plain[buildx_index:]
@@ -1032,6 +1113,167 @@ def test_dry_run_renders_an_independent_buildx_output_section(
         assert mode_index < output_index < tags_index
         assert tags_index < first_tag_index < second_tag_index
         assert "None" not in buildx_section
+
+
+def test_quiet_render_suppresses_phases_and_optional_result(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(
+        host_cli,
+        "prepare_render_context",
+        _prepared_render_with_events,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "--quiet",
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == result.stderr == ""
+
+
+def test_render_preparation_interrupt_reports_the_current_phase(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+
+    def interrupt_during_lock_reconciliation(*_args, **kwargs) -> None:
+        event_sink = kwargs["event_sink"]
+        event_sink.emit(HostPhaseCompleted(HostPhase.BUILD_INPUT_RESOLUTION))
+        event_sink.emit(HostPhaseStarted(HostPhase.LOCK_RECONCILIATION))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        host_cli,
+        "prepare_render_context",
+        interrupt_during_lock_reconciliation,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    output = _plain_output(result.stderr)
+    assert result.exit_code == 130
+    assert result.stdout == ""
+    assert "Interrupted" in output
+    assert "lock" in output.lower()
+    assert "Build context rendered" not in output
+    assert "Traceback" not in result.output
+
+
+def test_verbose_render_shows_safe_coarse_provider_subphases(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(
+        host_cli, "prepare_render_context", _prepared_render_with_events
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "--verbose",
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Preparing the canonical cdh wheel" in result.stderr
+    assert "Reconciling canonical identities" in result.stderr
+
+
+def test_render_cleanup_failure_marks_the_retained_context_phase(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CleanupFailingSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            raise HostSecretSessionError("cleanup_failed")
+
+        def git_binding(self):
+            return None
+
+        def drain_warnings(self):
+            return ()
+
+    session = CleanupFailingSession()
+    monkeypatch.setattr(
+        HostSecretSession,
+        "from_configuration",
+        classmethod(lambda _cls, _result: session),
+    )
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(
+        host_cli, "prepare_render_context", _prepared_render_with_events
+    )
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "render",
+            "-f",
+            str(config),
+            "-o",
+            str(tmp_path / "context"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Failed: Rendering or checking build context" in result.stderr
+    assert "Error: Unable to access configured secrets" in result.stderr
+    assert "private Secret session could not be cleaned up" in result.stderr
 
 
 # Host render preserves input ownership while presenting planning warnings on stderr.
@@ -1056,6 +1298,7 @@ def test_render_passes_runtime_hook_inputs_and_presents_planning_warnings(
         seen["runtime_hooks_dir"] = kwargs["runtime_hooks_dir"]
         seen["configuration_result"] = kwargs["configuration_result"]
         seen["build_hook_source_root"] = kwargs["build_hook_source_root"]
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             lock_result=accepted_resolution(),
             warnings=(
@@ -1103,7 +1346,8 @@ def test_render_passes_runtime_hook_inputs_and_presents_planning_warnings(
     )
 
     assert result.exit_code == 0
-    assert result.stdout == ""
+    assert "Build context rendered:" in result.stdout
+    assert "(lock unchanged)" in result.stdout
     assert "ignored 1 ordinary top-level runtime hook entry" in result.stderr
     assert "runtime_hooks.ignored_top_level" not in result.stderr
     assert seen["runtime_hooks_dir"] == hooks
@@ -1127,6 +1371,7 @@ def test_render_materialization_error_is_one_short_diagnostic(
         )
 
     def fail_prepare(*args, **kwargs):
+        _complete_stubbed_preparation(kwargs)
         raise HostRenderServiceError(
             (
                 Diagnostic(
@@ -1162,6 +1407,7 @@ def test_render_materialization_error_is_one_short_diagnostic(
     assert "Error: Unable to render build context" in result.stderr
     assert "Field: render" in result.stderr
     assert "context could not be written" in result.stderr
+    assert "Failed: Rendering or checking build context" in result.stderr
 
 
 def test_build_overrides_flow_through_plan_and_buildx(
@@ -1170,6 +1416,11 @@ def test_build_overrides_flow_through_plan_and_buildx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, object] = {}
+    original_seal = host_cli.HostWorkflowDisplay.seal_for_external_stream
+
+    def seal_for_external_stream(display) -> None:
+        original_seal(display)
+        seen["workflow_sealed"] = True
 
     @contextmanager
     def providers():
@@ -1208,6 +1459,7 @@ platforms = ["linux/amd64"]
         seen["configuration_build"] = configuration.config.build
         seen["tag_templates"] = kwargs["tag_templates"]
         seen["output"] = kwargs["output_mode"]
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
@@ -1219,6 +1471,7 @@ platforms = ["linux/amd64"]
         )
 
     def buildx(**kwargs):
+        assert seen.get("workflow_sealed") is True
         kwargs["log"]("external-buildkit-\x1b[31msentinel\x1b[0m")
         seen["buildx_ssh"] = (
             kwargs["forward_default_ssh"],
@@ -1241,6 +1494,11 @@ platforms = ["linux/amd64"]
     )
     monkeypatch.setattr(
         "comfyui_docker_helper.host.cli.build_image_with_buildx", buildx
+    )
+    monkeypatch.setattr(
+        host_cli.HostWorkflowDisplay,
+        "seal_for_external_stream",
+        seal_for_external_stream,
     )
     hooks = tmp_path / "hooks"
     context = tmp_path / "context"
@@ -1268,12 +1526,13 @@ platforms = ["linux/amd64"]
     )
 
     assert result.exit_code == 0
-    assert result.stderr == ""
+    assert "In progress: Validating configuration" in result.stderr
+    assert "In progress: Resolving build inputs" in result.stderr
+    assert "Starting image build" in result.stderr
     plain_stdout = _plain_output(result.stdout)
-    assert (
-        plain_stdout.index("Starting image build")
-        < plain_stdout.index("external-buildkit-sentinel")
-        < plain_stdout.index("Image build complete")
+    assert "Starting image build" not in plain_stdout
+    assert plain_stdout.index("external-buildkit-sentinel") < plain_stdout.index(
+        "Image build complete"
     )
     assert "external-buildkit-\x1b[31msentinel\x1b[0m" in result.stdout
     before_external, _, after_external = result.stdout.partition("external-buildkit-")
@@ -1295,6 +1554,105 @@ platforms = ["linux/amd64"]
         "cache_to": "type=gha,scope=build",
     }
     assert seen["buildx_ssh"] == (False, ())
+
+
+def test_quiet_build_preserves_raw_buildkit_without_cdh_framing(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(
+        host_cli,
+        "prepare_render_context",
+        _prepared_build_with_events,
+    )
+
+    def buildx(**kwargs):
+        kwargs["log"]("external-buildkit-\x1b[31msentinel\x1b[0m")
+
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "--quiet",
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == "external-buildkit-\x1b[31msentinel\x1b[0m\n"
+    assert result.stderr == ""
+
+
+def test_build_cleanup_failure_preserves_buildkit_and_omits_completion(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CleanupFailingSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            raise HostSecretSessionError("cleanup_failed")
+
+        def git_binding(self):
+            return None
+
+        def drain_warnings(self):
+            return ()
+
+    session = CleanupFailingSession()
+    monkeypatch.setattr(
+        HostSecretSession,
+        "from_configuration",
+        classmethod(lambda _cls, _result: session),
+    )
+    monkeypatch.setattr(
+        host_cli, "default_planning_providers", _stub_planning_providers
+    )
+    monkeypatch.setattr(host_cli, "prepare_render_context", _prepared_build_with_events)
+
+    def buildx(**kwargs):
+        kwargs["log"]("external-buildkit-cleanup-sentinel")
+
+    monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "host",
+            "build",
+            "-f",
+            str(config),
+            "--context-dir",
+            str(tmp_path / "context"),
+            "--tag",
+            "example:test",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "external-buildkit-cleanup-sentinel" in result.stdout
+    assert "Image build complete" not in result.stdout
+    assert "Error: Unable to access configured secrets" in result.stderr
+    assert "private Secret session could not be cleaned up" in result.stderr
+    assert "Failed:" not in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1372,7 +1730,8 @@ token = { secret = "root_token" }
             canonical_wheel=canonical_wheel(),
         )
 
-    def prepare(*_args, **_kwargs):
+    def prepare(*_args, **kwargs):
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=plan,
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
@@ -1414,11 +1773,10 @@ token = { secret = "root_token" }
     )
     assert result.exit_code == expected_exit_code
     plain_stdout = _plain_output(result.stdout)
-    assert plain_stdout.index("Starting image build") < plain_stdout.index(
-        "external-buildkit-sentinel"
-    )
+    assert "Starting image build" in result.stderr
+    assert "Starting image build" not in plain_stdout
+    assert "external-buildkit-sentinel" in plain_stdout
     if buildx_failure is None:
-        assert result.stderr == ""
         assert plain_stdout.index("external-buildkit-sentinel") < plain_stdout.index(
             "Image build complete"
         )
@@ -1481,7 +1839,8 @@ password = {{ secret = "team_token" }}
             canonical_wheel=canonical_wheel(),
         )
 
-    def prepare(*_args, **_kwargs):
+    def prepare(*_args, **kwargs):
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=plan,
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
@@ -1562,7 +1921,8 @@ downloader = "httpx"
             canonical_wheel=canonical_wheel(),
         )
 
-    def prepare(*_args, **_kwargs):
+    def prepare(*_args, **kwargs):
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=plan,
             output_plan=BuildxOutputPlan(tags=("example:test",), output="load"),
@@ -1628,13 +1988,18 @@ token = { secret = "unused_token" }
         )
 
     monkeypatch.setattr(host_cli, "default_planning_providers", providers)
+
+    def prepare(*_args, **kwargs):
+        _complete_stubbed_preparation(kwargs)
+        return SimpleNamespace(
+            warnings=(),
+            lock_result=SimpleNamespace(changed=False),
+        )
+
     monkeypatch.setattr(
         host_cli,
         "prepare_render_context",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            warnings=(),
-            lock_result=SimpleNamespace(changed=False),
-        ),
+        prepare,
     )
 
     result = cli_runner.invoke(
@@ -1805,6 +2170,7 @@ def test_build_cache_import_and_export_are_independent(
         del args
         assert kwargs["tag_templates"] == output_plan.tags
         assert kwargs["output_mode"] == output_plan.output
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
@@ -1859,7 +2225,8 @@ def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
     seen: dict[str, object] = {}
 
     def prepare(*args, **kwargs):
-        del args, kwargs
+        del args
+        _complete_stubbed_preparation(kwargs)
         return _prepared_build()
 
     def buildx(**kwargs):
@@ -1890,7 +2257,8 @@ def test_build_ssh_without_direct_git_warns_once_and_passes_no_capability(
     )
     assert result.exit_code == 0
     assert result.stderr.count(warning) == 1
-    assert "Starting image build" in result.stdout
+    assert "Starting image build" in result.stderr
+    assert "Starting image build" not in result.stdout
     assert "Image build complete" in result.stdout
     assert seen["forward_default_ssh"] is False
     assert seen["file_secret_bindings"] == ()
@@ -1946,8 +2314,11 @@ def test_build_ssh_on_posix_requires_nonempty_agent_before_planning_providers(
     )
 
     assert result.exit_code == 2
-    assert "Invalid value for --ssh" in _plain_output(result.output)
-    assert "non-empty SSH_AUTH_SOCK" in _plain_output(result.output)
+    output = _plain_output(result.output)
+    assert "Invalid value for --ssh" in output
+    assert "non-empty SSH_AUTH_SOCK" in output
+    assert "Failed: Resolving build inputs" in output
+    assert "Failed: Validating configuration" not in output
 
 
 def test_build_ssh_on_windows_delegates_default_agent_to_buildkit(
@@ -1965,9 +2336,7 @@ def test_build_ssh_on_windows_delegates_default_agent_to_buildkit(
     monkeypatch.setattr(
         host_cli, "default_planning_providers", _stub_planning_providers
     )
-    monkeypatch.setattr(
-        host_cli, "prepare_render_context", lambda *args, **kwargs: _prepared_build()
-    )
+    monkeypatch.setattr(host_cli, "prepare_render_context", _prepared_build_with_events)
     monkeypatch.setattr(host_cli, "build_image_with_buildx", buildx)
     monkeypatch.setattr(
         host_cli,
@@ -2014,8 +2383,9 @@ def test_build_ssh_forwards_agent_and_only_existing_default_trust_after_context(
         return original_exists(path)
 
     def prepare(*args, **kwargs):
-        del args, kwargs
+        del args
         assert checked_sources == []
+        _complete_stubbed_preparation(kwargs)
         return _prepared_build()
 
     def buildx(**kwargs):
@@ -2104,6 +2474,7 @@ def test_build_ssh_host_sources_enter_only_buildx_bindings(
             output_dir,
             canonical_wheel=canonical_wheel(),
         )
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(plan=plan, output_plan=output_plan, warnings=())
 
     def buildx(**kwargs):
@@ -2178,6 +2549,7 @@ platforms = ["linux/amd64"]
         assert kwargs["tag_templates"] == ("cli:test",)
         assert kwargs["output_mode"] == "load"
         output_plan = BuildxOutputPlan(tags=("cli:test",), output="load")
+        _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=SimpleNamespace(
                 toolchain=SimpleNamespace(platform="linux/amd64"),
@@ -2268,6 +2640,28 @@ def test_application_error_boundary(cli_runner: CliRunner) -> None:
     assert result.stdout == ""
     assert result.stderr == "Error: expected failure\n"
     assert result.output == "Error: expected failure\n"
+
+
+def test_application_error_boundary_escapes_terminal_controls(
+    cli_runner: CliRunner,
+) -> None:
+    probe_app = typer.Typer(cls=ApplicationGroup)
+
+    @probe_app.callback()
+    def probe() -> None:
+        """Keep the probe as a group so its custom group class is exercised."""
+
+    @probe_app.command()
+    def fail() -> None:
+        raise ApplicationError("expected\nforged\r\t\x1b\\suffix", exit_code=7)
+
+    result = cli_runner.invoke(probe_app, ["fail"])
+
+    assert result.exit_code == 7
+    assert result.stdout == ""
+    assert result.stderr == ("Error: expected\\nforged\\r\\t\\x1b\\\\suffix\n")
+    assert "\x1b" not in result.stderr
+    assert result.stderr.count("\n") == 1
 
 
 def test_application_error_requires_nonzero_exit_code() -> None:

@@ -48,6 +48,22 @@ Downloader credential route 则按 canonical `match` 合并：靠后等价 route
 
 环境变量覆盖和挂载的运行时输入属于部署时变更。它们不在固化镜像经过验证的重放边界之内。
 
+## 运行时输出详细度与输出流
+
+运行时详细度选项属于根命令，因此应写在 `container` 之前：
+
+```bash
+cdh -q container runtime COMMAND
+cdh -v container runtime COMMAND
+cdh -vv container runtime COMMAND
+```
+
+普通 `runtime serve` 输出是持久、纯文本的 stderr 日志；在相应阶段存在时，它会显示 generation 生命周期、运行时文件准备、Hook、SSH、ComfyUI 启动与 readiness，以及清理。即使 stderr 是终端，它仍保持纯文本，使容器日志稳定且按完整行记录。`-q/--quiet` 会抑制由 cdh 生成的信息性生命周期与进度行；`-v/--verbose` 增加安全的数量、耗时、mode 与受控原因，`-vv` 增加安全的调试分类。quiet 与 verbose 不能组合使用。warning 和受控 error 在 quiet 下仍会显示。
+
+运行时下载只标识安全 target 以及 item 和 attempt 位置。它会报告已传输字节；当同一字节域中的 total 可用时，还会报告百分比、速率和预计时间；total 未知时只显示字节信息，而不会虚构百分比。retry、stalled、resumed、ready 和 queue 结果都以持久文本行输出。后台下载与 SSH 报告采用有界、非阻塞传递；重复进度可以合并，如果信息性 presentation 饱和，cdh 会输出一条受控的聚合 warning。
+
+ComfyUI、Hook 与 SSH 子进程的 stdout 和 stderr 仍是原始子进程输出。cdh 不会给这些字节添加前缀、重新设置样式、过滤或脱敏。容器原始 stdout 与 stderr 仍是主要日志流。根级详细度选项同样不会改变 `runtime status` 必需的人类或 JSON 结果、`runtime restart` 的结果，或 `runtime follow` 传递的 stdout/stderr 字节。
+
 ## 运行时控制
 
 请对需要控制的容器运行以下命令：

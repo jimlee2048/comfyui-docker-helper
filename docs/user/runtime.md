@@ -48,6 +48,22 @@ The supported environment overrides are:
 
 Environment overrides and mounted runtime inputs are deployment-time changes. They are outside the baked image's verified replay boundary.
 
+## Runtime output detail and streams
+
+Runtime detail options belong to the root command and therefore precede `container`:
+
+```bash
+cdh -q container runtime COMMAND
+cdh -v container runtime COMMAND
+cdh -vv container runtime COMMAND
+```
+
+Normal `runtime serve` output is a durable plain stderr log, including generation lifecycle, runtime-file preparation, hooks, SSH, ComfyUI startup and readiness, and cleanup when those phases apply. It remains plain when stderr is a terminal so container logs are stable and line-oriented. `-q/--quiet` suppresses cdh-owned informational lifecycle and progress lines; `-v/--verbose` adds safe counts, durations, modes, and controlled reasons, while `-vv` adds safe debug categories. Quiet and verbose cannot be combined. Warnings and controlled errors remain visible under quiet.
+
+Runtime downloads identify only the safe target and its item and attempt position. They report transferred bytes and, when a total in the same byte domain is available, percentage, rate, and estimated time; an unknown total stays byte-based rather than inventing a percentage. Retry, stalled, resumed, ready, and queue outcomes are emitted as durable lines. Background download and SSH reporting is bounded and non-blocking; repeated progress may be coalesced, and cdh reports a controlled aggregate warning if informational presentation saturates.
+
+ComfyUI, hook, and SSH child stdout and stderr remain raw child output. cdh does not prefix, restyle, filter, or redact those bytes. The original container stdout and stderr remain the primary logging streams. Root detail options likewise do not change the required human or JSON result of `runtime status`, the result of `runtime restart`, or the stdout/stderr bytes delivered by `runtime follow`.
+
 ## Runtime control
 
 Run the following commands against the container you want to control:

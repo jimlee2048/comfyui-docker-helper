@@ -36,6 +36,7 @@ Host source admission observes user-selected local inputs under a cooperative-in
 
 | Component | Responsibility |
 | --- | --- |
+| [`cli_output/`](../../src/comfyui_docker_helper/cli_output/) | Presentation-neutral root detail settings, independent stream capability policy, control-safe text, and the minimal injected event-sink protocol. It contains no Host or Container renderer. |
 | [`config/`](../../src/comfyui_docker_helper/config/) | Strict public and runtime models, merge and validation, canonical request/lock/reconciliation models, BuildPlan construction, and final-manifest schemas. It owns shared decisions and serialized shapes, not concrete external I/O orchestration. |
 | [`host/`](../../src/comfyui_docker_helper/host/) | Operator CLI composition, provider acquisition, command-scoped Secret resolution and credential delivery, Docker-backed uv resolution, canonical-wheel construction, lock/context orchestration, publication choices, diagnostics, and Buildx invocation. It owns host filesystem, network, Git, Docker, and package-build effects. |
 | [`rendering/`](../../src/comfyui_docker_helper/rendering/) | Deterministic projection of one BuildPlan plus verified release/local inputs into a directly Buildx-usable context and Dockerfile. Rendering does not plan or resolve identities. |
@@ -43,7 +44,7 @@ Host source admission observes user-selected local inputs under a cooperative-in
 
 Package-level modules provide shared bounded helpers such as ComfyUI requirements parsing, PyTorch resolution rules, release artifacts, and exact project-owned identities. They support the four main components without creating another orchestration layer.
 
-The operator-facing `cdh host validate`, `render`, and `build` commands use a host-owned presentation boundary. Root help, usage, and parameter errors remain owned by Typer; image-internal `cdh container` commands retain simple plain execution and logging protocols. An explicitly exposed operator-facing live stream, currently BuildKit's unified stdout, remains outside host presentation, while captured provider and protocol output stays owned by its adapter. See the [CLI presentation rules](contributing.md#cli-presentation) for coding and testing guidance.
+The root CLI constructs one immutable output setting and independently detects the capabilities of the actual stdout and stderr destinations. Workflow, progress, and lifecycle producers that cross an event boundary emit typed semantic facts to Host- or Container-owned event presenters rather than importing Rich or formatting terminal strings. Explicit results and direct diagnostics retain their existing presenters, while root help, usage, and parameter errors remain Typer-owned. The Host event presenter may use terminal-aware Live output for one-shot preparation; Container helper presentation is durable plain text except for directly interactive download progress; Runtime presentation is always plain. BuildKit's library-yielded line stream and inherited child streams remain outside event presentation, while captured provider and protocol output stays adapter-owned. See the [CLI presentation rules](contributing.md#cli-presentation) for coding and testing guidance.
 
 ## Dependency direction
 
@@ -121,6 +122,6 @@ runtime stdout/stderr         -> controller log broker  -> original container ou
                                                      +-> bounded live followers
 ```
 
-The private control endpoint provides container-local restart and observation without transferring lifecycle ownership to the client. The controller-lifetime output broker preserves the original container stdout and stderr as primary logging authorities while fan-out supplies live-only followers across generation replacement.
+The private control endpoint provides container-local restart and observation without transferring lifecycle ownership to the client. The controller-lifetime output broker preserves the original container stdout and stderr as primary logging authorities while fan-out supplies live-only followers across generation replacement. Runtime presentation is constructed inside that broker lifetime: main-thread lifecycle facts render directly as serialized plain stderr lines, while download and SSH work that genuinely originates on background threads enters one controller-scoped bounded delivery owner. That owner coalesces progress, retains controlled warning categories under pressure, and closes before the broker restores the original descriptors; presentation pressure never becomes lifecycle backpressure.
 
 This runtime path consumes the generated remote-file runtime projection and deployment-time overrides rather than host configuration, local build-file inputs, the canonical lock, or reconciliation providers. See [Runtime and lifecycle](../user/runtime.md) for operational order and shutdown behavior, and [Cross-module contracts](contracts.md) for process-ownership and trust boundaries.

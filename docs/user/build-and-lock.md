@@ -16,6 +16,22 @@ cdh validates the file type and lexical path shape it observes while reading loc
 
 ## Validate, render, and build
 
+### Output detail and streams
+
+Output detail is selected at the root of the command and therefore appears before `host`:
+
+```bash
+cdh -q host render -f cdh.toml -o .cdh/build/current
+cdh -v host render -f cdh.toml -o .cdh/build/current
+cdh -vv host render -f cdh.toml -o .cdh/build/current
+```
+
+Normal output shows the minimum useful state. `-q/--quiet` hides cdh-owned informational progress and success summaries; `-v/--verbose` adds safe operational detail, and `-vv` adds safe debug detail. Quiet and verbose cannot be combined. Required data such as a dry-run plan, warnings, and errors remains visible under quiet.
+
+cdh treats stdout and stderr independently. Successful results and explicit data use stdout; preparation phases, warnings, and errors use stderr. On a capable terminal, render and build preparation may update one transient phase display. Redirected or non-interactive output uses flushed plain lines without terminal controls, including a line when each major phase begins so a long preparation remains observable. Verbose output adds safe subphase and duration information. Local hashing, copying, and context comparison report state and completion rather than an invented byte percentage.
+
+Successful validation summarizes the ordered configuration layers when stdout is an interactive terminal; ordinary non-interactive validation remains silent, while verbose mode requests the plain summary. A successful render reports the context and lock result on stdout. Build preparation stops its terminal display before the first line yielded by the BuildKit library. cdh writes each yielded message to stdout without adding a prefix, style, or detail filter, while normalizing its ending to one newline; this is a line stream rather than byte-preserving output. A successful build ends with a cdh result on stdout. Quiet does not suppress those BuildKit lines.
+
 Validate configuration before resolving or building anything:
 
 ```bash

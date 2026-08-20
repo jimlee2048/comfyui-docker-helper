@@ -934,7 +934,11 @@ def test_stale_cleanup_fsync_failure_retries_from_durable_absence(
         )
 
     assert [pending.digest for pending in first.cleanup_pending] == [digest]
-    assert "directory fsync failed" in first.cleanup_pending[0].reason
+    assert (
+        "download staging cleanup could not be made durable"
+        in first.cleanup_pending[0].reason
+    )
+    assert "directory fsync failed" not in first.cleanup_pending[0].reason
     assert first.state.downloads[digest].resume == entry.resume
     assert not staging.exists()
     assert not control.exists()
@@ -1305,7 +1309,7 @@ def test_skip_cleanup_failure_preserves_persisted_resume_state(
     with pytest.raises(
         PreservedTransferCleanupError,
         match="staging absence could not be made durable",
-    ):
+    ) as raised:
         process_runtime_file_downloads(
             RuntimeFilePlan(items=(item,)),
             config=_config(default="aria2", resume=True),
@@ -1314,6 +1318,10 @@ def test_skip_cleanup_failure_preserves_persisted_resume_state(
             log=lambda _: None,
         )
 
+    assert "fsync failed" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, DownloadFilesError)
+    assert isinstance(raised.value.__cause__.__cause__, OSError)
+    assert str(raised.value.__cause__.__cause__) == "fsync failed"
     assert observed == []
     assert backend.calls == []
     assert item.resume_authority == authority

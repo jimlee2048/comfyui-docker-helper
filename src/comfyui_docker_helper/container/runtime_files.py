@@ -921,7 +921,6 @@ def _download_runtime_file_with_policy(
         attempt_start_observer=observe_start,
         retry_observer=observe_retry,
         continuation_owner=True,
-        log=log,
     )
     if isinstance(result, AttemptSucceeded):
         return result.attempts, result.outcome

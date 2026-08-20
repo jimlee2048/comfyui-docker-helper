@@ -8,7 +8,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.url_validation import DownloaderName
+from comfyui_docker_helper.container.download_events import (
+    DownloadAttemptStarted,
+    DownloadEvent,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+)
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialError,
 )
@@ -19,7 +26,6 @@ from comfyui_docker_helper.container.transfer_core import (
     DownloadFilesError,
     FileTransferOutcome,
     FileTransferRequest,
-    Logger,
     ResumeAuthority,
     ResumeRejectedDownloadFilesError,
     StagingDisposition,
@@ -138,8 +144,8 @@ def coordinate_transfer_attempts(
     backend_call_admission: Callable[[TransportRequest], None] | None = None,
     attempt_start_observer: AttemptStartObserver | None = None,
     retry_observer: AttemptRetryObserver | None = None,
+    event_sink: EventSink[DownloadEvent] | None = None,
     continuation_owner: bool = False,
-    log: Logger = print,
 ) -> AttemptResult:
     """Run exactly one total transport-attempt budget for one desired file."""
     if max_attempts < 1:
@@ -179,17 +185,25 @@ def coordinate_transfer_attempts(
         next_attempt = attempts + 1
         clean_fallback_attempt = clean_fallback_pending
         clean_fallback_pending = False
+
+        def observe_attempt_start(attempt: int = next_attempt) -> None:
+            if attempt_start_observer is not None:
+                attempt_start_observer(attempt)
+            if event_sink is not None:
+                event_sink.emit(DownloadAttemptStarted(attempt))
+
         one_call = _OneCallBackend(
             backend,
             before_call=backend_call_admission,
-            on_call=(
-                (lambda attempt=next_attempt: attempt_start_observer(attempt))
-                if attempt_start_observer is not None
-                else None
-            ),
+            on_call=observe_attempt_start,
         )
         try:
-            outcome = transfer_file(admission, backend=one_call, settings=settings)
+            outcome = transfer_file(
+                admission,
+                backend=one_call,
+                settings=settings,
+                event_sink=event_sink,
+            )
         except DownloaderCredentialError as error:
             attempts += one_call.calls
             return AttemptLocalFailure(attempts=attempts, error=error)
@@ -207,7 +221,10 @@ def coordinate_transfer_attempts(
                 ) from error
             resume_authority = None
             allow_resume = False
-            exhausted = TransferDownloadFilesError(str(error))
+            exhausted = TransferDownloadFilesError(
+                str(error),
+                reason=DownloadRetryReason.RESUME_REJECTED,
+            )
             if attempts >= max_attempts:
                 return AttemptExhausted(
                     attempts=attempts,
@@ -215,6 +232,15 @@ def coordinate_transfer_attempts(
                 )
             if retry_observer is not None:
                 retry_observer(attempts, exhausted)
+            if event_sink is not None:
+                event_sink.emit(
+                    DownloadRetryScheduled(
+                        failed_attempt=attempts,
+                        next_attempt=attempts + 1,
+                        delay_seconds=0,
+                        reason=DownloadRetryReason.RESUME_REJECTED,
+                    )
+                )
             # The server rejected this exact continuation capability. The next
             # counted attempt starts clean immediately and resume stays disabled.
             clean_fallback_pending = True
@@ -249,11 +275,16 @@ def coordinate_transfer_attempts(
             try:
                 if retry_observer is not None:
                     retry_observer(attempts, error)
-                log(
-                    "Retrying file transport: "
-                    f"backend={backend_name} attempt={attempts}/{max_attempts} "
-                    f"delay={delay:g}s"
-                )
+                if event_sink is not None:
+                    event_sink.emit(
+                        DownloadRetryScheduled(
+                            failed_attempt=attempts,
+                            next_attempt=attempts + 1,
+                            delay_seconds=delay,
+                            reason=error.reason,
+                            http_status=error.http_status,
+                        )
+                    )
                 cancelled = cancellable_wait(delay, cancel_requested)
             except Exception:
                 if resume_authority is not None and not continuation_owner:

@@ -31,6 +31,9 @@ if sys.platform == "linux":
     )
     from comfyui_docker_helper.container.download_files import download_files
     from comfyui_docker_helper.container.final_manifest import emit_final_manifest
+    from comfyui_docker_helper.container.presentation import (
+        default_container_download_invocation,
+    )
     from comfyui_docker_helper.container.runners import (
         ContainerCommandError,
         ContainerRuntime,
@@ -81,6 +84,7 @@ def container(ctx: typer.Context) -> None:
 
 @app.command("download-files", context_settings=HELP_CONTEXT_SETTINGS)
 def download_files_command(
+    ctx: typer.Context,
     build_plan_digest: Annotated[
         str,
         typer.Option(
@@ -91,7 +95,9 @@ def download_files_command(
 ) -> None:
     """Download files declared by the canonical BuildPlan."""
     files, comfyui_root = _admission(build_plan_digest).file_downloads()
-    download_files(files, comfyui_root)
+    settings = require_output_settings(ctx)
+    with default_container_download_invocation(settings) as invocation:
+        download_files(files, comfyui_root, event_sink=invocation)
 
 
 @app.command("install-comfyui", context_settings=HELP_CONTEXT_SETTINGS)

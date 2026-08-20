@@ -16,6 +16,23 @@ from comfyui_docker_helper.config.build_plan import (
     HttpxPlan,
 )
 from comfyui_docker_helper.container import attempt_coordinator
+from comfyui_docker_helper.container.download_events import (
+    DownloadAttemptStarted,
+    DownloadBackendName,
+    DownloadBatchCompleted,
+    DownloadEvent,
+    DownloadFinalVerificationCompleted,
+    DownloadFinalVerificationStarted,
+    DownloadItemCompleted,
+    DownloadItemStarted,
+    DownloadItemStatus,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
+)
 from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
@@ -58,10 +75,23 @@ class RecordingBackend:
             output.write(b"downloaded")
         if self.fail_times:
             self.fail_times -= 1
-            return TransportRetryable(TransportDiagnostic("httpx", "network failed"))
+            return TransportRetryable(
+                TransportDiagnostic("httpx", "network failed"),
+                reason=DownloadRetryReason.NETWORK,
+            )
         return TransportSuccess(
             length=len(b"downloaded"), namespace="httpx", http_status=200
         )
+
+
+class RecordingEventSink:
+    """Record one serial build-download event stream."""
+
+    def __init__(self) -> None:
+        self.events: list[DownloadEvent] = []
+
+    def emit(self, event: DownloadEvent, /) -> None:
+        self.events.append(event)
 
 
 def _settings() -> DownloaderSettings:
@@ -228,7 +258,8 @@ def test_build_grants_each_declared_file_a_fresh_attempt_budget(
             if request.url not in self.seen:
                 self.seen.add(request.url)
                 return TransportRetryable(
-                    TransportDiagnostic("httpx", "network failed")
+                    TransportDiagnostic("httpx", "network failed"),
+                    reason=DownloadRetryReason.NETWORK,
                 )
             return TransportSuccess(
                 length=len(b"downloaded"), namespace="httpx", http_status=200
@@ -252,6 +283,98 @@ def test_build_grants_each_declared_file_a_fresh_attempt_budget(
     assert all(result.status is DownloadStatus.DOWNLOADED for result in results)
 
 
+def test_build_retry_emits_one_complete_typed_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _disable_retry_delay(monkeypatch)
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    item = _item(root, "model.bin")
+    events = RecordingEventSink()
+    logs: list[str] = []
+
+    process_file_downloads(
+        FileDownloadPlan(root, _settings(), (item,), 2),
+        backends={"httpx": RecordingBackend(fail_times=1)},
+        log=logs.append,
+        event_sink=events,
+    )
+
+    assert logs == []
+    assert events.events == [
+        DownloadItemStarted(
+            index=1,
+            total=1,
+            target="models/model.bin",
+            backend=DownloadBackendName.HTTPX,
+            max_attempts=2,
+            checksum_expected=False,
+        ),
+        DownloadAttemptStarted(1),
+        DownloadRetryScheduled(
+            failed_attempt=1,
+            next_attempt=2,
+            delay_seconds=1,
+            reason=DownloadRetryReason.NETWORK,
+        ),
+        DownloadAttemptStarted(2),
+        DownloadVerificationStarted(),
+        DownloadVerificationCompleted(),
+        DownloadPlacementStarted(),
+        DownloadPlacementCompleted(),
+        DownloadItemCompleted(
+            status=DownloadItemStatus.DOWNLOADED,
+            observed_bytes=len(b"downloaded"),
+            checksum_verified=False,
+        ),
+        DownloadFinalVerificationStarted(item_count=1, checksum_count=0),
+        DownloadFinalVerificationCompleted(),
+        DownloadBatchCompleted(item_count=1, checksum_verified_count=0),
+    ]
+
+
+def test_build_item_postcondition_failure_does_not_emit_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    item = _item(root, "model.bin")
+    events = RecordingEventSink()
+
+    def fail_postcondition(**_kwargs: object) -> None:
+        raise DownloadFilesError("postcondition failed")
+
+    monkeypatch.setattr(
+        "comfyui_docker_helper.container.download_files.verify_required_final",
+        fail_postcondition,
+    )
+
+    with pytest.raises(DownloadFilesError, match=r"models/model\.bin"):
+        process_file_downloads(
+            FileDownloadPlan(root, _settings(), (item,), 1),
+            backends={"httpx": RecordingBackend()},
+            event_sink=events,
+        )
+
+    assert events.events == [
+        DownloadItemStarted(
+            index=1,
+            total=1,
+            target="models/model.bin",
+            backend=DownloadBackendName.HTTPX,
+            max_attempts=1,
+            checksum_expected=False,
+        ),
+        DownloadAttemptStarted(1),
+        DownloadVerificationStarted(),
+        DownloadVerificationCompleted(),
+        DownloadPlacementStarted(),
+        DownloadPlacementCompleted(),
+    ]
+
+
 # Required build downloads expose stable success evidence and stop immediately
 # on exhausted or terminal outcomes.
 def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
@@ -268,14 +391,18 @@ def test_build_exhaustion_is_always_fatal_and_preserves_later_items(
     first.target.write_bytes(b"old")
     backend = RecordingBackend(fail_times=3)
 
-    with pytest.raises(TransferDownloadFilesError, match="network failed"):
+    with pytest.raises(TransferDownloadFilesError) as raised:
         process_file_downloads(
-            FileDownloadPlan(root, _settings(), (first, second), 2),
+            FileDownloadPlan(root, _settings(), (first, second), 1),
             backends={"httpx": backend},
             log=lambda _: None,
         )
 
-    assert len(backend.calls) == 2
+    assert raised.value.reason is DownloadRetryReason.NETWORK
+    assert raised.value.http_status is None
+    assert "after 1 attempt:" in str(raised.value)
+    assert "1 attempts" not in str(raised.value)
+    assert len(backend.calls) == 1
     assert first.target.read_bytes() == b"old"
     assert not second.target.exists()
     assert _owned_staging_leaves(root) == ()
@@ -340,13 +467,22 @@ def test_build_terminal_outcomes_are_fatal_and_stop_declaration_order(
 
     backend = TerminalBackend()
 
-    with pytest.raises(expected_error):
+    with pytest.raises(expected_error) as raised:
         process_file_downloads(
             FileDownloadPlan(root, _settings(), (first, second), 3),
             backends={"httpx": backend},
             log=lambda _: None,
         )
 
+    visible = str(raised.value)
+    assert "models/first.bin" in visible
+    assert str(root) not in visible
+    assert ".cdh-staging" not in visible
+    assert first.url not in visible
+    if isinstance(terminal_outcome, TransportOrdinaryTerminal):
+        assert isinstance(raised.value, TerminalTransferDownloadFilesError)
+        assert raised.value.http_status == 404
+        assert "HTTP 404" in visible
     assert [call.url for call in backend.calls] == [first.url]
     assert not first.target.exists()
     assert not second.target.exists()
@@ -361,17 +497,36 @@ def test_build_existing_regular_skip_does_not_call_backend(tmp_path: Path) -> No
     item.target.parent.mkdir(parents=True)
     item.target.write_bytes(b"keep")
     backend = RecordingBackend()
+    events = RecordingEventSink()
 
     result = process_file_downloads(
         FileDownloadPlan(root, _settings(), (item,), 1),
         backends={"httpx": backend},
-        log=lambda _: None,
+        event_sink=events,
     )[0]
 
     assert result.status is DownloadStatus.SKIPPED
     assert result.outcome.observed_checksum is None
     assert backend.calls == []
     assert item.target.read_bytes() == b"keep"
+    assert events.events == [
+        DownloadItemStarted(
+            index=1,
+            total=1,
+            target="models/model.bin",
+            backend=DownloadBackendName.HTTPX,
+            max_attempts=1,
+            checksum_expected=False,
+        ),
+        DownloadItemCompleted(
+            status=DownloadItemStatus.SKIPPED,
+            observed_bytes=len(b"keep"),
+            checksum_verified=False,
+        ),
+        DownloadFinalVerificationStarted(item_count=1, checksum_count=0),
+        DownloadFinalVerificationCompleted(),
+        DownloadBatchCompleted(item_count=1, checksum_verified_count=0),
+    ]
 
 
 def test_build_missing_backend_is_terminal_before_mutation(tmp_path: Path) -> None:
@@ -379,13 +534,17 @@ def test_build_missing_backend_is_terminal_before_mutation(tmp_path: Path) -> No
     root.mkdir()
     item = _item(root, "model.bin")
 
-    with pytest.raises(DownloadFilesError, match="not configured"):
+    with pytest.raises(DownloadFilesError, match="not configured") as raised:
         process_file_downloads(
             FileDownloadPlan(root, _settings(), (item,), 1),
             backends={},
         )
 
     assert not item.target.parent.exists()
+    visible = str(raised.value)
+    assert "models/model.bin" in visible
+    assert "httpx" not in visible
+    assert str(root) not in visible
 
 
 # Batch postconditions catch an earlier required final changed by later work.
@@ -396,6 +555,7 @@ def test_build_batch_rechecks_every_required_final(tmp_path: Path) -> None:
     second = _item(root, "second.bin")
     outside = tmp_path / "outside.bin"
     outside.write_bytes(b"outside")
+    events = RecordingEventSink()
 
     class MutatingBackend(RecordingBackend):
         def download(self, request, settings) -> TransportSuccess:
@@ -405,12 +565,29 @@ def test_build_batch_rechecks_every_required_final(tmp_path: Path) -> None:
                 first.target.symlink_to(outside)
             return result
 
-    with pytest.raises(DownloadFilesError, match=r"required.*regular"):
+    with pytest.raises(DownloadFilesError, match="verification failed") as raised:
         process_file_downloads(
             FileDownloadPlan(root, _settings(), (first, second), 1),
             backends={"httpx": MutatingBackend()},
             log=lambda _: None,
+            event_sink=events,
         )
 
     assert first.target.is_symlink()
     assert second.target.read_bytes() == b"downloaded"
+    assert (
+        DownloadFinalVerificationStarted(
+            item_count=2,
+            checksum_count=0,
+        )
+        in events.events
+    )
+    assert not any(
+        isinstance(event, (DownloadFinalVerificationCompleted, DownloadBatchCompleted))
+        for event in events.events
+    )
+    visible = str(raised.value)
+    assert "models/first.bin" in visible
+    assert str(root) not in visible
+    assert ".cdh-staging" not in visible
+    assert first.url not in visible

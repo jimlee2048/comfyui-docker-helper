@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.container.download_events import (
+    DownloadRetryReason,
+    DownloadTransferProgress,
+)
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloadSettings,
@@ -125,6 +130,7 @@ class FakeDownload:
         update_error: Exception | None = None,
         on_update: Callable[[], None] | None = None,
         after_update: Callable[[], None] | None = None,
+        metrics: list[tuple[object, object, object]] | None = None,
     ) -> None:
         self._statuses: Iterator[object] = iter(statuses)
         self.status = "active"
@@ -133,6 +139,10 @@ class FakeDownload:
         self.update_error = update_error
         self.on_update = on_update
         self.after_update = after_update
+        self._metrics: Iterator[tuple[object, object, object]] = iter(metrics or [])
+        self.completed_length: object = None
+        self.total_length: object = None
+        self.download_speed: object = None
 
     def update(self) -> None:
         if self.on_update is not None:
@@ -140,6 +150,13 @@ class FakeDownload:
         if self.update_error is not None:
             raise self.update_error
         self.status = next(self._statuses, self.status)
+        metric = next(self._metrics, None)
+        if metric is not None:
+            (
+                self.completed_length,
+                self.total_length,
+                self.download_speed,
+            ) = metric
         if self.after_update is not None:
             self.after_update()
 
@@ -166,6 +183,14 @@ class FakeApi:
         if self.submit_error is not None:
             raise self.submit_error
         return self.download
+
+
+class ProgressSink:
+    def __init__(self) -> None:
+        self.events: list[DownloadTransferProgress] = []
+
+    def emit(self, event: DownloadTransferProgress, /) -> None:
+        self.events.append(event)
 
 
 def make_settings(
@@ -214,6 +239,7 @@ def make_item(
     *,
     resume_allowed: bool = True,
     on_current_length: Callable[[], None] | None = None,
+    progress_sink: ProgressSink | None = None,
 ) -> TransportRequest:
     """Return one core-supplied aria2 staging request."""
     target = tmp_path / "models" / ".cdh-staging" / "cdh-model.part"
@@ -226,6 +252,7 @@ def make_item(
             resume_allowed=resume_allowed,
             on_current_length=on_current_length,
         ),
+        progress_sink=progress_sink,
     )
 
 
@@ -280,7 +307,7 @@ def test_aria2_downloader_starts_daemon_and_submits_options(
             "--rpc-secret=test-secret",
             "--disable-ipv6=true",
             "--auto-save-interval=0",
-            "--console-log-level=notice",
+            "--quiet=true",
         ]
     ]
     assert client_calls[0].host == "http://localhost"
@@ -332,6 +359,162 @@ def test_aria2_downloader_context_always_shuts_down_daemon(tmp_path: Path) -> No
         downloader.download(make_item(tmp_path), make_settings())
 
     assert client.shutdown_calls == 1
+    assert process.wait_calls == 1
+
+
+def test_aria2_progress_uses_existing_update_metrics(tmp_path: Path) -> None:
+    progress = ProgressSink()
+    download = FakeDownload(
+        ["active", "complete"],
+        metrics=[(4, 10, 2), (10, 10, 3)],
+    )
+    downloader = Aria2Downloader(
+        process_factory=lambda _: FakeProcess(),
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(download),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+
+    with downloader:
+        result = downloader.download(
+            make_item(tmp_path, progress_sink=progress),
+            make_settings(),
+        )
+
+    assert isinstance(result, TransportSuccess)
+    assert progress.events == [
+        DownloadTransferProgress(
+            transferred_bytes=4,
+            total_bytes=10,
+            stored_bytes=None,
+            reported_rate=2,
+        ),
+        DownloadTransferProgress(
+            transferred_bytes=10,
+            total_bytes=10,
+            stored_bytes=None,
+            reported_rate=3,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_type"),
+    [
+        ("complete", TransportSuccess),
+        ("error", TransportOrdinaryTerminal),
+    ],
+)
+def test_aria2_malformed_optional_metrics_do_not_change_strict_status(
+    tmp_path: Path,
+    status: str,
+    expected_type: type[TransportSuccess] | type[TransportOrdinaryTerminal],
+) -> None:
+    progress = ProgressSink()
+
+    class MalformedMetricsDownload:
+        error_code = "3"
+        completed_length = 1
+        download_speed = -1
+
+        def __init__(self) -> None:
+            self.status = "active"
+
+        @property
+        def total_length(self) -> int:
+            raise RuntimeError("optional metric unavailable")
+
+        def update(self) -> None:
+            self.status = status
+
+    downloader = Aria2Downloader(
+        process_factory=lambda _: FakeProcess(),
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(MalformedMetricsDownload()),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+
+    with downloader:
+        result = downloader.download(
+            make_item(tmp_path, progress_sink=progress),
+            make_settings(),
+        )
+
+    assert isinstance(result, expected_type)
+    if status == "complete":
+        assert progress.events == [
+            DownloadTransferProgress(
+                transferred_bytes=1,
+                total_bytes=None,
+                stored_bytes=None,
+                reported_rate=None,
+            )
+        ]
+    else:
+        assert progress.events == []
+
+
+def test_aria2_oversized_optional_metrics_do_not_change_completion(
+    tmp_path: Path,
+) -> None:
+    progress = ProgressSink()
+    download = FakeDownload(
+        ["complete"],
+        metrics=[(1, sys.maxsize + 1, sys.maxsize**sys.int_info.bits_per_digit)],
+    )
+    downloader = Aria2Downloader(
+        process_factory=lambda _: FakeProcess(),
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(download),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+
+    with downloader:
+        result = downloader.download(
+            make_item(tmp_path, progress_sink=progress),
+            make_settings(),
+        )
+
+    assert isinstance(result, TransportSuccess)
+    assert progress.events == [
+        DownloadTransferProgress(
+            transferred_bytes=1,
+            total_bytes=None,
+            stored_bytes=None,
+            reported_rate=None,
+        )
+    ]
+
+
+def test_aria2_progress_sink_failure_reaps_daemon(tmp_path: Path) -> None:
+    process = FakeProcess()
+
+    class FailingProgressSink:
+        def emit(self, event: DownloadTransferProgress, /) -> None:
+            del event
+            raise RuntimeError("display-progress-sentinel")
+
+    downloader = Aria2Downloader(
+        process_factory=lambda _: process,
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(FakeDownload(["active"], metrics=[(1, 10, 2)])),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+
+    with pytest.raises(RuntimeError, match="display-progress-sentinel"):
+        downloader.download(
+            make_item(tmp_path, progress_sink=FailingProgressSink()),
+            make_settings(),
+        )
+
     assert process.wait_calls == 1
 
 
@@ -409,23 +592,24 @@ def test_aria2_downloader_terminates_process_when_shutdown_does_not_exit(
 
 # The adapter uses only documented machine codes for retry policy.
 @pytest.mark.parametrize(
-    ("code", "expected_type"),
+    ("code", "expected_type", "expected_reason"),
     [
-        ("2", TransportRetryable),
-        ("6", TransportRetryable),
-        ("19", TransportRetryable),
-        ("29", TransportRetryable),
-        ("3", TransportOrdinaryTerminal),
-        ("4", TransportOrdinaryTerminal),
-        ("23", TransportOrdinaryTerminal),
-        ("24", TransportOrdinaryTerminal),
-        ("22", TransportOrdinaryTerminal),
+        ("2", TransportRetryable, DownloadRetryReason.TIMEOUT),
+        ("6", TransportRetryable, DownloadRetryReason.NETWORK),
+        ("19", TransportRetryable, DownloadRetryReason.NETWORK),
+        ("29", TransportRetryable, DownloadRetryReason.TEMPORARY_SERVER),
+        ("3", TransportOrdinaryTerminal, None),
+        ("4", TransportOrdinaryTerminal, None),
+        ("23", TransportOrdinaryTerminal, None),
+        ("24", TransportOrdinaryTerminal, None),
+        ("22", TransportOrdinaryTerminal, None),
     ],
 )
 def test_aria2_error_code_maps_to_capability_aware_outcome(
     tmp_path: Path,
     code: str,
     expected_type: type[TransportRetryable] | type[TransportOrdinaryTerminal],
+    expected_reason: DownloadRetryReason | None,
 ) -> None:
     api = FakeApi(
         FakeDownload(["error"], error_code=code, error_message="diagnostic only")
@@ -444,6 +628,8 @@ def test_aria2_error_code_maps_to_capability_aware_outcome(
     assert isinstance(result, expected_type)
     assert result.http_status is None
     assert "diagnostic only" not in result.diagnostic.summary
+    if isinstance(result, TransportRetryable):
+        assert result.reason is expected_reason
 
 
 # Human-readable text is not even admitted as machine classification input.
@@ -1043,6 +1229,32 @@ def test_aria2_interrupted_teardown_notifies_waiter_and_later_retries_reap(
     assert process.wait_calls == 2
 
 
+def test_aria2_ordinary_teardown_failure_is_controlled_and_retryable(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    process = FakeProcess(wait_errors=[RuntimeError("shutdown-raw-sentinel")])
+    downloader = Aria2Downloader(
+        process_factory=lambda _: process,
+        client_factory=lambda **kwargs: FakeClient(**kwargs),
+        api_factory=lambda _: FakeApi(FakeDownload(["complete"])),
+        secret_factory=lambda: "s",
+        cancel_wait=lambda _: False,
+        log=lambda _: None,
+    )
+    downloader.prepare(make_settings())
+
+    with pytest.raises(DownloadFilesError, match="daemon shutdown failed") as raised:
+        downloader.close()
+
+    assert "shutdown-raw-sentinel" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value.__cause__) == "shutdown-raw-sentinel"
+
+    downloader.close()
+    assert process.wait_calls == 2
+
+
 @pytest.mark.parametrize("failure_point", ["secret", "process"])
 def test_aria2_pre_spawn_base_exception_releases_waiting_starter(
     tmp_path: Path,
@@ -1274,21 +1486,38 @@ def test_aria2_rpc_submit_failure_fails_closed_and_context_reaps(
 ) -> None:
     """RPC submission failure is a daemon boundary error, never an item outcome."""
     process = FakeProcess()
+    raw_sentinel = "rpc-submit-raw-sentinel"
+    credential_sentinel = "credential-sentinel"
     downloader = Aria2Downloader(
         process_factory=lambda _: process,
         client_factory=lambda **kwargs: FakeClient(**kwargs),
         api_factory=lambda _: FakeApi(
             FakeDownload(["active"]),
-            submit_error=ConnectionError("RPC unavailable"),
+            submit_error=ConnectionError(
+                f"{raw_sentinel}: https://user:{credential_sentinel}@example.test"
+            ),
         ),
         secret_factory=lambda: "s",
         cancel_wait=lambda _: False,
         log=lambda _: None,
     )
 
-    with pytest.raises(DownloadFilesError, match="RPC submit"), downloader:
-        downloader.download(make_item(tmp_path), make_settings())
+    item = make_item(tmp_path)
+    request = TransportRequest(
+        url=(
+            f"https://user:{credential_sentinel}@example.test/private"
+            "?token=url-sentinel"
+        ),
+        sink=item.sink,
+    )
+    with pytest.raises(DownloadFilesError, match="RPC submit") as raised, downloader:
+        downloader.download(request, make_settings())
 
+    visible = str(raised.value)
+    assert raw_sentinel not in visible
+    assert credential_sentinel not in visible
+    assert "url-sentinel" not in visible
+    assert isinstance(raised.value.__cause__, ConnectionError)
     assert process.wait_calls == 1
 
 

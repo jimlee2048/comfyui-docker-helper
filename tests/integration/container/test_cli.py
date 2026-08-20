@@ -13,6 +13,23 @@ from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
+from comfyui_docker_helper.container.download_events import (
+    DownloadAttemptStarted,
+    DownloadBackendName,
+    DownloadBatchCompleted,
+    DownloadFinalVerificationCompleted,
+    DownloadFinalVerificationStarted,
+    DownloadItemCompleted,
+    DownloadItemStarted,
+    DownloadItemStatus,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
+)
+from comfyui_docker_helper.container.transfer_core import DownloadFilesError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
 )
@@ -26,6 +43,58 @@ from tests.build_plan_support import (
 
 def _plain_output(output: str) -> str:
     return Text.from_ansi(output).plain
+
+
+def _materialized_download_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    plan = build_plan(final_config(), accepted_resolution())
+    context = tmp_path / "download-context"
+    context.mkdir(mode=0o700)
+    _materialize_private_stage(plan, context, canonical_wheel=canonical_wheel())
+    monkeypatch.setattr(
+        container_cli,
+        "MATERIALIZED_BUILD_PLAN_PATH",
+        context / "build-plan.json",
+    )
+    return plan
+
+
+def _emit_download_success(event_sink, *, retry: bool = False) -> None:
+    event_sink.emit(
+        DownloadItemStarted(
+            index=1,
+            total=1,
+            target="models/checkpoints/model.safetensors",
+            backend=DownloadBackendName.HTTPX,
+            max_attempts=3,
+            checksum_expected=True,
+        )
+    )
+    event_sink.emit(DownloadAttemptStarted(1))
+    if retry:
+        event_sink.emit(
+            DownloadRetryScheduled(
+                failed_attempt=1,
+                next_attempt=2,
+                delay_seconds=1,
+                reason=DownloadRetryReason.TEMPORARY_SERVER,
+                http_status=503,
+            )
+        )
+        event_sink.emit(DownloadAttemptStarted(2))
+    event_sink.emit(DownloadVerificationStarted())
+    event_sink.emit(DownloadVerificationCompleted())
+    event_sink.emit(DownloadPlacementStarted())
+    event_sink.emit(DownloadPlacementCompleted())
+    event_sink.emit(
+        DownloadItemCompleted(
+            status=DownloadItemStatus.DOWNLOADED,
+            observed_bytes=1024,
+            checksum_verified=True,
+        )
+    )
+    event_sink.emit(DownloadFinalVerificationStarted(item_count=1, checksum_count=1))
+    event_sink.emit(DownloadFinalVerificationCompleted())
+    event_sink.emit(DownloadBatchCompleted(item_count=1, checksum_verified_count=1))
 
 
 @pytest.mark.parametrize(
@@ -120,7 +189,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
     monkeypatch.setattr(
         container_cli,
         "download_files",
-        lambda files, root: observed.append((files, root)),
+        lambda files, root, *, event_sink: observed.append((files, root)),
     )
     monkeypatch.setattr(
         container_cli,
@@ -255,6 +324,139 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
     assert target.read_bytes() == b"authenticated-plan"
 
 
+def test_download_files_cli_renders_plain_non_terminal_lifecycle(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_download(_files, _root, *, event_sink) -> None:
+        _emit_download_success(event_sink)
+
+    monkeypatch.setattr(container_cli, "download_files", fake_download)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "Required file: models/checkpoints/model.safetensors" in result.stderr
+    assert "Attempt [1/3] started" in result.stderr
+    assert "Verifying downloaded bytes" in result.stderr
+    assert "Placing required file" in result.stderr
+    assert "Downloads complete: 1 required file" in result.stderr
+    assert "backend=" not in result.stderr
+
+
+def test_download_files_cli_quiet_suppresses_success_lifecycle(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_download(_files, _root, *, event_sink) -> None:
+        _emit_download_success(event_sink)
+
+    monkeypatch.setattr(container_cli, "download_files", fake_download)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "--quiet",
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_download_files_cli_verbose_retry_is_human_oriented(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fake_download(_files, _root, *, event_sink) -> None:
+        _emit_download_success(event_sink, retry=True)
+
+    monkeypatch.setattr(container_cli, "download_files", fake_download)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "-v",
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "[1/3] failed; retrying as [2/3] in 1s" in result.stderr
+    assert "server is temporarily unavailable" in result.stderr
+    assert "backend=" not in result.stderr
+    assert "http_status=" not in result.stderr
+
+
+def test_download_files_cli_controlled_failure_stops_without_success(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fail_download(_files, _root, *, event_sink) -> None:
+        event_sink.emit(
+            DownloadItemStarted(
+                index=1,
+                total=1,
+                target="models/checkpoints/model.safetensors",
+                backend=DownloadBackendName.HTTPX,
+                max_attempts=3,
+                checksum_expected=True,
+            )
+        )
+        event_sink.emit(DownloadAttemptStarted(1))
+        raise DownloadFilesError(
+            "required download failed for models/checkpoints/model.safetensors"
+        )
+
+    monkeypatch.setattr(container_cli, "download_files", fail_download)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            "download-files",
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Error: required download failed" in result.stderr
+    assert "Downloads complete" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_container_plan_admission_hides_invalid_plan_secret_values(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -270,6 +472,13 @@ def test_container_plan_admission_hides_invalid_plan_secret_values(
     document["runtime"]["ssh"]["password"] = f"{sentinel}\n"
     plan_path.write_text(json.dumps(document))
     monkeypatch.setattr(container_cli, "MATERIALIZED_BUILD_PLAN_PATH", plan_path)
+    monkeypatch.setattr(
+        container_cli,
+        "default_container_download_invocation",
+        lambda *_args, **_kwargs: pytest.fail(
+            "presentation must not start before BuildPlan admission"
+        ),
+    )
 
     result = cli_runner.invoke(
         app,

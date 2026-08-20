@@ -19,9 +19,7 @@ from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
 )
 from comfyui_docker_helper.container.runtime_events import (
-    RuntimeGenerationStopCause as RuntimeEventStopCause,
-)
-from comfyui_docker_helper.container.runtime_events import (
+    RuntimeGenerationStopCause,
     RuntimeGenerationStopped,
     RuntimeGenerationStopping,
     RuntimePhase,
@@ -446,7 +444,7 @@ def test_controller_failure_wins_before_restart_and_cleans_running_generation(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.CONTROLLER_FAILURE,
+        cause=RuntimeGenerationStopCause.CONTROLLER_FAILURE,
         returncode=-int(signal.SIGTERM),
     )
     assert restart.accepted is False
@@ -707,7 +705,7 @@ def test_runtime_file_phase_does_not_complete_after_cancellation_or_health_failu
             in semantic_events
         )
     assert cancelled_result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGTERM),
     )
     assert isinstance(failed_result, RuntimeExecutionError)
@@ -815,7 +813,7 @@ def test_operator_restart_is_accepted_after_startup_and_uses_fixed_sigterm(
     )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.OPERATOR_RESTART,
+        cause=RuntimeGenerationStopCause.OPERATOR_RESTART,
         returncode=-int(signal.SIGTERM),
     )
     assert events.index("restart:accept") > events.index("post-start")
@@ -857,7 +855,7 @@ def test_pending_restart_loses_to_observed_natural_exit(tmp_path: Path) -> None:
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.NATURAL_EXIT,
+        cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=31,
     )
     assert restart.accepted is False
@@ -896,7 +894,7 @@ def test_pending_restart_loses_to_admitted_external_signal(tmp_path: Path) -> No
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGINT),
     )
     assert restart.accepted is False
@@ -972,7 +970,7 @@ def test_first_external_signal_during_restart_preserves_original_signal(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGINT),
     )
     assert child.signals == [signal.SIGINT]
@@ -988,7 +986,9 @@ def test_first_external_signal_during_restart_preserves_original_signal(
     assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
     assert (
         semantic_events.count(
-            RuntimeGenerationStopped("gen-1", RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
         )
         == 1
     )
@@ -1119,7 +1119,7 @@ def test_second_external_signal_during_restart_forces_exact_owners(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
     assert child.signals == []
@@ -1188,7 +1188,7 @@ def test_repeated_external_signal_at_send_decision_skips_ordinary_signal(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
     assert child.signals == []
@@ -1320,7 +1320,7 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.NATURAL_EXIT,
+        cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=19,
     )
     stop_hook_runner.assert_not_called()
@@ -1382,7 +1382,7 @@ def test_terminal_child_signal_race_preserves_natural_exit(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.NATURAL_EXIT,
+        cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=29,
     )
     stop_hook_runner.assert_not_called()
@@ -2443,7 +2443,7 @@ def test_repeated_signal_force_stops_downloads_ssh_and_comfyui(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
 
@@ -2582,7 +2582,7 @@ def test_shutdown_kills_child_at_outer_deadline_after_two_second_reserve(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGKILL),
     )
 
@@ -2667,7 +2667,7 @@ def test_shutdown_hooks_receive_one_pre_stop_deadline(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=23,
     )
 
@@ -2732,7 +2732,7 @@ def test_shutdown_timeout_minus_one_disables_outer_and_hook_deadlines(
         )
 
     assert result == lifecycle_module.RuntimeGenerationResult(
-        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         returncode=-int(signal.SIGINT),
     )
 

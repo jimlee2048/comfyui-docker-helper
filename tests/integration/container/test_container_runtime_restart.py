@@ -35,6 +35,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeGenerationAdmitted,
     RuntimeGenerationOperation,
     RuntimeGenerationReady,
+    RuntimeGenerationStopCause,
     RuntimeGenerationStopped,
     RuntimeGenerationStopping,
     RuntimePhase,
@@ -43,9 +44,6 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimePhaseStarted,
     RuntimeSshOutcome,
     RuntimeSshStatus,
-)
-from comfyui_docker_helper.container.runtime_events import (
-    RuntimeGenerationStopCause as RuntimeEventStopCause,
 )
 from comfyui_docker_helper.container.runtime_files import Logger, RuntimeFilePlan
 from comfyui_docker_helper.container.runtime_hooks import (
@@ -198,7 +196,7 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
         if isinstance(event, RuntimeGenerationStopped)
     ]
     assert [(event.generation, event.cause) for event in stopped] == [
-        ("gen-1", RuntimeEventStopCause.CONTROLLER_FAILURE)
+        ("gen-1", RuntimeGenerationStopCause.CONTROLLER_FAILURE)
     ]
 
 
@@ -325,7 +323,9 @@ def test_pre_lifecycle_primary_failure_closes_admitted_generation(
     assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
     assert (
         semantic_events.count(
-            RuntimeGenerationStopped("gen-1", RuntimeEventStopCause.CONTROLLER_FAILURE)
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.CONTROLLER_FAILURE
+            )
         )
         == 1
     )
@@ -385,7 +385,9 @@ def test_pre_lifecycle_signal_closes_admitted_generation(
     assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
     assert (
         semantic_events.count(
-            RuntimeGenerationStopped("gen-1", RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
         )
         == 1
     )
@@ -450,7 +452,9 @@ def test_signal_during_serve_stopping_finishes_terminal_event_once(
     assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
     assert (
         semantic_events.count(
-            RuntimeGenerationStopped("gen-1", RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
         )
         == 1
     )
@@ -503,7 +507,9 @@ def test_signal_at_lifecycle_handoff_closes_generation_once(
     assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
     assert (
         semantic_events.count(
-            RuntimeGenerationStopped("gen-1", RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
         )
         == 1
     )
@@ -578,7 +584,7 @@ def test_late_inner_signal_is_forwarded_after_lifecycle_finalization(
     assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
     assert (
         semantic_events.count(
-            RuntimeGenerationStopped("gen-1", RuntimeEventStopCause.NATURAL_EXIT)
+            RuntimeGenerationStopped("gen-1", RuntimeGenerationStopCause.NATURAL_EXIT)
         )
         == 1
     )
@@ -717,8 +723,8 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
     ]
     assert [event.generation for event in stopping] == ["gen-1", "gen-2"]
     assert [(event.generation, event.cause) for event in stopped] == [
-        ("gen-1", RuntimeEventStopCause.OPERATOR_RESTART),
-        ("gen-2", RuntimeEventStopCause.NATURAL_EXIT),
+        ("gen-1", RuntimeGenerationStopCause.OPERATOR_RESTART),
+        ("gen-2", RuntimeGenerationStopCause.NATURAL_EXIT),
     ]
     assert (
         semantic_events.index(ready[0])
@@ -805,7 +811,9 @@ def test_successor_admission_failure_exits_without_starting_a_second_owner(
     assert semantic_events.count(RuntimeGenerationStopping("gen-2")) == 1
     assert (
         semantic_events.count(
-            RuntimeGenerationStopped("gen-2", RuntimeEventStopCause.STARTUP_FAILURE)
+            RuntimeGenerationStopped(
+                "gen-2", RuntimeGenerationStopCause.STARTUP_FAILURE
+            )
         )
         == 1
     )

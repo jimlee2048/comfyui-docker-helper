@@ -9,9 +9,8 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from enum import StrEnum
 from types import FrameType
-from typing import Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar
 
 from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import RuntimeConfig
@@ -46,6 +45,7 @@ from comfyui_docker_helper.container.runtime_event_delivery import (
 )
 from comfyui_docker_helper.container.runtime_events import (
     RuntimeEvent,
+    RuntimeGenerationStopCause,
     RuntimeGenerationStopped,
     RuntimeGenerationStopping,
     RuntimePhase,
@@ -54,9 +54,6 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimePhaseStarted,
     RuntimeSshOutcome,
     RuntimeSshStatus,
-)
-from comfyui_docker_helper.container.runtime_events import (
-    RuntimeGenerationStopCause as RuntimeEventStopCause,
 )
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
@@ -87,20 +84,19 @@ AUXILIARY_SHUTDOWN_BOUND_SECONDS = 5.0
 _ResultT = TypeVar("_ResultT")
 
 
-class RuntimeGenerationStopCause(StrEnum):
-    """Terminal disposition of one admitted runtime generation."""
-
-    NATURAL_EXIT = "natural_exit"
-    EXTERNAL_SHUTDOWN = "external_shutdown"
-    OPERATOR_RESTART = "operator_restart"
-    CONTROLLER_FAILURE = "controller_failure"
+type RuntimeGenerationResultCause = Literal[
+    RuntimeGenerationStopCause.NATURAL_EXIT,
+    RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+    RuntimeGenerationStopCause.OPERATOR_RESTART,
+    RuntimeGenerationStopCause.CONTROLLER_FAILURE,
+]
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeGenerationResult:
     """Raw terminal result and cause for one runtime generation."""
 
-    cause: RuntimeGenerationStopCause
+    cause: RuntimeGenerationResultCause
     returncode: int
 
 
@@ -139,7 +135,7 @@ class _RuntimeLifecycleEvents:
         self._event_sink = safe_runtime_event_sink(event_sink)
         self._generation = generation
         self._active_phase: RuntimePhase | None = None
-        self._stop_cause: RuntimeEventStopCause | None = None
+        self._stop_cause: RuntimeGenerationStopCause | None = None
         self._stopped = False
 
     def start_phase(self, phase: RuntimePhase) -> None:
@@ -161,14 +157,14 @@ class _RuntimeLifecycleEvents:
         self._active_phase = None
         self._emit(RuntimePhaseFailed(phase))
 
-    def begin_stopping(self, cause: RuntimeEventStopCause) -> None:
+    def begin_stopping(self, cause: RuntimeGenerationStopCause) -> None:
         self.fail_active_phase()
         if self._generation is None:
             return
         if self._stop_cause is None:
             self._stop_cause = cause
             self._emit(RuntimeGenerationStopping(self._generation))
-        elif cause is RuntimeEventStopCause.EXTERNAL_SHUTDOWN:
+        elif cause is RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN:
             self._stop_cause = cause
 
     def run_generation_cleanup(
@@ -284,7 +280,9 @@ def run_runtime_lifecycle(
         def finish_startup_signal_shutdown(
             child: DirectProcess | None = None,
         ) -> RuntimeGenerationResult:
-            lifecycle_events.begin_stopping(RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+            lifecycle_events.begin_stopping(
+                RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+            )
             previous_raise_on_signal = startup_shutdown.raise_on_signal
             startup_shutdown.raise_on_signal = False
             try:
@@ -311,7 +309,9 @@ def run_runtime_lifecycle(
         def cleanup_startup_failure(
             child: DirectProcess | None = None,
             *,
-            cause: RuntimeEventStopCause = RuntimeEventStopCause.STARTUP_FAILURE,
+            cause: RuntimeGenerationStopCause = (
+                RuntimeGenerationStopCause.STARTUP_FAILURE
+            ),
         ) -> None:
             lifecycle_events.begin_stopping(cause)
             previous_raise_on_signal = startup_shutdown.raise_on_signal
@@ -404,7 +404,7 @@ def run_runtime_lifecycle(
             startup_shutdown.admit_runtime_failure()
             cleanup_startup_failure(
                 child,
-                cause=RuntimeEventStopCause.CONTROLLER_FAILURE,
+                cause=RuntimeGenerationStopCause.CONTROLLER_FAILURE,
             )
             raise RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
 
@@ -418,7 +418,7 @@ def run_runtime_lifecycle(
             startup_shutdown.admit_runtime_failure()
             cleanup_startup_failure(
                 child,
-                cause=RuntimeEventStopCause.CONTROLLER_FAILURE,
+                cause=RuntimeGenerationStopCause.CONTROLLER_FAILURE,
             )
             raise RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE) from error
 
@@ -617,7 +617,7 @@ def run_runtime_lifecycle(
             except RuntimeExecutionError:
                 cleanup_startup_failure(
                     completed,
-                    cause=RuntimeEventStopCause.CONTROLLER_FAILURE,
+                    cause=RuntimeGenerationStopCause.CONTROLLER_FAILURE,
                 )
                 raise
         except _StartupShutdownRequested as request:
@@ -932,7 +932,7 @@ def _finalize_runtime_generation(
     state.disable_signal_admission()
     external_shutdown = state.requested_signal is not None
     if external_shutdown:
-        lifecycle_events.begin_stopping(RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+        lifecycle_events.begin_stopping(RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN)
     lifecycle_events.mark_stopped()
     return external_shutdown
 
@@ -1009,7 +1009,7 @@ def _finish_startup_signal_shutdown(
     monotonic: Callable[[], float],
     sleep: Callable[[float], object],
 ) -> int:
-    lifecycle_events.begin_stopping(RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+    lifecycle_events.begin_stopping(RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN)
     state.raise_on_signal = False
     if child is not None and child.poll() is not None:
         exit_code = child.wait()
@@ -1045,7 +1045,7 @@ def _finish_startup_signal_shutdown(
         downloads=downloads,
         ssh_service=ssh_service,
         lifecycle_events=lifecycle_events,
-        cause=RuntimeEventStopCause.EXTERNAL_SHUTDOWN,
+        cause=RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
         monotonic=monotonic,
         sleep=sleep,
     ).returncode
@@ -1189,7 +1189,7 @@ def _wait_with_existing_signal_state(
 
         startup_shutdown.raise_on_signal = False
         startup_shutdown.disable_signal_admission()
-        lifecycle_events.begin_stopping(RuntimeEventStopCause.NATURAL_EXIT)
+        lifecycle_events.begin_stopping(RuntimeGenerationStopCause.NATURAL_EXIT)
 
         def cleanup_natural_exit() -> RuntimeGenerationResult:
             downloads.stop(cancel_requested=startup_shutdown.repeated_signal_requested)
@@ -1241,7 +1241,7 @@ def _finish_operator_restart(
         downloads=downloads,
         ssh_service=ssh_service,
         lifecycle_events=lifecycle_events,
-        cause=RuntimeEventStopCause.OPERATOR_RESTART,
+        cause=RuntimeGenerationStopCause.OPERATOR_RESTART,
         monotonic=monotonic,
         sleep=sleep,
         ordinary_signal_decider=startup_shutdown.ordinary_signal_decision,
@@ -1292,7 +1292,7 @@ def _finish_controller_failure(
         downloads=downloads,
         ssh_service=ssh_service,
         lifecycle_events=lifecycle_events,
-        cause=RuntimeEventStopCause.CONTROLLER_FAILURE,
+        cause=RuntimeGenerationStopCause.CONTROLLER_FAILURE,
         monotonic=monotonic,
         sleep=sleep,
         ordinary_signal_decider=startup_shutdown.ordinary_signal_decision,
@@ -1338,7 +1338,7 @@ def _finish_signal_shutdown(
     downloads: RuntimeDownloads,
     ssh_service: RuntimeSshService,
     lifecycle_events: _RuntimeLifecycleEvents,
-    cause: RuntimeEventStopCause,
+    cause: RuntimeGenerationStopCause,
     monotonic: Callable[[], float],
     sleep: Callable[[float], object],
     ordinary_signal_decider: (

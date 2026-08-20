@@ -54,11 +54,9 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeGenerationAdmitted,
     RuntimeGenerationOperation,
     RuntimeGenerationReady,
+    RuntimeGenerationStopCause,
     RuntimeGenerationStopped,
     RuntimeGenerationStopping,
-)
-from comfyui_docker_helper.container.runtime_events import (
-    RuntimeGenerationStopCause as RuntimeEventStopCause,
 )
 from comfyui_docker_helper.container.runtime_files import download_runtime_files
 from comfyui_docker_helper.container.runtime_hooks import (
@@ -73,7 +71,6 @@ from comfyui_docker_helper.container.runtime_hooks import (
 from comfyui_docker_helper.container.runtime_lifecycle import (
     ReadinessWaiter,
     RuntimeExecutionError,
-    RuntimeGenerationStopCause,
     RuntimeHealthObserver,
     RuntimeHookRunner,
     RuntimeStopHookRunner,
@@ -105,16 +102,16 @@ class _ServeGenerationLease:
 
     generation: str
     state: Literal["owned", "stopping", "stopped"] = "owned"
-    cause: RuntimeEventStopCause | None = None
+    cause: RuntimeGenerationStopCause | None = None
 
     def close(
         self,
-        cause: RuntimeEventStopCause,
+        cause: RuntimeGenerationStopCause,
         event_sink: EventSink[RuntimeEvent] | None,
     ) -> None:
         if self.state == "stopped":
             return
-        if self.cause is None or cause is RuntimeEventStopCause.EXTERNAL_SHUTDOWN:
+        if self.cause is None or cause is RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN:
             self.cause = cause
         if self.state == "owned":
             self.state = "stopping"
@@ -415,7 +412,7 @@ def _run_runtime_serve(
         serve_owned_generation: _ServeGenerationLease | None = None
 
         def close_serve_owned_generation(
-            cause: RuntimeEventStopCause,
+            cause: RuntimeGenerationStopCause,
         ) -> None:
             nonlocal serve_owned_generation
             lease = serve_owned_generation
@@ -479,7 +476,7 @@ def _run_runtime_serve(
                 if failure is not None:
                     error = RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
                     close_serve_owned_generation(
-                        RuntimeEventStopCause.CONTROLLER_FAILURE
+                        RuntimeGenerationStopCause.CONTROLLER_FAILURE
                     )
                     publish_start_failure(error)
                     raise error
@@ -489,10 +486,12 @@ def _run_runtime_serve(
                     external_exit_code = external_failure_exit_code()
                     if external_exit_code is not None:
                         close_serve_owned_generation(
-                            RuntimeEventStopCause.EXTERNAL_SHUTDOWN
+                            RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
                         )
                         return external_exit_code
-                    close_serve_owned_generation(RuntimeEventStopCause.STARTUP_FAILURE)
+                    close_serve_owned_generation(
+                        RuntimeGenerationStopCause.STARTUP_FAILURE
+                    )
                     publish_start_failure(error)
                     raise
 
@@ -575,6 +574,7 @@ def _run_runtime_serve(
                     publish_start_failure(error)
                     raise error
 
+                assert result.cause is RuntimeGenerationStopCause.OPERATOR_RESTART
                 successor = controller.allocate_restart_successor()
                 if successor is None:
                     failure = controller.runtime_failure_message()
@@ -598,7 +598,7 @@ def _run_runtime_serve(
                     )
                 initial_generation = False
         except _RuntimeControllerShutdownRequested as request:
-            close_serve_owned_generation(RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+            close_serve_owned_generation(RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN)
             controller.mark_external_shutdown()
             return 128 + int(request.signal)
 

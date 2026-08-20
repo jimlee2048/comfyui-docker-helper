@@ -25,7 +25,7 @@
   - `03-progress/`: execution status, validation evidence, and handoff records.
 - Before using or modifying an existing workdesk, inspect its current directory and file structure and the relevant neighboring documents once for the task. Preserve the canonical phase ownership; do not create a new file until its intended role and location are clear.
 - Keep work planning details in `docs/workdesk/`; do not mention milestones, task plans, or implementation work status in docs, examples, code comments, or user-facing copy.
-- Within each worktree,   handle only one active plan at a time, and within that plan, work on only one task at a time.
+- Within each worktree, handle only one active plan at a time, and within that plan, work on only one task at a time.
 - Load task-relevant skills when the current agent runtime provides them.
 - Sub-agents may take a long time to complete. After delegation, patiently wait for completion until the sub-agent has clearly stalled or terminated. While waiting for sub-agents, do not interrupt or require immediate report, and do not perform unnecessary parallel tasks.
 - If genuine browser verification is required, use the preferred tool if specified by the current agent runtime; if sub-agent feature is available, delegate the browser verification task to a new sub-agent.

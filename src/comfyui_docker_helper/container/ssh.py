@@ -9,6 +9,7 @@ import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -39,6 +40,16 @@ type Chmod = Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes], int]
 type Fchown = Callable[[int, int, int], None]
 type Fchmod = Callable[[int, int], None]
 type PreparationProcessObserver = Callable[[DirectProcess | None], object]
+
+
+class SshPreparationWarningKind(StrEnum):
+    """Controlled SSH credential-preparation warning outcomes."""
+
+    DIRECTORY_MODE_NONSTANDARD = "directory-mode-nonstandard"
+    AUTHORIZED_KEYS_MODE_NONSTANDARD = "authorized-keys-mode-nonstandard"
+
+
+type SshPreparationWarningObserver = Callable[[SshPreparationWarningKind], object]
 
 
 class SshCredentialPreparationError(ApplicationError):
@@ -125,6 +136,7 @@ def start_sshd_if_enabled(
     command_runner: CommandRunner | None = None,
     process_starter: SshdProcessStarter | None = None,
     preparation_process_observer: PreparationProcessObserver = lambda _process: None,
+    preparation_warning_observer: SshPreparationWarningObserver | None = None,
 ) -> SshdProcess | None:
     """Prepare and start foreground sshd when effective SSH is active."""
     del runtime
@@ -146,13 +158,25 @@ def start_sshd_if_enabled(
             process_observer=preparation_process_observer,
         )
     except SshCredentialPreparationError as error:
-        raise SshdStartupError(f"SSH credential preparation failed: {error}") from error
+        raise SshdStartupError("SSH credential preparation failed") from error
 
     for warning in status.warnings:
-        log(warning)
+        if preparation_warning_observer is None:
+            log(warning)
+        else:
+            kind = {
+                _SSH_DIRECTORY_MODE_WARNING: (
+                    SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
+                ),
+                _AUTHORIZED_KEYS_MODE_WARNING: (
+                    SshPreparationWarningKind.AUTHORIZED_KEYS_MODE_NONSTANDARD
+                ),
+            }[warning]
+            preparation_warning_observer(kind)
 
     if not status.has_credentials:
-        log("WARNING: SSH is enabled but no root SSH credentials are configured")
+        if preparation_warning_observer is None:
+            log("WARNING: SSH is enabled but no root SSH credentials are configured")
         return None
 
     run_command = (
@@ -328,7 +352,7 @@ def _run_checked_command(
     if returncode != 0:
         exit_code = returncode if returncode > 0 else 1
         raise SshdStartupError(
-            f"{description} failed with exit code {returncode}: {_format_argv(argv)}",
+            f"{description} failed with exit code {returncode}",
             exit_code=exit_code,
         )
 
@@ -341,16 +365,14 @@ def _run_command(
 ) -> int:
     command = list(argv)
     if not command:
-        raise SshdStartupError(f"{description} argv must not be empty")
+        raise SshdStartupError(f"{description} command is missing")
     try:
         process = subprocess.Popen(
             command,
             shell=False,
         )
     except FileNotFoundError as error:
-        raise SshdStartupError(
-            f"{description} executable not found: {command[0]}"
-        ) from error
+        raise SshdStartupError(f"{description} executable was not found") from error
     except OSError as error:
         raise SshdStartupError(f"{description} failed to start") from error
     process_observer(process)
@@ -370,13 +392,11 @@ def _run_command(
 def _start_process(argv: Sequence[str], *, description: str) -> SshdProcess:
     command = list(argv)
     if not command:
-        raise SshdStartupError(f"{description} argv must not be empty")
+        raise SshdStartupError(f"{description} command is missing")
     try:
         return subprocess.Popen(command, shell=False)
     except FileNotFoundError as error:
-        raise SshdStartupError(
-            f"{description} executable not found: {command[0]}"
-        ) from error
+        raise SshdStartupError(f"{description} executable was not found") from error
     except OSError as error:
         raise SshdStartupError(f"{description} failed to start") from error
 
@@ -600,7 +620,7 @@ def _run_checked_sensitive_command(
     if returncode != 0:
         exit_code = returncode if returncode > 0 else 1
         raise SshCredentialPreparationError(
-            f"{description} failed with exit code {returncode}: {_format_argv(argv)}",
+            f"{description} failed with exit code {returncode}",
             exit_code=exit_code,
         )
 
@@ -614,7 +634,7 @@ def _run_sensitive_command(
 ) -> int:
     command = list(argv)
     if not command:
-        raise SshCredentialPreparationError(f"{description} argv must not be empty")
+        raise SshCredentialPreparationError(f"{description} command is missing")
     try:
         process = subprocess.Popen(
             command,
@@ -623,7 +643,7 @@ def _run_sensitive_command(
         )
     except FileNotFoundError as error:
         raise SshCredentialPreparationError(
-            f"{description} executable not found: {command[0]}"
+            f"{description} executable was not found"
         ) from error
     except OSError as error:
         raise SshCredentialPreparationError(f"{description} failed to start") from error
@@ -641,7 +661,3 @@ def _run_sensitive_command(
         raise
     finally:
         process_observer(None)
-
-
-def _format_argv(argv: Sequence[str]) -> str:
-    return " ".join(argv)

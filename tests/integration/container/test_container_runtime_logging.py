@@ -232,7 +232,7 @@ def test_primary_failure_is_observable_without_pipe_backpressure() -> None:
 
     assert result.returncode == 0
     assert result.stdout == b""
-    assert result.stderr.startswith(b"cdh: Runtime stdout primary output failed:")
+    assert result.stderr == b"cdh: Runtime stdout primary output failed.\n"
 
 
 def test_broker_close_does_not_wait_for_descendant_pipe_eof() -> None:

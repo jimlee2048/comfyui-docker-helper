@@ -18,6 +18,19 @@ from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
 )
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeGenerationStopCause as RuntimeEventStopCause,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeGenerationStopped,
+    RuntimeGenerationStopping,
+    RuntimePhase,
+    RuntimePhaseCompleted,
+    RuntimePhaseFailed,
+    RuntimePhaseStarted,
+    RuntimeSshOutcome,
+    RuntimeSshStatus,
+)
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
     RuntimeDownloadStateObserver,
@@ -37,6 +50,7 @@ from comfyui_docker_helper.container.runtime_serve import (
     run_runtime_generation_once,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import RuntimeSshService
+from comfyui_docker_helper.container.ssh import SshPreparationWarningKind
 
 _WORKER_CLEANUP_TIMEOUT_SECONDS = 10
 
@@ -87,6 +101,99 @@ class FakeChild:
         if self._events is not None:
             self._events.append("kill")
         self.returncode = -int(signal.SIGKILL)
+
+
+@pytest.mark.parametrize(
+    ("ready", "expected_status"),
+    [
+        pytest.param(
+            False,
+            RuntimeSshStatus.ENABLED_WITHOUT_CREDENTIALS,
+            id="no-credentials",
+        ),
+        pytest.param(True, RuntimeSshStatus.READY, id="ready"),
+    ],
+)
+def test_managed_ssh_lifecycle_emits_one_typed_outcome_without_legacy_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    ready: bool,
+    expected_status: RuntimeSshStatus,
+) -> None:
+    runtime = _runtime(tmp_path)
+    ssh_config: dict[str, object] = {"enable": True}
+    if ready:
+        ssh_config["password"] = "configured"
+    config = RuntimeConfig.model_validate({"system": {"ssh": ssh_config}})
+    semantic_events: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            semantic_events.append(event)
+
+    class OwnedSshd:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self._terminal = threading.Event()
+
+        def wait(self) -> int:
+            assert self._terminal.wait(timeout=1)
+            assert self.returncode is not None
+            return self.returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+            self._terminal.set()
+
+        def kill(self) -> None:
+            self.terminate()
+
+    def starter(
+        _config: RuntimeConfig,
+        *,
+        runtime: ContainerRuntime,
+        log: Logger,
+        preparation_process_observer: Callable[[object | None], None],
+        preparation_warning_observer: (
+            Callable[[SshPreparationWarningKind], object] | None
+        ) = None,
+    ) -> OwnedSshd | None:
+        del runtime, log, preparation_process_observer
+        assert preparation_warning_observer is not None
+        return OwnedSshd() if ready else None
+
+    downloads = Mock()
+    downloads.is_stopped.return_value = True
+    recorder = Recorder()
+    result = lifecycle_module.run_runtime_lifecycle(
+        config,
+        RuntimeHookPlan(hooks=()),
+        runtime=runtime,
+        source_env={"PATH": "/usr/bin"},
+        downloads=downloads,
+        ssh_service=RuntimeSshService(
+            config,
+            runtime=runtime,
+            starter=starter,
+            event_sink=recorder,
+        ),
+        runner=lambda *_args, **_kwargs: FakeChild(0),
+        event_sink=recorder,
+    )
+
+    assert result.returncode == 0
+    assert [
+        event.status
+        for event in semantic_events
+        if isinstance(event, RuntimeSshOutcome)
+    ] == [expected_status]
+    captured = capsys.readouterr()
+    assert "WARNING: SSH is enabled but no root SSH credentials are configured" not in (
+        captured.out + captured.err
+    )
 
 
 # Generation admission keeps ordinary non-hook content nonfatal and reports only
@@ -548,6 +655,70 @@ def test_runtime_lifecycle_happy_path_orders_downloads_hooks_readiness_and_wait(
     ]
 
 
+def test_runtime_file_phase_does_not_complete_after_cancellation_or_health_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    handlers, _restored = _capture_signal_handlers(monkeypatch)
+
+    def run_case(*, primary_failure: bool) -> tuple[list[object], object]:
+        health = ControllableRuntimeHealth()
+        semantic_events: list[object] = []
+        downloads = Mock()
+        ssh_service = Mock()
+        downloads.is_stopped.return_value = True
+        ssh_service.is_stopped.return_value = True
+
+        def activate(**_kwargs: object) -> None:
+            if primary_failure:
+                health.fail("stdout failed during runtime file preparation")
+                return
+            handler = handlers[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+
+        downloads.activate.side_effect = activate
+        try:
+            result = lifecycle_module.run_runtime_lifecycle(
+                RuntimeConfig(),
+                RuntimeHookPlan(hooks=()),
+                runtime=runtime,
+                source_env={"PATH": "/usr/bin"},
+                downloads=downloads,
+                ssh_service=ssh_service,
+                runner=lambda *_args, **_kwargs: pytest.fail("ComfyUI must not start"),
+                runtime_health=health,
+                event_sink=Mock(emit=semantic_events.append),
+            )
+        except RuntimeExecutionError as error:
+            result = error
+        return semantic_events, result
+
+    cancelled_events, cancelled_result = run_case(primary_failure=False)
+    failed_events, failed_result = run_case(primary_failure=True)
+
+    for semantic_events in (cancelled_events, failed_events):
+        assert (
+            RuntimePhaseStarted(RuntimePhase.RUNTIME_FILES_PREPARATION)
+            in semantic_events
+        )
+        assert (
+            RuntimePhaseCompleted(RuntimePhase.RUNTIME_FILES_PREPARATION)
+            not in semantic_events
+        )
+        assert (
+            RuntimePhaseFailed(RuntimePhase.RUNTIME_FILES_PREPARATION)
+            in semantic_events
+        )
+    assert cancelled_result == lifecycle_module.RuntimeGenerationResult(
+        cause=lifecycle_module.RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN,
+        returncode=-int(signal.SIGTERM),
+    )
+    assert isinstance(failed_result, RuntimeExecutionError)
+    assert "runtime logging failed" in str(failed_result)
+
+
 @pytest.mark.parametrize(
     ("shutdown_timeout", "expected_deadlines"),
     [
@@ -764,6 +935,11 @@ def test_first_external_signal_during_restart_preserves_original_signal(
     ssh_service = Mock()
     ssh_service.request_stop.side_effect = lambda: events.append("ssh:request")
     ssh_service.is_stopped.return_value = True
+    semantic_events: list[object] = []
+    lifecycle_events = lifecycle_module._RuntimeLifecycleEvents(
+        Mock(emit=semantic_events.append),
+        "gen-1",
+    )
 
     def stop_hooks(
         _plan: RuntimeHookPlan,
@@ -794,6 +970,7 @@ def test_first_external_signal_during_restart_preserves_original_signal(
             downloads=downloads,
             ssh_service=ssh_service,
             startup_shutdown=startup_shutdown,
+            lifecycle_events=lifecycle_events,
             restart_acceptor=restart,
             monotonic=lambda: 0.0,
             sleep=lambda _seconds: None,
@@ -813,6 +990,57 @@ def test_first_external_signal_during_restart_preserves_original_signal(
         "forward:SIGINT",
         "child:reap",
     ]
+    assert semantic_events.count(RuntimeGenerationStopping("gen-1")) == 1
+    assert (
+        semantic_events.count(
+            RuntimeGenerationStopped("gen-1", RuntimeEventStopCause.EXTERNAL_SHUTDOWN)
+        )
+        == 1
+    )
+
+
+def test_presentation_failure_does_not_replace_startup_failure_or_cleanup(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    health = ControllableRuntimeHealth()
+    downloads = Mock()
+
+    def fail_primary_health(**_kwargs: object) -> None:
+        health.fail("primary output failed during runtime file activation")
+
+    downloads.activate.side_effect = fail_primary_health
+    downloads.is_stopped.return_value = True
+    ssh_service = Mock()
+    ssh_service.is_stopped.return_value = True
+
+    class FailingSink:
+        def emit(self, _event: object) -> None:
+            raise OSError("presentation sentinel")
+
+    with pytest.raises(RuntimeExecutionError, match="runtime logging failed") as caught:
+        lifecycle_module.run_runtime_lifecycle(
+            RuntimeConfig(),
+            RuntimeHookPlan(hooks=()),
+            runtime=runtime,
+            source_env={"PATH": "/usr/bin"},
+            downloads=downloads,
+            ssh_service=ssh_service,
+            runner=lambda *_args, **_kwargs: pytest.fail("ComfyUI must not start"),
+            runtime_health=health,
+            event_sink=FailingSink(),  # type: ignore[arg-type]
+            generation="gen-1",
+        )
+
+    assert "presentation sentinel" not in str(caught.value)
+    assert str(caught.value) == (
+        "runtime logging failed while preserving primary output"
+    )
+    assert "primary output failed during runtime file activation" not in str(
+        caught.value
+    )
+    downloads.stop.assert_called_once()
+    ssh_service.stop.assert_called_once()
 
 
 def test_second_external_signal_during_restart_forces_exact_owners(

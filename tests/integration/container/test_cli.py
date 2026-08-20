@@ -10,6 +10,7 @@ from rich.text import Text
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
+from comfyui_docker_helper.cli_output import CliOutputSettings, OutputDetail
 from comfyui_docker_helper.config.build_plan import HttpFilePlan, build_plan_digest
 from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
@@ -698,10 +699,10 @@ def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keep the serve command wired to the runtime lifecycle service."""
-    calls: list[str] = []
+    calls: list[CliOutputSettings] = []
 
-    def fake_run_runtime_serve() -> int:
-        calls.append("serve")
+    def fake_run_runtime_serve(settings: CliOutputSettings) -> int:
+        calls.append(settings)
         return 17
 
     monkeypatch.setattr(
@@ -709,10 +710,10 @@ def test_container_runtime_serve_invokes_service_and_propagates_exit_code(
         "run_runtime_serve",
         fake_run_runtime_serve,
     )
-    result = cli_runner.invoke(app, ["container", "runtime", "serve"])
+    result = cli_runner.invoke(app, ["-vv", "container", "runtime", "serve"])
 
     assert result.exit_code == 17
-    assert calls == ["serve"]
+    assert calls == [CliOutputSettings(detail=OutputDetail.DEBUG)]
 
 
 def test_container_runtime_restart_waits_without_detach_options(
@@ -772,19 +773,26 @@ def test_container_runtime_follow_is_output_only(
 
     def fake_follow_runtime() -> int:
         calls.append("follow")
+        sys.stdout.write("runtime-stdout\n")
+        sys.stderr.write("runtime-stderr\n")
         return 129
 
     monkeypatch.setattr(container_cli, "follow_runtime", fake_follow_runtime)
 
-    result = cli_runner.invoke(app, ["container", "runtime", "follow"])
+    normal = cli_runner.invoke(app, ["container", "runtime", "follow"])
+    quiet = cli_runner.invoke(
+        app,
+        ["--quiet", "container", "runtime", "follow"],
+    )
     help_result = cli_runner.invoke(
         app,
         ["container", "runtime", "follow", "--help"],
     )
 
-    assert result.exit_code == 129
-    assert result.output == ""
-    assert calls == ["follow"]
+    assert normal.exit_code == quiet.exit_code == 129
+    assert normal.stdout == quiet.stdout == "runtime-stdout\n"
+    assert normal.stderr == quiet.stderr == "runtime-stderr\n"
+    assert calls == ["follow", "follow"]
     plain_help = _plain_output(help_result.output)
     assert "live stdout and stderr" in plain_help
     assert "--detach" not in plain_help

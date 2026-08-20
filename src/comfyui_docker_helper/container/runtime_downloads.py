@@ -11,18 +11,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
-from comfyui_docker_helper.container.runtime_diagnostics import (
-    runtime_error_reason,
-    runtime_source_host,
-    short_runtime_identity,
-)
 from comfyui_docker_helper.container.runtime_download_state import (
     RuntimeDownloadStateWriter,
+)
+from comfyui_docker_helper.container.runtime_event_delivery import (
+    RuntimeBackgroundEventSink,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeDownloadQueue,
+    RuntimeDownloadQueueState,
+    RuntimeDownloadQueueSummary,
+    RuntimeDownloadQueueWarning,
+    RuntimeDownloadQueueWarningKind,
+    RuntimeDownloadReconciled,
+    RuntimeEvent,
+    RuntimeStaleCleanupPending,
 )
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
@@ -59,6 +68,7 @@ class RuntimeDownloadRunner(Protocol):
         cancel_requested: Callable[[], bool] | None = None,
         backend_observer: Callable[[CancellableDownloadBackend], None] | None = None,
         credential_policy: DownloaderCredentialPolicy | None = None,
+        event_sink: RuntimeBackgroundEventSink | None = None,
     ) -> tuple[RuntimeFileDownloadResult, ...]: ...
 
 
@@ -98,6 +108,7 @@ class RuntimeAsyncQueueStarter(Protocol):
         handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
         cancel_requested: Callable[[], bool],
         credential_policy: DownloaderCredentialPolicy | None = None,
+        event_sink: RuntimeBackgroundEventSink | None = None,
     ) -> RuntimeAsyncDownloadQueueHandle: ...
 
 
@@ -226,6 +237,8 @@ class RuntimeDownloads:
         downloader: RuntimeDownloadRunner = download_runtime_files,
         async_queue_starter: RuntimeAsyncQueueStarter | None = None,
         credential_policy: DownloaderCredentialPolicy | None = None,
+        event_sink: RuntimeBackgroundEventSink | None = None,
+        direct_event_sink: EventSink[RuntimeEvent] | None = None,
         log: Logger = print,
     ) -> None:
         self._config = config
@@ -240,6 +253,8 @@ class RuntimeDownloads:
         )
         self._log = log
         self._credential_policy = credential_policy
+        self._event_sink = event_sink
+        self._direct_event_sink = direct_event_sink
         self._prepared = _empty_prepared_runtime_downloads()
         self._sync_handle: _RuntimeDownloadOperationHandle | None = None
         self._async_handle: RuntimeAsyncDownloadQueueHandle | None = None
@@ -280,6 +295,7 @@ class RuntimeDownloads:
                         cancel_requested=stop_requested.is_set,
                         backend_observer=observe_backend,
                         credential_policy=self._credential_policy,
+                        event_sink=self._event_sink,
                     )
                 )
             except BaseException as error:
@@ -331,11 +347,12 @@ class RuntimeDownloads:
             raise RuntimeAsyncQueueStartupError(
                 "async runtime download generation is missing"
             )
-        self._log(
-            "Async runtime download queue scheduled: "
-            f"items={len(plan.items)} "
-            f"policy={self._config.cdh.download_failure_policy}"
-        )
+        if self._event_sink is None:
+            self._log(
+                "Async runtime download queue scheduled: "
+                f"items={len(plan.items)} "
+                f"policy={self._config.cdh.download_failure_policy}"
+            )
 
         def own_handle(handle: RuntimeAsyncDownloadQueueHandle) -> None:
             if self._async_handle is not None and self._async_handle is not handle:
@@ -347,6 +364,8 @@ class RuntimeDownloads:
         starter_kwargs: dict[str, Any] = {}
         if self._credential_policy is not None:
             starter_kwargs["credential_policy"] = self._credential_policy
+        if self._event_sink is not None:
+            starter_kwargs["event_sink"] = self._event_sink
         handle = self._async_queue_starter(
             plan,
             config=self._config,
@@ -381,6 +400,7 @@ class RuntimeDownloads:
             monotonic=monotonic,
             sleep=sleep,
             log=self._log,
+            event_sink=self._direct_event_sink,
         )
 
     def request_stop(self, *, deadline: float | None = None) -> None:
@@ -388,7 +408,8 @@ class RuntimeDownloads:
         for handle in self._owned_handles():
             if not handle.is_alive():
                 continue
-            self._log("Runtime download operation stop requested")
+            if self._direct_event_sink is None:
+                self._log("Runtime download operation stop requested")
             handle.request_stop()
             handle.request_backend_termination(deadline=deadline)
 
@@ -428,6 +449,7 @@ def start_runtime_async_download_queue(
     handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
     cancel_requested: Callable[[], bool],
     credential_policy: DownloaderCredentialPolicy | None = None,
+    event_sink: RuntimeBackgroundEventSink | None = None,
 ) -> RuntimeAsyncDownloadQueueHandle:
     """Start one cdh-managed background queue for async runtime files."""
     store: RuntimeStateStore | None = None
@@ -448,9 +470,15 @@ def start_runtime_async_download_queue(
     except Exception as error:
         if store is not None:
             store.close()
-        raise RuntimeAsyncQueueStartupError(str(error)) from error
+        raise RuntimeAsyncQueueStartupError(
+            "async runtime download queue admission failed"
+        ) from error
 
-    state_writer = RuntimeDownloadStateWriter(store, state, log=log)
+    state_writer = RuntimeDownloadStateWriter(
+        store,
+        state,
+        log=log if event_sink is None else None,
+    )
     accepted = threading.Event()
     stop_requested = threading.Event()
     startup_finished = threading.Event()
@@ -459,6 +487,14 @@ def start_runtime_async_download_queue(
     backends_lock = threading.Lock()
 
     def accept_queue() -> None:
+        if event_sink is not None:
+            event_sink.emit(
+                RuntimeDownloadQueueSummary(
+                    RuntimeDownloadQueue.ASYNCHRONOUS,
+                    RuntimeDownloadQueueState.ACCEPTED,
+                    len(plan.items),
+                )
+            )
         accepted.set()
 
     def observe_backend(backend: CancellableDownloadBackend) -> None:
@@ -477,16 +513,30 @@ def start_runtime_async_download_queue(
                 cancel_requested=stop_requested.is_set,
                 backend_observer=observe_backend,
                 credential_policy=credential_policy,
+                event_sink=event_sink,
             )
-            log(f"Async runtime download queue finished: items={len(plan.items)}")
+            if event_sink is not None and not stop_requested.is_set():
+                event_sink.emit(
+                    RuntimeDownloadQueueSummary(
+                        RuntimeDownloadQueue.ASYNCHRONOUS,
+                        RuntimeDownloadQueueState.COMPLETED,
+                        len(plan.items),
+                    )
+                )
+            if event_sink is None:
+                log(f"Async runtime download queue finished: items={len(plan.items)}")
         except Exception as error:
             if not accepted.is_set():
                 startup_error.append(error)
             else:
-                log(
-                    "WARNING: async runtime download worker failed: "
-                    f"reason={runtime_error_reason(error)}"
-                )
+                if event_sink is None:
+                    log("WARNING: async runtime download queue stopped after a failure")
+                else:
+                    event_sink.emit(
+                        RuntimeDownloadQueueWarning(
+                            RuntimeDownloadQueueWarningKind.STOPPED_AFTER_FAILURE
+                        )
+                    )
         finally:
             store.close()
             startup_finished.set()
@@ -511,7 +561,9 @@ def start_runtime_async_download_queue(
             store.close()
         if not isinstance(error, Exception):
             raise
-        raise RuntimeAsyncQueueStartupError(str(error)) from error
+        raise RuntimeAsyncQueueStartupError(
+            "async runtime download queue failed to start"
+        ) from error
 
     while not accepted.is_set():
         if cancel_requested():
@@ -520,9 +572,12 @@ def start_runtime_async_download_queue(
             break
     if not accepted.is_set():
         error = startup_error[0] if startup_error else RuntimeError("worker exited")
-        raise RuntimeAsyncQueueStartupError(str(error)) from error
+        raise RuntimeAsyncQueueStartupError(
+            "async runtime download queue failed before acceptance"
+        ) from error
 
-    log(f"Async runtime download queue accepted: items={len(plan.items)}")
+    if event_sink is None:
+        log(f"Async runtime download queue accepted: items={len(plan.items)}")
     return handle
 
 
@@ -537,6 +592,7 @@ def _activate_runtime_file_plan(
     cancel_requested: Callable[[], bool],
     backend_observer: Callable[[CancellableDownloadBackend], None],
     credential_policy: DownloaderCredentialPolicy | None,
+    event_sink: RuntimeBackgroundEventSink | None,
 ) -> _PreparedRuntimeDownloads:
     store = RuntimeStateStore.open(
         runtime_state_path,
@@ -561,9 +617,12 @@ def _activate_runtime_file_plan(
             default_downloader=config.cdh.default_downloader,
             resume_download=config.cdh.downloader.aria2.resume_download,
         )
-        _log_runtime_download_reconciliation(reconciliation, log=log)
+        if event_sink is None:
+            _log_runtime_download_reconciliation(reconciliation, log=log)
         store.write(reconciliation.state)
-        _log_runtime_download_reconciliation_persisted(reconciliation, log=log)
+        if event_sink is None:
+            _log_runtime_download_reconciliation_persisted(reconciliation, log=log)
+        _emit_runtime_reconciliation(reconciliation, event_sink=event_sink)
 
         sync_plan, prepared = _split_runtime_download_queues(
             reconciliation.download_plan,
@@ -575,11 +634,21 @@ def _activate_runtime_file_plan(
         state_writer = RuntimeDownloadStateWriter(
             store,
             reconciliation.state,
-            log=log,
+            log=log if event_sink is None else None,
         )
         downloader_kwargs: dict[str, Any] = {}
         if credential_policy is not None:
             downloader_kwargs["credential_policy"] = credential_policy
+        if event_sink is not None:
+            downloader_kwargs["event_sink"] = event_sink
+            if not cancel_requested():
+                event_sink.emit(
+                    RuntimeDownloadQueueSummary(
+                        RuntimeDownloadQueue.SYNCHRONOUS,
+                        RuntimeDownloadQueueState.ACCEPTED,
+                        len(sync_plan.items),
+                    )
+                )
         runtime_downloader(
             sync_plan,
             config=config,
@@ -589,6 +658,14 @@ def _activate_runtime_file_plan(
             backend_observer=backend_observer,
             **downloader_kwargs,
         )
+        if event_sink is not None and not cancel_requested():
+            event_sink.emit(
+                RuntimeDownloadQueueSummary(
+                    RuntimeDownloadQueue.SYNCHRONOUS,
+                    RuntimeDownloadQueueState.COMPLETED,
+                    len(sync_plan.items),
+                )
+            )
         return prepared
     finally:
         store.close()
@@ -670,17 +747,13 @@ def _log_runtime_download_reconciliation(
         log(
             "Runtime download reconcile: "
             f"mode={item.item.download_mode} target={item.item.relative_target} "
-            f"status={item.status} scheduled={str(item.scheduled).lower()} "
-            f"source_host={runtime_source_host(item.item.url)} "
-            f"identity={short_runtime_identity(item.digest)}"
+            f"status={item.status} scheduled={str(item.scheduled).lower()}"
         )
     for pending in reconciliation.cleanup_pending:
         entry = reconciliation.state.downloads[pending.digest]
         log(
             "WARNING: Runtime stale download cleanup remains pending: "
-            f"target={entry.target} "
-            f"identity={short_runtime_identity(pending.digest)} "
-            f"reason={runtime_error_reason(pending.reason)}"
+            f"target={entry.target}"
         )
 
 
@@ -703,6 +776,40 @@ def _log_runtime_download_reconciliation_persisted(
     )
 
 
+def _emit_runtime_reconciliation(
+    reconciliation: RuntimeFileReconciliation,
+    *,
+    event_sink: RuntimeBackgroundEventSink | None,
+) -> None:
+    if event_sink is None:
+        return
+    scheduled_sync = sum(
+        item.scheduled and item.item.download_mode == "sync"
+        for item in reconciliation.items
+    )
+    scheduled_async = sum(
+        item.scheduled and item.item.download_mode == "async"
+        for item in reconciliation.items
+    )
+    already_present = sum(not item.scheduled for item in reconciliation.items)
+    event_sink.emit(
+        RuntimeDownloadReconciled(
+            len(reconciliation.items),
+            scheduled_sync,
+            scheduled_async,
+            already_present,
+            len(reconciliation.stale_entry_digests),
+            len(reconciliation.cleanup_pending),
+        )
+    )
+    for pending in reconciliation.cleanup_pending:
+        event_sink.emit(
+            RuntimeStaleCleanupPending(
+                reconciliation.state.downloads[pending.digest].target
+            )
+        )
+
+
 def stop_runtime_async_download_queue(
     handle: RuntimeAsyncDownloadQueueHandle | None,
     *,
@@ -712,20 +819,28 @@ def stop_runtime_async_download_queue(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], object] = time.sleep,
     log: Logger = print,
+    event_sink: EventSink[RuntimeEvent] | None = None,
 ) -> bool:
     """Stop one owned queue against one absolute component boundary."""
     if handle is None or not handle.is_alive():
         return True
 
-    log("Async runtime download queue stop requested")
+    if event_sink is None:
+        log("Async runtime download queue stop requested")
     handle.request_stop()
     deadline = monotonic() + timeout
     forced = False
     while handle.is_alive() or handle.backend_termination_is_alive():
         now = monotonic()
         if not forced and (cancel_requested() or now >= deadline):
-            reason = "interrupted" if cancel_requested() else f"exceeded {timeout:.1f}s"
-            log(f"WARNING: Async runtime download queue {reason}; forcing backends")
+            if event_sink is None:
+                log("WARNING: Async runtime download queue required force termination")
+            else:
+                event_sink.emit(
+                    RuntimeDownloadQueueWarning(
+                        RuntimeDownloadQueueWarningKind.FORCE_TERMINATION_REQUIRED
+                    )
+                )
             handle.request_backend_termination(deadline=deadline)
             handle.terminate_backends()
             forced = True
@@ -733,5 +848,6 @@ def stop_runtime_async_download_queue(
         handle.join(timeout=max(0.0, delay))
         if handle.is_alive() or handle.backend_termination_is_alive():
             sleep(0)
-    log("Async runtime download queue stopped")
+    if event_sink is None:
+        log("Async runtime download queue stopped")
     return not forced

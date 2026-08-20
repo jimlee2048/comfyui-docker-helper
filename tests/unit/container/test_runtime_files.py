@@ -14,11 +14,19 @@ import pytest
 
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.container import transfer_core
+from comfyui_docker_helper.container.download_events import DownloadTransferProgress
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialError,
 )
 from comfyui_docker_helper.container.runtime_download_state import (
     RuntimeDownloadStateWriter,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeDownloadAttemptStarted,
+    RuntimeDownloadFailed,
+    RuntimeDownloadItemCompleted,
+    RuntimeDownloadItemProgress,
+    RuntimeDownloadItemRetryScheduled,
 )
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeFileDownloadError,
@@ -934,10 +942,7 @@ def test_stale_cleanup_fsync_failure_retries_from_durable_absence(
         )
 
     assert [pending.digest for pending in first.cleanup_pending] == [digest]
-    assert (
-        "download staging cleanup could not be made durable"
-        in first.cleanup_pending[0].reason
-    )
+    assert first.cleanup_pending[0].reason == "staging cleanup failed"
     assert "directory fsync failed" not in first.cleanup_pending[0].reason
     assert first.state.downloads[digest].resume == entry.resume
     assert not staging.exists()
@@ -982,7 +987,7 @@ def test_partial_stale_authority_and_unsafe_leaf_remain_cleanup_pending(
             if leaf.name.endswith(".aria2"):
                 real_unlink_owned_leaf(leaf)
                 return
-            raise DownloadFilesError("staging cleanup failed")
+            raise DownloadFilesError("raw-staging-cleanup-sentinel")
 
         patch.setattr(
             transfer_core,
@@ -1000,6 +1005,10 @@ def test_partial_stale_authority_and_unsafe_leaf_remain_cleanup_pending(
     assert {pending.digest for pending in result.cleanup_pending} == set(entries)
     assert any(
         pending.reason == "staging cleanup failed" for pending in result.cleanup_pending
+    )
+    assert all(
+        "raw-staging-cleanup-sentinel" not in pending.reason
+        for pending in result.cleanup_pending
     )
     assert staging.read_bytes() == b"partial"
     assert not control.exists()
@@ -1094,6 +1103,17 @@ def test_runtime_verified_existing_target_skips_credential_and_backend(
     item.target.parent.mkdir(parents=True)
     item.target.write_bytes(content)
     backend = FakeBackend()
+    presentation_events: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            presentation_events.append(event)
+
+        def emit_progress(self, _scope: object, event: object) -> None:
+            presentation_events.append(event)
+
+        def close_progress(self, _scope: object) -> None:
+            return
 
     class CredentialMustRemainLazy:
         def authorization_for(self, _url: object) -> bytes | None:
@@ -1105,10 +1125,17 @@ def test_runtime_verified_existing_target_skips_credential_and_backend(
         backends={"httpx": backend},
         log=lambda _: None,
         credential_policy=CredentialMustRemainLazy(),
+        event_sink=Recorder(),
     )
 
     assert results[0].status is DownloadStatus.SKIPPED
     assert backend.calls == []
+    completion = next(
+        event
+        for event in presentation_events
+        if isinstance(event, RuntimeDownloadItemCompleted)
+    )
+    assert completion.attempts == 0
 
 
 def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> None:
@@ -1117,15 +1144,94 @@ def test_runtime_retryable_failure_retries_then_completes(tmp_path: Path) -> Non
         failures=[TransportRetryable(TransportDiagnostic("httpx", "temporary"))]
     )
 
+    events: list[object] = []
+    logs: list[str] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            events.append(event)
+
+        def emit_progress(self, _scope: object, event: object) -> None:
+            events.append(event)
+
+        def close_progress(self, _scope: object) -> None:
+            return
+
     result = process_runtime_file_downloads(
         plan,
         config=_config(attempts=2),
         backends={"httpx": backend},
-        log=lambda _: None,
+        log=logs.append,
+        event_sink=Recorder(),
     )
 
     assert result[0].status is DownloadStatus.DOWNLOADED
     assert len(backend.calls) == 2
+    assert [type(event) for event in events] == [
+        RuntimeDownloadAttemptStarted,
+        RuntimeDownloadItemRetryScheduled,
+        RuntimeDownloadAttemptStarted,
+        RuntimeDownloadItemCompleted,
+    ]
+    assert all("https://" not in repr(event) for event in events)
+    assert logs == []
+
+
+def test_runtime_transport_progress_is_projected_to_background_scope(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path / "ComfyUI", _file("a.bin"))
+    progress = DownloadTransferProgress(
+        transferred_bytes=4,
+        total_bytes=10,
+        stored_bytes=4,
+        reported_rate=2,
+    )
+
+    class ProgressBackend(FakeBackend):
+        def download(
+            self,
+            request: TransportRequest,
+            settings: DownloaderSettings,
+        ) -> TransportOutcome:
+            assert request.progress_sink is not None
+            request.progress_sink.emit(progress)
+            return super().download(request, settings)
+
+    emitted_progress: list[tuple[object, object]] = []
+    closed_scopes: list[object] = []
+
+    class Recorder:
+        def emit(self, _event: object, /) -> None:
+            return
+
+        def emit_progress(self, scope: object, event: object) -> None:
+            emitted_progress.append((scope, event))
+
+        def close_progress(self, scope: object) -> None:
+            closed_scopes.append(scope)
+
+    result = process_runtime_file_downloads(
+        plan,
+        config=_config(attempts=2),
+        backends={"httpx": ProgressBackend()},
+        log=lambda _: None,
+        event_sink=Recorder(),
+    )
+
+    assert result[0].status is DownloadStatus.DOWNLOADED
+    assert len(emitted_progress) == 1
+    scope, event = emitted_progress[0]
+    assert event == RuntimeDownloadItemProgress(
+        index=1,
+        total=1,
+        target="models/a.bin",
+        mode="sync",
+        attempt=1,
+        max_attempts=2,
+        progress=progress,
+    )
+    assert closed_scopes == [scope]
 
 
 def test_runtime_continue_applies_only_after_retryable_exhaustion(
@@ -1214,17 +1320,36 @@ def test_runtime_credential_failure_is_not_retried_and_preserves_attempt_fact(
             return TransportSuccess(length=0, namespace="httpx", http_status=200)
 
     logs: list[str] = []
+    presentation_events: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            presentation_events.append(event)
+
+        def emit_progress(self, _scope: object, event: object) -> None:
+            presentation_events.append(event)
+
+        def close_progress(self, _scope: object) -> None:
+            return
+
     results = process_runtime_file_downloads(
         plan,
         config=_config(policy="continue", attempts=3),
         backends={"httpx": CredentialBackend()},
         log=logs.append,
         credential_policy=(None if network_attempted else InitialCredentialPolicy()),
+        event_sink=Recorder(),
     )
 
     assert [result.item.filename for result in results] == ["b.bin"]
     assert calls == (2 if network_attempted else 1)
-    assert any(f"attempts={expected_attempts}/3" in line for line in logs)
+    assert logs == []
+    failure = next(
+        event
+        for event in presentation_events
+        if isinstance(event, RuntimeDownloadFailed)
+    )
+    assert failure.attempts == expected_attempts
     if not network_attempted:
         assert not any(
             "target=models/a.bin" in line and "attempt=" in line for line in logs
@@ -1239,13 +1364,18 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
 ) -> None:
     plan = _plan(tmp_path / "ComfyUI", _file("a.bin"), _file("b.bin"))
     backend = FakeBackend(
-        failures=[TransportOrdinaryTerminal(TransportDiagnostic("aria2", "not found"))]
+        failures=[
+            TransportOrdinaryTerminal(
+                TransportDiagnostic("aria2", "credential-url-raw-reason")
+            )
+        ]
     )
     statuses: list[str] = []
     logs: list[str] = []
+    failure_text = ""
 
     if policy == "fail":
-        with pytest.raises(RuntimeFileDownloadError):
+        with pytest.raises(RuntimeFileDownloadError) as raised:
             process_runtime_file_downloads(
                 plan,
                 config=_config(policy=policy, attempts=3),
@@ -1253,6 +1383,7 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
                 state_observer=lambda _item, status, **_: statuses.append(status),
                 log=logs.append,
             )
+        failure_text = str(raised.value)
     else:
         results = process_runtime_file_downloads(
             plan,
@@ -1271,6 +1402,7 @@ def test_runtime_terminal_failure_applies_policy_without_retry(
         "Runtime download failed:" in line and "status=failed" in line for line in logs
     )
     assert all("status=exhausted" not in line for line in logs)
+    assert "credential-url-raw-reason" not in "\n".join((*logs, failure_text))
 
 
 # Cleanup failure must not overwrite the exact persisted authority it could not use.
@@ -1355,6 +1487,18 @@ def test_runtime_cancelled_transfer_stops_without_exhausted_failure(
         failures=[TransportCancelled(TransportDiagnostic("httpx", "cancelled"))]
     )
     statuses: list[str] = []
+    events: list[object] = []
+    closed_scopes: list[object] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            events.append(event)
+
+        def emit_progress(self, _scope: object, event: object) -> None:
+            events.append(event)
+
+        def close_progress(self, scope: object) -> None:
+            closed_scopes.append(scope)
 
     results = process_runtime_file_downloads(
         plan,
@@ -1362,11 +1506,18 @@ def test_runtime_cancelled_transfer_stops_without_exhausted_failure(
         backends={"httpx": backend},
         state_observer=lambda item, status, **_: statuses.append(status),
         log=lambda _: None,
+        event_sink=Recorder(),
     )
 
     assert results == ()
     assert statuses == ["failed"]
     assert len(backend.calls) == 1
+    assert len(closed_scopes) == 1
+    assert any(isinstance(event, RuntimeDownloadAttemptStarted) for event in events)
+    assert not any(
+        isinstance(event, (RuntimeDownloadFailed, RuntimeDownloadItemCompleted))
+        for event in events
+    )
 
 
 def test_required_completion_state_persistence_failure_is_fatal(

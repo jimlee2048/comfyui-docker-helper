@@ -185,10 +185,10 @@ def emit_final_manifest_command(
 
 
 @runtime_app.command("serve", context_settings=HELP_CONTEXT_SETTINGS)
-def runtime_serve_command() -> None:
+def runtime_serve_command(ctx: typer.Context) -> None:
     """Run the managed ComfyUI container runtime."""
     _require_linux_container()
-    raise typer.Exit(code=run_runtime_serve())
+    raise typer.Exit(code=run_runtime_serve(require_output_settings(ctx)))
 
 
 @runtime_app.command("restart", context_settings=HELP_CONTEXT_SETTINGS)

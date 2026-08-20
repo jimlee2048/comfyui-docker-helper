@@ -9,7 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.process_control import ProcessGroupSignalError
+from comfyui_docker_helper.container.runners import (
+    ContainerCommandError,
+    ContainerRuntime,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeHookCompleted,
+    RuntimeHookStarted,
+)
 from comfyui_docker_helper.container.runtime_hooks import (
     STOP_HOOK_POLL_INTERVAL_SECONDS,
     STOP_HOOK_TERMINATION_GRACE_SECONDS,
@@ -243,7 +251,10 @@ def test_discovery_wraps_root_inspection_permission_error(
     assert locations_and_codes(error.value) == [
         (("hooks", "mounted"), "runtime_hook.root_inspect_failed")
     ]
-    assert "inspect denied" in error.value.diagnostics[0].message
+    assert error.value.diagnostics[0].message == (
+        "runtime hook root could not be inspected"
+    )
+    assert "inspect denied" not in error.value.diagnostics[0].message
 
 
 def test_discovery_wraps_root_read_permission_error(
@@ -270,7 +281,8 @@ def test_discovery_wraps_root_read_permission_error(
     assert locations_and_codes(error.value) == [
         (("hooks", "mounted"), "runtime_hook.root_read_failed")
     ]
-    assert "read denied" in error.value.diagnostics[0].message
+    assert error.value.diagnostics[0].message == ("runtime hook root could not be read")
+    assert "read denied" not in error.value.diagnostics[0].message
 
 
 def test_strict_validation_rejects_special_files(tmp_path: Path) -> None:
@@ -336,6 +348,103 @@ def test_stop_hooks_request_process_group_and_keep_logging(tmp_path: Path) -> No
         "Running runtime hook source=mounted phase=stop filename=10-mounted.py",
     ]
     assert group_signals == []
+
+
+def test_runtime_hooks_emit_safe_indexed_facts_without_argv(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "mounted"
+    _write_hook(mounted, "pre-start.d", "05-prepare.sh")
+    _write_hook(mounted, "stop.d", "10-first.sh")
+    _write_hook(mounted, "stop.d", "20-second.py")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+    events: list[object] = []
+    logs: list[str] = []
+
+    class Sink:
+        def emit(self, event: object) -> None:
+            events.append(event)
+
+    def runner(
+        argv: Sequence[str | os.PathLike[str]],
+        **_kwargs: object,
+    ) -> FakeHookProcess:
+        del argv
+        return FakeHookProcess(pid=100, returncode=0)
+
+    sink = Sink()
+    run_runtime_startup_hooks(
+        plan,
+        "pre-start",
+        runtime=runtime,
+        log=logs.append,
+        runner=runner,  # type: ignore[arg-type]
+        event_sink=sink,  # type: ignore[arg-type]
+    )
+    run_runtime_stop_hooks(
+        plan,
+        runtime=runtime,
+        log=logs.append,
+        runner=runner,  # type: ignore[arg-type]
+        event_sink=sink,  # type: ignore[arg-type]
+    )
+
+    assert events == [
+        RuntimeHookStarted(1, 1, "pre-start", "mounted", "05-prepare.sh"),
+        RuntimeHookCompleted(1, 1, "pre-start", "mounted", "05-prepare.sh"),
+        RuntimeHookStarted(1, 2, "stop", "mounted", "10-first.sh"),
+        RuntimeHookCompleted(1, 2, "stop", "mounted", "10-first.sh"),
+        RuntimeHookStarted(2, 2, "stop", "mounted", "20-second.py"),
+        RuntimeHookCompleted(2, 2, "stop", "mounted", "20-second.py"),
+    ]
+    assert logs == []
+    assert os.fspath(tmp_path) not in repr(events)
+
+
+def test_runtime_hook_failure_diagnostics_omit_argv_and_runner_reason(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = tmp_path / "raw-argv-sentinel" / "mounted"
+    _write_hook(mounted, "pre-start.d", "10-fail.py")
+    plan = discover_runtime_hooks(
+        baked_hooks_path=tmp_path / "missing-baked",
+        mounted_hooks_path=mounted,
+    )
+
+    with pytest.raises(RuntimeHookError) as error:
+        run_runtime_startup_hooks(
+            plan,
+            "pre-start",
+            runtime=runtime,
+            runner=lambda *_args, **_kwargs: FakeHookProcess(
+                pid=101,
+                returncode=7,
+            ),
+        )
+
+    diagnostic = error.value.diagnostics[0]
+    assert diagnostic.path == ("hooks", "mounted", "pre-start", "10-fail.py")
+    assert diagnostic.message == "runtime hook failed with exit code 7"
+    assert "raw-argv-sentinel" not in diagnostic.message
+
+    def fail_start(*_args: object, **_kwargs: object) -> FakeHookProcess:
+        raise ContainerCommandError("raw-runner-credential-sentinel")
+
+    with pytest.raises(RuntimeHookError) as start_error:
+        run_runtime_startup_hooks(
+            plan,
+            "pre-start",
+            runtime=runtime,
+            runner=fail_start,  # type: ignore[arg-type]
+        )
+
+    start_diagnostic = start_error.value.diagnostics[0]
+    assert start_diagnostic.message == "runtime hook could not be started"
+    assert isinstance(start_error.value.__cause__, ContainerCommandError)
+    assert "raw-runner-credential-sentinel" not in start_diagnostic.message
 
 
 @pytest.mark.parametrize("phase", ["pre-start", "post-start"])
@@ -503,6 +612,13 @@ def test_stop_hook_deadline_signal_failure_does_not_wait(
     assert locations_and_codes(error.value) == [
         (("hooks", "mounted", "stop", "10-hang.sh"), "runtime_hook.termination_failed")
     ]
+    assert error.value.diagnostics[0].message == (
+        "runtime hook process group could not be signaled with SIGKILL"
+    )
+    signal_error = error.value.__cause__
+    assert isinstance(signal_error, ProcessGroupSignalError)
+    assert isinstance(signal_error.__cause__, OSError)
+    assert "signal unavailable" not in error.value.diagnostics[0].message
     assert process.waits == 0
 
 

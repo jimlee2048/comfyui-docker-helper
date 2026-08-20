@@ -11,11 +11,6 @@ import pytest
 from pydantic import ValidationError
 
 from comfyui_docker_helper.container import runtime_state
-from comfyui_docker_helper.container.runtime_diagnostics import (
-    runtime_error_reason,
-    runtime_source_host,
-    short_runtime_identity,
-)
 from comfyui_docker_helper.container.runtime_state import (
     RUNTIME_STATE_SCHEMA_VERSION,
     RuntimeDownloadEntry,
@@ -25,7 +20,6 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeStateStore,
     load_runtime_state,
     prepare_runtime_state_for_start,
-    summarize_runtime_error,
     write_runtime_state,
 )
 
@@ -501,62 +495,3 @@ def test_prepare_runtime_state_rebinds_generation_without_rewriting_entries(
     assert prepared is not None
     assert prepared.run_id == "run-2"
     assert prepared.downloads == state.downloads
-
-
-# Runtime error summaries preserve authored text while making logs structurally safe.
-def test_summarize_runtime_error_preserves_text_and_truncates() -> None:
-    raw = (
-        "failed\n"
-        "url=https://example.com/file.bin?token=abc "
-        "password=hunter2 api_key:abcdef Authorization=BearerValue "
-        "Authorization: Bearer auth-secret bearer bearer-secret "
-        "path /workspace/ComfyUI/models/file.bin "
-        "staging /var/lib/cdh/runtime/staging/file.tmp "
-        "\x00 done"
-    )
-
-    summarized = summarize_runtime_error(raw)
-    bounded = summarize_runtime_error(raw, max_length=80)
-
-    assert "\n" not in summarized
-    assert "\x00" not in summarized
-    assert "https://example.com/file.bin?token=abc" in summarized
-    assert "password=hunter2" in summarized
-    assert "api_key:abcdef" in summarized
-    assert "Authorization: Bearer auth-secret" in summarized
-    assert "/workspace/ComfyUI/models/file.bin" in summarized
-    assert "/var/lib/cdh/runtime/staging/file.tmp" in summarized
-    assert len(bounded) == 80
-    assert bounded.endswith("...")
-
-
-def test_runtime_diagnostics_source_host_and_short_identity_are_safe() -> None:
-    assert (
-        runtime_source_host(
-            "https://user:password@example.com:8443/path/file.bin?token=secret#frag"
-        )
-        == "example.com"
-    )
-    assert runtime_source_host("not a url") == "unknown"
-    assert (
-        short_runtime_identity(
-            "sha256:37b76480b800111122223333444455556666777788889999aaaabbbbccccdddd"
-        )
-        == "sha256:37b76480b800"
-    )
-
-
-def test_runtime_error_reason_preserves_authored_text_and_quotes_it() -> None:
-    reason = runtime_error_reason(
-        "failed https://user:pass@example.com/a.bin?token=url-secret "
-        "SSH_PASSWORD=hunter2 password=plain token:abc123 "
-        "Authorization: Bearer bearer-secret"
-    )
-
-    assert reason.startswith('"')
-    assert reason.endswith('"')
-    assert "https://user:pass@example.com/a.bin?token=url-secret" in reason
-    assert "SSH_PASSWORD=hunter2" in reason
-    assert "password=plain" in reason
-    assert "token:abc123" in reason
-    assert "Bearer bearer-secret" in reason

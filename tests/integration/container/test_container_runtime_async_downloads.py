@@ -24,7 +24,16 @@ from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncDownloadQueueHandle,
     RuntimeAsyncQueueStarter,
+    RuntimeAsyncQueueStartupError,
     start_runtime_async_download_queue,
+    stop_runtime_async_download_queue,
+)
+from comfyui_docker_helper.container.runtime_events import (
+    RuntimeDownloadItemCompleted,
+    RuntimeDownloadQueueState,
+    RuntimeDownloadQueueSummary,
+    RuntimeDownloadQueueWarning,
+    RuntimeDownloadQueueWarningKind,
 )
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
@@ -213,6 +222,7 @@ def _run_with_real_async_queue(
     runtime_async_queue_starter: RuntimeAsyncQueueStarter | None = None,
     runtime_hook_runner: RuntimeHookRunner | None = None,
     readiness_waiter: ReadinessWaiter | None = None,
+    background_event_sink: object | None = None,
 ) -> int:
     kwargs: dict[str, object] = {}
     if runtime_async_queue_starter is not None:
@@ -221,6 +231,8 @@ def _run_with_real_async_queue(
         kwargs["runtime_hook_runner"] = runtime_hook_runner
     if readiness_waiter is not None:
         kwargs["readiness_waiter"] = readiness_waiter
+    if background_event_sink is not None:
+        kwargs["background_event_sink"] = background_event_sink
     return run_runtime_generation_once(
         runtime=runtime,
         baked_config_path=config,
@@ -230,6 +242,54 @@ def _run_with_real_async_queue(
         runtime_state_path=state_path,
         **kwargs,
     )
+
+
+# The main-thread queue owner reports force escalation without raw timing or
+# backend detail when semantic Runtime presentation is active.
+def test_forced_async_queue_stop_emits_one_controlled_warning() -> None:
+    events: list[object] = []
+    logs: list[str] = []
+
+    class Recorder:
+        def emit(self, event: object, /) -> None:
+            events.append(event)
+
+    class ActiveQueue:
+        alive = True
+
+        def request_stop(self) -> None:
+            return
+
+        def request_backend_termination(self, *, deadline: float | None) -> None:
+            del deadline
+
+        def terminate_backends(self) -> None:
+            self.alive = False
+
+        def backend_termination_is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    assert (
+        stop_runtime_async_download_queue(
+            ActiveQueue(),
+            cancel_requested=lambda: True,
+            log=logs.append,
+            event_sink=Recorder(),
+        )
+        is False
+    )
+    assert events == [
+        RuntimeDownloadQueueWarning(
+            RuntimeDownloadQueueWarningKind.FORCE_TERMINATION_REQUIRED
+        )
+    ]
+    assert logs == []
 
 
 # State polling retries only the expected atomic-replacement observation.
@@ -357,6 +417,7 @@ download_mode = "sync"
 def test_actual_async_queue_acceptance_does_not_block_startup_hooks_or_completion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     runtime = _runtime(tmp_path)
     config = _write(
@@ -384,6 +445,17 @@ filename = "model.bin"
     backend.payloads["model.bin"] = b"async-bytes"
     _install_async_backend(monkeypatch, backend)
     events: list[str] = []
+    presentation_events: list[object] = []
+
+    class PresentationRecorder:
+        def emit(self, event: object, /) -> None:
+            presentation_events.append(event)
+
+        def emit_progress(self, _scope: object, event: object) -> None:
+            presentation_events.append(event)
+
+        def close_progress(self, _scope: object) -> None:
+            return
 
     def runner(
         argv: Sequence[str],
@@ -441,6 +513,7 @@ filename = "model.bin"
             runtime_state_path=state_path,
             runtime_hook_runner=runtime_hook_runner,
             readiness_waiter=readiness_waiter,
+            background_event_sink=PresentationRecorder(),
         )
         == 0
     )
@@ -450,6 +523,23 @@ filename = "model.bin"
         b"async-bytes"
     )
     assert _state_by_target(state_path)["models/model.bin"].status == "completed"
+    queue_states = [
+        event.state
+        for event in presentation_events
+        if isinstance(event, RuntimeDownloadQueueSummary)
+    ]
+    assert queue_states == [
+        RuntimeDownloadQueueState.ACCEPTED,
+        RuntimeDownloadQueueState.COMPLETED,
+    ]
+    assert any(
+        isinstance(event, RuntimeDownloadItemCompleted) for event in presentation_events
+    )
+    cdh_output = capsys.readouterr()
+    assert "source_host=" not in cdh_output.out
+    assert "identity=" not in cdh_output.out
+    assert "Runtime download state persisted" not in cdh_output.out
+    assert "Async runtime download queue" not in cdh_output.out
 
 
 def test_async_queue_rejects_replaced_start_generation_before_thread(
@@ -506,10 +596,7 @@ filename = "model.bin"
             cancel_requested=cancel_requested,
         )
 
-    with pytest.raises(
-        RuntimeExecutionError,
-        match="async runtime download queue failed to start",
-    ):
+    with pytest.raises(RuntimeExecutionError) as raised:
         _run_with_real_async_queue(
             runtime=runtime,
             config=config,
@@ -518,6 +605,10 @@ filename = "model.bin"
             runtime_async_queue_starter=replace_generation_then_start,
         )
 
+    assert str(raised.value) == "async runtime download queue failed to start"
+    startup_error = raised.value.__cause__
+    assert isinstance(startup_error, RuntimeAsyncQueueStartupError)
+    assert isinstance(startup_error.__cause__, RuntimeStateError)
     assert starter_calls == 1
 
 
@@ -969,6 +1060,17 @@ filename = "b.bin"
     backend.payloads["b.bin"] = b"later"
     _install_async_backend(monkeypatch, backend)
     events: list[str] = []
+    presentation_events: list[object] = []
+
+    class PresentationRecorder:
+        def emit(self, event: object, /) -> None:
+            presentation_events.append(event)
+
+        def emit_progress(self, _scope: object, event: object) -> None:
+            presentation_events.append(event)
+
+        def close_progress(self, _scope: object) -> None:
+            return
 
     def runner(
         argv: Sequence[str],
@@ -1002,6 +1104,7 @@ filename = "b.bin"
             config=config,
             state_path=state_path,
             runner=runner,
+            background_event_sink=PresentationRecorder(),
         )
         == 0
     )
@@ -1035,6 +1138,16 @@ filename = "b.bin"
         assert (runtime.comfyui_path / "models" / "b.bin").read_bytes() == b"later"
     else:
         assert not (runtime.comfyui_path / "models" / "b.bin").exists()
+    queue_warnings = [
+        event.kind
+        for event in presentation_events
+        if isinstance(event, RuntimeDownloadQueueWarning)
+    ]
+    assert queue_warnings == (
+        [RuntimeDownloadQueueWarningKind.STOPPED_AFTER_FAILURE]
+        if policy == "fail"
+        else []
+    )
 
 
 # Backend teardown may be slow, but the first signal must still reach stop hooks

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from comfyui_docker_helper.container.runtime_diagnostics import (
-    short_runtime_identity,
-)
 from comfyui_docker_helper.container.runtime_files import (
     Logger,
     RuntimeDownloadObservedStatus,
@@ -81,6 +78,5 @@ class RuntimeDownloadStateWriter:
             self._log(
                 "Runtime download state persisted: "
                 f"mode={item.download_mode} target={item.relative_target} "
-                f"status={updated_entry.status} "
-                f"identity={short_runtime_identity(digest)}"
+                f"status={updated_entry.status}"
             )

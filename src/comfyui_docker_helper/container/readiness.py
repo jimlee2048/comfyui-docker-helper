@@ -84,10 +84,10 @@ def probe_comfyui_readiness(
     )
     try:
         response = http_get(url, timeout=timeout)
-    except httpx.HTTPError as error:
+    except httpx.HTTPError:
         return ReadinessProbeResult(
             ready=False,
-            reason=f"readiness probe request failed: {error}",
+            reason="readiness probe request failed",
         )
 
     if response.status_code != 200:
@@ -138,15 +138,11 @@ def wait_for_comfyui_readiness(
         raise ValueError("readiness poll interval must be positive")
 
     deadline = monotonic() + timeout_seconds
-    last_result = ReadinessProbeResult(ready=False, reason="not checked")
-
     while True:
         _raise_if_child_exited(child)
         result = probe(port)
         if result.ready:
             return result
-        last_result = result
-
         now = monotonic()
         if now >= deadline:
             raise ReadinessError(
@@ -154,9 +150,9 @@ def wait_for_comfyui_readiness(
                     Diagnostic(
                         path=("readiness",),
                         code="readiness.timeout",
-                        message=(
-                            "ComfyUI did not become ready before timeout: "
-                            f"{last_result.reason}"
+                        message="ComfyUI did not become ready before timeout",
+                        hint=(
+                            "Inspect ComfyUI startup output and verify its listen port"
                         ),
                     ),
                 )

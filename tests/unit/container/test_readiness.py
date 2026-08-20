@@ -136,7 +136,12 @@ def test_wait_times_out_when_probe_never_becomes_ready() -> None:
         )
 
     assert locations_and_codes(error.value) == [(("readiness",), "readiness.timeout")]
-    assert "port 8188 not ready" in error.value.diagnostics[0].message
+    diagnostic = error.value.diagnostics[0]
+    assert diagnostic.message == "ComfyUI did not become ready before timeout"
+    assert diagnostic.hint == (
+        "Inspect ComfyUI startup output and verify its listen port"
+    )
+    assert "port 8188 not ready" not in diagnostic.message
 
 
 @pytest.mark.parametrize(
@@ -170,6 +175,9 @@ def test_probe_not_ready_responses_eventually_fail_readiness(
         del url, timeout
         return response_factory()
 
+    probe_result = probe_comfyui_readiness(8188, http_get=http_get)
+    assert probe_result.reason == expected_reason
+
     with pytest.raises(ReadinessError) as error:
         wait_for_comfyui_readiness(
             8188,
@@ -182,7 +190,9 @@ def test_probe_not_ready_responses_eventually_fail_readiness(
         )
 
     assert locations_and_codes(error.value) == [(("readiness",), "readiness.timeout")]
-    assert expected_reason in error.value.diagnostics[0].message
+    diagnostic = error.value.diagnostics[0]
+    assert diagnostic.message == "ComfyUI did not become ready before timeout"
+    assert expected_reason not in diagnostic.message
 
 
 def test_transport_errors_eventually_fail_readiness() -> None:
@@ -192,6 +202,9 @@ def test_transport_errors_eventually_fail_readiness() -> None:
         del timeout
         request = httpx.Request("GET", url)
         raise httpx.ConnectError("connection refused", request=request)
+
+    probe_result = probe_comfyui_readiness(8188, http_get=http_get)
+    assert probe_result.reason == "readiness probe request failed"
 
     with pytest.raises(ReadinessError) as error:
         wait_for_comfyui_readiness(
@@ -204,7 +217,7 @@ def test_transport_errors_eventually_fail_readiness() -> None:
             sleep=clock.sleep,
         )
 
-    assert "connection refused" in error.value.diagnostics[0].message
+    assert "connection refused" not in error.value.diagnostics[0].message
     assert error.value.diagnostics[0].code == "readiness.timeout"
 
 

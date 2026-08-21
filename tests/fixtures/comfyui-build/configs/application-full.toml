@@ -9,6 +9,10 @@ image_distro = "ubuntu24.04"
 [pytorch]
 version = "2.12.1"
 
+[system.env]
+CDH_SSH_FORMAL_SENTINEL = "cdh-py313-full-formal"
+CDH_SSH_OVERRIDE_SENTINEL = "cdh-image-default"
+
 [comfyui]
 version = "0.11.0"
 install_manager = true

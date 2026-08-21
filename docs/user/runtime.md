@@ -75,7 +75,7 @@ docker exec CONTAINER cdh container runtime status --json
 docker exec CONTAINER cdh container runtime follow
 ```
 
-An SSH session uses the same inherited tool path as the image's normal runtime environment, so invoke `cdh` and `uv` by name.
+Unless the deployment overrides `PATH`, an SSH session uses the image's normal tool path, so invoke `cdh` and `uv` by name. A deployment that overrides `PATH` must retain `/opt/uv/bin` to keep cdh, uv, and configured uv tools available by name.
 
 `restart` waits while cdh stops the current ComfyUI runtime and starts it again. Once accepted, the restart rereads baked and mounted runtime configuration and hooks, then runs the normal startup sequence below. The restarted runtime continues to use the container's startup environment; environment values supplied only to the `docker exec` command do not become runtime overrides. Only one restart can run at a time, so a concurrent request exits with a busy error.
 
@@ -166,7 +166,7 @@ If SSH is enabled with credentials but cdh cannot preserve the environment or pr
 
 The project-provided root Bash login shell automatically enters the effective `WORKSPACE` for SSH. This applies to an interactive `ssh root@host` login and to an explicitly requested login shell such as `ssh root@host 'bash -lc "pwd"'`. An ordinary remote command such as `ssh root@host pwd` does not invoke that login shell and starts in `/root`. If the login shell cannot enter `WORKSPACE`, it changes to `/root`, prints `Warning: cdh could not enter WORKSPACE; continuing in /root`, and continues there.
 
-Images built by current cdh place cdh, uv, and configured uv tools on the inherited tool path, so invoke them by name from SSH. Rebuild images created before this behavior was available; changing runtime configuration alone cannot update existing image contents.
+Images built by current cdh place cdh, uv, and configured uv tools on the image's default tool path. Rebuild images created before this behavior was available; changing runtime configuration alone cannot update existing image contents.
 
 When cdh creates `/root/.ssh` and `authorized_keys`, it uses modes `0700` and `0600`. An existing root-owned `.ssh` directory is admitted when it is not writable by group or other; a safe non-`0700` mode is preserved with a warning. The directory must still allow the temporary-file and atomic replacement operations that cdh attempts. Read-only mounts, access-control or capability restrictions, and other I/O failures remain fatal. An existing root-owned regular `authorized_keys` file is eligible for replacement when it is not writable by group or other; a safe non-`0600` mode warns, and the atomically replaced file is still `0600`. Wrong ownership, writable group/other bits, symlinks, and special files also remain fatal.
 

@@ -75,7 +75,7 @@ docker exec CONTAINER cdh container runtime status --json
 docker exec CONTAINER cdh container runtime follow
 ```
 
-SSH 会话使用与镜像正常运行环境相同的继承工具路径，因此可以直接按名称调用 `cdh` 和 `uv`。
+只要部署没有覆盖 `PATH`，SSH 会话就会使用镜像的正常工具路径，因此可以直接按名称调用 `cdh` 和 `uv`。如果部署需要覆盖 `PATH`，则须保留 `/opt/uv/bin`，才能继续按名称调用 cdh、uv 和配置的 uv 工具。
 
 `restart` 会在 cdh 停止当前 ComfyUI 运行时并重新启动的过程中保持等待。restart 被接纳后，会重新读取固化和挂载的运行时配置与 Hook，然后执行下文的正常启动顺序。重新启动的运行时仍使用容器启动时的环境；仅提供给 `docker exec` 命令的环境变量不会成为运行时覆盖项。同一时间只能执行一次 restart，因此并发请求会以 busy 错误退出。
 
@@ -166,7 +166,7 @@ SSH 提供选择性启用的 root 访问，默认处于禁用状态。可在运�
 
 项目提供的 root Bash login shell 会在 SSH 中自动进入生效的 `WORKSPACE`。这适用于交互式 `ssh root@host` 登录，也适用于显式请求 login shell 的 `ssh root@host 'bash -lc "pwd"'`。`ssh root@host pwd` 之类的普通远程命令不会调用该 login shell，而是从 `/root` 开始。如果 login shell 无法进入 `WORKSPACE`，它会切换到 `/root`，输出固定警告 `Warning: cdh could not enter WORKSPACE; continuing in /root`，然后继续运行。
 
-当前 cdh 构建的镜像会把 cdh、uv 和配置的 uv 工具放在继承的工具路径中，因此可在 SSH 中直接按名称调用。在此行为可用之前构建的镜像需要重新构建；仅更改运行时配置无法更新现有镜像内容。
+当前 cdh 构建的镜像会把 cdh、uv 和配置的 uv 工具放在镜像的默认工具路径中。在此行为可用之前构建的镜像需要重新构建；仅更改运行时配置无法更新现有镜像内容。
 
 cdh 创建 `/root/.ssh` 和 `authorized_keys` 时会分别使用 `0700` 和 `0600`。现有 `.ssh` 目录在由 root 拥有且同组用户和其他用户均不可写时可被接受；安全但不是 `0700` 的权限会原样保留并产生警告。该目录仍须实际允许 cdh 创建临时文件并执行原子替换；只读挂载、访问控制或 Linux capability 限制以及其他 I/O 失败仍会导致启动失败。现有由 root 拥有的普通 `authorized_keys` 文件在同组用户和其他用户均不可写时可被替换；安全但不是 `0600` 的权限会产生警告，而原子替换后的新文件仍为 `0600`。所有者不正确、同组用户或其他用户可写、符号链接和特殊文件也仍会导致启动失败。
 

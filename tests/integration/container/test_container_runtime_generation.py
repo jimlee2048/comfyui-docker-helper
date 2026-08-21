@@ -46,7 +46,10 @@ def test_generation_factory_rereads_inputs_and_creates_fresh_owners(
     source_env = {"STATIC_VALUE": "captured"}
     _write(
         baked_config,
-        '[comfyui]\nlisten = "0.0.0.0"\n',
+        '[comfyui]\nlisten = "0.0.0.0"\n'
+        "[system.ssh]\n"
+        "enable = true\n"
+        'password = "generation-ssh-password-sentinel"\n',
     )
     _write(mounted_config, "[comfyui]\nport = 8201\n")
     _write_hook(baked_hooks, "10-baked.sh")
@@ -105,6 +108,7 @@ def test_generation_factory_rereads_inputs_and_creates_fresh_owners(
     assert first.environment is second.environment
     assert "captured" not in repr(first.environment)
     assert "captured" not in repr(first)
+    assert "generation-ssh-password-sentinel" not in repr(first)
     assert first.downloads is not second.downloads
     assert first.ssh_service is not second.ssh_service
     assert first_diagnostics.err.count("Runtime hook warnings:") == 1

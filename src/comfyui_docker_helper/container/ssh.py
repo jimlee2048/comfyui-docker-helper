@@ -53,6 +53,7 @@ _SSHD_READINESS_TIMEOUT_SECONDS = 5.0
 _SSHD_READINESS_POLL_INTERVAL_SECONDS = 0.05
 _SSHD_READINESS_PROBE_TIMEOUT_SECONDS = 0.2
 _SSHD_FAILURE_CLEANUP_TIMEOUT_SECONDS = 1.0
+_SSHD_BANNER_PREFIX = b"SSH-2.0-"
 type Chown = Callable[
     [str | bytes | os.PathLike[str] | os.PathLike[bytes], int, int],
     None,
@@ -607,7 +608,7 @@ def _wait_for_sshd_readiness(
     while True:
         if cancel_requested():
             raise SshdReadinessError("sshd startup was cancelled")
-        if child.poll() is not None:
+        if _poll_sshd_for_readiness(child) is not None:
             raise SshdReadinessError("sshd exited before becoming ready")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -624,11 +625,29 @@ def _wait_for_sshd_readiness(
             continue
         if cancel_requested():
             raise SshdReadinessError("sshd startup was cancelled")
-        if not banner.startswith(b"SSH-2.0-"):
+        if not _is_complete_sshd_banner(banner):
             raise SshdReadinessError("sshd readiness check failed")
-        if child.poll() is not None:
+        if _poll_sshd_for_readiness(child) is not None:
             raise SshdReadinessError("sshd exited before becoming ready")
         return
+
+
+def _poll_sshd_for_readiness(child: SshdProcess) -> int | None:
+    try:
+        return child.poll()
+    except Exception as error:
+        raise SshdReadinessError("sshd readiness check failed") from error
+
+
+def _is_complete_sshd_banner(banner: bytes) -> bool:
+    if not banner.endswith(b"\n"):
+        return False
+    line = banner[:-1]
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    return line.startswith(_SSHD_BANNER_PREFIX) and bool(
+        line[len(_SSHD_BANNER_PREFIX) :]
+    )
 
 
 def _probe_sshd_banner(port: int, timeout: float) -> bytes:
@@ -646,7 +665,7 @@ def _probe_sshd_banner(port: int, timeout: float) -> bytes:
             banner.extend(chunk)
             if chunk == b"\n":
                 break
-    return bytes(banner).rstrip(b"\r\n")
+    return bytes(banner)
 
 
 def _coerce_ssh_config(

@@ -153,7 +153,7 @@ def capture_runtime_environment(
 class RuntimeGeneration:
     """Freshly admitted inputs and owners for one runtime lifecycle."""
 
-    config: RuntimeConfig
+    config: RuntimeConfig = field(repr=False)
     hook_plan: RuntimeHookPlan
     environment: RuntimeEnvironmentSnapshot = field(repr=False)
     downloads: RuntimeDownloads

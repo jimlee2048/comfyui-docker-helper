@@ -295,7 +295,7 @@ def test_start_sshd_observes_controlled_credential_path_mode_warning(
         command_runner=command_runner,
         preflight_command_runner=command_runner,
         process_starter=process_starter,
-        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=warnings.append,
     )
 
@@ -939,6 +939,7 @@ def test_serialize_sshd_set_env_omits_only_negotiated_session_names() -> None:
         b"SSH_PASSWORD": b"password-value",
         b"SSH_CLIENT": b"client-value",
         b"SSH_CONNECTION": b"connection-value",
+        b"SSH_ORIGINAL_COMMAND": b"command-value",
         b"SSH_TTY": b"tty-value",
         b"USER": b"user-value",
         b"HOME": b"home-value",
@@ -1014,6 +1015,7 @@ def test_serialize_sshd_set_env_rejects_only_unrepresentable_bytes_without_leak(
 
 
 def test_serialize_sshd_set_env_accepts_exact_openssh_name_capacity() -> None:
+    assert len(ssh_module._SSH_SESSION_ENVIRONMENT_NAMES) == 11
     environment = {
         f"CDH_CAPACITY_{index:04d}".encode(): b"value" for index in range(988)
     }
@@ -1140,7 +1142,7 @@ def test_start_sshd_if_enabled_generates_host_keys_runtime_dir_and_foreground_ar
         command_runner=command_runner,
         preflight_command_runner=command_runner,
         process_starter=process_starter,
-        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
 
@@ -1214,7 +1216,7 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
         command_runner=command_runner,
         preflight_command_runner=command_runner,
         process_starter=process_starter,
-        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
 
@@ -1327,7 +1329,7 @@ def test_start_sshd_rejects_unadmitted_config_directory_without_publication(
             command_runner=RecordingCommandRunner(),
             preflight_command_runner=RecordingCommandRunner(),
             process_starter=RecordingProcessStarter(),
-            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
             preparation_warning_observer=lambda _warning: None,
         )
 
@@ -1359,7 +1361,7 @@ def test_sshd_config_publication_failure_cleans_unique_temporary(
             command_runner=RecordingCommandRunner(),
             preflight_command_runner=RecordingCommandRunner(),
             process_starter=RecordingProcessStarter(),
-            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
             preparation_warning_observer=lambda _warning: None,
         )
 
@@ -1392,7 +1394,7 @@ def test_sshd_preflight_failure_cleans_config_before_process_start(
             command_runner=RecordingCommandRunner(),
             preflight_command_runner=RecordingCommandRunner(returncodes=(17,)),
             process_starter=process_starter,
-            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
             preparation_warning_observer=lambda _warning: None,
         )
 
@@ -1412,6 +1414,18 @@ def test_sshd_preflight_failure_cleans_config_before_process_start(
         ),
         pytest.param(
             lambda _port, _timeout: b"SSH-2.0-test",
+            lambda: False,
+            "sshd readiness check failed",
+            id="truncated-banner",
+        ),
+        pytest.param(
+            lambda _port, _timeout: b"SSH-2.0-\n",
+            lambda: False,
+            "sshd readiness check failed",
+            id="empty-software-version",
+        ),
+        pytest.param(
+            lambda _port, _timeout: b"SSH-2.0-test\n",
             lambda: True,
             "sshd startup was cancelled",
             id="cancelled",
@@ -1530,7 +1544,7 @@ def test_sshd_valid_banner_is_followed_by_final_child_poll(tmp_path: Path) -> No
             command_runner=RecordingCommandRunner(),
             preflight_command_runner=RecordingCommandRunner(),
             process_starter=RecordingProcessStarter(process),
-            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
             preparation_warning_observer=lambda _warning: None,
         )
 
@@ -1547,7 +1561,7 @@ def test_sshd_readiness_checks_cancellation_after_probe(tmp_path: Path) -> None:
     def cancel_during_probe(_port: int, _timeout: float) -> bytes:
         nonlocal cancelled
         cancelled = True
-        return b"SSH-2.0-test"
+        return b"SSH-2.0-test\n"
 
     with pytest.raises(
         SshdReadinessError,
@@ -1577,6 +1591,44 @@ def test_sshd_readiness_checks_cancellation_after_probe(tmp_path: Path) -> None:
     assert list(config_dir.iterdir()) == []
 
 
+def test_sshd_readiness_poll_error_is_fixed_and_retains_config(
+    tmp_path: Path,
+) -> None:
+    class PollErrorProcess(FakeSshdProcess):
+        def poll(self) -> int | None:
+            raise OSError("raw-poll-sentinel")
+
+    config_dir = _create_config_dir(tmp_path)
+    process = PollErrorProcess()
+
+    with pytest.raises(
+        SshdReadinessError,
+        match=r"^sshd readiness check failed$",
+    ) as raised:
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={b"POLL_SECRET": b"private-poll-value"},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(process),
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert str(raised.value) == "sshd readiness check failed"
+    assert "raw-poll-sentinel" not in str(raised.value)
+    assert list(config_dir.glob("sshd_config.*"))
+    assert process.wait_calls == 0
+
+
 def test_owned_sshd_process_does_not_remove_replacement_identity(
     tmp_path: Path,
 ) -> None:
@@ -1596,7 +1648,7 @@ def test_owned_sshd_process_does_not_remove_replacement_identity(
         command_runner=RecordingCommandRunner(),
         preflight_command_runner=RecordingCommandRunner(),
         process_starter=process_starter,
-        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
     assert isinstance(result, OwnedSshdProcess)
@@ -1652,7 +1704,7 @@ def test_owned_sshd_process_overlapping_terminal_observation_cleans_once(
         command_runner=RecordingCommandRunner(),
         preflight_command_runner=RecordingCommandRunner(),
         process_starter=process_starter,
-        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
     assert isinstance(result, OwnedSshdProcess)
@@ -1711,7 +1763,7 @@ def test_owned_sshd_process_cleanup_failure_does_not_replace_terminal_result(
         command_runner=RecordingCommandRunner(),
         preflight_command_runner=RecordingCommandRunner(),
         process_starter=process_starter,
-        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
     assert isinstance(result, OwnedSshdProcess)
@@ -1766,7 +1818,7 @@ def test_owned_sshd_process_observation_error_retains_config(
         command_runner=RecordingCommandRunner(),
         preflight_command_runner=RecordingCommandRunner(),
         process_starter=process_starter,
-        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test",
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
     assert isinstance(result, OwnedSshdProcess)

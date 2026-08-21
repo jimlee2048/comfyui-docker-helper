@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,12 +15,19 @@ import pytest
 import comfyui_docker_helper.container.ssh as ssh_module
 from comfyui_docker_helper.config import RuntimeConfig, RuntimeSystemSshConfig
 from comfyui_docker_helper.container.ssh import (
+    OwnedSshdProcess,
     RootSshCredentialPreparationStatus,
     SshCredentialPreparationError,
+    SshdConfigPreparationError,
+    SshdConfigValidationError,
+    SshdReadinessError,
     SshdStartupError,
+    SshEnvironmentProjectionError,
     SshPreparationWarningKind,
     build_sshd_argv,
     prepare_root_ssh_credentials,
+    serialize_sshd_config,
+    serialize_sshd_set_env,
     start_sshd_if_enabled,
 )
 
@@ -86,6 +96,8 @@ class FakeSshdProcess:
     def __init__(self, returncode: int | None = None) -> None:
         self.returncode = returncode
         self.wait_calls = 0
+        self.terminated = False
+        self.killed = False
 
     def poll(self) -> int | None:
         return self.returncode
@@ -94,6 +106,14 @@ class FakeSshdProcess:
         self.wait_calls += 1
         self.returncode = 0 if self.returncode is None else self.returncode
         return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
 
 
 class RecordingProcessStarter:
@@ -138,6 +158,13 @@ def _create_root_home(tmp_path: Path) -> Path:
     root_home = tmp_path / "root"
     root_home.mkdir(mode=0o700)
     return root_home
+
+
+def _create_config_dir(tmp_path: Path) -> Path:
+    config_dir = tmp_path / "run" / "cdh"
+    config_dir.mkdir(mode=0o700, parents=True)
+    config_dir.chmod(0o700)
+    return config_dir
 
 
 def _prepare_public_keys(root_home: Path) -> RootSshCredentialPreparationStatus:
@@ -254,19 +281,27 @@ def test_start_sshd_observes_controlled_credential_path_mode_warning(
     command_runner = RecordingCommandRunner()
     process_starter = RecordingProcessStarter()
     warnings: list[SshPreparationWarningKind] = []
+    config_dir = _create_config_dir(tmp_path)
 
     result = start_sshd_if_enabled(
         RuntimeConfig.model_validate(
             {"system": {"ssh": {"enable": True, "pub_keys": [VALID_SSH_KEY]}}}
         ),
+        environment={},
         runtime_dir=tmp_path / "run" / "sshd",
+        config_dir=config_dir,
+        config_owner_uid=os.getuid(),
+        config_owner_gid=os.getgid(),
         command_runner=command_runner,
+        preflight_command_runner=command_runner,
         process_starter=process_starter,
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=warnings.append,
     )
 
-    assert result is process_starter.process
+    assert isinstance(result, OwnedSshdProcess)
     assert warnings == [SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD]
+    assert result.wait() == 0
 
 
 def test_public_keys_prepare_authorized_keys_permissions_and_ownership(
@@ -867,37 +902,187 @@ def test_writer_leaves_unowned_similarly_named_entry_untouched(tmp_path: Path) -
     assert list(ssh_dir.glob(".authorized_keys.*.tmp")) == [unrelated]
 
 
-# sshd argument tests lock down the effective auth mode passed to OpenSSH.
-def test_build_sshd_argv_enforces_effective_config_without_credentials() -> None:
+def test_serialize_sshd_set_env_preserves_exact_representable_bytes() -> None:
+    environment = {
+        b"SSH_CUSTOM": b"preserved",
+        b"Z_NON_UTF8": b"\xff",
+        b"TERM": b"stale-container-terminal",
+        b"D_QUOTE": b'left"right',
+        b"A_EMPTY": b"",
+        b"F_HASH": b"# literal",
+        b"G_EQUALS": b"left=middle=right",
+        b"E_BACKSLASH": b"left\\right",
+        b"I_\xff_NON_UTF8_NAME": b"preserved",
+        b"SSH_AUTH_SOCK": b"/stale/agent.sock",
+        b"C_TAB": b"left\tright",
+        b"B_SPACE": b" left right ",
+        b"H-NON-SHELL-NAME": b"accepted",
+    }
+
+    serialized = serialize_sshd_set_env(environment)
+
+    assert serialized == (
+        b'SetEnv "A_EMPTY=" "B_SPACE= left right " "C_TAB=left\tright" '
+        b'"D_QUOTE=left\\"right" "E_BACKSLASH=left\\\\right" '
+        b'"F_HASH=# literal" "G_EQUALS=left=middle=right" '
+        b'"H-NON-SHELL-NAME=accepted" "I_\xff_NON_UTF8_NAME=preserved" '
+        b'"SSH_CUSTOM=preserved" '
+        b'"Z_NON_UTF8=\xff"\n'
+    )
+    assert serialized.count(b"SetEnv ") == 1
+    assert b"stale-container-terminal" not in serialized
+    assert b"/stale/agent.sock" not in serialized
+
+
+def test_serialize_sshd_set_env_omits_only_negotiated_session_names() -> None:
+    projected = {
+        b"SSH_PASSWORD": b"password-value",
+        b"SSH_CLIENT": b"client-value",
+        b"SSH_CONNECTION": b"connection-value",
+        b"SSH_ORIGINAL_COMMAND": b"command-value",
+        b"SSH_TTY": b"tty-value",
+        b"USER": b"user-value",
+        b"HOME": b"home-value",
+        b"SHELL": b"shell-value",
+        b"PATH": b"path-value",
+    }
+    environment = {
+        **projected,
+        b"TERM": b"stale-container-terminal",
+        b"SSH_AUTH_SOCK": b"/stale/agent.sock",
+    }
+
+    serialized = serialize_sshd_set_env(environment)
+
+    for name, value in projected.items():
+        assert b'"' + name + b"=" + value + b'"' in serialized
+    assert b"TERM=" not in serialized
+    assert b"SSH_AUTH_SOCK=" not in serialized
+
+
+def test_serialize_sshd_set_env_empty_projection_has_no_directive() -> None:
+    assert serialize_sshd_set_env({}) == b""
+    assert (
+        serialize_sshd_set_env(
+            {
+                b"TERM": b"stale-container-terminal",
+                b"SSH_AUTH_SOCK": b"/stale/agent.sock",
+            }
+        )
+        == b""
+    )
+
+
+@pytest.mark.parametrize(
+    ("environment", "leaked_fragment"),
+    [
+        pytest.param(
+            {b"BAD\x00NAME": b"value"},
+            "BAD",
+            id="nul-name",
+        ),
+        pytest.param(
+            {b"NAME": b"private-nul\x00sentinel"},
+            "private-nul",
+            id="nul-value",
+        ),
+        pytest.param(
+            {b"BAD\nNAME": b"value"},
+            "BAD",
+            id="lf-name",
+        ),
+        pytest.param(
+            {b"NAME": b"private-lf\nsentinel"},
+            "private-lf",
+            id="lf-value",
+        ),
+        pytest.param(
+            {b"BAD=NAME": b"value"},
+            "BAD",
+            id="equals-name",
+        ),
+    ],
+)
+def test_serialize_sshd_set_env_rejects_only_unrepresentable_bytes_without_leak(
+    environment: dict[bytes, bytes],
+    leaked_fragment: str,
+) -> None:
+    with pytest.raises(SshEnvironmentProjectionError) as raised:
+        serialize_sshd_set_env(environment)
+
+    assert str(raised.value) == "SSH environment cannot be projected"
+    assert leaked_fragment not in str(raised.value)
+
+
+def test_serialize_sshd_set_env_accepts_exact_openssh_name_capacity() -> None:
+    assert len(ssh_module._SSH_SESSION_ENVIRONMENT_NAMES) == 11
+    environment = {
+        f"CDH_CAPACITY_{index:04d}".encode(): b"value" for index in range(988)
+    }
+
+    serialized = serialize_sshd_set_env(environment)
+
+    assert serialized.startswith(b'SetEnv "CDH_CAPACITY_0000=value"')
+    assert serialized.endswith(b'"CDH_CAPACITY_0987=value"\n')
+
+
+def test_serialize_sshd_set_env_rejects_above_openssh_name_capacity() -> None:
+    environment = {
+        f"CDH_CAPACITY_{index:04d}".encode(): b"value" for index in range(989)
+    }
+
+    with pytest.raises(
+        SshEnvironmentProjectionError,
+        match=r"^SSH environment cannot be projected$",
+    ):
+        serialize_sshd_set_env(environment)
+
+
+def test_serialize_sshd_set_env_is_not_limited_by_single_argv_size() -> None:
+    value = b"x" * (128 * 1024 + 1)
+    expected = b'SetEnv "LARGE_VALUE=' + value + b'"\n'
+
+    serialized = serialize_sshd_set_env({b"LARGE_VALUE": value})
+
+    assert len(serialized) == len(expected)
+    assert hashlib.sha256(serialized).digest() == hashlib.sha256(expected).digest()
+
+
+# sshd config and argv tests lock down one complete configuration authority.
+def test_serialize_sshd_config_contains_service_policy_and_environment() -> None:
     status = RootSshCredentialPreparationStatus(
         ssh_enabled=True,
         public_key_count=1,
         password_configured=False,
     )
 
-    argv = build_sshd_argv(
+    serialized = serialize_sshd_config(
         RuntimeSystemSshConfig(enable=True, port=2022, pub_keys=[VALID_SSH_KEY]),
         status,
+        {b"TEST_SENTINEL": b"environment-value"},
     )
 
-    assert argv == [
+    assert serialized == (
+        b"Port 2022\n"
+        b"PermitRootLogin yes\n"
+        b"PasswordAuthentication no\n"
+        b"KbdInteractiveAuthentication no\n"
+        b"PubkeyAuthentication yes\n"
+        b"AuthorizedKeysFile /root/.ssh/authorized_keys\n"
+        b'SetEnv "TEST_SENTINEL=environment-value"\n'
+    )
+    assert VALID_SSH_KEY.encode() not in serialized
+
+
+def test_build_sshd_argv_uses_only_owned_config_and_process_flags() -> None:
+    config_path = Path("/run/cdh/sshd_config.unique")
+
+    assert build_sshd_argv(config_path) == [
         "/usr/sbin/sshd",
         "-f",
-        "/dev/null",
+        os.fspath(config_path),
         "-D",
         "-e",
-        "-o",
-        "Port=2022",
-        "-o",
-        "PermitRootLogin=yes",
-        "-o",
-        "PasswordAuthentication=no",
-        "-o",
-        "KbdInteractiveAuthentication=no",
-        "-o",
-        "PubkeyAuthentication=yes",
-        "-o",
-        "AuthorizedKeysFile=/root/.ssh/authorized_keys",
     ]
 
 
@@ -910,6 +1095,7 @@ def test_start_sshd_if_enabled_with_no_credentials_does_not_start(
 
     result = start_sshd_if_enabled(
         RuntimeConfig.model_validate({"system": {"ssh": {"enable": True}}}),
+        environment={b"UNREPRESENTABLE": b"line1\nline2"},
         root_home=tmp_path / "root",
         runtime_dir=tmp_path / "run" / "sshd",
         command_runner=command_runner,
@@ -932,6 +1118,7 @@ def test_start_sshd_if_enabled_generates_host_keys_runtime_dir_and_foreground_ar
     process_starter = RecordingProcessStarter(process)
     root_home = _create_root_home(tmp_path)
     runtime_dir = tmp_path / "run" / "sshd"
+    config_dir = _create_config_dir(tmp_path)
 
     result = start_sshd_if_enabled(
         RuntimeConfig.model_validate(
@@ -945,48 +1132,48 @@ def test_start_sshd_if_enabled_generates_host_keys_runtime_dir_and_foreground_ar
                 }
             }
         ),
+        environment={b"TEST_SENTINEL": b"safe-environment-value"},
         root_home=root_home,
         runtime_dir=runtime_dir,
+        config_dir=config_dir,
         credential_command_runner=credential_runner,
+        config_owner_uid=os.getuid(),
+        config_owner_gid=os.getgid(),
         command_runner=command_runner,
+        preflight_command_runner=command_runner,
         process_starter=process_starter,
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
 
-    assert result is process
-    assert command_runner.calls == [
-        PlainCommandCall(["/usr/bin/ssh-keygen", "-A"], "generate OpenSSH host keys")
-    ]
+    assert isinstance(result, OwnedSshdProcess)
     assert runtime_dir.is_dir()
     assert [call.argv for call in credential_runner.calls] == [
         ["chpasswd"],
         ["passwd", "-u", "root"],
     ]
-    assert process_starter.calls == [
+    assert len(process_starter.calls) == 1
+    config_path = Path(process_starter.calls[0].argv[2])
+    assert command_runner.calls == [
+        PlainCommandCall(["/usr/bin/ssh-keygen", "-A"], "generate OpenSSH host keys"),
         PlainCommandCall(
-            [
-                "/usr/sbin/sshd",
-                "-f",
-                "/dev/null",
-                "-D",
-                "-e",
-                "-o",
-                "Port=2222",
-                "-o",
-                "PermitRootLogin=yes",
-                "-o",
-                "PasswordAuthentication=yes",
-                "-o",
-                "KbdInteractiveAuthentication=no",
-                "-o",
-                "PubkeyAuthentication=no",
-                "-o",
-                "AuthorizedKeysFile=/root/.ssh/authorized_keys",
-            ],
-            "start sshd",
-        )
+            ["/usr/sbin/sshd", "-t", "-f", os.fspath(config_path)],
+            "validate sshd configuration",
+        ),
     ]
+    assert process_starter.calls == [
+        PlainCommandCall(build_sshd_argv(config_path), "start sshd")
+    ]
+    config_content = config_path.read_bytes()
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert b"Port 2222\n" in config_content
+    assert b"PasswordAuthentication yes\n" in config_content
+    assert b"PubkeyAuthentication no\n" in config_content
+    assert b'SetEnv "TEST_SENTINEL=safe-environment-value"\n' in config_content
+    assert "safe-environment-value" not in repr(result)
     assert "secret" not in " ".join(process_starter.calls[0].argv)
+    assert result.wait() == 0
+    assert not config_path.exists()
 
 
 def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
@@ -999,6 +1186,7 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
     ownership = OwnershipRecorder()
     root_home = _create_root_home(tmp_path)
     runtime_dir = tmp_path / "run" / "sshd"
+    config_dir = _create_config_dir(tmp_path)
 
     result = start_sshd_if_enabled(
         RuntimeConfig.model_validate(
@@ -1012,8 +1200,10 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
                 }
             }
         ),
+        environment={},
         root_home=root_home,
         runtime_dir=runtime_dir,
+        config_dir=config_dir,
         credential_command_runner=credential_runner,
         credential_chown=ownership.chown,
         credential_chmod=ownership.chmod,
@@ -1021,13 +1211,17 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
         credential_fchmod=ownership.fchmod,
         credential_owner_uid=os.getuid(),
         credential_owner_gid=os.getgid(),
+        config_owner_uid=os.getuid(),
+        config_owner_gid=os.getgid(),
         command_runner=command_runner,
+        preflight_command_runner=command_runner,
         process_starter=process_starter,
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
         preparation_warning_observer=lambda _warning: None,
     )
 
     authorized_keys = root_home / ".ssh" / "authorized_keys"
-    assert result is process
+    assert isinstance(result, OwnedSshdProcess)
     assert authorized_keys.read_text(encoding="utf-8") == f"{VALID_SSH_KEY}\n"
     assert ownership.chown_calls == [
         (root_home / ".ssh", os.getuid(), os.getgid()),
@@ -1037,36 +1231,27 @@ def test_start_sshd_if_enabled_key_only_writes_keys_and_disables_password_auth(
     ]
     assert ownership.fchown_calls == [(os.getuid(), os.getgid())]
     assert ownership.fchmod_calls == [0o600]
-    assert command_runner.calls == [
-        PlainCommandCall(["/usr/bin/ssh-keygen", "-A"], "generate OpenSSH host keys")
-    ]
     assert runtime_dir.is_dir()
     assert credential_runner.calls == []
-    assert process_starter.calls == [
+    assert len(process_starter.calls) == 1
+    config_path = Path(process_starter.calls[0].argv[2])
+    assert command_runner.calls == [
+        PlainCommandCall(["/usr/bin/ssh-keygen", "-A"], "generate OpenSSH host keys"),
         PlainCommandCall(
-            [
-                "/usr/sbin/sshd",
-                "-f",
-                "/dev/null",
-                "-D",
-                "-e",
-                "-o",
-                "Port=2222",
-                "-o",
-                "PermitRootLogin=yes",
-                "-o",
-                "PasswordAuthentication=no",
-                "-o",
-                "KbdInteractiveAuthentication=no",
-                "-o",
-                "PubkeyAuthentication=yes",
-                "-o",
-                "AuthorizedKeysFile=/root/.ssh/authorized_keys",
-            ],
-            "start sshd",
-        )
+            ["/usr/sbin/sshd", "-t", "-f", os.fspath(config_path)],
+            "validate sshd configuration",
+        ),
     ]
+    assert process_starter.calls == [
+        PlainCommandCall(build_sshd_argv(config_path), "start sshd")
+    ]
+    config_content = config_path.read_bytes()
+    assert b"PasswordAuthentication no\n" in config_content
+    assert b"PubkeyAuthentication yes\n" in config_content
     assert VALID_SSH_KEY not in " ".join(process_starter.calls[0].argv)
+    assert VALID_SSH_KEY.encode() not in config_content
+    assert result.wait() == 0
+    assert not config_path.exists()
 
 
 def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
@@ -1093,6 +1278,7 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
                     }
                 }
             ),
+            environment={},
             root_home=root_home,
             runtime_dir=runtime_dir,
             credential_command_runner=credential_runner,
@@ -1117,6 +1303,532 @@ def test_start_sshd_if_enabled_fails_when_host_key_generation_fails(
     ]
     assert process_starter.calls == []
     assert not runtime_dir.exists()
+
+
+def test_start_sshd_rejects_unadmitted_config_directory_without_publication(
+    tmp_path: Path,
+) -> None:
+    config_dir = _create_config_dir(tmp_path)
+    config_dir.chmod(0o755)
+
+    with pytest.raises(
+        SshdConfigPreparationError,
+        match=r"^SSH runtime configuration preparation failed$",
+    ):
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(),
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert list(config_dir.iterdir()) == []
+
+
+def test_sshd_config_publication_failure_cleans_unique_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = _create_config_dir(tmp_path)
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("raw-publication-sentinel")
+
+    monkeypatch.setattr(ssh_module.os, "replace", fail_replace)
+    with pytest.raises(SshdConfigPreparationError) as raised:
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(),
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert str(raised.value) == "SSH runtime configuration preparation failed"
+    assert "raw-publication-sentinel" not in str(raised.value)
+    assert list(config_dir.iterdir()) == []
+
+
+def test_sshd_preflight_failure_cleans_config_before_process_start(
+    tmp_path: Path,
+) -> None:
+    config_dir = _create_config_dir(tmp_path)
+    process_starter = RecordingProcessStarter()
+
+    with pytest.raises(
+        SshdConfigValidationError,
+        match=r"^sshd configuration validation failed$",
+    ) as raised:
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={b"TEST_SENTINEL": b"private-preflight-value"},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(returncodes=(17,)),
+            process_starter=process_starter,
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert process_starter.calls == []
+    assert list(config_dir.iterdir()) == []
+    assert "private-preflight-value" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("probe", "cancel_requested", "message"),
+    [
+        pytest.param(
+            lambda _port, _timeout: b"SSH-1.99-test",
+            lambda: False,
+            "sshd readiness check failed",
+            id="non-ssh-2-banner",
+        ),
+        pytest.param(
+            lambda _port, _timeout: b"SSH-2.0-test",
+            lambda: False,
+            "sshd readiness check failed",
+            id="truncated-banner",
+        ),
+        pytest.param(
+            lambda _port, _timeout: b"SSH-2.0-\n",
+            lambda: False,
+            "sshd readiness check failed",
+            id="empty-software-version",
+        ),
+        pytest.param(
+            lambda _port, _timeout: b"SSH-2.0-test\n",
+            lambda: True,
+            "sshd startup was cancelled",
+            id="cancelled",
+        ),
+    ],
+)
+def test_sshd_readiness_failure_terminates_reaps_and_cleans_config(
+    tmp_path: Path,
+    probe: Callable[[int, float], bytes],
+    cancel_requested: Callable[[], bool],
+    message: str,
+) -> None:
+    config_dir = _create_config_dir(tmp_path)
+    process = FakeSshdProcess()
+    observed: list[object | None] = []
+
+    with pytest.raises(SshdReadinessError) as raised:
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(process),
+            readiness_probe=probe,
+            cancel_requested=cancel_requested,
+            preparation_process_observer=observed.append,
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert str(raised.value) == message
+    assert len(observed) == 2
+    assert isinstance(observed[0], OwnedSshdProcess)
+    assert observed[1] is None
+    assert process.terminated is True
+    assert process.wait_calls == 1
+    assert list(config_dir.iterdir()) == []
+
+
+def test_sshd_readiness_timeout_is_fixed_and_cleans_owned_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = _create_config_dir(tmp_path)
+    process = FakeSshdProcess()
+    monkeypatch.setattr(ssh_module, "_SSHD_READINESS_TIMEOUT_SECONDS", 0.0)
+
+    def unavailable(_port: int, _timeout: float) -> bytes:
+        raise OSError("not ready")
+
+    with pytest.raises(
+        SshdReadinessError,
+        match=r"^sshd readiness timed out$",
+    ):
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(process),
+            readiness_probe=unavailable,
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert process.terminated is True
+    assert process.wait_calls == 1
+    assert list(config_dir.iterdir()) == []
+
+
+def test_sshd_valid_banner_is_followed_by_final_child_poll(tmp_path: Path) -> None:
+    class ExitAfterBannerProcess(FakeSshdProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.poll_calls = 0
+
+        def poll(self) -> int | None:
+            self.poll_calls += 1
+            if self.poll_calls == 1:
+                return None
+            self.returncode = 23
+            return self.returncode
+
+    config_dir = _create_config_dir(tmp_path)
+    process = ExitAfterBannerProcess()
+
+    with pytest.raises(
+        SshdReadinessError,
+        match=r"^sshd exited before becoming ready$",
+    ):
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(process),
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert process.poll_calls >= 2
+    assert process.wait_calls == 1
+    assert list(config_dir.iterdir()) == []
+
+
+def test_sshd_readiness_checks_cancellation_after_probe(tmp_path: Path) -> None:
+    config_dir = _create_config_dir(tmp_path)
+    process = FakeSshdProcess()
+    cancelled = False
+
+    def cancel_during_probe(_port: int, _timeout: float) -> bytes:
+        nonlocal cancelled
+        cancelled = True
+        return b"SSH-2.0-test\n"
+
+    with pytest.raises(
+        SshdReadinessError,
+        match=r"^sshd startup was cancelled$",
+    ):
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(process),
+            readiness_probe=cancel_during_probe,
+            cancel_requested=lambda: cancelled,
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert process.terminated is True
+    assert process.wait_calls == 1
+    assert list(config_dir.iterdir()) == []
+
+
+def test_sshd_readiness_poll_error_is_fixed_and_retains_config(
+    tmp_path: Path,
+) -> None:
+    class PollErrorProcess(FakeSshdProcess):
+        def poll(self) -> int | None:
+            raise OSError("raw-poll-sentinel")
+
+    config_dir = _create_config_dir(tmp_path)
+    process = PollErrorProcess()
+
+    with pytest.raises(
+        SshdReadinessError,
+        match=r"^sshd readiness check failed$",
+    ) as raised:
+        start_sshd_if_enabled(
+            RuntimeConfig.model_validate(
+                {"system": {"ssh": {"enable": True, "password": "secret"}}}
+            ),
+            environment={b"POLL_SECRET": b"private-poll-value"},
+            root_home=tmp_path / "root",
+            runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
+            credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
+            command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
+            process_starter=RecordingProcessStarter(process),
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+            preparation_warning_observer=lambda _warning: None,
+        )
+
+    assert str(raised.value) == "sshd readiness check failed"
+    assert "raw-poll-sentinel" not in str(raised.value)
+    assert list(config_dir.glob("sshd_config.*"))
+    assert process.wait_calls == 0
+
+
+def test_owned_sshd_process_does_not_remove_replacement_identity(
+    tmp_path: Path,
+) -> None:
+    config_dir = _create_config_dir(tmp_path)
+    process_starter = RecordingProcessStarter()
+    result = start_sshd_if_enabled(
+        RuntimeConfig.model_validate(
+            {"system": {"ssh": {"enable": True, "password": "secret"}}}
+        ),
+        environment={},
+        root_home=tmp_path / "root",
+        runtime_dir=tmp_path / "run" / "sshd",
+        config_dir=config_dir,
+        credential_command_runner=RecordingRunner(),
+        config_owner_uid=os.getuid(),
+        config_owner_gid=os.getgid(),
+        command_runner=RecordingCommandRunner(),
+        preflight_command_runner=RecordingCommandRunner(),
+        process_starter=process_starter,
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+        preparation_warning_observer=lambda _warning: None,
+    )
+    assert isinstance(result, OwnedSshdProcess)
+    config_path = Path(process_starter.calls[0].argv[2])
+    original_path = config_dir / "original-config"
+    os.replace(config_path, original_path)
+    config_path.write_bytes(b"replacement\n")
+
+    assert result.wait() == 0
+
+    assert config_path.read_bytes() == b"replacement\n"
+    assert original_path.exists()
+
+
+def test_owned_sshd_process_overlapping_terminal_observation_cleans_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RacingSshdProcess(FakeSshdProcess):
+        def __init__(self) -> None:
+            super().__init__()
+            self.racing = False
+            self.barrier = threading.Barrier(2)
+
+        def wait(self) -> int:
+            if self.racing:
+                self.barrier.wait(timeout=1)
+                self.returncode = 0
+                return 0
+            return super().wait()
+
+        def poll(self) -> int | None:
+            if self.racing:
+                self.barrier.wait(timeout=1)
+                self.returncode = 0
+                return 0
+            return super().poll()
+
+    config_dir = _create_config_dir(tmp_path)
+    process = RacingSshdProcess()
+    process_starter = RecordingProcessStarter(process)
+    result = start_sshd_if_enabled(
+        RuntimeConfig.model_validate(
+            {"system": {"ssh": {"enable": True, "password": "secret"}}}
+        ),
+        environment={},
+        root_home=tmp_path / "root",
+        runtime_dir=tmp_path / "run" / "sshd",
+        config_dir=config_dir,
+        credential_command_runner=RecordingRunner(),
+        config_owner_uid=os.getuid(),
+        config_owner_gid=os.getgid(),
+        command_runner=RecordingCommandRunner(),
+        preflight_command_runner=RecordingCommandRunner(),
+        process_starter=process_starter,
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+        preparation_warning_observer=lambda _warning: None,
+    )
+    assert isinstance(result, OwnedSshdProcess)
+    config_path = Path(process_starter.calls[0].argv[2])
+    real_unlink = ssh_module._unlink_owned_sshd_config
+    cleanup_calls = 0
+
+    def record_cleanup(config: object) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        real_unlink(config)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ssh_module, "_unlink_owned_sshd_config", record_cleanup)
+    process.racing = True
+    outcomes: list[int | None] = []
+    failures: list[BaseException] = []
+
+    def observe(operation: Callable[[], int | None]) -> None:
+        try:
+            outcomes.append(operation())
+        except BaseException as error:
+            failures.append(error)
+
+    threads = [
+        threading.Thread(target=observe, args=(result.wait,)),
+        threading.Thread(target=observe, args=(result.poll,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert failures == []
+    assert outcomes == [0, 0]
+    assert cleanup_calls == 1
+    assert not config_path.exists()
+
+
+def test_owned_sshd_process_cleanup_failure_does_not_replace_terminal_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = _create_config_dir(tmp_path)
+    process_starter = RecordingProcessStarter()
+    result = start_sshd_if_enabled(
+        RuntimeConfig.model_validate(
+            {"system": {"ssh": {"enable": True, "password": "secret"}}}
+        ),
+        environment={},
+        root_home=tmp_path / "root",
+        runtime_dir=tmp_path / "run" / "sshd",
+        config_dir=config_dir,
+        credential_command_runner=RecordingRunner(),
+        config_owner_uid=os.getuid(),
+        config_owner_gid=os.getgid(),
+        command_runner=RecordingCommandRunner(),
+        preflight_command_runner=RecordingCommandRunner(),
+        process_starter=process_starter,
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+        preparation_warning_observer=lambda _warning: None,
+    )
+    assert isinstance(result, OwnedSshdProcess)
+    config_path = Path(process_starter.calls[0].argv[2])
+    cleanup_calls = 0
+
+    def fail_cleanup(_config: object) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        raise OSError("raw-cleanup-sentinel")
+
+    monkeypatch.setattr(ssh_module, "_unlink_owned_sshd_config", fail_cleanup)
+
+    assert result.wait() == 0
+    assert result.poll() == 0
+    assert cleanup_calls == 1
+    assert config_path.exists()
+
+
+@pytest.mark.parametrize("operation", ["wait", "poll"])
+def test_owned_sshd_process_observation_error_retains_config(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    class ObservationErrorProcess(FakeSshdProcess):
+        fail_observation = False
+
+        def wait(self) -> int:
+            if self.fail_observation:
+                raise OSError("raw-wait-sentinel")
+            return super().wait()
+
+        def poll(self) -> int | None:
+            if self.fail_observation:
+                raise OSError("raw-poll-sentinel")
+            return super().poll()
+
+    config_dir = _create_config_dir(tmp_path)
+    process = ObservationErrorProcess()
+    process_starter = RecordingProcessStarter(process)
+    result = start_sshd_if_enabled(
+        RuntimeConfig.model_validate(
+            {"system": {"ssh": {"enable": True, "password": "secret"}}}
+        ),
+        environment={},
+        root_home=tmp_path / "root",
+        runtime_dir=tmp_path / "run" / "sshd",
+        config_dir=config_dir,
+        credential_command_runner=RecordingRunner(),
+        config_owner_uid=os.getuid(),
+        config_owner_gid=os.getgid(),
+        command_runner=RecordingCommandRunner(),
+        preflight_command_runner=RecordingCommandRunner(),
+        process_starter=process_starter,
+        readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+        preparation_warning_observer=lambda _warning: None,
+    )
+    assert isinstance(result, OwnedSshdProcess)
+    config_path = Path(process_starter.calls[0].argv[2])
+    process.fail_observation = True
+
+    with pytest.raises(OSError):
+        getattr(result, operation)()
+
+    assert config_path.exists()
 
 
 def test_ssh_default_runner_missing_executables_are_not_disclosed(
@@ -1193,17 +1905,25 @@ def test_prepare_root_ssh_credentials_rejects_control_public_key_before_write(
 def test_start_sshd_if_enabled_fails_when_sshd_exits_during_startup(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(SshdStartupError) as raised:
+    config_dir = _create_config_dir(tmp_path)
+
+    with pytest.raises(SshdReadinessError) as raised:
         start_sshd_if_enabled(
             RuntimeConfig.model_validate(
                 {"system": {"ssh": {"enable": True, "password": "secret"}}}
             ),
+            environment={},
             root_home=tmp_path / "root",
             runtime_dir=tmp_path / "run" / "sshd",
+            config_dir=config_dir,
             credential_command_runner=RecordingRunner(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
             command_runner=RecordingCommandRunner(),
+            preflight_command_runner=RecordingCommandRunner(),
             process_starter=RecordingProcessStarter(FakeSshdProcess(returncode=255)),
             preparation_warning_observer=lambda _warning: None,
         )
 
-    assert "sshd exited during startup with code 255" in str(raised.value)
+    assert str(raised.value) == "sshd exited before becoming ready"
+    assert list(config_dir.glob("sshd_config.*")) == []

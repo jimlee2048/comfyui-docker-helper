@@ -159,10 +159,17 @@ def test_managed_ssh_lifecycle_emits_one_typed_outcome(
     def starter(
         _config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
         preparation_process_observer: Callable[[object | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> OwnedSshd | None:
-        del preparation_process_observer, preparation_warning_observer
+        del (
+            environment,
+            cancel_requested,
+            preparation_process_observer,
+            preparation_warning_observer,
+        )
         return OwnedSshd() if ready else None
 
     downloads = Mock()
@@ -176,6 +183,7 @@ def test_managed_ssh_lifecycle_emits_one_typed_outcome(
         downloads=downloads,
         ssh_service=RuntimeSshService(
             config,
+            environment={b"PATH": b"/usr/bin"},
             starter=starter,
             background_event_sink=recorder,  # type: ignore[arg-type]
             event_sink=recorder,

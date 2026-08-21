@@ -8,7 +8,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType, MappingProxyType
 from typing import Literal
@@ -123,14 +123,51 @@ class _ServeGenerationLease:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeEnvironmentSnapshot:
+    """Immutable text and byte views of one runtime-start environment."""
+
+    text: Mapping[str, str] = field(repr=False)
+    raw: Mapping[bytes, bytes] = field(repr=False)
+
+
+def capture_runtime_environment(
+    environ: Mapping[str, str] | None = None,
+) -> RuntimeEnvironmentSnapshot:
+    """Capture one byte-preserving environment with an immutable text view."""
+    if environ is None:
+        raw_environment = dict(os.environb)
+    else:
+        raw_environment = {
+            os.fsencode(name): os.fsencode(value) for name, value in environ.items()
+        }
+    text_environment = {
+        os.fsdecode(name): os.fsdecode(value) for name, value in raw_environment.items()
+    }
+    return RuntimeEnvironmentSnapshot(
+        text=MappingProxyType(text_environment),
+        raw=MappingProxyType(raw_environment),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeGeneration:
     """Freshly admitted inputs and owners for one runtime lifecycle."""
 
-    config: RuntimeConfig
+    config: RuntimeConfig = field(repr=False)
     hook_plan: RuntimeHookPlan
-    source_env: Mapping[str, str]
+    environment: RuntimeEnvironmentSnapshot = field(repr=False)
     downloads: RuntimeDownloads
     ssh_service: RuntimeSshService
+
+    @property
+    def source_env(self) -> Mapping[str, str]:
+        """Return the controller-start text environment used by runtime owners."""
+        return self.environment.text
+
+    @property
+    def source_env_bytes(self) -> Mapping[bytes, bytes]:
+        """Return the matching byte environment for SSH projection."""
+        return self.environment.raw
 
 
 class RuntimeGenerationFactory:
@@ -146,7 +183,7 @@ class RuntimeGenerationFactory:
         mounted_config_path: str | Path = MOUNTED_RUNTIME_CONFIG_PATH,
         baked_hooks_path: str | Path = BAKED_RUNTIME_HOOKS_PATH,
         mounted_hooks_path: str | Path = MOUNTED_RUNTIME_HOOKS_PATH,
-        environ: Mapping[str, str] | None = None,
+        environment: RuntimeEnvironmentSnapshot,
         runtime_downloader: RuntimeDownloadRunner = download_runtime_files,
         runtime_async_queue_starter: RuntimeAsyncQueueStarter = (
             start_runtime_async_download_queue
@@ -159,9 +196,8 @@ class RuntimeGenerationFactory:
         self._mounted_config_path = Path(mounted_config_path)
         self._baked_hooks_path = Path(baked_hooks_path)
         self._mounted_hooks_path = Path(mounted_hooks_path)
-        self._source_env = MappingProxyType(
-            dict(os.environ if environ is None else environ)
-        )
+        self._environment = environment
+        self._source_env = environment.text
         self._runtime_downloader = runtime_downloader
         self._runtime_async_queue_starter = runtime_async_queue_starter
         self._runtime_ssh_starter = runtime_ssh_starter
@@ -211,7 +247,7 @@ class RuntimeGenerationFactory:
         return RuntimeGeneration(
             config=result.config,
             hook_plan=hook_plan,
-            source_env=self._source_env,
+            environment=self._environment,
             downloads=RuntimeDownloads(
                 result.config,
                 result.files,
@@ -225,6 +261,7 @@ class RuntimeGenerationFactory:
             ),
             ssh_service=RuntimeSshService(
                 result.config,
+                environment=self._environment.raw,
                 starter=self._runtime_ssh_starter,
                 background_event_sink=self._background_event_sink,
                 event_sink=self._event_sink,
@@ -258,7 +295,8 @@ def run_runtime_generation_once(
 ) -> int:
     """Compose and execute one generation through the injected test seam."""
     event_sink = safe_runtime_event_sink(event_sink)
-    source_env = MappingProxyType(dict(os.environ if environ is None else environ))
+    environment = capture_runtime_environment(environ)
+    source_env = environment.text
     effective_runtime = (
         ContainerRuntime.from_env(source_env) if runtime is None else runtime
     )
@@ -268,7 +306,7 @@ def run_runtime_generation_once(
         mounted_config_path=mounted_config_path,
         baked_hooks_path=baked_hooks_path,
         mounted_hooks_path=mounted_hooks_path,
-        environ=source_env,
+        environment=environment,
         runtime_downloader=runtime_downloader,
         runtime_async_queue_starter=runtime_async_queue_starter,
         runtime_ssh_starter=runtime_ssh_starter,
@@ -323,6 +361,7 @@ def run_runtime_serve(
     sleep: Callable[[float], object] = time.sleep,
 ) -> int:
     """Own controller-lifetime output and execute serial runtime generations."""
+    environment = capture_runtime_environment(environ)
     controller = RuntimeController()
     settings = output_settings or CliOutputSettings()
     with runtime_logging_factory(controller.observe_runtime_failure) as logging_broker:
@@ -341,7 +380,7 @@ def run_runtime_serve(
                 mounted_config_path=mounted_config_path,
                 baked_hooks_path=baked_hooks_path,
                 mounted_hooks_path=mounted_hooks_path,
-                environ=environ,
+                environment=environment,
                 runner=runner,
                 runtime_downloader=runtime_downloader,
                 runtime_async_queue_starter=runtime_async_queue_starter,
@@ -368,7 +407,7 @@ def _run_runtime_serve(
     mounted_config_path: str | Path,
     baked_hooks_path: str | Path,
     mounted_hooks_path: str | Path,
-    environ: Mapping[str, str] | None,
+    environment: RuntimeEnvironmentSnapshot,
     runner: DirectProcessStarter,
     runtime_downloader: RuntimeDownloadRunner,
     runtime_async_queue_starter: RuntimeAsyncQueueStarter,
@@ -386,7 +425,7 @@ def _run_runtime_serve(
 ) -> int:
     """Own the private endpoint and execute serial runtime generations."""
     event_sink = safe_runtime_event_sink(event_sink)
-    source_env = MappingProxyType(dict(os.environ if environ is None else environ))
+    source_env = environment.text
     effective_runtime = (
         ContainerRuntime.from_env(source_env) if runtime is None else runtime
     )
@@ -396,7 +435,7 @@ def _run_runtime_serve(
         mounted_config_path=mounted_config_path,
         baked_hooks_path=baked_hooks_path,
         mounted_hooks_path=mounted_hooks_path,
-        environ=source_env,
+        environment=environment,
         runtime_downloader=runtime_downloader,
         runtime_async_queue_starter=runtime_async_queue_starter,
         runtime_ssh_starter=runtime_ssh_starter,

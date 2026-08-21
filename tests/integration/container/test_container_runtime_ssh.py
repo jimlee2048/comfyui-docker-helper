@@ -40,7 +40,12 @@ from comfyui_docker_helper.container.runtime_ssh_service import (
     stop_runtime_ssh_service,
 )
 from comfyui_docker_helper.container.ssh import (
+    SshCredentialPreparationError,
+    SshdConfigPreparationError,
+    SshdConfigValidationError,
+    SshdReadinessError,
     SshdStartupError,
+    SshEnvironmentProjectionError,
     SshPreparationWarningKind,
     start_sshd_if_enabled,
 )
@@ -547,19 +552,26 @@ pub_keys = ["{VALID_SSH_KEY}"]
     root_home = tmp_path / "root"
     root_home.mkdir(mode=0o700)
     runtime_dir = tmp_path / "run" / "sshd"
+    config_dir = tmp_path / "run" / "cdh"
+    config_dir.mkdir(mode=0o700, parents=True)
+    config_dir.chmod(0o700)
     events: list[str] = []
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
         preparation_process_observer: Callable[[object | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> FakeSshdProcess | None:
         events.append("ssh-start")
         return start_sshd_if_enabled(
             config,
+            environment=environment,
             root_home=root_home,
             runtime_dir=runtime_dir,
+            config_dir=config_dir,
             credential_command_runner=credential_runner,
             credential_chown=ownership.chown,
             credential_chmod=ownership.chmod,
@@ -567,8 +579,13 @@ pub_keys = ["{VALID_SSH_KEY}"]
             credential_fchmod=ownership.fchmod,
             credential_owner_uid=os.getuid(),
             credential_owner_gid=os.getgid(),
+            config_owner_uid=os.getuid(),
+            config_owner_gid=os.getgid(),
             command_runner=command_runner,
+            preflight_command_runner=command_runner,
             process_starter=process_starter,
+            readiness_probe=lambda _port, _timeout: b"SSH-2.0-test\n",
+            cancel_requested=cancel_requested,
             preparation_process_observer=preparation_process_observer,
             preparation_warning_observer=preparation_warning_observer,
         )
@@ -622,33 +639,21 @@ pub_keys = ["{VALID_SSH_KEY}"]
         ),
     ]
     assert command_runner.calls == [
-        PlainCommandCall(["/usr/bin/ssh-keygen", "-A"], "generate OpenSSH host keys")
+        PlainCommandCall(["/usr/bin/ssh-keygen", "-A"], "generate OpenSSH host keys"),
+        PlainCommandCall(
+            ["/usr/sbin/sshd", "-t", "-f", process_starter.calls[0].argv[2]],
+            "validate sshd configuration",
+        ),
     ]
     assert runtime_dir.is_dir()
-    assert process_starter.calls == [
-        PlainCommandCall(
-            [
-                "/usr/sbin/sshd",
-                "-f",
-                "/dev/null",
-                "-D",
-                "-e",
-                "-o",
-                "Port=3022",
-                "-o",
-                "PermitRootLogin=yes",
-                "-o",
-                "PasswordAuthentication=yes",
-                "-o",
-                "KbdInteractiveAuthentication=no",
-                "-o",
-                "PubkeyAuthentication=yes",
-                "-o",
-                "AuthorizedKeysFile=/root/.ssh/authorized_keys",
-            ],
-            "start sshd",
-        )
-    ]
+    assert len(process_starter.calls) == 1
+    config_path = Path(process_starter.calls[0].argv[2])
+    assert process_starter.calls[0] == PlainCommandCall(
+        ["/usr/sbin/sshd", "-f", os.fspath(config_path), "-D", "-e"],
+        "start sshd",
+    )
+    assert config_path.parent == config_dir
+    assert not config_path.exists()
     assert secret not in " ".join(process_starter.calls[0].argv)
     assert VALID_SSH_KEY not in " ".join(process_starter.calls[0].argv)
 
@@ -678,12 +683,18 @@ pub_keys = ["{VALID_SSH_KEY}"]
 """,
     )
     seen: list[RuntimeConfig] = []
+    seen_environments: list[Mapping[bytes, bytes]] = []
 
     def runtime_ssh_starter(
         config: RuntimeConfig,
+        *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
         **_kwargs: object,
     ) -> FakeSshdProcess:
         seen.append(config)
+        seen_environments.append(environment)
+        assert cancel_requested() is False
         return FakeSshdProcess()
 
     assert (
@@ -711,6 +722,13 @@ pub_keys = ["{VALID_SSH_KEY}"]
     assert seen[0].system.ssh.port == 3022
     assert seen[0].system.ssh.password == " env-secret "
     assert seen[0].system.ssh.pub_keys == [VALID_SSH_KEY, SECOND_SSH_KEY]
+    assert dict(seen_environments[0]) == {
+        b"PATH": b"/usr/bin",
+        b"SSH_ENABLE": b" yes ",
+        b"SSH_PORT": b" 3022 ",
+        b"SSH_PASSWORD": b" env-secret ",
+        b"SSH_PUB_KEY": f" {SECOND_SSH_KEY} ".encode(),
+    }
 
 
 # Disabled and credential-less SSH cases must continue without starting sshd.
@@ -820,10 +838,12 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join() -> Non
     def managed_starter(
         _config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
         preparation_process_observer: Callable[[object | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> None:
-        del preparation_process_observer
+        del environment, cancel_requested, preparation_process_observer
         assert threading.current_thread().name == "cdh-ssh-startup"
         preparation_warning_observer(
             SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
@@ -832,6 +852,7 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join() -> Non
 
     service = RuntimeSshService(
         config,
+        environment={b"PATH": b"/usr/bin"},
         starter=managed_starter,
         background_event_sink=RecordingRuntimeEventSink(),
         event_sink=Recorder(),
@@ -873,6 +894,7 @@ def test_managed_ssh_direct_reap_warning_is_deduplicated() -> None:
 
     service = RuntimeSshService(
         config,
+        environment={b"PATH": b"/usr/bin"},
         starter=lambda *_args, **_kwargs: ReapFailureSshd(),
         background_event_sink=RecordingRuntimeEventSink(),
         event_sink=Recorder(),
@@ -936,7 +958,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
     captured = capsys.readouterr()
     payload = f"{raised.value}\n{captured.out}\n{captured.err}"
     assert events == ["ssh-start"]
-    assert str(raised.value) == "SSH runtime service failed to start"
+    assert str(raised.value) == "SSH startup/readiness failed"
     service_error = raised.value.__cause__
     assert isinstance(service_error, RuntimeSshServiceError)
     assert isinstance(service_error.__cause__, SshdStartupError)
@@ -973,13 +995,100 @@ password = "line1\\nline2"
 
     captured = capsys.readouterr()
     payload = f"{raised.value}\n{captured.out}\n{captured.err}"
-    assert str(raised.value) == "SSH runtime service failed to start"
+    assert str(raised.value) == "SSH credential preparation failed"
     service_error = raised.value.__cause__
     assert isinstance(service_error, RuntimeSshServiceError)
     assert isinstance(service_error.__cause__, SshdStartupError)
     assert "SSH password must not contain line breaks or NUL bytes" not in payload
     assert "line1" not in payload
     assert "line2" not in payload
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected"),
+    [
+        pytest.param(
+            "environment",
+            "SSH environment projection failed",
+            id="environment-projection",
+        ),
+        pytest.param(
+            "config",
+            "SSH protected configuration preparation failed",
+            id="protected-config",
+        ),
+        pytest.param(
+            "parser",
+            "SSH configuration parser validation failed",
+            id="parser-validation",
+        ),
+        pytest.param(
+            "credential",
+            "SSH credential preparation failed",
+            id="credential",
+        ),
+        pytest.param(
+            "readiness",
+            "SSH startup/readiness failed",
+            id="startup-readiness",
+        ),
+    ],
+)
+def test_ssh_activation_failures_use_fixed_top_level_categories(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure_kind: str,
+    expected: str,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "configured-secret"
+""",
+    )
+
+    def runtime_ssh_starter(
+        _config: RuntimeConfig,
+        **_kwargs: object,
+    ) -> FakeSshdProcess:
+        sentinel = "ssh-private-activation-sentinel"
+        if failure_kind == "environment":
+            raise SshEnvironmentProjectionError(sentinel)
+        if failure_kind == "config":
+            raise SshdConfigPreparationError(sentinel)
+        if failure_kind == "parser":
+            raise SshdConfigValidationError(sentinel)
+        if failure_kind == "credential":
+            try:
+                raise SshCredentialPreparationError(sentinel)
+            except SshCredentialPreparationError as cause:
+                raise SshdStartupError(sentinel) from cause
+        if failure_kind == "readiness":
+            raise SshdReadinessError(sentinel)
+        raise AssertionError(f"unexpected failure kind: {failure_kind}")
+
+    with pytest.raises(RuntimeExecutionError) as raised:
+        run_runtime_generation_once(
+            runtime=runtime,
+            baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
+            mounted_config_path=mounted,
+            baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+            mounted_hooks_path=_missing_path(tmp_path, "mounted-hooks"),
+            environ={"PATH": "/usr/bin", "SSH_SECRET": "environment-secret"},
+            runner=lambda *_args, **_kwargs: pytest.fail(
+                "ComfyUI must not start after SSH activation failure"
+            ),
+            runtime_ssh_starter=runtime_ssh_starter,
+        )
+
+    captured = capsys.readouterr()
+    payload = f"{raised.value}\n{captured.out}\n{captured.err}"
+    assert str(raised.value) == expected
+    assert "ssh-private-activation-sentinel" not in payload
+    assert "environment-secret" not in payload
 
 
 # A failed direct reap is not terminal evidence, so the SSH owner must report
@@ -1190,16 +1299,19 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
     published = threading.Event()
+    starter_cancellation_seen = threading.Event()
     process: subprocess.Popen[bytes] | None = None
 
     def starter(
         config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
         preparation_process_observer: Callable[[object | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> None:
         nonlocal process
-        del config, preparation_warning_observer
+        del config, environment, preparation_warning_observer
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"]
         )
@@ -1207,6 +1319,8 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
         preparation_process_observer(process)
         published.set()
         process.wait(timeout=_PREPARATION_PROCESS_TIMEOUT_SECONDS)
+        if cancel_requested():
+            starter_cancellation_seen.set()
         preparation_process_observer(None)
         return None
 
@@ -1220,6 +1334,7 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
     runtime_events = RecordingRuntimeEventSink()
     RuntimeSshService(
         config,
+        environment={b"PATH": b"/usr/bin"},
         starter=starter,
         background_event_sink=runtime_events,
         event_sink=runtime_events,
@@ -1227,6 +1342,7 @@ def test_ssh_startup_operation_cancels_and_reaps_published_process(
 
     assert process is not None
     assert process.returncode is not None
+    assert starter_cancellation_seen.is_set()
     with pytest.raises(ChildProcessError):
         os.waitpid(process.pid, os.WNOHANG)
 
@@ -1259,6 +1375,7 @@ def test_ssh_monitor_wait_failure_retains_unreaped_owner() -> None:
     runtime_events = RecordingRuntimeEventSink()
     service = RuntimeSshService(
         config,
+        environment={b"PATH": b"/usr/bin"},
         starter=lambda *_args, **_kwargs: sshd,
         background_event_sink=runtime_events,
         event_sink=runtime_events,
@@ -1314,6 +1431,7 @@ def test_ssh_stop_waits_for_inflight_monitor_warning_delivery() -> None:
     sshd = TerminalSshd()
     service = RuntimeSshService(
         config,
+        environment={b"PATH": b"/usr/bin"},
         starter=lambda *_args, **_kwargs: sshd,
         background_event_sink=Recorder(),
         event_sink=RecordingRuntimeEventSink(),

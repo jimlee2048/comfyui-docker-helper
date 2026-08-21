@@ -14,6 +14,7 @@ from comfyui_docker_helper.release_artifacts import (
     PACKAGE_ROOT,
     PROJECTED_LICENSE,
     PROJECTED_PYPROJECT,
+    WORKSPACE_PROFILE_RESOURCE,
     release_projection_files,
 )
 from comfyui_docker_helper.version import package_version
@@ -157,7 +158,9 @@ def test_package_resources_contain_the_final_probe_and_release_projection() -> N
     }
 
     assert resource_paths == {
+        PurePosixPath("cdh-workspace.sh"),
         PurePosixPath("final-core-probe.py"),
         PurePosixPath("release-projection/LICENSE"),
         PurePosixPath("release-projection/pyproject.toml"),
     }
+    assert WORKSPACE_PROFILE_RESOURCE.read_bytes()

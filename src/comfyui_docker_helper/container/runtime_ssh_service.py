@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Literal, Protocol, runtime_checkable
 
 from comfyui_docker_helper.cli_output import EventSink
@@ -26,8 +26,13 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeSshWarningKind,
 )
 from comfyui_docker_helper.container.ssh import (
+    SshCredentialPreparationError,
+    SshdConfigPreparationError,
+    SshdConfigValidationError,
     SshdProcess,
+    SshdReadinessError,
     SshdStartupError,
+    SshEnvironmentProjectionError,
     SshPreparationWarningKind,
     start_sshd_if_enabled,
 )
@@ -35,6 +40,13 @@ from comfyui_docker_helper.errors import ApplicationError
 
 SSHD_STOP_TIMEOUT_SECONDS = 5.0
 SSHD_STOP_POLL_INTERVAL_SECONDS = 0.05
+
+_SSH_ENVIRONMENT_PROJECTION_FAILURE = "SSH environment projection failed"
+_SSH_CONFIG_PREPARATION_FAILURE = "SSH protected configuration preparation failed"
+_SSH_CONFIG_VALIDATION_FAILURE = "SSH configuration parser validation failed"
+_SSH_CREDENTIAL_PREPARATION_FAILURE = "SSH credential preparation failed"
+_SSH_STARTUP_READINESS_FAILURE = "SSH startup/readiness failed"
+_SSH_EARLY_EXIT_FAILURE = "SSH runtime service exited before ComfyUI"
 
 
 class RuntimeSshStarter(Protocol):
@@ -44,6 +56,8 @@ class RuntimeSshStarter(Protocol):
         self,
         config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
         preparation_process_observer: Callable[[DirectProcess | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> SshdProcess | None: ...
@@ -74,6 +88,36 @@ class RuntimeSshServiceError(ApplicationError):
     """The runtime SSH service failed at a lifecycle boundary."""
 
 
+def _contains_ssh_error(
+    error: BaseException,
+    expected: type[BaseException],
+) -> bool:
+    """Find one typed SSH failure without formatting its private detail."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, expected):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _runtime_ssh_failure_message(error: BaseException) -> str:
+    """Project typed SSH activation failures into fixed safe categories."""
+    if _contains_ssh_error(error, SshEnvironmentProjectionError):
+        return _SSH_ENVIRONMENT_PROJECTION_FAILURE
+    if _contains_ssh_error(error, SshdConfigPreparationError):
+        return _SSH_CONFIG_PREPARATION_FAILURE
+    if _contains_ssh_error(error, SshdConfigValidationError):
+        return _SSH_CONFIG_VALIDATION_FAILURE
+    if _contains_ssh_error(error, SshCredentialPreparationError):
+        return _SSH_CREDENTIAL_PREPARATION_FAILURE
+    if _contains_ssh_error(error, SshdReadinessError):
+        return _SSH_STARTUP_READINESS_FAILURE
+    return _SSH_STARTUP_READINESS_FAILURE
+
+
 def _force_requested(cancel_requested: Callable[[], bool]) -> bool:
     return (
         isinstance(cancel_requested, ForceEscalationCancellation)
@@ -101,11 +145,13 @@ class RuntimeSshService:
         self,
         config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
         background_event_sink: RuntimeBackgroundEventSink,
         event_sink: EventSink[RuntimeEvent],
         starter: RuntimeSshStarter = start_sshd_if_enabled,
     ) -> None:
         self._config = config
+        self._environment = environment
         self._starter = starter
         self._background_event_sink = background_event_sink
         self._event_sink = safe_runtime_event_sink(event_sink)
@@ -147,6 +193,8 @@ class RuntimeSshService:
             try:
                 handle = self._starter(
                     self._config,
+                    environment=self._environment,
+                    cancel_requested=self._shutdown_requested.is_set,
                     preparation_process_observer=observe_preparation_process,
                     preparation_warning_observer=preparation_warnings.append,
                 )
@@ -202,11 +250,11 @@ class RuntimeSshService:
             error = errors[0]
             if isinstance(error, (SshdStartupError, ApplicationError)):
                 raise RuntimeSshServiceError(
-                    "SSH runtime service failed to start"
+                    _runtime_ssh_failure_message(error)
                 ) from error
             raise error
         if len(result) != 1:
-            raise RuntimeSshServiceError("SSH runtime service result is missing")
+            raise RuntimeSshServiceError(_SSH_STARTUP_READINESS_FAILURE)
         self._handle = result[0]
 
     def ensure_running_before_comfyui(self) -> None:
@@ -215,9 +263,7 @@ class RuntimeSshService:
             return
         returncode = self._handle.poll()
         if returncode is not None:
-            raise RuntimeSshServiceError(
-                f"SSH runtime service exited before ComfyUI: {returncode}"
-            )
+            raise RuntimeSshServiceError(_SSH_EARLY_EXIT_FAILURE)
 
     def startup_outcome(
         self,

@@ -23,6 +23,21 @@ _IMAGE_ENV = "CDH_LIFECYCLE_IMAGE"
 _CONTEXT_ENV = "CDH_LIFECYCLE_CONTEXT"
 _POLL_INTERVAL_SECONDS = 0.05
 _VERIFIED_BINDINGS: set[tuple[Path, str]] = set()
+_SSH_PORT = 2222
+_SSH_FORMAL_ENV_NAME = "CDH_SSH_FORMAL_SENTINEL"
+_SSH_FORMAL_ENV_VALUE = "cdh-py313-full-formal"
+_SSH_OVERRIDE_ENV_NAME = "CDH_SSH_OVERRIDE_SENTINEL"
+_SSH_OVERRIDE_IMAGE_VALUE = "cdh-image-default"
+_SSH_OVERRIDE_ENV_VALUE = "cdh-docker-override"
+_SSH_ADD_ENV_NAME = "CDH_SSH_DOCKER_ADD"
+_SSH_ADD_ENV_VALUE = "cdh-docker-add"
+_SSH_CUSTOM_ENV_NAME = "SSH_CUSTOM_SENTINEL"
+_SSH_CUSTOM_ENV_VALUE = "cdh-custom-ssh-name"
+_SSH_QUOTING_ENV_NAME = "CDH_SSH_QUOTING"
+_SSH_QUOTING_ENV_VALUE = 'space # equals= "quote" \\slash\ttab'
+_SSH_LOG_MARKER_NAME = "CDH_SSH_LOG_MARKER"
+_SSH_LOG_MARKER = "cdh-ssh-log-marker"
+_SSH_CLIENT_TERM = "xterm-256color"
 
 
 def _image() -> str:
@@ -110,6 +125,7 @@ def _docker(
     *arguments: str,
     check: bool = True,
     timeout: float = 30,
+    input_data: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["docker", *arguments],
@@ -117,7 +133,76 @@ def _docker(
         capture_output=True,
         text=True,
         timeout=timeout,
+        input=input_data,
     )
+
+
+def _formal_workspace() -> str:
+    document = json.loads((_formal_context() / "build-plan.json").read_text())
+    return document["application"]["paths"]["workspace"]
+
+
+def _ssh_client(
+    server: str,
+    private_key: Path,
+    *,
+    port: int = _SSH_PORT,
+    command: str | None = None,
+    input_data: str | None = None,
+    force_pty: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    arguments = [
+        "run",
+        "--rm",
+        "--network",
+        f"container:{server}",
+        "--env",
+        f"TERM={_SSH_CLIENT_TERM}",
+        "--mount",
+        f"type=bind,src={private_key},dst=/tmp/cdh-ssh-client-key,readonly",
+        "--entrypoint",
+        "/usr/bin/ssh",
+        _image(),
+        "-i",
+        "/tmp/cdh-ssh-client-key",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        "-o",
+        "ConnectTimeout=5",
+        # This is the in-namespace SSH port; Docker receives no --publish.
+        "-p",
+        str(port),
+    ]
+    if input_data is not None:
+        arguments.insert(1, "--interactive")
+    if force_pty:
+        arguments.append("-tt")
+    arguments.append("root@127.0.0.1")
+    if command is not None:
+        arguments.append(command)
+    return _docker(*arguments, check=False, timeout=30, input_data=input_data)
+
+
+def _ssh_fact(output: str, name: str) -> str:
+    prefix = f"CDH_SSH_FACT|{name}|"
+    candidates = [
+        line.split(prefix, 1)[1]
+        for line in output.replace("\r", "").splitlines()
+        if prefix in line
+    ]
+    if not candidates:
+        pytest.fail(f"SSH session did not report fact {name}")
+    return candidates[-1]
 
 
 def _inspect_container(name: str) -> dict[str, object]:
@@ -1234,3 +1319,181 @@ def test_natural_exit_preserves_result_without_stop_hooks(tmp_path: Path) -> Non
     assert events[-1] == "child:natural:23"
     assert not any(item.startswith("hook:") for item in events)
     assert not any(item.startswith("child:signal:") for item in events)
+
+
+# The retained-image probe checks only cdh/sshd-owned argv and logs; it makes no
+# promise about output emitted by an authenticated child process.
+def test_retained_formal_image_supports_real_ssh_environment_and_tools(
+    tmp_path: Path,
+) -> None:
+    """Prove the retained formal image's real SSH session boundary."""
+    private_key = tmp_path / "ssh-client-key"
+    keygen = _docker(
+        "run",
+        "--rm",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "--mount",
+        f"type=bind,src={tmp_path},dst=/keys",
+        "--entrypoint",
+        "/usr/bin/ssh-keygen",
+        _image(),
+        "-q",
+        "-t",
+        "ed25519",
+        "-N",
+        "",
+        "-C",
+        "cdh-lifecycle-test",
+        "-f",
+        "/keys/ssh-client-key",
+        check=False,
+        timeout=30,
+    )
+    assert keygen.returncode == 0
+    public_key = (
+        private_key.with_name(f"{private_key.name}.pub")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+
+    runtime_config = tmp_path / "ssh-runtime.toml"
+    runtime_config.write_text(
+        "[system.ssh]\n"
+        "enable = true\n"
+        f"port = {_SSH_PORT}\n"
+        f"pub_keys = [{json.dumps(public_key)}]\n",
+        encoding="utf-8",
+    )
+
+    image_config = json.loads(_docker("image", "inspect", _image()).stdout)[0]["Config"]
+    assert f"{_SSH_FORMAL_ENV_NAME}={_SSH_FORMAL_ENV_VALUE}" in image_config["Env"]
+    assert (
+        f"{_SSH_OVERRIDE_ENV_NAME}={_SSH_OVERRIDE_IMAGE_VALUE}" in image_config["Env"]
+    )
+
+    server_environment = {
+        _SSH_OVERRIDE_ENV_NAME: _SSH_OVERRIDE_ENV_VALUE,
+        _SSH_ADD_ENV_NAME: _SSH_ADD_ENV_VALUE,
+        _SSH_CUSTOM_ENV_NAME: _SSH_CUSTOM_ENV_VALUE,
+        _SSH_QUOTING_ENV_NAME: _SSH_QUOTING_ENV_VALUE,
+        _SSH_LOG_MARKER_NAME: _SSH_LOG_MARKER,
+        "TERM": "server-ambient-term",
+    }
+    with _container(
+        tmp_path,
+        environment=server_environment,
+        runtime_config=runtime_config,
+    ) as name:
+        _wait_for_event(tmp_path, "child:ready")
+
+        interactive_script = (
+            "\n".join(
+                (
+                    "printf 'CDH_SSH_FACT|PWD|%s\\n' \"$(pwd -P)\"",
+                    "printf 'CDH_SSH_FACT|WORKSPACE|%s\\n' \"$WORKSPACE\"",
+                    "printf 'CDH_SSH_FACT|FORMAL_ENV|%s\\n' "
+                    '"$CDH_SSH_FORMAL_SENTINEL"',
+                    "printf 'CDH_SSH_FACT|OVERRIDE_ENV|%s\\n' "
+                    '"$CDH_SSH_OVERRIDE_SENTINEL"',
+                    "printf 'CDH_SSH_FACT|ADDED_ENV|%s\\n' \"$CDH_SSH_DOCKER_ADD\"",
+                    "printf 'CDH_SSH_FACT|CUSTOM_ENV|%s\\n' \"$SSH_CUSTOM_SENTINEL\"",
+                    "printf 'CDH_SSH_FACT|QUOTING_ENV|%s\\n' \"$CDH_SSH_QUOTING\"",
+                    "printf 'CDH_SSH_FACT|LOG_MARKER|%s\\n' \"$CDH_SSH_LOG_MARKER\"",
+                    "printf 'CDH_SSH_FACT|CDH|%s\\n' \"$(command -v cdh)\"",
+                    "printf 'CDH_SSH_FACT|UV|%s\\n' \"$(command -v uv)\"",
+                    "uv tool list >/dev/null && printf "
+                    "'CDH_SSH_FACT|UV_TOOL_LIST|ok\\n'",
+                    "printf 'CDH_SSH_FACT|TERM|%s\\n' \"$TERM\"",
+                    "exit",
+                )
+            )
+            + "\n"
+        )
+        interactive = _ssh_client(
+            name,
+            private_key,
+            input_data=interactive_script,
+            force_pty=True,
+        )
+        assert interactive.returncode == 0
+        interactive_output = interactive.stdout + interactive.stderr
+        assert _ssh_fact(interactive_output, "PWD") == _formal_workspace()
+        assert _ssh_fact(interactive_output, "WORKSPACE") == _formal_workspace()
+        assert _ssh_fact(interactive_output, "FORMAL_ENV") == _SSH_FORMAL_ENV_VALUE
+        assert _ssh_fact(interactive_output, "OVERRIDE_ENV") == _SSH_OVERRIDE_ENV_VALUE
+        assert _ssh_fact(interactive_output, "ADDED_ENV") == _SSH_ADD_ENV_VALUE
+        assert _ssh_fact(interactive_output, "CUSTOM_ENV") == _SSH_CUSTOM_ENV_VALUE
+        assert _ssh_fact(interactive_output, "QUOTING_ENV") == _SSH_QUOTING_ENV_VALUE
+        assert _ssh_fact(interactive_output, "LOG_MARKER") == _SSH_LOG_MARKER
+        assert _ssh_fact(interactive_output, "CDH").endswith("/cdh")
+        assert _ssh_fact(interactive_output, "UV").endswith("/uv")
+        assert _ssh_fact(interactive_output, "UV_TOOL_LIST") == "ok"
+        assert _ssh_fact(interactive_output, "TERM") == _SSH_CLIENT_TERM
+
+        remote_command = "\n".join(
+            (
+                "printf 'CDH_SSH_FACT|PWD|%s\\n' \"$(pwd -P)\"",
+                "printf 'CDH_SSH_FACT|WORKSPACE|%s\\n' \"$WORKSPACE\"",
+                "printf 'CDH_SSH_FACT|FORMAL_ENV|%s\\n' \"$CDH_SSH_FORMAL_SENTINEL\"",
+                "printf 'CDH_SSH_FACT|OVERRIDE_ENV|%s\\n' "
+                '"$CDH_SSH_OVERRIDE_SENTINEL"',
+                "printf 'CDH_SSH_FACT|ADDED_ENV|%s\\n' \"$CDH_SSH_DOCKER_ADD\"",
+                "printf 'CDH_SSH_FACT|CUSTOM_ENV|%s\\n' \"$SSH_CUSTOM_SENTINEL\"",
+                "printf 'CDH_SSH_FACT|QUOTING_ENV|%s\\n' \"$CDH_SSH_QUOTING\"",
+                "printf 'CDH_SSH_FACT|LOG_MARKER|%s\\n' \"$CDH_SSH_LOG_MARKER\"",
+                "printf 'CDH_SSH_FACT|CDH|%s\\n' \"$(command -v cdh)\"",
+                "printf 'CDH_SSH_FACT|UV|%s\\n' \"$(command -v uv)\"",
+                "uv tool list >/dev/null && printf 'CDH_SSH_FACT|UV_TOOL_LIST|ok\\n'",
+                "printf 'CDH_SSH_FACT|STATUS|'\ncdh container runtime status --json",
+            )
+        )
+        remote = _ssh_client(name, private_key, command=remote_command)
+        assert remote.returncode == 0
+        remote_output = remote.stdout + remote.stderr
+        assert _ssh_fact(remote_output, "PWD") == "/root"
+        assert _ssh_fact(remote_output, "WORKSPACE") == _formal_workspace()
+        assert _ssh_fact(remote_output, "FORMAL_ENV") == _SSH_FORMAL_ENV_VALUE
+        assert _ssh_fact(remote_output, "OVERRIDE_ENV") == _SSH_OVERRIDE_ENV_VALUE
+        assert _ssh_fact(remote_output, "ADDED_ENV") == _SSH_ADD_ENV_VALUE
+        assert _ssh_fact(remote_output, "CUSTOM_ENV") == _SSH_CUSTOM_ENV_VALUE
+        assert _ssh_fact(remote_output, "QUOTING_ENV") == _SSH_QUOTING_ENV_VALUE
+        assert _ssh_fact(remote_output, "LOG_MARKER") == _SSH_LOG_MARKER
+        assert _ssh_fact(remote_output, "CDH").endswith("/cdh")
+        assert _ssh_fact(remote_output, "UV").endswith("/uv")
+        assert _ssh_fact(remote_output, "UV_TOOL_LIST") == "ok"
+        status = json.loads(_ssh_fact(remote_output, "STATUS"))
+        assert status["state"] == "running"
+
+        login_shell = _ssh_client(
+            name,
+            private_key,
+            command="bash -lc 'pwd -P'",
+        )
+        assert login_shell.returncode == 0
+        assert login_shell.stdout.strip() == _formal_workspace()
+
+        posix_login_shell = _ssh_client(
+            name,
+            private_key,
+            command="sh -lc 'pwd -P'",
+        )
+        assert posix_login_shell.returncode == 0
+        assert posix_login_shell.stdout.strip() == _formal_workspace()
+
+        sshd_argv = _docker(
+            "exec",
+            name,
+            "sh",
+            "-c",
+            "for path in /proc/[0-9]*/cmdline; do "
+            "if [ -r \"$path\" ]; then tr '\\0' ' ' < \"$path\"; "
+            "printf '\\n'; fi; done",
+        ).stdout
+        sshd_lines = [line for line in sshd_argv.splitlines() if "sshd" in line]
+        assert sshd_lines
+        assert all(_SSH_LOG_MARKER not in line for line in sshd_lines)
+
+        logs = _docker("logs", name)
+        assert _SSH_LOG_MARKER not in logs.stdout
+        assert _SSH_LOG_MARKER not in logs.stderr

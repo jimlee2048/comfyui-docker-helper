@@ -82,24 +82,18 @@ from comfyui_docker_helper.host.render_service import (
     admit_build_hook_source,
     prepare_render_context,
 )
-from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
 )
 from comfyui_docker_helper.version import package_version
+from tests.build_plan_support import canonical_wheel
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
 DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT = "1" * 40
-WHEEL_CONTENT = b"host render canonical wheel"
 PACKAGE_VERSION = package_version()
-CANONICAL_WHEEL = CanonicalWheel(
-    filename=f"comfyui_docker_helper-{PACKAGE_VERSION}-py3-none-any.whl",
-    version=PACKAGE_VERSION,
-    digest=f"sha256:{hashlib.sha256(WHEEL_CONTENT).hexdigest()}",
-    content=WHEEL_CONTENT,
-)
+CANONICAL_WHEEL = canonical_wheel()
 
 
 def _config(

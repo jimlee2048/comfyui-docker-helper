@@ -40,7 +40,12 @@ from comfyui_docker_helper.container.runtime_ssh_service import (
     stop_runtime_ssh_service,
 )
 from comfyui_docker_helper.container.ssh import (
+    SshCredentialPreparationError,
+    SshdConfigPreparationError,
+    SshdConfigValidationError,
+    SshdReadinessError,
     SshdStartupError,
+    SshEnvironmentProjectionError,
     SshPreparationWarningKind,
     start_sshd_if_enabled,
 )
@@ -953,7 +958,7 @@ pub_keys = ["{VALID_SSH_KEY}"]
     captured = capsys.readouterr()
     payload = f"{raised.value}\n{captured.out}\n{captured.err}"
     assert events == ["ssh-start"]
-    assert str(raised.value) == "SSH runtime service failed to start"
+    assert str(raised.value) == "SSH startup/readiness failed"
     service_error = raised.value.__cause__
     assert isinstance(service_error, RuntimeSshServiceError)
     assert isinstance(service_error.__cause__, SshdStartupError)
@@ -990,13 +995,100 @@ password = "line1\\nline2"
 
     captured = capsys.readouterr()
     payload = f"{raised.value}\n{captured.out}\n{captured.err}"
-    assert str(raised.value) == "SSH runtime service failed to start"
+    assert str(raised.value) == "SSH credential preparation failed"
     service_error = raised.value.__cause__
     assert isinstance(service_error, RuntimeSshServiceError)
     assert isinstance(service_error.__cause__, SshdStartupError)
     assert "SSH password must not contain line breaks or NUL bytes" not in payload
     assert "line1" not in payload
     assert "line2" not in payload
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected"),
+    [
+        pytest.param(
+            "environment",
+            "SSH environment projection failed",
+            id="environment-projection",
+        ),
+        pytest.param(
+            "config",
+            "SSH protected configuration preparation failed",
+            id="protected-config",
+        ),
+        pytest.param(
+            "parser",
+            "SSH configuration parser validation failed",
+            id="parser-validation",
+        ),
+        pytest.param(
+            "credential",
+            "SSH credential preparation failed",
+            id="credential",
+        ),
+        pytest.param(
+            "readiness",
+            "SSH startup/readiness failed",
+            id="startup-readiness",
+        ),
+    ],
+)
+def test_ssh_activation_failures_use_fixed_top_level_categories(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure_kind: str,
+    expected: str,
+) -> None:
+    runtime = _runtime(tmp_path)
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[system.ssh]
+enable = true
+password = "configured-secret"
+""",
+    )
+
+    def runtime_ssh_starter(
+        _config: RuntimeConfig,
+        **_kwargs: object,
+    ) -> FakeSshdProcess:
+        sentinel = "ssh-private-activation-sentinel"
+        if failure_kind == "environment":
+            raise SshEnvironmentProjectionError(sentinel)
+        if failure_kind == "config":
+            raise SshdConfigPreparationError(sentinel)
+        if failure_kind == "parser":
+            raise SshdConfigValidationError(sentinel)
+        if failure_kind == "credential":
+            try:
+                raise SshCredentialPreparationError(sentinel)
+            except SshCredentialPreparationError as cause:
+                raise SshdStartupError(sentinel) from cause
+        if failure_kind == "readiness":
+            raise SshdReadinessError(sentinel)
+        raise AssertionError(f"unexpected failure kind: {failure_kind}")
+
+    with pytest.raises(RuntimeExecutionError) as raised:
+        run_runtime_generation_once(
+            runtime=runtime,
+            baked_config_path=_missing_path(tmp_path, "baked-config.toml"),
+            mounted_config_path=mounted,
+            baked_hooks_path=_missing_path(tmp_path, "baked-hooks"),
+            mounted_hooks_path=_missing_path(tmp_path, "mounted-hooks"),
+            environ={"PATH": "/usr/bin", "SSH_SECRET": "environment-secret"},
+            runner=lambda *_args, **_kwargs: pytest.fail(
+                "ComfyUI must not start after SSH activation failure"
+            ),
+            runtime_ssh_starter=runtime_ssh_starter,
+        )
+
+    captured = capsys.readouterr()
+    payload = f"{raised.value}\n{captured.out}\n{captured.err}"
+    assert str(raised.value) == expected
+    assert "ssh-private-activation-sentinel" not in payload
+    assert "environment-secret" not in payload
 
 
 # A failed direct reap is not terminal evidence, so the SSH owner must report

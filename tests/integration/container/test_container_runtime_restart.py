@@ -55,6 +55,7 @@ from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
     run_runtime_serve,
 )
+from comfyui_docker_helper.container.ssh import SshdReadinessError
 
 
 class _RestartChild:
@@ -816,6 +817,148 @@ def test_successor_admission_failure_exits_without_starting_a_second_owner(
         )
         == 1
     )
+
+
+@pytest.mark.parametrize(
+    "failure_generation",
+    [
+        pytest.param("initial", id="initial"),
+        pytest.param("successor", id="successor"),
+    ],
+)
+def test_ssh_readiness_failure_is_terminal_without_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_generation: str,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config = tmp_path / "runtime.toml"
+    config.write_text(
+        """
+[system.ssh]
+enable = true
+password = "configured-secret"
+""",
+        encoding="utf-8",
+    )
+    events: list[str] = []
+    semantic_events: list[object] = []
+    app_children: list[_RestartChild] = []
+    ssh_handles: list[object] = []
+    seen_environments: list[Mapping[bytes, bytes]] = []
+    submission: RuntimeRestartSubmission | None = None
+
+    class ManagedSshd:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.terminated = False
+            self.released = threading.Event()
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.released.wait(timeout=1)
+            if self.returncode is None:
+                self.returncode = 0
+            events.append("ssh:wait")
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -int(signal.SIGTERM)
+            self.released.set()
+            events.append("ssh:terminate")
+
+        def kill(self) -> None:
+            self.returncode = -int(signal.SIGKILL)
+            self.released.set()
+            events.append("ssh:kill")
+
+    def display(event: object) -> None:
+        semantic_events.append(event)
+
+    monkeypatch.setattr(
+        runtime_serve_module,
+        "default_runtime_display",
+        lambda _settings: Mock(emit=display),
+    )
+
+    def ssh_starter(
+        _config: object,
+        *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
+        preparation_process_observer: Callable[[object | None], None],
+        preparation_warning_observer: Callable[[object], object],
+    ) -> ManagedSshd:
+        del cancel_requested, preparation_process_observer, preparation_warning_observer
+        seen_environments.append(environment)
+        assert environment[b"W19_SSH_SNAPSHOT"] == b"captured"
+        if len(seen_environments) == (1 if failure_generation == "initial" else 2):
+            raise SshdReadinessError("delayed-readiness-private-sentinel")
+        handle = ManagedSshd()
+        ssh_handles.append(handle)
+        return handle
+
+    def runner(
+        _argv: Sequence[str],
+        **_kwargs: object,
+    ) -> _RestartChild:
+        child = _RestartChild(events, "app")
+        app_children.append(child)
+        events.append("app:spawn")
+        return child
+
+    def generation_running(controller: RuntimeController) -> None:
+        nonlocal submission
+        assert failure_generation == "successor"
+        submission = controller.submit_restart(delivery_expected=False)
+
+    with pytest.raises(RuntimeExecutionError, match="SSH startup/readiness failed"):
+        run_runtime_serve(
+            runtime=runtime,
+            mounted_config_path=config,
+            baked_config_path=tmp_path / "missing-baked.toml",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={"PATH": "/usr/bin", "W19_SSH_SNAPSHOT": "captured"},
+            runner=runner,  # type: ignore[arg-type]
+            runtime_ssh_starter=ssh_starter,  # type: ignore[arg-type]
+            runtime_state_path=tmp_path / "state.json",
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+            generation_running=generation_running,
+        )
+
+    assert len(seen_environments) == (1 if failure_generation == "initial" else 2)
+    assert all(environment is seen_environments[0] for environment in seen_environments)
+    assert len(app_children) == (0 if failure_generation == "initial" else 1)
+    if failure_generation == "initial":
+        assert submission is None
+        assert (
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.STARTUP_FAILURE
+            )
+            in semantic_events
+        )
+    else:
+        assert submission is not None and submission.ticket is not None
+        assert submission.ticket.snapshot().state == "failed"
+        assert submission.ticket.snapshot().message == "SSH startup/readiness failed"
+        assert (
+            RuntimeGenerationStopped(
+                "gen-1", RuntimeGenerationStopCause.OPERATOR_RESTART
+            )
+            in semantic_events
+        )
+        assert (
+            RuntimeGenerationStopped(
+                "gen-2", RuntimeGenerationStopCause.STARTUP_FAILURE
+            )
+            in semantic_events
+        )
+        assert ssh_handles[0].terminated is True  # type: ignore[union-attr]
+        assert RuntimeGenerationReady("gen-2") not in semantic_events
 
 
 def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(

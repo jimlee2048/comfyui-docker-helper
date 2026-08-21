@@ -28,7 +28,11 @@ from comfyui_docker_helper.file_admission import (
     operate_regular_absolute_file,
     read_regular_absolute_file,
 )
-from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.release_artifacts import (
+    WORKSPACE_PROFILE_CONTEXT_PATH,
+    WORKSPACE_PROFILE_RESOURCE,
+    CanonicalWheel,
+)
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
@@ -128,6 +132,11 @@ def _materialize_private_stage(
         PurePosixPath("runtime/config.toml"),
         _runtime_config_bytes(plan),
     )
+    _write(
+        stage,
+        WORKSPACE_PROFILE_CONTEXT_PATH,
+        _workspace_profile_bytes(),
+    )
     _materialize_canonical_wheel(plan, canonical_wheel, stage)
     _write(
         stage,
@@ -152,6 +161,15 @@ def _materialize_canonical_wheel(
     ):
         raise FinalMaterializationError("canonical cdh wheel does not match BuildPlan")
     _write(stage, PurePosixPath("bootstrap") / wheel.filename, wheel.content)
+
+
+def _workspace_profile_bytes() -> bytes:
+    try:
+        return WORKSPACE_PROFILE_RESOURCE.read_bytes()
+    except OSError as error:
+        raise FinalMaterializationError(
+            "workspace profile resource could not be read"
+        ) from error
 
 
 def _expected_hooks(

@@ -18,6 +18,7 @@ from comfyui_docker_helper.config.credential_secrets import (
     downloader_credential_secret_target,
 )
 from comfyui_docker_helper.config.git_credentials import git_credential_secret_target
+from comfyui_docker_helper.release_artifacts import WORKSPACE_PROFILE_CONTEXT_PATH
 
 _BUILD_PLAN_MOUNT = (
     "--mount=type=bind,source=build-plan.json,"
@@ -41,6 +42,9 @@ def render_build_plan_dockerfile(plan: BuildPlan) -> str:
         "COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/",
         "RUN mkdir -p /opt/cdh/build",
         "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml",
+        "COPY --chmod=0644 "
+        f"{WORKSPACE_PROFILE_CONTEXT_PATH.as_posix()} "
+        "/etc/profile.d/cdh-workspace.sh",
     ]
     if any(
         node.pre_install_hooks or node.post_install_hooks

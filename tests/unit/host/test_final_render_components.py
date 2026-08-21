@@ -29,7 +29,11 @@ from comfyui_docker_helper.config.final_validation import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
-from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.release_artifacts import (
+    WORKSPACE_PROFILE_CONTEXT_PATH,
+    WORKSPACE_PROFILE_RESOURCE,
+    CanonicalWheel,
+)
 from comfyui_docker_helper.rendering import final_materializer as materializer_module
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
@@ -91,6 +95,12 @@ def test_renderer_uses_only_literal_digest_qualified_from_references() -> None:
     assert rendered.count("test -x /usr/bin/tini") == 1
     assert plan.application.os_packages.count("tini") == 1
     assert plan.application.os_packages.count("tzdata") == 1
+    assert (
+        rendered.splitlines().count(
+            "COPY --chmod=0644 runtime/cdh-workspace.sh /etc/profile.d/cdh-workspace.sh"
+        )
+        == 1
+    )
     assert rendered == render_build_plan_dockerfile(plan)
 
 
@@ -714,10 +724,17 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
 
     assert (first / "build-plan.json").read_bytes() == dump_build_plan_json(plan)
     assert (first / "build/hooks/hooks/pre.py").read_bytes() == content
+    assert (first / WORKSPACE_PROFILE_CONTEXT_PATH).read_bytes() == (
+        WORKSPACE_PROFILE_RESOURCE.read_bytes()
+    )
     assert (first / "Dockerfile").read_text() == render_build_plan_dockerfile(plan)
     assert (
         "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml"
         in (first / "Dockerfile").read_text()
+    )
+    assert (
+        "COPY --chmod=0644 runtime/cdh-workspace.sh "
+        "/etc/profile.d/cdh-workspace.sh" in (first / "Dockerfile").read_text()
     )
     runtime = load_runtime_config(
         baked_config_path=first / "runtime/config.toml",

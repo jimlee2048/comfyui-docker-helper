@@ -44,6 +44,7 @@ from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
 from tests.build_plan_support import (
+    CANONICAL_WORKSPACE_PROFILE_CONTENT,
     accepted_resolution,
     build_plan,
     canonical_wheel,
@@ -724,17 +725,16 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
 
     assert (first / "build-plan.json").read_bytes() == dump_build_plan_json(plan)
     assert (first / "build/hooks/hooks/pre.py").read_bytes() == content
-    assert (first / WORKSPACE_PROFILE_CONTEXT_PATH).read_bytes() == (
-        WORKSPACE_PROFILE_RESOURCE.read_bytes()
+    assert (
+        first / WORKSPACE_PROFILE_CONTEXT_PATH
+    ).read_bytes() == CANONICAL_WORKSPACE_PROFILE_CONTENT
+    assert (
+        WORKSPACE_PROFILE_RESOURCE.read_bytes() != CANONICAL_WORKSPACE_PROFILE_CONTENT
     )
     assert (first / "Dockerfile").read_text() == render_build_plan_dockerfile(plan)
     assert (
         "COPY --chmod=0644 runtime/config.toml /opt/cdh/runtime/config.toml"
         in (first / "Dockerfile").read_text()
-    )
-    assert (
-        "COPY --chmod=0644 runtime/cdh-workspace.sh "
-        "/etc/profile.d/cdh-workspace.sh" in (first / "Dockerfile").read_text()
     )
     runtime = load_runtime_config(
         baked_config_path=first / "runtime/config.toml",

@@ -10,6 +10,9 @@ RELEASE_PROJECTION = PACKAGE_ROOT / "resources" / "release-projection"
 PROJECTED_PYPROJECT = RELEASE_PROJECTION / "pyproject.toml"
 PROJECTED_LICENSE = RELEASE_PROJECTION / "LICENSE"
 WORKSPACE_PROFILE_RESOURCE = PACKAGE_ROOT / "resources" / "cdh-workspace.sh"
+WORKSPACE_PROFILE_WHEEL_MEMBER = PurePosixPath(
+    "comfyui_docker_helper/resources/cdh-workspace.sh"
+)
 WORKSPACE_PROFILE_CONTEXT_PATH = PurePosixPath("runtime/cdh-workspace.sh")
 
 

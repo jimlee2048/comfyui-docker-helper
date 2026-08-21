@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import zipfile
 from pathlib import Path
 
 from comfyui_docker_helper.comfyui_requirements import merge_pytorch_requirements
@@ -51,7 +53,10 @@ from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )
 from comfyui_docker_helper.host.planning_authority import planning_release_inputs
-from comfyui_docker_helper.release_artifacts import CanonicalWheel
+from comfyui_docker_helper.release_artifacts import (
+    WORKSPACE_PROFILE_WHEEL_MEMBER,
+    CanonicalWheel,
+)
 from comfyui_docker_helper.version import package_version
 
 DIGEST_A = f"sha256:{'a' * 64}"
@@ -59,7 +64,24 @@ DIGEST_B = f"sha256:{'b' * 64}"
 DIGEST_C = f"sha256:{'c' * 64}"
 COMMIT_A = "1" * 40
 COMMIT_B = "2" * 40
-CANONICAL_WHEEL_CONTENT = b"canonical cdh wheel test artifact"
+CANONICAL_WORKSPACE_PROFILE_CONTENT = b"# canonical wheel workspace profile\n"
+
+
+def _canonical_wheel_content() -> bytes:
+    output = io.BytesIO()
+    profile = zipfile.ZipInfo(
+        WORKSPACE_PROFILE_WHEEL_MEMBER.as_posix(),
+        date_time=(1980, 1, 1, 0, 0, 0),
+    )
+    profile.compress_type = zipfile.ZIP_STORED
+    profile.create_system = 3
+    profile.external_attr = 0o100644 << 16
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(profile, CANONICAL_WORKSPACE_PROFILE_CONTENT)
+    return output.getvalue()
+
+
+CANONICAL_WHEEL_CONTENT = _canonical_wheel_content()
 
 
 def canonical_wheel() -> CanonicalWheel:

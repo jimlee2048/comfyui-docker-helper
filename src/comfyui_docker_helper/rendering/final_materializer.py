@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import stat
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -30,7 +32,7 @@ from comfyui_docker_helper.file_admission import (
 )
 from comfyui_docker_helper.release_artifacts import (
     WORKSPACE_PROFILE_CONTEXT_PATH,
-    WORKSPACE_PROFILE_RESOURCE,
+    WORKSPACE_PROFILE_WHEEL_MEMBER,
     CanonicalWheel,
 )
 from comfyui_docker_helper.rendering.final_renderer import (
@@ -132,12 +134,12 @@ def _materialize_private_stage(
         PurePosixPath("runtime/config.toml"),
         _runtime_config_bytes(plan),
     )
+    _materialize_canonical_wheel(plan, canonical_wheel, stage)
     _write(
         stage,
         WORKSPACE_PROFILE_CONTEXT_PATH,
-        _workspace_profile_bytes(),
+        _workspace_profile_from_canonical_wheel(canonical_wheel),
     )
-    _materialize_canonical_wheel(plan, canonical_wheel, stage)
     _write(
         stage,
         PurePosixPath("Dockerfile"),
@@ -163,12 +165,13 @@ def _materialize_canonical_wheel(
     _write(stage, PurePosixPath("bootstrap") / wheel.filename, wheel.content)
 
 
-def _workspace_profile_bytes() -> bytes:
+def _workspace_profile_from_canonical_wheel(wheel: CanonicalWheel) -> bytes:
     try:
-        return WORKSPACE_PROFILE_RESOURCE.read_bytes()
-    except OSError as error:
+        with zipfile.ZipFile(io.BytesIO(wheel.content)) as archive:
+            return archive.read(WORKSPACE_PROFILE_WHEEL_MEMBER.as_posix())
+    except (KeyError, zipfile.BadZipFile) as error:
         raise FinalMaterializationError(
-            "workspace profile resource could not be read"
+            "canonical cdh wheel workspace profile is invalid"
         ) from error
 
 

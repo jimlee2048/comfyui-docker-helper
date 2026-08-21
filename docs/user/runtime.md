@@ -75,7 +75,7 @@ docker exec CONTAINER cdh container runtime status --json
 docker exec CONTAINER cdh container runtime follow
 ```
 
-In an SSH session, use the installed absolute path `/opt/uv/bin/cdh` in place of `cdh`; the SSH login environment does not guarantee that the image entrypoint's tool path is present.
+An SSH session uses the same inherited tool path as the image's normal runtime environment, so invoke `cdh` and `uv` by name.
 
 `restart` waits while cdh stops the current ComfyUI runtime and starts it again. Once accepted, the restart rereads baked and mounted runtime configuration and hooks, then runs the normal startup sequence below. The restarted runtime continues to use the container's startup environment; environment values supplied only to the `docker exec` command do not become runtime overrides. Only one restart can run at a time, so a concurrent request exits with a busy error.
 
@@ -158,7 +158,15 @@ Prefer `SSH_PUB_KEY` or `SSH_PASSWORD` at container startup instead of baking cr
 
 Runtime public keys use the same plain-line syntax and supported security-key algorithms described in the [configuration guide](configuration.md#layer-configuration). An `authorized_keys` options prefix is not accepted.
 
-cdh starts sshd in the foreground and owns its startup, monitoring, and shutdown. If sshd exits unexpectedly after ComfyUI starts, cdh warns but does not stop ComfyUI. The configured SSH port is the port inside the container; Docker or the deployment platform owns host port publication and network exposure.
+cdh captures the complete effective container-start environment when `cdh container runtime serve` begins and gives each enabled SSH generation an immutable snapshot of it. This includes image `ENV`, authored `[system.env]`, cdh-managed values, and Docker or OCI runtime additions and overrides. Authenticated SSH sessions inherit every value representable by the native mechanism except exactly `TERM` and `SSH_AUTH_SOCK`; OpenSSH negotiates those two values per connection. cdh does not apply any broader name or prefix filter and does not heuristically classify credentials or Secret values.
+
+This inheritance is an explicit deployment trust decision. The image builder and deployment operator are responsible for values placed in image `ENV`, `[system.env]`, Docker or OCI environment, and runtime credentials. An authenticated root SSH session can inspect inherited values, including passwords, tokens, and Secret-source environment values. cdh protects only its own bridge surfaces: it does not copy those values into sshd arguments, cdh diagnostics, logs, events, representations, or exception text, and it does not promise to redact output deliberately produced by sshd, a profile, or an authenticated child process.
+
+cdh starts sshd in the foreground and owns its startup, monitoring, and shutdown. If SSH is enabled with credentials but cdh cannot losslessly project the environment, prepare or validate its configuration, or bring sshd to readiness, that runtime generation fails; cdh does not silently trim the environment or continue with a partial SSH service. If sshd exits unexpectedly after ComfyUI starts, cdh warns but does not stop ComfyUI. The configured SSH port is the port inside the container; Docker or the deployment platform owns host port publication and network exposure.
+
+An interactive SSH login using the project-provided root Bash shell automatically enters the effective `WORKSPACE`. This profile behavior is limited to interactive SSH login shells; it does not mediate remote commands. If `WORKSPACE` is missing or cannot be entered, the login first changes to `/root`, prints `Warning: cdh could not enter WORKSPACE; continuing in /root` on stderr, and continues there. Non-interactive remote commands retain native OpenSSH behavior and start with `/root` as their working directory rather than entering `WORKSPACE`.
+
+The corrected image places cdh and uv on the inherited tool path, so an SSH session can invoke `cdh` and `uv` by name; user-supplied environment overrides remain authoritative. Images built before this SSH environment and login behavior were included must be rebuilt to acquire it; changing runtime configuration alone cannot add the image content.
 
 When cdh creates `/root/.ssh` and `authorized_keys`, it uses modes `0700` and `0600`. An existing root-owned `.ssh` directory is admitted when it is not writable by group or other; a safe non-`0700` mode is preserved with a warning. The directory must still allow the temporary-file and atomic replacement operations that cdh attempts. Read-only mounts, access-control or capability restrictions, and other I/O failures remain fatal. An existing root-owned regular `authorized_keys` file is eligible for replacement when it is not writable by group or other; a safe non-`0600` mode warns, and the atomically replaced file is still `0600`. Wrong ownership, writable group/other bits, symlinks, and special files also remain fatal.
 

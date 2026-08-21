@@ -158,15 +158,15 @@ SSH 提供选择性启用的 root 访问，默认处于禁用状态。可在运�
 
 运行时公钥采用[配置指南](configuration.zh-CN.md#对配置进行分层)所述的相同普通行语法和受支持安全密钥算法。不接受 `authorized_keys` options 前缀。
 
-cdh 会在 `cdh container runtime serve` 开始时捕获完整的生效容器启动环境，并将其不可变快照交给每个已启用的 SSH generation。这包括镜像 `ENV`、声明的 `[system.env]`、cdh 管理的值，以及 Docker 或 OCI 运行时新增和覆盖的值。经过认证的 SSH 会话会继承本地机制能够表示的全部值，唯一例外是精确的 `TERM` 和 `SSH_AUTH_SOCK`；这两个值由 OpenSSH 按连接协商。cdh 不使用更宽泛的名称或前缀过滤，也不会启发式地把值分类为 credential 或 Secret。
+经过认证的 SSH 会话会继承容器启动时的生效环境，包括镜像 `ENV`、`[system.env]`，以及 Docker 或其他 OCI 运行时新增或覆盖的值。OpenSSH 会为当前连接提供 `TERM` 和 `SSH_AUTH_SOCK`；cdh 不会用容器启动时的同名值替换它们。其他变量不会根据名称或内容被过滤。
 
-这种继承是明确的部署信任决定。镜像构建者和部署操作者须对写入镜像 `ENV`、`[system.env]`、Docker 或 OCI 环境以及运行时凭据的值负责。经过认证的 root SSH 会话可以检查继承的值，包括密码、token 和 Secret source 环境值。cdh 只保护自己拥有的桥接面：不会把这些值复制到 sshd 参数、cdh 诊断、日志、事件、repr 或异常文本中，也不承诺对 sshd、profile 或已认证子进程主动产生的输出进行脱敏。
+因此，经过认证的 root 会话可以检查继承的密码、token 和 Secret source 环境值。镜像构建者和部署操作者须对写入该环境的所有值负责；cdh 提供的 SSH 访问不是 Secret 隔离边界，也不会对 sshd、shell profile 或认证后所执行命令产生的输出进行脱敏。
 
-cdh 以前台方式启动 sshd，并负责其启动、监控和关闭。如果 SSH 已启用且凭据有效，但 cdh 无法无损投影环境、准备或校验配置，或使 sshd 达到就绪状态，则该 runtime generation 会失败；cdh 不会静默裁剪环境，也不会继续运行一个只有部分功能的 SSH 服务。如果 sshd 在 ComfyUI 启动后意外退出，cdh 会发出警告，但不会停止 ComfyUI。配置的 SSH 端口是容器内部的端口；主机端口发布和网络暴露由 Docker 或部署平台负责。
+如果已经使用凭据启用 SSH，但 cdh 无法保留完整环境或准备并启动 sshd，则容器启动会失败，而不会提供功能不完整的 SSH 服务。如果 sshd 在 ComfyUI 启动后意外退出，cdh 会发出警告，但不会停止 ComfyUI。配置的 SSH 端口位于容器内部；主机端口发布和网络暴露由 Docker 或部署平台负责。
 
-使用项目提供的 root Bash shell 进行交互式 SSH 登录时，会自动进入生效的 `WORKSPACE`。该 profile 行为仅适用于交互式 SSH login shell，不会中介远程命令。如果缺少 `WORKSPACE` 或无法进入，登录会先切换到 `/root`，向 stderr 输出固定警告 `Warning: cdh could not enter WORKSPACE; continuing in /root`，然后继续在该目录中运行。非交互式远程命令保持 OpenSSH 的原生行为，工作目录为 `/root`，不会自动进入 `WORKSPACE`。
+项目提供的 root Bash login shell 会在 SSH 中自动进入生效的 `WORKSPACE`。这适用于交互式 `ssh root@host` 登录，也适用于显式请求 login shell 的 `ssh root@host 'bash -lc "pwd"'`。`ssh root@host pwd` 之类的普通远程命令不会调用该 login shell，而是从 `/root` 开始。如果 login shell 无法进入 `WORKSPACE`，它会切换到 `/root`，输出固定警告 `Warning: cdh could not enter WORKSPACE; continuing in /root`，然后继续运行。
 
-修正后的镜像会把 cdh 和 uv 放在继承的工具路径中，因此 SSH 会话可以直接按名称调用 `cdh` 和 `uv`；用户提供的环境覆盖仍具有权威性。包含此 SSH 环境和登录行为之前构建的镜像必须重新构建才能获得修正；仅更改运行时配置无法把镜像内容补进去。
+当前 cdh 构建的镜像会把 cdh、uv 和配置的 uv 工具放在继承的工具路径中，因此可在 SSH 中直接按名称调用。在此行为可用之前构建的镜像需要重新构建；仅更改运行时配置无法更新现有镜像内容。
 
 cdh 创建 `/root/.ssh` 和 `authorized_keys` 时会分别使用 `0700` 和 `0600`。现有 `.ssh` 目录在由 root 拥有且同组用户和其他用户均不可写时可被接受；安全但不是 `0700` 的权限会原样保留并产生警告。该目录仍须实际允许 cdh 创建临时文件并执行原子替换；只读挂载、访问控制或 Linux capability 限制以及其他 I/O 失败仍会导致启动失败。现有由 root 拥有的普通 `authorized_keys` 文件在同组用户和其他用户均不可写时可被替换；安全但不是 `0600` 的权限会产生警告，而原子替换后的新文件仍为 `0600`。所有者不正确、同组用户或其他用户可写、符号链接和特殊文件也仍会导致启动失败。
 

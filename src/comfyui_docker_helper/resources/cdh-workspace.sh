@@ -1,6 +1,6 @@
-# cdh's SSH-login workspace convenience for the project-provided root Bash shell.
-if [[ -n ${SSH_CONNECTION:-} ]]; then
-    if [[ -n ${WORKSPACE+x} ]] && cd -- "$WORKSPACE" 2>/dev/null; then
+# cdh's POSIX-shell workspace convenience for SSH-associated login profiles.
+if [ -n "${SSH_CONNECTION:-}" ]; then
+    if [ "${WORKSPACE+x}" = x ] && cd "$WORKSPACE" 2>/dev/null; then
         :
     else
         cd /root 2>/dev/null || :

@@ -1,4 +1,4 @@
-"""Direct Bash coverage for the static SSH-login workspace profile hook."""
+"""Direct behavior and portability coverage for the SSH workspace profile."""
 
 from __future__ import annotations
 
@@ -83,6 +83,36 @@ def test_profile_hook_enters_inherited_workspace_with_spaces(tmp_path: Path) -> 
         start,
         workspace=str(workspace),
         ssh_connection=_SSH_CONNECTION,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == f"{workspace}\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.skipif(
+    shutil.which("dash") is None,
+    reason="dash is required for the POSIX shell portability check",
+)
+def test_profile_hook_is_portable_when_sourced_by_dash(tmp_path: Path) -> None:
+    start = tmp_path / "starting"
+    start.mkdir()
+    workspace = tmp_path / "project workspace with spaces"
+    workspace.mkdir()
+    environment = os.environ.copy()
+    for name in ("CDPATH", "ENV", "SSH_CONNECTION", "WORKSPACE"):
+        environment.pop(name, None)
+    environment["SSH_CONNECTION"] = _SSH_CONNECTION
+    environment["WORKSPACE"] = str(workspace)
+    command = f". {shlex.quote(str(WORKSPACE_PROFILE_RESOURCE))}; pwd -P"
+
+    result = subprocess.run(
+        ["dash", "-c", command],
+        cwd=start,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
     )
 
     assert result.returncode == 0

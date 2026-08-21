@@ -164,7 +164,7 @@ SSH 提供选择性启用的 root 访问，默认处于禁用状态。可在运�
 
 如果已经使用凭据启用 SSH，但 cdh 无法保留完整环境或准备并启动 sshd，则容器启动会失败，而不会提供功能不完整的 SSH 服务。如果 sshd 在 ComfyUI 启动后意外退出，cdh 会发出警告，但不会停止 ComfyUI。配置的 SSH 端口位于容器内部；主机端口发布和网络暴露由 Docker 或部署平台负责。
 
-项目提供的 root Bash login shell 会在 SSH 中自动进入生效的 `WORKSPACE`。这适用于交互式 `ssh root@host` 登录，也适用于显式请求 login shell 的 `ssh root@host 'bash -lc "pwd"'`。`ssh root@host pwd` 之类的普通远程命令不会调用该 login shell，而是从 `/root` 开始。如果 login shell 无法进入 `WORKSPACE`，它会切换到 `/root`，输出固定警告 `Warning: cdh could not enter WORKSPACE; continuing in /root`，然后继续运行。
+与 SSH 关联且会加载镜像系统 profile 的 login shell 会自动进入生效的 `WORKSPACE`。这适用于默认的交互式 `ssh root@host` 登录，也适用于显式请求且会加载系统 profile 的 login-shell 命令，例如 `ssh root@host 'bash -lc "pwd"'` 或 `ssh root@host 'sh -lc "pwd"'`。不加载系统 profile 的 shell 启动方式不会获得这项便利。`ssh root@host pwd` 之类的普通远程命令不会调用 login shell，而是从 `/root` 开始。如果加载该 profile 的 login shell 无法进入 `WORKSPACE`，它会切换到 `/root`，输出固定警告 `Warning: cdh could not enter WORKSPACE; continuing in /root`，然后继续运行。
 
 当前 cdh 构建的镜像会把 cdh、uv 和配置的 uv 工具放在镜像的默认工具路径中。在此行为可用之前构建的镜像需要重新构建；仅更改运行时配置无法更新现有镜像内容。
 

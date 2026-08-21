@@ -1473,6 +1473,14 @@ def test_retained_formal_image_supports_real_ssh_environment_and_tools(
         assert login_shell.returncode == 0
         assert login_shell.stdout.strip() == _formal_workspace()
 
+        posix_login_shell = _ssh_client(
+            name,
+            private_key,
+            command="sh -lc 'pwd -P'",
+        )
+        assert posix_login_shell.returncode == 0
+        assert posix_login_shell.stdout.strip() == _formal_workspace()
+
         sshd_argv = _docker(
             "exec",
             name,

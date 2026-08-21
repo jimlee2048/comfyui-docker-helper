@@ -1328,21 +1328,27 @@ def test_retained_formal_image_supports_real_ssh_environment_and_tools(
 ) -> None:
     """Prove the retained formal image's real SSH session boundary."""
     private_key = tmp_path / "ssh-client-key"
-    keygen = subprocess.run(
-        [
-            "ssh-keygen",
-            "-q",
-            "-t",
-            "ed25519",
-            "-N",
-            "",
-            "-f",
-            os.fspath(private_key),
-        ],
+    keygen = _docker(
+        "run",
+        "--rm",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "--mount",
+        f"type=bind,src={tmp_path},dst=/keys",
+        "--entrypoint",
+        "/usr/bin/ssh-keygen",
+        _image(),
+        "-q",
+        "-t",
+        "ed25519",
+        "-N",
+        "",
+        "-C",
+        "cdh-lifecycle-test",
+        "-f",
+        "/keys/ssh-client-key",
         check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
+        timeout=30,
     )
     assert keygen.returncode == 0
     public_key = (
@@ -1458,6 +1464,14 @@ def test_retained_formal_image_supports_real_ssh_environment_and_tools(
         assert _ssh_fact(remote_output, "UV_TOOL_LIST") == "ok"
         status = json.loads(_ssh_fact(remote_output, "STATUS"))
         assert status["state"] == "running"
+
+        login_shell = _ssh_client(
+            name,
+            private_key,
+            command="bash -lc 'pwd -P'",
+        )
+        assert login_shell.returncode == 0
+        assert login_shell.stdout.strip() == _formal_workspace()
 
         sshd_argv = _docker(
             "exec",

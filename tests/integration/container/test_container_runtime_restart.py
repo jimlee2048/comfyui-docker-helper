@@ -894,7 +894,7 @@ password = "configured-secret"
     ) -> ManagedSshd:
         del cancel_requested, preparation_process_observer, preparation_warning_observer
         seen_environments.append(environment)
-        assert environment[b"W19_SSH_SNAPSHOT"] == b"captured"
+        assert environment[b"CDH_SSH_SNAPSHOT_SENTINEL"] == b"captured"
         if len(seen_environments) == (1 if failure_generation == "initial" else 2):
             raise SshdReadinessError("delayed-readiness-private-sentinel")
         handle = ManagedSshd()
@@ -922,7 +922,7 @@ password = "configured-secret"
             baked_config_path=tmp_path / "missing-baked.toml",
             baked_hooks_path=tmp_path / "missing-baked-hooks",
             mounted_hooks_path=tmp_path / "missing-mounted-hooks",
-            environ={"PATH": "/usr/bin", "W19_SSH_SNAPSHOT": "captured"},
+            environ={"PATH": "/usr/bin", "CDH_SSH_SNAPSHOT_SENTINEL": "captured"},
             runner=runner,  # type: ignore[arg-type]
             runtime_ssh_starter=ssh_starter,  # type: ignore[arg-type]
             runtime_state_path=tmp_path / "state.json",

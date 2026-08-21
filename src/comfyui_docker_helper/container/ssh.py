@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -19,6 +22,7 @@ from comfyui_docker_helper.container.process_control import (
     DirectProcess,
     terminate_direct_process_until,
 )
+from comfyui_docker_helper.container.runtime_control import RUNTIME_CONTROL_DIRECTORY
 from comfyui_docker_helper.errors import ApplicationError
 
 _ROOT_UID = 0
@@ -43,6 +47,12 @@ _SSH_SESSION_ENVIRONMENT_NAMES = frozenset(
 )
 _SSH_ENVIRONMENT_PROJECTION_ERROR = "SSH environment cannot be projected"
 _SSH_ENVIRONMENT_RESERVED_NAMES = frozenset({b"SSH_AUTH_SOCK", b"TERM"})
+_SSHD_CONFIG_PREPARATION_ERROR = "SSH runtime configuration preparation failed"
+_SSHD_CONFIG_VALIDATION_ERROR = "sshd configuration validation failed"
+_SSHD_READINESS_TIMEOUT_SECONDS = 5.0
+_SSHD_READINESS_POLL_INTERVAL_SECONDS = 0.05
+_SSHD_READINESS_PROBE_TIMEOUT_SECONDS = 0.2
+_SSHD_FAILURE_CLEANUP_TIMEOUT_SECONDS = 1.0
 type Chown = Callable[
     [str | bytes | os.PathLike[str] | os.PathLike[bytes], int, int],
     None,
@@ -51,6 +61,8 @@ type Chmod = Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes], int]
 type Fchown = Callable[[int, int, int], None]
 type Fchmod = Callable[[int, int], None]
 type PreparationProcessObserver = Callable[[DirectProcess | None], object]
+type CancelRequested = Callable[[], bool]
+type SshdReadinessProbe = Callable[[int, float], bytes]
 
 
 class SshPreparationWarningKind(StrEnum):
@@ -73,6 +85,18 @@ class SshdStartupError(ApplicationError):
 
 class SshEnvironmentProjectionError(ApplicationError):
     """The runtime environment cannot be represented for an SSH session."""
+
+
+class SshdConfigPreparationError(ApplicationError):
+    """The protected runtime sshd config could not be prepared."""
+
+
+class SshdConfigValidationError(ApplicationError):
+    """The generated runtime sshd config failed parser preflight."""
+
+
+class SshdReadinessError(ApplicationError):
+    """The foreground sshd child did not become ready."""
 
 
 class SensitiveCommandRunner(Protocol):
@@ -114,6 +138,56 @@ class SshdProcessStarter(Protocol):
 
     def __call__(self, argv: Sequence[str], *, description: str) -> SshdProcess:
         """Start argv without shell expansion."""
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedSshdConfig:
+    path: Path
+    device: int
+    inode: int
+
+
+@dataclass(slots=True)
+class OwnedSshdProcess:
+    """Delegate to one sshd child and clean its identity after terminal proof."""
+
+    _child: SshdProcess = field(repr=False)
+    _config: _OwnedSshdConfig = field(repr=False)
+    _cleanup_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
+    _cleaned: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def returncode(self) -> int | None:
+        return self._child.returncode
+
+    def wait(self) -> int:
+        returncode = self._child.wait()
+        self._cleanup_after_terminal()
+        return returncode
+
+    def poll(self) -> int | None:
+        returncode = self._child.poll()
+        if returncode is not None:
+            self._cleanup_after_terminal()
+        return returncode
+
+    def terminate(self) -> None:
+        self._child.terminate()
+
+    def kill(self) -> None:
+        self._child.kill()
+
+    def _cleanup_after_terminal(self) -> None:
+        with self._cleanup_lock:
+            if self._cleaned:
+                return
+            with suppress(OSError):
+                _unlink_owned_sshd_config(self._config)
+            self._cleaned = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,11 +244,30 @@ def _escape_sshd_config_token(value: bytes) -> bytes:
     return value.replace(b"\\", b"\\\\").replace(b'"', b'\\"')
 
 
+def serialize_sshd_config(
+    ssh: RuntimeSystemSshConfig,
+    status: RootSshCredentialPreparationStatus,
+    environment: Mapping[bytes, bytes],
+) -> bytes:
+    """Serialize the complete cdh-owned sshd service configuration."""
+    service_config = (
+        f"Port {ssh.port}\n"
+        "PermitRootLogin yes\n"
+        f"PasswordAuthentication {_yes_no(status.password_configured)}\n"
+        "KbdInteractiveAuthentication no\n"
+        f"PubkeyAuthentication {_yes_no(status.public_key_count > 0)}\n"
+        "AuthorizedKeysFile /root/.ssh/authorized_keys\n"
+    ).encode("ascii")
+    return service_config + serialize_sshd_set_env(environment)
+
+
 def start_sshd_if_enabled(
     config: RuntimeConfig,
     *,
+    environment: Mapping[bytes, bytes],
     root_home: Path = Path("/root"),
     runtime_dir: Path = Path("/run/sshd"),
+    config_dir: Path = RUNTIME_CONTROL_DIRECTORY,
     credential_command_runner: SensitiveCommandRunner | None = None,
     credential_chown: Chown | None = None,
     credential_chmod: Chmod | None = None,
@@ -182,8 +275,13 @@ def start_sshd_if_enabled(
     credential_fchmod: Fchmod | None = None,
     credential_owner_uid: int = _ROOT_UID,
     credential_owner_gid: int = _ROOT_GID,
+    config_owner_uid: int = _ROOT_UID,
+    config_owner_gid: int = _ROOT_GID,
     command_runner: CommandRunner | None = None,
+    preflight_command_runner: CommandRunner | None = None,
     process_starter: SshdProcessStarter | None = None,
+    readiness_probe: SshdReadinessProbe | None = None,
+    cancel_requested: CancelRequested = lambda: False,
     preparation_process_observer: PreparationProcessObserver = lambda _process: None,
     preparation_warning_observer: SshPreparationWarningObserver,
 ) -> SshdProcess | None:
@@ -228,34 +326,63 @@ def start_sshd_if_enabled(
     starter = _start_process if process_starter is None else process_starter
     _ensure_host_keys(run_command)
     _ensure_sshd_runtime_dir(runtime_dir)
-    argv = build_sshd_argv(ssh, status)
-    child = _start_foreground_sshd(argv, starter)
-    return child
+    config_content = serialize_sshd_config(ssh, status, environment)
+    owned_config = _publish_sshd_config(
+        config_content,
+        config_dir=config_dir,
+        owner_uid=config_owner_uid,
+        owner_gid=config_owner_gid,
+    )
+    try:
+        _preflight_sshd_config(
+            owned_config.path,
+            runner=(
+                (
+                    lambda argv, *, description: _run_quiet_command(
+                        argv,
+                        description=description,
+                        process_observer=preparation_process_observer,
+                    )
+                )
+                if preflight_command_runner is None
+                else preflight_command_runner
+            ),
+        )
+        child = _start_foreground_sshd(build_sshd_argv(owned_config.path), starter)
+    except BaseException:
+        _unlink_owned_sshd_config_best_effort(owned_config)
+        raise
+
+    owned_process = OwnedSshdProcess(child, owned_config)
+    try:
+        preparation_process_observer(owned_process)
+        _wait_for_sshd_readiness(
+            owned_process,
+            port=ssh.port,
+            probe=_probe_sshd_banner if readiness_probe is None else readiness_probe,
+            cancel_requested=cancel_requested,
+        )
+    except BaseException:
+        with suppress(Exception):
+            terminate_direct_process_until(
+                owned_process,
+                deadline=time.monotonic() + _SSHD_FAILURE_CLEANUP_TIMEOUT_SECONDS,
+                poll_interval=_SSHD_READINESS_POLL_INTERVAL_SECONDS,
+            )
+        with suppress(Exception):
+            preparation_process_observer(None)
+        raise
+    return owned_process
 
 
-def build_sshd_argv(
-    ssh: RuntimeSystemSshConfig,
-    status: RootSshCredentialPreparationStatus,
-) -> list[str]:
+def build_sshd_argv(config_path: Path) -> list[str]:
     """Build cdh-controlled foreground sshd argv without credential material."""
     return [
         "/usr/sbin/sshd",
         "-f",
-        "/dev/null",
+        os.fspath(config_path),
         "-D",
         "-e",
-        "-o",
-        f"Port={ssh.port}",
-        "-o",
-        "PermitRootLogin=yes",
-        "-o",
-        f"PasswordAuthentication={_yes_no(status.password_configured)}",
-        "-o",
-        "KbdInteractiveAuthentication=no",
-        "-o",
-        f"PubkeyAuthentication={_yes_no(status.public_key_count > 0)}",
-        "-o",
-        "AuthorizedKeysFile=/root/.ssh/authorized_keys",
     ]
 
 
@@ -353,6 +480,109 @@ def _ensure_sshd_runtime_dir(path: Path) -> None:
         raise SshdStartupError("failed to create sshd runtime directory") from error
 
 
+def _publish_sshd_config(
+    content: bytes,
+    *,
+    config_dir: Path,
+    owner_uid: int,
+    owner_gid: int,
+) -> _OwnedSshdConfig:
+    temporary_path: Path | None = None
+    owned_config: _OwnedSshdConfig | None = None
+    completed = False
+    try:
+        _validate_sshd_config_directory(
+            config_dir,
+            owner_uid=owner_uid,
+        )
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".sshd_config.",
+            suffix=".tmp",
+            dir=config_dir,
+        )
+        temporary_path = Path(temporary_name)
+        unique_id = temporary_path.name.removeprefix(".sshd_config.").removesuffix(
+            ".tmp"
+        )
+        final_path = config_dir / f"sshd_config.{unique_id}"
+        with os.fdopen(descriptor, "wb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise SshdConfigPreparationError(_SSHD_CONFIG_PREPARATION_ERROR)
+            os.fchown(stream.fileno(), owner_uid, owner_gid)
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            metadata = os.fstat(stream.fileno())
+        os.replace(temporary_path, final_path)
+        temporary_path = None
+        owned_config = _OwnedSshdConfig(
+            path=final_path,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+        )
+        completed = True
+        return owned_config
+    except SshdConfigPreparationError:
+        raise
+    except OSError as error:
+        raise SshdConfigPreparationError(_SSHD_CONFIG_PREPARATION_ERROR) from error
+    finally:
+        if temporary_path is not None:
+            with suppress(OSError):
+                temporary_path.unlink(missing_ok=True)
+        if owned_config is not None and not completed:
+            _unlink_owned_sshd_config_best_effort(owned_config)
+
+
+def _validate_sshd_config_directory(
+    path: Path,
+    *,
+    owner_uid: int,
+) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise SshdConfigPreparationError(_SSHD_CONFIG_PREPARATION_ERROR) from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != owner_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise SshdConfigPreparationError(_SSHD_CONFIG_PREPARATION_ERROR)
+
+
+def _sshd_config_is_published(config: _OwnedSshdConfig) -> bool:
+    try:
+        metadata = config.path.lstat()
+    except FileNotFoundError:
+        return False
+    return metadata.st_dev == config.device and metadata.st_ino == config.inode
+
+
+def _unlink_owned_sshd_config(config: _OwnedSshdConfig) -> None:
+    if _sshd_config_is_published(config):
+        config.path.unlink()
+
+
+def _unlink_owned_sshd_config_best_effort(config: _OwnedSshdConfig) -> None:
+    with suppress(OSError):
+        _unlink_owned_sshd_config(config)
+
+
+def _preflight_sshd_config(path: Path, *, runner: CommandRunner) -> None:
+    try:
+        returncode = runner(
+            ["/usr/sbin/sshd", "-t", "-f", os.fspath(path)],
+            description="validate sshd configuration",
+        )
+    except Exception as error:
+        raise SshdConfigValidationError(_SSHD_CONFIG_VALIDATION_ERROR) from error
+    if returncode != 0:
+        raise SshdConfigValidationError(_SSHD_CONFIG_VALIDATION_ERROR)
+
+
 def _start_foreground_sshd(
     argv: Sequence[str],
     starter: SshdProcessStarter,
@@ -363,10 +593,60 @@ def _start_foreground_sshd(
         raise
     except OSError as error:
         raise SshdStartupError("sshd failed to start") from error
-    returncode = child.poll()
-    if returncode is not None:
-        raise SshdStartupError(f"sshd exited during startup with code {returncode}")
     return child
+
+
+def _wait_for_sshd_readiness(
+    child: SshdProcess,
+    *,
+    port: int,
+    probe: SshdReadinessProbe,
+    cancel_requested: CancelRequested,
+) -> None:
+    deadline = time.monotonic() + _SSHD_READINESS_TIMEOUT_SECONDS
+    while True:
+        if cancel_requested():
+            raise SshdReadinessError("sshd startup was cancelled")
+        if child.poll() is not None:
+            raise SshdReadinessError("sshd exited before becoming ready")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SshdReadinessError("sshd readiness timed out")
+        try:
+            banner = probe(
+                port,
+                min(_SSHD_READINESS_PROBE_TIMEOUT_SECONDS, remaining),
+            )
+        except (OSError, TimeoutError):
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(_SSHD_READINESS_POLL_INTERVAL_SECONDS, remaining))
+            continue
+        if cancel_requested():
+            raise SshdReadinessError("sshd startup was cancelled")
+        if not banner.startswith(b"SSH-2.0-"):
+            raise SshdReadinessError("sshd readiness check failed")
+        if child.poll() is not None:
+            raise SshdReadinessError("sshd exited before becoming ready")
+        return
+
+
+def _probe_sshd_banner(port: int, timeout: float) -> bytes:
+    deadline = time.monotonic() + timeout
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as connection:
+        banner = bytearray()
+        while len(banner) < 255:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            connection.settimeout(remaining)
+            chunk = connection.recv(1)
+            if not chunk:
+                break
+            banner.extend(chunk)
+            if chunk == b"\n":
+                break
+    return bytes(banner).rstrip(b"\r\n")
 
 
 def _coerce_ssh_config(
@@ -404,6 +684,40 @@ def _run_command(
     try:
         process = subprocess.Popen(
             command,
+            shell=False,
+        )
+    except FileNotFoundError as error:
+        raise SshdStartupError(f"{description} executable was not found") from error
+    except OSError as error:
+        raise SshdStartupError(f"{description} failed to start") from error
+    process_observer(process)
+    try:
+        return process.wait()
+    except BaseException:
+        terminate_direct_process_until(
+            process,
+            deadline=time.monotonic() + 1.0,
+            poll_interval=0.05,
+        )
+        raise
+    finally:
+        process_observer(None)
+
+
+def _run_quiet_command(
+    argv: Sequence[str],
+    *,
+    description: str,
+    process_observer: PreparationProcessObserver = lambda _process: None,
+) -> int:
+    command = list(argv)
+    if not command:
+        raise SshdStartupError(f"{description} command is missing")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             shell=False,
         )
     except FileNotFoundError as error:

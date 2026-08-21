@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Literal, Protocol, runtime_checkable
 
 from comfyui_docker_helper.cli_output import EventSink
@@ -44,6 +44,8 @@ class RuntimeSshStarter(Protocol):
         self,
         config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
+        cancel_requested: Callable[[], bool],
         preparation_process_observer: Callable[[DirectProcess | None], None],
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> SshdProcess | None: ...
@@ -101,11 +103,13 @@ class RuntimeSshService:
         self,
         config: RuntimeConfig,
         *,
+        environment: Mapping[bytes, bytes],
         background_event_sink: RuntimeBackgroundEventSink,
         event_sink: EventSink[RuntimeEvent],
         starter: RuntimeSshStarter = start_sshd_if_enabled,
     ) -> None:
         self._config = config
+        self._environment = environment
         self._starter = starter
         self._background_event_sink = background_event_sink
         self._event_sink = safe_runtime_event_sink(event_sink)
@@ -147,6 +151,8 @@ class RuntimeSshService:
             try:
                 handle = self._starter(
                     self._config,
+                    environment=self._environment,
+                    cancel_requested=self._shutdown_requested.is_set,
                     preparation_process_observer=observe_preparation_process,
                     preparation_warning_observer=preparation_warnings.append,
                 )

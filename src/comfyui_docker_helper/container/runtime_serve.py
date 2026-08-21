@@ -261,6 +261,7 @@ class RuntimeGenerationFactory:
             ),
             ssh_service=RuntimeSshService(
                 result.config,
+                environment=self._environment.raw,
                 starter=self._runtime_ssh_starter,
                 background_event_sink=self._background_event_sink,
                 event_sink=self._event_sink,

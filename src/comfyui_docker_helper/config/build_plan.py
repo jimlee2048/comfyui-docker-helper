@@ -14,6 +14,15 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from comfyui_docker_helper.config.authored.models import (
+    CudaImageDistro,
+    CudaImageFlavor,
+    FinalSecretRef,
+)
+from comfyui_docker_helper.config.authored.validation.domains import (
+    is_aria2_argument_value,
+    is_managed_environment_name,
+)
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -84,16 +93,7 @@ from comfyui_docker_helper.config.downloader_credentials import (
     select_downloader_credential_context,
 )
 from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
-from comfyui_docker_helper.config.final_models import (
-    CudaImageDistro,
-    CudaImageFlavor,
-    FinalSecretRef,
-)
 from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
-from comfyui_docker_helper.config.final_validation import (
-    is_aria2_argument_value,
-    is_managed_environment_name,
-)
 from comfyui_docker_helper.config.git_credentials import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
     GitCredentialContextError,

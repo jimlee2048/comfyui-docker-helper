@@ -13,6 +13,10 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator
 
+from comfyui_docker_helper.config.authored.models import (
+    FinalDownloaderCredentialConfig,
+    FinalSecretSourceConfig,
+)
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticComparison,
@@ -32,10 +36,6 @@ from comfyui_docker_helper.config.downloader_credentials import (
     select_downloader_credential_context,
 )
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
-from comfyui_docker_helper.config.final_models import (
-    FinalDownloaderCredentialConfig,
-    FinalSecretSourceConfig,
-)
 from comfyui_docker_helper.config.merge import (
     ANY_PATH_PART,
     AtomicPolicy,

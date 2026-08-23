@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
+from comfyui_docker_helper.config.authored.models import FinalConfig
 from comfyui_docker_helper.config.canonical_lock import (
     CanonicalLock,
     ComfyUIRequirementsLockEntry,
@@ -36,7 +37,6 @@ from comfyui_docker_helper.config.canonical_resolver import (
     entries_satisfy_request,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
-from comfyui_docker_helper.config.final_models import FinalConfig
 from comfyui_docker_helper.config.hook_validation import hook_lock_identity
 from comfyui_docker_helper.exact_ledger import PIP_VERSION
 from comfyui_docker_helper.host.canonical_acquisition import (

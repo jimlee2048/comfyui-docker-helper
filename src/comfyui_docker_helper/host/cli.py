@@ -17,6 +17,7 @@ from comfyui_docker_helper.cli_settings import (
     HELP_CONTEXT_SETTINGS,
     require_output_settings,
 )
+from comfyui_docker_helper.config.authored.models import FinalGitCustomNodeConfig
 from comfyui_docker_helper.config.build_plan import (
     downloader_credential_secret_ids,
     git_credential_secret_ids,
@@ -25,7 +26,6 @@ from comfyui_docker_helper.config.credential_secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
-from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
 from comfyui_docker_helper.config.git_credentials import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
 )

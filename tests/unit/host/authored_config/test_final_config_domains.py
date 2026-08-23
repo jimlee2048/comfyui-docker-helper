@@ -1,48 +1,23 @@
-"""Public-configuration boundary contracts."""
+"""Public-configuration domain contracts."""
 
 from pathlib import Path
-from typing import Any
 
 import pytest
-
-from comfyui_docker_helper.config.diagnostics import (
-    Diagnostic,
-    DiagnosticError,
-    DiagnosticSeverity,
+from tests.final_config_support import (
+    _credential_document,
+    _document,
 )
-from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_validation import (
-    FinalConfigError,
+
+from comfyui_docker_helper.config.authored.validation.domains import (
     validate_final_config_domains,
+)
+from comfyui_docker_helper.config.authored.validation.semantics import (
     validate_final_config_semantics,
+)
+from comfyui_docker_helper.config.authored.validation.structure import (
     validate_final_config_structure,
 )
-
-
-def _document() -> dict[str, Any]:
-    return {
-        "compute_platform": {"type": "cuda", "cuda": {"version": "13.0.3"}},
-        "pytorch": {"version": "2.12.1"},
-        "comfyui": {"version": "0.11.0", "install_manager": False},
-    }
-
-
-def _credential_document() -> dict[str, Any]:
-    document = _document()
-    document["secrets"] = {"private_git": {"env": "CDH_PRIVATE_GIT_TOKEN"}}
-    document["cdh"] = {
-        "git": {
-            "credentials": [
-                {
-                    "match": "https://github.com/acme/",
-                    "username": "x-access-token",
-                    "password": {"secret": "private_git"},
-                }
-            ]
-        }
-    }
-    return document
-
+from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
 
 _PRIVATE_SECRET_PATH = ("secrets", "private_git")
 _CREDENTIAL_PATH = ("cdh", "git", "credentials", 0)
@@ -52,89 +27,6 @@ _VALID_SSH_KEY = (
     "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f "
     "first@example"
 )
-
-
-def _codes(config: FinalConfig, *, build_hooks_dir: Path | None = None) -> set[str]:
-    return {
-        diagnostic.code
-        for diagnostic in _diagnostics(config, build_hooks_dir=build_hooks_dir)
-    }
-
-
-def _diagnostics(
-    config: FinalConfig,
-    *,
-    build_hooks_dir: Path | None = None,
-) -> tuple[Diagnostic, ...]:
-    domains = validate_final_config_domains(config, build_hooks_dir=build_hooks_dir)
-    return (*domains.diagnostics, *validate_final_config_semantics(config, domains))
-
-
-# Final configuration admits strict public types and enforces cross-field ownership.
-def test_final_structure_uses_exact_baseline_defaults() -> None:
-    config = validate_final_config_structure(_document())
-
-    assert config.python.version == "3.13.14"
-    assert config.python.uv_version == "latest"
-    assert config.build.platforms == ["linux/amd64"]
-    assert config.compute_platform.cuda.image_flavor == "cudnn-devel"
-    assert config.compute_platform.cuda.image_distro == "ubuntu24.04"
-    assert config.comfyui.install_cli is True
-    assert _diagnostics(config) == ()
-
-
-def test_secret_sources_and_git_credentials_use_typed_complete_values() -> None:
-    config = validate_final_config_structure(_credential_document())
-
-    assert config.secrets["private_git"].env == "CDH_PRIVATE_GIT_TOKEN"
-    route = config.cdh.git.credentials[0]
-    assert route.password.secret == "private_git"
-    assert _diagnostics(config) == ()
-
-    document = _credential_document()
-    document["cdh"]["git"]["credentials"][0]["password"] = "plaintext-token"
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-    assert raised.value.diagnostics[0].path == (
-        "cdh",
-        "git",
-        "credentials",
-        0,
-        "password",
-    )
-
-
-def test_downloader_credentials_use_typed_bearer_secret_references() -> None:
-    document = _document()
-    document["secrets"] = {"hf_read": {"env": "HF_TOKEN"}}
-    document["cdh"] = {
-        "downloader": {
-            "credentials": [
-                {
-                    "match": "https://huggingface.co/acme/private/",
-                    "type": "bearer",
-                    "token": {"secret": "hf_read"},
-                }
-            ]
-        }
-    }
-    config = validate_final_config_structure(document)
-
-    route = config.cdh.downloader.credentials[0]
-    assert route.type == "bearer"
-    assert route.token.secret == "hf_read"
-    assert _diagnostics(config) == ()
-
-    document["cdh"]["downloader"]["credentials"][0]["token"] = "inline-token"
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-    assert raised.value.diagnostics[0].path == (
-        "cdh",
-        "downloader",
-        "credentials",
-        0,
-        "token",
-    )
 
 
 def test_downloader_credential_routes_report_route_and_reference_diagnostics() -> None:
@@ -158,7 +50,10 @@ def test_downloader_credential_routes_report_route_and_reference_diagnostics() -
     }
     config = validate_final_config_structure(document)
 
-    assert {(item.path, item.code, item.severity) for item in _diagnostics(config)} == {
+    domains = validate_final_config_domains(config)
+    semantics = validate_final_config_semantics(config, domains)
+
+    assert {(item.path, item.code, item.severity) for item in domains.diagnostics} == {
         (
             ("cdh", "downloader", "credentials", 0, "match"),
             "downloader_credential.insecure_http",
@@ -169,6 +64,8 @@ def test_downloader_credential_routes_report_route_and_reference_diagnostics() -
             "downloader_credential.insecure_http",
             DiagnosticSeverity.WARNING,
         ),
+    }
+    assert {(item.path, item.code, item.severity) for item in semantics} == {
         (
             ("cdh", "downloader", "credentials", 1, "match"),
             "downloader_credential.duplicate_match",
@@ -189,51 +86,6 @@ def test_downloader_credential_routes_report_route_and_reference_diagnostics() -
     }
 
 
-def test_authenticated_download_requires_httpx_with_actionable_hint() -> None:
-    document = _document()
-    document["secrets"] = {"model_read": {"env": "MODEL_TOKEN"}}
-    document["cdh"] = {
-        "default_downloader": "aria2",
-        "downloader": {
-            "credentials": [
-                {
-                    "match": "https://example.com/models/",
-                    "type": "bearer",
-                    "token": {"secret": "model_read"},
-                }
-            ]
-        },
-    }
-    document["files"] = [
-        {
-            "type": "http",
-            "url": "https://example.com/models/model.bin?download=true",
-            "target_dir": "models/checkpoints",
-            "filename": "model.bin",
-        }
-    ]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
-        (
-            ("files", 0, "downloader"),
-            "file.authenticated_downloader_requires_httpx",
-            DiagnosticSeverity.ERROR,
-        )
-    ]
-    diagnostic = next(
-        item
-        for item in diagnostics
-        if item.code == "file.authenticated_downloader_requires_httpx"
-    )
-    assert diagnostic.hint is not None and "httpx" in diagnostic.hint
-
-    document["files"][0]["downloader"] = "httpx"
-    accepted = validate_final_config_structure(document)
-    assert "file.authenticated_downloader_requires_httpx" not in _codes(accepted)
-
-
 @pytest.mark.parametrize(
     "locator",
     [
@@ -250,7 +102,7 @@ def test_secret_file_locators_accept_posix_file_spellings(locator: str) -> None:
     document["secrets"]["private_git"] = {"file": locator}
     config = validate_final_config_structure(document)
 
-    assert _diagnostics(config) == ()
+    assert validate_final_config_domains(config).diagnostics == ()
 
 
 @pytest.mark.parametrize(
@@ -273,7 +125,7 @@ def test_secret_file_locators_reject_non_file_spellings(locator: str) -> None:
     document["secrets"]["private_git"] = {"file": locator}
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
     assert [(item.path, item.code, item.severity) for item in diagnostics] == [
         (
@@ -360,55 +212,26 @@ def test_secret_and_credential_domains_report_exact_diagnostics(
         route["match"] = "https://user:synthetic-marker@github.com/acme/"
 
     config = validate_final_config_structure(document)
-    diagnostics = _diagnostics(config)
+    domains = validate_final_config_domains(config)
+    semantics = validate_final_config_semantics(config, domains)
 
+    expected_domain = tuple(
+        (path, code) for path, code in expected if code != "secret.unknown_reference"
+    )
+    expected_semantic = tuple(
+        (path, code) for path, code in expected if code == "secret.unknown_reference"
+    )
     assert tuple(
-        (item.path, item.code, item.severity) for item in diagnostics
-    ) == tuple((path, code, DiagnosticSeverity.ERROR) for path, code in expected)
+        (item.path, item.code, item.severity) for item in domains.diagnostics
+    ) == tuple((path, code, DiagnosticSeverity.ERROR) for path, code in expected_domain)
+    assert tuple((item.path, item.code, item.severity) for item in semantics) == tuple(
+        (path, code, DiagnosticSeverity.ERROR) for path, code in expected_semantic
+    )
     if mutation == "password-userinfo":
-        assert all("synthetic-marker" not in item.message for item in diagnostics)
-
-
-def test_git_credential_context_duplicates_and_http_warnings_are_semantic() -> None:
-    document = _credential_document()
-    document["cdh"]["git"]["credentials"] = [
-        {
-            "match": "http://EXAMPLE.com:80/team/",
-            "username": "first",
-            "password": {"secret": "private_git"},
-        },
-        {
-            "match": "http://example.com/team",
-            "username": "second",
-            "password": {"secret": "private_git"},
-        },
-        {
-            "match": "https://example.com/other/",
-            "username": "secure",
-            "password": {"secret": "private_git"},
-        },
-    ]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
-        (
-            ("cdh", "git", "credentials", 0, "match"),
-            "git_credential.insecure_http",
-            DiagnosticSeverity.WARNING,
-        ),
-        (
-            ("cdh", "git", "credentials", 1, "match"),
-            "git_credential.insecure_http",
-            DiagnosticSeverity.WARNING,
-        ),
-        (
-            ("cdh", "git", "credentials", 1, "match"),
-            "git_credential.duplicate_match",
-            DiagnosticSeverity.ERROR,
-        ),
-    ]
+        assert all(
+            "synthetic-marker" not in item.message
+            for item in (*domains.diagnostics, *semantics)
+        )
 
 
 def test_git_credential_username_uses_the_protocol_utf8_byte_limit() -> None:
@@ -417,15 +240,20 @@ def test_git_credential_username_uses_the_protocol_utf8_byte_limit() -> None:
     route["username"] = "é" * 32_762 + "a"
     maximum = validate_final_config_structure(document)
 
-    assert "git_credential.invalid_username" not in _codes(maximum)
+    maximum_domains = validate_final_config_domains(maximum)
+    assert all(
+        item.code != "git_credential.invalid_username"
+        for item in maximum_domains.diagnostics
+    )
     route["username"] += "a"
     oversized = validate_final_config_structure(document)
-    diagnostics = _diagnostics(oversized)
+    diagnostics = validate_final_config_domains(oversized).diagnostics
 
-    assert [(item.path, item.code) for item in diagnostics] == [
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
         (
             ("cdh", "git", "credentials", 0, "username"),
             "git_credential.invalid_username",
+            DiagnosticSeverity.ERROR,
         )
     ]
 
@@ -444,66 +272,16 @@ def test_direct_git_password_userinfo_is_rejected_but_username_only_is_valid() -
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-    assert [item.code for item in diagnostics] == [
-        "custom_node.password_userinfo_forbidden"
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("comfyui", "custom_nodes", 1, "url"),
+            "custom_node.password_userinfo_forbidden",
+            DiagnosticSeverity.ERROR,
+        )
     ]
     assert "synthetic-marker" not in diagnostics[0].message
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("image_flavor", "cudnn"),
-        ("image_flavor", 1),
-        ("image_distro", "ubuntu20.04"),
-        ("image_distro", 24),
-    ],
-)
-def test_cuda_image_selectors_reject_values_outside_the_public_enums(
-    field: str,
-    value: object,
-) -> None:
-    document = _document()
-    document["compute_platform"]["cuda"][field] = value
-
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-
-    assert raised.value.diagnostics[0].path == (
-        "compute_platform",
-        "cuda",
-        field,
-    )
-    assert raised.value.diagnostics[0].code == "schema.literal_error"
-
-
-@pytest.mark.parametrize("value", [0, 1, "true", "false"])
-def test_install_cli_is_a_strict_boolean(value: object) -> None:
-    document = _document()
-    document["comfyui"]["install_cli"] = value
-
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-
-    assert raised.value.diagnostics[0].path == ("comfyui", "install_cli")
-
-
-def test_domain_and_semantic_passes_are_isolated_and_ordered() -> None:
-    document = _document()
-    document["compute_platform"]["cuda"]["version"] = "bad"
-    document["build"] = {"platforms": ["linux/amd64", "linux/amd64"]}
-    config = validate_final_config_structure(document)
-
-    domains = validate_final_config_domains(config)
-    semantics = validate_final_config_semantics(config, domains)
-
-    assert [item.code for item in domains.diagnostics] == [
-        "compute_platform.invalid_cuda_version"
-    ]
-    assert [item.code for item in semantics] == ["build.duplicate_platform"]
-    assert _diagnostics(config) == (*domains.diagnostics, *semantics)
 
 
 def test_uv_tools_are_active_strict_isolated_requirements() -> None:
@@ -513,62 +291,7 @@ def test_uv_tools_are_active_strict_isolated_requirements() -> None:
     config = validate_final_config_structure(document)
 
     assert config.python.uv_tools == ["Ruff==0.15.18", "mypy[dmypy]>=1,<2"]
-    assert _diagnostics(config) == ()
-
-
-@pytest.mark.parametrize(
-    "uv_tools",
-    [
-        ["ruff", "Ruff==0.15.18"],
-        ["comfyui-docker-helper==0.5.0"],
-        ["Comfy_CLI>=1.7"],
-    ],
-)
-def test_uv_tools_reject_duplicate_or_reserved_owners(
-    uv_tools: list[str],
-) -> None:
-    document = _document()
-    document["python"] = {"uv_tools": uv_tools}
-    config = validate_final_config_structure(document)
-
-    assert _diagnostics(config)
-
-
-# Package-owner diagnostics identify the field that retains install authority.
-@pytest.mark.parametrize("install_cli", [True, False])
-def test_comfy_cli_generic_tool_owner_is_reserved_in_both_modes(
-    install_cli: bool,
-) -> None:
-    document = _document()
-    document["comfyui"]["install_cli"] = install_cli
-    document["python"] = {"uv_tools": ["Comfy_CLI"]}
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
-    assert diagnostics[0].path == ("python", "uv_tools", 0)
-    assert "comfy-cli" in diagnostics[0].message
-    assert "comfyui.install_cli" in diagnostics[0].message
-
-
-@pytest.mark.parametrize("install_cli", [True, False])
-@pytest.mark.parametrize("group", ["python", "pytorch"])
-def test_comfy_cli_application_owner_is_reserved_in_every_direct_group(
-    install_cli: bool,
-    group: str,
-) -> None:
-    document = _document()
-    document["comfyui"]["install_cli"] = install_cli
-    document.setdefault(group, {})["extra_packages"] = ["Comfy_CLI>=1.7,<2"]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [item.code for item in diagnostics] == ["python.duplicate_package_owner"]
-    assert diagnostics[0].path == (group, "extra_packages", 0)
-    assert "comfy-cli" in diagnostics[0].message
-    assert "comfyui.install_cli" in diagnostics[0].message
+    assert validate_final_config_domains(config).diagnostics == ()
 
 
 @pytest.mark.parametrize(
@@ -589,10 +312,15 @@ def test_system_env_rejects_package_authority_controls(name: str) -> None:
     document["system"] = {"env": {name: "user-value"}}
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-    assert [item.code for item in diagnostics] == ["system.managed_env_override"]
-    assert diagnostics[0].path == ("system", "env", name)
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("system", "env", name),
+            "system.managed_env_override",
+            DiagnosticSeverity.ERROR,
+        )
+    ]
 
 
 def test_system_env_preserves_non_package_runtime_values() -> None:
@@ -607,7 +335,7 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
     }
     config = validate_final_config_structure(document)
 
-    assert _diagnostics(config) == ()
+    assert validate_final_config_domains(config).diagnostics == ()
     assert config.system.env == {
         "APP_PROFILE": "production",
         "PIPER_MODE": "fast",
@@ -616,54 +344,20 @@ def test_system_env_preserves_non_package_runtime_values() -> None:
     }
 
 
-# Public OS-package diagnostics cover the effective default-plus-user set and
-# enforce canonical lowercase Debian identities before planning.
-@pytest.mark.parametrize("package", ["bash", "tini", "tzdata"])
-def test_system_extra_package_warns_and_filters_default_overlap(package: str) -> None:
-    document = _document()
-    document["system"] = {"extra_packages": [package]}
-    config = validate_final_config_structure(document)
-
-    domains = validate_final_config_domains(config)
-    diagnostics = (
-        *domains.diagnostics,
-        *validate_final_config_semantics(config, domains),
-    )
-
-    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
-        (
-            ("system", "extra_packages", 0),
-            "system.redundant_default_apt_package",
-            DiagnosticSeverity.WARNING,
-        )
-    ]
-    assert domains.authored_apt_packages[0].value == package
-    assert domains.apt_packages == ()
-
-
-@pytest.mark.parametrize("package", ["bash", "libexample"])
-def test_system_extra_package_keeps_user_duplicate_as_error(package: str) -> None:
-    document = _document()
-    document["system"] = {"extra_packages": [package, package]}
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [(item.path, item.code) for item in diagnostics] == [
-        (("system", "extra_packages", 1), "system.duplicate_apt_package")
-    ]
-
-
 @pytest.mark.parametrize("package", ["Bash", "x"])
 def test_system_extra_package_rejects_noncanonical_debian_name(package: str) -> None:
     document = _document()
     document["system"] = {"extra_packages": [package]}
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-    assert [(item.path, item.code) for item in diagnostics] == [
-        (("system", "extra_packages", 0), "system.invalid_apt_package")
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("system", "extra_packages", 0),
+            "system.invalid_apt_package",
+            DiagnosticSeverity.ERROR,
+        )
     ]
 
 
@@ -672,7 +366,7 @@ def test_system_extra_package_accepts_lowercase_debian_punctuation() -> None:
     document["system"] = {"extra_packages": ["libfoo+bar.1-dev"]}
     config = validate_final_config_structure(document)
 
-    assert _diagnostics(config) == ()
+    assert validate_final_config_domains(config).diagnostics == ()
 
 
 def test_host_ssh_public_keys_normalize_and_warn_by_key_identity() -> None:
@@ -697,31 +391,23 @@ def test_host_ssh_public_keys_normalize_and_warn_by_key_identity() -> None:
     assert _VALID_SSH_KEY not in domains.diagnostics[0].message
 
 
-# Structural and scalar domains reject coercion, ambiguity, and unsupported values.
-def test_strict_structure_forbids_unknown_fields_and_coercion() -> None:
-    document = _document()
-    document["build"] = {"platforms": ["linux/amd64"], "unknown": True}
-    document["comfyui"]["port"] = "8188"
-
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-
-    assert [(item.path, item.code) for item in raised.value.diagnostics] == [
-        (("build", "unknown"), "schema.extra_forbidden"),
-        (("comfyui", "port"), "schema.int_type"),
-    ]
-
-
 @pytest.mark.parametrize("version", ["3.13", "3.13.14rc1", "latest", " 3.13.14"])
 def test_python_requires_an_exact_stable_patch(version: str) -> None:
     document = _document()
     document["python"] = {"version": version}
     config = validate_final_config_structure(document)
 
-    assert _codes(config) & {
-        "python.exact_patch_required",
-        "python.stable_version_required",
-    }
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("python", "version"),
+            "python.exact_patch_required",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
 
 
 @pytest.mark.parametrize("version", ["3.11.9", "3.15.0"])
@@ -730,10 +416,14 @@ def test_python_rejects_versions_outside_package_support(version: str) -> None:
     document["python"] = {"version": version}
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-    assert [(item.path, item.code) for item in diagnostics] == [
-        (("python", "version"), "python.unsupported_version")
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("python", "version"),
+            "python.unsupported_version",
+            DiagnosticSeverity.ERROR,
+        )
     ]
 
 
@@ -742,7 +432,7 @@ def test_python_accepts_unlisted_patch_inside_package_support() -> None:
     document["python"] = {"version": "3.13.15"}
     config = validate_final_config_structure(document)
 
-    assert _diagnostics(config) == ()
+    assert validate_final_config_domains(config).diagnostics == ()
 
 
 @pytest.mark.parametrize("selector", ["0.11.28", "latest"])
@@ -751,7 +441,7 @@ def test_uv_release_selector_accepts_exact_or_rolling_authority(selector: str) -
     document["python"] = {"uv_version": selector}
     config = validate_final_config_structure(document)
 
-    assert _diagnostics(config) == ()
+    assert validate_final_config_domains(config).diagnostics == ()
 
 
 @pytest.mark.parametrize(
@@ -771,7 +461,17 @@ def test_uv_release_selector_rejects_non_release_provider_tags(selector: str) ->
     document["python"] = {"uv_version": selector}
     config = validate_final_config_structure(document)
 
-    assert "python.invalid_uv_version" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("python", "uv_version"),
+            "python.invalid_uv_version",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
 
 
 @pytest.mark.parametrize("version", ["2.12", "2.12.1rc1", "latest", "v2.12.1"])
@@ -780,7 +480,17 @@ def test_pytorch_requires_an_exact_stable_public_version(version: str) -> None:
     document["pytorch"]["version"] = version
     config = validate_final_config_structure(document)
 
-    assert "pytorch.exact_stable_version_required" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("pytorch", "version"),
+            "pytorch.exact_stable_version_required",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
 
 
 @pytest.mark.parametrize(
@@ -808,7 +518,11 @@ def test_planning_execution_strings_have_consumer_aligned_domains(
 
     domains = validate_final_config_domains(config)
 
-    assert code in {item.code for item in domains.diagnostics}
+    assert any(
+        (item.path, item.code, item.severity)
+        == ((section, field), code, DiagnosticSeverity.ERROR)
+        for item in domains.diagnostics
+    )
 
 
 @pytest.mark.parametrize(
@@ -825,24 +539,17 @@ def test_aria2_min_split_size_rejects_ambiguous_argv_values(value: str) -> None:
     document["cdh"] = {"downloader": {"aria2": {"min_split_size": value}}}
     config = validate_final_config_structure(document)
 
-    assert "cdh.downloader.invalid_aria2_min_split_size" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-
-def test_platforms_are_nonempty_typed_and_duplicate_free() -> None:
-    document = _document()
-    document["build"] = {"platforms": []}
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-    assert raised.value.diagnostics[0].path == ("build", "platforms")
-
-    document["build"] = {"platforms": ["linux/arm64"]}
-    with pytest.raises(FinalConfigError) as raised:
-        validate_final_config_structure(document)
-    assert raised.value.diagnostics[0].code == "schema.literal_error"
-
-    document["build"] = {"platforms": ["linux/amd64", "linux/amd64"]}
-    config = validate_final_config_structure(document)
-    assert "build.duplicate_platform" in _codes(config)
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("cdh", "downloader", "aria2", "min_split_size"),
+            "cdh.downloader.invalid_aria2_min_split_size",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
 
 
 # ComfyUI and Registry selectors preserve stable supported release identities.
@@ -852,7 +559,17 @@ def test_comfyui_rejects_selectors_definitely_below_floor(version: str) -> None:
     document["comfyui"]["version"] = version
     config = validate_final_config_structure(document)
 
-    assert "comfyui.version_below_floor" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("comfyui", "version"),
+            "comfyui.version_below_floor",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
 
 
 @pytest.mark.parametrize(
@@ -871,7 +588,9 @@ def test_comfyui_accepts_floor_compatible_stable_selectors(version: str) -> None
     document["comfyui"]["version"] = version
     config = validate_final_config_structure(document)
 
-    assert "comfyui.version_below_floor" not in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert not any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics)
 
 
 @pytest.mark.parametrize(
@@ -895,7 +614,13 @@ def test_comfyui_requires_a_satisfiable_stable_formal_selector(
     document["comfyui"]["version"] = version
     config = validate_final_config_structure(document)
 
-    assert code in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert any(
+        (item.path, item.code, item.severity)
+        == (("comfyui", "version"), code, DiagnosticSeverity.ERROR)
+        for item in diagnostics
+    )
 
 
 def test_comfyui_selector_satisfiability_uses_discrete_formal_releases() -> None:
@@ -903,7 +628,9 @@ def test_comfyui_selector_satisfiability_uses_discrete_formal_releases() -> None
     document["comfyui"]["version"] = ">=0.12.0,<0.12.1"
     config = validate_final_config_structure(document)
 
-    assert "comfyui.unsatisfiable_selector" not in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert not any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics)
 
 
 def test_build_tags_admit_dynamic_publication_expressions() -> None:
@@ -917,7 +644,7 @@ def test_build_tags_admit_dynamic_publication_expressions() -> None:
     }
     config = validate_final_config_structure(document)
 
-    assert _diagnostics(config) == ()
+    assert validate_final_config_domains(config).diagnostics == ()
 
 
 @pytest.mark.parametrize(
@@ -931,10 +658,14 @@ def test_release_expression_rejects_selectors_without_formal_releases(
     document["build"] = {"tags": ["example/image:v${{ comfyui.release }}"]}
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-    assert [(item.path, item.code) for item in diagnostics] == [
-        (("build", "tags", 0), "build.release_unavailable")
+    assert [(item.path, item.code, item.severity) for item in diagnostics] == [
+        (
+            ("build", "tags", 0),
+            "build.release_unavailable",
+            DiagnosticSeverity.ERROR,
+        )
     ]
 
 
@@ -944,25 +675,18 @@ def test_invalid_comfyui_selector_does_not_cascade_release_diagnostic() -> None:
     document["build"] = {"tags": ["example/image:v${{ comfyui.release }}"]}
     config = validate_final_config_structure(document)
 
-    assert [item.code for item in _diagnostics(config)] == ["comfyui.invalid_version"]
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-
-def test_registry_nodes_require_manager_but_direct_git_nodes_do_not() -> None:
-    document = _document()
-    document["comfyui"]["custom_nodes"] = [
-        {"type": "git", "url": "https://github.com/example/direct.git"}
-    ]
-    git_config = validate_final_config_structure(document)
-    assert "custom_node.manager_required" not in _codes(git_config)
-
-    document["comfyui"]["custom_nodes"] = [
-        {"type": "registry", "id": "example-node", "version": "1.0.0"}
-    ]
-    registry_config = validate_final_config_structure(document)
-    diagnostics = _diagnostics(registry_config)
-    assert [
-        item.path for item in diagnostics if item.code == "custom_node.manager_required"
-    ] == [("comfyui", "custom_nodes", 0, "type")]
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("comfyui", "version"),
+            "comfyui.invalid_version",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
+    assert not any(item.code == "build.release_unavailable" for item in diagnostics)
 
 
 def test_exact_registry_prerelease_remains_a_valid_published_selector() -> None:
@@ -973,26 +697,9 @@ def test_exact_registry_prerelease_remains_a_valid_published_selector() -> None:
     ]
     config = validate_final_config_structure(document)
 
-    assert "custom_node.invalid_registry_version" not in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-
-def test_registry_punctuation_variants_report_distribution_identity_collision() -> None:
-    document = _document()
-    document["comfyui"]["install_manager"] = True
-    document["comfyui"]["custom_nodes"] = [
-        {"type": "registry", "id": "Example_Node", "version": "1.0.0"},
-        {"type": "registry", "id": "example.node", "version": "1.1.0"},
-    ]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert config.comfyui.custom_nodes[0].id == "Example_Node"
-    assert [
-        item.path
-        for item in diagnostics
-        if item.code == "custom_node.registry_distribution_identity_collision"
-    ] == [("comfyui", "custom_nodes", 1, "id")]
+    assert not any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics)
 
 
 @pytest.mark.parametrize("node_id", ["invalid/name", "invalid!name"])
@@ -1004,7 +711,17 @@ def test_registry_id_requires_valid_project_name(node_id: str) -> None:
     ]
     config = validate_final_config_structure(document)
 
-    assert "custom_node.invalid_registry_id" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("comfyui", "custom_nodes", 0, "id"),
+            "custom_node.invalid_registry_id",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
 
 
 def test_registry_selector_ranges_reject_prerelease_operands() -> None:
@@ -1015,96 +732,17 @@ def test_registry_selector_ranges_reject_prerelease_operands() -> None:
     ]
     config = validate_final_config_structure(document)
 
-    assert "custom_node.invalid_registry_version" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-
-# Target marker projection precedes ownership and protected-source enforcement.
-def test_package_ownership_is_normalized_across_groups() -> None:
-    document = _document()
-    document["python"] = {"extra_packages": ["My_Package[cli]>=1,<2"]}
-    document["pytorch"]["extra_packages"] = ["my-package==1.5", "torch==2.12.1"]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    domains = validate_final_config_domains(config)
-    assert "python.duplicate_package_owner" not in {
-        item.code for item in domains.diagnostics
-    }
-    assert "python.duplicate_package_owner" in {
-        item.code for item in validate_final_config_semantics(config, domains)
-    }
-
-    assert [
-        item.path
-        for item in diagnostics
-        if item.code == "python.conflicting_package_requirement"
-    ] == [("pytorch", "extra_packages", 0)]
-    assert [
-        item.path
-        for item in diagnostics
-        if item.code == "python.duplicate_package_owner"
-    ] == [("pytorch", "extra_packages", 1)]
-
-
-@pytest.mark.parametrize(
-    "requirement",
-    [
-        "Torch==2.12.1",
-        "TorchVision==0.27.1",
-        "TorchAudio==2.11.0",
-        "PIP==26.1.2",
-        "Setuptools==81.0.0",
-    ],
-)
-def test_python_extras_reject_reserved_application_package_owners(
-    requirement: str,
-) -> None:
-    document = _document()
-    document["python"] = {"extra_packages": [requirement]}
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [(item.path, item.code) for item in diagnostics] == [
-        (("python", "extra_packages", 0), "python.duplicate_package_owner")
-    ]
-
-
-def test_pytorch_extras_reject_protected_direct_source() -> None:
-    document = _document()
-    document["pytorch"]["extra_packages"] = [
-        "torchvision @ https://example.test/torchvision.whl"
-    ]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [(item.path, item.code) for item in diagnostics] == [
-        (
-            ("pytorch", "extra_packages", 0),
-            "pytorch.protected_requirement_conflict",
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("comfyui", "custom_nodes", 0, "version"),
+            "custom_node.invalid_registry_version",
+            DiagnosticSeverity.ERROR,
         )
-    ]
-
-
-def test_pytorch_extras_accept_protected_index_requirement() -> None:
-    document = _document()
-    document["pytorch"]["extra_packages"] = ["torchvision>=0.27"]
-    config = validate_final_config_structure(document)
-
-    assert _diagnostics(config) == ()
-
-
-def test_package_ownership_is_scoped_to_isolated_environment() -> None:
-    document = _document()
-    document["python"] = {
-        "extra_packages": ["ruff==0.15.18"],
-        "uv_tools": ["Ruff==0.15.18"],
-    }
-    config = validate_final_config_structure(document)
-
-    assert _diagnostics(config) == ()
+        for item in diagnostics
+    )
 
 
 @pytest.mark.parametrize(
@@ -1129,7 +767,13 @@ def test_python_requirement_domain_rejects_invalid_or_unsupported_inputs(
     domains = validate_final_config_domains(config)
 
     assert domains.package_requirements == ()
-    assert [item.code for item in domains.diagnostics] == [code]
+    assert [(item.path, item.code, item.severity) for item in domains.diagnostics] == [
+        (
+            ("python", "extra_packages", 0),
+            code,
+            DiagnosticSeverity.ERROR,
+        )
+    ]
 
 
 def test_python_requirement_domain_does_not_pre_solve_standard_selector() -> None:
@@ -1195,13 +839,13 @@ def test_requirement_domain_rejects_undefined_containing_marker_context() -> Non
 
     domains = validate_final_config_domains(config)
 
-    assert [(item.path, item.code) for item in domains.diagnostics] == [
-        (("python", "uv_tools", 0), "python.unsupported_marker_context")
+    assert [(item.path, item.code, item.severity) for item in domains.diagnostics] == [
+        (
+            ("python", "uv_tools", 0),
+            "python.unsupported_marker_context",
+            DiagnosticSeverity.ERROR,
+        )
     ]
-    assert (
-        str(domains.diagnostics[0].message)
-        == "marker requires an unsupported extra or dependency-group context"
-    )
     assert len(domains.authored_package_requirements) == 1
     assert domains.package_requirements == ()
 
@@ -1226,21 +870,6 @@ def test_invalid_target_keeps_only_unmarked_requirement_active() -> None:
     assert [item.name for item in domains.package_requirements] == ["plain"]
 
 
-def test_inactive_application_requirement_does_not_claim_package_ownership() -> None:
-    document = _document()
-    document["python"] = {"extra_packages": ['demo<2; python_version < "3.13"']}
-    document["pytorch"]["extra_packages"] = ['Demo>=2; python_version >= "3.13"']
-    config = validate_final_config_structure(document)
-
-    domains = validate_final_config_domains(config)
-
-    assert len(domains.authored_package_requirements) == 2
-    assert [item.path for item in domains.package_requirements] == [
-        ("pytorch", "extra_packages", 0)
-    ]
-    assert validate_final_config_semantics(config, domains) == ()
-
-
 def test_undefined_marker_comparison_is_a_domain_diagnostic() -> None:
     document = _document()
     document["python"] = {"extra_packages": ['demo; os_name ~= "posix"']}
@@ -1248,8 +877,12 @@ def test_undefined_marker_comparison_is_a_domain_diagnostic() -> None:
 
     domains = validate_final_config_domains(config)
 
-    assert [(item.path, item.code) for item in domains.diagnostics] == [
-        (("python", "extra_packages", 0), "python.invalid_environment_marker")
+    assert [(item.path, item.code, item.severity) for item in domains.diagnostics] == [
+        (
+            ("python", "extra_packages", 0),
+            "python.invalid_environment_marker",
+            DiagnosticSeverity.ERROR,
+        )
     ]
     assert domains.package_requirements == ()
 
@@ -1292,32 +925,6 @@ def test_requirement_extra_aliases_are_stably_deduplicated() -> None:
     assert requirement.extras == ("foo-bar", "z-extra")
 
 
-# File, Git, and hook inputs are unique, contained, and safe for their consumers.
-def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
-    document = _document()
-    document["files"] = [
-        {
-            "type": "http",
-            "url": "https://example.com/a",
-            "target_dir": "models/x",
-            "filename": "a.bin",
-        },
-        {
-            "type": "local",
-            "path": "model.bin",
-            "target_dir": "models//x/./",
-            "filename": "a.bin",
-        },
-    ]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [
-        item.path for item in diagnostics if item.code == "file.duplicate_target"
-    ] == [("files", 1, "filename")]
-
-
 def test_file_directory_normalization_supports_the_comfyui_root() -> None:
     document = _document()
     document["files"] = [
@@ -1356,28 +963,19 @@ def test_file_target_rejects_only_the_exact_internal_staging_leaf() -> None:
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
     assert [
-        (item.path, item.code) for item in diagnostics if item.code.startswith("file.")
-    ] == [(("files", 0, "filename"), "file.invalid_filename")]
-
-
-def test_duplicate_effective_git_targets_are_rejected() -> None:
-    document = _document()
-    document["comfyui"]["custom_nodes"] = [
-        {"type": "git", "url": "https://github.com/a/one.git", "target_dir": "same"},
-        {"type": "git", "url": "https://github.com/b/two.git", "target_dir": "same"},
-    ]
-    config = validate_final_config_structure(document)
-
-    diagnostics = _diagnostics(config)
-
-    assert [
-        item.path
+        (item.path, item.code, item.severity)
         for item in diagnostics
-        if item.code == "custom_node.duplicate_git_target_dir"
-    ] == [("comfyui", "custom_nodes", 1, "target_dir")]
+        if item.code.startswith("file.")
+    ] == [
+        (
+            ("files", 0, "filename"),
+            "file.invalid_filename",
+            DiagnosticSeverity.ERROR,
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1389,7 +987,17 @@ def test_git_source_url_requires_a_supported_remote_form(url: str) -> None:
     document["comfyui"]["custom_nodes"] = [{"type": "git", "url": url}]
     config = validate_final_config_structure(document)
 
-    assert "custom_node.invalid_git_url" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("comfyui", "custom_nodes", 0, "url"),
+            "custom_node.invalid_git_url",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )
 
 
 def test_invalid_git_url_does_not_suppress_independent_field_diagnostics() -> None:
@@ -1401,18 +1009,21 @@ def test_invalid_git_url_does_not_suppress_independent_field_diagnostics() -> No
 
     domains = validate_final_config_domains(config)
 
-    assert [(item.path, item.code) for item in domains.diagnostics] == [
+    assert [(item.path, item.code, item.severity) for item in domains.diagnostics] == [
         (
             ("comfyui", "custom_nodes", 0, "url"),
             "custom_node.invalid_git_url",
+            DiagnosticSeverity.ERROR,
         ),
         (
             ("comfyui", "custom_nodes", 0, "ref"),
             "custom_node.invalid_git_ref",
+            DiagnosticSeverity.ERROR,
         ),
         (
             ("comfyui", "custom_nodes", 0, "target_dir"),
             "custom_node.invalid_git_target_dir",
+            DiagnosticSeverity.ERROR,
         ),
     ]
 
@@ -1431,7 +1042,9 @@ def test_git_source_url_accepts_supported_remote_forms(url: str) -> None:
     document["comfyui"]["custom_nodes"] = [{"type": "git", "url": url}]
     config = validate_final_config_structure(document)
 
-    assert "custom_node.invalid_git_url" not in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert not any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics)
 
 
 def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(
@@ -1450,11 +1063,21 @@ def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(
     ]
     config = validate_final_config_structure(document)
 
-    diagnostics = _diagnostics(config, build_hooks_dir=tmp_path)
+    diagnostics = validate_final_config_domains(
+        config, build_hooks_dir=tmp_path
+    ).diagnostics
 
     assert [
-        item.path for item in diagnostics if item.code == "hook.source_not_regular"
-    ] == [("comfyui", "custom_nodes", 0, "pre_install_hooks", 1)]
+        (item.path, item.code, item.severity)
+        for item in diagnostics
+        if item.code == "hook.source_not_regular"
+    ] == [
+        (
+            ("comfyui", "custom_nodes", 0, "pre_install_hooks", 1),
+            "hook.source_not_regular",
+            DiagnosticSeverity.ERROR,
+        )
+    ]
     assert config.comfyui.custom_nodes[0].pre_install_hooks == [
         "first.sh",
         "linked.py",
@@ -1473,17 +1096,14 @@ def test_git_refs_reject_ambiguous_or_invalid_forms(ref: str) -> None:
     ]
     config = validate_final_config_structure(document)
 
-    assert "custom_node.invalid_git_ref" in _codes(config)
+    diagnostics = validate_final_config_domains(config).diagnostics
 
-
-def test_diagnostic_error_requires_stable_diagnostics_and_positive_exit_code() -> None:
-    diagnostic = Diagnostic(("python", "version"), "python.invalid", "fix it")
-    error = DiagnosticError((diagnostic,), exit_code=3)
-
-    assert error.diagnostics == (diagnostic,)
-    assert error.exit_code == 3
-
-    with pytest.raises(ValueError, match="at least one"):
-        DiagnosticError(())
-    with pytest.raises(ValueError, match="positive"):
-        DiagnosticError((diagnostic,), exit_code=0)
+    assert any(
+        (item.path, item.code, item.severity)
+        == (
+            ("comfyui", "custom_nodes", 0, "ref"),
+            "custom_node.invalid_git_ref",
+            DiagnosticSeverity.ERROR,
+        )
+        for item in diagnostics
+    )

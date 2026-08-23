@@ -8,6 +8,17 @@ import zipfile
 from pathlib import Path
 
 from comfyui_docker_helper.comfyui_requirements import merge_pytorch_requirements
+from comfyui_docker_helper.config.authored.models import FinalConfig
+from comfyui_docker_helper.config.authored.validation.domains import (
+    validate_direct_requirement,
+    validate_final_config_domains,
+)
+from comfyui_docker_helper.config.authored.validation.semantics import (
+    validate_final_config_semantics,
+)
+from comfyui_docker_helper.config.authored.validation.structure import (
+    validate_final_config_structure,
+)
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     RuntimePlanningProvenance,
@@ -40,13 +51,6 @@ from comfyui_docker_helper.config.canonical_request import (
     comfyui_requirements_request,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
-from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_validation import (
-    validate_direct_requirement,
-    validate_final_config_domains,
-    validate_final_config_semantics,
-    validate_final_config_structure,
-)
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_REPOSITORY,

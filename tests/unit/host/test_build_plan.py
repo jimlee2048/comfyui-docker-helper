@@ -13,6 +13,16 @@ from pydantic import ValidationError
 
 from comfyui_docker_helper.config import build_plan as build_plan_module
 from comfyui_docker_helper.config import canonical_request as canonical_request_module
+from comfyui_docker_helper.config.authored.models import FinalConfig
+from comfyui_docker_helper.config.authored.validation.domains import (
+    validate_final_config_domains,
+)
+from comfyui_docker_helper.config.authored.validation.semantics import (
+    validate_final_config_semantics,
+)
+from comfyui_docker_helper.config.authored.validation.structure import (
+    validate_final_config_structure,
+)
 from comfyui_docker_helper.config.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
@@ -42,12 +52,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     canonical_lock_from_entries,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
-from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_validation import (
-    validate_final_config_domains,
-    validate_final_config_semantics,
-    validate_final_config_structure,
-)
 from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,

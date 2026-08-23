@@ -24,6 +24,7 @@ from comfyui_docker_helper.comfyui_requirements import (
     ParsedManagerRequirements,
     parse_ordinary_requirements,
 )
+from comfyui_docker_helper.config.authored.validation.domains import is_git_source_url
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     CustomNodePlan,
@@ -38,7 +39,6 @@ from comfyui_docker_helper.config.custom_node_inventory import (
     CustomNodeInventory,
     custom_node_inventory,
 )
-from comfyui_docker_helper.config.final_validation import is_git_source_url
 from comfyui_docker_helper.config.registry_validation import (
     validate_registry_node_authority,
 )

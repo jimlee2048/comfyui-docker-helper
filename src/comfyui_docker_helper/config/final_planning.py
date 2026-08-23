@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
-from comfyui_docker_helper.config.final_models import (
+from comfyui_docker_helper.config.authored.models import (
     CudaImageDistro,
     CudaImageFlavor,
 )

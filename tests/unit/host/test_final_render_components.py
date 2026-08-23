@@ -14,6 +14,10 @@ from pydantic import ValidationError
 
 from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
+from comfyui_docker_helper.config.authored.models import FinalConfig
+from comfyui_docker_helper.config.authored.validation.structure import (
+    validate_final_config_structure,
+)
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     DownloaderCredentialRoutePlan,
@@ -23,10 +27,6 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_digest,
     dump_build_plan_json,
     parse_build_plan_json,
-)
-from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_validation import (
-    validate_final_config_structure,
 )
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.release_artifacts import (

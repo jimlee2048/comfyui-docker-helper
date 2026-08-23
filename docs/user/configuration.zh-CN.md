@@ -2,7 +2,7 @@
 
 规范性来源：[English](configuration.md) | 简体中文
 
-本指南面向为 cdh 选择和组合 TOML 输入的用户。[严格配置模型](../../src/comfyui_docker_helper/config/final_models.py) 和验证代码是机器权威；本指南说明面向用户的选择，而不重复每一个字段。
+本指南面向为 cdh 选择和组合 TOML 输入的用户。[严格配置模型](../../src/comfyui_docker_helper/config/authored/models.py) 和验证代码是机器权威；本指南说明面向用户的选择，而不重复每一个字段。
 
 ## 选择起始示例
 

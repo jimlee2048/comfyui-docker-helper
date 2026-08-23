@@ -9,6 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.config.authored.models import FinalConfig
+from comfyui_docker_helper.config.authored.validation.domains import (
+    validate_final_config_domains,
+)
+from comfyui_docker_helper.config.authored.validation.semantics import (
+    validate_final_config_semantics,
+)
 from comfyui_docker_helper.config.build_plan import (
     GitNodePlan,
     HookPlan,
@@ -21,11 +28,6 @@ from comfyui_docker_helper.config.canonical_lock import (
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
-from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_validation import (
-    validate_final_config_domains,
-    validate_final_config_semantics,
-)
 from comfyui_docker_helper.container import custom_node_installer
 from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,

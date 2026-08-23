@@ -15,7 +15,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from comfyui_docker_helper.config.final_validation import (
+from comfyui_docker_helper.config.authored.validation.domains import (
     is_git_ref,
     is_git_source_url,
     is_oci_tag,

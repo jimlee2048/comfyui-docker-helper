@@ -37,7 +37,7 @@ _EXPORTS = {
         "comfyui_docker_helper.config.diagnostics",
         "DiagnosticSeverity",
     ),
-    "FinalConfig": ("comfyui_docker_helper.config.final_models", "FinalConfig"),
+    "FinalConfig": ("comfyui_docker_helper.config.authored.models", "FinalConfig"),
     "LockPolicy": (
         "comfyui_docker_helper.config.canonical_resolver",
         "LockPolicy",

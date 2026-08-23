@@ -16,6 +16,13 @@ from comfyui_docker_helper.comfyui_requirements import (
     merge_pytorch_requirements,
     parse_comfyui_requirements,
 )
+from comfyui_docker_helper.config.authored.models import (
+    FinalConfig,
+    FinalHttpFileConfig,
+)
+from comfyui_docker_helper.config.authored.validation.result import (
+    FinalConfigDomainResult,
+)
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
@@ -37,15 +44,11 @@ from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.config.downloader_credentials import (
     canonicalize_downloader_credential_context,
 )
-from comfyui_docker_helper.config.final_models import FinalConfig, FinalHttpFileConfig
 from comfyui_docker_helper.config.final_planning import (
     BackendPlan,
     CudaBackendAdapter,
     CudaVersion,
     TargetPlatform,
-)
-from comfyui_docker_helper.config.final_validation import (
-    FinalConfigDomainResult,
 )
 from comfyui_docker_helper.config.git_credentials import (
     canonicalize_git_credential_context,

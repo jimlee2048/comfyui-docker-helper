@@ -19,7 +19,7 @@ def create_private_directory(
     _require_private_prefix(prefix)
     selected_parent = _temporary_parent() if parent is None else _path_string(parent)
     if _platform_name == "nt":
-        from comfyui_docker_helper._windows_files import (
+        from comfyui_docker_helper.filesystem.windows import (
             create_private_directory as create_windows_private_directory,
         )
 
@@ -42,7 +42,7 @@ def create_private_file(path: str | os.PathLike[str]) -> int:
     """Exclusively create a private file and return its caller-owned descriptor."""
     value = _path_string(path)
     if _platform_name == "nt":
-        from comfyui_docker_helper._windows_files import (
+        from comfyui_docker_helper.filesystem.windows import (
             create_private_file as create_windows_private_file,
         )
 
@@ -55,7 +55,7 @@ def open_private_lock_file(path: str | os.PathLike[str]) -> int:
     """Create or open a private read-write lock file and return its descriptor."""
     value = _path_string(path)
     if _platform_name == "nt":
-        from comfyui_docker_helper._windows_files import (
+        from comfyui_docker_helper.filesystem.windows import (
             open_private_lock_file as open_windows_private_lock_file,
         )
 

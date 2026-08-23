@@ -13,6 +13,7 @@ FORBIDDEN_COMPONENTS = {
     "rendering": frozenset({"host", "container"}),
     "host": frozenset({"container"}),
     "container": frozenset({"host", "rendering"}),
+    "filesystem": frozenset({"host", "container", "rendering"}),
 }
 FORBIDDEN_CLI_OUTPUT_DEPENDENCIES = frozenset({"rich", "typer"})
 

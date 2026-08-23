@@ -74,7 +74,7 @@ from comfyui_docker_helper.container.helper_events import (
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.container.transfer_core import verify_required_final
 from comfyui_docker_helper.errors import ApplicationError
-from comfyui_docker_helper.file_admission import read_regular_absolute_file
+from comfyui_docker_helper.filesystem.admission import read_regular_absolute_file
 
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _MANIFEST_PATH = _BUILD_DIRECTORY / "manifest.json"

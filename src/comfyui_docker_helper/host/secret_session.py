@@ -26,7 +26,7 @@ from comfyui_docker_helper.config.git_credentials import (
     parse_git_credential_context,
 )
 from comfyui_docker_helper.config.service import ConfigurationResult
-from comfyui_docker_helper.file_admission import (
+from comfyui_docker_helper.filesystem.admission import (
     read_bounded_regular_absolute_file,
 )
 from comfyui_docker_helper.git_credential_policy import git_credential_config_args

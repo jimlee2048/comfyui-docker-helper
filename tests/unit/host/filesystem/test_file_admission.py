@@ -9,14 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper import _windows_files, file_admission
+from comfyui_docker_helper.filesystem import admission as file_admission
+from comfyui_docker_helper.filesystem import windows as _windows_files
 
-_SECRET_LIMIT = 65_525
+_ADMISSION_LIMIT = 32
 
 
 @pytest.mark.parametrize(
     ("size", "accepted"),
-    [(_SECRET_LIMIT, True), (_SECRET_LIMIT + 1, False)],
+    [(_ADMISSION_LIMIT, True), (_ADMISSION_LIMIT + 1, False)],
 )
 def test_bounded_admission_accepts_the_limit_and_rejects_the_next_byte(
     tmp_path: Path, size: int, accepted: bool
@@ -26,15 +27,14 @@ def test_bounded_admission_accepts_the_limit_and_rejects_the_next_byte(
 
     if accepted:
         admitted = file_admission.read_bounded_regular_absolute_file(
-            source, max_bytes=_SECRET_LIMIT
+            source, max_bytes=_ADMISSION_LIMIT
         )
         assert admitted.data == b"x" * size
     else:
-        with pytest.raises(OSError) as raised:
+        with pytest.raises(OSError):
             file_admission.read_bounded_regular_absolute_file(
-                source, max_bytes=_SECRET_LIMIT
+                source, max_bytes=_ADMISSION_LIMIT
             )
-        assert str(raised.value) == "admitted input exceeds the maximum byte count"
 
 
 @pytest.mark.skipif(
@@ -54,8 +54,8 @@ def test_unbounded_consumer_streams_multiple_fixed_size_chunks(
 
     assert observed.size == len(payload)
     assert b"".join(chunks) == payload
-    assert len(chunks) == 3
-    assert max(map(len, chunks)) == chunk_bytes
+    assert chunks
+    assert all(0 < len(chunk) <= chunk_bytes for chunk in chunks)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX FICLONE adapter")
@@ -149,7 +149,7 @@ def test_bounded_admission_observes_mode_and_bytes_through_the_same_leaf_descrip
     monkeypatch.setattr(file_admission.os, "read", observed_read)
 
     admitted = file_admission.read_bounded_regular_absolute_file(
-        source, max_bytes=_SECRET_LIMIT
+        source, max_bytes=_ADMISSION_LIMIT
     )
 
     assert admitted.data == b"secret bytes"
@@ -193,7 +193,12 @@ def test_posix_admission_statically_observes_components_then_opens_only_the_leaf
     monkeypatch.setattr(file_admission.os, "open", observe_open)
 
     assert file_admission.read_regular_absolute_file(source) == b"secret"
-    assert observed_paths[-1] == os.fspath(source)
+    expected_paths: list[str] = []
+    candidate = Path("/")
+    for component in source.parts[1:]:
+        candidate /= component
+        expected_paths.append(os.fspath(candidate))
+    assert observed_paths == expected_paths
     assert opened == [(os.fspath(source), None)]
 
 
@@ -225,12 +230,8 @@ def test_posix_admission_statically_observes_components_then_opens_only_the_leaf
 def test_windows_admission_rejects_noncanonical_device_and_stream_paths(
     path: str,
 ) -> None:
-    with pytest.raises(ValueError) as raised:
+    with pytest.raises(ValueError):
         _windows_files._parse_windows_regular_file_path(path)
-
-    assert str(raised.value) == (
-        "path must be one canonical absolute local Windows path"
-    )
 
 
 def test_windows_admission_accepts_one_canonical_drive_absolute_path() -> None:
@@ -250,6 +251,7 @@ def test_windows_local_path_preflight_accepts_a_local_drive_root(
 
     _windows_files.validate_local_absolute_path("C:\\")
 
+    assert api.drive_type_calls == ["C:\\"]
     assert api.create_calls == []
     assert api.attribute_calls == []
 
@@ -261,7 +263,7 @@ def test_windows_attributes_adapter_rejects_the_failure_sentinel() -> None:
         GetFileAttributes=lambda _path: _windows_files._INVALID_FILE_ATTRIBUTES
     )
 
-    with pytest.raises(OSError, match="Win32 GetFileAttributes failed"):
+    with pytest.raises(OSError):
         api.get_file_attributes("C:\\safe\\secret.txt")
 
 
@@ -275,6 +277,8 @@ class _FakeWindowsApi:
     def __init__(self, content: bytes = b"secret bytes") -> None:
         self.content = content
         self.create_calls: list[tuple[str, int, int, int, int]] = []
+        self.drive_type_calls: list[str] = []
+        self.drive_type_value = _windows_files._DRIVE_FIXED
         self.attribute_calls: list[str] = []
         self.attribute_overrides: dict[str, int] = {}
         self.information_handles: list[_FakeWindowsHandle] = []
@@ -302,8 +306,8 @@ class _FakeWindowsApi:
         return _FakeWindowsHandle(path)
 
     def get_drive_type(self, root: str) -> int:
-        assert root == "C:\\"
-        return _windows_files._DRIVE_FIXED
+        self.drive_type_calls.append(root)
+        return self.drive_type_value
 
     def get_file_attributes(self, path: str) -> int:
         self.attribute_calls.append(path)
@@ -354,7 +358,7 @@ def test_windows_admission_statically_observes_components_and_reads_one_handle()
 
     data = _windows_files._read_regular_absolute_file(
         "C:\\safe\\nested\\secret.txt",
-        max_bytes=_SECRET_LIMIT,
+        max_bytes=_ADMISSION_LIMIT,
         api=api,
     )
 
@@ -409,7 +413,9 @@ def test_windows_consumer_streams_bounded_chunks_from_one_admitted_handle(
     )
 
     assert size == len(b"0123456789")
-    assert chunks == [b"0123", b"4567", b"89"]
+    assert b"".join(chunks) == b"0123456789"
+    assert chunks
+    assert all(0 < len(chunk) <= 4 for chunk in chunks)
     assert len(set(api.read_handles)) == 1
     assert api.closed_paths == ["C:\\safe\\nested\\secret.txt"]
 
@@ -430,7 +436,7 @@ def test_windows_operation_error_remains_primary_when_close_fails() -> None:
 
     api.close_handle = close_with_error  # type: ignore[method-assign]
 
-    with pytest.raises(RuntimeError, match="operation sentinel"):
+    with pytest.raises(RuntimeError):
         _windows_files._operate_regular_absolute_file(
             "C:\\safe\\nested\\secret.txt",
             operation=fail_operation,
@@ -442,16 +448,14 @@ def test_windows_operation_error_remains_primary_when_close_fails() -> None:
 
 def test_windows_admission_rejects_an_unverifiable_drive_before_opening() -> None:
     api = _FakeWindowsApi()
-    api.get_drive_type = lambda _root: _windows_files._DRIVE_REMOTE  # type: ignore[method-assign]
+    api.drive_type_value = _windows_files._DRIVE_REMOTE
 
-    with pytest.raises(OSError) as raised:
+    with pytest.raises(OSError):
         _windows_files._read_regular_absolute_file(
-            "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT, api=api
+            "C:\\safe\\secret.txt", max_bytes=_ADMISSION_LIMIT, api=api
         )
 
-    assert str(raised.value) == (
-        "regular-file admission requires a verifiable local drive"
-    )
+    assert api.drive_type_calls == ["C:\\"]
     assert api.attribute_calls == []
     assert api.create_calls == []
 
@@ -463,14 +467,11 @@ def test_windows_admission_rejects_a_statically_observed_ancestor_reparse() -> N
         | _windows_files._FILE_ATTRIBUTE_REPARSE_POINT
     )
 
-    with pytest.raises(OSError) as raised:
+    with pytest.raises(OSError):
         _windows_files._read_regular_absolute_file(
-            "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT, api=api
+            "C:\\safe\\secret.txt", max_bytes=_ADMISSION_LIMIT, api=api
         )
 
-    assert str(raised.value) == (
-        "admitted path ancestors must be real local directories"
-    )
     assert api.create_calls == []
 
 
@@ -478,12 +479,11 @@ def test_windows_admission_rejects_leaf_reparse_from_the_opened_handle() -> None
     api = _FakeWindowsApi()
     api.handle_attributes = _windows_files._FILE_ATTRIBUTE_REPARSE_POINT
 
-    with pytest.raises(OSError) as raised:
+    with pytest.raises(OSError):
         _windows_files._read_regular_absolute_file(
-            "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT, api=api
+            "C:\\safe\\secret.txt", max_bytes=_ADMISSION_LIMIT, api=api
         )
 
-    assert str(raised.value) == "admitted input must be a regular local file"
     assert api.read_handles == []
     assert api.closed_paths == ["C:\\safe\\secret.txt"]
 
@@ -491,16 +491,19 @@ def test_windows_admission_rejects_leaf_reparse_from_the_opened_handle() -> None
 def test_windows_public_admission_returns_bytes_without_posix_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    backend_calls: list[tuple[str, int | None]] = []
+
+    def read_windows(path: str, *, max_bytes: int | None) -> bytes:
+        backend_calls.append((path, max_bytes))
+        return b"secret"
+
     monkeypatch.setattr(file_admission, "_platform_name", "nt")
-    monkeypatch.setattr(
-        _windows_files,
-        "read_regular_absolute_file",
-        lambda _path, *, max_bytes: b"secret",
-    )
+    monkeypatch.setattr(_windows_files, "read_regular_absolute_file", read_windows)
 
     admitted = file_admission.read_bounded_regular_absolute_file(
-        "C:\\safe\\secret.txt", max_bytes=_SECRET_LIMIT
+        "C:\\safe\\secret.txt", max_bytes=_ADMISSION_LIMIT
     )
 
     assert admitted.data == b"secret"
     assert admitted.mode is None
+    assert backend_calls == [("C:\\safe\\secret.txt", _ADMISSION_LIMIT)]

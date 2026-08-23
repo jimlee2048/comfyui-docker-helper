@@ -24,7 +24,7 @@ from comfyui_docker_helper.config.runtime_hooks import (
     BUILD_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )
-from comfyui_docker_helper.file_admission import (
+from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     FileCloneUnavailableError,
     operate_regular_absolute_file,

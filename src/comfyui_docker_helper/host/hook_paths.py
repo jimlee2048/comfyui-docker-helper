@@ -22,7 +22,7 @@ def lexical_hook_source_root(
     candidate = selected if selected.is_absolute() else base / selected
     root = Path(_absolute_path(candidate))
     if _platform_name == "nt":
-        from comfyui_docker_helper._windows_files import (
+        from comfyui_docker_helper.filesystem.windows import (
             validate_local_absolute_path,
         )
 

@@ -48,7 +48,7 @@ from comfyui_docker_helper.config.publication_tags import (
 from comfyui_docker_helper.config.service import (
     ConfigurationResult,
 )
-from comfyui_docker_helper.file_admission import (
+from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     consume_regular_absolute_file,
     observe_regular_absolute_file,

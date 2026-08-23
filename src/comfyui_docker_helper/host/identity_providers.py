@@ -38,7 +38,7 @@ from comfyui_docker_helper.config.value_validation import (
     validate_managed_python_catalog_key,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
-from comfyui_docker_helper.file_admission import read_regular_absolute_file
+from comfyui_docker_helper.filesystem.admission import read_regular_absolute_file
 from comfyui_docker_helper.git_credential_policy import (
     noninteractive_git_environment,
 )

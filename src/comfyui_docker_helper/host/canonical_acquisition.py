@@ -63,7 +63,7 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_MINIMUM_VERSION,
 )
-from comfyui_docker_helper.file_admission import consume_regular_absolute_file
+from comfyui_docker_helper.filesystem.admission import consume_regular_absolute_file
 from comfyui_docker_helper.host.identity_providers import (
     DirectGitIdentityProvider,
     DirectGitIdentityRequest,

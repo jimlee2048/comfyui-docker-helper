@@ -11,7 +11,7 @@ from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialError,
     MountedDownloaderCredentialPolicy,
 )
-from comfyui_docker_helper.file_admission import AdmittedRegularFile
+from comfyui_docker_helper.filesystem.admission import AdmittedRegularFile
 
 
 def _route(match: str, secret_id: str) -> DownloaderCredentialRoutePlan:

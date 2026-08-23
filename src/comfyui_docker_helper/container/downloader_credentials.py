@@ -21,7 +21,9 @@ from comfyui_docker_helper.config.downloader_credentials import (
     parse_downloader_credential_context,
     select_downloader_credential_context,
 )
-from comfyui_docker_helper.file_admission import read_bounded_regular_absolute_file
+from comfyui_docker_helper.filesystem.admission import (
+    read_bounded_regular_absolute_file,
+)
 
 if TYPE_CHECKING:
     from comfyui_docker_helper.config.build_plan import DownloaderCredentialRoutePlan

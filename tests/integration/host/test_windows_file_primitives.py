@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper import file_admission
+from comfyui_docker_helper.filesystem import admission as file_admission
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",

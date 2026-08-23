@@ -98,7 +98,7 @@ def _read_regular_absolute_file(
     if _platform_name == "nt":
         if not isinstance(value, str):
             raise ValueError("path must be one canonical absolute platform path")
-        from comfyui_docker_helper._windows_files import (
+        from comfyui_docker_helper.filesystem.windows import (
             read_regular_absolute_file as read_windows_regular_absolute_file,
         )
 
@@ -151,7 +151,7 @@ def _operate_regular_absolute_file[T](
     if not isinstance(value, str):
         raise ValueError("path must be one canonical absolute platform path")
     if _platform_name == "nt":
-        from comfyui_docker_helper._windows_files import (
+        from comfyui_docker_helper.filesystem.windows import (
             operate_regular_absolute_file as operate_windows_regular_absolute_file,
         )
 

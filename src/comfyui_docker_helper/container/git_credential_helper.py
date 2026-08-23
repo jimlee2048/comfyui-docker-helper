@@ -16,7 +16,7 @@ from comfyui_docker_helper.container.build_plan_input import (
     MATERIALIZED_BUILD_PLAN_PATH,
     BuildPlanInputAdmission,
 )
-from comfyui_docker_helper.file_admission import (
+from comfyui_docker_helper.filesystem.admission import (
     read_bounded_regular_absolute_file,
 )
 from comfyui_docker_helper.git_credential_protocol import (

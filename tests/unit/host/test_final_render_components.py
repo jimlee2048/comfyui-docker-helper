@@ -12,7 +12,6 @@ from pathlib import Path, PurePosixPath
 import pytest
 from pydantic import ValidationError
 
-from comfyui_docker_helper import file_admission
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.authored.models import FinalConfig
 from comfyui_docker_helper.config.authored.validation.structure import (
@@ -29,6 +28,7 @@ from comfyui_docker_helper.config.build_plan import (
     parse_build_plan_json,
 )
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
+from comfyui_docker_helper.filesystem import admission as file_admission
 from comfyui_docker_helper.release_artifacts import (
     WORKSPACE_PROFILE_CONTEXT_PATH,
     WORKSPACE_PROFILE_RESOURCE,

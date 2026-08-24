@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from comfyui_docker_helper.config.runtime_models import RuntimeConfig
+from comfyui_docker_helper.config.runtime.models import RuntimeConfig
 from comfyui_docker_helper.container import transfer_core
 from comfyui_docker_helper.container.download_events import DownloadTransferProgress
 from comfyui_docker_helper.container.downloader_credentials import (

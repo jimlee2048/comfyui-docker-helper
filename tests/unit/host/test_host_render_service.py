@@ -50,7 +50,7 @@ from comfyui_docker_helper.config.planning.resolver import (
     LockPolicy,
     ReconcilePurpose,
 )
-from comfyui_docker_helper.config.runtime_config import load_runtime_config
+from comfyui_docker_helper.config.runtime.config import load_runtime_config
 from comfyui_docker_helper.host import render_service as render_service_module
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
 from comfyui_docker_helper.host.canonical_acquisition import (

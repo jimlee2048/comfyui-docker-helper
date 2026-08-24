@@ -27,7 +27,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
     dump_build_plan_json,
     parse_build_plan_json,
 )
-from comfyui_docker_helper.config.runtime_config import load_runtime_config
+from comfyui_docker_helper.config.runtime.config import load_runtime_config
 from comfyui_docker_helper.filesystem import admission as file_admission
 from comfyui_docker_helper.release_artifacts import (
     WORKSPACE_PROFILE_CONTEXT_PATH,

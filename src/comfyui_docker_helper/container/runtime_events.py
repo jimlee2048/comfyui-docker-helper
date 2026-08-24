@@ -8,7 +8,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal
 
-from comfyui_docker_helper.config.runtime_hooks import (
+from comfyui_docker_helper.config.runtime.hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE,
     RUNTIME_HOOK_SOURCE_NAMES,
 )

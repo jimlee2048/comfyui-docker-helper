@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from comfyui_docker_helper.config.runtime_models import RuntimeConfig
+from comfyui_docker_helper.config.runtime.models import RuntimeConfig
 from comfyui_docker_helper.container import runtime_secret_session as subject
 from comfyui_docker_helper.container.runtime_secret_session import (
     RuntimeDownloaderCredentialPolicy,

@@ -48,7 +48,7 @@ from comfyui_docker_helper.config.merge import (
     merge_toml_documents,
 )
 from comfyui_docker_helper.config.model_base import ConfigModel
-from comfyui_docker_helper.config.runtime_models import RuntimeConfig
+from comfyui_docker_helper.config.runtime.models import RuntimeConfig
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.runtime_files import (
     normalize_runtime_file_path,

@@ -13,7 +13,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import Diagnostic, DiagnosticSeverity
-from comfyui_docker_helper.config.runtime_hooks import (
+from comfyui_docker_helper.config.runtime.hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE,
     RUNTIME_HOOK_PHASES_BY_DIRECTORY,
     RuntimeHookEntryKind,

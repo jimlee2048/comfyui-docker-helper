@@ -22,7 +22,7 @@ from comfyui_docker_helper.config.credentials.secrets import (
     BearerTokenError,
     validate_bearer_token,
 )
-from comfyui_docker_helper.config.runtime_models import RuntimeConfig
+from comfyui_docker_helper.config.runtime.models import RuntimeConfig
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialError,
 )

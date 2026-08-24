@@ -8,7 +8,7 @@ _EXPORTS = {
         "AcceptedCanonicalLock",
     ),
     "BAKED_RUNTIME_CONFIG_PATH": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "BAKED_RUNTIME_CONFIG_PATH",
     ),
     "BuildPlan": ("comfyui_docker_helper.config.planning.build_plan", "BuildPlan"),
@@ -43,7 +43,7 @@ _EXPORTS = {
         "LockPolicy",
     ),
     "MOUNTED_RUNTIME_CONFIG_PATH": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "MOUNTED_RUNTIME_CONFIG_PATH",
     ),
     "ManifestBinding": (
@@ -55,19 +55,19 @@ _EXPORTS = {
         "ReconcilePurpose",
     ),
     "RuntimeConfig": (
-        "comfyui_docker_helper.config.runtime_models",
+        "comfyui_docker_helper.config.runtime.models",
         "RuntimeConfig",
     ),
     "RuntimeConfigurationError": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "RuntimeConfigurationError",
     ),
     "RuntimeConfigurationResult": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "RuntimeConfigurationResult",
     ),
     "RuntimeSystemSshConfig": (
-        "comfyui_docker_helper.config.runtime_models",
+        "comfyui_docker_helper.config.runtime.models",
         "RuntimeSystemSshConfig",
     ),
     "build_plan_digest": (
@@ -91,7 +91,7 @@ _EXPORTS = {
         "load_canonical_lock",
     ),
     "load_runtime_config": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "load_runtime_config",
     ),
     "load_validate_config": (

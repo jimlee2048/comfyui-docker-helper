@@ -14,7 +14,7 @@ from comfyui_docker_helper.config.diagnostics import (
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
-from comfyui_docker_helper.config.runtime_hooks import (
+from comfyui_docker_helper.config.runtime.hooks import (
     RuntimeHookEntryKind,
     classify_runtime_hook_entry,
     runtime_hook_phase_directory_list,

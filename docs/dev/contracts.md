@@ -233,7 +233,7 @@ The transfer path deliberately splits policy from mechanism:
 | Owner | Owns | Must not become |
 | --- | --- | --- |
 | Build and runtime orchestrators | Ordering, attempt budgets, applicable backend and mode selection, failure policy, and cancellation | A second placement implementation |
-| [`transfer_core.py`](../../src/comfyui_docker_helper/container/transfer_core.py) | Target admission, transfer identity, transport sinks, verification, atomic final placement, durability, and exact cleanup | A scheduler or runtime-policy interpreter |
+| [`transfer/core.py`](../../src/comfyui_docker_helper/container/transfer/core.py) | Target admission, transfer identity, transport sinks, verification, atomic final placement, durability, and exact cleanup | A scheduler or runtime-policy interpreter |
 | Transport adapters in [`download_files.py`](../../src/comfyui_docker_helper/container/download_files.py) | Moving bytes through the sink supplied by the core | Owners of final paths, overwrite policy, verification, or cleanup |
 | Runtime state modules | Minimal persisted recovery authority and its transition API | User configuration, history, telemetry, or a second retry policy |
 

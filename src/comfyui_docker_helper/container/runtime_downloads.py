@@ -46,10 +46,10 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeStateStore,
     prepare_runtime_state_for_start,
 )
+from comfyui_docker_helper.container.transfer.core import CancellableDownloadBackend
 from comfyui_docker_helper.container.transfer.credentials import (
     DownloaderCredentialPolicy,
 )
-from comfyui_docker_helper.container.transfer_core import CancellableDownloadBackend
 
 ASYNC_QUEUE_STOP_TIMEOUT_SECONDS = 5.0
 ASYNC_QUEUE_STOP_POLL_INTERVAL_SECONDS = 0.05

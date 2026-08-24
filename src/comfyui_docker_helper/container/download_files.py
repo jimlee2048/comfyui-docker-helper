@@ -35,24 +35,7 @@ from comfyui_docker_helper.container.transfer.coordinator import (
     AttemptSucceeded,
     coordinate_transfer_attempts,
 )
-from comfyui_docker_helper.container.transfer.credentials import (
-    DownloaderCredentialError,
-    DownloaderCredentialPolicy,
-    MountedDownloaderCredentialPolicy,
-)
-from comfyui_docker_helper.container.transfer.events import (
-    DownloadBackendName,
-    DownloadBatchCompleted,
-    DownloadEvent,
-    DownloadFinalVerificationCompleted,
-    DownloadFinalVerificationStarted,
-    DownloadItemCompleted,
-    DownloadItemStarted,
-    DownloadItemStatus,
-    DownloadRetryReason,
-    DownloadTransferProgress,
-)
-from comfyui_docker_helper.container.transfer_core import (
+from comfyui_docker_helper.container.transfer.core import (
     Aria2DownloadSettings,
     DownloadBackend,
     DownloadCancelled,
@@ -75,6 +58,23 @@ from comfyui_docker_helper.container.transfer_core import (
     TransportSuccess,
     VerificationStatus,
     verify_required_final,
+)
+from comfyui_docker_helper.container.transfer.credentials import (
+    DownloaderCredentialError,
+    DownloaderCredentialPolicy,
+    MountedDownloaderCredentialPolicy,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadBackendName,
+    DownloadBatchCompleted,
+    DownloadEvent,
+    DownloadFinalVerificationCompleted,
+    DownloadFinalVerificationStarted,
+    DownloadItemCompleted,
+    DownloadItemStarted,
+    DownloadItemStatus,
+    DownloadRetryReason,
+    DownloadTransferProgress,
 )
 
 # Bound external counters to the process-sized byte range used by local I/O.

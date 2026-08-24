@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container import transfer_core
+from comfyui_docker_helper.container.transfer import core as transfer_core
 from comfyui_docker_helper.container.transfer.coordinator import (
     AttemptCancelled,
     AttemptExhausted,
@@ -16,18 +16,7 @@ from comfyui_docker_helper.container.transfer.coordinator import (
     AttemptSucceeded,
     coordinate_transfer_attempts,
 )
-from comfyui_docker_helper.container.transfer.events import (
-    DownloadAttemptStarted,
-    DownloadEvent,
-    DownloadPlacementCompleted,
-    DownloadPlacementStarted,
-    DownloadRetryReason,
-    DownloadRetryScheduled,
-    DownloadTransferProgress,
-    DownloadVerificationCompleted,
-    DownloadVerificationStarted,
-)
-from comfyui_docker_helper.container.transfer_core import (
+from comfyui_docker_helper.container.transfer.core import (
     Aria2DownloadSettings,
     DownloaderSettings,
     DownloadFilesError,
@@ -43,6 +32,17 @@ from comfyui_docker_helper.container.transfer_core import (
     TransportRetryable,
     TransportSuccess,
     transfer_staging_target,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadAttemptStarted,
+    DownloadEvent,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadTransferProgress,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
 )
 
 

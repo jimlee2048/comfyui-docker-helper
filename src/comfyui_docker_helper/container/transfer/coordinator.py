@@ -10,16 +10,7 @@ from typing import Protocol
 
 from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.validation.urls import DownloaderName
-from comfyui_docker_helper.container.transfer.credentials import (
-    DownloaderCredentialError,
-)
-from comfyui_docker_helper.container.transfer.events import (
-    DownloadAttemptStarted,
-    DownloadEvent,
-    DownloadRetryReason,
-    DownloadRetryScheduled,
-)
-from comfyui_docker_helper.container.transfer_core import (
+from comfyui_docker_helper.container.transfer.core import (
     DownloadBackend,
     DownloadCancelled,
     DownloaderSettings,
@@ -35,6 +26,15 @@ from comfyui_docker_helper.container.transfer_core import (
     TransportRequest,
     discard_preserved_transfer,
     transfer_file,
+)
+from comfyui_docker_helper.container.transfer.credentials import (
+    DownloaderCredentialError,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadAttemptStarted,
+    DownloadEvent,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
 )
 
 

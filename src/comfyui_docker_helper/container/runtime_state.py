@@ -28,7 +28,7 @@ from comfyui_docker_helper.config.validation.urls import (
 from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
 )
-from comfyui_docker_helper.container.transfer_core import ResumeAuthority
+from comfyui_docker_helper.container.transfer.core import ResumeAuthority
 
 RUNTIME_STATE_PATH = Path("/var/lib/cdh/runtime/state.json")
 RUNTIME_STATE_SCHEMA_VERSION = 1

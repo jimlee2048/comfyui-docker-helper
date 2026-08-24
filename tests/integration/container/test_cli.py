@@ -28,6 +28,7 @@ from comfyui_docker_helper.container.helper_events import (
     RegistryCustomNodeStarted,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.container.transfer.core import DownloadFilesError
 from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadBackendName,
@@ -44,7 +45,6 @@ from comfyui_docker_helper.container.transfer.events import (
     DownloadVerificationCompleted,
     DownloadVerificationStarted,
 )
-from comfyui_docker_helper.container.transfer_core import DownloadFilesError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
 )

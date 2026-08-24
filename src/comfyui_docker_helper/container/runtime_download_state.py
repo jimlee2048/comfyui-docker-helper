@@ -14,7 +14,7 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeStateError,
     RuntimeStateStore,
 )
-from comfyui_docker_helper.container.transfer_core import ResumeAuthority
+from comfyui_docker_helper.container.transfer.core import ResumeAuthority
 
 
 class RuntimeDownloadStateWriter:

@@ -34,6 +34,11 @@ from comfyui_docker_helper.container.download_files import (
     process_file_downloads,
 )
 from comfyui_docker_helper.container.transfer import coordinator as attempt_coordinator
+from comfyui_docker_helper.container.transfer.core import (
+    DownloadCancelled,
+    TerminalTransferDownloadFilesError,
+    TransferDownloadFilesError,
+)
 from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadBackendName,
@@ -50,11 +55,6 @@ from comfyui_docker_helper.container.transfer.events import (
     DownloadRetryScheduled,
     DownloadVerificationCompleted,
     DownloadVerificationStarted,
-)
-from comfyui_docker_helper.container.transfer_core import (
-    DownloadCancelled,
-    TerminalTransferDownloadFilesError,
-    TransferDownloadFilesError,
 )
 
 

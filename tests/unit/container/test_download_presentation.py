@@ -21,6 +21,7 @@ from comfyui_docker_helper.container.presentation import (
     ContainerDownloadInvocation,
     default_container_download_invocation,
 )
+from comfyui_docker_helper.container.transfer.core import DownloadCancelled
 from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadBackendName,
@@ -38,7 +39,6 @@ from comfyui_docker_helper.container.transfer.events import (
     DownloadVerificationCompleted,
     DownloadVerificationStarted,
 )
-from comfyui_docker_helper.container.transfer_core import DownloadCancelled
 
 
 class _Clock:

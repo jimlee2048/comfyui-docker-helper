@@ -74,7 +74,7 @@ from comfyui_docker_helper.container.helper_events import (
     FinalManifestCompleted,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
-from comfyui_docker_helper.container.transfer_core import verify_required_final
+from comfyui_docker_helper.container.transfer.core import verify_required_final
 from comfyui_docker_helper.errors import ApplicationError
 from comfyui_docker_helper.filesystem.admission import read_regular_absolute_file
 

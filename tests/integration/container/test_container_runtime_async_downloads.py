@@ -57,7 +57,7 @@ from comfyui_docker_helper.container.runtime_state import (
     load_runtime_state,
     write_runtime_state,
 )
-from comfyui_docker_helper.container.transfer_core import TransferDownloadFilesError
+from comfyui_docker_helper.container.transfer.core import TransferDownloadFilesError
 from tests.runtime_event_support import (
     RecordingRuntimeEventSink,
 )

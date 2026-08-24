@@ -53,19 +53,7 @@ from comfyui_docker_helper.container.transfer.coordinator import (
     AttemptSucceeded,
     coordinate_transfer_attempts,
 )
-from comfyui_docker_helper.container.transfer.credentials import (
-    DownloaderCredentialPolicy,
-)
-from comfyui_docker_helper.container.transfer.events import (
-    DownloadAttemptStarted,
-    DownloadBackendName,
-    DownloadEvent,
-    DownloadRetryReason,
-    DownloadRetryScheduled,
-    DownloadTransferProgress,
-    DownloadVerificationStarted,
-)
-from comfyui_docker_helper.container.transfer_core import (
+from comfyui_docker_helper.container.transfer.core import (
     Aria2DownloadSettings,
     CancellableDownloadBackend,
     DownloadBackend,
@@ -86,6 +74,18 @@ from comfyui_docker_helper.container.transfer_core import (
     confirm_indexed_transfer_artifacts_absent,
     discard_preserved_transfer,
     project_transfer_identity,
+)
+from comfyui_docker_helper.container.transfer.credentials import (
+    DownloaderCredentialPolicy,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadAttemptStarted,
+    DownloadBackendName,
+    DownloadEvent,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadTransferProgress,
+    DownloadVerificationStarted,
 )
 
 type RuntimeFilePath = tuple[str | int, ...]

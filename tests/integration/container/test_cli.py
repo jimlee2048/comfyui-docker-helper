@@ -19,7 +19,16 @@ from comfyui_docker_helper.config.planning.build_plan import (
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.helper_events import (
+    ComfyUIInstallCompleted,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    CustomNodesInstallCompleted,
+    RegistryCustomNodeStarted,
+)
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadBackendName,
     DownloadBatchCompleted,
@@ -35,15 +44,6 @@ from comfyui_docker_helper.container.download_events import (
     DownloadVerificationCompleted,
     DownloadVerificationStarted,
 )
-from comfyui_docker_helper.container.helper_events import (
-    ComfyUIInstallCompleted,
-    ContainerHelperPhase,
-    ContainerHelperPhaseCompleted,
-    ContainerHelperPhaseStarted,
-    CustomNodesInstallCompleted,
-    RegistryCustomNodeStarted,
-)
-from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.transfer_core import DownloadFilesError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,

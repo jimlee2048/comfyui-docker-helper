@@ -9,14 +9,14 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.container import transfer_core
-from comfyui_docker_helper.container.attempt_coordinator import (
+from comfyui_docker_helper.container.transfer.coordinator import (
     AttemptCancelled,
     AttemptExhausted,
     AttemptOrdinaryTerminal,
     AttemptSucceeded,
     coordinate_transfer_attempts,
 )
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadEvent,
     DownloadPlacementCompleted,

@@ -27,7 +27,7 @@ from comfyui_docker_helper.config.validation.urls import (
     DownloaderName,
     require_downloader_name,
 )
-from comfyui_docker_helper.container.attempt_coordinator import (
+from comfyui_docker_helper.container.transfer.coordinator import (
     AttemptCancelled,
     AttemptExhausted,
     AttemptLocalFailure,
@@ -35,7 +35,12 @@ from comfyui_docker_helper.container.attempt_coordinator import (
     AttemptSucceeded,
     coordinate_transfer_attempts,
 )
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.transfer.credentials import (
+    DownloaderCredentialError,
+    DownloaderCredentialPolicy,
+    MountedDownloaderCredentialPolicy,
+)
+from comfyui_docker_helper.container.transfer.events import (
     DownloadBackendName,
     DownloadBatchCompleted,
     DownloadEvent,
@@ -46,11 +51,6 @@ from comfyui_docker_helper.container.download_events import (
     DownloadItemStatus,
     DownloadRetryReason,
     DownloadTransferProgress,
-)
-from comfyui_docker_helper.container.downloader_credentials import (
-    DownloaderCredentialError,
-    DownloaderCredentialPolicy,
-    MountedDownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,

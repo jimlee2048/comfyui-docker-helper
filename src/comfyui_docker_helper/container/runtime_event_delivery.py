@@ -9,10 +9,6 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from comfyui_docker_helper.cli_output import EventSink
-from comfyui_docker_helper.container.download_cadence import (
-    DownloadCadenceDecision,
-    PlainDownloadCadence,
-)
 from comfyui_docker_helper.container.runtime_events import (
     RuntimeDownloadAttemptStarted,
     RuntimeDownloadFailed,
@@ -30,6 +26,10 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeStaleCleanupPending,
     RuntimeWarningCategory,
     RuntimeWarningsAggregated,
+)
+from comfyui_docker_helper.container.transfer.cadence import (
+    DownloadCadenceDecision,
+    PlainDownloadCadence,
 )
 
 type RuntimeBackgroundEvent = (

@@ -25,7 +25,7 @@ from comfyui_docker_helper.config.validation.urls import (
     DownloaderName,
     is_reserved_file_target_name,
 )
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.transfer.events import (
     DownloadEvent,
     DownloadPlacementCompleted,
     DownloadPlacementStarted,

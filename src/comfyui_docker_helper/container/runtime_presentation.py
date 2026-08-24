@@ -11,7 +11,6 @@ from typing import TextIO
 from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.cli_output.policy import CliOutputSettings, OutputDetail
 from comfyui_docker_helper.cli_output.text import control_safe_text
-from comfyui_docker_helper.container.download_events import DownloadRetryReason
 from comfyui_docker_helper.container.runtime_events import (
     RuntimeDownloadAttemptStarted,
     RuntimeDownloadFailed,
@@ -47,6 +46,7 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimeWarningCategory,
     RuntimeWarningsAggregated,
 )
+from comfyui_docker_helper.container.transfer.events import DownloadRetryReason
 
 _RUNTIME_PHASE_LABELS = {
     RuntimePhase.RUNTIME_FILES_PREPARATION: "Preparing runtime files",

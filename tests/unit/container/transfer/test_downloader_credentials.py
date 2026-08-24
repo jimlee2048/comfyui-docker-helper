@@ -8,8 +8,8 @@ import pytest
 from comfyui_docker_helper.config.planning.build_plan import (
     DownloaderCredentialRoutePlan,
 )
-from comfyui_docker_helper.container import downloader_credentials as subject
-from comfyui_docker_helper.container.downloader_credentials import (
+from comfyui_docker_helper.container.transfer import credentials as subject
+from comfyui_docker_helper.container.transfer.credentials import (
     DownloaderCredentialError,
     MountedDownloaderCredentialPolicy,
 )

@@ -14,10 +14,6 @@ import pytest
 
 from comfyui_docker_helper.config.runtime.models import RuntimeConfig
 from comfyui_docker_helper.container import transfer_core
-from comfyui_docker_helper.container.download_events import DownloadTransferProgress
-from comfyui_docker_helper.container.downloader_credentials import (
-    DownloaderCredentialError,
-)
 from comfyui_docker_helper.container.runtime_download_state import (
     RuntimeDownloadStateWriter,
 )
@@ -50,6 +46,10 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeState,
     RuntimeStateError,
 )
+from comfyui_docker_helper.container.transfer.credentials import (
+    DownloaderCredentialError,
+)
+from comfyui_docker_helper.container.transfer.events import DownloadTransferProgress
 from comfyui_docker_helper.container.transfer_core import (
     DownloaderSettings,
     DownloadFilesError,

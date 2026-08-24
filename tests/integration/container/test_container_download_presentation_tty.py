@@ -15,7 +15,7 @@ def test_download_progress_activates_and_tears_down_on_a_real_terminal() -> None
     script = dedent(
         """
         from comfyui_docker_helper.cli_output import CliOutputSettings
-        from comfyui_docker_helper.container.download_events import (
+        from comfyui_docker_helper.container.transfer.events import (
             DownloadAttemptStarted,
             DownloadBackendName,
             DownloadBatchCompleted,

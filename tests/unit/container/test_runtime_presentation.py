@@ -10,12 +10,6 @@ from io import StringIO
 import pytest
 
 from comfyui_docker_helper.cli_output.policy import CliOutputSettings, OutputDetail
-from comfyui_docker_helper.container.download_events import (
-    DownloadBackendName,
-    DownloadRetryReason,
-    DownloadRetryScheduled,
-    DownloadTransferProgress,
-)
 from comfyui_docker_helper.container.runtime_event_delivery import (
     safe_runtime_event_sink,
 )
@@ -58,6 +52,12 @@ from comfyui_docker_helper.container.runtime_events import (
 from comfyui_docker_helper.container.runtime_presentation import (
     RuntimeDisplay,
     default_runtime_display,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadBackendName,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadTransferProgress,
 )
 
 

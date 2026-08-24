@@ -10,10 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.download_events import (
-    DownloadRetryReason,
-    DownloadTransferProgress,
-)
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloadSettings,
@@ -26,6 +22,10 @@ from comfyui_docker_helper.container.download_files import (
     TransportResumeRejected,
     TransportRetryable,
     TransportSuccess,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadRetryReason,
+    DownloadTransferProgress,
 )
 from comfyui_docker_helper.container.transfer_core import (
     DownloadCancelled,

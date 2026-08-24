@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.container import transfer_core
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.transfer.events import (
     DownloadEvent,
     DownloadPlacementCompleted,
     DownloadPlacementStarted,

@@ -5,11 +5,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from comfyui_docker_helper.container.download_events import (
-    DownloadBackendName,
-    DownloadRetryReason,
-    DownloadTransferProgress,
-)
 from comfyui_docker_helper.container.runtime_event_delivery import (
     RuntimeEventDelivery,
 )
@@ -23,6 +18,11 @@ from comfyui_docker_helper.container.runtime_events import (
     RuntimePresentationSaturated,
     RuntimeWarningCategory,
     RuntimeWarningsAggregated,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadBackendName,
+    DownloadRetryReason,
+    DownloadTransferProgress,
 )
 
 

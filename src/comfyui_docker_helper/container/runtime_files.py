@@ -20,31 +20,11 @@ from comfyui_docker_helper.config.validation.runtime_files import (
     validate_runtime_file_url,
 )
 from comfyui_docker_helper.config.validation.urls import DownloaderName
-from comfyui_docker_helper.container.attempt_coordinator import (
-    AttemptCancelled,
-    AttemptExhausted,
-    AttemptLocalFailure,
-    AttemptOrdinaryTerminal,
-    AttemptSucceeded,
-    coordinate_transfer_attempts,
-)
-from comfyui_docker_helper.container.download_events import (
-    DownloadAttemptStarted,
-    DownloadBackendName,
-    DownloadEvent,
-    DownloadRetryReason,
-    DownloadRetryScheduled,
-    DownloadTransferProgress,
-    DownloadVerificationStarted,
-)
 from comfyui_docker_helper.container.download_files import (
     Aria2Downloader,
     Aria2DownloaderFactory,
     DownloadBackendPreparer,
     HttpxDownloader,
-)
-from comfyui_docker_helper.container.downloader_credentials import (
-    DownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.runtime_event_delivery import (
     RuntimeBackgroundEventSink,
@@ -64,6 +44,26 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeState,
     RuntimeStateError,
     runtime_download_desired_identity_digest,
+)
+from comfyui_docker_helper.container.transfer.coordinator import (
+    AttemptCancelled,
+    AttemptExhausted,
+    AttemptLocalFailure,
+    AttemptOrdinaryTerminal,
+    AttemptSucceeded,
+    coordinate_transfer_attempts,
+)
+from comfyui_docker_helper.container.transfer.credentials import (
+    DownloaderCredentialPolicy,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadAttemptStarted,
+    DownloadBackendName,
+    DownloadEvent,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadTransferProgress,
+    DownloadVerificationStarted,
 )
 from comfyui_docker_helper.container.transfer_core import (
     Aria2DownloadSettings,

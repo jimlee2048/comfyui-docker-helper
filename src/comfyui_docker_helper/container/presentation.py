@@ -26,13 +26,25 @@ from comfyui_docker_helper.cli_output.policy import (
     detect_stream_capabilities,
 )
 from comfyui_docker_helper.cli_output.text import control_safe_text
-from comfyui_docker_helper.container.download_cadence import (
+from comfyui_docker_helper.container.helper_events import (
+    ComfyUIInstallCompleted,
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    CustomNodeCompleted,
+    CustomNodesInstallCompleted,
+    FinalManifestCompleted,
+    GitCustomNodeStarted,
+    RegistryCustomNodeStarted,
+)
+from comfyui_docker_helper.container.transfer.cadence import (
     DownloadCadenceDecision as _CadenceDecision,
 )
-from comfyui_docker_helper.container.download_cadence import (
+from comfyui_docker_helper.container.transfer.cadence import (
     PlainDownloadCadence as _PlainDownloadCadence,
 )
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadBackendName,
     DownloadBatchCompleted,
@@ -49,18 +61,6 @@ from comfyui_docker_helper.container.download_events import (
     DownloadTransferProgress,
     DownloadVerificationCompleted,
     DownloadVerificationStarted,
-)
-from comfyui_docker_helper.container.helper_events import (
-    ComfyUIInstallCompleted,
-    ContainerHelperEvent,
-    ContainerHelperPhase,
-    ContainerHelperPhaseCompleted,
-    ContainerHelperPhaseStarted,
-    CustomNodeCompleted,
-    CustomNodesInstallCompleted,
-    FinalManifestCompleted,
-    GitCustomNodeStarted,
-    RegistryCustomNodeStarted,
 )
 
 _RETRY_REASON_LABELS = {

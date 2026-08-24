@@ -16,7 +16,12 @@ from comfyui_docker_helper.cli_output.policy import (
     StreamCapabilities,
 )
 from comfyui_docker_helper.container import presentation as presentation_module
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.presentation import (
+    ContainerDownloadDisplay,
+    ContainerDownloadInvocation,
+    default_container_download_invocation,
+)
+from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadBackendName,
     DownloadBatchCompleted,
@@ -32,11 +37,6 @@ from comfyui_docker_helper.container.download_events import (
     DownloadTransferProgress,
     DownloadVerificationCompleted,
     DownloadVerificationStarted,
-)
-from comfyui_docker_helper.container.presentation import (
-    ContainerDownloadDisplay,
-    ContainerDownloadInvocation,
-    default_container_download_invocation,
 )
 from comfyui_docker_helper.container.transfer_core import DownloadCancelled
 

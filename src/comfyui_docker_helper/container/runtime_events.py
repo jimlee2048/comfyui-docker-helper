@@ -13,7 +13,7 @@ from comfyui_docker_helper.config.runtime.hooks import (
     RUNTIME_HOOK_SOURCE_NAMES,
 )
 from comfyui_docker_helper.config.validation.hooks import validate_hook_relative_path
-from comfyui_docker_helper.container.download_events import (
+from comfyui_docker_helper.container.transfer.events import (
     DownloadBackendName,
     DownloadRetryReason,
     DownloadRetryScheduled,

@@ -15,24 +15,6 @@ from comfyui_docker_helper.config.planning.build_plan import (
     HttpFilePlan,
     HttpxPlan,
 )
-from comfyui_docker_helper.container import attempt_coordinator
-from comfyui_docker_helper.container.download_events import (
-    DownloadAttemptStarted,
-    DownloadBackendName,
-    DownloadBatchCompleted,
-    DownloadEvent,
-    DownloadFinalVerificationCompleted,
-    DownloadFinalVerificationStarted,
-    DownloadItemCompleted,
-    DownloadItemStarted,
-    DownloadItemStatus,
-    DownloadPlacementCompleted,
-    DownloadPlacementStarted,
-    DownloadRetryReason,
-    DownloadRetryScheduled,
-    DownloadVerificationCompleted,
-    DownloadVerificationStarted,
-)
 from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
@@ -50,6 +32,24 @@ from comfyui_docker_helper.container.download_files import (
     TransportSuccess,
     file_download_plan,
     process_file_downloads,
+)
+from comfyui_docker_helper.container.transfer import coordinator as attempt_coordinator
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadAttemptStarted,
+    DownloadBackendName,
+    DownloadBatchCompleted,
+    DownloadEvent,
+    DownloadFinalVerificationCompleted,
+    DownloadFinalVerificationStarted,
+    DownloadItemCompleted,
+    DownloadItemStarted,
+    DownloadItemStatus,
+    DownloadPlacementCompleted,
+    DownloadPlacementStarted,
+    DownloadRetryReason,
+    DownloadRetryScheduled,
+    DownloadVerificationCompleted,
+    DownloadVerificationStarted,
 )
 from comfyui_docker_helper.container.transfer_core import (
     DownloadCancelled,

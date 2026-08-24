@@ -17,10 +17,6 @@ import httpx
 import pytest
 
 from comfyui_docker_helper.container import download_files as download_files_module
-from comfyui_docker_helper.container.download_events import (
-    DownloadRetryReason,
-    DownloadTransferProgress,
-)
 from comfyui_docker_helper.container.download_files import (
     Aria2DownloadSettings,
     DownloaderSettings,
@@ -33,8 +29,12 @@ from comfyui_docker_helper.container.download_files import (
     TransportRetryable,
     TransportSuccess,
 )
-from comfyui_docker_helper.container.downloader_credentials import (
+from comfyui_docker_helper.container.transfer.credentials import (
     DownloaderCredentialError,
+)
+from comfyui_docker_helper.container.transfer.events import (
+    DownloadRetryReason,
+    DownloadTransferProgress,
 )
 from comfyui_docker_helper.container.transfer_core import (
     FileTransferRequest,

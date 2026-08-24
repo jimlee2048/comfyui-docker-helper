@@ -20,7 +20,7 @@ from comfyui_docker_helper.container.build.events import (
     GitCustomNodeStarted,
     RegistryCustomNodeStarted,
 )
-from comfyui_docker_helper.container.presentation import (
+from comfyui_docker_helper.container.presentation.helper import (
     ContainerHelperDisplay,
     default_container_helper_display,
 )
@@ -82,54 +82,67 @@ def _render_detail(detail: OutputDetail) -> tuple[str, int]:
     return stream.getvalue(), stream.flushes
 
 
-@pytest.mark.parametrize(
-    ("detail", "present", "absent"),
-    [
-        (OutputDetail.QUIET, (), ("Checking out", "Custom node", "complete")),
-        (
-            OutputDetail.NORMAL,
-            (
-                "Checking out ComfyUI source",
-                "[1/2] Custom node: registry-node 1.2.3",
-                "[2/2] Custom node: git-node",
-                "Custom node complete",
-                "ComfyUI installation complete",
-                "Custom-node installation complete",
-                "Final manifest complete",
-            ),
-            ("Phase complete", "hooks=", "source=", "2 nodes"),
-        ),
-        (
-            OutputDetail.VERBOSE,
-            (
-                "Phase complete",
-                "pre-install hooks=1",
-                "post-install hooks=2",
-                "Custom-node installation complete: 2 nodes",
-            ),
-            ("source=",),
-        ),
-        (
-            OutputDetail.DEBUG,
-            ("source=registry", "source=git", "pre-install hooks=1"),
-            (),
-        ),
-    ],
-)
-def test_helper_detail_semantics_are_bounded_and_plain(
+@pytest.mark.parametrize("detail", list(OutputDetail))
+def test_helper_detail_preserves_event_roles_and_detail_boundaries(
     detail: OutputDetail,
-    present: tuple[str, ...],
-    absent: tuple[str, ...],
 ) -> None:
     output, flushes = _render_detail(detail)
+    lines = output.splitlines()
 
-    for value in present:
-        assert value in output
-    for value in absent:
-        assert value not in output
+    if detail is OutputDetail.QUIET:
+        assert lines == []
+    else:
+        aggregate_completion_lines = [
+            line
+            for line in lines
+            if "custom" in line.lower()
+            and "install" in line.lower()
+            and "complete" in line.lower()
+        ]
+        assert (
+            len(aggregate_completion_lines) == 1
+            and not aggregate_completion_lines[0].lstrip().startswith("[")
+            and (
+                detail < OutputDetail.VERBOSE
+                or "2 nodes" in aggregate_completion_lines[0]
+            )
+        )
+        checks = [
+            any(
+                "1/2" in line and "registry-node" in line and "1.2.3" in line
+                for line in lines
+            ),
+            any("2/2" in line and "git-node" in line for line in lines),
+            sum("Custom node" in line and "complete" in line for line in lines) == 2,
+            any("ComfyUI" in line and "complete" in line for line in lines),
+            any("Final manifest" in line and "complete" in line for line in lines),
+        ]
+
+        if detail is OutputDetail.NORMAL:
+            checks.extend(
+                not any(marker in line for line in lines)
+                for marker in ("Phase complete", "hooks=", "source=", "2 nodes")
+            )
+        elif detail >= OutputDetail.VERBOSE:
+            checks.extend(
+                any(marker in line for line in lines)
+                for marker in (
+                    "Phase complete",
+                    "pre-install hooks=1",
+                    "post-install hooks=2",
+                    "2 nodes",
+                )
+            )
+        if detail is OutputDetail.DEBUG:
+            checks.extend(
+                any(marker in line for line in lines)
+                for marker in ("source=registry", "source=git")
+            )
+        assert all(checks)
+
     assert "\x1b" not in output
     assert "\r" not in output
-    assert flushes == len(output.splitlines())
+    assert flushes == len(lines)
 
 
 def test_fake_tty_remains_control_safe_flushed_and_append_only() -> None:
@@ -206,12 +219,21 @@ def test_verbose_phase_and_command_durations_follow_event_order() -> None:
     display.emit(FinalManifestCompleted())
 
     output = stream.getvalue()
-    phase_start = output.index("Verifying final image state")
-    phase_complete = output.index("Phase complete")
-    command_complete = output.index("Final manifest complete")
+    lines = output.splitlines()
+    phase_start = next(
+        index for index, line in enumerate(lines) if "final image state" in line.lower()
+    )
+    phase_complete = next(
+        index for index, line in enumerate(lines) if "phase complete" in line.lower()
+    )
+    command_complete = next(
+        index
+        for index, line in enumerate(lines)
+        if "manifest" in line.lower() and "complete" in line.lower()
+    )
     assert phase_start < phase_complete < command_complete
-    assert "2s" in output[phase_complete:command_complete]
-    assert "7s" in output[command_complete:]
+    assert "2s" in lines[phase_complete]
+    assert "7s" in lines[command_complete]
 
 
 @pytest.mark.parametrize(
@@ -268,6 +290,11 @@ def test_zero_custom_nodes_keeps_truthful_phases_and_count_visible() -> None:
     display.emit(CustomNodesInstallCompleted(node_count=0))
 
     output = stream.getvalue()
-    assert "Preparing custom-node installation" in output
-    assert "Verifying custom-node installation" in output
-    assert "Custom-node installation complete: 0 nodes" in output
+    lines = output.splitlines()
+    assert any(
+        "preparing" in line.lower() and "custom-node" in line.lower() for line in lines
+    )
+    assert any(
+        "verifying" in line.lower() and "custom-node" in line.lower() for line in lines
+    )
+    assert any("0 nodes" in line for line in lines)

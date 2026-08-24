@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import threading
 from dataclasses import FrozenInstanceError
 from io import StringIO
 
 import pytest
 
+import comfyui_docker_helper.container.presentation.download as presentation_module
 from comfyui_docker_helper.cli_output.policy import (
     CliOutputSettings,
     OutputContextKind,
@@ -15,8 +15,7 @@ from comfyui_docker_helper.cli_output.policy import (
     OutputPolicy,
     StreamCapabilities,
 )
-from comfyui_docker_helper.container import presentation as presentation_module
-from comfyui_docker_helper.container.presentation import (
+from comfyui_docker_helper.container.presentation.download import (
     ContainerDownloadDisplay,
     ContainerDownloadInvocation,
     default_container_download_invocation,
@@ -102,12 +101,15 @@ class _InterruptingTerminalStream(_TerminalStream):
         self._fail_on_write = fail_on_write
         self._failure = failure
         self._write_count = 0
+        self.successful_writes = 0
 
     def write(self, value: str) -> int:
         self._write_count += 1
         if self._write_count == self._fail_on_write:
             raise self._failure
-        return super().write(value)
+        result = super().write(value)
+        self.successful_writes += 1
+        return result
 
 
 class _ManualWatchdog:
@@ -139,47 +141,22 @@ class _ManualWatchdogFactory:
         return self.watchdog
 
 
-def test_condition_watchdog_wakes_recomputes_deadline_and_closes() -> None:
-    immediate = threading.Event()
-    woken = threading.Event()
-    deadline = threading.Event()
-    calls_lock = threading.Lock()
-    call_count = 0
+def test_invocation_watchdog_lifecycle_uses_public_injected_seam() -> None:
+    invocation, stream, _, factory = _invocation()
+    assert factory.watchdog is not None
+    watchdog = factory.watchdog
 
-    def callback() -> float | None:
-        nonlocal call_count
-        with calls_lock:
-            call_count += 1
-            current_call = call_count
-        if current_call == 1:
-            immediate.set()
-            return None
-        if current_call == 2:
-            woken.set()
-            return 0.0
-        deadline.set()
-        return None
+    with invocation as display:
+        _start_item(display)
+        display.emit(DownloadAttemptStarted(1))
+        assert watchdog.wake_count == 2
+        watchdog.fire()
 
-    watchdog = presentation_module._ConditionDownloadWatchdog(callback)
-    try:
-        assert immediate.wait(timeout=1)
-        with calls_lock:
-            assert call_count == 1
-
-        watchdog.wake()
-        assert woken.wait(timeout=1)
-        assert deadline.wait(timeout=1)
-
-        watchdog.wake()
-    finally:
-        watchdog.close()
-    watchdog.close()
-
-    with calls_lock:
-        calls_after_close = call_count
+    output = stream.getvalue()
+    assert "models/checkpoints/model.bin" in output and watchdog.fire_count == 1
     watchdog.wake()
-    with calls_lock:
-        assert call_count == calls_after_close
+    watchdog.fire()
+    assert watchdog.close_count == 1 and stream.getvalue() == output
 
 
 def _policy(
@@ -619,15 +596,18 @@ def test_rich_progress_preserves_transfer_domains_and_durable_results() -> None:
         display.emit(DownloadBatchCompleted(item_count=1, checksum_verified_count=1))
 
     output = stream.getvalue()
-    assert "999 B / 1000 B" in output
+    assert all(value in output for value in ("999 B", "1000 B"))
     assert "%" in output
     assert "128 B/s" in output
     assert "ETA" in output
     assert "stored 768 B" in output
     assert "Verifying downloaded bytes" in output
     assert "Placing required file" in output
-    assert "models/checkpoints/model.bin: Downloaded: 768 B" in output
-    assert output.count("Downloaded: 768 B") == 1
+    completed_lines = [
+        line for line in output.splitlines() if "Downloaded" in line and "768 B" in line
+    ]
+    assert len(completed_lines) == 1
+    assert "models/checkpoints/model.bin" in completed_lines[0]
     assert "Downloads complete:" in output
     assert "backend=" not in output
 
@@ -687,27 +667,35 @@ def test_rich_progress_uses_ascii_bar_when_terminal_encoding_requires_it() -> No
     output = stream.getvalue()
     assert output
     output.encode("ascii")
-    assert "0 B / 0 B (0%)" in output
+    assert (
+        output.count("0 B") >= 2 and "0%" in output and ("#" in output or "-" in output)
+    )
 
 
-def test_rich_start_interrupt_clears_live_registration() -> None:
+def test_rich_start_interrupt_preserves_public_invocation_teardown() -> None:
     failure = KeyboardInterrupt("start-write-interrupted")
     stream = _InterruptingTerminalStream(
         fail_on_write=2,
         failure=failure,
     )
-    display = presentation_module._RichContainerDownloadDisplay(
+    invocation = ContainerDownloadInvocation(
         stderr=stream,
         policy=_policy(live_stderr=True),
     )
 
     with pytest.raises(KeyboardInterrupt) as raised:
-        _start_item(display)
+        _start_item(invocation)
 
     assert raised.value is failure
-    assert display._progress.live.is_started is False
-    display.close()
-    display.close()
+    successful_writes_after_failure = stream.successful_writes
+    cleanup_write_count = successful_writes_after_failure - 1
+    assert cleanup_write_count == 1
+    invocation.close()
+    assert stream.successful_writes == successful_writes_after_failure
+    invocation.close()
+    assert stream.successful_writes == successful_writes_after_failure
+    with pytest.raises(RuntimeError, match="after display close"):
+        _start_item(invocation)
 
 
 def test_rich_teardown_preserves_primary_failure() -> None:

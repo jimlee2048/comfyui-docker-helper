@@ -33,8 +33,10 @@ if sys.platform == "linux":
     from comfyui_docker_helper.container.build.manifest.observer import (
         emit_final_manifest,
     )
-    from comfyui_docker_helper.container.presentation import (
+    from comfyui_docker_helper.container.presentation.download import (
         default_container_download_invocation,
+    )
+    from comfyui_docker_helper.container.presentation.helper import (
         default_container_helper_display,
     )
     from comfyui_docker_helper.container.process.runners import (

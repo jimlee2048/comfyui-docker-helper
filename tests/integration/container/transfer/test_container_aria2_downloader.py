@@ -10,23 +10,21 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.download_files import (
-    Aria2Downloader,
+from comfyui_docker_helper.container.transfer.aria2 import Aria2Downloader
+from comfyui_docker_helper.container.transfer.core import (
     Aria2DownloadSettings,
+    DownloadCancelled,
     DownloaderSettings,
     DownloadFilesError,
+    FileTransferRequest,
     HttpxDownloadSettings,
+    StagingDisposition,
     TransportCancelled,
     TransportOrdinaryTerminal,
     TransportRequest,
     TransportResumeRejected,
     TransportRetryable,
     TransportSuccess,
-)
-from comfyui_docker_helper.container.transfer.core import (
-    DownloadCancelled,
-    FileTransferRequest,
-    StagingDisposition,
     transfer_file,
     transfer_staging_target,
 )

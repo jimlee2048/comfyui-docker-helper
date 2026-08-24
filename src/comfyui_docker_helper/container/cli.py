@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     )
 
 if sys.platform == "linux":
+    from comfyui_docker_helper.container.build.downloads import download_files
     from comfyui_docker_helper.container.build_plan_input import (
         MATERIALIZED_BUILD_PLAN_PATH,
         BuildPlanInputAdmission,
@@ -29,7 +30,6 @@ if sys.platform == "linux":
     from comfyui_docker_helper.container.custom_node_installer import (
         install_custom_nodes,
     )
-    from comfyui_docker_helper.container.download_files import download_files
     from comfyui_docker_helper.container.final_manifest import emit_final_manifest
     from comfyui_docker_helper.container.presentation import (
         default_container_download_invocation,

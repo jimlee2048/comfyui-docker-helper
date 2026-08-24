@@ -18,7 +18,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
 )
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
-from comfyui_docker_helper.container import download_files as download_files_module
+from comfyui_docker_helper.container.build import downloads as download_files_module
 from comfyui_docker_helper.container.helper_events import (
     ComfyUIInstallCompleted,
     ContainerHelperPhase,
@@ -28,7 +28,10 @@ from comfyui_docker_helper.container.helper_events import (
     RegistryCustomNodeStarted,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
-from comfyui_docker_helper.container.transfer.core import DownloadFilesError
+from comfyui_docker_helper.container.transfer.core import (
+    DownloadFilesError,
+    TransportSuccess,
+)
 from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
     DownloadBackendName,
@@ -465,7 +468,7 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
             del settings
             with item.sink.open_for_write() as output:
                 output.write(b"authenticated-plan")
-            return download_files_module.TransportSuccess(
+            return TransportSuccess(
                 length=len(b"authenticated-plan"),
                 namespace="httpx",
                 http_status=200,

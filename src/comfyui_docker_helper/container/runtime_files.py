@@ -20,12 +20,6 @@ from comfyui_docker_helper.config.validation.runtime_files import (
     validate_runtime_file_url,
 )
 from comfyui_docker_helper.config.validation.urls import DownloaderName
-from comfyui_docker_helper.container.download_files import (
-    Aria2Downloader,
-    Aria2DownloaderFactory,
-    DownloadBackendPreparer,
-    HttpxDownloader,
-)
 from comfyui_docker_helper.container.runtime_event_delivery import (
     RuntimeBackgroundEventSink,
 )
@@ -44,6 +38,10 @@ from comfyui_docker_helper.container.runtime_state import (
     RuntimeState,
     RuntimeStateError,
     runtime_download_desired_identity_digest,
+)
+from comfyui_docker_helper.container.transfer.aria2 import (
+    Aria2Downloader,
+    Aria2DownloaderFactory,
 )
 from comfyui_docker_helper.container.transfer.coordinator import (
     AttemptCancelled,
@@ -87,6 +85,8 @@ from comfyui_docker_helper.container.transfer.events import (
     DownloadTransferProgress,
     DownloadVerificationStarted,
 )
+from comfyui_docker_helper.container.transfer.httpx import HttpxDownloader
+from comfyui_docker_helper.container.transfer.models import DownloadBackendPreparer
 
 type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeDownloadStartupObserver = Callable[[], None]

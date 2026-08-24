@@ -16,22 +16,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-from comfyui_docker_helper.container import download_files as download_files_module
-from comfyui_docker_helper.container.download_files import (
+from comfyui_docker_helper.container.transfer import httpx as httpx_module
+from comfyui_docker_helper.container.transfer.core import (
     Aria2DownloadSettings,
     DownloaderSettings,
     DownloadFilesError,
-    HttpxDownloader,
+    FileTransferRequest,
     HttpxDownloadSettings,
+    StagingDisposition,
     TransportCancelled,
     TransportOrdinaryTerminal,
     TransportRequest,
     TransportRetryable,
     TransportSuccess,
-)
-from comfyui_docker_helper.container.transfer.core import (
-    FileTransferRequest,
-    StagingDisposition,
     transfer_file,
     transfer_staging_target,
 )
@@ -42,6 +39,7 @@ from comfyui_docker_helper.container.transfer.events import (
     DownloadRetryReason,
     DownloadTransferProgress,
 )
+from comfyui_docker_helper.container.transfer.httpx import HttpxDownloader
 
 
 class IteratorStream(httpx.AsyncByteStream):
@@ -669,7 +667,7 @@ def test_httpx_cancel_between_task_creation_and_registration_is_observed(
         downloader.cancel()
         return original_run(coroutine)
 
-    monkeypatch.setattr(download_files_module.asyncio, "run", cancel_then_run)
+    monkeypatch.setattr(httpx_module.asyncio, "run", cancel_then_run)
 
     result = downloader.download(_request(tmp_path), _settings())
 

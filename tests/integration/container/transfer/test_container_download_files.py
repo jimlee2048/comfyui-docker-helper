@@ -15,14 +15,22 @@ from comfyui_docker_helper.config.planning.build_plan import (
     HttpFilePlan,
     HttpxPlan,
 )
-from comfyui_docker_helper.container.download_files import (
+from comfyui_docker_helper.container.build.downloads import (
+    FileDownloadItem,
+    FileDownloadPlan,
+    file_download_plan,
+    process_file_downloads,
+)
+from comfyui_docker_helper.container.transfer import coordinator as attempt_coordinator
+from comfyui_docker_helper.container.transfer.core import (
     Aria2DownloadSettings,
+    DownloadCancelled,
     DownloaderSettings,
     DownloadFilesError,
     DownloadStatus,
-    FileDownloadItem,
-    FileDownloadPlan,
     HttpxDownloadSettings,
+    TerminalTransferDownloadFilesError,
+    TransferDownloadFilesError,
     TransportCancelled,
     TransportDiagnostic,
     TransportOrdinaryTerminal,
@@ -30,14 +38,6 @@ from comfyui_docker_helper.container.download_files import (
     TransportRequest,
     TransportRetryable,
     TransportSuccess,
-    file_download_plan,
-    process_file_downloads,
-)
-from comfyui_docker_helper.container.transfer import coordinator as attempt_coordinator
-from comfyui_docker_helper.container.transfer.core import (
-    DownloadCancelled,
-    TerminalTransferDownloadFilesError,
-    TransferDownloadFilesError,
 )
 from comfyui_docker_helper.container.transfer.events import (
     DownloadAttemptStarted,
@@ -342,7 +342,7 @@ def test_build_item_postcondition_failure_does_not_emit_completion(
         raise DownloadFilesError("postcondition failed")
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.container.download_files.verify_required_final",
+        "comfyui_docker_helper.container.build.downloads.verify_required_final",
         fail_postcondition,
     )
 

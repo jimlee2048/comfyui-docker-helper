@@ -10,7 +10,7 @@ from comfyui_docker_helper.config.diagnostics import (
     SourceLocation,
     SourceReference,
 )
-from comfyui_docker_helper.container.runtime_diagnostics import (
+from comfyui_docker_helper.container.runtime.diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
 )
@@ -136,7 +136,9 @@ def test_warning_renderer_retains_code_and_severity(
         ),
     )
 
-    lines = capsys.readouterr().err.splitlines()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
     assert lines[0] == "Runtime configuration warnings:"
     assert len(lines) == 3
     assert lines[1].startswith("[system.workspace] ")
@@ -198,4 +200,6 @@ def test_empty_diagnostics_do_not_render_a_header(
 ) -> None:
     render_runtime_diagnostics("unused\nheader", ())
 
-    assert capsys.readouterr().err == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

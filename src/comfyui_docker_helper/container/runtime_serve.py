@@ -24,6 +24,10 @@ from comfyui_docker_helper.config import (
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.readiness import wait_for_comfyui_readiness
+from comfyui_docker_helper.container.runtime.diagnostics import (
+    format_runtime_diagnostics,
+    render_runtime_diagnostics,
+)
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeEvent,
     RuntimeGenerationAdmitted,
@@ -32,6 +36,9 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeGenerationStopCause,
     RuntimeGenerationStopped,
     RuntimeGenerationStopping,
+)
+from comfyui_docker_helper.container.runtime.presentation import (
+    default_runtime_display,
 )
 from comfyui_docker_helper.container.runtime.state import RUNTIME_STATE_PATH
 from comfyui_docker_helper.container.runtime_control import (
@@ -43,10 +50,6 @@ from comfyui_docker_helper.container.runtime_control_server import RuntimeContro
 from comfyui_docker_helper.container.runtime_controller import (
     RuntimeController,
     RuntimeControllerError,
-)
-from comfyui_docker_helper.container.runtime_diagnostics import (
-    format_runtime_diagnostics,
-    render_runtime_diagnostics,
 )
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStarter,
@@ -82,9 +85,6 @@ from comfyui_docker_helper.container.runtime_logging import (
     RuntimeLoggingBroker,
     RuntimeLoggingFactory,
     open_runtime_logging_broker,
-)
-from comfyui_docker_helper.container.runtime_presentation import (
-    default_runtime_display,
 )
 from comfyui_docker_helper.container.runtime_secret_session import (
     RuntimeDownloaderCredentialPolicy,

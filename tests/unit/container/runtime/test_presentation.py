@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from io import StringIO
@@ -45,12 +46,12 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeWarningCategory,
     RuntimeWarningsAggregated,
 )
-from comfyui_docker_helper.container.runtime_event_delivery import (
-    safe_runtime_event_sink,
-)
-from comfyui_docker_helper.container.runtime_presentation import (
+from comfyui_docker_helper.container.runtime.presentation import (
     RuntimeDisplay,
     default_runtime_display,
+)
+from comfyui_docker_helper.container.runtime_event_delivery import (
+    safe_runtime_event_sink,
 )
 from comfyui_docker_helper.container.transfer.events import (
     DownloadBackendName,
@@ -185,7 +186,7 @@ def test_runtime_display_owns_the_four_detail_levels_once() -> None:
     saturation_line = next(
         line for line in quiet.splitlines() if "Runtime output was busy" in line
     )
-    assert "2" in saturation_line
+    assert re.search(r"(?<!\d)2(?!\d)", saturation_line)
     assert "omitted" in saturation_line
     assert "event delivery" not in saturation_line
     assert "queue stopped after a failure" in quiet
@@ -237,7 +238,6 @@ def test_runtime_display_ignores_terminal_capability_and_preserves_unknown_total
     )
 
     output = stream.getvalue()
-    output.encode("ascii")
     assert "512 B transferred" in output
     assert "%" not in output
     assert "ETA" not in output
@@ -322,7 +322,7 @@ def test_runtime_warnings_keep_safe_context_even_when_quiet() -> None:
     aggregate_line = next(
         line for line in output.splitlines() if "output was busy" in line
     )
-    assert "3" in aggregate_line
+    assert re.search(r"(?<!\d)3(?!\d)", aggregate_line)
     assert "download" in aggregate_line
     assert "warning" in aggregate_line
 

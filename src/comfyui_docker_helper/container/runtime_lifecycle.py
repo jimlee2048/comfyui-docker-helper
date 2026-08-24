@@ -32,6 +32,10 @@ from comfyui_docker_helper.container.readiness import (
     ReadinessError,
     wait_for_comfyui_readiness,
 )
+from comfyui_docker_helper.container.runtime.diagnostics import (
+    format_runtime_diagnostics,
+    render_runtime_diagnostics,
+)
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeEvent,
     RuntimeGenerationStopCause,
@@ -45,10 +49,6 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeSshStatus,
 )
 from comfyui_docker_helper.container.runtime.state import RuntimeStateError
-from comfyui_docker_helper.container.runtime_diagnostics import (
-    format_runtime_diagnostics,
-    render_runtime_diagnostics,
-)
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
     RuntimeDownloads,

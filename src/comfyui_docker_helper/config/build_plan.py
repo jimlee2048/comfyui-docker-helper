@@ -67,16 +67,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_registry_id,
     validate_sha256_digest,
 )
-from comfyui_docker_helper.config.canonical_request import (
-    CanonicalRequestGraph,
-    CustomNodeRequest,
-    DownloaderCredentialRouteRequest,
-    GitCredentialRouteRequest,
-    GitNodeRequest,
-    HttpFileRequest,
-    LocalFileRequest,
-    RegistryNodeRequest,
-)
 from comfyui_docker_helper.config.canonical_resolver import (
     entries_satisfy_request,
 )
@@ -100,6 +90,16 @@ from comfyui_docker_helper.config.credentials.secrets import (
     downloader_credential_secret_target,
 )
 from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
+from comfyui_docker_helper.config.planning.request import (
+    CanonicalRequestGraph,
+    CustomNodeRequest,
+    DownloaderCredentialRouteRequest,
+    GitCredentialRouteRequest,
+    GitNodeRequest,
+    HttpFileRequest,
+    LocalFileRequest,
+    RegistryNodeRequest,
+)
 from comfyui_docker_helper.config.planning.target import CudaBackendAdapter
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.hooks import (

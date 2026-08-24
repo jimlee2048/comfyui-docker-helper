@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
+from tests.build_plan_support import accepted_resolution, final_config, request_graph
 
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
@@ -17,7 +18,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     RegistryRequestIdentity,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.canonical_request import (
+from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestError,
     DesiredResolution,
     PlanningReleaseInputs,
@@ -26,7 +27,6 @@ from comfyui_docker_helper.config.canonical_request import (
     request_stability,
     uv_provider_tag,
 )
-from tests.build_plan_support import accepted_resolution, final_config, request_graph
 
 DIGEST = f"sha256:{'a' * 64}"
 COMMIT = "1" * 40

@@ -28,13 +28,13 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_oci_repository,
     validate_oci_tag,
 )
-from comfyui_docker_helper.config.canonical_request import SelectorStability
 from comfyui_docker_helper.config.credentials.process_policy import (
     noninteractive_git_environment,
 )
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
+from comfyui_docker_helper.config.planning.request import SelectorStability
 from comfyui_docker_helper.config.validation.registry import (
     registry_resource_identity,
 )

@@ -40,16 +40,16 @@ from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
     uv_image_version_matches_tag,
 )
-from comfyui_docker_helper.config.canonical_request import (
-    DesiredResolution,
-    SelectorStability,
-    request_keys,
-)
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
 from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.request import (
+    DesiredResolution,
+    SelectorStability,
+    request_keys,
+)
 from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
 
 type LockEntryKey = tuple[str, ...]

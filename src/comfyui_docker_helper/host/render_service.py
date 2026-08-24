@@ -33,12 +33,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
-from comfyui_docker_helper.config.canonical_request import (
-    CanonicalRequestError,
-    FileRequest,
-    LocalFileRequest,
-    build_canonical_request_graph,
-)
 from comfyui_docker_helper.config.canonical_resolver import (
     AcceptedCanonicalLock,
     CanonicalResolutionError,
@@ -49,6 +43,12 @@ from comfyui_docker_helper.config.canonical_resolver import (
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.request import (
+    CanonicalRequestError,
+    FileRequest,
+    LocalFileRequest,
+    build_canonical_request_graph,
+)
 from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     consume_regular_absolute_file,

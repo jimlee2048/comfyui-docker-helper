@@ -19,15 +19,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     canonical_entry_key,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.canonical_request import (
-    CanonicalRequestGraph,
-    PlanningReleaseInputs,
-    SelectorStability,
-    comfyui_request,
-    comfyui_requirements_request,
-    request_stability,
-    uv_oci_request,
-)
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
     CanonicalAcquisitionError,
@@ -39,6 +30,15 @@ from comfyui_docker_helper.config.canonical_resolver import (
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
+)
+from comfyui_docker_helper.config.planning.request import (
+    CanonicalRequestGraph,
+    PlanningReleaseInputs,
+    SelectorStability,
+    comfyui_request,
+    comfyui_requirements_request,
+    request_stability,
+    uv_oci_request,
 )
 from comfyui_docker_helper.config.validation.hooks import hook_lock_identity
 from comfyui_docker_helper.exact_ledger import PIP_VERSION

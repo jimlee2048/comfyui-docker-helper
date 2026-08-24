@@ -8,7 +8,7 @@ The planning path has four distinct authorities. They must not be collapsed into
 
 ### Canonical request graph
 
-The [canonical request graph](../../src/comfyui_docker_helper/config/canonical_request.py) is immutable and process-local. It normalizes the effective configuration, target, release inputs, admitted user-authored package requirements, and checkout-owned upstream requirements into one source for desired resolution and BuildPlan phase projection. User-authored marker text remains part of image-configuration identity, while only members active for the fixed target enter ownership and marker-free resolver requests. It is deliberately not a serialized public artifact.
+The [canonical request graph](../../src/comfyui_docker_helper/config/planning/request.py) is immutable and process-local. It normalizes the effective configuration, target, release inputs, admitted user-authored package requirements, and checkout-owned upstream requirements into one source for desired resolution and BuildPlan phase projection. User-authored marker text remains part of image-configuration identity, while only members active for the fixed target enter ownership and marker-free resolver requests. It is deliberately not a serialized public artifact.
 
 Resolution code may satisfy the graph's desired identities, but it must not invent phase behavior. BuildPlan construction may project phase behavior, but it must use the same graph rather than reconstructing intent from lock rows. This shared origin prevents resolver and image execution from becoming parallel planners.
 

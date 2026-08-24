@@ -30,7 +30,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     UvToolLockEntry,
     canonical_lock_from_entries,
 )
-from comfyui_docker_helper.config.canonical_request import DesiredResolution
 from comfyui_docker_helper.config.canonical_resolver import (
     AcquiredCanonicalEntries,
     CanonicalResolutionError,
@@ -44,6 +43,7 @@ from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
 from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.request import DesiredResolution
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 
 DIGEST_A = f"sha256:{'a' * 64}"

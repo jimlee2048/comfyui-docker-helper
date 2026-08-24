@@ -11,8 +11,8 @@ import pytest
 import tomli_w
 from pydantic import ValidationError
 
+import comfyui_docker_helper.config.planning.request as canonical_request_module
 from comfyui_docker_helper.config import build_plan as build_plan_module
-from comfyui_docker_helper.config import canonical_request as canonical_request_module
 from comfyui_docker_helper.config.authored.models import FinalConfig
 from comfyui_docker_helper.config.authored.service import load_validate_config_result
 from comfyui_docker_helper.config.authored.validation.domains import (

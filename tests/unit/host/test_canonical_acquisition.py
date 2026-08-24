@@ -24,7 +24,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     UvImageLockEntry,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.canonical_request import DesiredResolution
 from comfyui_docker_helper.config.canonical_resolver import (
     CanonicalAcquisitionError,
     CanonicalResolutionError,
@@ -34,6 +33,7 @@ from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
 from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.request import DesiredResolution
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,

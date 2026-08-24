@@ -44,12 +44,12 @@ from comfyui_docker_helper.config.canonical_lock import (
     canonical_lock_from_entries,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.canonical_request import (
+from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
+from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestGraph,
     build_canonical_request_graph,
     comfyui_requirements_request,
 )
-from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.planning.requirements import (
     merge_pytorch_requirements,
 )

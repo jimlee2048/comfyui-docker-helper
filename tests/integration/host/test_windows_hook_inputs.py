@@ -11,16 +11,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.host.planning.providers.local import (
-    FilesystemLocalExecutableIdentityProvider,
+from comfyui_docker_helper.host.context.runtime_hooks import (
+    RuntimeHookInputError,
+    discover_runtime_hook_inputs,
 )
-from comfyui_docker_helper.host.render_service import (
+from comfyui_docker_helper.host.context.service import (
     HostRenderServiceError,
     admit_build_hook_source,
 )
-from comfyui_docker_helper.host.runtime_hook_inputs import (
-    RuntimeHookInputError,
-    discover_runtime_hook_inputs,
+from comfyui_docker_helper.host.planning.providers.local import (
+    FilesystemLocalExecutableIdentityProvider,
 )
 
 pytestmark = pytest.mark.skipif(

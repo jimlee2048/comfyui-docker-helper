@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from build import BuildBackendException
 
-from comfyui_docker_helper.host import release_wheel
-from comfyui_docker_helper.host.release_wheel import (
+from comfyui_docker_helper.host.context import wheel as release_wheel
+from comfyui_docker_helper.host.context.wheel import (
     CanonicalWheelError,
     build_canonical_wheel,
 )

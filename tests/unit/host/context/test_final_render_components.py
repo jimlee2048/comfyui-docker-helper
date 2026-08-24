@@ -11,6 +11,13 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import ValidationError
+from tests.build_plan_support import (
+    CANONICAL_WORKSPACE_PROFILE_CONTENT,
+    accepted_resolution,
+    build_plan,
+    canonical_wheel,
+    final_config,
+)
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.authored.models import FinalConfig
@@ -42,13 +49,6 @@ from comfyui_docker_helper.rendering.final_materializer import (
 )
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
-)
-from tests.build_plan_support import (
-    CANONICAL_WORKSPACE_PROFILE_CONTENT,
-    accepted_resolution,
-    build_plan,
-    canonical_wheel,
-    final_config,
 )
 
 _VALID_SSH_KEY = (

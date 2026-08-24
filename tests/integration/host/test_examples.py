@@ -10,7 +10,7 @@ from comfyui_docker_helper.config import load_validate_config_result
 from comfyui_docker_helper.config.validation.hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
 )
-from comfyui_docker_helper.host.runtime_hook_inputs import (
+from comfyui_docker_helper.host.context.runtime_hooks import (
     discover_runtime_hook_inputs,
 )
 

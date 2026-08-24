@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.host import render_service
-from comfyui_docker_helper.host.render_service import HostRenderServiceError
+from comfyui_docker_helper.host.context import service as render_service
+from comfyui_docker_helper.host.context.service import HostRenderServiceError
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",

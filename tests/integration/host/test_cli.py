@@ -28,6 +28,7 @@ from comfyui_docker_helper.host.buildx import (
     BuildxOutputPlan,
     FileSecretBinding,
 )
+from comfyui_docker_helper.host.context.service import HostRenderServiceError
 from comfyui_docker_helper.host.credentials import session as secret_session_module
 from comfyui_docker_helper.host.credentials.session import (
     GIT_CREDENTIAL_SESSION_ENV,
@@ -42,7 +43,6 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseCompleted,
     HostSubphaseStarted,
 )
-from comfyui_docker_helper.host.render_service import HostRenderServiceError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
 )

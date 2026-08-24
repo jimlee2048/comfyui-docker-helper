@@ -103,7 +103,7 @@ jobs:
           import os
           from pathlib import Path
 
-          from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
+          from comfyui_docker_helper.host.context.wheel import build_canonical_wheel
 
           candidates = tuple(Path(os.environ["DIST_DIR"]).glob("*.whl"))
           if len(candidates) != 1:

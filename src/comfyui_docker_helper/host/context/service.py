@@ -56,6 +56,15 @@ from comfyui_docker_helper.filesystem.admission import (
     operate_regular_absolute_file,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
+from comfyui_docker_helper.host.context.hook_paths import (
+    lexical_hook_source_root,
+    observed_path_is_real_directory,
+    observed_path_is_reparse,
+)
+from comfyui_docker_helper.host.context.runtime_hooks import (
+    RuntimeHookInputError,
+    discover_runtime_hook_inputs,
+)
 from comfyui_docker_helper.host.events import (
     HostPhase,
     HostPhaseCompleted,
@@ -66,11 +75,6 @@ from comfyui_docker_helper.host.events import (
     HostWorkflowEvent,
 )
 from comfyui_docker_helper.host.filesystem.private_state import create_private_directory
-from comfyui_docker_helper.host.hook_paths import (
-    lexical_hook_source_root,
-    observed_path_is_real_directory,
-    observed_path_is_reparse,
-)
 from comfyui_docker_helper.host.planning.acquisition import (
     LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
 )
@@ -81,10 +85,6 @@ from comfyui_docker_helper.host.planning.authority import (
     stable_comfyui_entry,
     stable_comfyui_requirements_entry,
     uv_catalog_descriptor_digest,
-)
-from comfyui_docker_helper.host.runtime_hook_inputs import (
-    RuntimeHookInputError,
-    discover_runtime_hook_inputs,
 )
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (

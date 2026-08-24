@@ -9,6 +9,7 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
+from tests.project_paths import PROJECT_ROOT
 
 from comfyui_docker_helper.release_artifacts import (
     PACKAGE_ROOT,
@@ -18,7 +19,6 @@ from comfyui_docker_helper.release_artifacts import (
     release_projection_files,
 )
 from comfyui_docker_helper.version import package_version
-from tests.project_paths import PROJECT_ROOT
 
 INLINE_README = """\
 `comfyui-docker-helper` (`cdh`) is an independent, unofficial command-line

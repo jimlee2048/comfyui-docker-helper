@@ -133,7 +133,7 @@ def test_host_workflow_live_teardown_and_final_result_on_real_tty() -> None:
             "HostPhaseCompleted, HostPhaseStarted, HostWorkflowSucceeded",
             "from comfyui_docker_helper.host.presentation import "
             "default_host_presenter",
-            "from comfyui_docker_helper.host.render_service import PlanningOptions",
+            "from comfyui_docker_helper.host.context.service import PlanningOptions",
             "presenter = default_host_presenter()",
             "workflow = presenter.workflow('Preparing build context')",
             "workflow.emit(HostPhaseStarted(HostPhase.CONFIGURATION_VALIDATION))",

@@ -24,7 +24,7 @@ from comfyui_docker_helper.config.validation.hooks import (
     hook_lock_identity,
     validate_hook_relative_path,
 )
-from comfyui_docker_helper.host.hook_paths import (
+from comfyui_docker_helper.host.context.hook_paths import (
     lexical_hook_source_root,
     observed_path_is_real_directory,
     observed_path_is_reparse,

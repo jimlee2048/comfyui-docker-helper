@@ -45,6 +45,13 @@ from comfyui_docker_helper.host.buildx import (
     FileSecretBinding,
     build_image_with_buildx,
 )
+from comfyui_docker_helper.host.context.service import (
+    HostRenderServiceError,
+    PlanningOptions,
+    admit_build_hook_source,
+    prepare_render_context,
+)
+from comfyui_docker_helper.host.context.wheel import CanonicalWheelError
 from comfyui_docker_helper.host.events import (
     HostPhase,
     HostPhaseCompleted,
@@ -58,13 +65,6 @@ from comfyui_docker_helper.host.planning.authority import default_planning_provi
 from comfyui_docker_helper.host.presentation import (
     HostPresenter,
     default_host_presenter,
-)
-from comfyui_docker_helper.host.release_wheel import CanonicalWheelError
-from comfyui_docker_helper.host.render_service import (
-    HostRenderServiceError,
-    PlanningOptions,
-    admit_build_hook_source,
-    prepare_render_context,
 )
 from comfyui_docker_helper.host.workflow_display import HostWorkflowDisplay
 

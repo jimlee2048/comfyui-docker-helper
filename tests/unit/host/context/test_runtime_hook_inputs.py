@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.host import hook_paths
-from comfyui_docker_helper.host.runtime_hook_inputs import (
+from comfyui_docker_helper.host.context import hook_paths
+from comfyui_docker_helper.host.context.runtime_hooks import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
 )

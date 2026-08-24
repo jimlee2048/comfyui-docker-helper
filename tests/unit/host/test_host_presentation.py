@@ -25,10 +25,10 @@ from comfyui_docker_helper.config.diagnostics import (
 )
 from comfyui_docker_helper.host import presentation as presentation_module
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
+from comfyui_docker_helper.host.context.service import PlanningOptions
 from comfyui_docker_helper.host.events import HostPhase
 from comfyui_docker_helper.host.path_display import display_host_path
 from comfyui_docker_helper.host.presentation import HostPresenter
-from comfyui_docker_helper.host.render_service import PlanningOptions
 from comfyui_docker_helper.host.workflow_display import (
     HostCompletedPhase,
     HostWorkflowSummary,

@@ -42,10 +42,11 @@ from comfyui_docker_helper.config.planning.resolver import (
 )
 from comfyui_docker_helper.config.validation.hooks import hook_lock_identity
 from comfyui_docker_helper.exact_ledger import PIP_VERSION
+from comfyui_docker_helper.host.context.hook_paths import lexical_hook_source_root
+from comfyui_docker_helper.host.context.wheel import build_canonical_wheel
 from comfyui_docker_helper.host.credentials.git_process import (
     GitCredentialProcessBinding,
 )
-from comfyui_docker_helper.host.hook_paths import lexical_hook_source_root
 from comfyui_docker_helper.host.planning.acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
@@ -69,7 +70,6 @@ from comfyui_docker_helper.host.planning.providers.python import (
 from comfyui_docker_helper.host.planning.providers.registry import (
     HttpRegistryNodeIdentityProvider,
 )
-from comfyui_docker_helper.host.release_wheel import build_canonical_wheel
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.version import package_version
 

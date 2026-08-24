@@ -20,11 +20,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
     RegistryNodePlan,
 )
 from comfyui_docker_helper.container import comfyui_installer, custom_node_installer
-from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallError
-from comfyui_docker_helper.container.custom_node_installer import (
-    CustomNodeInstallError,
-)
-from comfyui_docker_helper.container.helper_events import (
+from comfyui_docker_helper.container.build.events import (
     ContainerHelperEvent,
     ContainerHelperPhase,
     ContainerHelperPhaseCompleted,
@@ -33,6 +29,10 @@ from comfyui_docker_helper.container.helper_events import (
     CustomNodesInstallCompleted,
     GitCustomNodeStarted,
     RegistryCustomNodeStarted,
+)
+from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallError
+from comfyui_docker_helper.container.custom_node_installer import (
+    CustomNodeInstallError,
 )
 from comfyui_docker_helper.container.process.runners import (
     ContainerCommandError,

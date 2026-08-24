@@ -17,19 +17,19 @@ from comfyui_docker_helper.config.planning.requirements import (
     parse_manager_requirements,
 )
 from comfyui_docker_helper.container import comfyui_installer
+from comfyui_docker_helper.container.build.events import (
+    ComfyUIInstallCompleted,
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+)
 from comfyui_docker_helper.container.comfyui_installer import (
     ComfyUIInstallError,
     _checkout_exact,
     _verify_checkout,
     _verify_floor_ancestry,
     observe_application_state,
-)
-from comfyui_docker_helper.container.helper_events import (
-    ComfyUIInstallCompleted,
-    ContainerHelperEvent,
-    ContainerHelperPhase,
-    ContainerHelperPhaseCompleted,
-    ContainerHelperPhaseStarted,
 )
 from comfyui_docker_helper.container.process.runners import (
     ContainerCommandError,

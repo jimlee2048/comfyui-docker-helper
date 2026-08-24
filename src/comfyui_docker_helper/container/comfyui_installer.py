@@ -35,7 +35,7 @@ from comfyui_docker_helper.container.application_installer import (
     install_python_extras,
     verify_application_environment,
 )
-from comfyui_docker_helper.container.helper_events import (
+from comfyui_docker_helper.container.build.events import (
     ComfyUIInstallCompleted,
     ContainerHelperEvent,
     ContainerHelperPhase,

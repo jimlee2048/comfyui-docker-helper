@@ -16,16 +16,16 @@ from comfyui_docker_helper.cli_settings import (
 from comfyui_docker_helper.errors import ApplicationError
 
 if TYPE_CHECKING:
-    from comfyui_docker_helper.container.build_plan_input import (
+    from comfyui_docker_helper.container.build.admission import (
         BuildPlanInputAdmission,
     )
 
 if sys.platform == "linux":
-    from comfyui_docker_helper.container.build.downloads import download_files
-    from comfyui_docker_helper.container.build_plan_input import (
+    from comfyui_docker_helper.container.build.admission import (
         MATERIALIZED_BUILD_PLAN_PATH,
         BuildPlanInputAdmission,
     )
+    from comfyui_docker_helper.container.build.downloads import download_files
     from comfyui_docker_helper.container.comfyui_installer import install_comfyui
     from comfyui_docker_helper.container.custom_node_installer import (
         install_custom_nodes,

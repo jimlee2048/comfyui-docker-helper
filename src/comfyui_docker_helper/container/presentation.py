@@ -26,7 +26,7 @@ from comfyui_docker_helper.cli_output.policy import (
     detect_stream_capabilities,
 )
 from comfyui_docker_helper.cli_output.text import control_safe_text
-from comfyui_docker_helper.container.helper_events import (
+from comfyui_docker_helper.container.build.events import (
     ComfyUIInstallCompleted,
     ContainerHelperEvent,
     ContainerHelperPhase,

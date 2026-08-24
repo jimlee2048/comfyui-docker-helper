@@ -97,6 +97,7 @@ markers = [
     "slow: tests that require --run-slow authorization",
 ]
 testpaths = ["tests"]
+norecursedirs = [".*", "_darcs", "CVS", "dist", "node_modules", "venv"]
 
 [tool.ruff]
 target-version = "py312"

@@ -48,9 +48,16 @@ from comfyui_docker_helper.config.planning.build_plan import ProtectedRequiremen
 from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestMember,
 )
-from comfyui_docker_helper.container.build_plan_input import (
+from comfyui_docker_helper.container.build.admission import (
     FinalCoreProbeInput,
     FinalManifestInput,
+)
+from comfyui_docker_helper.container.build.events import (
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    FinalManifestCompleted,
 )
 from comfyui_docker_helper.container.comfyui_installer import (
     capture_application_requirements,
@@ -65,13 +72,6 @@ from comfyui_docker_helper.container.custom_node_installer import (
 from comfyui_docker_helper.container.final_manifest_writer import (
     FinalManifestWriteError,
     write_final_manifest_file,
-)
-from comfyui_docker_helper.container.helper_events import (
-    ContainerHelperEvent,
-    ContainerHelperPhase,
-    ContainerHelperPhaseCompleted,
-    ContainerHelperPhaseStarted,
-    FinalManifestCompleted,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.container.transfer.core import verify_required_final

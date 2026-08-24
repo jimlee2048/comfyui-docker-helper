@@ -16,10 +16,10 @@ from comfyui_docker_helper.config.planning.build_plan import (
     HttpFilePlan,
     build_plan_digest,
 )
-from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
+from comfyui_docker_helper.container.build import admission as build_plan_input_module
 from comfyui_docker_helper.container.build import downloads as download_files_module
-from comfyui_docker_helper.container.helper_events import (
+from comfyui_docker_helper.container.build.events import (
     ComfyUIInstallCompleted,
     ContainerHelperPhase,
     ContainerHelperPhaseCompleted,

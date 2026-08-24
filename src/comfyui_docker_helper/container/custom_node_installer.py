@@ -50,6 +50,16 @@ from comfyui_docker_helper.config.validation.selectors import is_safe_git_target
 from comfyui_docker_helper.container.application_installer import (
     application_build_environment,
 )
+from comfyui_docker_helper.container.build.events import (
+    ContainerHelperEvent,
+    ContainerHelperPhase,
+    ContainerHelperPhaseCompleted,
+    ContainerHelperPhaseStarted,
+    CustomNodeCompleted,
+    CustomNodesInstallCompleted,
+    GitCustomNodeStarted,
+    RegistryCustomNodeStarted,
+)
 from comfyui_docker_helper.container.comfyui_installer import (
     capture_application_requirements,
     capture_manager_authority,
@@ -60,16 +70,6 @@ from comfyui_docker_helper.container.comfyui_installer import (
 )
 from comfyui_docker_helper.container.git_credential_helper import (
     GIT_CREDENTIAL_BUILD_PLAN_DIGEST_ENV,
-)
-from comfyui_docker_helper.container.helper_events import (
-    ContainerHelperEvent,
-    ContainerHelperPhase,
-    ContainerHelperPhaseCompleted,
-    ContainerHelperPhaseStarted,
-    CustomNodeCompleted,
-    CustomNodesInstallCompleted,
-    GitCustomNodeStarted,
-    RegistryCustomNodeStarted,
 )
 from comfyui_docker_helper.container.process.runners import (
     ContainerRuntime,

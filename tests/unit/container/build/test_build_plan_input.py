@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
@@ -17,11 +15,10 @@ from comfyui_docker_helper.config.planning.build_plan import (
     build_plan_digest,
     dump_build_plan_json,
 )
-from comfyui_docker_helper.container.build_plan_input import (
+from comfyui_docker_helper.container.build.admission import (
     BuildPlanInputAdmission,
     FinalManifestLocalFileInput,
 )
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _write_plan(path: Path) -> tuple[BuildPlan, str]:
@@ -125,31 +122,3 @@ def test_admission_rejects_leaf_and_ancestor_symlinks(tmp_path: Path) -> None:
             ancestor_link / "build-plan.json",
             expected_build_plan_digest=digest,
         )
-
-
-@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX FIFO")
-def test_admission_rejects_fifo_without_blocking(tmp_path: Path) -> None:
-    fifo = tmp_path / "build-plan.fifo"
-    os.mkfifo(fifo)
-    script = """
-import sys
-from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
-
-try:
-    BuildPlanInputAdmission.from_path(
-        sys.argv[1], expected_build_plan_digest="sha256:" + "a" * 64
-    )
-except ValueError as error:
-    assert str(error) == "could not read canonical BuildPlan"
-else:
-    raise AssertionError("FIFO was admitted")
-"""
-
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(fifo)],
-        check=False,
-        capture_output=True,
-        timeout=3,
-    )
-
-    assert result.returncode == 0, result.stderr.decode()

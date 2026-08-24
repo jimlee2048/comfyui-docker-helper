@@ -29,17 +29,17 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestMember,
 )
 from comfyui_docker_helper.container import final_manifest as final_manifest_service
-from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission
-from comfyui_docker_helper.container.final_manifest import FinalManifestError
-from comfyui_docker_helper.container.final_manifest_writer import (
-    FinalManifestWriteError,
-)
-from comfyui_docker_helper.container.helper_events import (
+from comfyui_docker_helper.container.build.admission import BuildPlanInputAdmission
+from comfyui_docker_helper.container.build.events import (
     ContainerHelperEvent,
     ContainerHelperPhase,
     ContainerHelperPhaseCompleted,
     ContainerHelperPhaseStarted,
     FinalManifestCompleted,
+)
+from comfyui_docker_helper.container.final_manifest import FinalManifestError
+from comfyui_docker_helper.container.final_manifest_writer import (
+    FinalManifestWriteError,
 )
 from tests.build_plan_support import accepted_resolution, build_plan, final_config
 from tests.final_manifest_support import manifest_for_plan

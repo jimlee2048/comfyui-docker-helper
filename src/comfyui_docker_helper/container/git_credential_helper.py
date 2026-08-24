@@ -18,7 +18,7 @@ from comfyui_docker_helper.config.credentials.git_protocol import (
     evaluate_git_credential_request,
     render_git_credential_response,
 )
-from comfyui_docker_helper.container.build_plan_input import (
+from comfyui_docker_helper.container.build.admission import (
     MATERIALIZED_BUILD_PLAN_PATH,
     BuildPlanInputAdmission,
 )

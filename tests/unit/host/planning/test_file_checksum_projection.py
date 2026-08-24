@@ -16,7 +16,10 @@ from tests.build_plan_support import (
 )
 
 from comfyui_docker_helper.config.authored.models import FinalConfig
-from comfyui_docker_helper.config.build_plan import BuildPlan, dump_build_plan_json
+from comfyui_docker_helper.config.planning.build_plan import (
+    BuildPlan,
+    dump_build_plan_json,
+)
 from comfyui_docker_helper.config.planning.canonical_lock import (
     dump_canonical_lock_toml,
 )

@@ -5,7 +5,9 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from comfyui_docker_helper.config.build_plan import DownloaderCredentialRoutePlan
+from comfyui_docker_helper.config.planning.build_plan import (
+    DownloaderCredentialRoutePlan,
+)
 from comfyui_docker_helper.container import downloader_credentials as subject
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialError,

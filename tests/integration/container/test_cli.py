@@ -12,7 +12,10 @@ from typer.testing import CliRunner
 from comfyui_docker_helper.cli import app
 from comfyui_docker_helper.cli_output import CliOutputSettings, OutputDetail
 from comfyui_docker_helper.config.authored.models import FinalConfig
-from comfyui_docker_helper.config.build_plan import HttpFilePlan, build_plan_digest
+from comfyui_docker_helper.config.planning.build_plan import (
+    HttpFilePlan,
+    build_plan_digest,
+)
 from comfyui_docker_helper.container import build_plan_input as build_plan_input_module
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import download_files as download_files_module

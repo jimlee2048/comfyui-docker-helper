@@ -8,7 +8,11 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.final_manifest import (
+    FinalBuildCheckId,
+    final_build_check_ids,
+)
+from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
     BuildPlan,
     CustomNodesPhase,
@@ -22,10 +26,6 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_hook_identities,
     manifest_binding,
     parse_build_plan_json,
-)
-from comfyui_docker_helper.config.final_manifest import (
-    FinalBuildCheckId,
-    final_build_check_ids,
 )
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.filesystem.admission import read_regular_absolute_file

@@ -10,13 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.config.build_plan import (
-    BuildPlan,
-    LocalFilePlan,
-    build_plan_digest,
-    dump_build_plan_json,
-    manifest_binding,
-)
 from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.config.final_manifest import (
     DistributionVersionEvidence,
@@ -24,6 +17,13 @@ from comfyui_docker_helper.config.final_manifest import (
     ProtectedRequirementEvidence,
     dump_final_manifest,
     final_build_check_ids,
+)
+from comfyui_docker_helper.config.planning.build_plan import (
+    BuildPlan,
+    LocalFilePlan,
+    build_plan_digest,
+    dump_build_plan_json,
+    manifest_binding,
 )
 from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestMember,

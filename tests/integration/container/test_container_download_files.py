@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     Aria2Plan,
     DownloaderPlan,
     FilesPhase,

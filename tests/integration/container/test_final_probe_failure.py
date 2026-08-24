@@ -8,7 +8,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config.build_plan import build_plan_digest
+from comfyui_docker_helper.config.planning.build_plan import build_plan_digest
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.container import final_manifest as final_manifest_service
 from comfyui_docker_helper.container.build_plan_input import BuildPlanInputAdmission

@@ -11,7 +11,7 @@ _EXPORTS = {
         "comfyui_docker_helper.config.runtime_config",
         "BAKED_RUNTIME_CONFIG_PATH",
     ),
-    "BuildPlan": ("comfyui_docker_helper.config.build_plan", "BuildPlan"),
+    "BuildPlan": ("comfyui_docker_helper.config.planning.build_plan", "BuildPlan"),
     "CanonicalLock": (
         "comfyui_docker_helper.config.planning.canonical_lock",
         "CanonicalLock",
@@ -47,7 +47,7 @@ _EXPORTS = {
         "MOUNTED_RUNTIME_CONFIG_PATH",
     ),
     "ManifestBinding": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "ManifestBinding",
     ),
     "ReconcilePurpose": (
@@ -71,15 +71,15 @@ _EXPORTS = {
         "RuntimeSystemSshConfig",
     ),
     "build_plan_digest": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "build_plan_digest",
     ),
     "construct_build_plan": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "construct_build_plan",
     ),
     "dump_build_plan_json": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "dump_build_plan_json",
     ),
     "dump_canonical_lock_toml": (
@@ -103,11 +103,11 @@ _EXPORTS = {
         "load_validate_config_result",
     ),
     "manifest_binding": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "manifest_binding",
     ),
     "parse_build_plan_json": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "parse_build_plan_json",
     ),
     "parse_canonical_lock_toml": (

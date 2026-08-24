@@ -17,7 +17,7 @@ from comfyui_docker_helper.config.authored.models import FinalConfig
 from comfyui_docker_helper.config.authored.validation.structure import (
     validate_final_config_structure,
 )
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,

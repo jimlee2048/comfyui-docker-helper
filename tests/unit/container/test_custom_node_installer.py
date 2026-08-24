@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
+from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
     CustomNodePlan,
     GitCredentialRoutePlan,
@@ -18,7 +19,6 @@ from comfyui_docker_helper.config.build_plan import (
     HookPlan,
     RegistryNodePlan,
 )
-from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.container import comfyui_installer, custom_node_installer
 from comfyui_docker_helper.container.comfyui_installer import ComfyUIInstallError
 from comfyui_docker_helper.container.custom_node_installer import (

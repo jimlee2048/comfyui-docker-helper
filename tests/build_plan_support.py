@@ -18,7 +18,7 @@ from comfyui_docker_helper.config.authored.validation.semantics import (
 from comfyui_docker_helper.config.authored.validation.structure import (
     validate_final_config_structure,
 )
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     RuntimePlanningProvenance,
     construct_build_plan,

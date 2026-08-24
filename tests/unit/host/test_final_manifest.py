@@ -7,7 +7,6 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.build_plan import BuildPlan
 from comfyui_docker_helper.config.final_manifest import (
     ComfyCliEvidence,
     DistributionVersionEvidence,
@@ -19,6 +18,7 @@ from comfyui_docker_helper.config.final_manifest import (
     dump_final_manifest,
     parse_final_manifest,
 )
+from comfyui_docker_helper.config.planning.build_plan import BuildPlan
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )

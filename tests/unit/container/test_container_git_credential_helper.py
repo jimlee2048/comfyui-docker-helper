@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
     build_plan_digest,
     dump_build_plan_json,

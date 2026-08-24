@@ -16,11 +16,11 @@ from comfyui_docker_helper.config.authored.validation.domains import (
 from comfyui_docker_helper.config.authored.validation.semantics import (
     validate_final_config_semantics,
 )
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
+from comfyui_docker_helper.config.planning.build_plan import (
     GitNodePlan,
     HookPlan,
 )
-from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,

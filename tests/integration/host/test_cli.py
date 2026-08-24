@@ -14,11 +14,11 @@ from typer.testing import CliRunner
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.cli import app
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
+from comfyui_docker_helper.config.planning.build_plan import (
     DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,
 )
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
 from comfyui_docker_helper.config.planning.resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup

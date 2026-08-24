@@ -16,7 +16,6 @@ from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.config.build_plan import ProtectedRequirementPlan
 from comfyui_docker_helper.config.final_manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
@@ -45,6 +44,7 @@ from comfyui_docker_helper.config.final_manifest import (
     VersionEvidence,
     dump_final_manifest,
 )
+from comfyui_docker_helper.config.planning.build_plan import ProtectedRequirementPlan
 from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestMember,
 )

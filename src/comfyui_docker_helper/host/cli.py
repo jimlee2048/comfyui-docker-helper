@@ -27,10 +27,6 @@ from comfyui_docker_helper.config.authored.service import (
     ConfigurationServiceError,
     load_validate_config_result,
 )
-from comfyui_docker_helper.config.build_plan import (
-    downloader_credential_secret_ids,
-    git_credential_secret_ids,
-)
 from comfyui_docker_helper.config.credentials.git import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
 )
@@ -38,6 +34,10 @@ from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.planning.build_plan import (
+    downloader_credential_secret_ids,
+    git_credential_secret_ids,
+)
 from comfyui_docker_helper.config.validation.values import is_argv_value
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,

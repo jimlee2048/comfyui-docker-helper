@@ -21,13 +21,13 @@ from comfyui_docker_helper.config.authored.publication import (
 from comfyui_docker_helper.config.authored.service import (
     ConfigurationResult,
 )
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     LocalFilePlan,
     RuntimePlanningProvenance,
     construct_build_plan,
 )
-from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.canonical_lock import (
     CanonicalLock,
     CanonicalLockError,

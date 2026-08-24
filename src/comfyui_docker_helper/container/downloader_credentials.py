@@ -26,7 +26,9 @@ from comfyui_docker_helper.filesystem.admission import (
 )
 
 if TYPE_CHECKING:
-    from comfyui_docker_helper.config.build_plan import DownloaderCredentialRoutePlan
+    from comfyui_docker_helper.config.planning.build_plan import (
+        DownloaderCredentialRoutePlan,
+    )
 
 
 class DownloaderCredentialError(Exception):

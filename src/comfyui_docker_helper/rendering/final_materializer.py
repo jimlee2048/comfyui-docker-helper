@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 import tomli_w
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     HookPlan,
     HttpFilePlan,

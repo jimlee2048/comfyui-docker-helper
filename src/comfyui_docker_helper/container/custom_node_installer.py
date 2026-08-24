@@ -19,15 +19,6 @@ from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.authored.validation.domains import is_git_source_url
-from comfyui_docker_helper.config.build_plan import (
-    ApplicationPhase,
-    CustomNodePlan,
-    CustomNodesPhase,
-    GitNodePlan,
-    PyTorchGroupPlan,
-    RegistryNodePlan,
-    managed_build_constraints_bytes,
-)
 from comfyui_docker_helper.config.credentials.process_policy import (
     GitCredentialPolicyError,
     git_credential_environment,
@@ -35,6 +26,15 @@ from comfyui_docker_helper.config.credentials.process_policy import (
 from comfyui_docker_helper.config.custom_node_inventory import (
     CustomNodeInventory,
     custom_node_inventory,
+)
+from comfyui_docker_helper.config.planning.build_plan import (
+    ApplicationPhase,
+    CustomNodePlan,
+    CustomNodesPhase,
+    GitNodePlan,
+    PyTorchGroupPlan,
+    RegistryNodePlan,
+    managed_build_constraints_bytes,
 )
 from comfyui_docker_helper.config.planning.canonical_lock import normalized_registry_id
 from comfyui_docker_helper.config.planning.requirements import (

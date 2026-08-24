@@ -25,7 +25,6 @@ from comfyui_docker_helper.cli_output.policy import (
     detect_stream_capabilities,
 )
 from comfyui_docker_helper.cli_output.text import control_safe_text
-from comfyui_docker_helper.config.build_plan import BuildPlan, build_plan_digest
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticComparison,
@@ -33,6 +32,10 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticPath,
     DiagnosticSeverity,
     SourceLocation,
+)
+from comfyui_docker_helper.config.planning.build_plan import (
+    BuildPlan,
+    build_plan_digest,
 )
 from comfyui_docker_helper.config.planning.resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan

@@ -16,7 +16,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
     ManagerCapabilityPlan,
     ToolchainPhase,

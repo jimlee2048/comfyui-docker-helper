@@ -19,7 +19,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
     ToolchainPhase,
     managed_runtime_constraints_bytes,

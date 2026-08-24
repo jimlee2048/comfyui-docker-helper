@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.config.build_plan import ApplicationPhase
+from comfyui_docker_helper.config.planning.build_plan import ApplicationPhase
 from comfyui_docker_helper.config.planning.requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
     parse_comfyui_requirements,

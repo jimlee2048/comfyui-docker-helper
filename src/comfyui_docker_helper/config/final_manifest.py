@@ -12,7 +12,11 @@ from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from comfyui_docker_helper.config.build_plan import ManifestBinding
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.custom_node_inventory import CustomNodeInventory
+from comfyui_docker_helper.config.file_checksum import (
+    validate_canonical_file_checksum,
+)
+from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_exact_distribution_version,
     validate_exact_stable_distribution_version,
     validate_exact_stable_version,
@@ -24,10 +28,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_oci_repository,
     validate_oci_tag,
     validate_sha256_digest,
-)
-from comfyui_docker_helper.config.custom_node_inventory import CustomNodeInventory
-from comfyui_docker_helper.config.file_checksum import (
-    validate_canonical_file_checksum,
 )
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.hooks import (

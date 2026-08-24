@@ -7,7 +7,7 @@ import hashlib
 import pytest
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     INVALID_CANONICAL_LOCK_MESSAGE,
     MAX_COMFYUI_REQUIREMENTS_BYTES,
     ApplicationExtrasLockEntry,

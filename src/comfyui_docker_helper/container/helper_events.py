@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_exact_registry_version,
     validate_registry_id,
 )

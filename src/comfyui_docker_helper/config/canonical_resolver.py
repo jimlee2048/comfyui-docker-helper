@@ -10,7 +10,8 @@ from typing import Protocol
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     CanonicalLock,
     CanonicalLockEntry,
@@ -40,7 +41,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
     uv_image_version_matches_tag,
 )
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )

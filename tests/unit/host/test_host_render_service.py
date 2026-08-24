@@ -13,7 +13,14 @@ import pytest
 
 import comfyui_docker_helper.config.planning.request as canonical_request_module
 from comfyui_docker_helper.config.authored.service import load_validate_config_result
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import (
+    AcquiredCanonicalEntries,
+    CanonicalAcquisitionError,
+    LockPolicy,
+    ReconcilePurpose,
+)
+from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     CanonicalLock,
     CanonicalLockEntry,
@@ -42,13 +49,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
-from comfyui_docker_helper.config.canonical_resolver import (
-    AcquiredCanonicalEntries,
-    CanonicalAcquisitionError,
-    LockPolicy,
-    ReconcilePurpose,
-)
-from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.request import CanonicalRequestError
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
 from comfyui_docker_helper.host import render_service as render_service_module

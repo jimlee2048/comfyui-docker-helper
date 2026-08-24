@@ -6,7 +6,9 @@ import hashlib
 
 import pytest
 
-from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
+from comfyui_docker_helper.config.planning.canonical_lock import (
+    DirectPythonRequestMember,
+)
 from comfyui_docker_helper.config.planning.requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
     ComfyUIRequirementsError,

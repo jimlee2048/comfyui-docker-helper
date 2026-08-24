@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 from tests.build_plan_support import accepted_resolution, final_config, request_graph
 
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequirementsRequestIdentity,
     DirectGitRequestIdentity,

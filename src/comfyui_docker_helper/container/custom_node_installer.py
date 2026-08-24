@@ -28,7 +28,6 @@ from comfyui_docker_helper.config.build_plan import (
     RegistryNodePlan,
     managed_build_constraints_bytes,
 )
-from comfyui_docker_helper.config.canonical_lock import normalized_registry_id
 from comfyui_docker_helper.config.credentials.process_policy import (
     GitCredentialPolicyError,
     git_credential_environment,
@@ -37,6 +36,7 @@ from comfyui_docker_helper.config.custom_node_inventory import (
     CustomNodeInventory,
     custom_node_inventory,
 )
+from comfyui_docker_helper.config.planning.canonical_lock import normalized_registry_id
 from comfyui_docker_helper.config.planning.requirements import (
     ComfyUIRequirementsError,
     ParsedComfyUIRequirements,

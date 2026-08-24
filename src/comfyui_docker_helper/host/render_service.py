@@ -27,12 +27,6 @@ from comfyui_docker_helper.config.build_plan import (
     RuntimePlanningProvenance,
     construct_build_plan,
 )
-from comfyui_docker_helper.config.canonical_lock import (
-    CanonicalLock,
-    CanonicalLockError,
-    dump_canonical_lock_toml,
-    parse_canonical_lock_toml,
-)
 from comfyui_docker_helper.config.canonical_resolver import (
     AcceptedCanonicalLock,
     CanonicalResolutionError,
@@ -42,6 +36,12 @@ from comfyui_docker_helper.config.canonical_resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.planning.canonical_lock import (
+    CanonicalLock,
+    CanonicalLockError,
+    dump_canonical_lock_toml,
+    parse_canonical_lock_toml,
+)
 from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestError,

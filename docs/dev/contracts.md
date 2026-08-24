@@ -14,7 +14,7 @@ Resolution code may satisfy the graph's desired identities, but it must not inve
 
 ### Canonical lock
 
-The [canonical lock](../../src/comfyui_docker_helper/config/canonical_lock.py) is strict schema-v1 host reconciliation state. It records exact external or content results. Resolver-backed domains retain the normalized request identity needed to decide whether each result is still reusable. Content-owned local executables use their canonical relative path and digest and deliberately have no resolver request. A content-locked local build file likewise owns a target-keyed SHA-256 row, while an unlocked local build file creates no content row. Request identity and acquired result remain separate concepts.
+The [canonical lock](../../src/comfyui_docker_helper/config/planning/canonical_lock.py) is strict schema-v1 host reconciliation state. It records exact external or content results. Resolver-backed domains retain the normalized request identity needed to decide whether each result is still reusable. Content-owned local executables use their canonical relative path and digest and deliberately have no resolver request. A content-locked local build file likewise owns a target-keyed SHA-256 row, while an unlocked local build file creates no content row. Request identity and acquired result remain separate concepts.
 
 The lock is complete for its typed direct-input domains, but it is not an installation script or a complete transitive artifact lock. A resolved user package result preserves matching request identity and an exact top-level distribution result while remaining artifact-free. Container helpers do not read the lock, and materialized `config.lock.toml` is excluded from Buildx input.
 
@@ -273,7 +273,7 @@ The renderer and final materializer obtain the package-provided static SSH-condi
 
 ### Baked and mounted hooks have different identity authority
 
-Baked runtime hooks cross [`runtime_hook_inputs.py`](../../src/comfyui_docker_helper/host/runtime_hook_inputs.py), the [`canonical lock`](../../src/comfyui_docker_helper/config/canonical_lock.py), the [`BuildPlan`](../../src/comfyui_docker_helper/config/build_plan.py), and [`final materialization`](../../src/comfyui_docker_helper/rendering/final_materializer.py) as selected content-identified image inputs. Mounted hooks are external deployment inputs and never enter that identity chain.
+Baked runtime hooks cross [`runtime_hook_inputs.py`](../../src/comfyui_docker_helper/host/runtime_hook_inputs.py), the [`canonical lock`](../../src/comfyui_docker_helper/config/planning/canonical_lock.py), the [`BuildPlan`](../../src/comfyui_docker_helper/config/build_plan.py), and [`final materialization`](../../src/comfyui_docker_helper/rendering/final_materializer.py) as selected content-identified image inputs. Mounted hooks are external deployment inputs and never enter that identity chain.
 
 [`runtime_hooks.py`](../../src/comfyui_docker_helper/container/runtime_hooks.py) discovers the two sources without turning them into an override overlay: baked hooks run first, followed by mounted hooks, with lexical ordering inside each source and phase. Both sources are trusted executable code. Content identity for baked bytes does not sandbox their effects or make their filesystem, network, package, or process behavior reproducible.
 

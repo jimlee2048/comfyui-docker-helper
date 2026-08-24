@@ -23,7 +23,8 @@ from comfyui_docker_helper.config.build_plan import (
     RuntimePlanningProvenance,
     construct_build_plan,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
     ComfyCliRequestIdentity,
@@ -44,7 +45,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     canonical_lock_from_entries,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestGraph,
     build_canonical_request_graph,

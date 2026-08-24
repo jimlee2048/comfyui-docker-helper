@@ -11,7 +11,7 @@ from comfyui_docker_helper.config.build_plan import (
     CustomNodePlan,
     RegistryNodePlan,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_exact_registry_version,
     validate_git_commit,
     validate_git_url,

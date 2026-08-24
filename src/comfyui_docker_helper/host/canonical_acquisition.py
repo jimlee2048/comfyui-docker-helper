@@ -19,7 +19,13 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import (
+    AcquiredCanonicalEntries,
+    CanonicalAcquisitionError,
+    entries_satisfy_request,
+    rebuild_canonical_entries,
+)
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
     CanonicalLockEntry,
@@ -51,12 +57,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
     uv_image_version_matches_tag,
     validate_exact_distribution_version,
-)
-from comfyui_docker_helper.config.canonical_resolver import (
-    AcquiredCanonicalEntries,
-    CanonicalAcquisitionError,
-    entries_satisfy_request,
-    rebuild_canonical_entries,
 )
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,

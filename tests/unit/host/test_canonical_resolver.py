@@ -8,7 +8,16 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import (
+    AcquiredCanonicalEntries,
+    CanonicalResolutionError,
+    DeltaKind,
+    LockPolicy,
+    ReconcilePurpose,
+    entries_satisfy_request,
+    reconcile_canonical_lock,
+)
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
     ComfyCliRequestIdentity,
@@ -29,15 +38,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     UvImageLockEntry,
     UvToolLockEntry,
     canonical_lock_from_entries,
-)
-from comfyui_docker_helper.config.canonical_resolver import (
-    AcquiredCanonicalEntries,
-    CanonicalResolutionError,
-    DeltaKind,
-    LockPolicy,
-    ReconcilePurpose,
-    entries_satisfy_request,
-    reconcile_canonical_lock,
 )
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,

@@ -24,12 +24,12 @@ from docker import DockerClient, from_env
 from docker.errors import DockerException
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.canonical_lock import (
-    validate_oci_repository,
-    validate_oci_tag,
-)
 from comfyui_docker_helper.config.credentials.process_policy import (
     noninteractive_git_environment,
+)
+from comfyui_docker_helper.config.planning.canonical_lock import (
+    validate_oci_repository,
+    validate_oci_tag,
 )
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,

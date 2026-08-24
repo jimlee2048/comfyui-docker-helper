@@ -13,11 +13,11 @@ _EXPORTS = {
     ),
     "BuildPlan": ("comfyui_docker_helper.config.build_plan", "BuildPlan"),
     "CanonicalLock": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "CanonicalLock",
     ),
     "CanonicalLockError": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "CanonicalLockError",
     ),
     "CanonicalResolutionError": (
@@ -83,11 +83,11 @@ _EXPORTS = {
         "dump_build_plan_json",
     ),
     "dump_canonical_lock_toml": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "dump_canonical_lock_toml",
     ),
     "load_canonical_lock": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "load_canonical_lock",
     ),
     "load_runtime_config": (
@@ -111,7 +111,7 @@ _EXPORTS = {
         "parse_build_plan_json",
     ),
     "parse_canonical_lock_toml": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "parse_canonical_lock_toml",
     ),
 }

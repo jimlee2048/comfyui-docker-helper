@@ -44,7 +44,8 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.build_plan import (
     construct_build_plan as _construct_build_plan,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
+from comfyui_docker_helper.config.planning.canonical_lock import (
     CanonicalLock,
     DirectPythonRequestIdentity,
     LocalFileLockEntry,
@@ -52,7 +53,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     UvToolLockEntry,
     canonical_lock_from_entries,
 )
-from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )

@@ -12,7 +12,9 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
+from comfyui_docker_helper.config.planning.canonical_lock import (
+    DirectPythonRequestMember,
+)
 from comfyui_docker_helper.config.validation.requirements import (
     target_marker_environment as _target_marker_environment,
 )

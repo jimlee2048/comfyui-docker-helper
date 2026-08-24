@@ -20,14 +20,14 @@ from comfyui_docker_helper.config.build_plan import (
     GitNodePlan,
     HookPlan,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
+from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
+from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectGitLockEntry,
     DirectGitRequestIdentity,
     canonical_lock_from_entries,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
-from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
 from comfyui_docker_helper.container import custom_node_installer
 from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,

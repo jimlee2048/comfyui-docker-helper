@@ -22,7 +22,30 @@ from comfyui_docker_helper.config.authored.validation.domains import (
     is_aria2_argument_value,
     is_managed_environment_name,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import (
+    entries_satisfy_request,
+)
+from comfyui_docker_helper.config.credentials.downloader import (
+    DownloaderCredentialContextError,
+    canonicalize_downloader_credential_context,
+    parse_downloader_credential_context,
+    parse_downloader_request_url,
+    select_downloader_credential_context,
+)
+from comfyui_docker_helper.config.credentials.git import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
+    GitCredentialContextError,
+    canonicalize_git_credential_context,
+    git_credential_secret_id,
+    git_credential_secret_target,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
+    FinalSecretRef,
+    downloader_credential_secret_id,
+    downloader_credential_secret_target,
+)
+from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
     CanonicalLock,
@@ -67,29 +90,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_registry_id,
     validate_sha256_digest,
 )
-from comfyui_docker_helper.config.canonical_resolver import (
-    entries_satisfy_request,
-)
-from comfyui_docker_helper.config.credentials.downloader import (
-    DownloaderCredentialContextError,
-    canonicalize_downloader_credential_context,
-    parse_downloader_credential_context,
-    parse_downloader_request_url,
-    select_downloader_credential_context,
-)
-from comfyui_docker_helper.config.credentials.git import (
-    GIT_CREDENTIAL_VALUE_MAX_BYTES,
-    GitCredentialContextError,
-    canonicalize_git_credential_context,
-    git_credential_secret_id,
-    git_credential_secret_target,
-)
-from comfyui_docker_helper.config.credentials.secrets import (
-    FinalSecretRef,
-    downloader_credential_secret_id,
-    downloader_credential_secret_target,
-)
-from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestGraph,
     CustomNodeRequest,

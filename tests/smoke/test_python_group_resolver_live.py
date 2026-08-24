@@ -7,13 +7,13 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 from tests.acceptance_scenarios import RELEASE_PYTHON_PROFILES
 
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ComfyCliRequestIdentity,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     PyTorchRequestIdentity,
 )
-from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.planning.requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
     parse_comfyui_requirements,

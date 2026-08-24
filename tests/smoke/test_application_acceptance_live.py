@@ -29,7 +29,7 @@ from comfyui_docker_helper.config.build_plan import (
     manifest_binding,
     parse_build_plan_json,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )

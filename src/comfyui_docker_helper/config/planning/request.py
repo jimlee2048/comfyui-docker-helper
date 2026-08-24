@@ -16,7 +16,14 @@ from comfyui_docker_helper.config.authored.models import (
 from comfyui_docker_helper.config.authored.validation.result import (
     FinalConfigDomainResult,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.credentials.downloader import (
+    canonicalize_downloader_credential_context,
+)
+from comfyui_docker_helper.config.credentials.git import (
+    canonicalize_git_credential_context,
+)
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
     ComfyUIRequirementsLockEntry,
@@ -33,13 +40,6 @@ from comfyui_docker_helper.config.canonical_lock import (
     ResolverRequestIdentity,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.credentials.downloader import (
-    canonicalize_downloader_credential_context,
-)
-from comfyui_docker_helper.config.credentials.git import (
-    canonicalize_git_credential_context,
-)
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.config.planning.requirements import (
     COMFYUI_REQUIREMENTS_PATH,
     ComfyUIRequirementsError,

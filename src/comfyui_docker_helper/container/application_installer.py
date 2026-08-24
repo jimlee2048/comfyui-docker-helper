@@ -24,7 +24,7 @@ from comfyui_docker_helper.config.build_plan import (
     ToolchainPhase,
     managed_runtime_constraints_bytes,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     pytorch_core_version_matches_channel,
 )
 from comfyui_docker_helper.config.planning.pytorch import (

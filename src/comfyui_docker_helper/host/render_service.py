@@ -68,6 +68,7 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
     HostWorkflowEvent,
 )
+from comfyui_docker_helper.host.filesystem.private_state import create_private_directory
 from comfyui_docker_helper.host.hook_paths import (
     lexical_hook_source_root,
     observed_path_is_real_directory,
@@ -81,7 +82,6 @@ from comfyui_docker_helper.host.planning_authority import (
     stable_comfyui_requirements_entry,
     uv_catalog_descriptor_digest,
 )
-from comfyui_docker_helper.host.private_state import create_private_directory
 from comfyui_docker_helper.host.runtime_hook_inputs import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,

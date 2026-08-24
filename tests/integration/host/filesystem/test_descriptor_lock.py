@@ -8,7 +8,7 @@ from typing import Protocol
 
 import pytest
 
-from comfyui_docker_helper.host.descriptor_lock import (
+from comfyui_docker_helper.host.filesystem.descriptor_lock import (
     acquire_descriptor_lock,
     release_descriptor_lock,
 )

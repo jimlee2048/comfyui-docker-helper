@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.filesystem import windows as _windows_files
-from comfyui_docker_helper.host import private_state
+from comfyui_docker_helper.host.filesystem import private_state
 
 
 # POSIX private state proves restrictive modes and caller-owned descriptor lifetimes.

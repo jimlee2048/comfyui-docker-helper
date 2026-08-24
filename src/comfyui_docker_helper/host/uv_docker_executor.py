@@ -22,7 +22,7 @@ from python_on_whales.exceptions import DockerException, NoSuchContainer, NoSuch
 
 from comfyui_docker_helper.errors import ApplicationError
 from comfyui_docker_helper.exact_ledger import UV_IMAGE_REPOSITORY
-from comfyui_docker_helper.host.private_state import (
+from comfyui_docker_helper.host.filesystem.private_state import (
     create_private_directory,
     create_private_file,
 )

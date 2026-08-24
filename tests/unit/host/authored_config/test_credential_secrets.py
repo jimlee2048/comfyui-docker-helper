@@ -1,8 +1,7 @@
 """Credential Secret value and stable-ID contracts."""
 
 import pytest
-
-from comfyui_docker_helper.config.credential_secrets import (
+from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
     BearerTokenError,
     downloader_credential_secret_id,
@@ -70,10 +69,18 @@ def test_downloader_secret_id_and_target_are_consumer_isolated() -> None:
 
 
 def test_downloader_secret_id_rejects_path_injection() -> None:
-    with pytest.raises(ValueError, match="must be canonical"):
-        downloader_credential_secret_id("token/slash")
+    value = "token/slash"
+
+    with pytest.raises(ValueError) as raised:
+        downloader_credential_secret_id(value)
+
+    assert value not in str(raised.value)
 
 
 def test_downloader_secret_target_rejects_other_consumer_id() -> None:
-    with pytest.raises(ValueError, match="must be canonical"):
-        downloader_credential_secret_target("cdh-git-credential-hf_read")
+    value = "cdh-git-credential-hf_read"
+
+    with pytest.raises(ValueError) as raised:
+        downloader_credential_secret_target(value)
+
+    assert value not in str(raised.value)

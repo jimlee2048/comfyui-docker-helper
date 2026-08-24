@@ -35,6 +35,10 @@ from comfyui_docker_helper.config.build_plan import (
     managed_build_constraints_bytes,
 )
 from comfyui_docker_helper.config.canonical_lock import normalized_registry_id
+from comfyui_docker_helper.config.credentials.process_policy import (
+    GitCredentialPolicyError,
+    git_credential_environment,
+)
 from comfyui_docker_helper.config.custom_node_inventory import (
     CustomNodeInventory,
     custom_node_inventory,
@@ -69,10 +73,6 @@ from comfyui_docker_helper.container.helper_events import (
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv, run_hook
 from comfyui_docker_helper.errors import ApplicationError
-from comfyui_docker_helper.git_credential_policy import (
-    GitCredentialPolicyError,
-    git_credential_environment,
-)
 
 _GIT_PATH = Path("/usr/bin/git")
 _UV_PATH = Path("/usr/local/bin/uv")

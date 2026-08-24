@@ -22,13 +22,13 @@ from comfyui_docker_helper.config.build_plan import (
     downloader_credential_secret_ids,
     git_credential_secret_ids,
 )
-from comfyui_docker_helper.config.credential_secrets import (
+from comfyui_docker_helper.config.credentials.git import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
-from comfyui_docker_helper.config.git_credentials import (
-    GIT_CREDENTIAL_VALUE_MAX_BYTES,
-)
 from comfyui_docker_helper.config.publication_tags import (
     static_release_availability,
     validate_publication_tags,

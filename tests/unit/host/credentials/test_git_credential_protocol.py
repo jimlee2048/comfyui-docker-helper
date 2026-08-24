@@ -1,11 +1,10 @@
 """Binary Git credential-helper protocol core contracts."""
 
 import pytest
-
-from comfyui_docker_helper.config.git_credentials import (
+from comfyui_docker_helper.config.credentials.git import (
     parse_git_credential_context,
 )
-from comfyui_docker_helper.git_credential_protocol import (
+from comfyui_docker_helper.config.credentials.git_protocol import (
     GitCredentialDecision,
     GitCredentialProtocolError,
     GitCredentialRuntimeRoute,

@@ -11,16 +11,16 @@ from pathlib import PurePosixPath
 
 import httpx
 
-from comfyui_docker_helper.config.credential_secrets import (
-    CREDENTIAL_SECRET_MAX_BYTES,
-    BearerTokenError,
-    validate_bearer_token,
-)
-from comfyui_docker_helper.config.downloader_credentials import (
+from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContext,
     downloader_httpx_request_context,
     parse_downloader_credential_context,
     select_downloader_credential_context,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
+    CREDENTIAL_SECRET_MAX_BYTES,
+    BearerTokenError,
+    validate_bearer_token,
 )
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.container.downloader_credentials import (

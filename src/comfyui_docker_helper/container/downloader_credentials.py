@@ -9,17 +9,17 @@ from typing import TYPE_CHECKING, Protocol
 
 import httpx
 
-from comfyui_docker_helper.config.credential_secrets import (
-    CREDENTIAL_SECRET_MAX_BYTES,
-    BearerTokenError,
-    downloader_credential_secret_target,
-    validate_bearer_token,
-)
-from comfyui_docker_helper.config.downloader_credentials import (
+from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContext,
     downloader_httpx_request_context,
     parse_downloader_credential_context,
     select_downloader_credential_context,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
+    CREDENTIAL_SECRET_MAX_BYTES,
+    BearerTokenError,
+    downloader_credential_secret_target,
+    validate_bearer_token,
 )
 from comfyui_docker_helper.filesystem.admission import (
     read_bounded_regular_absolute_file,

@@ -7,10 +7,16 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from comfyui_docker_helper.config.git_credentials import (
+from comfyui_docker_helper.config.credentials.git import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
     git_credential_secret_target,
     parse_git_credential_context,
+)
+from comfyui_docker_helper.config.credentials.git_protocol import (
+    GitCredentialProtocolError,
+    GitCredentialRuntimeRoute,
+    evaluate_git_credential_request,
+    render_git_credential_response,
 )
 from comfyui_docker_helper.container.build_plan_input import (
     MATERIALIZED_BUILD_PLAN_PATH,
@@ -18,12 +24,6 @@ from comfyui_docker_helper.container.build_plan_input import (
 )
 from comfyui_docker_helper.filesystem.admission import (
     read_bounded_regular_absolute_file,
-)
-from comfyui_docker_helper.git_credential_protocol import (
-    GitCredentialProtocolError,
-    GitCredentialRuntimeRoute,
-    evaluate_git_credential_request,
-    render_git_credential_response,
 )
 
 GIT_CREDENTIAL_BUILD_PLAN_DIGEST_ENV = "CDH_GIT_CREDENTIAL_BUILD_PLAN_DIGEST"

@@ -25,20 +25,20 @@ from comfyui_docker_helper.config.authored.validation.result import (
     NormalizedFile,
     NormalizedRequirement,
 )
-from comfyui_docker_helper.config.diagnostics import (
-    Diagnostic,
-    DiagnosticPath,
-    DiagnosticSeverity,
-)
-from comfyui_docker_helper.config.downloader_credentials import (
+from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContextError,
     parse_downloader_credential_context,
 )
-from comfyui_docker_helper.config.git_credentials import (
+from comfyui_docker_helper.config.credentials.git import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
     GitCredentialContextError,
     has_password_userinfo,
     parse_git_credential_context,
+)
+from comfyui_docker_helper.config.diagnostics import (
+    Diagnostic,
+    DiagnosticPath,
+    DiagnosticSeverity,
 )
 from comfyui_docker_helper.config.publication_tags import (
     static_release_availability,

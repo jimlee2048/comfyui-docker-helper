@@ -17,6 +17,14 @@ from comfyui_docker_helper.config.authored.models import (
     FinalDownloaderCredentialConfig,
     FinalSecretSourceConfig,
 )
+from comfyui_docker_helper.config.credentials.downloader import (
+    DownloaderCredentialContext,
+    DownloaderCredentialContextError,
+    canonicalize_downloader_credential_context,
+    parse_downloader_credential_context,
+    parse_downloader_request_url,
+    select_downloader_credential_context,
+)
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticComparison,
@@ -26,14 +34,6 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticSourceContext,
     SourceLocation,
     SourceReference,
-)
-from comfyui_docker_helper.config.downloader_credentials import (
-    DownloaderCredentialContext,
-    DownloaderCredentialContextError,
-    canonicalize_downloader_credential_context,
-    parse_downloader_credential_context,
-    parse_downloader_request_url,
-    select_downloader_credential_context,
 )
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
 from comfyui_docker_helper.config.merge import (

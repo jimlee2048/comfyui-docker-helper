@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from comfyui_docker_helper.git_credential_protocol import (
+from comfyui_docker_helper.config.credentials.git_protocol import (
     GitCredentialProtocolError,
     evaluate_git_credential_request,
     render_git_credential_response,

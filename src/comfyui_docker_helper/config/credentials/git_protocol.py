@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from comfyui_docker_helper.config.git_credentials import (
+from comfyui_docker_helper.config.credentials.git import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
     GitCredentialContext,
     parse_git_credential_fields,

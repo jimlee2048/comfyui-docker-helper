@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlsplit
 
-from comfyui_docker_helper.config.credential_secrets import (
+from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
 )
 from comfyui_docker_helper.config.validation.values import has_control_characters

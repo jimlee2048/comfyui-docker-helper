@@ -40,18 +40,18 @@ from comfyui_docker_helper.config.canonical_lock import (
     ResolverRequestIdentity,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
-from comfyui_docker_helper.config.downloader_credentials import (
+from comfyui_docker_helper.config.credentials.downloader import (
     canonicalize_downloader_credential_context,
 )
+from comfyui_docker_helper.config.credentials.git import (
+    canonicalize_git_credential_context,
+)
+from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
 from comfyui_docker_helper.config.final_planning import (
     BackendPlan,
     CudaBackendAdapter,
     CudaVersion,
     TargetPlatform,
-)
-from comfyui_docker_helper.config.git_credentials import (
-    canonicalize_git_credential_context,
 )
 from comfyui_docker_helper.config.validation.os_packages import DEFAULT_OS_PACKAGES
 from comfyui_docker_helper.config.validation.requirements import (

@@ -13,24 +13,28 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from comfyui_docker_helper.config.credential_secrets import (
+from comfyui_docker_helper.config.credentials.git import (
+    canonicalize_git_credential_context,
+    git_credential_secret_id,
+    parse_git_credential_context,
+)
+from comfyui_docker_helper.config.credentials.git_protocol import (
+    GitCredentialRuntimeRoute,
+)
+from comfyui_docker_helper.config.credentials.process_policy import (
+    git_credential_config_args,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
     BearerTokenError,
     downloader_credential_secret_id,
     validate_bearer_token,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
-from comfyui_docker_helper.config.git_credentials import (
-    canonicalize_git_credential_context,
-    git_credential_secret_id,
-    parse_git_credential_context,
-)
 from comfyui_docker_helper.config.service import ConfigurationResult
 from comfyui_docker_helper.filesystem.admission import (
     read_bounded_regular_absolute_file,
 )
-from comfyui_docker_helper.git_credential_policy import git_credential_config_args
-from comfyui_docker_helper.git_credential_protocol import GitCredentialRuntimeRoute
 from comfyui_docker_helper.host.descriptor_lock import (
     acquire_descriptor_lock,
     release_descriptor_lock,

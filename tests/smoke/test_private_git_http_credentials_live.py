@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from comfyui_docker_helper.config.credentials.git import has_password_userinfo
 from tests.smoke.test_private_git_build_access_live import (
     _ALPINE_IMAGE,
     _BUILD_TIMEOUT_SECONDS,
@@ -28,8 +29,6 @@ from tests.smoke.test_private_git_build_access_live import (
     _read_log_tail,
     _require_isolated_preflight,
 )
-
-from comfyui_docker_helper.config.git_credentials import has_password_userinfo
 
 pytestmark = [
     pytest.mark.smoke,

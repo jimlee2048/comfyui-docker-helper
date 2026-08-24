@@ -3,11 +3,11 @@
 from collections.abc import Mapping
 from typing import Any
 
-from comfyui_docker_helper.config.downloader_credentials import (
+from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContextError,
     canonicalize_downloader_credential_context,
 )
-from comfyui_docker_helper.config.git_credentials import (
+from comfyui_docker_helper.config.credentials.git import (
     GitCredentialContextError,
     canonicalize_git_credential_context,
 )

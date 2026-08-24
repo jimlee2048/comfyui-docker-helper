@@ -81,26 +81,26 @@ from comfyui_docker_helper.config.canonical_request import (
 from comfyui_docker_helper.config.canonical_resolver import (
     entries_satisfy_request,
 )
-from comfyui_docker_helper.config.credential_secrets import (
-    downloader_credential_secret_id,
-    downloader_credential_secret_target,
-)
-from comfyui_docker_helper.config.downloader_credentials import (
+from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContextError,
     canonicalize_downloader_credential_context,
     parse_downloader_credential_context,
     parse_downloader_request_url,
     select_downloader_credential_context,
 )
-from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
-from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
-from comfyui_docker_helper.config.git_credentials import (
+from comfyui_docker_helper.config.credentials.git import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
     GitCredentialContextError,
     canonicalize_git_credential_context,
     git_credential_secret_id,
     git_credential_secret_target,
 )
+from comfyui_docker_helper.config.credentials.secrets import (
+    downloader_credential_secret_id,
+    downloader_credential_secret_target,
+)
+from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
+from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,

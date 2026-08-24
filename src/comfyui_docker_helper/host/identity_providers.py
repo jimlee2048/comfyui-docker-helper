@@ -29,6 +29,9 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_oci_tag,
 )
 from comfyui_docker_helper.config.canonical_request import SelectorStability
+from comfyui_docker_helper.config.credentials.process_policy import (
+    noninteractive_git_environment,
+)
 from comfyui_docker_helper.config.registry_identity import (
     registry_resource_identity,
 )
@@ -39,9 +42,6 @@ from comfyui_docker_helper.config.validation.values import (
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.filesystem.admission import read_regular_absolute_file
-from comfyui_docker_helper.git_credential_policy import (
-    noninteractive_git_environment,
-)
 from comfyui_docker_helper.host.git_credential_process import (
     GitCredentialProcessBinding,
 )

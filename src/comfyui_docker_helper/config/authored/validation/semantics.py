@@ -14,18 +14,18 @@ from comfyui_docker_helper.config.authored.validation.result import (
     LocatedValue,
     NormalizedRequirement,
 )
+from comfyui_docker_helper.config.credentials.downloader import (
+    DownloaderCredentialContextError,
+    parse_downloader_credential_context,
+    parse_downloader_request_url,
+    select_downloader_credential_context,
+)
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticComparison,
     DiagnosticComparisonSite,
     DiagnosticPath,
     DiagnosticSeverity,
-)
-from comfyui_docker_helper.config.downloader_credentials import (
-    DownloaderCredentialContextError,
-    parse_downloader_credential_context,
-    parse_downloader_request_url,
-    select_downloader_credential_context,
 )
 from comfyui_docker_helper.config.merge import OriginNode
 from comfyui_docker_helper.config.registry_identity import (

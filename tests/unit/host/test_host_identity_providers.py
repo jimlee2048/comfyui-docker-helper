@@ -15,7 +15,7 @@ from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
-from comfyui_docker_helper.host.git_credential_process import (
+from comfyui_docker_helper.host.credentials.git_process import (
     GitCredentialProcessBinding,
 )
 from comfyui_docker_helper.host.identity_providers import (

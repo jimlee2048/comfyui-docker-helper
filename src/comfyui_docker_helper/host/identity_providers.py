@@ -45,7 +45,7 @@ from comfyui_docker_helper.config.validation.values import (
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.filesystem.admission import read_regular_absolute_file
-from comfyui_docker_helper.host.git_credential_process import (
+from comfyui_docker_helper.host.credentials.git_process import (
     GitCredentialProcessBinding,
 )
 from comfyui_docker_helper.host.uv_docker_executor import (

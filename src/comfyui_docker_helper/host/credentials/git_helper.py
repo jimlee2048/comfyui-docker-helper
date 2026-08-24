@@ -11,7 +11,7 @@ from comfyui_docker_helper.config.credentials.git_protocol import (
     evaluate_git_credential_request,
     render_git_credential_response,
 )
-from comfyui_docker_helper.host.secret_session import (
+from comfyui_docker_helper.host.credentials.session import (
     GIT_CREDENTIAL_SESSION_ENV,
     HostSecretSession,
     HostSecretSessionError,

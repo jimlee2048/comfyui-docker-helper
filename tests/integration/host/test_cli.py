@@ -23,11 +23,16 @@ from comfyui_docker_helper.config.planning.resolver import CanonicalAcquisitionE
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli
-from comfyui_docker_helper.host import secret_session as secret_session_module
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,
     BuildxOutputPlan,
     FileSecretBinding,
+)
+from comfyui_docker_helper.host.credentials import session as secret_session_module
+from comfyui_docker_helper.host.credentials.session import (
+    GIT_CREDENTIAL_SESSION_ENV,
+    HostSecretSession,
+    HostSecretSessionError,
 )
 from comfyui_docker_helper.host.events import (
     HostPhase,
@@ -38,11 +43,6 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
 )
 from comfyui_docker_helper.host.render_service import HostRenderServiceError
-from comfyui_docker_helper.host.secret_session import (
-    GIT_CREDENTIAL_SESSION_ENV,
-    HostSecretSession,
-    HostSecretSessionError,
-)
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,
 )

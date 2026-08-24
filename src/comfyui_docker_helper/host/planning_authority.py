@@ -47,7 +47,7 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     LocalExecutableEntryAcquirer,
     ProviderIdentityAcquirer,
 )
-from comfyui_docker_helper.host.git_credential_process import (
+from comfyui_docker_helper.host.credentials.git_process import (
     GitCredentialProcessBinding,
 )
 from comfyui_docker_helper.host.hook_paths import lexical_hook_source_root

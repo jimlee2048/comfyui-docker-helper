@@ -12,10 +12,10 @@ import pytest
 
 from comfyui_docker_helper.config.authored.service import load_validate_config_result
 from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
-from comfyui_docker_helper.host import git_credential_helper as helper_module
-from comfyui_docker_helper.host import git_credential_process as process_module
-from comfyui_docker_helper.host import secret_session as secret_session_module
-from comfyui_docker_helper.host.secret_session import (
+from comfyui_docker_helper.host.credentials import git_helper as helper_module
+from comfyui_docker_helper.host.credentials import git_process as process_module
+from comfyui_docker_helper.host.credentials import session as secret_session_module
+from comfyui_docker_helper.host.credentials.session import (
     GIT_CREDENTIAL_SESSION_ENV,
     HostSecretSession,
     HostSecretSessionError,
@@ -130,7 +130,7 @@ def test_session_binding_and_snapshot_are_private_exact_and_reused(
         )
         assert binding.config_args[3].startswith("credential.helper=!")
         assert (
-            " -m comfyui_docker_helper.host.git_credential_helper"
+            " -m comfyui_docker_helper.host.credentials.git_helper"
             in (binding.config_args[3])
         )
         assert binding.environment == {
@@ -168,7 +168,7 @@ def test_windows_git_binding_quotes_unicode_python_path(
     assert binding is not None
     assert binding.config_args[3] == (
         "credential.helper=!'D:/Program Files/Python 测试/python.exe' "
-        "-m comfyui_docker_helper.host.git_credential_helper"
+        "-m comfyui_docker_helper.host.credentials.git_helper"
     )
 
 

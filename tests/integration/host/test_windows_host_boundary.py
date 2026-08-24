@@ -19,7 +19,7 @@ _LINUX_IMPLEMENTATION_MODULES = frozenset(
         "comfyui_docker_helper.container.runners",
         "comfyui_docker_helper.container.runtime_control_client",
         "comfyui_docker_helper.container.runtime_serve",
-        "comfyui_docker_helper.host.secret_session",
+        "comfyui_docker_helper.host.credentials.session",
     }
 )
 

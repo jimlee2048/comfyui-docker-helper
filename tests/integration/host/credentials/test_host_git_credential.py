@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config.authored.service import load_validate_config_result
-from comfyui_docker_helper.host import secret_session as secret_session_module
+from comfyui_docker_helper.host.credentials import session as secret_session_module
+from comfyui_docker_helper.host.credentials.session import HostSecretSession
 from comfyui_docker_helper.host.filesystem import private_state
-from comfyui_docker_helper.host.secret_session import HostSecretSession
 
 _GIT_CREDENTIAL_TIMEOUT_SECONDS = 30
 

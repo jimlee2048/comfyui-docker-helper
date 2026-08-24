@@ -69,7 +69,7 @@ from comfyui_docker_helper.host.render_service import (
 from comfyui_docker_helper.host.workflow_display import HostWorkflowDisplay
 
 if TYPE_CHECKING:
-    from comfyui_docker_helper.host.secret_session import (
+    from comfyui_docker_helper.host.credentials.session import (
         HostSecretSession,
         HostSecretSessionError,
     )
@@ -201,7 +201,7 @@ def render(
     ] = False,
 ) -> None:
     """Render a context; Docker may be used when new uv resolution is needed."""
-    from comfyui_docker_helper.host.secret_session import (
+    from comfyui_docker_helper.host.credentials.session import (
         HostSecretSession,
         HostSecretSessionError,
     )
@@ -397,7 +397,7 @@ def build(
     ] = False,
 ) -> None:
     """Render a build context and build it with Docker Buildx."""
-    from comfyui_docker_helper.host.secret_session import (
+    from comfyui_docker_helper.host.credentials.session import (
         HostSecretSession,
         HostSecretSessionError,
     )

@@ -35,6 +35,10 @@ from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSever
 from comfyui_docker_helper.filesystem.admission import (
     read_bounded_regular_absolute_file,
 )
+from comfyui_docker_helper.host.credentials.git_process import (
+    GitCredentialProcessBinding,
+    git_credential_helper_command,
+)
 from comfyui_docker_helper.host.filesystem.descriptor_lock import (
     acquire_descriptor_lock,
     release_descriptor_lock,
@@ -43,10 +47,6 @@ from comfyui_docker_helper.host.filesystem.private_state import (
     create_private_directory,
     create_private_file,
     open_private_lock_file,
-)
-from comfyui_docker_helper.host.git_credential_process import (
-    GitCredentialProcessBinding,
-    git_credential_helper_command,
 )
 
 __all__ = [

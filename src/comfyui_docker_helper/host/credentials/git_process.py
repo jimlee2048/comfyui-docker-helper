@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
 
-_HELPER_MODULE = "comfyui_docker_helper.host.git_credential_helper"
+_HELPER_MODULE = "comfyui_docker_helper.host.credentials.git_helper"
 _platform_name = os.name
 
 

@@ -47,7 +47,7 @@ from comfyui_docker_helper.config.validation.registry import (
     validate_registry_node_authority,
 )
 from comfyui_docker_helper.config.validation.selectors import is_safe_git_target_dir
-from comfyui_docker_helper.container.application_installer import (
+from comfyui_docker_helper.container.build.application import (
     application_build_environment,
 )
 from comfyui_docker_helper.container.build.events import (

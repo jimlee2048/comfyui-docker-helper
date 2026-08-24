@@ -28,7 +28,7 @@ from comfyui_docker_helper.config.planning.requirements import (
     parse_comfyui_requirements,
     parse_manager_requirements,
 )
-from comfyui_docker_helper.container.application_installer import (
+from comfyui_docker_helper.container.build.application import (
     application_build_environment,
     application_process_environment,
     install_inference_group,

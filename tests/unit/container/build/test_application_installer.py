@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
@@ -21,8 +22,8 @@ from comfyui_docker_helper.config.planning.build_plan import (
 from comfyui_docker_helper.config.planning.pytorch import (
     pytorch_resolution_manifest_bytes,
 )
-from comfyui_docker_helper.container import application_installer
-from comfyui_docker_helper.container.application_installer import (
+from comfyui_docker_helper.container.build import application as application_installer
+from comfyui_docker_helper.container.build.application import (
     ApplicationInstallError,
     _verify_application_pip_commands,
     _verify_ordinary_requirements,
@@ -34,7 +35,6 @@ from comfyui_docker_helper.container.application_installer import (
     verify_application_environment,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _write_phases(tmp_path: Path):

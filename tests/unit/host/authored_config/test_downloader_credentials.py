@@ -1,6 +1,8 @@
 """Downloader credential route parsing and selection contracts."""
 
 import pytest
+from httpx import URL
+
 from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContextError,
     canonicalize_downloader_credential_context,
@@ -9,7 +11,6 @@ from comfyui_docker_helper.config.credentials.downloader import (
     parse_downloader_request_url,
     select_downloader_credential_context,
 )
-from httpx import URL
 
 
 def test_authored_route_canonicalizes_origin_and_path_without_decoding() -> None:

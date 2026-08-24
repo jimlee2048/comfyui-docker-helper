@@ -1,6 +1,7 @@
 """Credential Secret value and stable-ID contracts."""
 
 import pytest
+
 from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
     BearerTokenError,

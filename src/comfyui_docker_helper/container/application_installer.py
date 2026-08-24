@@ -19,7 +19,6 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.comfyui_requirements import target_marker_environment
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     ToolchainPhase,
@@ -28,11 +27,12 @@ from comfyui_docker_helper.config.build_plan import (
 from comfyui_docker_helper.config.canonical_lock import (
     pytorch_core_version_matches_channel,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
-from comfyui_docker_helper.errors import ApplicationError
-from comfyui_docker_helper.pytorch_resolution import (
+from comfyui_docker_helper.config.planning.pytorch import (
     pytorch_resolution_manifest_bytes,
 )
+from comfyui_docker_helper.config.planning.requirements import target_marker_environment
+from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
+from comfyui_docker_helper.errors import ApplicationError
 
 _UV_PATH = Path("/usr/local/bin/uv")
 _BUILD_DIRECTORY = Path("/opt/cdh/build")

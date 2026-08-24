@@ -7,11 +7,6 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 from tests.acceptance_scenarios import RELEASE_PYTHON_PROFILES
 
-from comfyui_docker_helper.comfyui_requirements import (
-    CUDA_PROTECTED_REQUIREMENTS,
-    parse_comfyui_requirements,
-    parse_manager_requirements,
-)
 from comfyui_docker_helper.config.canonical_lock import (
     ComfyCliRequestIdentity,
     DirectPythonRequestIdentity,
@@ -19,6 +14,11 @@ from comfyui_docker_helper.config.canonical_lock import (
     PyTorchRequestIdentity,
 )
 from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
+from comfyui_docker_helper.config.planning.requirements import (
+    CUDA_PROTECTED_REQUIREMENTS,
+    parse_comfyui_requirements,
+    parse_manager_requirements,
+)
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,

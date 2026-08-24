@@ -6,7 +6,8 @@ import hashlib
 
 import pytest
 
-from comfyui_docker_helper.comfyui_requirements import (
+from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
+from comfyui_docker_helper.config.planning.requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
     ComfyUIRequirementsError,
     merge_pytorch_requirements,
@@ -14,7 +15,6 @@ from comfyui_docker_helper.comfyui_requirements import (
     parse_manager_requirements,
     target_marker_environment,
 )
-from comfyui_docker_helper.config.canonical_lock import DirectPythonRequestMember
 
 
 def _parse(content: bytes, *, python_version: str = "3.13.14"):

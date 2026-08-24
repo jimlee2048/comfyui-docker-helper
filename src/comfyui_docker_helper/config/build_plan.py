@@ -100,7 +100,7 @@ from comfyui_docker_helper.config.credentials.secrets import (
     downloader_credential_secret_target,
 )
 from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
-from comfyui_docker_helper.config.final_planning import CudaBackendAdapter
+from comfyui_docker_helper.config.planning.target import CudaBackendAdapter
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,

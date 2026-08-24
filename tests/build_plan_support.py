@@ -7,7 +7,6 @@ import io
 import zipfile
 from pathlib import Path
 
-from comfyui_docker_helper.comfyui_requirements import merge_pytorch_requirements
 from comfyui_docker_helper.config.authored.models import FinalConfig
 from comfyui_docker_helper.config.authored.validation.domains import (
     validate_direct_requirement,
@@ -51,6 +50,9 @@ from comfyui_docker_helper.config.canonical_request import (
     comfyui_requirements_request,
 )
 from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
+from comfyui_docker_helper.config.planning.requirements import (
+    merge_pytorch_requirements,
+)
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_REPOSITORY,

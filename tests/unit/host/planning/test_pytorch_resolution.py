@@ -6,7 +6,7 @@ import tomllib
 
 import pytest
 
-from comfyui_docker_helper.pytorch_resolution import (
+from comfyui_docker_helper.config.planning.pytorch import (
     pytorch_resolution_manifest_bytes,
 )
 

@@ -19,7 +19,6 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.comfyui_requirements import target_marker_environment
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -59,6 +58,14 @@ from comfyui_docker_helper.config.canonical_resolver import (
     entries_satisfy_request,
     rebuild_canonical_entries,
 )
+from comfyui_docker_helper.config.planning.inputs.executable import (
+    LocalExecutableIdentityRequest,
+)
+from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.pytorch import (
+    pytorch_resolution_manifest_bytes,
+)
+from comfyui_docker_helper.config.planning.requirements import target_marker_environment
 from comfyui_docker_helper.exact_ledger import (
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_MINIMUM_VERSION,
@@ -86,11 +93,6 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     UvDockerExecutor,
     UvDockerExecutorError,
     UvResolverDescriptor,
-)
-from comfyui_docker_helper.local_executable import LocalExecutableIdentityRequest
-from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
-from comfyui_docker_helper.pytorch_resolution import (
-    pytorch_resolution_manifest_bytes,
 )
 
 _COMFYUI_FLOOR = Version(COMFYUI_MINIMUM_VERSION)

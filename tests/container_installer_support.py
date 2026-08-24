@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.comfyui_requirements import ParsedComfyUIRequirements
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
     CustomNodePlan,
     CustomNodesPhase,
     GitCredentialRoutePlan,
 )
+from comfyui_docker_helper.config.planning.requirements import ParsedComfyUIRequirements
 from comfyui_docker_helper.container import custom_node_installer
 from comfyui_docker_helper.container.runners import ContainerRuntime
 from tests.build_plan_support import accepted_resolution, build_plan, final_config

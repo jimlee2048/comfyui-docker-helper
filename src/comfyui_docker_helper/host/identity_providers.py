@@ -32,6 +32,9 @@ from comfyui_docker_helper.config.canonical_request import SelectorStability
 from comfyui_docker_helper.config.credentials.process_policy import (
     noninteractive_git_environment,
 )
+from comfyui_docker_helper.config.planning.inputs.executable import (
+    LocalExecutableIdentityRequest,
+)
 from comfyui_docker_helper.config.validation.registry import (
     registry_resource_identity,
 )
@@ -53,7 +56,6 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     UvResolverDescriptor,
     uv_image_version_label,
 )
-from comfyui_docker_helper.local_executable import LocalExecutableIdentityRequest
 
 _COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")

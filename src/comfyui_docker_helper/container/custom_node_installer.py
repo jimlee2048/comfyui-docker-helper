@@ -18,12 +18,6 @@ from pathlib import Path, PurePosixPath
 from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.comfyui_requirements import (
-    ComfyUIRequirementsError,
-    ParsedComfyUIRequirements,
-    ParsedManagerRequirements,
-    parse_ordinary_requirements,
-)
 from comfyui_docker_helper.config.authored.validation.domains import is_git_source_url
 from comfyui_docker_helper.config.build_plan import (
     ApplicationPhase,
@@ -42,6 +36,12 @@ from comfyui_docker_helper.config.credentials.process_policy import (
 from comfyui_docker_helper.config.custom_node_inventory import (
     CustomNodeInventory,
     custom_node_inventory,
+)
+from comfyui_docker_helper.config.planning.requirements import (
+    ComfyUIRequirementsError,
+    ParsedComfyUIRequirements,
+    ParsedManagerRequirements,
+    parse_ordinary_requirements,
 )
 from comfyui_docker_helper.config.validation.registry import (
     validate_registry_node_authority,

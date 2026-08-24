@@ -46,11 +46,11 @@ from comfyui_docker_helper.config.canonical_request import (
     request_keys,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
-from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
-from comfyui_docker_helper.local_executable import (
+from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
-from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.exact_ledger import COMFYUI_MINIMUM_VERSION
 
 type LockEntryKey = tuple[str, ...]
 

@@ -10,12 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.comfyui_requirements import (
+from comfyui_docker_helper.config.build_plan import ApplicationPhase
+from comfyui_docker_helper.config.planning.requirements import (
     CUDA_PROTECTED_REQUIREMENTS,
     parse_comfyui_requirements,
     parse_manager_requirements,
 )
-from comfyui_docker_helper.config.build_plan import ApplicationPhase
 from comfyui_docker_helper.container import comfyui_installer
 from comfyui_docker_helper.container.comfyui_installer import (
     ComfyUIInstallError,

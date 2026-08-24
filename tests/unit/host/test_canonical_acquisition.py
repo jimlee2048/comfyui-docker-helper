@@ -30,6 +30,10 @@ from comfyui_docker_helper.config.canonical_resolver import (
     CanonicalResolutionError,
     reconcile_canonical_lock,
 )
+from comfyui_docker_helper.config.planning.inputs.executable import (
+    LocalExecutableIdentityRequest,
+)
+from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.canonical_acquisition import (
     DockerPythonGroupResolver,
@@ -48,10 +52,6 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     UvDockerExecutorError,
     UvResolverResult,
 )
-from comfyui_docker_helper.local_executable import (
-    LocalExecutableIdentityRequest,
-)
-from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"

@@ -48,6 +48,7 @@ from comfyui_docker_helper.config.canonical_resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
 from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     consume_regular_absolute_file,
@@ -85,7 +86,6 @@ from comfyui_docker_helper.host.runtime_hook_inputs import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
 )
-from comfyui_docker_helper.local_file_identity import LocalFileIdentityRequest
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,

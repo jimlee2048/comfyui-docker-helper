@@ -9,13 +9,6 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal, cast
 
-from comfyui_docker_helper.comfyui_requirements import (
-    COMFYUI_REQUIREMENTS_PATH,
-    ComfyUIRequirementsError,
-    ParsedComfyUIRequirements,
-    merge_pytorch_requirements,
-    parse_comfyui_requirements,
-)
 from comfyui_docker_helper.config.authored.models import (
     FinalConfig,
     FinalHttpFileConfig,
@@ -47,7 +40,14 @@ from comfyui_docker_helper.config.credentials.git import (
     canonicalize_git_credential_context,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
-from comfyui_docker_helper.config.final_planning import (
+from comfyui_docker_helper.config.planning.requirements import (
+    COMFYUI_REQUIREMENTS_PATH,
+    ComfyUIRequirementsError,
+    ParsedComfyUIRequirements,
+    merge_pytorch_requirements,
+    parse_comfyui_requirements,
+)
+from comfyui_docker_helper.config.planning.target import (
     BackendPlan,
     CudaBackendAdapter,
     CudaVersion,

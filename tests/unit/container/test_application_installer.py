@@ -18,6 +18,9 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_digest,
     managed_runtime_constraints_bytes,
 )
+from comfyui_docker_helper.config.planning.pytorch import (
+    pytorch_resolution_manifest_bytes,
+)
 from comfyui_docker_helper.container import application_installer
 from comfyui_docker_helper.container.application_installer import (
     ApplicationInstallError,
@@ -31,9 +34,6 @@ from comfyui_docker_helper.container.application_installer import (
     verify_application_environment,
 )
 from comfyui_docker_helper.container.runners import ContainerRuntime
-from comfyui_docker_helper.pytorch_resolution import (
-    pytorch_resolution_manifest_bytes,
-)
 from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 

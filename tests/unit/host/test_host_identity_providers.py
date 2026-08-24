@@ -11,6 +11,9 @@ import httpx
 import pytest
 from docker.errors import APIError, DockerException
 
+from comfyui_docker_helper.config.planning.inputs.executable import (
+    LocalExecutableIdentityRequest,
+)
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.git_credential_process import (
     GitCredentialProcessBinding,
@@ -36,7 +39,6 @@ from comfyui_docker_helper.host.uv_docker_executor import (
     UvImageEvidenceError,
     UvResolverResult,
 )
-from comfyui_docker_helper.local_executable import LocalExecutableIdentityRequest
 
 INDEX_DIGEST_A = f"sha256:{'a' * 64}"
 COMMIT_A = "1" * 40

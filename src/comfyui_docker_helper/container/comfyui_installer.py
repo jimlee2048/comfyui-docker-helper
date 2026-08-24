@@ -16,17 +16,17 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.comfyui_requirements import (
+from comfyui_docker_helper.config.build_plan import (
+    ApplicationPhase,
+    ManagerCapabilityPlan,
+    ToolchainPhase,
+)
+from comfyui_docker_helper.config.planning.requirements import (
     ComfyUIRequirementsError,
     ParsedComfyUIRequirements,
     ParsedManagerRequirements,
     parse_comfyui_requirements,
     parse_manager_requirements,
-)
-from comfyui_docker_helper.config.build_plan import (
-    ApplicationPhase,
-    ManagerCapabilityPlan,
-    ToolchainPhase,
 )
 from comfyui_docker_helper.container.application_installer import (
     application_build_environment,

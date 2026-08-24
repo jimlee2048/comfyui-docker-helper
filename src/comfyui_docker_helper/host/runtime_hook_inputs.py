@@ -11,6 +11,9 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticError,
     DiagnosticSeverity,
 )
+from comfyui_docker_helper.config.planning.inputs.executable import (
+    LocalExecutableIdentityRequest,
+)
 from comfyui_docker_helper.config.runtime_hooks import (
     RuntimeHookEntryKind,
     classify_runtime_hook_entry,
@@ -25,9 +28,6 @@ from comfyui_docker_helper.host.hook_paths import (
     lexical_hook_source_root,
     observed_path_is_real_directory,
     observed_path_is_reparse,
-)
-from comfyui_docker_helper.local_executable import (
-    LocalExecutableIdentityRequest,
 )
 
 

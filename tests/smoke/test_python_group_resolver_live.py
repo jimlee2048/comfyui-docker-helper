@@ -26,7 +26,7 @@ from comfyui_docker_helper.exact_ledger import (
     DEFAULT_MANAGED_PYTHON_VERSION,
     UV_IMAGE_REPOSITORY,
 )
-from comfyui_docker_helper.host.canonical_acquisition import DockerPythonGroupResolver
+from comfyui_docker_helper.host.planning.acquisition import DockerPythonGroupResolver
 from comfyui_docker_helper.host.planning.providers.comfyui import (
     GitOfficialComfyUIIdentityProvider,
 )

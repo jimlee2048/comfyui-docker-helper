@@ -58,7 +58,7 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
 )
-from comfyui_docker_helper.host.planning_authority import planning_release_inputs
+from comfyui_docker_helper.host.planning.authority import planning_release_inputs
 from comfyui_docker_helper.release_artifacts import (
     WORKSPACE_PROFILE_WHEEL_MEMBER,
     CanonicalWheel,

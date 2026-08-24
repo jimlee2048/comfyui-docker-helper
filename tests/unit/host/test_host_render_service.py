@@ -53,12 +53,6 @@ from comfyui_docker_helper.config.planning.resolver import (
 from comfyui_docker_helper.config.runtime.config import load_runtime_config
 from comfyui_docker_helper.host import render_service as render_service_module
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
-from comfyui_docker_helper.host.canonical_acquisition import (
-    DockerPythonGroupResolver,
-    LocalExecutableEntryAcquirer,
-    LocalFileEntryAcquirer,
-    ProviderIdentityAcquirer,
-)
 from comfyui_docker_helper.host.events import (
     HostPhase,
     HostPhaseCompleted,
@@ -68,6 +62,15 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
     HostWorkflowEvent,
 )
+from comfyui_docker_helper.host.planning.acquisition import (
+    DockerPythonGroupResolver,
+    LocalExecutableEntryAcquirer,
+    LocalFileEntryAcquirer,
+    ProviderIdentityAcquirer,
+)
+from comfyui_docker_helper.host.planning.authority import (
+    CachingCanonicalAcquirer,
+)
 from comfyui_docker_helper.host.planning.providers.local import (
     FilesystemLocalExecutableIdentityProvider,
 )
@@ -76,9 +79,6 @@ from comfyui_docker_helper.host.planning.providers.oci import (
 )
 from comfyui_docker_helper.host.planning.providers.python import (
     DockerManagedPythonIdentityProvider,
-)
-from comfyui_docker_helper.host.planning_authority import (
-    CachingCanonicalAcquirer,
 )
 from comfyui_docker_helper.host.render_service import (
     HostRenderServiceError,

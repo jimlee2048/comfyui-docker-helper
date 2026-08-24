@@ -35,7 +35,7 @@ from comfyui_docker_helper.config.planning.resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
-from comfyui_docker_helper.host.canonical_acquisition import (
+from comfyui_docker_helper.host.planning.acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
     LocalFileEntryAcquirer,

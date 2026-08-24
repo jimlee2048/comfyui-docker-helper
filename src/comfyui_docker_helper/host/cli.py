@@ -54,7 +54,7 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
     HostWorkflowSucceeded,
 )
-from comfyui_docker_helper.host.planning_authority import default_planning_providers
+from comfyui_docker_helper.host.planning.authority import default_planning_providers
 from comfyui_docker_helper.host.presentation import (
     HostPresenter,
     default_host_presenter,

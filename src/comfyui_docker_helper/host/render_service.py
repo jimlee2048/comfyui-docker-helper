@@ -56,9 +56,6 @@ from comfyui_docker_helper.filesystem.admission import (
     operate_regular_absolute_file,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
-from comfyui_docker_helper.host.canonical_acquisition import (
-    LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
-)
 from comfyui_docker_helper.host.events import (
     HostPhase,
     HostPhaseCompleted,
@@ -74,7 +71,10 @@ from comfyui_docker_helper.host.hook_paths import (
     observed_path_is_real_directory,
     observed_path_is_reparse,
 )
-from comfyui_docker_helper.host.planning_authority import (
+from comfyui_docker_helper.host.planning.acquisition import (
+    LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
+)
+from comfyui_docker_helper.host.planning.authority import (
     CachingCanonicalAcquirer,
     build_local_executable_requests,
     planning_release_inputs,

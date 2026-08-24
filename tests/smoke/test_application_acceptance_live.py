@@ -487,7 +487,7 @@ manifest = json.loads(manifest_path.read_text())
 assert manifest["schema_version"] == 1
 strict_manifest_source = (
     "import pathlib;"
-    "from comfyui_docker_helper.config.final_manifest import "
+    "from comfyui_docker_helper.config.evidence.manifest import "
     "dump_final_manifest,parse_final_manifest;"
     "path=pathlib.Path('/opt/cdh/build/manifest.json');"
     "content=path.read_bytes();"

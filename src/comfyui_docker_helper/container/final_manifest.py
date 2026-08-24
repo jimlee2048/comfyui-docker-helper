@@ -16,7 +16,7 @@ from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.config.final_manifest import (
+from comfyui_docker_helper.config.evidence.manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
     CdhToolEnvironmentEvidence,

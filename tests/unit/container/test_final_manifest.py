@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
-from comfyui_docker_helper.config.final_manifest import (
+from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inventory
+from comfyui_docker_helper.config.evidence.manifest import (
     DistributionVersionEvidence,
     LocalFileEvidence,
     ProtectedRequirementEvidence,

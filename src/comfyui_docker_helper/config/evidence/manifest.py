@@ -11,7 +11,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from comfyui_docker_helper.config.custom_node_inventory import CustomNodeInventory
+from comfyui_docker_helper.config.evidence.custom_nodes import CustomNodeInventory
 from comfyui_docker_helper.config.file_checksum import (
     validate_canonical_file_checksum,
 )

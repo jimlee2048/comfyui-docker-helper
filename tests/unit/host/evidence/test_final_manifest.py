@@ -6,8 +6,10 @@ import json
 
 import pytest
 from pydantic import ValidationError
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
+from tests.final_manifest_support import manifest_for_plan
 
-from comfyui_docker_helper.config.final_manifest import (
+from comfyui_docker_helper.config.evidence.manifest import (
     ComfyCliEvidence,
     DistributionVersionEvidence,
     FinalManifest,
@@ -22,8 +24,6 @@ from comfyui_docker_helper.config.planning.build_plan import BuildPlan
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
-from tests.final_manifest_support import manifest_for_plan
 
 
 # Canonical bytes retain exact local versions without promoting observations.

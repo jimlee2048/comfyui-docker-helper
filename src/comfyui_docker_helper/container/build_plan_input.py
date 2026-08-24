@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from comfyui_docker_helper.config.final_manifest import (
+from comfyui_docker_helper.config.evidence.manifest import (
     FinalBuildCheckId,
     final_build_check_ids,
 )

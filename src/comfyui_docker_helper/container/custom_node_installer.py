@@ -23,7 +23,7 @@ from comfyui_docker_helper.config.credentials.process_policy import (
     GitCredentialPolicyError,
     git_credential_environment,
 )
-from comfyui_docker_helper.config.custom_node_inventory import (
+from comfyui_docker_helper.config.evidence.custom_nodes import (
     CustomNodeInventory,
     custom_node_inventory,
 )

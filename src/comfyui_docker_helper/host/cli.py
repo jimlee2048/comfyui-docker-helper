@@ -52,7 +52,8 @@ from comfyui_docker_helper.host.context.service import (
     prepare_render_context,
 )
 from comfyui_docker_helper.host.context.wheel import CanonicalWheelError
-from comfyui_docker_helper.host.events import (
+from comfyui_docker_helper.host.planning.authority import default_planning_providers
+from comfyui_docker_helper.host.presentation.events import (
     HostPhase,
     HostPhaseCompleted,
     HostPhaseStarted,
@@ -61,12 +62,11 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
     HostWorkflowSucceeded,
 )
-from comfyui_docker_helper.host.planning.authority import default_planning_providers
-from comfyui_docker_helper.host.presentation import (
+from comfyui_docker_helper.host.presentation.presenter import (
     HostPresenter,
     default_host_presenter,
 )
-from comfyui_docker_helper.host.workflow_display import HostWorkflowDisplay
+from comfyui_docker_helper.host.presentation.workflow import HostWorkflowDisplay
 
 if TYPE_CHECKING:
     from comfyui_docker_helper.host.credentials.session import (

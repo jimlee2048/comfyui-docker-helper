@@ -6,7 +6,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import TextIO
+from typing import Protocol, TextIO
 
 from rich import box
 from rich.console import Console, Group, RenderableType
@@ -37,17 +37,38 @@ from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     build_plan_digest,
 )
-from comfyui_docker_helper.config.planning.resolver import AcceptedCanonicalLock
+from comfyui_docker_helper.config.planning.resolver import (
+    AcceptedCanonicalLock,
+    LockPolicy,
+)
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
-from comfyui_docker_helper.host.context.service import PlanningOptions
-from comfyui_docker_helper.host.path_display import display_host_path
-from comfyui_docker_helper.host.workflow_display import (
+from comfyui_docker_helper.host.presentation.paths import display_host_path
+from comfyui_docker_helper.host.presentation.workflow import (
     HostWorkflowDisplay,
     HostWorkflowSummary,
     host_phase_label,
 )
 
 _WIDE_COMPARISON_MIN_WIDTH = 100
+
+
+class HostPresentationFacts(Protocol):
+    """Read-only planning facts needed for Host output projection."""
+
+    @property
+    def dry_run(self) -> bool: ...
+
+    @property
+    def check(self) -> bool: ...
+
+    @property
+    def locked(self) -> bool: ...
+
+    @property
+    def policy(self) -> LockPolicy: ...
+
+    @property
+    def writes(self) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +165,7 @@ class HostPresenter:
         self,
         output_dir: str | Path,
         *,
-        options: PlanningOptions,
+        options: HostPresentationFacts,
         lock_changed: bool,
         workflow_summary: HostWorkflowSummary | None = None,
     ) -> None:
@@ -196,7 +217,7 @@ class HostPresenter:
         plan: BuildPlan,
         *,
         lock_result: AcceptedCanonicalLock,
-        options: PlanningOptions,
+        options: HostPresentationFacts,
         output_plan: BuildxOutputPlan | None,
     ) -> None:
         """Render exact BuildPlan authority to stdout in every output mode."""

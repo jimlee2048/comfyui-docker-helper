@@ -35,7 +35,7 @@ from comfyui_docker_helper.host.credentials.session import (
     HostSecretSession,
     HostSecretSessionError,
 )
-from comfyui_docker_helper.host.events import (
+from comfyui_docker_helper.host.presentation.events import (
     HostPhase,
     HostPhaseCompleted,
     HostPhaseStarted,

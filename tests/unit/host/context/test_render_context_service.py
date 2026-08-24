@@ -22,7 +22,7 @@ from comfyui_docker_helper.host.context.service import (
     HostRenderServiceError,
     PlanningOptions,
 )
-from comfyui_docker_helper.host.events import (
+from comfyui_docker_helper.host.presentation.events import (
     HostPhase,
     HostPhaseCompleted,
     HostPhaseStarted,

@@ -65,15 +65,6 @@ from comfyui_docker_helper.host.context.runtime_hooks import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
 )
-from comfyui_docker_helper.host.events import (
-    HostPhase,
-    HostPhaseCompleted,
-    HostPhaseStarted,
-    HostSubphase,
-    HostSubphaseCompleted,
-    HostSubphaseStarted,
-    HostWorkflowEvent,
-)
 from comfyui_docker_helper.host.filesystem.private_state import create_private_directory
 from comfyui_docker_helper.host.planning.acquisition import (
     LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
@@ -85,6 +76,15 @@ from comfyui_docker_helper.host.planning.authority import (
     stable_comfyui_entry,
     stable_comfyui_requirements_entry,
     uv_catalog_descriptor_digest,
+)
+from comfyui_docker_helper.host.presentation.events import (
+    HostPhase,
+    HostPhaseCompleted,
+    HostPhaseStarted,
+    HostSubphase,
+    HostSubphaseCompleted,
+    HostSubphaseStarted,
+    HostWorkflowEvent,
 )
 from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (

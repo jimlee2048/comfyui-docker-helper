@@ -7,6 +7,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 
 import pytest
 from rich.console import Console
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.cli_output.policy import (
     CliOutputSettings,
@@ -23,17 +24,16 @@ from comfyui_docker_helper.config.diagnostics import (
     SourceLocation,
     SourceReference,
 )
-from comfyui_docker_helper.host import presentation as presentation_module
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.context.service import PlanningOptions
-from comfyui_docker_helper.host.events import HostPhase
-from comfyui_docker_helper.host.path_display import display_host_path
-from comfyui_docker_helper.host.presentation import HostPresenter
-from comfyui_docker_helper.host.workflow_display import (
+from comfyui_docker_helper.host.presentation import presenter as presentation_module
+from comfyui_docker_helper.host.presentation.events import HostPhase
+from comfyui_docker_helper.host.presentation.paths import display_host_path
+from comfyui_docker_helper.host.presentation.presenter import HostPresenter
+from comfyui_docker_helper.host.presentation.workflow import (
     HostCompletedPhase,
     HostWorkflowSummary,
 )
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _console(

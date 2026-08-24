@@ -18,8 +18,8 @@ from comfyui_docker_helper.cli_output.policy import (
     OutputPolicy,
     StreamCapabilities,
 )
-from comfyui_docker_helper.host import workflow_display as display_module
-from comfyui_docker_helper.host.events import (
+from comfyui_docker_helper.host.presentation import workflow as display_module
+from comfyui_docker_helper.host.presentation.events import (
     HostPhase,
     HostPhaseCompleted,
     HostPhaseFailed,
@@ -30,7 +30,7 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
     HostWorkflowSucceeded,
 )
-from comfyui_docker_helper.host.workflow_display import HostWorkflowDisplay
+from comfyui_docker_helper.host.presentation.workflow import HostWorkflowDisplay
 
 
 class _FlushTrackingStream(StringIO):

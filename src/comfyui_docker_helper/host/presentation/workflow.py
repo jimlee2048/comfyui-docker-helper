@@ -20,7 +20,7 @@ from comfyui_docker_helper.cli_output.policy import (
     OutputStream,
 )
 from comfyui_docker_helper.cli_output.text import control_safe_text
-from comfyui_docker_helper.host.events import (
+from comfyui_docker_helper.host.presentation.events import (
     HostPhase,
     HostPhaseCompleted,
     HostPhaseFailed,

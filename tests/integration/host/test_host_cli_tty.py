@@ -129,9 +129,9 @@ def test_host_workflow_live_teardown_and_final_result_on_real_tty() -> None:
     """Complete a live Host workflow without hanging or duplicating its result."""
     code = "\n".join(
         (
-            "from comfyui_docker_helper.host.events import HostPhase, "
+            "from comfyui_docker_helper.host.presentation.events import HostPhase, "
             "HostPhaseCompleted, HostPhaseStarted, HostWorkflowSucceeded",
-            "from comfyui_docker_helper.host.presentation import "
+            "from comfyui_docker_helper.host.presentation.presenter import "
             "default_host_presenter",
             "from comfyui_docker_helper.host.context.service import PlanningOptions",
             "presenter = default_host_presenter()",

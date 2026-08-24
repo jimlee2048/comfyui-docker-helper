@@ -28,11 +28,11 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticSeverity,
 )
 from comfyui_docker_helper.config.merge import OriginNode
-from comfyui_docker_helper.config.registry_identity import (
+from comfyui_docker_helper.config.validation.os_packages import DEFAULT_OS_PACKAGES
+from comfyui_docker_helper.config.validation.registry import (
     registry_distribution_identity,
     registry_resource_identity,
 )
-from comfyui_docker_helper.config.validation.os_packages import DEFAULT_OS_PACKAGES
 from comfyui_docker_helper.exact_ledger import CUDA_PROTECTED_REQUIREMENTS
 
 

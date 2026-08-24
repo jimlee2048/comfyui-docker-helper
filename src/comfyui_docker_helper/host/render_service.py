@@ -14,6 +14,13 @@ from pathlib import Path, PurePosixPath
 
 from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.authored.models import FinalLocalFileConfig
+from comfyui_docker_helper.config.authored.publication import (
+    PublicationTagError,
+    resolve_publication_tags,
+)
+from comfyui_docker_helper.config.authored.service import (
+    ConfigurationResult,
+)
 from comfyui_docker_helper.config.build_plan import (
     BuildPlan,
     LocalFilePlan,
@@ -41,13 +48,6 @@ from comfyui_docker_helper.config.canonical_resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
-from comfyui_docker_helper.config.publication_tags import (
-    PublicationTagError,
-    resolve_publication_tags,
-)
-from comfyui_docker_helper.config.service import (
-    ConfigurationResult,
-)
 from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     consume_regular_absolute_file,

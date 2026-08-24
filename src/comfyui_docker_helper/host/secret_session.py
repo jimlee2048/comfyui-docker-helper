@@ -13,6 +13,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from comfyui_docker_helper.config.authored.service import ConfigurationResult
 from comfyui_docker_helper.config.credentials.git import (
     canonicalize_git_credential_context,
     git_credential_secret_id,
@@ -31,7 +32,6 @@ from comfyui_docker_helper.config.credentials.secrets import (
     validate_bearer_token,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
-from comfyui_docker_helper.config.service import ConfigurationResult
 from comfyui_docker_helper.filesystem.admission import (
     read_bounded_regular_absolute_file,
 )

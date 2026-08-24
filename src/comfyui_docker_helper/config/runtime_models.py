@@ -4,8 +4,10 @@ from typing import Literal
 
 from pydantic import Field
 
-from comfyui_docker_helper.config.authored.models import (
+from comfyui_docker_helper.config.credentials.downloader import (
     FinalDownloaderCredentialConfig,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
     FinalSecretSourceConfig,
 )
 from comfyui_docker_helper.config.model_base import ConfigModel

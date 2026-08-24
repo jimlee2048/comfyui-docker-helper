@@ -2,9 +2,19 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
+from comfyui_docker_helper.config.credentials.downloader import (
+    FinalDownloaderCredentialConfig as _FinalDownloaderCredentialConfig,
+)
+from comfyui_docker_helper.config.credentials.git import (
+    FinalGitCredentialConfig as _FinalGitCredentialConfig,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
+    FinalSecretSourceConfig as _FinalSecretSourceConfig,
+)
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
+from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.exact_ledger import (
     DEFAULT_CUDA_IMAGE_DISTRO,
@@ -16,10 +26,8 @@ CudaImageFlavor = Literal["base", "runtime", "devel", "cudnn-runtime", "cudnn-de
 CudaImageDistro = Literal["ubuntu22.04", "ubuntu24.04"]
 
 
-class FinalConfigModel(BaseModel):
+class FinalConfigModel(ConfigModel):
     """Apply strict structural validation to every configuration block."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, validate_default=True)
 
 
 class FinalCudaConfig(FinalConfigModel):
@@ -90,47 +98,18 @@ class FinalHttpxConfig(FinalConfigModel):
     timeout: int | float = Field(default=60, gt=0)
 
 
-class FinalSecretRef(FinalConfigModel):
-    """A complete typed reference to one logical Secret."""
-
-    secret: str
-
-
-class FinalDownloaderCredentialConfig(FinalConfigModel):
-    """One cdh-managed Bearer credential route for HTTPX downloads."""
-
-    match: str
-    type: Literal["bearer"]
-    token: FinalSecretRef
-
-
 class FinalDownloaderConfig(FinalConfigModel):
     """Downloader-specific settings."""
 
     aria2: FinalAria2Config = Field(default_factory=FinalAria2Config)
     httpx: FinalHttpxConfig = Field(default_factory=FinalHttpxConfig)
-    credentials: list[FinalDownloaderCredentialConfig] = Field(default_factory=list)
-
-
-class FinalSecretSourceConfig(FinalConfigModel):
-    """One logical Secret source definition."""
-
-    env: str | None = None
-    file: str | None = None
-
-
-class FinalGitCredentialConfig(FinalConfigModel):
-    """One cdh-managed HTTP(S) Git credential route."""
-
-    match: str
-    username: str
-    password: FinalSecretRef
+    credentials: list[_FinalDownloaderCredentialConfig] = Field(default_factory=list)
 
 
 class FinalGitConfig(FinalConfigModel):
     """Git behavior owned by cdh host and build commands."""
 
-    credentials: list[FinalGitCredentialConfig] = Field(default_factory=list)
+    credentials: list[_FinalGitCredentialConfig] = Field(default_factory=list)
 
 
 class FinalCdhConfig(FinalConfigModel):
@@ -247,4 +226,4 @@ class FinalConfig(FinalConfigModel):
     build: FinalBuildConfig = Field(default_factory=FinalBuildConfig)
     comfyui: FinalComfyUIConfig
     files: list[FinalFileConfig] = Field(default_factory=list)
-    secrets: dict[str, FinalSecretSourceConfig] = Field(default_factory=dict)
+    secrets: dict[str, _FinalSecretSourceConfig] = Field(default_factory=dict)

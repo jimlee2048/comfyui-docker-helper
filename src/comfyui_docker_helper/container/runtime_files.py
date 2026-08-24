@@ -14,11 +14,11 @@ from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
 from comfyui_docker_helper.config.model_base import ConfigModel
-from comfyui_docker_helper.config.runtime_file_validation import (
+from comfyui_docker_helper.config.runtime_models import RuntimeConfig
+from comfyui_docker_helper.config.validation.runtime_files import (
     normalize_runtime_file_path,
     validate_runtime_file_url,
 )
-from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.config.validation.urls import DownloaderName
 from comfyui_docker_helper.container.attempt_coordinator import (
     AttemptCancelled,

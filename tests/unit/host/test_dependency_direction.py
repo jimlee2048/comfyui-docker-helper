@@ -16,9 +16,11 @@ FORBIDDEN_COMPONENTS = {
     "filesystem": frozenset({"host", "container", "rendering"}),
 }
 FORBIDDEN_CLI_OUTPUT_DEPENDENCIES = frozenset({"rich", "typer"})
+CONFIG_AUTHORED_PREFIX = f"{PACKAGE_NAME}.config.authored"
+CONFIG_RUNTIME_PREFIX = f"{PACKAGE_NAME}.config.runtime"
 FORBIDDEN_CONFIG_VALIDATION_PREFIXES = (
-    f"{PACKAGE_NAME}.config.authored",
-    f"{PACKAGE_NAME}.config.runtime",
+    CONFIG_AUTHORED_PREFIX,
+    CONFIG_RUNTIME_PREFIX,
 )
 
 
@@ -39,9 +41,16 @@ def _imported_module_names(path: Path, node: ast.AST) -> tuple[str, ...]:
     if not isinstance(node, ast.ImportFrom):
         return ()
     if node.level == 0:
-        if node.module == PACKAGE_NAME:
-            return tuple(f"{PACKAGE_NAME}.{alias.name}" for alias in node.names)
-        return (node.module,) if node.module is not None else ()
+        if node.module is None:
+            return ()
+        modules = [node.module]
+        if node.module == PACKAGE_NAME or node.module.startswith(f"{PACKAGE_NAME}."):
+            modules.extend(
+                f"{node.module}.{alias.name}"
+                for alias in node.names
+                if alias.name != "*"
+            )
+        return tuple(modules)
 
     package_parts = _source_package_parts(path)
     parent_count = node.level - 1
@@ -58,6 +67,12 @@ def _imported_module_names(path: Path, node: ast.AST) -> tuple[str, ...]:
 def _source_package_parts(path: Path) -> tuple[str, ...]:
     relative = path.relative_to(SOURCE_ROOT).with_suffix("")
     return (PACKAGE_NAME, *relative.parts[:-1])
+
+
+def _is_in_module_namespace(name: str, prefix: str) -> bool:
+    return (
+        name == prefix or name.startswith(f"{prefix}.") or name.startswith(f"{prefix}_")
+    )
 
 
 def test_component_dependencies_follow_documented_direction() -> None:
@@ -98,12 +113,38 @@ def test_config_validation_does_not_depend_on_authored_or_runtime_layers() -> No
         for node in ast.walk(tree):
             for name in _imported_module_names(path, node):
                 if any(
-                    name == prefix
-                    or name.startswith(f"{prefix}.")
-                    or name.startswith(f"{prefix}_")
+                    _is_in_module_namespace(name, prefix)
                     for prefix in FORBIDDEN_CONFIG_VALIDATION_PREFIXES
                 ):
                     relative = path.relative_to(SOURCE_ROOT)
                     violations.append(f"{relative}:{node.lineno} imports {name}")
+
+    assert violations == []
+
+
+def test_authored_and_runtime_config_layers_do_not_depend_on_each_other() -> None:
+    """Keep authored composition and runtime admission as sibling layers."""
+    config_root = SOURCE_ROOT / "config"
+    layer_paths = {
+        "authored": tuple((config_root / "authored").rglob("*.py")),
+        "runtime": (
+            *tuple((config_root / "runtime").rglob("*.py")),
+            *tuple(config_root.glob("runtime*.py")),
+        ),
+    }
+    forbidden_prefixes = {
+        "authored": CONFIG_RUNTIME_PREFIX,
+        "runtime": CONFIG_AUTHORED_PREFIX,
+    }
+    violations = []
+    for layer, paths in layer_paths.items():
+        forbidden = forbidden_prefixes[layer]
+        for path in sorted(paths):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                for name in _imported_module_names(path, node):
+                    if _is_in_module_namespace(name, forbidden):
+                        relative = path.relative_to(SOURCE_ROOT)
+                        violations.append(f"{relative}:{node.lineno} imports {name}")
 
     assert violations == []

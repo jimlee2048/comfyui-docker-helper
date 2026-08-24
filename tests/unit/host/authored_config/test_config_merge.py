@@ -5,10 +5,10 @@ from typing import Any, cast
 
 import pytest
 
-from comfyui_docker_helper.config.diagnostics import SourceReference
-from comfyui_docker_helper.config.host_merge_policies import (
+from comfyui_docker_helper.config.authored.merge_policies import (
     HOST_CONFIG_MERGE_POLICIES,
 )
+from comfyui_docker_helper.config.diagnostics import SourceReference
 from comfyui_docker_helper.config.merge import (
     MergedDocument,
     SourceDocument,

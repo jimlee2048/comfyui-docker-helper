@@ -13,11 +13,13 @@ from packaging.version import InvalidVersion, Version
 
 from comfyui_docker_helper.config.authored.models import (
     FinalConfig,
-    FinalDownloaderCredentialConfig,
-    FinalGitCredentialConfig,
     FinalGitCustomNodeConfig,
     FinalHttpFileConfig,
     FinalRegistryCustomNodeConfig,
+)
+from comfyui_docker_helper.config.authored.publication import (
+    static_release_availability,
+    validate_publication_tags,
 )
 from comfyui_docker_helper.config.authored.validation.result import (
     FinalConfigDomainResult,
@@ -27,10 +29,12 @@ from comfyui_docker_helper.config.authored.validation.result import (
 )
 from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContextError,
+    FinalDownloaderCredentialConfig,
     parse_downloader_credential_context,
 )
 from comfyui_docker_helper.config.credentials.git import (
     GIT_CREDENTIAL_VALUE_MAX_BYTES,
+    FinalGitCredentialConfig,
     GitCredentialContextError,
     has_password_userinfo,
     parse_git_credential_context,
@@ -40,16 +44,12 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticPath,
     DiagnosticSeverity,
 )
-from comfyui_docker_helper.config.publication_tags import (
-    static_release_availability,
-    validate_publication_tags,
-)
-from comfyui_docker_helper.config.registry_identity import validate_registry_id
 from comfyui_docker_helper.config.validation.hooks import validate_hook_relative_path
 from comfyui_docker_helper.config.validation.os_packages import (
     DEFAULT_OS_PACKAGES,
     validate_apt_package_identity,
 )
+from comfyui_docker_helper.config.validation.registry import validate_registry_id
 from comfyui_docker_helper.config.validation.requirements import (
     DirectRequirementError,
     direct_requirement_is_active,

@@ -10,11 +10,14 @@ from urllib.parse import urlsplit
 
 from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
+    FinalSecretRef,
 )
+from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.validation.values import has_control_characters
 
 __all__ = [
     "GIT_CREDENTIAL_VALUE_MAX_BYTES",
+    "FinalGitCredentialConfig",
     "GitCredentialContext",
     "GitCredentialContextError",
     "canonicalize_git_credential_context",
@@ -39,6 +42,14 @@ type GitCredentialContextErrorCode = Literal[
 
 _DEFAULT_PORTS: dict[GitCredentialScheme, int] = {"http": 80, "https": 443}
 _SECRET_ID_PATTERN = re.compile(r"cdh-git-credential-[a-z][a-z0-9_-]{0,63}\Z")
+
+
+class FinalGitCredentialConfig(ConfigModel):
+    """One cdh-managed HTTP(S) Git credential route."""
+
+    match: str
+    username: str
+    password: FinalSecretRef
 
 
 def git_credential_secret_id(secret_name: str) -> str:

@@ -20,10 +20,10 @@ from comfyui_docker_helper.config.authored.validation.domains import (
     is_git_source_url,
     is_oci_tag,
 )
-from comfyui_docker_helper.config.registry_identity import (
+from comfyui_docker_helper.config.validation.registry import (
     registry_distribution_identity,
 )
-from comfyui_docker_helper.config.registry_identity import (
+from comfyui_docker_helper.config.validation.registry import (
     validate_registry_id as validate_registry_resource_id,
 )
 from comfyui_docker_helper.config.validation.requirements import (

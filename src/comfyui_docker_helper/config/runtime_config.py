@@ -13,17 +13,17 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator
 
-from comfyui_docker_helper.config.authored.models import (
-    FinalDownloaderCredentialConfig,
-    FinalSecretSourceConfig,
-)
 from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContext,
     DownloaderCredentialContextError,
+    FinalDownloaderCredentialConfig,
     canonicalize_downloader_credential_context,
     parse_downloader_credential_context,
     parse_downloader_request_url,
     select_downloader_credential_context,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
+    FinalSecretSourceConfig,
 )
 from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
@@ -48,14 +48,14 @@ from comfyui_docker_helper.config.merge import (
     merge_toml_documents,
 )
 from comfyui_docker_helper.config.model_base import ConfigModel
-from comfyui_docker_helper.config.runtime_file_validation import (
+from comfyui_docker_helper.config.runtime_models import RuntimeConfig
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
+from comfyui_docker_helper.config.validation.runtime_files import (
     normalize_runtime_file_path,
     runtime_file_item_merge,
     runtime_file_target_identity,
     validate_runtime_file_url,
 )
-from comfyui_docker_helper.config.runtime_models import RuntimeConfig
-from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.ssh_keys import (
     normalize_ssh_public_key,
     normalize_ssh_public_keys,

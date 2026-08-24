@@ -20,19 +20,19 @@ from comfyui_docker_helper.config.merge import (
     MergePolicyRegistry,
     PolicyRule,
 )
-from comfyui_docker_helper.config.registry_identity import (
-    registry_resource_identity,
-)
-from comfyui_docker_helper.config.runtime_file_validation import (
-    runtime_file_item_merge,
-    runtime_file_target_identity,
-)
 from comfyui_docker_helper.config.validation.os_packages import (
     validate_apt_package_identity,
+)
+from comfyui_docker_helper.config.validation.registry import (
+    registry_resource_identity,
 )
 from comfyui_docker_helper.config.validation.requirements import (
     DirectRequirementError,
     parse_direct_requirement,
+)
+from comfyui_docker_helper.config.validation.runtime_files import (
+    runtime_file_item_merge,
+    runtime_file_target_identity,
 )
 
 

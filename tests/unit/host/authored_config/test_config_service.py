@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.config.diagnostics import (
-    DiagnosticComparison,
-    SourceLocation,
-)
-from comfyui_docker_helper.config.service import (
+from comfyui_docker_helper.config.authored.service import (
     ConfigurationServiceError,
     load_validate_config,
     load_validate_config_result,
+)
+from comfyui_docker_helper.config.diagnostics import (
+    DiagnosticComparison,
+    SourceLocation,
 )
 
 _VALID_SSH_KEY = (

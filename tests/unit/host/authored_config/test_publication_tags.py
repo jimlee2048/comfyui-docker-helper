@@ -2,7 +2,7 @@
 
 import pytest
 
-from comfyui_docker_helper.config.publication_tags import (
+from comfyui_docker_helper.config.authored.publication import (
     PublicationTagError,
     resolve_publication_tags,
     validate_publication_tags,

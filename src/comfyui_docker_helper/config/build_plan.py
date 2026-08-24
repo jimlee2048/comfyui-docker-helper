@@ -17,7 +17,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from comfyui_docker_helper.config.authored.models import (
     CudaImageDistro,
     CudaImageFlavor,
-    FinalSecretRef,
 )
 from comfyui_docker_helper.config.authored.validation.domains import (
     is_aria2_argument_value,
@@ -96,6 +95,7 @@ from comfyui_docker_helper.config.credentials.git import (
     git_credential_secret_target,
 )
 from comfyui_docker_helper.config.credentials.secrets import (
+    FinalSecretRef,
     downloader_credential_secret_id,
     downloader_credential_secret_target,
 )

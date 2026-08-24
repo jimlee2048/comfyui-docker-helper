@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from comfyui_docker_helper.config.authored.service import load_validate_config_result
 from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
-from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.host import git_credential_helper as helper_module
 from comfyui_docker_helper.host import git_credential_process as process_module
 from comfyui_docker_helper.host import secret_session as secret_session_module

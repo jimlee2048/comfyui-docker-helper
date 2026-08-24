@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import canonical_request as canonical_request_module
+from comfyui_docker_helper.config.authored.service import load_validate_config_result
 from comfyui_docker_helper.config.canonical_lock import (
     ApplicationExtrasLockEntry,
     CanonicalLock,
@@ -50,7 +51,6 @@ from comfyui_docker_helper.config.canonical_resolver import (
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.runtime_config import load_runtime_config
-from comfyui_docker_helper.config.service import load_validate_config_result
 from comfyui_docker_helper.host import render_service as render_service_module
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
 from comfyui_docker_helper.host.canonical_acquisition import (

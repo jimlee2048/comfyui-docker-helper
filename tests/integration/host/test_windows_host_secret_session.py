@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.config.service import load_validate_config_result
+from comfyui_docker_helper.config.authored.service import load_validate_config_result
 from comfyui_docker_helper.host.secret_session import HostSecretSession
 
 pytestmark = pytest.mark.skipif(

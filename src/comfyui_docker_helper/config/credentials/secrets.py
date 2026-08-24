@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import re
 
+from comfyui_docker_helper.config.model_base import ConfigModel
+
 __all__ = [
     "CREDENTIAL_SECRET_MAX_BYTES",
     "BearerTokenError",
+    "FinalSecretRef",
+    "FinalSecretSourceConfig",
     "downloader_credential_secret_id",
     "downloader_credential_secret_target",
     "validate_bearer_token",
@@ -18,6 +22,19 @@ _BEARER_TOKEN_PATTERN = re.compile(rb"[A-Za-z0-9\-._~+/]+=*\Z")
 _DOWNLOADER_SECRET_ID_PATTERN = re.compile(
     r"cdh-downloader-credential-[a-z][a-z0-9_-]{0,63}\Z"
 )
+
+
+class FinalSecretRef(ConfigModel):
+    """A complete typed reference to one logical Secret."""
+
+    secret: str
+
+
+class FinalSecretSourceConfig(ConfigModel):
+    """One logical Secret source definition."""
+
+    env: str | None = None
+    file: str | None = None
 
 
 class BearerTokenError(ValueError):

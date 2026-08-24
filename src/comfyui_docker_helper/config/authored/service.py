@@ -6,6 +6,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from comfyui_docker_helper.config.authored.merge_policies import (
+    HOST_CONFIG_MERGE_POLICIES,
+)
 from comfyui_docker_helper.config.authored.models import FinalConfig
 from comfyui_docker_helper.config.authored.validation.domains import (
     validate_final_config_domains,
@@ -26,9 +29,6 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticSourceContext,
     SourceLocation,
     SourceReference,
-)
-from comfyui_docker_helper.config.host_merge_policies import (
-    HOST_CONFIG_MERGE_POLICIES,
 )
 from comfyui_docker_helper.config.merge import (
     OriginNode,

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.config.service import load_validate_config_result
+from comfyui_docker_helper.config.authored.service import load_validate_config_result
 from comfyui_docker_helper.host import private_state
 from comfyui_docker_helper.host import secret_session as secret_session_module
 from comfyui_docker_helper.host.secret_session import HostSecretSession

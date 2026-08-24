@@ -18,6 +18,15 @@ from comfyui_docker_helper.cli_settings import (
     require_output_settings,
 )
 from comfyui_docker_helper.config.authored.models import FinalGitCustomNodeConfig
+from comfyui_docker_helper.config.authored.publication import (
+    static_release_availability,
+    validate_publication_tags,
+)
+from comfyui_docker_helper.config.authored.service import (
+    ConfigurationResult,
+    ConfigurationServiceError,
+    load_validate_config_result,
+)
 from comfyui_docker_helper.config.build_plan import (
     downloader_credential_secret_ids,
     git_credential_secret_ids,
@@ -29,15 +38,6 @@ from comfyui_docker_helper.config.credentials.secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic
-from comfyui_docker_helper.config.publication_tags import (
-    static_release_availability,
-    validate_publication_tags,
-)
-from comfyui_docker_helper.config.service import (
-    ConfigurationResult,
-    ConfigurationServiceError,
-    load_validate_config_result,
-)
 from comfyui_docker_helper.config.validation.values import is_argv_value
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,

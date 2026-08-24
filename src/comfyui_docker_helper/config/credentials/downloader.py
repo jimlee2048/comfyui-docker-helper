@@ -9,11 +9,16 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from comfyui_docker_helper.config.credentials.secrets import (
+    FinalSecretRef,
+)
+from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.validation.values import has_control_characters
 
 __all__ = [
     "DownloaderCredentialContext",
     "DownloaderCredentialContextError",
+    "FinalDownloaderCredentialConfig",
     "canonicalize_downloader_credential_context",
     "downloader_httpx_request_context",
     "downloader_request_context",
@@ -30,6 +35,14 @@ type DownloaderCredentialContextErrorCode = Literal[
 ]
 
 _DEFAULT_PORTS: dict[DownloaderCredentialScheme, int] = {"http": 80, "https": 443}
+
+
+class FinalDownloaderCredentialConfig(ConfigModel):
+    """One cdh-managed Bearer credential route for HTTPX downloads."""
+
+    match: str
+    type: Literal["bearer"]
+    token: FinalSecretRef
 
 
 @dataclass(frozen=True, slots=True)

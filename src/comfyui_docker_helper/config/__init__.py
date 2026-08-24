@@ -25,11 +25,11 @@ _EXPORTS = {
         "CanonicalResolutionError",
     ),
     "ConfigurationResult": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "ConfigurationResult",
     ),
     "ConfigurationServiceError": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "ConfigurationServiceError",
     ),
     "Diagnostic": ("comfyui_docker_helper.config.diagnostics", "Diagnostic"),
@@ -95,11 +95,11 @@ _EXPORTS = {
         "load_runtime_config",
     ),
     "load_validate_config": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "load_validate_config",
     ),
     "load_validate_config_result": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "load_validate_config_result",
     ),
     "manifest_binding": (

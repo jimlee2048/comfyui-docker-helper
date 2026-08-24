@@ -58,16 +58,18 @@ from comfyui_docker_helper.container.build.comfyui import (
     observe_application_state,
     observe_manager_absence,
 )
+from comfyui_docker_helper.container.build.custom_nodes.contracts import (
+    CustomNodeInstallError,
+)
+from comfyui_docker_helper.container.build.custom_nodes.orchestrator import (
+    observe_custom_node_state,
+)
 from comfyui_docker_helper.container.build.events import (
     ContainerHelperEvent,
     ContainerHelperPhase,
     ContainerHelperPhaseCompleted,
     ContainerHelperPhaseStarted,
     FinalManifestCompleted,
-)
-from comfyui_docker_helper.container.custom_node_installer import (
-    CustomNodeInstallError,
-    observe_custom_node_state,
 )
 from comfyui_docker_helper.container.final_manifest_writer import (
     FinalManifestWriteError,

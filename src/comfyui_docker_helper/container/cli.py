@@ -26,10 +26,10 @@ if sys.platform == "linux":
         BuildPlanInputAdmission,
     )
     from comfyui_docker_helper.container.build.comfyui import install_comfyui
-    from comfyui_docker_helper.container.build.downloads import download_files
-    from comfyui_docker_helper.container.custom_node_installer import (
+    from comfyui_docker_helper.container.build.custom_nodes.orchestrator import (
         install_custom_nodes,
     )
+    from comfyui_docker_helper.container.build.downloads import download_files
     from comfyui_docker_helper.container.final_manifest import emit_final_manifest
     from comfyui_docker_helper.container.presentation import (
         default_container_download_invocation,

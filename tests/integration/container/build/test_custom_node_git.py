@@ -8,6 +8,16 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
+from tests.container_installer_support import (
+    application as _application,
+)
+from tests.container_installer_support import (
+    custom_nodes_phase as _phase,
+)
+from tests.container_installer_support import (
+    patch_phases as _patch_phases,
+)
 
 from comfyui_docker_helper.config.authored.models import FinalConfig
 from comfyui_docker_helper.config.authored.validation.domains import (
@@ -28,21 +38,18 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     compute_request_digest,
 )
 from comfyui_docker_helper.config.planning.resolver import AcceptedCanonicalLock
-from comfyui_docker_helper.container import custom_node_installer
-from comfyui_docker_helper.container.custom_node_installer import (
+from comfyui_docker_helper.container.build.custom_nodes import (
+    git as git_installer,
+)
+from comfyui_docker_helper.container.build.custom_nodes import (
+    orchestrator as custom_node_installer,
+)
+from comfyui_docker_helper.container.build.custom_nodes.contracts import (
     CustomNodeInstallError,
+)
+from comfyui_docker_helper.container.build.custom_nodes.git import (
     _install_git_node,
     _verify_git_provenance,
-)
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
-from tests.container_installer_support import (
-    application as _application,
-)
-from tests.container_installer_support import (
-    custom_nodes_phase as _phase,
-)
-from tests.container_installer_support import (
-    patch_phases as _patch_phases,
 )
 
 _LOCAL_GIT_TIMEOUT_SECONDS = 30
@@ -331,7 +338,7 @@ def test_direct_git_install_clones_into_final_target_and_retains_repository_meta
         post_install_hooks=(),
     )
     monkeypatch.setattr(
-        "comfyui_docker_helper.container.custom_node_installer._install_git_root_surfaces",
+        "comfyui_docker_helper.container.build.custom_nodes.git._install_git_root_surfaces",
         lambda *_args: None,
     )
 
@@ -383,7 +390,7 @@ def test_direct_git_install_never_replaces_an_occupied_target(
         post_install_hooks=(),
     )
     monkeypatch.setattr(
-        custom_node_installer,
+        git_installer,
         "_run_git",
         lambda *_args, **_kwargs: pytest.fail("occupied target must stop before Git"),
     )
@@ -430,7 +437,7 @@ def test_direct_git_install_readmits_the_real_custom_nodes_root(
         post_install_hooks=(),
     )
     monkeypatch.setattr(
-        custom_node_installer,
+        git_installer,
         "_run_git",
         lambda *_args, **_kwargs: pytest.fail("unsafe root must stop before Git"),
     )
@@ -507,7 +514,7 @@ def test_failed_git_command_preserves_stderr_diagnostic(
         CustomNodeInstallError,
         match="Git diagnostic probe failed with exit code 19",
     ):
-        custom_node_installer._run_git(
+        git_installer._run_git(
             command,
             cwd=tmp_path,
             env=os.environ,
@@ -578,14 +585,14 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
         return b""
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.container.custom_node_installer._run_git", run_git
+        "comfyui_docker_helper.container.build.custom_nodes.git._run_git", run_git
     )
     monkeypatch.setattr(
-        "comfyui_docker_helper.container.custom_node_installer._verify_git_provenance",
+        "comfyui_docker_helper.container.build.custom_nodes.git._verify_git_provenance",
         lambda _node, path, *_args, **_kwargs: events.append(("proof", Path(path))),
     )
     monkeypatch.setattr(
-        "comfyui_docker_helper.container.custom_node_installer._install_git_root_surfaces",
+        "comfyui_docker_helper.container.build.custom_nodes.git._install_git_root_surfaces",
         lambda *_args: events.append(("root-install", None)),
     )
 
@@ -670,10 +677,10 @@ def test_post_hook_head_drift_stops_before_next_node(
                 leaf_second,
             )
 
-    monkeypatch.setattr(custom_node_installer, "_install_git_node", install)
+    monkeypatch.setattr(git_installer, "_install_git_node", install)
     monkeypatch.setattr(custom_node_installer, "run_hook", mutate)
     monkeypatch.setattr(
-        custom_node_installer,
+        git_installer,
         "run_argv",
         lambda *_args, **_kwargs: pytest.fail("final health must not run"),
     )

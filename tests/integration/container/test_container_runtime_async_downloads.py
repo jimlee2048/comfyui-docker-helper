@@ -15,6 +15,9 @@ from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container import runtime_files as runtime_files_module
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime.event_delivery import (
+    RuntimeBackgroundEventSink,
+)
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadItemCompleted,
     RuntimeDownloadQueueState,
@@ -34,9 +37,6 @@ from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
     start_runtime_async_download_queue,
     stop_runtime_async_download_queue,
-)
-from comfyui_docker_helper.container.runtime_event_delivery import (
-    RuntimeBackgroundEventSink,
 )
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeFilePlan,

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+import pytest
+
+from comfyui_docker_helper.container.runtime.event_delivery import (
+    RuntimeEventDelivery,
+    safe_runtime_event_sink,
+)
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadAttemptStarted,
     RuntimeDownloadFailed,
@@ -12,12 +17,10 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadProgressState,
     RuntimeDownloadQueueWarning,
     RuntimeDownloadQueueWarningKind,
+    RuntimeGenerationReady,
     RuntimePresentationSaturated,
     RuntimeWarningCategory,
     RuntimeWarningsAggregated,
-)
-from comfyui_docker_helper.container.runtime_event_delivery import (
-    RuntimeEventDelivery,
 )
 from comfyui_docker_helper.container.transfer.events import (
     DownloadBackendName,
@@ -128,12 +131,12 @@ def test_bounded_delivery_preserves_fifo_and_aggregates_saturation() -> None:
     )
     factory.worker.run()
 
-    assert isinstance(recorder.events[0], RuntimeDownloadAttemptStarted)
-    assert isinstance(recorder.events[1], RuntimeDownloadFailed)
-    assert RuntimeWarningsAggregated(RuntimeWarningCategory.DOWNLOAD_FAILURE, 1) in (
-        recorder.events
-    )
-    assert RuntimePresentationSaturated(1) in recorder.events
+    assert recorder.events == [
+        _attempt("models/a.bin"),
+        _failure("models/a.bin"),
+        RuntimeWarningsAggregated(RuntimeWarningCategory.DOWNLOAD_FAILURE, 1),
+        RuntimePresentationSaturated(1),
+    ]
     recorder.events.clear()
     factory.worker.run()
     assert recorder.events == []
@@ -170,8 +173,13 @@ def test_delivery_coalesces_two_scopes_and_reports_stall_and_recovery() -> None:
         for event in recorder.events
         if isinstance(event, RuntimeDownloadItemProgress)
     ]
-    assert [event.progress.transferred_bytes for event in active] == [11, 22]
-    assert {event.state for event in active} == {RuntimeDownloadProgressState.ACTIVE}
+    assert {
+        (event.target, event.progress.transferred_bytes, event.state)
+        for event in active
+    } == {
+        ("models/a.bin", 11, RuntimeDownloadProgressState.ACTIVE),
+        ("models/b.bin", 22, RuntimeDownloadProgressState.ACTIVE),
+    }
 
     recorder.events.clear()
     clock.now = 40.0
@@ -181,7 +189,13 @@ def test_delivery_coalesces_two_scopes_and_reports_stall_and_recovery() -> None:
         for event in recorder.events
         if isinstance(event, RuntimeDownloadItemProgress)
     ]
-    assert {event.state for event in stalled} == {RuntimeDownloadProgressState.STALLED}
+    assert {
+        (event.target, event.progress.transferred_bytes, event.state)
+        for event in stalled
+    } == {
+        ("models/a.bin", 11, RuntimeDownloadProgressState.STALLED),
+        ("models/b.bin", 22, RuntimeDownloadProgressState.STALLED),
+    }
 
     recorder.events.clear()
     delivery.emit_progress(first_scope, _progress("models/a.bin", 12))
@@ -249,39 +263,75 @@ def test_quiet_admission_discards_information_without_false_saturation() -> None
     assert recorder.events == [_failure("models/a.bin")]
 
 
-def test_real_delivery_worker_never_blocks_background_offer_on_rendering() -> None:
+def test_injected_worker_keeps_offer_nonblocking_while_renderer_blocks() -> None:
     entered = threading.Event()
     release = threading.Event()
 
     class BlockingRecorder(_Recorder):
         def emit(self, event: object, /) -> None:
             entered.set()
-            release.wait(timeout=1)
+            release.wait()
             super().emit(event)
 
     recorder = BlockingRecorder()
+    factory = _ManualWorkerFactory()
     delivery = RuntimeEventDelivery(
         recorder,
         transition_capacity=1,
-        clock=time.monotonic,
+        clock=_Clock(),
+        worker_factory=factory,
     )
-    delivery.emit(_attempt())
-    assert entered.wait(timeout=1)
+    assert factory.worker is not None
+    renderer = threading.Thread(target=factory.worker.run)
+    producer: threading.Thread | None = None
+    try:
+        delivery.emit(_attempt())
+        renderer.start()
+        assert entered.wait(timeout=1)
 
-    def offer_while_renderer_is_blocked() -> None:
-        delivery.emit(_attempt("models/b.bin"))
-        delivery.emit(_attempt("models/c.bin"))
+        def offer_while_renderer_is_blocked() -> None:
+            delivery.emit(_attempt("models/b.bin"))
+            delivery.emit(_attempt("models/c.bin"))
 
-    producer = threading.Thread(target=offer_while_renderer_is_blocked)
-    producer.start()
-    producer.join(timeout=0.5)
-    assert producer.is_alive() is False
+        producer = threading.Thread(target=offer_while_renderer_is_blocked)
+        producer.start()
+        producer.join(timeout=0.5)
+        assert producer.is_alive() is False
+    finally:
+        release.set()
+        if producer is not None:
+            producer.join(timeout=1)
+        renderer.join(timeout=1)
+        delivery.close()
 
-    release.set()
-    delivery.close()
+    assert renderer.is_alive() is False
+    if producer is not None:
+        assert producer.is_alive() is False
     assert (
         sum(
             isinstance(event, RuntimePresentationSaturated) for event in recorder.events
         )
         == 1
     )
+
+
+def test_safe_runtime_event_sink_latches_exceptions_but_preserves_interrupts() -> None:
+    calls: list[object] = []
+
+    class FailingSink:
+        def emit(self, event: object) -> None:
+            calls.append(event)
+            raise OSError("ordinary presentation failure")
+
+    safe_sink = safe_runtime_event_sink(FailingSink())  # type: ignore[arg-type]
+    safe_sink.emit(RuntimeGenerationReady("gen-1"))
+    safe_sink.emit(RuntimeGenerationReady("gen-2"))
+    assert calls == [RuntimeGenerationReady("gen-1")]
+
+    class InterruptingSink:
+        def emit(self, _event: object) -> None:
+            raise KeyboardInterrupt
+
+    interrupting = safe_runtime_event_sink(InterruptingSink())  # type: ignore[arg-type]
+    with pytest.raises(KeyboardInterrupt):
+        interrupting.emit(RuntimeGenerationReady("gen-3"))

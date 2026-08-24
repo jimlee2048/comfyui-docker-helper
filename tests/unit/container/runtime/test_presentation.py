@@ -50,9 +50,6 @@ from comfyui_docker_helper.container.runtime.presentation import (
     RuntimeDisplay,
     default_runtime_display,
 )
-from comfyui_docker_helper.container.runtime_event_delivery import (
-    safe_runtime_event_sink,
-)
 from comfyui_docker_helper.container.transfer.events import (
     DownloadBackendName,
     DownloadRetryReason,
@@ -397,25 +394,3 @@ def test_runtime_display_serializes_complete_lines_between_threads() -> None:
     )
     assert all(not ("10-one.sh" in line and "20-two.py" in line) for line in lines)
     assert stream.flushes == 2
-
-
-def test_safe_runtime_event_sink_latches_exceptions_but_preserves_interrupts() -> None:
-    calls: list[object] = []
-
-    class FailingSink:
-        def emit(self, event: object) -> None:
-            calls.append(event)
-            raise OSError("ordinary presentation failure")
-
-    safe_sink = safe_runtime_event_sink(FailingSink())  # type: ignore[arg-type]
-    safe_sink.emit(RuntimeGenerationReady("gen-1"))
-    safe_sink.emit(RuntimeGenerationReady("gen-2"))
-    assert calls == [RuntimeGenerationReady("gen-1")]
-
-    class InterruptingSink:
-        def emit(self, _event: object) -> None:
-            raise KeyboardInterrupt
-
-    interrupting = safe_runtime_event_sink(InterruptingSink())  # type: ignore[arg-type]
-    with pytest.raises(KeyboardInterrupt):
-        interrupting.emit(RuntimeGenerationReady("gen-3"))

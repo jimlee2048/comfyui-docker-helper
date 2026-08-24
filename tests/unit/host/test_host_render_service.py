@@ -68,10 +68,14 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
     HostWorkflowEvent,
 )
-from comfyui_docker_helper.host.identity_providers import (
-    DockerEngineOciIdentityProvider,
-    DockerManagedPythonIdentityProvider,
+from comfyui_docker_helper.host.planning.providers.local import (
     FilesystemLocalExecutableIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.oci import (
+    DockerEngineOciIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.python import (
+    DockerManagedPythonIdentityProvider,
 )
 from comfyui_docker_helper.host.planning_authority import (
     CachingCanonicalAcquirer,
@@ -873,7 +877,7 @@ def test_matching_lock_modes_do_not_construct_docker_authority(
         raise AssertionError("matching lock must not construct Engine DockerClient")
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.uv_docker_executor.DockerClient",
+        "comfyui_docker_helper.host.planning.providers.uv.DockerClient",
         fail_cli_docker_client,
     )
     unused = _NoProviderCalls()

@@ -71,7 +71,7 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_MINIMUM_VERSION,
 )
 from comfyui_docker_helper.filesystem.admission import consume_regular_absolute_file
-from comfyui_docker_helper.host.identity_providers import (
+from comfyui_docker_helper.host.planning.providers.contracts import (
     DirectGitIdentityProvider,
     DirectGitIdentityRequest,
     IdentityProviderError,
@@ -87,7 +87,7 @@ from comfyui_docker_helper.host.identity_providers import (
     RegistryNodeIdentityProvider,
     RegistryNodeIdentityRequest,
 )
-from comfyui_docker_helper.host.uv_docker_executor import (
+from comfyui_docker_helper.host.planning.providers.uv import (
     PyTorchCompileOperation,
     RequirementsCompileOperation,
     UvDockerExecutor,

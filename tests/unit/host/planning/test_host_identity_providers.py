@@ -14,27 +14,39 @@ from docker.errors import APIError, DockerException
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
+from comfyui_docker_helper.config.planning.request import SelectorStability
 from comfyui_docker_helper.exact_ledger import COMFYUI_REPOSITORY
 from comfyui_docker_helper.host.credentials.git_process import (
     GitCredentialProcessBinding,
 )
-from comfyui_docker_helper.host.identity_providers import (
-    DirectGitIdentityRequest,
-    DockerEngineOciIdentityProvider,
-    DockerManagedPythonIdentityProvider,
-    FilesystemLocalExecutableIdentityProvider,
-    GitDirectIdentityProvider,
+from comfyui_docker_helper.host.planning.providers.comfyui import (
     GitOfficialComfyUIIdentityProvider,
-    HttpRegistryNodeIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.contracts import (
+    DirectGitIdentityRequest,
     IdentityProviderError,
     ManagedPythonIdentityRequest,
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
     ProviderFailureKind,
     RegistryNodeIdentityRequest,
-    SelectorStability,
 )
-from comfyui_docker_helper.host.uv_docker_executor import (
+from comfyui_docker_helper.host.planning.providers.git import (
+    GitDirectIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.local import (
+    FilesystemLocalExecutableIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.oci import (
+    DockerEngineOciIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.python import (
+    DockerManagedPythonIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.registry import (
+    HttpRegistryNodeIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.uv import (
     UvDockerExecutorError,
     UvImageEvidenceError,
     UvResolverResult,

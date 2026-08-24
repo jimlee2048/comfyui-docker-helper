@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from comfyui_docker_helper.host.identity_providers import (
+from comfyui_docker_helper.host.planning.providers.local import (
     FilesystemLocalExecutableIdentityProvider,
 )
 from comfyui_docker_helper.host.render_service import (

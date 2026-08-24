@@ -27,11 +27,15 @@ from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )
 from comfyui_docker_helper.host.canonical_acquisition import DockerPythonGroupResolver
-from comfyui_docker_helper.host.identity_providers import (
-    DockerEngineOciIdentityProvider,
+from comfyui_docker_helper.host.planning.providers.comfyui import (
     GitOfficialComfyUIIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.contracts import (
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
+)
+from comfyui_docker_helper.host.planning.providers.oci import (
+    DockerEngineOciIdentityProvider,
 )
 
 QUALIFIED_TEST_UV_VERSION = "0.11.28"

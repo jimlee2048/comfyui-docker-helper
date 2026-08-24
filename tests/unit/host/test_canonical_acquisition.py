@@ -43,12 +43,12 @@ from comfyui_docker_helper.host.canonical_acquisition import (
     ResolvedPythonGroup,
     ResolvedPythonMember,
 )
-from comfyui_docker_helper.host.identity_providers import (
+from comfyui_docker_helper.host.planning.providers.contracts import (
     LocalExecutableIdentity,
     ManagedPythonIdentity,
     OciIdentity,
 )
-from comfyui_docker_helper.host.uv_docker_executor import (
+from comfyui_docker_helper.host.planning.providers.uv import (
     UvDockerExecutorError,
     UvResolverResult,
 )

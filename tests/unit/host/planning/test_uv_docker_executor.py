@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from python_on_whales.exceptions import DockerException, NoSuchContainer, NoSuchImage
 
-from comfyui_docker_helper.host.uv_docker_executor import (
+from comfyui_docker_helper.host.planning.providers.uv import (
     ManagedPythonCatalogOperation,
     PyTorchCompileOperation,
     RequirementsCompileOperation,
@@ -135,7 +135,7 @@ class _FakeDockerClient:
 
 def _install_client(monkeypatch: pytest.MonkeyPatch, client: _FakeDockerClient) -> None:
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.uv_docker_executor.DockerClient",
+        "comfyui_docker_helper.host.planning.providers.uv.DockerClient",
         lambda: client,
     )
 
@@ -270,11 +270,11 @@ def test_input_cancellation_outranks_cleanup_failures_and_attempts_every_cleanup
     cleanup_calls: list[tuple[str, object]] = []
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.uv_docker_executor.create_private_directory",
+        "comfyui_docker_helper.host.planning.providers.uv.create_private_directory",
         lambda **_kwargs: root,
     )
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.uv_docker_executor.create_private_file",
+        "comfyui_docker_helper.host.planning.providers.uv.create_private_file",
         lambda _path: 91,
     )
 
@@ -513,7 +513,7 @@ def test_stream_overflow_fails_closed_and_cleans(
     client = _FakeDockerClient()
     _install_client(monkeypatch, client)
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.uv_docker_executor._MAX_STDOUT_BYTES", 3
+        "comfyui_docker_helper.host.planning.providers.uv._MAX_STDOUT_BYTES", 3
     )
 
     with pytest.raises(UvDockerExecutorError, match="stdout exceeded"):
@@ -735,7 +735,7 @@ def test_worker_thread_rejects_before_docker_authority(
         return object()
 
     monkeypatch.setattr(
-        "comfyui_docker_helper.host.uv_docker_executor.DockerClient",
+        "comfyui_docker_helper.host.planning.providers.uv.DockerClient",
         docker_client,
     )
     failures: list[BaseException] = []

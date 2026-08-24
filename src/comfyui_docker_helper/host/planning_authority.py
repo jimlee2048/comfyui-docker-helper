@@ -51,12 +51,22 @@ from comfyui_docker_helper.host.credentials.git_process import (
     GitCredentialProcessBinding,
 )
 from comfyui_docker_helper.host.hook_paths import lexical_hook_source_root
-from comfyui_docker_helper.host.identity_providers import (
-    DockerEngineOciIdentityProvider,
-    DockerManagedPythonIdentityProvider,
-    FilesystemLocalExecutableIdentityProvider,
-    GitDirectIdentityProvider,
+from comfyui_docker_helper.host.planning.providers.comfyui import (
     GitOfficialComfyUIIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.git import (
+    GitDirectIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.local import (
+    FilesystemLocalExecutableIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.oci import (
+    DockerEngineOciIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.python import (
+    DockerManagedPythonIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.registry import (
     HttpRegistryNodeIdentityProvider,
 )
 from comfyui_docker_helper.host.release_wheel import build_canonical_wheel

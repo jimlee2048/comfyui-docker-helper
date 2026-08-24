@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from comfyui_docker_helper.cli_output import EventSink
-from comfyui_docker_helper.container.runtime_events import (
+from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadAttemptStarted,
     RuntimeDownloadFailed,
     RuntimeDownloadItemCompleted,

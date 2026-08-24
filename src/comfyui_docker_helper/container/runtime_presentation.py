@@ -11,7 +11,7 @@ from typing import TextIO
 from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.cli_output.policy import CliOutputSettings, OutputDetail
 from comfyui_docker_helper.cli_output.text import control_safe_text
-from comfyui_docker_helper.container.runtime_events import (
+from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadAttemptStarted,
     RuntimeDownloadFailed,
     RuntimeDownloadItemCompleted,

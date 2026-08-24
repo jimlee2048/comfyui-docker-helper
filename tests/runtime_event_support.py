@@ -6,10 +6,10 @@ from threading import Lock
 from typing import Any
 
 from comfyui_docker_helper.cli_output import EventSink
+from comfyui_docker_helper.container.runtime.events import RuntimeEvent
 from comfyui_docker_helper.container.runtime_event_delivery import (
     RuntimeBackgroundEventSink,
 )
-from comfyui_docker_helper.container.runtime_events import RuntimeEvent
 from comfyui_docker_helper.container.runtime_serve import run_runtime_generation_once
 
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.process_control import (
+from comfyui_docker_helper.container.process.control import (
     start_direct_process,
     terminate_process_group_until,
     wait_for_process_reap,

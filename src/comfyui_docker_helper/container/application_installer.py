@@ -31,7 +31,7 @@ from comfyui_docker_helper.config.planning.pytorch import (
     pytorch_resolution_manifest_bytes,
 )
 from comfyui_docker_helper.config.planning.requirements import target_marker_environment
-from comfyui_docker_helper.container.runners import ContainerRuntime, run_argv
+from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.errors import ApplicationError
 
 _UV_PATH = Path("/usr/local/bin/uv")

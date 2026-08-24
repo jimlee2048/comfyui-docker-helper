@@ -9,7 +9,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container.process_control import (
+from comfyui_docker_helper.container.process.control import (
     DirectProcess,
     reap_process_terminal,
     request_force_direct_process,

@@ -16,7 +16,7 @@ from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container.downloader_credentials import (
     DownloaderCredentialPolicy,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_download_state import (
     RuntimeDownloadStateWriter,
 )

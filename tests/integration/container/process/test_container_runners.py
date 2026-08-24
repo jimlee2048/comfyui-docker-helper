@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.runners import (
+from comfyui_docker_helper.container.process.runners import (
     ContainerCommandError,
     ContainerRuntime,
     run_argv,
@@ -457,7 +457,7 @@ def test_run_hook_rejects_unwritten_later_fifo_without_blocking(
     script = """
 import pathlib
 import sys
-from comfyui_docker_helper.container import runners
+from comfyui_docker_helper.container.process import runners
 
 marker = pathlib.Path(sys.argv[2])
 

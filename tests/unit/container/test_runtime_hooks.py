@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.process_control import ProcessGroupSignalError
-from comfyui_docker_helper.container.runners import (
+from comfyui_docker_helper.container.process.control import ProcessGroupSignalError
+from comfyui_docker_helper.container.process.runners import (
     ContainerCommandError,
     ContainerRuntime,
 )

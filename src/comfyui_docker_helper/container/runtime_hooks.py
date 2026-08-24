@@ -19,7 +19,7 @@ from comfyui_docker_helper.config.runtime.hooks import (
     RuntimeHookEntryKind,
     classify_runtime_hook_entry,
 )
-from comfyui_docker_helper.container.process_control import (
+from comfyui_docker_helper.container.process.control import (
     ProcessGroupSignaler,
     ProcessGroupSignalError,
     SessionLeaderProcess,
@@ -28,7 +28,7 @@ from comfyui_docker_helper.container.process_control import (
     signal_process_group,
     terminate_process_group_until,
 )
-from comfyui_docker_helper.container.runners import (
+from comfyui_docker_helper.container.process.runners import (
     ContainerCommandError,
     ContainerRuntime,
     start_argv,

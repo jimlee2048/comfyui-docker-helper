@@ -16,7 +16,7 @@ import pytest
 
 from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container import ssh as ssh_module
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_events import (
     RuntimeSshOutcome,
     RuntimeSshStatus,

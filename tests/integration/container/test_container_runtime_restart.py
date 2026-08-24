@@ -13,7 +13,7 @@ import pytest
 from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
 from comfyui_docker_helper.container import runtime_serve as runtime_serve_module
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_control import (
     RuntimeAcceptedResponse,
     RuntimeAckRequest,

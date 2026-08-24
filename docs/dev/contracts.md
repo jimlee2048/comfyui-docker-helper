@@ -287,7 +287,7 @@ Do not move this probe into unconditional startup or give it wider health meanin
 
 ### Hook ownership ends when the leader is reaped
 
-Each active hook runs as a new session leader. [`runtime_hooks.py`](../../src/comfyui_docker_helper/container/runtime_hooks.py) owns that leader and its process group through cancellation or deadline escalation, terminal result, and leader reap. [`process_control.py`](../../src/comfyui_docker_helper/container/process_control.py) provides the narrow spawn, signal, terminate, kill, wait, and reap mechanisms; it does not decide lifecycle policy.
+Each active hook runs as a new session leader. [`runtime_hooks.py`](../../src/comfyui_docker_helper/container/runtime_hooks.py) owns that leader and its process group through cancellation or deadline escalation, terminal result, and leader reap. [`process/control.py`](../../src/comfyui_docker_helper/container/process/control.py) provides the narrow spawn, signal, terminate, kill, wait, and reap mechanisms; it does not decide lifecycle policy.
 
 After the hook leader's terminal result is accepted and reaped, cdh releases that execution's group authority. It does not enumerate descendants, discover or supervise deliberately backgrounded services, health-check them, or broadly signal them later. A process that detaches from the original group is also outside hook ownership.
 

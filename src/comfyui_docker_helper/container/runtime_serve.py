@@ -21,9 +21,9 @@ from comfyui_docker_helper.config import (
     RuntimeConfigurationError,
     load_runtime_config,
 )
-from comfyui_docker_helper.container.process_control import DirectProcessStarter
+from comfyui_docker_helper.container.process.control import DirectProcessStarter
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.readiness import wait_for_comfyui_readiness
-from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_control import (
     RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
     RUNTIME_CONTROL_SOCKET_PATH,

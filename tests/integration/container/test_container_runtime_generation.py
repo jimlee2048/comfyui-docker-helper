@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_secret_session import (
     RuntimeDownloaderCredentialPolicy,
 )

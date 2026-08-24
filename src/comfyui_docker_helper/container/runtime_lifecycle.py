@@ -14,7 +14,7 @@ from typing import Literal, Protocol, TypeVar
 
 from comfyui_docker_helper.cli_output import EventSink
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container.process_control import (
+from comfyui_docker_helper.container.process.control import (
     DirectProcess,
     DirectProcessStarter,
     ProcessStartError,
@@ -27,11 +27,11 @@ from comfyui_docker_helper.container.process_control import (
     terminate_direct_process_until,
     terminate_process_group_until,
 )
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.readiness import (
     ReadinessError,
     wait_for_comfyui_readiness,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,

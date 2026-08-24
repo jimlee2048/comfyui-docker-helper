@@ -13,14 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.process_control import (
+from comfyui_docker_helper.container.process.control import (
     reap_process_if_exited,
     send_direct_process_signal,
     signal_process_group,
     terminate_direct_process,
     wait_for_process_reap,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime, start_argv
+from comfyui_docker_helper.container.process.runners import ContainerRuntime, start_argv
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     discover_runtime_hooks,

@@ -19,8 +19,8 @@ from comfyui_docker_helper.container.download_files import (
     TransportRequest,
     TransportSuccess,
 )
-from comfyui_docker_helper.container.process_control import DirectProcessStarter
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.process.control import DirectProcessStarter
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncDownloadQueueHandle,
     RuntimeAsyncQueueStarter,

@@ -43,7 +43,7 @@ from comfyui_docker_helper.container.helper_events import (
     CustomNodesInstallCompleted,
     RegistryCustomNodeStarted,
 )
-from comfyui_docker_helper.container.runners import ContainerRuntime
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.transfer_core import DownloadFilesError
 from comfyui_docker_helper.rendering.final_materializer import (
     _materialize_private_stage,

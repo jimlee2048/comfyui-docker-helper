@@ -13,8 +13,8 @@ import pytest
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
 from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
+from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.readiness import ReadinessError
-from comfyui_docker_helper.container.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
 )

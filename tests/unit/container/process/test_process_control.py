@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
-from comfyui_docker_helper.container.process_control import (
+from comfyui_docker_helper.container.process.control import (
     ProcessGroupSignalError,
     ProcessStartError,
     reap_process_if_exited,

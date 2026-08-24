@@ -31,7 +31,7 @@ from comfyui_docker_helper.container.helper_events import (
     ContainerHelperPhaseCompleted,
     ContainerHelperPhaseStarted,
 )
-from comfyui_docker_helper.container.runners import (
+from comfyui_docker_helper.container.process.runners import (
     ContainerCommandError,
     ContainerRuntime,
 )

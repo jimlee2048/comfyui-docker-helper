@@ -7,14 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
     build_plan_digest,
     dump_build_plan_json,
 )
-from comfyui_docker_helper.container import git_credential_helper
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
+from comfyui_docker_helper.container.build import git_credential_helper
 
 
 def _credential_plan(path: Path):

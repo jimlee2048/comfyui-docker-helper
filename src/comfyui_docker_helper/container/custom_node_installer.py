@@ -68,7 +68,7 @@ from comfyui_docker_helper.container.build.events import (
     GitCustomNodeStarted,
     RegistryCustomNodeStarted,
 )
-from comfyui_docker_helper.container.git_credential_helper import (
+from comfyui_docker_helper.container.build.git_credential_helper import (
     GIT_CREDENTIAL_BUILD_PLAN_DIGEST_ENV,
 )
 from comfyui_docker_helper.container.process.runners import (
@@ -496,7 +496,7 @@ def _git_environment(
         raise CustomNodeInstallError("Git credential BuildPlan identity is unavailable")
     helper = (
         f"!exec {shlex.quote(sys.executable)} "
-        "-m comfyui_docker_helper.container.git_credential_helper"
+        "-m comfyui_docker_helper.container.build.git_credential_helper"
     )
     try:
         return git_credential_environment(

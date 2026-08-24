@@ -939,7 +939,8 @@ def test_git_credential_policy_covers_install_and_provenance_with_ssh_coexistenc
         assert git_environment["GIT_CONFIG_VALUE_1"] == ""
         assert git_environment["GIT_CONFIG_KEY_2"] == "credential.helper"
         assert (
-            "container.git_credential_helper" in git_environment["GIT_CONFIG_VALUE_2"]
+            "container.build.git_credential_helper"
+            in git_environment["GIT_CONFIG_VALUE_2"]
         )
         assert git_environment["GIT_CONFIG_KEY_3"] == "credential.useHttpPath"
         assert git_environment["GIT_CONFIG_VALUE_3"] == "true"

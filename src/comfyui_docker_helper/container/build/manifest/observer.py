@@ -71,10 +71,7 @@ from comfyui_docker_helper.container.build.events import (
     ContainerHelperPhaseStarted,
     FinalManifestCompleted,
 )
-from comfyui_docker_helper.container.final_manifest_writer import (
-    FinalManifestWriteError,
-    write_final_manifest_file,
-)
+from comfyui_docker_helper.container.build.manifest import writer
 from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.container.transfer.core import verify_required_final
 from comfyui_docker_helper.errors import ApplicationError
@@ -86,7 +83,7 @@ _UV_PATH = Path("/usr/local/bin/uv")
 _TINI_PATH = Path("/usr/bin/tini")
 _GIT_PATH = Path("/usr/bin/git")
 _DPKG_QUERY_PATH = Path("/usr/bin/dpkg-query")
-_FINAL_CORE_PROBE_PATH = Path(__file__).parents[1] / "resources" / "final-core-probe.py"
+_FINAL_CORE_PROBE_PATH = Path(__file__).parents[3] / "resources" / "final-core-probe.py"
 _VERSION_PATTERN = re.compile(r"^(?:uv|uvx) (?P<version>\S+)(?: \([^\n]+\))?$")
 _OBSERVATION_ENVIRONMENT = {
     "HOME": "/root",
@@ -120,8 +117,8 @@ def emit_final_manifest(
         ContainerHelperPhaseStarted(ContainerHelperPhase.FINAL_MANIFEST_WRITE),
     )
     try:
-        write_final_manifest_file(_MANIFEST_PATH, dump_final_manifest(manifest))
-    except FinalManifestWriteError as error:
+        writer.write_final_manifest_file(_MANIFEST_PATH, dump_final_manifest(manifest))
+    except writer.FinalManifestWriteError as error:
         raise FinalManifestError(str(error)) from error
     _emit_helper_event(
         event_sink,

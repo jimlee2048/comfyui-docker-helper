@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container import final_manifest_writer
-from comfyui_docker_helper.container.final_manifest_writer import (
+from comfyui_docker_helper.container.build.manifest import (
+    writer as final_manifest_writer,
+)
+from comfyui_docker_helper.container.build.manifest.writer import (
     FinalManifestWriteError,
     write_final_manifest_file,
 )

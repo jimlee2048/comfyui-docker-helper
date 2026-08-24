@@ -30,7 +30,9 @@ if sys.platform == "linux":
         install_custom_nodes,
     )
     from comfyui_docker_helper.container.build.downloads import download_files
-    from comfyui_docker_helper.container.final_manifest import emit_final_manifest
+    from comfyui_docker_helper.container.build.manifest.observer import (
+        emit_final_manifest,
+    )
     from comfyui_docker_helper.container.presentation import (
         default_container_download_invocation,
         default_container_helper_display,

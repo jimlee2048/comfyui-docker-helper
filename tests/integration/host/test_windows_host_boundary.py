@@ -15,7 +15,7 @@ _NATIVE_WINDOWS_PROBE_TIMEOUT_SECONDS = 30
 _LINUX_IMPLEMENTATION_MODULES = frozenset(
     {
         "comfyui_docker_helper.container.build.admission",
-        "comfyui_docker_helper.container.final_manifest",
+        "comfyui_docker_helper.container.build.manifest.observer",
         "comfyui_docker_helper.container.process.runners",
         "comfyui_docker_helper.container.runtime_control_client",
         "comfyui_docker_helper.container.runtime_serve",

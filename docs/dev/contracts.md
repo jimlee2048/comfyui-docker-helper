@@ -34,7 +34,7 @@ Resolved publication tags and output selection belong to the host's process-loca
 
 ### Final manifest
 
-The [final manifest schema](../../src/comfyui_docker_helper/config/evidence/manifest.py) and [observer](../../src/comfyui_docker_helper/container/final_manifest.py) own strict schema-v1 final image evidence. Observation runs only after build mutations, re-proves the selected final state, binds the image-config, lock, and BuildPlan digests, and publishes no partial manifest when an observation fails.
+The [final manifest schema](../../src/comfyui_docker_helper/config/evidence/manifest.py) and [observer](../../src/comfyui_docker_helper/container/build/manifest/observer.py) own strict schema-v1 final image evidence. Observation runs only after build mutations, re-proves the selected final state, binds the image-config, lock, and BuildPlan digests, and publishes no partial manifest when an observation fails.
 
 The manifest is downstream evidence. It is not configuration, a resolver result, canonical-lock input, BuildPlan input, an attestation, a support verdict, or a general application health check.
 

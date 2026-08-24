@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container import final_manifest
+from comfyui_docker_helper.container.build.manifest import observer as final_manifest
 
 _PROBE = final_manifest._FINAL_CORE_PROBE_PATH
 _INTERPRETER_PROBE_TIMEOUT_SECONDS = 30

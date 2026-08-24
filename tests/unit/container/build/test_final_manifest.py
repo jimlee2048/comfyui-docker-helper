@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
+from tests.final_manifest_support import manifest_for_plan
 
 from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inventory
 from comfyui_docker_helper.config.evidence.manifest import (
@@ -28,7 +30,6 @@ from comfyui_docker_helper.config.planning.build_plan import (
 from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestMember,
 )
-from comfyui_docker_helper.container import final_manifest as final_manifest_service
 from comfyui_docker_helper.container.build.admission import BuildPlanInputAdmission
 from comfyui_docker_helper.container.build.events import (
     ContainerHelperEvent,
@@ -37,12 +38,13 @@ from comfyui_docker_helper.container.build.events import (
     ContainerHelperPhaseStarted,
     FinalManifestCompleted,
 )
-from comfyui_docker_helper.container.final_manifest import FinalManifestError
-from comfyui_docker_helper.container.final_manifest_writer import (
+from comfyui_docker_helper.container.build.manifest import (
+    observer as final_manifest_service,
+)
+from comfyui_docker_helper.container.build.manifest.observer import FinalManifestError
+from comfyui_docker_helper.container.build.manifest.writer import (
     FinalManifestWriteError,
 )
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
-from tests.final_manifest_support import manifest_for_plan
 
 
 def _plan_with_local_file(*, locked: bool) -> BuildPlan:
@@ -407,7 +409,7 @@ def test_manifest_service_publishes_only_after_successful_observation(
         observe,
     )
     monkeypatch.setattr(
-        final_manifest_service,
+        final_manifest_service.writer,
         "write_final_manifest_file",
         publish,
     )
@@ -475,7 +477,11 @@ def test_manifest_service_projects_writer_failure(
         events.append("write")
         raise FinalManifestWriteError("final manifest target already exists")
 
-    monkeypatch.setattr(final_manifest_service, "write_final_manifest_file", fail_write)
+    monkeypatch.setattr(
+        final_manifest_service.writer,
+        "write_final_manifest_file",
+        fail_write,
+    )
 
     with pytest.raises(FinalManifestError) as error:
         final_manifest_service.emit_final_manifest(

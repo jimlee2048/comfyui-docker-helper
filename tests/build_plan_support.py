@@ -23,7 +23,6 @@ from comfyui_docker_helper.config.build_plan import (
     RuntimePlanningProvenance,
     construct_build_plan,
 )
-from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -53,6 +52,7 @@ from comfyui_docker_helper.config.planning.request import (
 from comfyui_docker_helper.config.planning.requirements import (
     merge_pytorch_requirements,
 )
+from comfyui_docker_helper.config.planning.resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_REPOSITORY,

@@ -22,9 +22,6 @@ from comfyui_docker_helper.config.authored.validation.domains import (
     is_aria2_argument_value,
     is_managed_environment_name,
 )
-from comfyui_docker_helper.config.canonical_resolver import (
-    entries_satisfy_request,
-)
 from comfyui_docker_helper.config.credentials.downloader import (
     DownloaderCredentialContextError,
     canonicalize_downloader_credential_context,
@@ -99,6 +96,9 @@ from comfyui_docker_helper.config.planning.request import (
     HttpFileRequest,
     LocalFileRequest,
     RegistryNodeRequest,
+)
+from comfyui_docker_helper.config.planning.resolver import (
+    entries_satisfy_request,
 )
 from comfyui_docker_helper.config.planning.target import CudaBackendAdapter
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout

@@ -10,14 +10,6 @@ from pathlib import Path, PurePosixPath
 import httpx
 
 from comfyui_docker_helper.config.authored.models import FinalConfig
-from comfyui_docker_helper.config.canonical_resolver import (
-    AcquiredCanonicalEntries,
-    CanonicalAcquisitionError,
-    CanonicalEntryAcquirer,
-    CanonicalResolutionError,
-    LockPolicy,
-    entries_satisfy_request,
-)
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.canonical_lock import (
     CanonicalLock,
@@ -39,6 +31,14 @@ from comfyui_docker_helper.config.planning.request import (
     comfyui_requirements_request,
     request_stability,
     uv_oci_request,
+)
+from comfyui_docker_helper.config.planning.resolver import (
+    AcquiredCanonicalEntries,
+    CanonicalAcquisitionError,
+    CanonicalEntryAcquirer,
+    CanonicalResolutionError,
+    LockPolicy,
+    entries_satisfy_request,
 )
 from comfyui_docker_helper.config.validation.hooks import hook_lock_identity
 from comfyui_docker_helper.exact_ledger import PIP_VERSION

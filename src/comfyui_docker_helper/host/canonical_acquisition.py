@@ -19,12 +19,6 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.canonical_resolver import (
-    AcquiredCanonicalEntries,
-    CanonicalAcquisitionError,
-    entries_satisfy_request,
-    rebuild_canonical_entries,
-)
 from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -66,6 +60,12 @@ from comfyui_docker_helper.config.planning.pytorch import (
     pytorch_resolution_manifest_bytes,
 )
 from comfyui_docker_helper.config.planning.requirements import target_marker_environment
+from comfyui_docker_helper.config.planning.resolver import (
+    AcquiredCanonicalEntries,
+    CanonicalAcquisitionError,
+    entries_satisfy_request,
+    rebuild_canonical_entries,
+)
 from comfyui_docker_helper.exact_ledger import (
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_MINIMUM_VERSION,

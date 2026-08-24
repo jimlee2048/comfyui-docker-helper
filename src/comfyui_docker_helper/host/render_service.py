@@ -27,14 +27,6 @@ from comfyui_docker_helper.config.build_plan import (
     RuntimePlanningProvenance,
     construct_build_plan,
 )
-from comfyui_docker_helper.config.canonical_resolver import (
-    AcceptedCanonicalLock,
-    CanonicalResolutionError,
-    LocalExecutableEntryAcquirer,
-    LockPolicy,
-    ReconcilePurpose,
-    reconcile_canonical_lock,
-)
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.canonical_lock import (
     CanonicalLock,
@@ -48,6 +40,14 @@ from comfyui_docker_helper.config.planning.request import (
     FileRequest,
     LocalFileRequest,
     build_canonical_request_graph,
+)
+from comfyui_docker_helper.config.planning.resolver import (
+    AcceptedCanonicalLock,
+    CanonicalResolutionError,
+    LocalExecutableEntryAcquirer,
+    LockPolicy,
+    ReconcilePurpose,
+    reconcile_canonical_lock,
 )
 from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,

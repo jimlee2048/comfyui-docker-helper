@@ -20,7 +20,7 @@ The lock is complete for its typed direct-input domains, but it is not an instal
 
 ### Reconciliation policy and purpose
 
-[Canonical reconciliation](../../src/comfyui_docker_helper/config/canonical_resolver.py) separates provider policy from caller purpose. Default, locked, and upgrade policies decide whether compatible results are reused, rejected, refreshed, or acquired. Apply, check, and dry-run purposes decide whether the accepted result may later be published, compared, or previewed. The resolver itself performs no filesystem write.
+[Canonical reconciliation](../../src/comfyui_docker_helper/config/planning/resolver.py) separates provider policy from caller purpose. Default, locked, and upgrade policies decide whether compatible results are reused, rejected, refreshed, or acquired. Apply, check, and dry-run purposes decide whether the accepted result may later be published, compared, or previewed. The resolver itself performs no filesystem write.
 
 A no-write purpose may still need provider or Docker-backed acquisition. Locked policy instead requires the existing resolver-backed identities and freshly read local content identities to match without external provider calls. Docker Buildx is downstream of successful planning and remains outside reconciliation policy. The [user build guide](../user/build-and-lock.md#reconciliation-modes) owns the operational mode matrix.
 

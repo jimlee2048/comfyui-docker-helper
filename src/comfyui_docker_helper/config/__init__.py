@@ -4,7 +4,7 @@ from importlib import import_module
 
 _EXPORTS = {
     "AcceptedCanonicalLock": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "AcceptedCanonicalLock",
     ),
     "BAKED_RUNTIME_CONFIG_PATH": (
@@ -21,7 +21,7 @@ _EXPORTS = {
         "CanonicalLockError",
     ),
     "CanonicalResolutionError": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "CanonicalResolutionError",
     ),
     "ConfigurationResult": (
@@ -39,7 +39,7 @@ _EXPORTS = {
     ),
     "FinalConfig": ("comfyui_docker_helper.config.authored.models", "FinalConfig"),
     "LockPolicy": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "LockPolicy",
     ),
     "MOUNTED_RUNTIME_CONFIG_PATH": (
@@ -51,7 +51,7 @@ _EXPORTS = {
         "ManifestBinding",
     ),
     "ReconcilePurpose": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "ReconcilePurpose",
     ),
     "RuntimeConfig": (

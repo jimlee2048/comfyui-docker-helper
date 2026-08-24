@@ -8,15 +8,6 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from comfyui_docker_helper.config.canonical_resolver import (
-    AcquiredCanonicalEntries,
-    CanonicalResolutionError,
-    DeltaKind,
-    LockPolicy,
-    ReconcilePurpose,
-    entries_satisfy_request,
-    reconcile_canonical_lock,
-)
 from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -44,6 +35,15 @@ from comfyui_docker_helper.config.planning.inputs.executable import (
 )
 from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
 from comfyui_docker_helper.config.planning.request import DesiredResolution
+from comfyui_docker_helper.config.planning.resolver import (
+    AcquiredCanonicalEntries,
+    CanonicalResolutionError,
+    DeltaKind,
+    LockPolicy,
+    ReconcilePurpose,
+    entries_satisfy_request,
+    reconcile_canonical_lock,
+)
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 
 DIGEST_A = f"sha256:{'a' * 64}"

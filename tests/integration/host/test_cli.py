@@ -18,8 +18,8 @@ from comfyui_docker_helper.config.build_plan import (
     DownloaderCredentialRoutePlan,
     GitCredentialRoutePlan,
 )
-from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticSeverity
+from comfyui_docker_helper.config.planning.resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.container import cli as container_cli
 from comfyui_docker_helper.errors import ApplicationError, ApplicationGroup
 from comfyui_docker_helper.host import cli as host_cli

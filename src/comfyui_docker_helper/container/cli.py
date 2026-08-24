@@ -25,8 +25,8 @@ if sys.platform == "linux":
         MATERIALIZED_BUILD_PLAN_PATH,
         BuildPlanInputAdmission,
     )
+    from comfyui_docker_helper.container.build.comfyui import install_comfyui
     from comfyui_docker_helper.container.build.downloads import download_files
-    from comfyui_docker_helper.container.comfyui_installer import install_comfyui
     from comfyui_docker_helper.container.custom_node_installer import (
         install_custom_nodes,
     )

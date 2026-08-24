@@ -52,18 +52,18 @@ from comfyui_docker_helper.container.build.admission import (
     FinalCoreProbeInput,
     FinalManifestInput,
 )
+from comfyui_docker_helper.container.build.comfyui import (
+    capture_application_requirements,
+    capture_manager_authority,
+    observe_application_state,
+    observe_manager_absence,
+)
 from comfyui_docker_helper.container.build.events import (
     ContainerHelperEvent,
     ContainerHelperPhase,
     ContainerHelperPhaseCompleted,
     ContainerHelperPhaseStarted,
     FinalManifestCompleted,
-)
-from comfyui_docker_helper.container.comfyui_installer import (
-    capture_application_requirements,
-    capture_manager_authority,
-    observe_application_state,
-    observe_manager_absence,
 )
 from comfyui_docker_helper.container.custom_node_installer import (
     CustomNodeInstallError,

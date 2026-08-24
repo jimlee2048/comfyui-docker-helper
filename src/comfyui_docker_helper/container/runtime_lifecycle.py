@@ -32,6 +32,7 @@ from comfyui_docker_helper.container.readiness import (
     ReadinessError,
     wait_for_comfyui_readiness,
 )
+from comfyui_docker_helper.container.runtime.state import RuntimeStateError
 from comfyui_docker_helper.container.runtime_diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
@@ -73,7 +74,6 @@ from comfyui_docker_helper.container.runtime_ssh_service import (
     RuntimeSshService,
     RuntimeSshServiceError,
 )
-from comfyui_docker_helper.container.runtime_state import RuntimeStateError
 from comfyui_docker_helper.errors import ApplicationError
 
 CHILD_TERMINATION_REAP_GRACE_SECONDS = 2.0

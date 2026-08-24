@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from comfyui_docker_helper.container import runtime_state
-from comfyui_docker_helper.container.runtime_state import (
+from comfyui_docker_helper.container.runtime import state as runtime_state
+from comfyui_docker_helper.container.runtime.state import (
     RUNTIME_STATE_SCHEMA_VERSION,
     RuntimeDownloadEntry,
     RuntimeResumeState,

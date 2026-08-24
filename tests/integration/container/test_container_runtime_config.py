@@ -15,6 +15,7 @@ from comfyui_docker_helper.config import (
     load_runtime_config,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime.state import RuntimeStateError
 from comfyui_docker_helper.container.runtime_files import (
     RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
@@ -23,7 +24,6 @@ from comfyui_docker_helper.container.runtime_files import (
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
 )
-from comfyui_docker_helper.container.runtime_state import RuntimeStateError
 from tests.runtime_event_support import (
     run_runtime_generation_once_for_test as run_runtime_generation_once,
 )

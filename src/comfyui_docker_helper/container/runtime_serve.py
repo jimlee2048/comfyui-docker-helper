@@ -24,6 +24,7 @@ from comfyui_docker_helper.config import (
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.readiness import wait_for_comfyui_readiness
+from comfyui_docker_helper.container.runtime.state import RUNTIME_STATE_PATH
 from comfyui_docker_helper.container.runtime_control import (
     RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
     RUNTIME_CONTROL_SOCKET_PATH,
@@ -92,7 +93,6 @@ from comfyui_docker_helper.container.runtime_ssh_service import (
     RuntimeSshService,
     RuntimeSshStarter,
 )
-from comfyui_docker_helper.container.runtime_state import RUNTIME_STATE_PATH
 from comfyui_docker_helper.container.ssh import start_sshd_if_enabled
 
 

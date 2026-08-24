@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.validation.values import has_control_characters
 
 __all__ = [
     "DownloaderCredentialContext",

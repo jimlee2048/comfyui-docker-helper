@@ -6,7 +6,7 @@ from pathlib import PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.validation.values import has_control_characters
 
 type DownloaderName = Literal["aria2", "httpx"]
 

@@ -56,12 +56,12 @@ from comfyui_docker_helper.config.runtime_file_validation import (
 )
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
-from comfyui_docker_helper.config.ssh_keys import (
+from comfyui_docker_helper.config.validation.ssh_keys import (
     normalize_ssh_public_key,
     normalize_ssh_public_keys,
 )
-from comfyui_docker_helper.config.url_validation import DownloaderName
-from comfyui_docker_helper.config.value_validation import is_argv_value
+from comfyui_docker_helper.config.validation.urls import DownloaderName
+from comfyui_docker_helper.config.validation.values import is_argv_value
 
 
 def _runtime_downloader_credential_key(item: Any) -> tuple[str, ...] | None:

@@ -6,7 +6,7 @@ from typing import Any
 
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.merge import KeyedItemMerge
-from comfyui_docker_helper.config.url_validation import (
+from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
     validate_file_name,
     validate_relative_file_directory,

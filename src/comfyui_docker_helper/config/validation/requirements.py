@@ -9,7 +9,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.validation.values import has_control_characters
 
 _SUPPORTED_DIRECT_REFERENCE_SCHEMES = frozenset(
     {"http", "https", "git+http", "git+https"}

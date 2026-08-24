@@ -10,7 +10,7 @@ from comfyui_docker_helper.config.authored.models import (
 )
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
-from comfyui_docker_helper.config.url_validation import DownloaderName
+from comfyui_docker_helper.config.validation.urls import DownloaderName
 
 
 class RuntimeComfyUIConfig(ConfigModel):

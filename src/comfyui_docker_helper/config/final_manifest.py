@@ -29,13 +29,15 @@ from comfyui_docker_helper.config.custom_node_inventory import CustomNodeInvento
 from comfyui_docker_helper.config.file_checksum import (
     validate_canonical_file_checksum,
 )
-from comfyui_docker_helper.config.hook_validation import (
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
+from comfyui_docker_helper.config.validation.hooks import (
     validate_hook_digest,
     validate_hook_relative_path,
 )
-from comfyui_docker_helper.config.os_packages import validate_apt_package_identity
-from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.validation.os_packages import (
+    validate_apt_package_identity,
+)
+from comfyui_docker_helper.config.validation.values import has_control_characters
 
 FINAL_MANIFEST_SCHEMA_VERSION = 1
 

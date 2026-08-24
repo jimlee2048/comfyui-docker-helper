@@ -19,7 +19,7 @@ from comfyui_docker_helper.config.runtime_file_validation import (
     validate_runtime_file_url,
 )
 from comfyui_docker_helper.config.runtime_models import RuntimeConfig
-from comfyui_docker_helper.config.url_validation import DownloaderName
+from comfyui_docker_helper.config.validation.urls import DownloaderName
 from comfyui_docker_helper.container.attempt_coordinator import (
     AttemptCancelled,
     AttemptExhausted,

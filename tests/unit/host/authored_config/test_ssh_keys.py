@@ -5,7 +5,8 @@ import struct
 
 import pytest
 
-from comfyui_docker_helper.config.ssh_keys import (
+from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
+from comfyui_docker_helper.config.validation.ssh_keys import (
     normalize_ssh_public_key,
     normalize_ssh_public_keys,
 )
@@ -145,6 +146,15 @@ def test_non_ascii_structural_separators_are_rejected_without_disclosure(
 
     assert normalized is None
     assert diagnostic is not None
+    assert (
+        diagnostic.path,
+        diagnostic.code,
+        diagnostic.severity,
+    ) == (
+        ("system", "ssh", "pub_keys", 0),
+        "ssh.invalid_public_key",
+        DiagnosticSeverity.ERROR,
+    )
     for sensitive_value in (key_type, blob, comment):
         assert sensitive_value not in diagnostic.message
         assert sensitive_value not in request.node.nodeid
@@ -241,6 +251,15 @@ def test_malformed_public_key_blobs_are_rejected(key: str) -> None:
 
     assert normalized is None
     assert diagnostic is not None
+    assert (
+        diagnostic.path,
+        diagnostic.code,
+        diagnostic.severity,
+    ) == (
+        ("system", "ssh", "pub_keys", 0),
+        "ssh.invalid_public_key",
+        DiagnosticSeverity.ERROR,
+    )
 
 
 def test_noncanonical_base64_is_rejected_before_key_loading() -> None:
@@ -252,7 +271,15 @@ def test_noncanonical_base64_is_rejected_before_key_loading() -> None:
 
     assert normalized is None
     assert diagnostic is not None
-    assert diagnostic.message == "must contain a canonical base64 public key blob"
+    assert (
+        diagnostic.path,
+        diagnostic.code,
+        diagnostic.severity,
+    ) == (
+        ("system", "ssh", "pub_keys", 0),
+        "ssh.invalid_public_key",
+        DiagnosticSeverity.ERROR,
+    )
 
 
 @pytest.mark.parametrize(
@@ -275,6 +302,15 @@ def test_non_public_key_line_syntax_is_rejected(key: str) -> None:
 
     assert normalized is None
     assert diagnostic is not None
+    assert (
+        diagnostic.path,
+        diagnostic.code,
+        diagnostic.severity,
+    ) == (
+        ("system", "ssh", "pub_keys", 0),
+        "ssh.invalid_public_key",
+        DiagnosticSeverity.ERROR,
+    )
 
 
 def test_loader_failure_diagnostic_does_not_expose_key_or_comment() -> None:
@@ -295,6 +331,15 @@ def test_loader_failure_diagnostic_does_not_expose_key_or_comment() -> None:
 
     assert normalized is None
     assert diagnostic is not None
+    assert (
+        diagnostic.path,
+        diagnostic.code,
+        diagnostic.severity,
+    ) == (
+        ("system", "ssh", "pub_keys", 0),
+        "ssh.invalid_public_key",
+        DiagnosticSeverity.ERROR,
+    )
     assert blob not in diagnostic.message
     assert "sensitive-application" not in diagnostic.message
     assert "sensitive-comment" not in diagnostic.message

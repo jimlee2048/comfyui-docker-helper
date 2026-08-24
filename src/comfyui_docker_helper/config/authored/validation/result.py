@@ -8,7 +8,7 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticError,
     DiagnosticPath,
 )
-from comfyui_docker_helper.config.requirement_validation import (
+from comfyui_docker_helper.config.validation.requirements import (
     DirectRequirementIdentity,
 )
 

@@ -17,7 +17,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_git_url,
     validate_registry_id,
 )
-from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
+from comfyui_docker_helper.config.validation.selectors import resolve_git_target_dir
 
 
 class _InventoryModel(BaseModel):

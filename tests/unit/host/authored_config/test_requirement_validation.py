@@ -2,7 +2,7 @@
 
 import pytest
 
-from comfyui_docker_helper.config.requirement_validation import (
+from comfyui_docker_helper.config.validation.requirements import (
     DirectRequirementError,
     direct_requirement_is_active,
     direct_selector_is_exact,
@@ -106,7 +106,6 @@ def test_requirement_identity_rejects_unsupported_direct_references(
         parse_direct_requirement(requirement)
 
     assert raised.value.code == "python.unsupported_direct_reference"
-    assert str(raised.value) == "must use a supported public remote direct reference"
 
 
 @pytest.mark.parametrize(

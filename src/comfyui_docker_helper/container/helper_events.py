@@ -9,7 +9,7 @@ from comfyui_docker_helper.config.canonical_lock import (
     validate_exact_registry_version,
     validate_registry_id,
 )
-from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
+from comfyui_docker_helper.config.validation.selectors import is_safe_git_target_dir
 
 
 class ContainerHelperPhase(StrEnum):

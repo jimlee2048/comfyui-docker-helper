@@ -16,6 +16,10 @@ FORBIDDEN_COMPONENTS = {
     "filesystem": frozenset({"host", "container", "rendering"}),
 }
 FORBIDDEN_CLI_OUTPUT_DEPENDENCIES = frozenset({"rich", "typer"})
+FORBIDDEN_CONFIG_VALIDATION_PREFIXES = (
+    f"{PACKAGE_NAME}.config.authored",
+    f"{PACKAGE_NAME}.config.runtime",
+)
 
 
 def _imported_components(path: Path) -> tuple[tuple[int, str], ...]:
@@ -82,5 +86,24 @@ def test_shared_cli_output_foundation_has_no_renderer_dependency() -> None:
                 if root in FORBIDDEN_CLI_OUTPUT_DEPENDENCIES:
                     relative = path.relative_to(SOURCE_ROOT)
                     violations.append(f"{relative}:{node.lineno} imports {root}")
+
+    assert violations == []
+
+
+def test_config_validation_does_not_depend_on_authored_or_runtime_layers() -> None:
+    """Keep shared validation upstream of authored and runtime orchestration."""
+    violations = []
+    for path in sorted((SOURCE_ROOT / "config" / "validation").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            for name in _imported_module_names(path, node):
+                if any(
+                    name == prefix
+                    or name.startswith(f"{prefix}.")
+                    or name.startswith(f"{prefix}_")
+                    for prefix in FORBIDDEN_CONFIG_VALIDATION_PREFIXES
+                ):
+                    relative = path.relative_to(SOURCE_ROOT)
+                    violations.append(f"{relative}:{node.lineno} imports {name}")
 
     assert violations == []

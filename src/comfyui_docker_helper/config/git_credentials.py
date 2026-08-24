@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from comfyui_docker_helper.config.credential_secrets import (
     CREDENTIAL_SECRET_MAX_BYTES,
 )
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.validation.values import has_control_characters
 
 __all__ = [
     "GIT_CREDENTIAL_VALUE_MAX_BYTES",

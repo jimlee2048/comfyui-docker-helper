@@ -11,15 +11,15 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticError,
     DiagnosticSeverity,
 )
-from comfyui_docker_helper.config.hook_validation import (
-    hook_lock_identity,
-    validate_hook_relative_path,
-)
 from comfyui_docker_helper.config.runtime_hooks import (
-    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
     RuntimeHookEntryKind,
     classify_runtime_hook_entry,
     runtime_hook_phase_directory_list,
+)
+from comfyui_docker_helper.config.validation.hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
+    hook_lock_identity,
+    validate_hook_relative_path,
 )
 from comfyui_docker_helper.host.hook_paths import (
     lexical_hook_source_root,

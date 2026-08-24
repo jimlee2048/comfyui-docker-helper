@@ -26,15 +26,15 @@ from comfyui_docker_helper.config.registry_identity import (
 from comfyui_docker_helper.config.registry_identity import (
     validate_registry_id as validate_registry_resource_id,
 )
-from comfyui_docker_helper.config.requirement_validation import (
+from comfyui_docker_helper.config.validation.requirements import (
     parse_direct_requirement,
 )
-from comfyui_docker_helper.config.selector_validation import (
+from comfyui_docker_helper.config.validation.selectors import (
     normalize_comfyui_version,
     normalize_registry_version,
 )
-from comfyui_docker_helper.config.url_validation import is_http_url
-from comfyui_docker_helper.config.value_validation import (
+from comfyui_docker_helper.config.validation.urls import is_http_url
+from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
     validate_managed_python_catalog_key,
 )

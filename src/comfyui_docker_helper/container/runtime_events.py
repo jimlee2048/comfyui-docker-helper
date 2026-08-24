@@ -8,11 +8,11 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Literal
 
-from comfyui_docker_helper.config.hook_validation import validate_hook_relative_path
 from comfyui_docker_helper.config.runtime_hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE,
     RUNTIME_HOOK_SOURCE_NAMES,
 )
+from comfyui_docker_helper.config.validation.hooks import validate_hook_relative_path
 from comfyui_docker_helper.container.download_events import (
     DownloadBackendName,
     DownloadRetryReason,

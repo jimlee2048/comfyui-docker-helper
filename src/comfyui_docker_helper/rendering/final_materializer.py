@@ -20,7 +20,7 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_hook_identities,
     dump_build_plan_json,
 )
-from comfyui_docker_helper.config.runtime_hooks import (
+from comfyui_docker_helper.config.validation.hooks import (
     BUILD_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )

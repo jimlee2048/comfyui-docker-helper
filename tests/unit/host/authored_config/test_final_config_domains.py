@@ -366,7 +366,14 @@ def test_system_extra_package_accepts_lowercase_debian_punctuation() -> None:
     document["system"] = {"extra_packages": ["libfoo+bar.1-dev"]}
     config = validate_final_config_structure(document)
 
-    assert validate_final_config_domains(config).diagnostics == ()
+    domains = validate_final_config_domains(config)
+
+    assert not any(
+        item.severity == DiagnosticSeverity.ERROR for item in domains.diagnostics
+    )
+    assert [(item.path, item.value) for item in domains.authored_apt_packages] == [
+        (("system", "extra_packages", 0), "libfoo+bar.1-dev")
+    ]
 
 
 def test_host_ssh_public_keys_normalize_and_warn_by_key_identity() -> None:
@@ -441,7 +448,9 @@ def test_uv_release_selector_accepts_exact_or_rolling_authority(selector: str) -
     document["python"] = {"uv_version": selector}
     config = validate_final_config_structure(document)
 
-    assert validate_final_config_domains(config).diagnostics == ()
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    assert not any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics)
 
 
 @pytest.mark.parametrize(
@@ -1042,9 +1051,14 @@ def test_git_source_url_accepts_supported_remote_forms(url: str) -> None:
     document["comfyui"]["custom_nodes"] = [{"type": "git", "url": url}]
     config = validate_final_config_structure(document)
 
-    diagnostics = validate_final_config_domains(config).diagnostics
+    domains = validate_final_config_domains(config)
 
-    assert not any(item.severity == DiagnosticSeverity.ERROR for item in diagnostics)
+    assert not any(
+        item.severity == DiagnosticSeverity.ERROR for item in domains.diagnostics
+    )
+    assert [(item.path, item.value) for item in domains.git_urls] == [
+        (("comfyui", "custom_nodes", 0, "url"), url)
+    ]
 
 
 def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(

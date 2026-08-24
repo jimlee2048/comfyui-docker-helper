@@ -101,31 +101,31 @@ from comfyui_docker_helper.config.git_credentials import (
     git_credential_secret_id,
     git_credential_secret_target,
 )
-from comfyui_docker_helper.config.hook_validation import (
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
+from comfyui_docker_helper.config.validation.hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
     hook_lock_identity,
     materialized_hook_identity,
     validate_hook_digest,
     validate_hook_relative_path,
 )
-from comfyui_docker_helper.config.os_packages import validate_apt_package_identity
-from comfyui_docker_helper.config.registry_validation import (
+from comfyui_docker_helper.config.validation.os_packages import (
+    validate_apt_package_identity,
+)
+from comfyui_docker_helper.config.validation.registry import (
     validate_registry_node_authority,
 )
-from comfyui_docker_helper.config.requirement_validation import (
+from comfyui_docker_helper.config.validation.requirements import (
     DirectRequirementError,
     parse_direct_requirement,
 )
-from comfyui_docker_helper.config.runtime_hooks import (
-    RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
-)
-from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
-from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
-from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
-from comfyui_docker_helper.config.url_validation import (
+from comfyui_docker_helper.config.validation.selectors import resolve_git_target_dir
+from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
+from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
     is_reserved_file_target_name,
 )
-from comfyui_docker_helper.config.value_validation import (
+from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
     is_argv_value,
     validate_managed_python_catalog_key,

@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from comfyui_docker_helper.config.hook_validation import (
+from comfyui_docker_helper.config.validation.hooks import (
     validate_hook_digest,
     validate_hook_relative_path,
 )

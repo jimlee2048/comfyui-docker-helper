@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.config.url_validation import DownloaderName
+from comfyui_docker_helper.config.validation.urls import DownloaderName
 from comfyui_docker_helper.container.download_events import (
     DownloadAttemptStarted,
     DownloadEvent,

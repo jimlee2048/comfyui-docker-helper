@@ -39,10 +39,10 @@ from comfyui_docker_helper.config.custom_node_inventory import (
     CustomNodeInventory,
     custom_node_inventory,
 )
-from comfyui_docker_helper.config.registry_validation import (
+from comfyui_docker_helper.config.validation.registry import (
     validate_registry_node_authority,
 )
-from comfyui_docker_helper.config.selector_validation import is_safe_git_target_dir
+from comfyui_docker_helper.config.validation.selectors import is_safe_git_target_dir
 from comfyui_docker_helper.container.application_installer import (
     application_build_environment,
 )

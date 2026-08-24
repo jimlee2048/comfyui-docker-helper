@@ -5,7 +5,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from comfyui_docker_helper.config.selector_validation import normalize_comfyui_version
+from comfyui_docker_helper.config.validation.selectors import normalize_comfyui_version
 
 __all__ = [
     "PublicationTagError",

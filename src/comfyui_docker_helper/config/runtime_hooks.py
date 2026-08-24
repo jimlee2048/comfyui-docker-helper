@@ -6,24 +6,18 @@ import stat
 from enum import Enum, auto
 from types import MappingProxyType
 
-RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS = (
-    ("pre-start", "pre-start.d"),
-    ("post-start", "post-start.d"),
-    ("stop", "stop.d"),
+from comfyui_docker_helper.config.validation.hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
+    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
 )
+
 RUNTIME_HOOK_PHASE_DIRECTORIES_BY_PHASE = MappingProxyType(
     dict(RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS)
 )
 RUNTIME_HOOK_PHASES_BY_DIRECTORY = MappingProxyType(
     {dirname: phase for phase, dirname in RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS}
 )
-RUNTIME_HOOK_PHASE_DIRECTORY_NAMES = frozenset(
-    dirname for _, dirname in RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS
-)
-RUNTIME_HOOK_SUPPORTED_SUFFIXES = frozenset({".sh", ".py"})
 RUNTIME_HOOK_SOURCE_NAMES = frozenset({"baked", "mounted"})
-RUNTIME_HOOK_LOCK_PREFIX = "runtime-hooks"
-BUILD_HOOK_LOCK_PREFIX = "build-hooks"
 
 
 class RuntimeHookEntryKind(Enum):

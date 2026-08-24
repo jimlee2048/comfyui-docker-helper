@@ -38,7 +38,7 @@ from comfyui_docker_helper.config.service import (
     ConfigurationServiceError,
     load_validate_config_result,
 )
-from comfyui_docker_helper.config.value_validation import is_argv_value
+from comfyui_docker_helper.config.validation.values import is_argv_value
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,
     BuildxOutput,

@@ -2,7 +2,7 @@
 
 from packaging.utils import InvalidName, canonicalize_name
 
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.validation.values import has_control_characters
 
 
 def validate_registry_id(value: str) -> str:

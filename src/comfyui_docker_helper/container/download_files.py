@@ -23,7 +23,7 @@ import httpx
 
 from comfyui_docker_helper.cli_output.events import EventSink
 from comfyui_docker_helper.config.build_plan import FilesPhase, HttpFilePlan
-from comfyui_docker_helper.config.url_validation import (
+from comfyui_docker_helper.config.validation.urls import (
     DownloaderName,
     require_downloader_name,
 )

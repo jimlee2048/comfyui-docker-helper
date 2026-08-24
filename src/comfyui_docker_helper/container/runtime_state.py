@@ -20,12 +20,12 @@ from comfyui_docker_helper.config.file_checksum import (
     validate_canonical_file_checksum,
 )
 from comfyui_docker_helper.config.model_base import ConfigModel
-from comfyui_docker_helper.config.url_validation import (
+from comfyui_docker_helper.config.validation.urls import (
     DownloaderName,
     is_http_url,
     is_reserved_file_target_name,
 )
-from comfyui_docker_helper.config.value_validation import (
+from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
 )
 from comfyui_docker_helper.container.transfer_core import ResumeAuthority

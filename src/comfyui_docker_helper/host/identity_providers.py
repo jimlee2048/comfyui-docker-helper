@@ -32,8 +32,8 @@ from comfyui_docker_helper.config.canonical_request import SelectorStability
 from comfyui_docker_helper.config.registry_identity import (
     registry_resource_identity,
 )
-from comfyui_docker_helper.config.selector_validation import normalize_registry_version
-from comfyui_docker_helper.config.value_validation import (
+from comfyui_docker_helper.config.validation.selectors import normalize_registry_version
+from comfyui_docker_helper.config.validation.values import (
     is_argv_value,
     validate_managed_python_catalog_key,
 )

@@ -6,15 +6,20 @@ import re
 from pathlib import PurePosixPath
 from typing import Literal
 
-from comfyui_docker_helper.config.runtime_hooks import (
-    BUILD_HOOK_LOCK_PREFIX,
-    RUNTIME_HOOK_LOCK_PREFIX,
-    RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
-    RUNTIME_HOOK_SUPPORTED_SUFFIXES,
-)
-from comfyui_docker_helper.config.value_validation import has_control_characters
+from comfyui_docker_helper.config.validation.values import has_control_characters
 
 type HookTree = Literal["build", "runtime"]
+RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS = (
+    ("pre-start", "pre-start.d"),
+    ("post-start", "post-start.d"),
+    ("stop", "stop.d"),
+)
+RUNTIME_HOOK_PHASE_DIRECTORY_NAMES = frozenset(
+    dirname for _, dirname in RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS
+)
+RUNTIME_HOOK_SUPPORTED_SUFFIXES = frozenset({".sh", ".py"})
+RUNTIME_HOOK_LOCK_PREFIX = "runtime-hooks"
+BUILD_HOOK_LOCK_PREFIX = "build-hooks"
 _SHA256_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 

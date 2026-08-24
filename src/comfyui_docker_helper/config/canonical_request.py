@@ -53,11 +53,11 @@ from comfyui_docker_helper.config.final_planning import (
 from comfyui_docker_helper.config.git_credentials import (
     canonicalize_git_credential_context,
 )
-from comfyui_docker_helper.config.os_packages import DEFAULT_OS_PACKAGES
-from comfyui_docker_helper.config.requirement_validation import (
+from comfyui_docker_helper.config.validation.os_packages import DEFAULT_OS_PACKAGES
+from comfyui_docker_helper.config.validation.requirements import (
     direct_selector_is_exact,
 )
-from comfyui_docker_helper.config.selector_validation import resolve_git_target_dir
+from comfyui_docker_helper.config.validation.selectors import resolve_git_target_dir
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,

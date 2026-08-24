@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from comfyui_docker_helper.config import RuntimeConfig, RuntimeSystemSshConfig
-from comfyui_docker_helper.config.ssh_keys import normalize_ssh_public_keys
+from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.container.process_control import (
     DirectProcess,
     terminate_direct_process_until,

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config import load_validate_config_result
-from comfyui_docker_helper.config.runtime_hooks import (
+from comfyui_docker_helper.config.validation.hooks import (
     RUNTIME_HOOK_PHASE_DIRECTORY_NAMES,
 )
 from comfyui_docker_helper.host.runtime_hook_inputs import (

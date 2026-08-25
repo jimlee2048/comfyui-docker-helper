@@ -10,6 +10,7 @@ import math
 import os
 import re
 import stat
+import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -35,6 +36,12 @@ from comfyui_docker_helper.container.transfer.events import (
     DownloadVerificationStarted,
 )
 from comfyui_docker_helper.errors import ApplicationError
+
+_MAX_TRANSFER_BYTES = sys.maxsize
+
+
+class Monotonic(Protocol):
+    def __call__(self) -> float: ...
 
 
 class DownloadFilesError(ApplicationError):
@@ -407,6 +414,17 @@ class TransportCancelled:
 
     def __post_init__(self) -> None:
         _validate_transport_diagnostic(self.diagnostic)
+
+
+def _transport_cancelled(
+    namespace: Literal["httpx", "aria2"],
+) -> TransportCancelled:
+    return TransportCancelled(
+        diagnostic=TransportDiagnostic(
+            namespace=namespace,
+            summary=f"{namespace} download cancelled",
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)

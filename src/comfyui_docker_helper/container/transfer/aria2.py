@@ -5,23 +5,24 @@ from __future__ import annotations
 import math
 import secrets
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from enum import Enum, auto
 from types import TracebackType
-from typing import Literal, Protocol
+from typing import Protocol
 
 import aria2p
 
 from comfyui_docker_helper.container.transfer.core import (
+    _MAX_TRANSFER_BYTES,
     Aria2DownloadSettings,
     DownloadBackend,
     DownloadCancelled,
     DownloaderSettings,
     DownloadFilesError,
+    Monotonic,
     TransportCancelled,
     TransportDiagnostic,
     TransportOrdinaryTerminal,
@@ -30,13 +31,12 @@ from comfyui_docker_helper.container.transfer.core import (
     TransportResumeRejected,
     TransportRetryable,
     TransportSuccess,
+    _transport_cancelled,
 )
 from comfyui_docker_helper.container.transfer.events import (
     DownloadRetryReason,
     DownloadTransferProgress,
 )
-
-_MAX_TRANSFER_BYTES = sys.maxsize
 
 
 def _aria2_transfer_progress(
@@ -100,10 +100,6 @@ class _Aria2LifecycleState(Enum):
 
 class CancellationWait(Protocol):
     def __call__(self, timeout: float) -> bool: ...
-
-
-class Monotonic(Protocol):
-    def __call__(self) -> float: ...
 
 
 class SecretFactory(Protocol):
@@ -674,17 +670,6 @@ class Aria2Downloader:
             raise DownloadFilesError(
                 "aria2 daemon did not exit within the shutdown deadline"
             )
-
-
-def _transport_cancelled(
-    namespace: Literal["httpx", "aria2"],
-) -> TransportCancelled:
-    return TransportCancelled(
-        diagnostic=TransportDiagnostic(
-            namespace=namespace,
-            summary=f"{namespace} download cancelled",
-        )
-    )
 
 
 def _classify_aria2_error(

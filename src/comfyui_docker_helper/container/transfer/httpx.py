@@ -11,20 +11,18 @@ from contextlib import suppress
 
 import httpx
 
-from comfyui_docker_helper.container.transfer.aria2 import (
-    _MAX_TRANSFER_BYTES,
-    Monotonic,
-    _transport_cancelled,
-)
 from comfyui_docker_helper.container.transfer.core import (
+    _MAX_TRANSFER_BYTES,
     DownloaderSettings,
     DownloadFilesError,
+    Monotonic,
     TransportDiagnostic,
     TransportOrdinaryTerminal,
     TransportOutcome,
     TransportRequest,
     TransportRetryable,
     TransportSuccess,
+    _transport_cancelled,
 )
 from comfyui_docker_helper.container.transfer.credentials import (
     DownloaderCredentialError,

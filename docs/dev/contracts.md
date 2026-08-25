@@ -281,7 +281,7 @@ Host baking and container discovery select only direct regular `.sh` and `.py` f
 
 ### Readiness gates post-start hooks only
 
-[`readiness.py`](../../src/comfyui_docker_helper/container/readiness.py) and the lifecycle owner invoke the loopback ComfyUI probe only when post-start hooks exist. A successful probe admits those hooks; process exit or timeout fails that startup path. It is not continuous monitoring, a container health check, or evidence that nodes, models, workflows, GPUs, or production workloads function correctly.
+[`runtime/readiness.py`](../../src/comfyui_docker_helper/container/runtime/readiness.py) and the lifecycle owner invoke the loopback ComfyUI probe only when post-start hooks exist. A successful probe admits those hooks; process exit or timeout fails that startup path. It is not continuous monitoring, a container health check, or evidence that nodes, models, workflows, GPUs, or production workloads function correctly.
 
 Do not move this probe into unconditional startup or give it wider health meaning without defining a new public lifecycle contract.
 

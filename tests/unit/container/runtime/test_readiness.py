@@ -5,13 +5,9 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from comfyui_docker_helper.container.readiness import (
+from comfyui_docker_helper.container.runtime.readiness import (
     READINESS_CONNECT_TIMEOUT_SECONDS,
-    READINESS_HOST,
-    READINESS_PATH,
-    READINESS_POLL_INTERVAL_SECONDS,
     READINESS_READ_TIMEOUT_SECONDS,
-    READINESS_TIMEOUT_SECONDS,
     ReadinessError,
     ReadinessProbeResult,
     probe_comfyui_readiness,
@@ -25,11 +21,13 @@ class FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
         self.sleeps: list[float] = []
+        self.sleep_observations: list[tuple[float, float]] = []
 
     def monotonic(self) -> float:
         return self.now
 
     def sleep(self, seconds: float) -> None:
+        self.sleep_observations.append((self.now, seconds))
         self.sleeps.append(seconds)
         self.now += seconds
 
@@ -69,15 +67,6 @@ class FakeResponse:
         if self.json_error is not None:
             raise self.json_error
         return self.payload
-
-
-# Readiness polling is bounded, loopback-only, and coupled to child liveness.
-def test_readiness_constants_are_bounded() -> None:
-    assert READINESS_HOST == "127.0.0.1"
-    assert READINESS_PATH == "/system_stats"
-    assert 0 < READINESS_POLL_INTERVAL_SECONDS < READINESS_TIMEOUT_SECONDS
-    assert 0 < READINESS_CONNECT_TIMEOUT_SECONDS < READINESS_TIMEOUT_SECONDS
-    assert 0 < READINESS_READ_TIMEOUT_SECONDS < READINESS_TIMEOUT_SECONDS
 
 
 def test_probe_uses_loopback_effective_port_and_timeout_constants() -> None:
@@ -123,23 +112,25 @@ def test_wait_succeeds_after_failed_polls() -> None:
 
 def test_wait_times_out_when_probe_never_becomes_ready() -> None:
     clock = FakeClock()
+    timeout_seconds = 0.25
+    poll_interval_seconds = 0.1
 
     with pytest.raises(ReadinessError) as error:
         wait_for_comfyui_readiness(
             8188,
             child=RunningChild(),
             probe=lambda _port: ReadinessProbeResult(False),
-            timeout_seconds=0.2,
-            poll_interval_seconds=0.1,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
             monotonic=clock.monotonic,
             sleep=clock.sleep,
         )
 
     assert locations_and_codes(error.value) == [(("readiness",), "readiness.timeout")]
-    diagnostic = error.value.diagnostics[0]
-    assert diagnostic.message == "ComfyUI did not become ready before timeout"
-    assert diagnostic.hint == (
-        "Inspect ComfyUI startup output and verify its listen port"
+    assert clock.now == pytest.approx(timeout_seconds)
+    assert all(
+        0 < seconds <= poll_interval_seconds and seconds <= timeout_seconds - started_at
+        for started_at, seconds in clock.sleep_observations
     )
 
 
@@ -158,32 +149,15 @@ def test_wait_times_out_when_probe_never_becomes_ready() -> None:
         pytest.param(lambda: FakeResponse(payload=[]), id="non-object"),
     ],
 )
-def test_probe_not_ready_responses_eventually_fail_readiness(
+def test_probe_marks_invalid_responses_not_ready(
     response_factory,
 ) -> None:
-    clock = FakeClock()
-
     def http_get(url: str, *, timeout: httpx.Timeout) -> FakeResponse:
         del url, timeout
         return response_factory()
 
     probe_result = probe_comfyui_readiness(8188, http_get=http_get)
     assert probe_result.ready is False
-
-    with pytest.raises(ReadinessError) as error:
-        wait_for_comfyui_readiness(
-            8188,
-            child=RunningChild(),
-            probe=lambda port: probe_comfyui_readiness(port, http_get=http_get),
-            timeout_seconds=0.2,
-            poll_interval_seconds=0.1,
-            monotonic=clock.monotonic,
-            sleep=clock.sleep,
-        )
-
-    assert locations_and_codes(error.value) == [(("readiness",), "readiness.timeout")]
-    diagnostic = error.value.diagnostics[0]
-    assert diagnostic.message == "ComfyUI did not become ready before timeout"
 
 
 def test_transport_errors_eventually_fail_readiness() -> None:

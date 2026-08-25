@@ -14,7 +14,6 @@ import pytest
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
 from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
-from comfyui_docker_helper.container.readiness import ReadinessError
 from comfyui_docker_helper.container.runtime.downloads import (
     RuntimeAsyncQueueStartupError,
 )
@@ -42,6 +41,7 @@ from comfyui_docker_helper.container.runtime.hooks import (
     discover_runtime_hooks,
     run_runtime_stop_hooks,
 )
+from comfyui_docker_helper.container.runtime.readiness import ReadinessError
 from comfyui_docker_helper.container.runtime.ssh.config import SshPreparationWarningKind
 from comfyui_docker_helper.container.runtime.ssh.service import RuntimeSshService
 from comfyui_docker_helper.container.runtime_serve import (

@@ -28,10 +28,6 @@ from comfyui_docker_helper.container.process.control import (
     terminate_process_group_until,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
-from comfyui_docker_helper.container.readiness import (
-    ReadinessError,
-    wait_for_comfyui_readiness,
-)
 from comfyui_docker_helper.container.runtime.diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
@@ -68,6 +64,10 @@ from comfyui_docker_helper.container.runtime.hooks import (
 )
 from comfyui_docker_helper.container.runtime.logging import (
     RUNTIME_LOGGING_UNAVAILABLE_MESSAGE,
+)
+from comfyui_docker_helper.container.runtime.readiness import (
+    ReadinessError,
+    wait_for_comfyui_readiness,
 )
 from comfyui_docker_helper.container.runtime.ssh.service import (
     RuntimeSshService,

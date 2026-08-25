@@ -23,7 +23,6 @@ from comfyui_docker_helper.config import (
 )
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
-from comfyui_docker_helper.container.readiness import wait_for_comfyui_readiness
 from comfyui_docker_helper.container.runtime.control.server import RuntimeControlServer
 from comfyui_docker_helper.container.runtime.control.transport import (
     RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
@@ -75,6 +74,7 @@ from comfyui_docker_helper.container.runtime.logging import (
 from comfyui_docker_helper.container.runtime.presentation import (
     default_runtime_display,
 )
+from comfyui_docker_helper.container.runtime.readiness import wait_for_comfyui_readiness
 from comfyui_docker_helper.container.runtime.secret_session import (
     RuntimeDownloaderCredentialPolicy,
 )

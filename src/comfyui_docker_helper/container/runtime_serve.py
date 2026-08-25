@@ -54,6 +54,9 @@ from comfyui_docker_helper.container.runtime.logging import (
 from comfyui_docker_helper.container.runtime.presentation import (
     default_runtime_display,
 )
+from comfyui_docker_helper.container.runtime.secret_session import (
+    RuntimeDownloaderCredentialPolicy,
+)
 from comfyui_docker_helper.container.runtime.state import RUNTIME_STATE_PATH
 from comfyui_docker_helper.container.runtime_control import (
     RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
@@ -87,9 +90,6 @@ from comfyui_docker_helper.container.runtime_lifecycle import (
     RuntimeHookRunner,
     RuntimeStopHookRunner,
     run_runtime_lifecycle,
-)
-from comfyui_docker_helper.container.runtime_secret_session import (
-    RuntimeDownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.runtime_ssh_service import (
     RuntimeSshService,

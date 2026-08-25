@@ -9,9 +9,12 @@ from pathlib import Path
 import httpx
 import pytest
 
+from comfyui_docker_helper.config.credentials.secrets import (
+    CREDENTIAL_SECRET_MAX_BYTES,
+)
 from comfyui_docker_helper.config.runtime.models import RuntimeConfig
-from comfyui_docker_helper.container import runtime_secret_session as subject
-from comfyui_docker_helper.container.runtime_secret_session import (
+from comfyui_docker_helper.container.runtime import secret_session as subject
+from comfyui_docker_helper.container.runtime.secret_session import (
     RuntimeDownloaderCredentialPolicy,
     RuntimeSecretSession,
     RuntimeSecretSessionError,
@@ -53,9 +56,10 @@ def test_environment_secret_is_lazy_and_cached_once() -> None:
 
 
 def test_cached_failure_raises_fresh_attempt_state() -> None:
+    environ = CountingEnvironment({})
     session = RuntimeSecretSession(
         {"hf_read": RuntimeSecretSource("env", "HF_TOKEN")},
-        {},
+        environ,
     )
 
     with pytest.raises(RuntimeSecretSessionError) as first:
@@ -68,6 +72,7 @@ def test_cached_failure_raises_fresh_attempt_state() -> None:
     assert second.value is not first.value
     assert second.value.code == "source_unavailable"
     assert second.value.network_attempted is False
+    assert environ.reads == 1
 
 
 def test_unexpected_bearer_validator_failure_is_not_policy_eligible(
@@ -78,13 +83,20 @@ def test_unexpected_bearer_validator_failure_is_not_policy_eligible(
         {"HF_TOKEN": "valid-token"},
     )
 
+    validation_attempts = 0
+
     def fail(_: bytes) -> None:
+        nonlocal validation_attempts
+        validation_attempts += 1
         raise RuntimeError("programming failure")
 
     monkeypatch.setattr(subject, "validate_bearer_token", fail)
 
-    with pytest.raises(RuntimeError, match="programming failure"):
-        session.bearer_token("hf_read")
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="programming failure"):
+            session.bearer_token("hf_read")
+
+    assert validation_attempts == 2
 
 
 def test_projected_symlink_is_resolved_fresh_by_each_session(tmp_path: Path) -> None:
@@ -102,19 +114,43 @@ def test_projected_symlink_is_resolved_fresh_by_each_session(tmp_path: Path) -> 
     assert RuntimeSecretSession(source, {}).bearer_token("hf_read") == b"second-token"
 
 
-def test_runtime_secret_file_enforces_shared_bounded_read(tmp_path: Path) -> None:
+def test_runtime_secret_file_enforces_shared_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     token = tmp_path / "token"
-    token.write_bytes(b"a" * 65_526)
-    session = RuntimeSecretSession(
+    admitted = b"a" * CREDENTIAL_SECRET_MAX_BYTES
+    token.write_bytes(admitted)
+    requested_sizes: list[int] = []
+    real_read = subject.os.read
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        requested_sizes.append(size)
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(subject.os, "read", observe_read)
+    admitted_session = RuntimeSecretSession(
+        {"hf_read": RuntimeSecretSource("file", os.fspath(token))},
+        {},
+    )
+
+    assert admitted_session.bearer_token("hf_read") == admitted
+    assert requested_sizes
+    assert max(requested_sizes) <= CREDENTIAL_SECRET_MAX_BYTES + 1
+
+    requests_before_rejection = len(requested_sizes)
+    token.write_bytes(b"a" * (CREDENTIAL_SECRET_MAX_BYTES + 1))
+    oversized_session = RuntimeSecretSession(
         {"hf_read": RuntimeSecretSource("file", os.fspath(token))},
         {},
     )
 
     with pytest.raises(RuntimeSecretSessionError) as raised:
-        session.bearer_token("hf_read")
+        oversized_session.bearer_token("hf_read")
 
     assert raised.value.code == "source_unavailable"
     assert "a" * 100 not in str(raised.value)
+    assert len(requested_sizes) == requests_before_rejection
 
 
 @pytest.mark.parametrize("source_kind", ["directory", "fifo"])

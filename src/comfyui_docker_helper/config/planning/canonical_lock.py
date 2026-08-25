@@ -21,10 +21,7 @@ from comfyui_docker_helper.config.authored.validation.domains import (
     is_oci_tag,
 )
 from comfyui_docker_helper.config.validation.registry import (
-    registry_distribution_identity,
-)
-from comfyui_docker_helper.config.validation.registry import (
-    validate_registry_id as validate_registry_resource_id,
+    validate_registry_id as _validate_registry_id,
 )
 from comfyui_docker_helper.config.validation.requirements import (
     parse_direct_requirement,
@@ -1208,15 +1205,6 @@ def validate_environment(value: str) -> str:
     return _require_environment(value)
 
 
-def validate_registry_id(value: str) -> str:
-    return validate_registry_resource_id(value)
-
-
-def normalized_registry_id(value: str) -> str:
-    """Return the PyPA installed-distribution identity for one Registry ID."""
-    return registry_distribution_identity(value)
-
-
 def validate_exact_registry_version(value: str) -> str:
     return _require_exact_registry_version(value)
 
@@ -1348,7 +1336,7 @@ def _require_token(value: str, field: str) -> str:
 
 
 def _require_registry_id(value: str) -> str:
-    return validate_registry_resource_id(value)
+    return _validate_registry_id(value)
 
 
 def _require_direct_package_specifier(value: str) -> str:

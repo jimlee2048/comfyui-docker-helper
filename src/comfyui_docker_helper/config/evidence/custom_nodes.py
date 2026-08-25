@@ -15,8 +15,8 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_exact_registry_version,
     validate_git_commit,
     validate_git_url,
-    validate_registry_id,
 )
+from comfyui_docker_helper.config.validation.registry import validate_registry_id
 from comfyui_docker_helper.config.validation.selectors import resolve_git_target_dir
 
 

@@ -84,7 +84,6 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_normalized_package,
     validate_oci_repository,
     validate_oci_tag,
-    validate_registry_id,
     validate_sha256_digest,
 )
 from comfyui_docker_helper.config.planning.request import (
@@ -113,6 +112,7 @@ from comfyui_docker_helper.config.validation.os_packages import (
     validate_apt_package_identity,
 )
 from comfyui_docker_helper.config.validation.registry import (
+    validate_registry_id,
     validate_registry_node_authority,
 )
 from comfyui_docker_helper.config.validation.requirements import (

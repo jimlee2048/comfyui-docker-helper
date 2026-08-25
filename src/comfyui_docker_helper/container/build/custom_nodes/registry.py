@@ -15,8 +15,10 @@ from comfyui_docker_helper.config.planning.build_plan import (
     CustomNodesPhase,
     RegistryNodePlan,
 )
-from comfyui_docker_helper.config.planning.canonical_lock import normalized_registry_id
 from comfyui_docker_helper.config.planning.requirements import ParsedManagerRequirements
+from comfyui_docker_helper.config.validation.registry import (
+    registry_distribution_identity,
+)
 from comfyui_docker_helper.container.build.custom_nodes import contracts
 from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
 
@@ -68,7 +70,7 @@ def _verify_registry_set(
         custom_nodes_root, excluded_git_targets=excluded_git_targets
     )
     for node in expected:
-        normalized = normalized_registry_id(node.id)
+        normalized = registry_distribution_identity(node.id)
         identity = observed.get(normalized)
         if identity is None:
             raise contracts.CustomNodeInstallError(
@@ -84,7 +86,7 @@ def _verify_registry_set(
             raise contracts.CustomNodeInstallError(
                 f"Registry node {node.id} version does not match BuildPlan"
             )
-    expected_names = {normalized_registry_id(node.id) for node in expected}
+    expected_names = {registry_distribution_identity(node.id) for node in expected}
     if set(observed) != expected_names:
         raise contracts.CustomNodeInstallError(
             "installed Registry identities do not match the admitted declaration prefix"
@@ -181,7 +183,7 @@ def _parse_project_identity(content: bytes) -> _ObservedRegistryIdentity:
         version = project["version"]
         if not isinstance(name, str) or not isinstance(version, str):
             raise TypeError
-        normalized_name = normalized_registry_id(name)
+        normalized_name = registry_distribution_identity(name)
         parsed_version = Version(version)
     except (
         ValueError,

@@ -7,8 +7,8 @@ from enum import StrEnum
 
 from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_exact_registry_version,
-    validate_registry_id,
 )
+from comfyui_docker_helper.config.validation.registry import validate_registry_id
 from comfyui_docker_helper.config.validation.selectors import is_safe_git_target_dir
 
 

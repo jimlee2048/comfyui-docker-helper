@@ -28,6 +28,7 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeSshOutcome,
     RuntimeSshStatus,
 )
+from comfyui_docker_helper.container.runtime.files.models import RuntimeFilePlan
 from comfyui_docker_helper.container.runtime_control import (
     RuntimeAcceptedResponse,
     RuntimeAckRequest,
@@ -45,7 +46,6 @@ from comfyui_docker_helper.container.runtime_controller import (
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncDownloadQueueHandle,
 )
-from comfyui_docker_helper.container.runtime_files import RuntimeFilePlan
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     RuntimeHookPlan,

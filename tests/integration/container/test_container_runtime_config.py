@@ -15,12 +15,12 @@ from comfyui_docker_helper.config import (
     load_runtime_config,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
-from comfyui_docker_helper.container.runtime.state import RuntimeStateError
-from comfyui_docker_helper.container.runtime_files import (
+from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
+from comfyui_docker_helper.container.runtime.state import RuntimeStateError
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
 )

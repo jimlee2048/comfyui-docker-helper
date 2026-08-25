@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 import pytest
 
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container import runtime_files as runtime_files_module
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime.event_delivery import (
@@ -24,6 +23,17 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadQueueSummary,
     RuntimeDownloadQueueWarning,
     RuntimeDownloadQueueWarningKind,
+)
+from comfyui_docker_helper.container.runtime.files import (
+    download as runtime_file_download_module,
+)
+from comfyui_docker_helper.container.runtime.files.models import (
+    RuntimeFilePlan,
+    RuntimeFilePlanItem,
+)
+from comfyui_docker_helper.container.runtime.files.planning import (
+    build_runtime_file_plan,
+    runtime_file_staging_target,
 )
 from comfyui_docker_helper.container.runtime.state import (
     RuntimeState,
@@ -37,10 +47,6 @@ from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
     start_runtime_async_download_queue,
     stop_runtime_async_download_queue,
-)
-from comfyui_docker_helper.container.runtime_files import (
-    RuntimeFilePlan,
-    RuntimeFilePlanItem,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
@@ -158,14 +164,14 @@ def _install_async_backend(
     backend: AsyncBackend,
 ) -> None:
     monkeypatch.setattr(
-        runtime_files_module,
+        runtime_file_download_module,
         "HttpxDownloader",
         lambda: backend,
     )
 
 
 def _staging_target(item: RuntimeFilePlanItem) -> Path:
-    return runtime_files_module.runtime_file_staging_target(item)
+    return runtime_file_staging_target(item)
 
 
 def _source_filename(request: TransportRequest) -> str:
@@ -1097,7 +1103,7 @@ filename = "b.bin"
     assert not _staging_target(
         next(
             item
-            for item in runtime_files_module.build_runtime_file_plan(
+            for item in build_runtime_file_plan(
                 [
                     {
                         "type": "http",

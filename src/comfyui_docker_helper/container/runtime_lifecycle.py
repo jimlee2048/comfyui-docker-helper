@@ -51,6 +51,10 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeSshOutcome,
     RuntimeSshStatus,
 )
+from comfyui_docker_helper.container.runtime.files.models import (
+    RuntimeFileDownloadError,
+    RuntimeFilePlanError,
+)
 from comfyui_docker_helper.container.runtime.logging import (
     RUNTIME_LOGGING_UNAVAILABLE_MESSAGE,
 )
@@ -58,10 +62,6 @@ from comfyui_docker_helper.container.runtime.state import RuntimeStateError
 from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeAsyncQueueStartupError,
     RuntimeDownloads,
-)
-from comfyui_docker_helper.container.runtime_files import (
-    RuntimeFileDownloadError,
-    RuntimeFilePlanError,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,

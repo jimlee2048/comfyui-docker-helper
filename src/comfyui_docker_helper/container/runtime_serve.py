@@ -42,6 +42,9 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeGenerationStopped,
     RuntimeGenerationStopping,
 )
+from comfyui_docker_helper.container.runtime.files.download import (
+    download_runtime_files,
+)
 from comfyui_docker_helper.container.runtime.logging import (
     RUNTIME_LOGGING_UNAVAILABLE_MESSAGE,
     RuntimeLoggingBroker,
@@ -68,7 +71,6 @@ from comfyui_docker_helper.container.runtime_downloads import (
     RuntimeDownloads,
     start_runtime_async_download_queue,
 )
-from comfyui_docker_helper.container.runtime_files import download_runtime_files
 from comfyui_docker_helper.container.runtime_hooks import (
     BAKED_RUNTIME_HOOKS_PATH,
     MOUNTED_RUNTIME_HOOKS_PATH,

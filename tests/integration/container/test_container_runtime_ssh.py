@@ -23,7 +23,7 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeSshWarning,
     RuntimeSshWarningKind,
 )
-from comfyui_docker_helper.container.runtime_files import (
+from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )

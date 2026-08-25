@@ -26,6 +26,9 @@ from tests.unit.container.runtime.runtime_file_support import (
     runtime_state_digest as _state_digest,
 )
 
+from comfyui_docker_helper.container.runtime.download_state import (
+    RuntimeDownloadStateWriter,
+)
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadAttemptStarted,
     RuntimeDownloadFailed,
@@ -54,9 +57,6 @@ from comfyui_docker_helper.container.runtime.state import (
     RuntimeResumeState,
     RuntimeState,
     RuntimeStateError,
-)
-from comfyui_docker_helper.container.runtime_download_state import (
-    RuntimeDownloadStateWriter,
 )
 from comfyui_docker_helper.container.transfer import core as transfer_core
 from comfyui_docker_helper.container.transfer.core import (

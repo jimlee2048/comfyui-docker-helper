@@ -249,7 +249,7 @@ A configured checksum is trusted content intent supplied from outside the transp
 
 ### Runtime state is minimal recovery authority
 
-[`state.py`](../../src/comfyui_docker_helper/container/runtime/state.py) owns the strict serialized recovery model and durable store. [`runtime_download_state.py`](../../src/comfyui_docker_helper/container/runtime_download_state.py) owns current-run state transitions, while [`runtime/files/reconciliation.py`](../../src/comfyui_docker_helper/container/runtime/files/reconciliation.py) owns reconciliation against desired files.
+[`state.py`](../../src/comfyui_docker_helper/container/runtime/state.py) owns the strict serialized recovery model and durable store. [`runtime/download_state.py`](../../src/comfyui_docker_helper/container/runtime/download_state.py) owns current-run state transitions, while [`runtime/files/reconciliation.py`](../../src/comfyui_docker_helper/container/runtime/files/reconciliation.py) owns reconciliation against desired files.
 
 The state records only the startup generation, desired download identity, actionable recovery status, and exact resume authority needed for safe reconciliation. It is not a durable attempt log, error history, progress feed, or user-editable control surface. Do not add telemetry fields and then make runtime policy depend on them.
 

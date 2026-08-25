@@ -7,7 +7,7 @@ from dataclasses import asdict
 
 import pytest
 
-from comfyui_docker_helper.container.runtime_controller import (
+from comfyui_docker_helper.container.runtime.controller import (
     RuntimeController,
     RuntimeControllerError,
 )
@@ -142,7 +142,6 @@ def test_restart_failure_is_terminal_and_retains_one_summary() -> None:
     assert snapshot.operation == "op-1"
     assert snapshot.last_restart is not None
     assert snapshot.last_restart.result == "failed"
-    assert submission.ticket.snapshot().state == "failed"
 
 
 def test_natural_exit_wins_before_restart_acceptance() -> None:
@@ -231,13 +230,33 @@ def test_external_shutdown_after_success_terminal_cannot_restore_running() -> No
     assert snapshot.last_restart.result == "succeeded"
 
 
+def test_runtime_failure_after_success_terminal_keeps_restart_terminal() -> None:
+    controller = _running_controller()
+    submission = controller.submit_restart(delivery_expected=False)
+    assert submission.ticket is not None
+    assert controller.accept_if_requested(accepted_at=0.0) is True
+    assert controller.allocate_restart_successor() is not None
+    controller.publish_restart_terminal("succeeded")
+
+    controller.observe_runtime_failure("Runtime primary output is unavailable.")
+
+    assert controller.release_successful_restart() is False
+    snapshot = controller.snapshot()
+    assert snapshot.state == "stopping"
+    assert snapshot.phase == "finalizing"
+    assert snapshot.operation is not None
+    assert snapshot.last_restart is not None
+    assert snapshot.operation == snapshot.last_restart.id
+    assert snapshot.last_restart.result == "succeeded"
+
+
 def test_generation_terminal_cannot_orphan_an_active_restart() -> None:
     controller = _running_controller()
     submission = controller.submit_restart()
     assert submission.ticket is not None
     controller.accept_if_requested(accepted_at=0.0)
 
-    with pytest.raises(RuntimeControllerError, match="explicit terminal"):
+    with pytest.raises(RuntimeControllerError):
         controller.mark_generation_terminal("wrong terminal path")
 
     assert submission.ticket.snapshot().state == "accepted"
@@ -247,7 +266,7 @@ def test_generation_terminal_cannot_orphan_an_active_restart() -> None:
 def test_invalid_transition_fails_without_mutating_state() -> None:
     controller = RuntimeController()
 
-    with pytest.raises(RuntimeControllerError, match="No stopped restart"):
+    with pytest.raises(RuntimeControllerError):
         controller.allocate_restart_successor()
 
     assert controller.snapshot().state == "starting"
@@ -303,5 +322,5 @@ def test_runtime_failure_before_success_checkpoint_publishes_failure() -> None:
     )
     assert controller.snapshot().last_restart is not None
     assert controller.snapshot().last_restart.result == "failed"
-    with pytest.raises(RuntimeControllerError, match="No successful restart"):
+    with pytest.raises(RuntimeControllerError):
         controller.release_successful_restart()

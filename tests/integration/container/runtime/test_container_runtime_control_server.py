@@ -41,6 +41,7 @@ from comfyui_docker_helper.container.runtime.control.transport import (
     connect_runtime_control,
     open_runtime_control_listener,
 )
+from comfyui_docker_helper.container.runtime.controller import RuntimeController
 from comfyui_docker_helper.container.runtime.logging import (
     RUNTIME_LOG_MAX_FOLLOWERS,
     RuntimeLogChunk,
@@ -48,7 +49,6 @@ from comfyui_docker_helper.container.runtime.logging import (
     RuntimeLoggingBroker,
     RuntimeLoggingError,
 )
-from comfyui_docker_helper.container.runtime_controller import RuntimeController
 
 
 class _UnavailableLoggingBroker:

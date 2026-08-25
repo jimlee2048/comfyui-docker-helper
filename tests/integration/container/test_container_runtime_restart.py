@@ -25,6 +25,11 @@ from comfyui_docker_helper.container.runtime.control.protocol import (
 from comfyui_docker_helper.container.runtime.control.transport import (
     connect_runtime_control,
 )
+from comfyui_docker_helper.container.runtime.controller import (
+    RuntimeController,
+    RuntimeRestartSubmission,
+    RuntimeRestartTicket,
+)
 from comfyui_docker_helper.container.runtime.downloads import (
     RuntimeAsyncDownloadQueueHandle,
 )
@@ -49,11 +54,6 @@ from comfyui_docker_helper.container.runtime.hooks import (
     RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime.ssh.config import SshdReadinessError
-from comfyui_docker_helper.container.runtime_controller import (
-    RuntimeController,
-    RuntimeRestartSubmission,
-    RuntimeRestartTicket,
-)
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
     run_runtime_serve,

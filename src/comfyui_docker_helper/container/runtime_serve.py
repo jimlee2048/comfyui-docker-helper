@@ -29,6 +29,10 @@ from comfyui_docker_helper.container.runtime.control.transport import (
     RUNTIME_CONTROL_SOCKET_PATH,
     open_runtime_control_listener,
 )
+from comfyui_docker_helper.container.runtime.controller import (
+    RuntimeController,
+    RuntimeControllerError,
+)
 from comfyui_docker_helper.container.runtime.diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
@@ -84,10 +88,6 @@ from comfyui_docker_helper.container.runtime.ssh.service import (
     RuntimeSshStarter,
 )
 from comfyui_docker_helper.container.runtime.state import RUNTIME_STATE_PATH
-from comfyui_docker_helper.container.runtime_controller import (
-    RuntimeController,
-    RuntimeControllerError,
-)
 from comfyui_docker_helper.container.runtime_lifecycle import (
     ReadinessWaiter,
     RuntimeExecutionError,

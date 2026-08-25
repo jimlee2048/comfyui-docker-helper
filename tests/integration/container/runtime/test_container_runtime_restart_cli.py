@@ -21,8 +21,8 @@ from comfyui_docker_helper.container.runtime.control.server import (
 from comfyui_docker_helper.container.runtime.control.transport import (
     open_runtime_control_listener,
 )
+from comfyui_docker_helper.container.runtime.controller import RuntimeController
 from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
-from comfyui_docker_helper.container.runtime_controller import RuntimeController
 
 _RESTART_CLI = """
 import sys

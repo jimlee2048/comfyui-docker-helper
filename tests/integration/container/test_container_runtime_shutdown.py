@@ -26,7 +26,7 @@ from comfyui_docker_helper.container.runtime.hooks import (
     discover_runtime_hooks,
     run_runtime_stop_hooks,
 )
-from comfyui_docker_helper.container.runtime_lifecycle import (
+from comfyui_docker_helper.container.runtime.lifecycle import (
     _wait_for_managed_shutdown,
 )
 from tests.runtime_event_support import RecordingRuntimeEventSink

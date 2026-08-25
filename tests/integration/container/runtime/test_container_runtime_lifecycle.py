@@ -10,12 +10,19 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from tests.runtime_event_support import (
+    RecordingRuntimeEventSink,
+)
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
+)
 
 from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
-from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime import lifecycle as lifecycle_module
 from comfyui_docker_helper.container.runtime.downloads import (
     RuntimeAsyncQueueStartupError,
+    RuntimeDownloads,
 )
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeGenerationStopCause,
@@ -46,12 +53,6 @@ from comfyui_docker_helper.container.runtime.ssh.config import SshPreparationWar
 from comfyui_docker_helper.container.runtime.ssh.service import RuntimeSshService
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
-)
-from tests.runtime_event_support import (
-    RecordingRuntimeEventSink,
-)
-from tests.runtime_event_support import (
-    run_runtime_generation_once_for_test as run_runtime_generation_once,
 )
 
 _WORKER_CLEANUP_TIMEOUT_SECONDS = 10
@@ -172,7 +173,7 @@ def test_managed_ssh_lifecycle_emits_one_typed_outcome(
         )
         return OwnedSshd() if ready else None
 
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.is_stopped.return_value = True
     recorder = Recorder()
     result = lifecycle_module.run_runtime_lifecycle(
@@ -668,9 +669,9 @@ def test_runtime_file_phase_does_not_complete_after_cancellation_or_health_failu
 
     def run_case(*, primary_failure: bool) -> tuple[list[object], object]:
         health = ControllableRuntimeHealth()
-        semantic_events: list[object] = []
-        downloads = Mock()
-        ssh_service = Mock()
+        event_sink = RecordingRuntimeEventSink()
+        downloads = Mock(spec=RuntimeDownloads)
+        ssh_service = Mock(spec=RuntimeSshService)
         downloads.is_stopped.return_value = True
         ssh_service.is_stopped.return_value = True
 
@@ -693,11 +694,11 @@ def test_runtime_file_phase_does_not_complete_after_cancellation_or_health_failu
                 ssh_service=ssh_service,
                 runner=lambda *_args, **_kwargs: pytest.fail("ComfyUI must not start"),
                 runtime_health=health,
-                event_sink=Mock(emit=semantic_events.append),
+                event_sink=event_sink,
             )
         except RuntimeExecutionError as error:
             result = error
-        return semantic_events, result
+        return event_sink.events, result
 
     cancelled_events, cancelled_result = run_case(primary_failure=False)
     failed_events, failed_result = run_case(primary_failure=True)
@@ -757,7 +758,7 @@ def test_operator_restart_is_accepted_after_startup_and_uses_fixed_sigterm(
     restart = PendingRestart(events, after_accept=lambda: clock.sleep(1.0))
     deadlines: list[float | None] = []
 
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.activate.side_effect = lambda **_kwargs: events.append(
         "downloads:activate"
     )
@@ -769,7 +770,7 @@ def test_operator_restart_is_accepted_after_startup_and_uses_fixed_sigterm(
         events.append("downloads:request"),
     )
     downloads.is_stopped.return_value = True
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.start.side_effect = lambda **_kwargs: events.append("ssh:start")
     ssh_service.ensure_running_before_comfyui.side_effect = lambda: events.append(
         "ssh:ensure"
@@ -846,8 +847,8 @@ def test_pending_restart_loses_to_observed_natural_exit(tmp_path: Path) -> None:
     child = FakeChild(31)
     child.returncode = 31
     restart = PendingRestart()
-    downloads = Mock()
-    ssh_service = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
+    ssh_service = Mock(spec=RuntimeSshService)
 
     startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
@@ -880,9 +881,9 @@ def test_pending_restart_loses_to_admitted_external_signal(tmp_path: Path) -> No
     runtime = _runtime(tmp_path)
     child = FakeChild(-int(signal.SIGINT))
     restart = PendingRestart()
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.is_stopped.return_value = True
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.is_stopped.return_value = True
     startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
@@ -934,19 +935,20 @@ def test_first_external_signal_during_restart_preserves_original_signal(
         events=events,
         wait_event="child:reap",
     )
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.request_stop.side_effect = lambda **_kwargs: events.append(
         "downloads:request"
     )
     downloads.is_stopped.return_value = True
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.request_stop.side_effect = lambda: events.append("ssh:request")
     ssh_service.is_stopped.return_value = True
-    semantic_events: list[object] = []
+    event_sink = RecordingRuntimeEventSink()
     lifecycle_events = lifecycle_module._RuntimeLifecycleEvents(
-        Mock(emit=semantic_events.append),
+        event_sink,
         "gen-1",
     )
+    semantic_events = event_sink.events
 
     def stop_hooks(
         _plan: RuntimeHookPlan,
@@ -1013,14 +1015,14 @@ def test_presentation_failure_does_not_replace_startup_failure_or_cleanup(
 ) -> None:
     runtime = _runtime(tmp_path)
     health = ControllableRuntimeHealth()
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
 
     def fail_primary_health(**_kwargs: object) -> None:
         health.fail("primary output failed during runtime file activation")
 
     downloads.activate.side_effect = fail_primary_health
     downloads.is_stopped.return_value = True
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.is_stopped.return_value = True
 
     class FailingSink:
@@ -1160,12 +1162,12 @@ def test_repeated_external_signal_at_send_decision_skips_ordinary_signal(
     events: list[str] = []
     restart = PendingRestart(events)
     child = FakeChild(0, events=events, wait_event="child:reap")
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.request_stop.side_effect = lambda **_kwargs: events.append(
         "downloads:request"
     )
     downloads.is_stopped.return_value = True
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.request_stop.side_effect = lambda: events.append("ssh:request")
     ssh_service.is_stopped.return_value = True
     startup_shutdown = lifecycle_module._StartupShutdownState(
@@ -1241,12 +1243,12 @@ def test_operator_restart_stop_hook_failure_cleans_exact_owners_before_error(
 
     active_hook = CompletedHook(0, events=events, wait_event="hook:reap")
     active_hook.returncode = 0
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.request_stop.side_effect = lambda **_kwargs: events.append(
         "downloads:request"
     )
     downloads.is_stopped.return_value = True
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.request_stop.side_effect = lambda: events.append("ssh:request")
     ssh_service.is_stopped.return_value = True
 
@@ -1312,13 +1314,17 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
     )
     events: list[str] = []
     child = FakeChild(19, events=events, wait_event="child:wait")
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.stop.side_effect = lambda **_kwargs: events.append("async:stop")
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.stop.side_effect = lambda **_kwargs: events.extend(
         ("ssh:terminate", "ssh:wait")
     )
-    stop_hook_runner = Mock()
+
+    def stop_hook_runner(
+        *_args: object, **_kwargs: object
+    ) -> tuple[RuntimeHookResult, ...]:
+        pytest.fail("natural child exit must not run signal-only stop hooks")
 
     startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
@@ -1341,7 +1347,6 @@ def test_natural_child_exit_cleans_auxiliaries_without_running_stop_hooks(
         cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=19,
     )
-    stop_hook_runner.assert_not_called()
     assert events == [
         "child:wait",
         "async:stop",
@@ -1377,11 +1382,15 @@ def test_terminal_child_signal_race_preserves_natural_exit(
                 raise AssertionError("signal handler must interrupt the first wait")
             return self.returncode
 
-    downloads = Mock()
+    downloads = Mock(spec=RuntimeDownloads)
     downloads.stop.side_effect = lambda **_kwargs: events.append("async:stop")
-    ssh_service = Mock()
+    ssh_service = Mock(spec=RuntimeSshService)
     ssh_service.stop.side_effect = lambda **_kwargs: events.append("ssh:stop")
-    stop_hook_runner = Mock()
+
+    def stop_hook_runner(
+        *_args: object, **_kwargs: object
+    ) -> tuple[RuntimeHookResult, ...]:
+        pytest.fail("terminal child exit must not run signal-only stop hooks")
 
     startup_shutdown = lifecycle_module._StartupShutdownState(
         shutdown_timeout=8,
@@ -1404,7 +1413,6 @@ def test_terminal_child_signal_race_preserves_natural_exit(
         cause=RuntimeGenerationStopCause.NATURAL_EXIT,
         returncode=29,
     )
-    stop_hook_runner.assert_not_called()
     assert events == ["async:stop", "ssh:stop"]
     assert restored == [signal.SIGTERM, signal.SIGINT]
 

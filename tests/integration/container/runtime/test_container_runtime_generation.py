@@ -7,16 +7,16 @@ from pathlib import Path
 
 import httpx
 import pytest
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime.secret_session import (
     RuntimeDownloaderCredentialPolicy,
 )
-from comfyui_docker_helper.container.runtime_serve import (
+from comfyui_docker_helper.container.runtime.serve import (
     RuntimeGenerationFactory,
     capture_runtime_environment,
 )
-from tests.runtime_event_support import RecordingRuntimeEventSink
 
 
 def _write(path: Path, content: str) -> None:

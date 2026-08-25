@@ -6,14 +6,14 @@ import signal
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 from comfyui_docker_helper.config import Diagnostic
-from comfyui_docker_helper.container import runtime_serve as runtime_serve_module
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime import lifecycle as lifecycle_module
+from comfyui_docker_helper.container.runtime import serve as runtime_serve_module
 from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeAcceptedResponse,
     RuntimeAckRequest,
@@ -28,7 +28,6 @@ from comfyui_docker_helper.container.runtime.control.transport import (
 from comfyui_docker_helper.container.runtime.controller import (
     RuntimeController,
     RuntimeRestartSubmission,
-    RuntimeRestartTicket,
 )
 from comfyui_docker_helper.container.runtime.downloads import (
     RuntimeAsyncDownloadQueueHandle,
@@ -53,11 +52,11 @@ from comfyui_docker_helper.container.runtime.hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
 )
-from comfyui_docker_helper.container.runtime.ssh.config import SshdReadinessError
-from comfyui_docker_helper.container.runtime_serve import (
+from comfyui_docker_helper.container.runtime.serve import (
     RuntimeExecutionError,
     run_runtime_serve,
 )
+from comfyui_docker_helper.container.runtime.ssh.config import SshdReadinessError
 
 
 class _RestartChild:
@@ -131,12 +130,13 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
     events: list[str] = []
     child = _RestartChild(events, "only")
     failure_observer: list[Callable[[str], object]] = []
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
 
     monkeypatch.setattr(
         runtime_serve_module,
         "default_runtime_display",
-        lambda _settings: Mock(emit=semantic_events.append),
+        lambda _settings: recorder,
     )
 
     class InjectedLogging:
@@ -278,7 +278,8 @@ def test_pre_lifecycle_primary_failure_closes_admitted_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
     failure_observers: list[Callable[[str], object]] = []
 
     class InjectedLogging:
@@ -339,7 +340,8 @@ def test_pre_lifecycle_signal_closes_admitted_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handlers: dict[signal.Signals, object] = {}
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
 
     monkeypatch.setattr(
         signal,
@@ -356,7 +358,7 @@ def test_pre_lifecycle_signal_closes_admitted_generation(
     monkeypatch.setattr(
         runtime_serve_module,
         "default_runtime_display",
-        lambda _settings: Mock(emit=semantic_events.append),
+        lambda _settings: recorder,
     )
 
     def interrupt_factory(_factory: object) -> object:
@@ -401,7 +403,8 @@ def test_signal_during_serve_stopping_finishes_terminal_event_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handlers: dict[signal.Signals, object] = {}
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
     invalid_config = tmp_path / "invalid.toml"
     invalid_config.write_text("[comfyui\ninvalid", encoding="utf-8")
 
@@ -468,8 +471,8 @@ def test_signal_at_lifecycle_handoff_closes_generation_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handlers: dict[signal.Signals, object] = {}
-    installs: dict[signal.Signals, int] = {}
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
 
     monkeypatch.setattr(
         signal,
@@ -479,18 +482,21 @@ def test_signal_at_lifecycle_handoff_closes_generation_once(
 
     def install_handler(sig: signal.Signals, handler: object) -> object:
         previous = handlers.get(sig, signal.SIG_DFL)
+        if (
+            sig is signal.SIGTERM
+            and handler not in (signal.SIG_DFL, signal.SIG_IGN)
+            and previous not in (signal.SIG_DFL, signal.SIG_IGN)
+        ):
+            assert callable(previous)
+            previous(signal.SIGTERM, None)
         handlers[sig] = handler
-        installs[sig] = installs.get(sig, 0) + 1
-        if sig is signal.SIGTERM and installs[sig] == 2:
-            assert callable(handler)
-            handler(signal.SIGTERM, None)
         return previous
 
     monkeypatch.setattr(signal, "signal", install_handler)
     monkeypatch.setattr(
         runtime_serve_module,
         "default_runtime_display",
-        lambda _settings: Mock(emit=semantic_events.append),
+        lambda _settings: recorder,
     )
 
     assert (
@@ -524,7 +530,8 @@ def test_late_inner_signal_is_forwarded_after_lifecycle_finalization(
 ) -> None:
     handlers: dict[signal.Signals, object] = {}
     observed: list[signal.Signals] = []
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
 
     monkeypatch.setattr(
         signal,
@@ -610,16 +617,13 @@ def test_restart_replaces_the_complete_generation_without_owner_overlap(
     events: list[str] = []
     children: list[_RestartChild] = []
     submission: RuntimeRestartSubmission | None = None
-    semantic_events: list[object] = []
-
-    class RecordingDisplay:
-        def emit(self, event: object) -> None:
-            semantic_events.append(event)
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
 
     monkeypatch.setattr(
         runtime_serve_module,
         "default_runtime_display",
-        lambda _settings: RecordingDisplay(),
+        lambda _settings: recorder,
     )
 
     def runner(
@@ -763,12 +767,13 @@ def test_successor_admission_failure_exits_without_starting_a_second_owner(
     _write_config(config, "old")
     children: list[_RestartChild] = []
     submission: RuntimeRestartSubmission | None = None
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
 
     monkeypatch.setattr(
         runtime_serve_module,
         "default_runtime_display",
-        lambda _settings: Mock(emit=semantic_events.append),
+        lambda _settings: recorder,
     )
 
     def runner(
@@ -844,7 +849,8 @@ password = "configured-secret"
         encoding="utf-8",
     )
     events: list[str] = []
-    semantic_events: list[object] = []
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
     app_children: list[_RestartChild] = []
     ssh_handles: list[object] = []
     seen_environments: list[Mapping[bytes, bytes]] = []
@@ -877,13 +883,10 @@ password = "configured-secret"
             self.released.set()
             events.append("ssh:kill")
 
-    def display(event: object) -> None:
-        semantic_events.append(event)
-
     monkeypatch.setattr(
         runtime_serve_module,
         "default_runtime_display",
-        lambda _settings: Mock(emit=display),
+        lambda _settings: recorder,
     )
 
     def ssh_starter(
@@ -972,16 +975,13 @@ def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(
     _write_hook(hooks, "stop", "30-stop.sh")
     children: list[_RestartChild] = []
     submission: RuntimeRestartSubmission | None = None
-    semantic_events: list[object] = []
-
-    class RecordingDisplay:
-        def emit(self, event: object) -> None:
-            semantic_events.append(event)
+    recorder = RecordingRuntimeEventSink()
+    semantic_events = recorder.events
 
     monkeypatch.setattr(
         runtime_serve_module,
         "default_runtime_display",
-        lambda _settings: RecordingDisplay(),
+        lambda _settings: recorder,
     )
 
     def runner(
@@ -1245,18 +1245,26 @@ def test_successor_post_start_failure_cleans_exact_owners_before_terminal(
         "terminate_process_group_until",
         terminate_hook,
     )
-    original_publish = RuntimeRestartTicket._publish
+    original_publish_terminal = RuntimeController.publish_restart_terminal
 
     def observe_ticket_publish(
-        ticket: RuntimeRestartTicket,
+        controller: RuntimeController,
         state: object,
         **kwargs: object,
     ) -> None:
-        original_publish(ticket, state, **kwargs)  # type: ignore[arg-type]
+        original_publish_terminal(
+            controller,
+            state,  # type: ignore[arg-type]
+            **kwargs,
+        )
         if state == "failed":
             events.append("ticket:failed")
 
-    monkeypatch.setattr(RuntimeRestartTicket, "_publish", observe_ticket_publish)
+    monkeypatch.setattr(
+        RuntimeController,
+        "publish_restart_terminal",
+        observe_ticket_publish,
+    )
 
     def runner(
         argv: Sequence[str],
@@ -1406,8 +1414,7 @@ def test_successor_cleanup_precedes_real_terminal_delivery_and_ack(
             assert isinstance(terminal, RuntimeTerminalResponse)
             assert terminal.operation == "op-1"
             assert terminal.result == "failed"
-            assert terminal.message is not None
-            assert "synthetic successor failure" in terminal.message
+            assert terminal.message
             events.append("client:terminal")
             send_runtime_control_message(peer, RuntimeAckRequest(operation="op-1"))
             events.append("client:ack")

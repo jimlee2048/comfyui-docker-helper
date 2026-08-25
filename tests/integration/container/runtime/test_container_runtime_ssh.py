@@ -37,6 +37,9 @@ from comfyui_docker_helper.container.runtime.hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
 )
+from comfyui_docker_helper.container.runtime.serve import (
+    RuntimeExecutionError,
+)
 from comfyui_docker_helper.container.runtime.ssh.config import (
     SshCredentialPreparationError,
     SshdConfigPreparationError,
@@ -51,9 +54,6 @@ from comfyui_docker_helper.container.runtime.ssh.service import (
     RuntimeSshService,
     RuntimeSshServiceError,
     stop_runtime_ssh_service,
-)
-from comfyui_docker_helper.container.runtime_serve import (
-    RuntimeExecutionError,
 )
 
 VALID_SSH_KEY = (

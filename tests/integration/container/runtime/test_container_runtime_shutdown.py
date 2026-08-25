@@ -12,6 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 from comfyui_docker_helper.container.process.control import (
     reap_process_if_exited,
@@ -29,7 +30,6 @@ from comfyui_docker_helper.container.runtime.hooks import (
 from comfyui_docker_helper.container.runtime.lifecycle import (
     _wait_for_managed_shutdown,
 )
-from tests.runtime_event_support import RecordingRuntimeEventSink
 
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 10
 _PROCESS_CLEANUP_POLL_INTERVAL_SECONDS = 0.02

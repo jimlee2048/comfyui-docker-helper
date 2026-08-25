@@ -10,7 +10,7 @@ from comfyui_docker_helper.container.runtime.event_delivery import (
     RuntimeBackgroundEventSink,
 )
 from comfyui_docker_helper.container.runtime.events import RuntimeEvent
-from comfyui_docker_helper.container.runtime_serve import run_runtime_generation_once
+from comfyui_docker_helper.container.runtime.serve import run_runtime_generation_once
 
 
 class RecordingRuntimeEventSink:

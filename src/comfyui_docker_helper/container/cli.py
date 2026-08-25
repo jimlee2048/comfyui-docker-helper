@@ -48,7 +48,7 @@ if sys.platform == "linux":
         read_runtime_status,
         restart_runtime,
     )
-    from comfyui_docker_helper.container.runtime_serve import run_runtime_serve
+    from comfyui_docker_helper.container.runtime.serve import run_runtime_serve
 else:
     MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
 

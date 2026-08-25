@@ -5,12 +5,14 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import pytest
+
 _REAL_FD_BROKER = r"""
 import os
 import subprocess
 import sys
 
-from comfyui_docker_helper.container.runtime_logging import RuntimeLoggingBroker
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 
 
 def write_all(fd, data):
@@ -85,7 +87,7 @@ _PRIMARY_FAILURE = r"""
 import errno
 import os
 
-from comfyui_docker_helper.container.runtime_logging import RuntimeLoggingBroker
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 
 
 def fail_saved_writer(_fd, _data):
@@ -94,12 +96,15 @@ def fail_saved_writer(_fd, _data):
 
 broker = RuntimeLoggingBroker(writer=fail_saved_writer)
 broker.start()
+follower = broker.follow()
 os.write(1, b"fatal")
 if not broker.wait_for_failure(2.0):
     os._exit(21)
 failure = broker.failure()
 if failure is None or failure.stream != "stdout":
     os._exit(22)
+if follower.receive(0) is not None:
+    os._exit(23)
 
 # A failed primary output remains drained so the workload cannot block before
 # the runtime handles the fatal output error.
@@ -117,7 +122,7 @@ _CLOSE_WITH_DESCENDANT = r"""
 import subprocess
 import sys
 
-from comfyui_docker_helper.container.runtime_logging import RuntimeLoggingBroker
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 
 
 broker = RuntimeLoggingBroker()
@@ -143,8 +148,8 @@ _START_FAILURE = r"""
 import errno
 import os
 
-from comfyui_docker_helper.container import runtime_logging
-from comfyui_docker_helper.container.runtime_logging import (
+from comfyui_docker_helper.container.runtime import logging as runtime_logging
+from comfyui_docker_helper.container.runtime.logging import (
     RuntimeLoggingBroker,
     RuntimeLoggingError,
 )
@@ -174,10 +179,61 @@ os.write(2, b"stderr-restored")
 """
 
 
+_THREAD_START_FAILURE = r"""
+import errno
+import os
+import sys
+
+from comfyui_docker_helper.container.runtime import logging as runtime_logging
+from comfyui_docker_helper.container.runtime.logging import (
+    RuntimeLoggingBroker,
+    RuntimeLoggingError,
+)
+
+
+failure_index = int(sys.argv[1])
+original_start = runtime_logging.threading.Thread.start
+calls = 0
+
+
+def fail_selected_start(thread):
+    global calls
+    calls += 1
+    if calls == failure_index:
+        raise RuntimeError("synthetic drain thread start failure")
+    return original_start(thread)
+
+
+runtime_logging.threading.Thread.start = fail_selected_start
+broker = RuntimeLoggingBroker()
+try:
+    broker.start()
+except RuntimeLoggingError:
+    pass
+else:
+    raise SystemExit(61)
+finally:
+    runtime_logging.threading.Thread.start = original_start
+
+for pipe in broker._pipes:
+    for fd in (pipe.restore_fd, pipe.writer_fd, pipe.read_fd):
+        try:
+            os.fstat(fd)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            raise SystemExit(62)
+
+os.write(1, b"stdout-restored")
+os.write(2, b"stderr-restored")
+"""
+
+
 _BUFFERED_CLOSE = r"""
 import sys
 
-from comfyui_docker_helper.container.runtime_logging import RuntimeLoggingBroker
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 
 
 broker = RuntimeLoggingBroker()
@@ -191,7 +247,7 @@ broker.close()
 _SLOW_FOLLOWER = r"""
 import os
 
-from comfyui_docker_helper.container.runtime_logging import RuntimeLoggingBroker
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 
 
 broker = RuntimeLoggingBroker()
@@ -251,6 +307,22 @@ def test_broker_close_does_not_wait_for_descendant_pipe_eof() -> None:
 def test_broker_start_failure_restores_both_primary_streams() -> None:
     result = subprocess.run(
         [sys.executable, "-c", _START_FAILURE],
+        capture_output=True,
+        check=False,
+        timeout=10.0,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == b"stdout-restored"
+    assert result.stderr == b"stderr-restored"
+
+
+@pytest.mark.parametrize("failure_index", [1, 2])
+def test_broker_thread_start_failure_closes_all_owned_descriptors(
+    failure_index: int,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", _THREAD_START_FAILURE, str(failure_index)],
         capture_output=True,
         check=False,
         timeout=10.0,

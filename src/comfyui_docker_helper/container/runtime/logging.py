@@ -236,6 +236,10 @@ class RuntimeLoggingBroker:
                 thread.start()
                 started_threads.append(thread)
         except Exception as error:
+            for pipe in self._pipes[len(started_threads) :]:
+                for fd in (pipe.read_fd, pipe.writer_fd):
+                    with suppress(OSError):
+                        os.close(fd)
             self._threads = tuple(started_threads)
             self.close()
             raise RuntimeLoggingError(

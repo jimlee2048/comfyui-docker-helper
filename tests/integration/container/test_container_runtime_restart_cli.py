@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 from comfyui_docker_helper.container.runtime_control import (
     open_runtime_control_listener,
 )
@@ -22,7 +23,6 @@ from comfyui_docker_helper.container.runtime_control_server import (
     RuntimeControlServer,
 )
 from comfyui_docker_helper.container.runtime_controller import RuntimeController
-from comfyui_docker_helper.container.runtime_logging import RuntimeLoggingBroker
 
 _RESTART_CLI = """
 import sys

@@ -6,8 +6,8 @@ import threading
 
 import pytest
 
-from comfyui_docker_helper.container import runtime_logging as logging_module
-from comfyui_docker_helper.container.runtime_logging import (
+from comfyui_docker_helper.container.runtime import logging as logging_module
+from comfyui_docker_helper.container.runtime.logging import (
     RUNTIME_LOG_FOLLOWER_QUEUE_BYTES,
     RUNTIME_LOG_MAX_FOLLOWERS,
     RuntimeLogChunk,

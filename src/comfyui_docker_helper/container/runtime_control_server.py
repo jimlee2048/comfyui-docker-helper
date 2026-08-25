@@ -7,6 +7,12 @@ import socket
 import threading
 from contextlib import suppress
 
+from comfyui_docker_helper.container.runtime.logging import (
+    RuntimeLogFollower,
+    RuntimeLogFollowerSource,
+    RuntimeLoggingError,
+    RuntimeLoggingFollowerLimitError,
+)
 from comfyui_docker_helper.container.runtime_control import (
     RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
     RuntimeAcceptedResponse,
@@ -29,12 +35,6 @@ from comfyui_docker_helper.container.runtime_controller import (
     RuntimeController,
     RuntimeRestartTicket,
     RuntimeRestartTicketSnapshot,
-)
-from comfyui_docker_helper.container.runtime_logging import (
-    RuntimeLogFollower,
-    RuntimeLogFollowerSource,
-    RuntimeLoggingError,
-    RuntimeLoggingFollowerLimitError,
 )
 
 _ACCEPT_POLL_SECONDS = 0.1

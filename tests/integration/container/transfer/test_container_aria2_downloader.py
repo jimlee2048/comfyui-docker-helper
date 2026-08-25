@@ -1369,7 +1369,8 @@ def test_aria2_post_spawn_base_exception_cleans_child_and_notifies_waiter(
     assert len(waiter_errors) == 1
     assert isinstance(waiter_errors[0], DownloadFilesError)
     assert process.wait_calls == 1
-    assert downloader._process is None
+    downloader.close()
+    assert process.wait_calls == 1
 
 
 @pytest.mark.parametrize("failure_point", ["client", "api", "readiness"])

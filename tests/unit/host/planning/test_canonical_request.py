@@ -447,18 +447,20 @@ def test_protected_pytorch_direct_source_fails_before_resolution() -> None:
 
 
 @pytest.mark.parametrize(
-    ("group", "field"),
+    ("group", "field", "request_group"),
     [
-        ("python", "extra_packages"),
-        ("python", "uv_tools"),
-        ("pytorch", "extra_packages"),
+        ("python", "extra_packages", "application-extra"),
+        ("python", "uv_tools", "uv-tool"),
+        ("pytorch", "extra_packages", "pytorch"),
     ],
 )
 def test_inactive_requirement_changes_image_identity_without_entering_requests(
     group: str,
     field: str,
+    request_group: str,
 ) -> None:
-    baseline = final_config()
+    baseline = final_config().model_copy(deep=True)
+    getattr(getattr(baseline, group), field).append("active-demo==1.0")
     configured = baseline.model_copy(deep=True)
     values = getattr(getattr(configured, group), field)
     values.append('inactive-demo; python_version < "3.13"')
@@ -466,12 +468,26 @@ def test_inactive_requirement_changes_image_identity_without_entering_requests(
 
     baseline_graph = request_graph(baseline, resolution)
     configured_graph = request_graph(configured, resolution)
+    requests = tuple(
+        item.request
+        for item in configured_graph.desired
+        if isinstance(
+            item.request, (DirectPythonRequestIdentity, PyTorchRequestIdentity)
+        )
+        and item.request.group == request_group
+    )
 
     assert baseline_graph.image_config_digest != configured_graph.image_config_digest
+    assert requests
+    assert any(
+        member.package == "active-demo"
+        for request in requests
+        for member in request.members
+    )
     assert all(
-        not isinstance(item.request, DirectPythonRequestIdentity)
-        or all(member.package != "inactive-demo" for member in item.request.members)
-        for item in configured_graph.desired
+        member.package != "inactive-demo"
+        for request in requests
+        for member in request.members
     )
 
 

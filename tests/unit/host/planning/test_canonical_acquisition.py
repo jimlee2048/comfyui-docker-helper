@@ -500,54 +500,56 @@ def test_generic_pylock_rejects_malformed_requested_results(output: bytes) -> No
 
 
 @pytest.mark.parametrize(
-    ("environment", "group", "package", "selector"),
+    "identity",
     [
-        ("application", "application-extra", "packaging", "==26.2"),
-        ("uv-tool:ruff", "uv-tool", "ruff", "==0.15.18"),
-    ],
-)
-def test_direct_python_groups_preserve_controlled_executor_cleanup_identity(
-    environment: str,
-    group: str,
-    package: str,
-    selector: str,
-) -> None:
-    request = DirectPythonRequestIdentity(
-        type="python-group",
-        environment=environment,
-        group=group,
-        python_version="3.13.14",
-        platform="linux/amd64",
-        index_url="https://pypi.org/simple",
-        resolver_descriptor_digest=DIGEST_A,
-        members=(
-            DirectPythonRequestMember(package=package, extras=(), specifier=selector),
+        DirectPythonRequestIdentity(
+            type="python-group",
+            environment="application",
+            group="application-extra",
+            python_version="3.13.14",
+            platform="linux/amd64",
+            index_url="https://pypi.org/simple",
+            resolver_descriptor_digest=DIGEST_A,
+            members=(
+                DirectPythonRequestMember(
+                    package="packaging", extras=(), specifier="==26.2"
+                ),
+            ),
         ),
-    )
+        DirectPythonRequestIdentity(
+            type="python-group",
+            environment="uv-tool:ruff",
+            group="uv-tool",
+            python_version="3.13.14",
+            platform="linux/amd64",
+            index_url="https://pypi.org/simple",
+            resolver_descriptor_digest=DIGEST_A,
+            members=(
+                DirectPythonRequestMember(
+                    package="ruff", extras=(), specifier="==0.15.18"
+                ),
+            ),
+        ),
+        ComfyCliRequestIdentity(
+            type="comfy-cli",
+            package="comfy-cli",
+            policy="highest-target-compatible-stable",
+            minimum_version="1.7.0",
+            environment="uv-tool:comfy-cli",
+            index_url="https://pypi.org/simple",
+            python_version="3.13.14",
+            platform="linux/amd64",
+            resolver_descriptor_digest=DIGEST_A,
+        ),
+    ],
+    ids=("application", "uv-tool", "comfy-cli"),
+)
+def test_python_group_requests_preserve_controlled_executor_cleanup_identity(
+    identity: DirectPythonRequestIdentity | ComfyCliRequestIdentity,
+) -> None:
 
     with pytest.raises(CanonicalAcquisitionError) as raised:
-        DockerPythonGroupResolver(_FailingUvExecutor()).resolve(request)
-
-    assert str(raised.value) == (
-        f"Python group resolution failed: {CONTROLLED_CLEANUP_ERROR}"
-    )
-
-
-def test_comfy_cli_preserves_controlled_executor_cleanup_identity() -> None:
-    request = ComfyCliRequestIdentity(
-        type="comfy-cli",
-        package="comfy-cli",
-        policy="highest-target-compatible-stable",
-        minimum_version="1.7.0",
-        environment="uv-tool:comfy-cli",
-        index_url="https://pypi.org/simple",
-        python_version="3.13.14",
-        platform="linux/amd64",
-        resolver_descriptor_digest=DIGEST_A,
-    )
-
-    with pytest.raises(CanonicalAcquisitionError) as raised:
-        DockerPythonGroupResolver(_FailingUvExecutor()).resolve(request)
+        DockerPythonGroupResolver(_FailingUvExecutor()).resolve(identity)
 
     assert str(raised.value) == (
         f"Python group resolution failed: {CONTROLLED_CLEANUP_ERROR}"

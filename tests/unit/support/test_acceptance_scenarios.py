@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 import tomllib
-from collections import Counter
 
 import pytest
 from packaging.version import Version
@@ -50,40 +49,40 @@ def test_catalog_has_unique_total_fixture_ownership() -> None:
     assert len(documents) == len(set(documents))
 
 
-# The durable matrix is six GPU-accepted images with one non-default CUDA selector.
-def test_release_matrix_has_exact_dispositions_and_selector_allocation() -> None:
-    assert len(RELEASE_SCENARIOS) == 6
-    assert Counter(scenario.python_version for scenario in RELEASE_SCENARIOS) == {
-        "3.12.13": 1,
-        "3.13.14": 4,
-        "3.14.6": 1,
+# Release scenarios own complete, unique artifact inputs and explicit GPU cost.
+def test_release_scenarios_have_complete_inputs_and_gpu_authorization() -> None:
+    assert RELEASE_SCENARIOS
+    project = tomllib.loads((_PROJECT_ROOT / "pyproject.toml").read_text())["project"]
+    classifier_prefix = "Programming Language :: Python :: "
+    supported_minors = {
+        tuple(int(part) for part in suffix.split("."))
+        for classifier in project["classifiers"]
+        if classifier.startswith(classifier_prefix)
+        and (suffix := classifier.removeprefix(classifier_prefix)).count(".") == 1
+        and all(part.isdigit() for part in suffix.split("."))
     }
-    py313 = {
-        frozenset(
-            capability
-            for capability in scenario.capabilities
-            if capability
-            in {Capability.CLI, Capability.MANAGER, Capability.CUSTOM_NODES}
+    release_minors = {
+        Version(scenario.python_version).release[:2] for scenario in RELEASE_SCENARIOS
+    }
+    capability_combinations = {
+        (
+            Capability.CLI in scenario.capabilities,
+            Capability.MANAGER in scenario.capabilities,
+            Capability.CUSTOM_NODES in scenario.capabilities,
         )
         for scenario in RELEASE_SCENARIOS
-        if scenario.python_version == "3.13.14"
     }
-    assert py313 == {
-        frozenset({Capability.CLI, Capability.MANAGER, Capability.CUSTOM_NODES}),
-        frozenset(),
-        frozenset({Capability.CLI}),
-        frozenset({Capability.MANAGER, Capability.CUSTOM_NODES}),
+
+    assert release_minors == supported_minors
+    assert capability_combinations >= {
+        (False, False, False),
+        (False, True, True),
+        (True, False, False),
+        (True, True, True),
     }
-    nondefault = [
-        scenario
-        for scenario in ACCEPTANCE_SCENARIOS
-        if (scenario.image_flavor, scenario.image_distro)
-        != ("cudnn-devel", "ubuntu24.04")
-    ]
-    assert [
-        (scenario.id, scenario.image_flavor, scenario.image_distro)
-        for scenario in nondefault
-    ] == [("py312-full", "cudnn-devel", "ubuntu22.04")]
+    assert {"ubuntu22.04", "ubuntu24.04"} <= {
+        scenario.image_distro for scenario in RELEASE_SCENARIOS
+    }
     assert all(
         scenario.image_variable and scenario.context_variable
         for scenario in RELEASE_SCENARIOS

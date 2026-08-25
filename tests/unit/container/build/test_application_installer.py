@@ -14,7 +14,6 @@ from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
     ExactPackagePlan,
     PackageGroupPlan,
-    PyTorchGroupPlan,
     build_plan_digest,
     managed_runtime_constraints_bytes,
 )
@@ -489,11 +488,8 @@ def test_runtime_rejects_forged_python_extra_owner_overlap_before_install(
             ),
         ),
     )
-    forged = ApplicationPhase.model_construct(
-        **{
-            **application.__dict__,
-            "python_extras": forged_group,
-        }
+    forged = application.model_copy(
+        update={"python_extras": forged_group},
     )
     monkeypatch.setattr(
         application_installer,
@@ -515,11 +511,8 @@ def test_runtime_rejects_python_extra_overlap_with_arbitrary_pytorch_member(
         version="0.0.35",
         environment="application",
     )
-    forged_pytorch = PyTorchGroupPlan.model_construct(
-        **{
-            **application.pytorch.__dict__,
-            "packages": (*application.pytorch.packages, xformers),
-        }
+    forged_pytorch = application.pytorch.model_copy(
+        update={"packages": (*application.pytorch.packages, xformers)},
     )
     forged_extras = PackageGroupPlan.model_construct(
         group="application-extra",
@@ -528,12 +521,8 @@ def test_runtime_rejects_python_extra_overlap_with_arbitrary_pytorch_member(
         index_url=application.python_index_url,
         packages=(xformers,),
     )
-    forged = ApplicationPhase.model_construct(
-        **{
-            **application.__dict__,
-            "python_extras": forged_extras,
-            "pytorch": forged_pytorch,
-        }
+    forged = application.model_copy(
+        update={"python_extras": forged_extras, "pytorch": forged_pytorch},
     )
     monkeypatch.setattr(
         application_installer,

@@ -1,6 +1,5 @@
 """Smoke tests for the CLI skeleton and shared error boundary."""
 
-import inspect
 from contextlib import contextmanager
 from importlib.metadata import entry_points, version
 from pathlib import Path
@@ -493,15 +492,6 @@ def test_host_render_and_build_help_explain_locked_docker_boundaries(
         assert "without resolving" in normalized
         assert "updating the context" in normalized
     assert "build it with Docker Buildx" in build_output
-
-
-def test_host_hook_roots_have_no_implicit_defaults() -> None:
-    for command in (host_cli.validate, host_cli.render, host_cli.build):
-        assert inspect.signature(command).parameters["build_hooks_dir"].default is None
-    for command in (host_cli.render, host_cli.build):
-        assert (
-            inspect.signature(command).parameters["runtime_hooks_dir"].default is None
-        )
 
 
 @pytest.mark.parametrize(
@@ -1067,6 +1057,8 @@ def test_dry_run_renders_an_independent_buildx_output_section(
     def prepare(*args, **kwargs):
         del args
         assert tuple(kwargs["tag_templates"]) == tag_templates
+        assert kwargs["build_hook_source_root"] is None
+        assert kwargs["runtime_hooks_dir"] is None
         _complete_stubbed_preparation(kwargs)
         return SimpleNamespace(
             plan=plan,
@@ -1566,11 +1558,13 @@ def test_quiet_build_preserves_raw_buildkit_without_cdh_framing(
     monkeypatch.setattr(
         host_cli, "default_planning_providers", _stub_planning_providers
     )
-    monkeypatch.setattr(
-        host_cli,
-        "prepare_render_context",
-        _prepared_build_with_events,
-    )
+
+    def prepare(*args, **kwargs):
+        assert kwargs["build_hook_source_root"] is None
+        assert kwargs["runtime_hooks_dir"] is None
+        return _prepared_build_with_events(*args, **kwargs)
+
+    monkeypatch.setattr(host_cli, "prepare_render_context", prepare)
 
     def buildx(**kwargs):
         kwargs["log"]("external-buildkit-\x1b[31msentinel\x1b[0m")

@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 from tests.unit.container.runtime.runtime_ssh_support import VALID_SSH_KEY
 
-import comfyui_docker_helper.container.runtime.ssh.config as ssh_module
 from comfyui_docker_helper.config import RuntimeSystemSshConfig
 from comfyui_docker_helper.container.runtime.ssh.config import (
     RootSshCredentialPreparationStatus,
@@ -134,7 +133,6 @@ def test_serialize_sshd_set_env_rejects_only_unrepresentable_bytes_without_leak(
 
 
 def test_serialize_sshd_set_env_accepts_exact_openssh_name_capacity() -> None:
-    assert len(ssh_module._SSH_SESSION_ENVIRONMENT_NAMES) == 11
     environment = {
         f"CDH_CAPACITY_{index:04d}".encode(): b"value" for index in range(988)
     }

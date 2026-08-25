@@ -6,8 +6,6 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tests.build_plan_support import canonical_wheel
-
 from comfyui_docker_helper.config.authored.service import load_validate_config_result
 from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
@@ -50,6 +48,7 @@ from comfyui_docker_helper.host.planning.authority import (
 from comfyui_docker_helper.host.planning.providers.local import (
     FilesystemLocalExecutableIdentityProvider,
 )
+from tests.build_plan_support import canonical_wheel
 
 DIGEST_A = f"sha256:{'a' * 64}"
 

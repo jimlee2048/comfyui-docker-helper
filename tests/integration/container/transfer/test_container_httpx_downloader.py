@@ -229,6 +229,7 @@ def test_httpx_oversized_content_length_is_unknown_but_succeeds(
 
     assert isinstance(result, TransportSuccess)
     assert result.length == 1
+    assert progress.events
     assert all(event.total_bytes is None for event in progress.events)
 
 
@@ -246,6 +247,7 @@ def test_httpx_content_length_ignores_leading_zeroes(tmp_path: Path) -> None:
 
     assert isinstance(result, TransportSuccess)
     assert result.length == 1
+    assert progress.events
     assert all(event.total_bytes == 1 for event in progress.events)
 
 

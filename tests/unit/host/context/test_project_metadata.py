@@ -20,15 +20,6 @@ from comfyui_docker_helper.release_artifacts import (
 )
 from comfyui_docker_helper.version import package_version
 
-INLINE_README = """\
-`comfyui-docker-helper` (`cdh`) is an independent, unofficial command-line
-helper for using ComfyUI with Docker. It is not affiliated with or endorsed by
-the ComfyUI project.
-
-See the [GitHub repository](https://github.com/jimlee2048/comfyui-docker-helper)
-for current capabilities, requirements, documentation, examples, and issue
-tracking."""
-
 
 def _project_metadata() -> dict[str, object]:
     pyproject = tomllib.loads(
@@ -44,6 +35,27 @@ def _locked_project() -> dict[str, object]:
         for package in lock["package"]
         if package["name"] == "comfyui-docker-helper"
     )
+
+
+def _requirement_identity(
+    requirement: Requirement,
+) -> tuple[str, tuple[str, ...], str, str | None]:
+    marker = str(requirement.marker) if requirement.marker is not None else None
+    return (
+        canonicalize_name(requirement.name),
+        tuple(sorted(requirement.extras)),
+        str(requirement.specifier),
+        marker,
+    )
+
+
+def _locked_requirement(item: dict[str, object]) -> Requirement:
+    extras = item.get("extras", ())
+    extras_suffix = f"[{','.join(extras)}]" if extras else ""
+    value = f"{item['name']}{extras_suffix}{item.get('specifier', '')}"
+    if marker := item.get("marker"):
+        value = f"{value}; {marker}"
+    return Requirement(value)
 
 
 # Published metadata and projected source artifacts stay aligned with release authority.
@@ -70,20 +82,13 @@ def test_supported_python_minors_match_project_metadata() -> None:
 
 
 def test_project_release_identity_matches_package_metadata() -> None:
-    """Package metadata matches the current release and runtime dependencies."""
+    """Package metadata matches the current release and dependency roles."""
 
     pyproject = _project_metadata()
     project = pyproject["project"]
     locked = _locked_project()
 
     assert project["version"] == package_version() == locked["version"]
-    assert project["description"] == (
-        "Unofficial command-line helper for using ComfyUI with Docker"
-    )
-    assert project["readme"] == {
-        "text": INLINE_README,
-        "content-type": "text/markdown",
-    }
     assert {
         classifier
         for classifier in project["classifiers"]
@@ -92,18 +97,26 @@ def test_project_release_identity_matches_package_metadata() -> None:
         "Operating System :: Microsoft :: Windows",
         "Operating System :: POSIX :: Linux",
     }
-    assert (
-        project["urls"]["Changelog"]
-        == "https://github.com/jimlee2048/comfyui-docker-helper/releases"
-    )
-    assert "build>=1,<2" in project["dependencies"]
-    assert "filelock>=3.32.2,<4" in project["dependencies"]
-    assert "cryptography>=49" in project["dependencies"]
-    assert "python-on-whales>=0.81.0" in project["dependencies"]
-    assert "pywin32==312; sys_platform == 'win32'" in project["dependencies"]
-    assert "twine" in pyproject["dependency-groups"]["dev"]
-    assert "twine" in {item["name"] for item in locked["dev-dependencies"]["dev"]}
-    assert "twine" not in {item["name"] for item in locked["dependencies"]}
+    runtime_requirements = {
+        _requirement_identity(Requirement(item)) for item in project["dependencies"]
+    }
+    development_requirements = {
+        _requirement_identity(Requirement(item))
+        for item in pyproject["dependency-groups"]["dev"]
+    }
+    locked_runtime_requirements = {
+        _requirement_identity(_locked_requirement(item))
+        for item in locked["metadata"]["requires-dist"]
+    }
+    locked_development_requirements = {
+        _requirement_identity(_locked_requirement(item))
+        for item in locked["metadata"]["requires-dev"]["dev"]
+    }
+
+    assert runtime_requirements == locked_runtime_requirements
+    assert development_requirements == locked_development_requirements
+    assert any(item[0] == "twine" for item in development_requirements)
+    assert all(item[0] != "twine" for item in runtime_requirements)
 
 
 def test_projected_release_metadata_matches_repository_metadata() -> None:

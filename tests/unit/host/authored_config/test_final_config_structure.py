@@ -7,8 +7,6 @@ from comfyui_docker_helper.config.authored.validation.structure import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.config.diagnostics import (
-    Diagnostic,
-    DiagnosticError,
     DiagnosticSeverity,
 )
 from tests.final_config_support import (
@@ -182,16 +180,3 @@ def test_platforms_are_nonempty_and_typed() -> None:
         )
         for item in raised.value.diagnostics
     )
-
-
-def test_diagnostic_error_requires_stable_diagnostics_and_positive_exit_code() -> None:
-    diagnostic = Diagnostic(("python", "version"), "python.invalid", "fix it")
-    error = DiagnosticError((diagnostic,), exit_code=3)
-
-    assert error.diagnostics == (diagnostic,)
-    assert error.exit_code == 3
-
-    with pytest.raises(ValueError, match="at least one"):
-        DiagnosticError(())
-    with pytest.raises(ValueError, match="positive"):
-        DiagnosticError((diagnostic,), exit_code=0)

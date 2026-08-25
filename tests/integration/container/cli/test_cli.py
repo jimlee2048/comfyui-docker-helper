@@ -136,17 +136,22 @@ def _emit_comfyui_success(event_sink) -> None:
         (["runtime", "status"], "Usage: cdh container runtime status"),
     ],
 )
-@pytest.mark.parametrize("help_flag", ["--help", "-h"])
 def test_container_helper_help_succeeds(
     cli_runner: CliRunner,
     args: list[str],
     usage: str,
-    help_flag: str,
 ) -> None:
-    result = cli_runner.invoke(app, ["container", *args, help_flag])
+    result = cli_runner.invoke(app, ["container", *args, "--help"])
 
     assert result.exit_code == 0
     assert usage in _plain_output(result.output)
+
+
+def test_container_helper_short_help_alias_succeeds(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(app, ["container", "download-files", "-h"])
+
+    assert result.exit_code == 0
+    assert "Usage: cdh container download-files" in _plain_output(result.output)
 
 
 def test_container_helper_help_exposes_build_plan_binding(

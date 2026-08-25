@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from tests.unit.host.context._render_service_support import (
+from tests.host_render_service_support import (
     COMMIT,
     FakeAcquirer,
     _config,

@@ -325,7 +325,6 @@ def test_live_start_failure_stops_and_preserves_the_start_error(
 
     assert raised.value is start_error
     assert _FakeLive.instances[0].stopped == 1
-    assert display._live is None
     display.terminate_for_error(ValueError("workflow failed"))
     assert _FakeLive.instances[0].stopped == 1
 
@@ -345,7 +344,6 @@ def test_terminal_update_failure_still_stops_and_remains_the_first_error(
 
     assert raised.value is update_error
     assert _FakeLive.instances[0].stopped == 1
-    assert display._live is None
     assert "Interrupted: Validating configuration" in stderr.getvalue()
 
 

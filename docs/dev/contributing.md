@@ -47,6 +47,7 @@ The narrow ignore covers actionlint 1.7.12's stale schema for GitHub's supported
 The project uses a `src` layout:
 
 - `src/comfyui_docker_helper/config/` owns strict configuration, validation, merge, and planning models.
+- `src/comfyui_docker_helper/filesystem/` provides shared platform-native filesystem primitives.
 - `src/comfyui_docker_helper/host/` owns commands and orchestration that run on the host.
 - `src/comfyui_docker_helper/rendering/` materializes Docker build contexts.
 - `src/comfyui_docker_helper/container/` owns build-container and runtime helpers.

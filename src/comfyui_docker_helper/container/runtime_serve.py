@@ -28,6 +28,12 @@ from comfyui_docker_helper.container.runtime.diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
 )
+from comfyui_docker_helper.container.runtime.downloads import (
+    RuntimeAsyncQueueStarter,
+    RuntimeDownloadRunner,
+    RuntimeDownloads,
+    start_runtime_async_download_queue,
+)
 from comfyui_docker_helper.container.runtime.event_delivery import (
     RuntimeBackgroundEventSink,
     RuntimeEventDelivery,
@@ -67,12 +73,6 @@ from comfyui_docker_helper.container.runtime_control_server import RuntimeContro
 from comfyui_docker_helper.container.runtime_controller import (
     RuntimeController,
     RuntimeControllerError,
-)
-from comfyui_docker_helper.container.runtime_downloads import (
-    RuntimeAsyncQueueStarter,
-    RuntimeDownloadRunner,
-    RuntimeDownloads,
-    start_runtime_async_download_queue,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     BAKED_RUNTIME_HOOKS_PATH,

@@ -15,6 +15,9 @@ from comfyui_docker_helper.config import Diagnostic, RuntimeConfig
 from comfyui_docker_helper.container import runtime_lifecycle as lifecycle_module
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.readiness import ReadinessError
+from comfyui_docker_helper.container.runtime.downloads import (
+    RuntimeAsyncQueueStartupError,
+)
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeGenerationStopCause,
     RuntimeGenerationStopped,
@@ -31,9 +34,6 @@ from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeFileDownloadError,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
-)
-from comfyui_docker_helper.container.runtime_downloads import (
-    RuntimeAsyncQueueStartupError,
 )
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,

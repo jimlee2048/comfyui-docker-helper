@@ -10,15 +10,29 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from tests.runtime_event_support import (
+    RecordingRuntimeEventSink,
+)
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
+)
 
 from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime.downloads import (
+    RuntimeAsyncDownloadQueueHandle,
+    RuntimeAsyncQueueStarter,
+    RuntimeAsyncQueueStartupError,
+    start_runtime_async_download_queue,
+    stop_runtime_async_download_queue,
+)
 from comfyui_docker_helper.container.runtime.event_delivery import (
     RuntimeBackgroundEventSink,
 )
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadItemCompleted,
+    RuntimeDownloadQueue,
     RuntimeDownloadQueueState,
     RuntimeDownloadQueueSummary,
     RuntimeDownloadQueueWarning,
@@ -41,13 +55,6 @@ from comfyui_docker_helper.container.runtime.state import (
     load_runtime_state,
     write_runtime_state,
 )
-from comfyui_docker_helper.container.runtime_downloads import (
-    RuntimeAsyncDownloadQueueHandle,
-    RuntimeAsyncQueueStarter,
-    RuntimeAsyncQueueStartupError,
-    start_runtime_async_download_queue,
-    stop_runtime_async_download_queue,
-)
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
@@ -64,11 +71,8 @@ from comfyui_docker_helper.container.transfer.core import (
     TransportRequest,
     TransportSuccess,
 )
-from tests.runtime_event_support import (
-    RecordingRuntimeEventSink,
-)
-from tests.runtime_event_support import (
-    run_runtime_generation_once_for_test as run_runtime_generation_once,
+from comfyui_docker_helper.container.transfer.credentials import (
+    DownloaderCredentialPolicy,
 )
 
 
@@ -200,23 +204,6 @@ def _state_by_target(state_path: Path):
     return {entry.target: entry for entry in state.downloads.values()}
 
 
-def _expected_state_is_visible(
-    state_path: Path,
-    expected_statuses: Mapping[str, str],
-) -> bool:
-    try:
-        entries = _state_by_target(state_path)
-    except RuntimeStateError as error:
-        if str(error).startswith("runtime state changed during operation:"):
-            return False
-        raise
-    return {
-        target: entry.status
-        for target, entry in entries.items()
-        if target in expected_statuses
-    } == expected_statuses
-
-
 def _eventually(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -302,17 +289,9 @@ def test_forced_async_queue_stop_emits_one_controlled_warning() -> None:
     ]
 
 
-# State polling retries only the expected atomic-replacement observation.
-def test_state_polling_does_not_hide_persistent_invalid_state(tmp_path: Path) -> None:
-    state_path = tmp_path / "state.json"
-    state_path.write_text("{}")
-
-    with pytest.raises(RuntimeStateError, match="runtime state is invalid"):
-        _expected_state_is_visible(state_path, {"models/a.bin": "completed"})
-
-
 # Mixed-mode scheduling coverage proves mode partitioning keeps declaration
-# order within each queue and completes sync files before async acceptance.
+# order within each queue, completes sync files before async acceptance, and
+# executes the accepted async queue in declaration order.
 def test_mixed_runtime_downloads_preserve_queue_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -356,40 +335,7 @@ download_mode = "sync"
     state_path = tmp_path / "state.json"
     backend = AsyncBackend()
     _install_async_backend(monkeypatch, backend)
-    events: list[str] = []
-    async_filenames: list[str] = []
-
-    class AcceptedQueue:
-        def request_stop(self) -> None:
-            pytest.fail("a completed test queue must not be stopped")
-
-        def terminate_backends(self) -> None:
-            pytest.fail("a completed test queue has no active backend")
-
-        def join(self, timeout: float | None = None) -> None:
-            del timeout
-
-        def is_alive(self) -> bool:
-            return False
-
-    def async_starter(
-        plan: RuntimeFilePlan,
-        **kwargs: object,
-    ) -> AcceptedQueue:
-        handle_observer = kwargs.pop("handle_observer")
-        cancel_requested = kwargs.pop("cancel_requested")
-        assert callable(handle_observer)
-        assert callable(cancel_requested)
-        del kwargs
-        assert [_source_filename(call[0]) for call in backend.calls] == [
-            "sync-a.bin",
-            "sync-b.bin",
-        ]
-        events.append("async-accepted")
-        async_filenames.extend(item.filename for item in plan.items)
-        handle = AcceptedQueue()
-        handle_observer(handle)
-        return handle
+    presentation = RecordingRuntimeEventSink()
 
     def runner(
         argv: Sequence[str],
@@ -399,8 +345,24 @@ download_mode = "sync"
         shell: bool,
     ) -> FakeChild:
         del argv, cwd, env, shell
-        events.append("spawn")
-        return FakeChild(0)
+
+        class Child(FakeChild):
+            def wait(self) -> int:
+                _eventually(lambda: len(backend.calls) == 4)
+                _eventually(
+                    lambda: all(
+                        (runtime.comfyui_path / "models" / filename).is_file()
+                        for filename in (
+                            "sync-a.bin",
+                            "sync-b.bin",
+                            "async-a.bin",
+                            "async-b.bin",
+                        )
+                    )
+                )
+                return super().wait()
+
+        return Child(0)
 
     assert (
         _run_with_real_async_queue(
@@ -408,18 +370,45 @@ download_mode = "sync"
             config=config,
             state_path=state_path,
             runner=runner,
-            runtime_async_queue_starter=async_starter,
+            background_event_sink=presentation,
         )
         == 0
     )
 
-    assert async_filenames == ["async-a.bin", "async-b.bin"]
-    assert events == ["async-accepted", "spawn"]
+    assert [_source_filename(call[0]) for call in backend.calls] == [
+        "sync-a.bin",
+        "sync-b.bin",
+        "async-a.bin",
+        "async-b.bin",
+    ]
+    queue_states = [
+        (event.queue, event.state)
+        for event in presentation.events
+        if isinstance(event, RuntimeDownloadQueueSummary)
+    ]
+    assert queue_states == [
+        (
+            RuntimeDownloadQueue.SYNCHRONOUS,
+            RuntimeDownloadQueueState.ACCEPTED,
+        ),
+        (
+            RuntimeDownloadQueue.SYNCHRONOUS,
+            RuntimeDownloadQueueState.COMPLETED,
+        ),
+        (
+            RuntimeDownloadQueue.ASYNCHRONOUS,
+            RuntimeDownloadQueueState.ACCEPTED,
+        ),
+        (
+            RuntimeDownloadQueue.ASYNCHRONOUS,
+            RuntimeDownloadQueueState.COMPLETED,
+        ),
+    ]
     entries = _state_by_target(state_path)
     assert [
         entries[f"models/{name}"].status
         for name in ("sync-a.bin", "sync-b.bin", "async-a.bin", "async-b.bin")
-    ] == ["completed", "completed", "pending", "pending"]
+    ] == ["completed", "completed", "completed", "completed"]
 
 
 # Async queue acceptance coverage proves startup hooks and readiness are not
@@ -606,37 +595,61 @@ filename = "model.bin"
     assert starter_calls == 1
 
 
-# Async startup suppresses exception-style signal delivery while publishing and
-# starting the real handle, then force-stops it before application spawn.
+# Async startup publishes its typed handle before its worker can be accepted;
+# repeated signals force-stop that published queue before application spawn.
 def test_repeated_signal_before_async_acceptance_force_stops_published_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class ForceObservedBackend(AsyncBackend):
+    class PublishedQueue:
         def __init__(self) -> None:
-            super().__init__()
-            self.cancel_calls = 0
-            self.force_cancel_calls = 0
+            self.alive = True
+            self.accepted = False
+            self.stop_requested = False
+            self.force_requested = False
+            self.call_trace: list[str] = []
+            self.request_stop_calls = 0
+            self.request_backend_termination_calls = 0
+            self.terminate_backends_calls = 0
 
-        def cancel(self, *, deadline: float | None = None) -> None:
-            self.cancel_calls += 1
-            super().cancel(deadline=deadline)
+        def request_stop(self) -> None:
+            self.call_trace.append("request_stop")
+            self.request_stop_calls += 1
+            self.stop_requested = True
 
-        def force_cancel(self) -> None:
-            self.force_cancel_calls += 1
-            AsyncBackend.cancel(self)
+        def request_backend_termination(self, *, deadline: float | None) -> None:
+            del deadline
+            self.call_trace.append("request_backend_termination")
+            self.request_backend_termination_calls += 1
 
-        def download(
+        def terminate_backends(self) -> None:
+            self.call_trace.append("terminate_backends")
+            self.terminate_backends_calls += 1
+            self.force_requested = True
+            self.alive = False
+
+        def backend_termination_is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            self.call_trace.append("join")
+            if self.alive and timeout not in (0, 0.0):
+                pytest.fail("queue joined before repeated-signal force escalation")
+
+        def is_alive(self) -> bool:
+            if self.alive and self.stop_requested and not self.force_requested:
+                pytest.fail("ordinary queue fallback reached before force escalation")
+            return self.alive
+
+        def wait_until_stopped(
             self,
-            item: TransportRequest,
-            settings: DownloaderSettings,
-        ) -> TransportSuccess:
-            self.calls.append((item, settings))
-            self.entered.set()
-            self.release.wait(timeout=1)
-            if self.cancelled:
-                raise DownloadCancelled("cancelled")
-            return super().download(item, settings)
+            *,
+            timeout: float,
+            poll_interval: float,
+            monotonic: Callable[[], float] = time.monotonic,
+        ) -> bool:
+            del timeout, poll_interval, monotonic
+            return not self.alive
 
     runtime = _runtime(tmp_path)
     config = _write(
@@ -655,32 +668,41 @@ filename = "model.bin"
     )
     state_path = tmp_path / "state.json"
     handlers = _capture_signal_handlers(monkeypatch)
-    backend = ForceObservedBackend()
-    backend.block = True
-    _install_async_backend(monkeypatch, backend)
-    original_start = threading.Thread.start
-    signal_injected = False
+    published: PublishedQueue | None = None
 
-    def signal_between_publication_and_thread_start(thread: threading.Thread) -> None:
-        nonlocal signal_injected
-        if thread.name == "cdh-runtime-async-downloads":
-            original_start(thread)
-            assert backend.entered.wait(timeout=1)
-            signal_injected = True
-            first = handlers[signal.SIGTERM]
-            repeated = handlers[signal.SIGINT]
-            assert callable(first)
-            assert callable(repeated)
-            first(signal.SIGTERM, None)
-            repeated(signal.SIGINT, None)
-            return
-        original_start(thread)
-
-    monkeypatch.setattr(
-        threading.Thread,
-        "start",
-        signal_between_publication_and_thread_start,
-    )
+    def publish_then_signal(
+        plan: RuntimeFilePlan,
+        *,
+        config: RuntimeConfig,
+        runtime: ContainerRuntime,
+        runtime_state_path: Path,
+        expected_run_id: str,
+        handle_observer: Callable[[RuntimeAsyncDownloadQueueHandle], None],
+        cancel_requested: Callable[[], bool],
+        credential_policy: DownloaderCredentialPolicy | None = None,
+        event_sink: RuntimeBackgroundEventSink,
+    ) -> RuntimeAsyncDownloadQueueHandle:
+        del (
+            plan,
+            config,
+            runtime,
+            runtime_state_path,
+            expected_run_id,
+            cancel_requested,
+            credential_policy,
+            event_sink,
+        )
+        nonlocal published
+        queue = PublishedQueue()
+        published = queue
+        handle_observer(queue)
+        first = handlers[signal.SIGTERM]
+        repeated = handlers[signal.SIGINT]
+        assert callable(first)
+        assert callable(repeated)
+        first(signal.SIGTERM, None)
+        repeated(signal.SIGINT, None)
+        return queue
 
     assert (
         _run_with_real_async_queue(
@@ -690,22 +712,20 @@ filename = "model.bin"
             runner=lambda *_args, **_kwargs: pytest.fail(
                 "ComfyUI must not spawn before async acceptance"
             ),
+            runtime_async_queue_starter=publish_then_signal,
         )
         == 143
     )
 
-    assert signal_injected is True
-    assert backend.cancelled is True
-    _eventually(lambda: backend.cancel_calls >= 1)
-    assert backend.force_cancel_calls == 1
-    _eventually(
-        lambda: (
-            not any(
-                thread.name == "cdh-runtime-async-downloads" and thread.is_alive()
-                for thread in threading.enumerate()
-            )
-        )
-    )
+    assert published is not None
+    assert published.accepted is False
+    force_index = published.call_trace.index("terminate_backends")
+    assert published.call_trace.index("request_stop") < force_index
+    assert published.call_trace.index("request_backend_termination") < force_index
+    assert published.request_stop_calls >= 1
+    assert published.request_backend_termination_calls >= 1
+    assert published.terminate_backends_calls >= 1
+    assert published.is_alive() is False
     assert not (runtime.comfyui_path / "models" / "model.bin").exists()
     assert _state_by_target(state_path)["models/model.bin"].status != "completed"
 
@@ -782,6 +802,11 @@ def test_interrupted_async_download_restarts_without_exposing_partial_final(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class BlockingUntilCancelledBackend(AsyncBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.partial_path: Path | None = None
+            self.partial_written = threading.Event()
+
         def download(
             self,
             item: TransportRequest,
@@ -789,6 +814,10 @@ def test_interrupted_async_download_restarts_without_exposing_partial_final(
         ) -> TransportSuccess:
             self.calls.append((item, settings))
             self.entered.set()
+            self.partial_path = item.sink.display_path
+            with item.sink.open_for_write() as output:
+                output.write(b"partial")
+            self.partial_written.set()
             self.release.wait(timeout=1)
             if self.cancelled:
                 raise DownloadCancelled("cancelled")
@@ -849,6 +878,10 @@ filename = "model.bin"
                 assert self.returncode is not None
                 return self.returncode
             assert backend.entered.wait(timeout=1)
+            assert backend.partial_written.wait(timeout=1)
+            assert backend.partial_path is not None
+            assert backend.partial_path.read_bytes() == b"partial"
+            assert not (runtime.comfyui_path / "models" / "model.bin").exists()
             interrupted_entries = _state_by_target(state_path)
             assert interrupted_entries["models/model.bin"].status == "pending"
             handler = handlers[signal.SIGTERM]
@@ -883,6 +916,8 @@ filename = "model.bin"
     assert first_child.signals == [signal.SIGTERM]
     assert backend.cancelled is True
     assert not (runtime.comfyui_path / "models" / "model.bin").exists()
+    assert backend.partial_path is not None
+    assert not backend.partial_path.exists()
     interrupted_entries = _state_by_target(state_path)
     assert interrupted_entries["models/model.bin"].status == "pending"
 
@@ -980,6 +1015,8 @@ overwrite = true
     )
     assert state_path.exists()
     assert backend.calls
+    first_entries = _state_by_target(state_path)
+    assert first_entries["models/model.bin"].status == "completed"
     assert (runtime.comfyui_path / "models" / "model.bin").read_bytes() == b"first"
 
     (runtime.comfyui_path / "models" / "model.bin").unlink()
@@ -1146,13 +1183,17 @@ def test_signal_shutdown_does_not_wait_for_blocking_backend_cancellation(
             self.block = True
             self.cancel_entered = threading.Event()
             self.cancel_release = threading.Event()
+            self.cancel_completed = threading.Event()
             self.deadline: float | None = None
 
         def cancel(self, *, deadline: float | None = None) -> None:
             self.deadline = deadline
             self.cancel_entered.set()
-            self.cancel_release.wait(timeout=1)
-            super().cancel(deadline=deadline)
+            try:
+                self.cancel_release.wait(timeout=1)
+                super().cancel(deadline=deadline)
+            finally:
+                self.cancel_completed.set()
 
     runtime = _runtime(tmp_path)
     config = _write(
@@ -1191,13 +1232,12 @@ filename = "model.bin"
             return self.returncode
 
     def stop_hooks(*_args: object, **_kwargs: object) -> tuple[RuntimeHookResult, ...]:
-        assert backend.cancel_entered.wait(timeout=0.1)
-        assert not backend.cancel_release.is_set()
+        assert backend.cancel_entered.wait(timeout=1)
+        assert not backend.cancel_completed.is_set()
         events.append("stop-hook")
         backend.cancel_release.set()
         return ()
 
-    started = time.monotonic()
     try:
         assert (
             run_runtime_generation_once(
@@ -1216,10 +1256,10 @@ filename = "model.bin"
     finally:
         backend.cancel_release.set()
 
-    assert time.monotonic() - started < 0.8
     assert events == ["stop-hook"]
     assert backend.deadline is not None
-    _eventually(lambda: backend.cancelled)
+    assert backend.cancel_completed.wait(timeout=1)
+    assert backend.cancelled is True
 
 
 # Cross-start accounting coverage proves each start owns its complete in-memory

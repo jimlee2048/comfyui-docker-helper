@@ -30,6 +30,8 @@ Wait for the direct `Package Build` run and require it to pass. Check that it bu
 
 Create a stable GitHub Release using the existing validated tag, review the tag target and release notes, and publish it through the GitHub UI. Do not mark it as a prerelease. This action makes the Release public and immediately authorizes the formal PyPI workflow; there is no second human approval after the formal build.
 
+Release notes are user-facing documentation and follow the source-formatting and maintenance rules in [Writing and maintenance](README.md#writing-and-maintenance). Before publication, review both the final Markdown source and rendered result; keep each paragraph or list item on one source line unless Markdown syntax requires a line break.
+
 The GitHub Release owns the human-facing notes and GitHub's automatic repository source archives. Those archives are not Python sdists, and the release process does not attach duplicate wheel or sdist assets to the Release.
 
 ## Observe formal publication
@@ -58,7 +60,7 @@ Confirm that the GitHub Release is public, stable, Latest as intended, and marke
 
 ## Failure and recovery
 
-Fail closed whenever the tag, Release, artifact, PyPI files, digests, attestations, or publisher identity are missing, inconsistent, or uncertain. Never use `skip-existing`, move a package tag, overwrite a PyPI file, promote a candidate artifact, combine artifacts from different runs, add a token publisher, or mutate an immutable Release to make an old version appear complete.
+Fail closed whenever the tag, Release, artifact, PyPI files, digests, attestations, or publisher identity are missing, inconsistent, or uncertain. Never use `skip-existing`, move a package tag, overwrite a PyPI file, promote a candidate artifact, combine artifacts from different runs, add a token publisher, or replace the protected tag or assets of an immutable Release to make an old version appear complete.
 
 - If a candidate tag build fails, do not publish its GitHub Release. Fix the source and create a new version and tag.
 - If the formal build fails before artifact upload, rerun the full workflow only for a transient failure while the immutable source and workflow remain authoritative. If source or workflow correction is required, issue a higher version.
@@ -66,6 +68,6 @@ Fail closed whenever the tag, Release, artifact, PyPI files, digests, attestatio
 - If PyPI still has zero files but the seven-day artifact expired, rerun the full workflow within GitHub's 30-day rerun window so a new `github.run_attempt` rebuilds and names a new artifact. After that window, issue a higher version.
 - If PyPI contains any partial, unexpected, mismatched, or attestation-defective file, treat the version as consumed. Preserve the evidence, yank as applicable, and issue a higher version.
 - If the publisher reports failure but PyPI already contains the exact wheel and sdist with the expected metadata, digests, and attestations, do not upload again. Preserve the failed run, complete the manual verification, and treat publication as complete.
-- If an incorrect tag or public immutable Release exists, do not repair it through automation. Assess it manually and normally issue a higher version.
+- If an immutable Release has an incorrect protected tag or asset, do not try to repair that protected object through automation. Assess it manually and normally issue a higher version. A release-note-only correction may update the body in place; afterward, reconfirm that the Release is public, stable, Latest as intended, and Immutable, and that its tag target and asset set are unchanged.
 
 Handle suspected credential compromise, malicious publication, or another sensitive security incident privately. Do not disclose credentials, exploit details, or unverified allegations in a public issue.

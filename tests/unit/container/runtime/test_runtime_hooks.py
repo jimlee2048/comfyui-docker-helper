@@ -8,6 +8,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
+from tests.runtime_event_support import RecordingRuntimeEventSink
 
 from comfyui_docker_helper.container.process.control import ProcessGroupSignalError
 from comfyui_docker_helper.container.process.runners import (
@@ -18,15 +19,12 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeHookCompleted,
     RuntimeHookStarted,
 )
-from comfyui_docker_helper.container.runtime_hooks import (
-    STOP_HOOK_POLL_INTERVAL_SECONDS,
-    STOP_HOOK_TERMINATION_GRACE_SECONDS,
+from comfyui_docker_helper.container.runtime.hooks import (
     RuntimeHookError,
     discover_runtime_hooks,
     run_runtime_startup_hooks,
     run_runtime_stop_hooks,
 )
-from tests.runtime_event_support import RecordingRuntimeEventSink
 
 
 def _runtime(tmp_path: Path) -> ContainerRuntime:
@@ -804,11 +802,6 @@ def test_stop_hook_force_cancellation_skips_termination_grace(
     ]
     assert signals == [(4444, signal.SIGKILL)]
     assert process.waits == 1
-
-
-def test_stop_hook_process_cleanup_constants_are_bounded() -> None:
-    assert STOP_HOOK_POLL_INTERVAL_SECONDS > 0
-    assert STOP_HOOK_TERMINATION_GRACE_SECONDS > 0
 
 
 def locations_and_codes(

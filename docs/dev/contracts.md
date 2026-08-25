@@ -275,7 +275,7 @@ The renderer and final materializer obtain the package-provided static SSH-condi
 
 Baked runtime hooks cross [`runtime_hooks.py`](../../src/comfyui_docker_helper/host/context/runtime_hooks.py), the [`canonical lock`](../../src/comfyui_docker_helper/config/planning/canonical_lock.py), the [`BuildPlan`](../../src/comfyui_docker_helper/config/planning/build_plan.py), and [`final materialization`](../../src/comfyui_docker_helper/rendering/final_materializer.py) as selected content-identified image inputs. Mounted hooks are external deployment inputs and never enter that identity chain.
 
-[`runtime_hooks.py`](../../src/comfyui_docker_helper/container/runtime_hooks.py) discovers the two sources without turning them into an override overlay: baked hooks run first, followed by mounted hooks, with lexical ordering inside each source and phase. Both sources are trusted executable code. Content identity for baked bytes does not sandbox their effects or make their filesystem, network, package, or process behavior reproducible.
+[`runtime/hooks.py`](../../src/comfyui_docker_helper/container/runtime/hooks.py) discovers the two sources without turning them into an override overlay: baked hooks run first, followed by mounted hooks, with lexical ordering inside each source and phase. Both sources are trusted executable code. Content identity for baked bytes does not sandbox their effects or make their filesystem, network, package, or process behavior reproducible.
 
 Host baking and container discovery select only direct regular `.sh` and `.py` files inside known phase directories. Ordinary unselected files and directories are ignored without recursion and reported through bounded source/phase warnings; symlinks, special files, inspection/read failures, invalid phase paths, and selected-hook failures remain hard boundaries.
 
@@ -287,7 +287,7 @@ Do not move this probe into unconditional startup or give it wider health meanin
 
 ### Hook ownership ends when the leader is reaped
 
-Each active hook runs as a new session leader. [`runtime_hooks.py`](../../src/comfyui_docker_helper/container/runtime_hooks.py) owns that leader and its process group through cancellation or deadline escalation, terminal result, and leader reap. [`process/control.py`](../../src/comfyui_docker_helper/container/process/control.py) provides the narrow spawn, signal, terminate, kill, wait, and reap mechanisms; it does not decide lifecycle policy.
+Each active hook runs as a new session leader. [`runtime/hooks.py`](../../src/comfyui_docker_helper/container/runtime/hooks.py) owns that leader and its process group through cancellation or deadline escalation, terminal result, and leader reap. [`process/control.py`](../../src/comfyui_docker_helper/container/process/control.py) provides the narrow spawn, signal, terminate, kill, wait, and reap mechanisms; it does not decide lifecycle policy.
 
 After the hook leader's terminal result is accepted and reaped, cdh releases that execution's group authority. It does not enumerate descendants, discover or supervise deliberately backgrounded services, health-check them, or broadly signal them later. A process that detaches from the original group is also outside hook ownership.
 

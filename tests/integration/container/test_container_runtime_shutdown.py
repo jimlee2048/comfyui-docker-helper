@@ -21,7 +21,7 @@ from comfyui_docker_helper.container.process.control import (
     wait_for_process_reap,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime, start_argv
-from comfyui_docker_helper.container.runtime_hooks import (
+from comfyui_docker_helper.container.runtime.hooks import (
     RuntimeHookError,
     discover_runtime_hooks,
     run_runtime_stop_hooks,

@@ -49,15 +49,15 @@ from comfyui_docker_helper.container.runtime.files.planning import (
     build_runtime_file_plan,
     runtime_file_staging_target,
 )
+from comfyui_docker_helper.container.runtime.hooks import (
+    RuntimeHookPlan,
+    RuntimeHookResult,
+)
 from comfyui_docker_helper.container.runtime.state import (
     RuntimeState,
     RuntimeStateError,
     load_runtime_state,
     write_runtime_state,
-)
-from comfyui_docker_helper.container.runtime_hooks import (
-    RuntimeHookPlan,
-    RuntimeHookResult,
 )
 from comfyui_docker_helper.container.runtime_lifecycle import (
     ReadinessWaiter,

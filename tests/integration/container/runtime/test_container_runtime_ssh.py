@@ -13,9 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from tests.runtime_event_support import (
+    RecordingRuntimeEventSink,
+)
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
+)
 
+import comfyui_docker_helper.container.runtime.ssh.config as ssh_module
 from comfyui_docker_helper.config import RuntimeConfig
-from comfyui_docker_helper.container import ssh as ssh_module
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime.events import (
     RuntimeSshOutcome,
@@ -27,19 +33,7 @@ from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
-from comfyui_docker_helper.container.runtime_hooks import (
-    RuntimeHookPlan,
-    RuntimeHookResult,
-)
-from comfyui_docker_helper.container.runtime_serve import (
-    RuntimeExecutionError,
-)
-from comfyui_docker_helper.container.runtime_ssh_service import (
-    RuntimeSshService,
-    RuntimeSshServiceError,
-    stop_runtime_ssh_service,
-)
-from comfyui_docker_helper.container.ssh import (
+from comfyui_docker_helper.container.runtime.ssh.config import (
     SshCredentialPreparationError,
     SshdConfigPreparationError,
     SshdConfigValidationError,
@@ -49,11 +43,17 @@ from comfyui_docker_helper.container.ssh import (
     SshPreparationWarningKind,
     start_sshd_if_enabled,
 )
-from tests.runtime_event_support import (
-    RecordingRuntimeEventSink,
+from comfyui_docker_helper.container.runtime.ssh.service import (
+    RuntimeSshService,
+    RuntimeSshServiceError,
+    stop_runtime_ssh_service,
 )
-from tests.runtime_event_support import (
-    run_runtime_generation_once_for_test as run_runtime_generation_once,
+from comfyui_docker_helper.container.runtime_hooks import (
+    RuntimeHookPlan,
+    RuntimeHookResult,
+)
+from comfyui_docker_helper.container.runtime_serve import (
+    RuntimeExecutionError,
 )
 
 VALID_SSH_KEY = (
@@ -829,11 +829,12 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join() -> Non
     config = RuntimeConfig.model_validate(
         {"system": {"ssh": {"enable": True, "password": "secret"}}}
     )
-    events: list[tuple[object, str]] = []
+    caller_thread = threading.get_ident()
+    events: list[tuple[object, int]] = []
 
     class Recorder:
         def emit(self, event: object, /) -> None:
-            events.append((event, threading.current_thread().name))
+            events.append((event, threading.get_ident()))
 
     def managed_starter(
         _config: RuntimeConfig,
@@ -844,7 +845,7 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join() -> Non
         preparation_warning_observer: Callable[[SshPreparationWarningKind], object],
     ) -> None:
         del environment, cancel_requested, preparation_process_observer
-        assert threading.current_thread().name == "cdh-ssh-startup"
+        assert threading.get_ident() != caller_thread
         preparation_warning_observer(
             SshPreparationWarningKind.DIRECTORY_MODE_NONSTANDARD
         )
@@ -862,7 +863,7 @@ def test_managed_ssh_preparation_warning_is_emitted_directly_after_join() -> Non
     assert events == [
         (
             RuntimeSshWarning(RuntimeSshWarningKind.DIRECTORY_MODE_NONSTANDARD),
-            threading.current_thread().name,
+            caller_thread,
         )
     ]
 

@@ -35,6 +35,8 @@ from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
 )
+from comfyui_docker_helper.container.runtime.ssh.config import SshPreparationWarningKind
+from comfyui_docker_helper.container.runtime.ssh.service import RuntimeSshService
 from comfyui_docker_helper.container.runtime_hooks import (
     RuntimeHookError,
     RuntimeHookPlan,
@@ -45,8 +47,6 @@ from comfyui_docker_helper.container.runtime_hooks import (
 from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
 )
-from comfyui_docker_helper.container.runtime_ssh_service import RuntimeSshService
-from comfyui_docker_helper.container.ssh import SshPreparationWarningKind
 from tests.runtime_event_support import (
     RecordingRuntimeEventSink,
 )

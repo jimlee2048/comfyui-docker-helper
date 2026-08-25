@@ -25,7 +25,7 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeSshWarning,
     RuntimeSshWarningKind,
 )
-from comfyui_docker_helper.container.ssh import (
+from comfyui_docker_helper.container.runtime.ssh.config import (
     SshCredentialPreparationError,
     SshdConfigPreparationError,
     SshdConfigValidationError,

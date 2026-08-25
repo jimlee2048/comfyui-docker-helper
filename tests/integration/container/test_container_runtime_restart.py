@@ -43,6 +43,7 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeSshStatus,
 )
 from comfyui_docker_helper.container.runtime.files.models import RuntimeFilePlan
+from comfyui_docker_helper.container.runtime.ssh.config import SshdReadinessError
 from comfyui_docker_helper.container.runtime_controller import (
     RuntimeController,
     RuntimeRestartSubmission,
@@ -57,7 +58,6 @@ from comfyui_docker_helper.container.runtime_serve import (
     RuntimeExecutionError,
     run_runtime_serve,
 )
-from comfyui_docker_helper.container.ssh import SshdReadinessError
 
 
 class _RestartChild:

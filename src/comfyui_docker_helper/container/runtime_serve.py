@@ -69,6 +69,11 @@ from comfyui_docker_helper.container.runtime.presentation import (
 from comfyui_docker_helper.container.runtime.secret_session import (
     RuntimeDownloaderCredentialPolicy,
 )
+from comfyui_docker_helper.container.runtime.ssh.config import start_sshd_if_enabled
+from comfyui_docker_helper.container.runtime.ssh.service import (
+    RuntimeSshService,
+    RuntimeSshStarter,
+)
 from comfyui_docker_helper.container.runtime.state import RUNTIME_STATE_PATH
 from comfyui_docker_helper.container.runtime_controller import (
     RuntimeController,
@@ -91,11 +96,6 @@ from comfyui_docker_helper.container.runtime_lifecycle import (
     RuntimeStopHookRunner,
     run_runtime_lifecycle,
 )
-from comfyui_docker_helper.container.runtime_ssh_service import (
-    RuntimeSshService,
-    RuntimeSshStarter,
-)
-from comfyui_docker_helper.container.ssh import start_sshd_if_enabled
 
 
 @dataclass(slots=True)

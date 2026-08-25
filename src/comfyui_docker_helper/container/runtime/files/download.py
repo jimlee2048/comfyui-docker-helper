@@ -24,6 +24,7 @@ from comfyui_docker_helper.container.runtime.events import (
 )
 from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeDownloadBackendObserver,
+    RuntimeDownloadCancellationObserver,
     RuntimeDownloadCancelRequested,
     RuntimeDownloadObservedStatus,
     RuntimeDownloadStartupObserver,
@@ -89,6 +90,7 @@ def process_runtime_file_downloads(
     backends: Mapping[str, DownloadBackend],
     state_observer: RuntimeDownloadStateObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
+    cancellation_observer: RuntimeDownloadCancellationObserver | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
     credential_policy: DownloaderCredentialPolicy | None = None,
     event_sink: RuntimeBackgroundEventSink,
@@ -100,6 +102,8 @@ def process_runtime_file_downloads(
 
     for index, item in enumerate(plan.items, 1):
         if is_cancelled():
+            if cancellation_observer is not None:
+                cancellation_observer()
             break
         backend_name = _effective_downloader(item, config)
         staging_target = runtime_file_staging_target(item)
@@ -146,6 +150,8 @@ def process_runtime_file_downloads(
         except _RuntimeDownloadContinued:
             continue
         except RuntimeFileDownloadCancelled:
+            if cancellation_observer is not None:
+                cancellation_observer()
             break
         except _RuntimeDownloadPolicyFailure:
             raise
@@ -186,6 +192,7 @@ def download_runtime_files(
     state_observer: RuntimeDownloadStateObserver | None = None,
     startup_observer: RuntimeDownloadStartupObserver | None = None,
     cancel_requested: RuntimeDownloadCancelRequested | None = None,
+    cancellation_observer: RuntimeDownloadCancellationObserver | None = None,
     backend_observer: RuntimeDownloadBackendObserver | None = None,
     credential_policy: DownloaderCredentialPolicy | None = None,
     event_sink: RuntimeBackgroundEventSink,
@@ -216,6 +223,7 @@ def download_runtime_files(
             backends=backends,
             state_observer=state_observer,
             cancel_requested=is_cancelled,
+            cancellation_observer=cancellation_observer,
             backend_observer=observe_backend,
             credential_policy=credential_policy,
             event_sink=event_sink,
@@ -234,6 +242,7 @@ def download_runtime_files(
             backends=backends,
             state_observer=state_observer,
             cancel_requested=is_cancelled,
+            cancellation_observer=cancellation_observer,
             backend_observer=observe_backend,
             credential_policy=credential_policy,
             event_sink=event_sink,

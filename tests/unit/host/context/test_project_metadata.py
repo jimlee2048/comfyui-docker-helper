@@ -144,6 +144,7 @@ def test_projected_release_source_is_entirely_wheel_owned() -> None:
     projected = release_projection_files()
     relative_paths = tuple(item.relative_path for item in projected)
 
+    assert projected
     assert len(relative_paths) == len(set(relative_paths))
     for item in projected:
         assert item.source_path.is_relative_to(PACKAGE_ROOT)

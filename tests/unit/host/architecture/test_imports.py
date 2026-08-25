@@ -25,5 +25,8 @@ def test_generic_import_selectors_partition_package_modules() -> None:
     host_modules = set(host_module_names())
     container_modules = set(container_module_names())
 
+    assert package_modules
+    assert host_modules
+    assert container_modules
     assert host_modules.isdisjoint(container_modules)
     assert host_modules | container_modules == package_modules

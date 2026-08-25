@@ -1,25 +1,14 @@
-"""Linux authority for importing every package module."""
-
-import subprocess
-import sys
+"""Linux authority for importing Container implementation modules."""
 
 import pytest
 
-from tests.import_support import package_module_names
+from tests.import_support import (
+    assert_clean_subprocess_import,
+    container_module_names,
+)
 
-_INTERPRETER_PROBE_TIMEOUT_SECONDS = 30
 
-
-@pytest.mark.parametrize("module_name", package_module_names())
-def test_every_package_module_imports_without_side_effects(module_name: str) -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", f"import {module_name}"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=_INTERPRETER_PROBE_TIMEOUT_SECONDS,
-    )
-
-    assert result.returncode == 0
-    assert result.stdout == ""
-    assert result.stderr == ""
+@pytest.mark.parametrize("module_name", container_module_names())
+def test_container_module_imports_cleanly(module_name: str) -> None:
+    """Import each Linux Container implementation successfully and without output."""
+    assert_clean_subprocess_import(module_name)

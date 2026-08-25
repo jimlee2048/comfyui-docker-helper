@@ -1,42 +1,29 @@
-"""Import smoke tests for the supported host/shared package closure."""
-
-import subprocess
-import sys
+"""Import smoke tests for the Host/shared generic selector."""
 
 import pytest
 
-from tests.import_support import package_module_names
-
-_CONTAINER_PREFIX = "comfyui_docker_helper.container."
-_HOST_CONTAINER_MODULES = frozenset({"comfyui_docker_helper.container.cli"})
-_INTERPRETER_PROBE_TIMEOUT_SECONDS = 30
-
-
-def host_module_names() -> tuple[str, ...]:
-    """Return modules owned by the native host execution contract."""
-    return tuple(
-        name
-        for name in package_module_names()
-        if not name.startswith(_CONTAINER_PREFIX) or name in _HOST_CONTAINER_MODULES
-    )
+from tests.import_support import (
+    assert_clean_subprocess_import,
+    container_module_names,
+    host_module_names,
+    package_module_names,
+)
 
 
-# Importing public modules must not start processes, network access, or
-# filesystem writes.
 @pytest.mark.parametrize(
     "module_name",
     host_module_names(),
 )
-def test_import_has_no_observable_side_effects(module_name: str) -> None:
-    """Import every host-owned module without output or process failure."""
-    result = subprocess.run(
-        [sys.executable, "-c", f"import {module_name}"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=_INTERPRETER_PROBE_TIMEOUT_SECONDS,
-    )
+def test_host_module_imports_cleanly(module_name: str) -> None:
+    """Import each Host-owned module successfully and without output."""
+    assert_clean_subprocess_import(module_name)
 
-    assert result.returncode == 0
-    assert result.stdout == ""
-    assert result.stderr == ""
+
+def test_generic_import_selectors_partition_package_modules() -> None:
+    """Assign every discovered module to exactly one generic import owner."""
+    package_modules = set(package_module_names())
+    host_modules = set(host_module_names())
+    container_modules = set(container_module_names())
+
+    assert host_modules.isdisjoint(container_modules)
+    assert host_modules | container_modules == package_modules

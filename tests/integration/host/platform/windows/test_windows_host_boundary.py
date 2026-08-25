@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 import pytest
+from tests.import_support import container_module_names
 from typer.testing import CliRunner
 
 pytestmark = pytest.mark.skipif(
@@ -12,21 +13,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 _NATIVE_WINDOWS_PROBE_TIMEOUT_SECONDS = 30
-_LINUX_IMPLEMENTATION_MODULES = frozenset(
-    {
-        "comfyui_docker_helper.container.build.admission",
-        "comfyui_docker_helper.container.build.manifest.observer",
-        "comfyui_docker_helper.container.process.runners",
-        "comfyui_docker_helper.container.runtime.control.client",
-        "comfyui_docker_helper.container.runtime.serve",
-        "comfyui_docker_helper.host.credentials.session",
-    }
+_HOST_SECRET_IMPLEMENTATION_MODULES = frozenset(
+    {"comfyui_docker_helper.host.credentials.session"}
 )
 
 
 def test_root_cli_does_not_load_platform_implementations() -> None:
     """Keep root registration outside Linux and Secret implementation closures."""
-    modules = repr(_LINUX_IMPLEMENTATION_MODULES)
+    forbidden_modules = frozenset(
+        (*container_module_names(), *_HOST_SECRET_IMPLEMENTATION_MODULES)
+    )
+    modules = repr(forbidden_modules)
     result = subprocess.run(
         [
             sys.executable,

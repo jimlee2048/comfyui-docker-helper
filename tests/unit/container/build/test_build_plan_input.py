@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
@@ -19,6 +18,7 @@ from comfyui_docker_helper.container.build.admission import (
     BuildPlanInputAdmission,
     FinalManifestLocalFileInput,
 )
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _write_plan(path: Path) -> tuple[BuildPlan, str]:

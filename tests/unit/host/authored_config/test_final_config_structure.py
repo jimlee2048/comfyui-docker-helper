@@ -1,10 +1,6 @@
 """Public-configuration structure contracts."""
 
 import pytest
-from tests.final_config_support import (
-    _credential_document,
-    _document,
-)
 
 from comfyui_docker_helper.config.authored.validation.result import FinalConfigError
 from comfyui_docker_helper.config.authored.validation.structure import (
@@ -14,6 +10,10 @@ from comfyui_docker_helper.config.diagnostics import (
     Diagnostic,
     DiagnosticError,
     DiagnosticSeverity,
+)
+from tests.final_config_support import (
+    _credential_document,
+    _document,
 )
 
 

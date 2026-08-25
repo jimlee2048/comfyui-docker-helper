@@ -31,6 +31,103 @@ def _identities(error: RuntimeConfigurationError) -> list[tuple[tuple, str]]:
     return [(diagnostic.path, diagnostic.code) for diagnostic in error.diagnostics]
 
 
+def test_runtime_downloader_credentials_are_independent_and_value_lazy(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_downloader = "httpx"
+
+[[cdh.downloader.credentials]]
+match = "https://example.test/private/"
+type = "bearer"
+token = { secret = "runtime_read" }
+
+[secrets.runtime_read]
+file = "/run/secrets/runtime-token"
+
+[[files]]
+type = "http"
+url = "https://example.test/private/model.bin?download=1"
+target_dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    result = load_runtime_config(
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=mounted,
+        environ={},
+    )
+
+    assert result.config.secrets["runtime_read"].file == "/run/secrets/runtime-token"
+
+
+def test_runtime_authenticated_aria2_fails_with_security_remediation(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "runtime.toml",
+        """
+[[cdh.downloader.credentials]]
+match = "https://example.test/private/"
+type = "bearer"
+token = { secret = "runtime_read" }
+
+[secrets.runtime_read]
+env = "RUNTIME_TOKEN"
+
+[[files]]
+type = "http"
+url = "https://example.test/private/model.bin"
+target_dir = "models"
+filename = "model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+        )
+
+    diagnostic = next(
+        item
+        for item in raised.value.diagnostics
+        if item.code == "downloader_credential.httpx_required"
+    )
+    assert diagnostic.path == ("files", 0, "downloader")
+    assert "security" in diagnostic.message.lower()
+    assert diagnostic.hint is not None and "httpx" in diagnostic.hint
+
+
+def test_runtime_secret_file_requires_absolute_container_path(tmp_path: Path) -> None:
+    mounted = _write(
+        tmp_path / "runtime.toml",
+        """
+[[cdh.downloader.credentials]]
+match = "https://example.test/private/"
+type = "bearer"
+token = { secret = "runtime_read" }
+
+[secrets.runtime_read]
+file = "relative/token"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as raised:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+            environ={},
+        )
+
+    assert any(item.code == "secret.invalid_file" for item in raised.value.diagnostics)
+
+
 def test_invalid_ssh_public_keys_fail_without_leaking_password(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",

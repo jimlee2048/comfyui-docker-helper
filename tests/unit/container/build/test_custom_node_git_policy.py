@@ -6,15 +6,6 @@ import os
 from pathlib import Path
 
 import pytest
-from tests.container_installer_support import (
-    _git_node,
-)
-from tests.container_installer_support import (
-    application as _application,
-)
-from tests.container_installer_support import (
-    custom_nodes_phase as _phase,
-)
 
 from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
@@ -27,6 +18,15 @@ from comfyui_docker_helper.container.build.custom_nodes import (
 )
 from comfyui_docker_helper.container.build.custom_nodes.contracts import (
     CustomNodeInstallError,
+)
+from tests.container_installer_support import (
+    _git_node,
+)
+from tests.container_installer_support import (
+    application as _application,
+)
+from tests.container_installer_support import (
+    custom_nodes_phase as _phase,
 )
 
 

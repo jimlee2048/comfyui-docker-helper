@@ -8,12 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-
-from comfyui_docker_helper.config import (
-    RuntimeConfig,
-    RuntimeConfigurationError,
-    load_runtime_config,
+from tests.runtime_event_support import (
+    run_runtime_generation_once_for_test as run_runtime_generation_once,
 )
+
+from comfyui_docker_helper.config import RuntimeConfig
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeDownloadStateObserver,
@@ -24,9 +23,6 @@ from comfyui_docker_helper.container.runtime.serve import (
     RuntimeExecutionError,
 )
 from comfyui_docker_helper.container.runtime.state import RuntimeStateError
-from tests.runtime_event_support import (
-    run_runtime_generation_once_for_test as run_runtime_generation_once,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,103 +118,6 @@ def _missing_baked_hooks(tmp_path: Path) -> Path:
 
 def _missing_mounted_hooks(tmp_path: Path) -> Path:
     return tmp_path / "missing-mounted-hooks"
-
-
-def test_runtime_downloader_credentials_are_independent_and_value_lazy(
-    tmp_path: Path,
-) -> None:
-    mounted = _write(
-        tmp_path / "runtime.toml",
-        """
-[cdh]
-default_downloader = "httpx"
-
-[[cdh.downloader.credentials]]
-match = "https://example.test/private/"
-type = "bearer"
-token = { secret = "runtime_read" }
-
-[secrets.runtime_read]
-file = "/run/secrets/runtime-token"
-
-[[files]]
-type = "http"
-url = "https://example.test/private/model.bin?download=1"
-target_dir = "models"
-filename = "model.bin"
-""",
-    )
-
-    result = load_runtime_config(
-        baked_config_path=_missing_baked_config(tmp_path),
-        mounted_config_path=mounted,
-        environ={},
-    )
-
-    assert result.config.secrets["runtime_read"].file == "/run/secrets/runtime-token"
-
-
-def test_runtime_authenticated_aria2_fails_with_security_remediation(
-    tmp_path: Path,
-) -> None:
-    mounted = _write(
-        tmp_path / "runtime.toml",
-        """
-[[cdh.downloader.credentials]]
-match = "https://example.test/private/"
-type = "bearer"
-token = { secret = "runtime_read" }
-
-[secrets.runtime_read]
-env = "RUNTIME_TOKEN"
-
-[[files]]
-type = "http"
-url = "https://example.test/private/model.bin"
-target_dir = "models"
-filename = "model.bin"
-""",
-    )
-
-    with pytest.raises(RuntimeConfigurationError) as raised:
-        load_runtime_config(
-            baked_config_path=_missing_baked_config(tmp_path),
-            mounted_config_path=mounted,
-            environ={},
-        )
-
-    diagnostic = next(
-        item
-        for item in raised.value.diagnostics
-        if item.code == "downloader_credential.httpx_required"
-    )
-    assert diagnostic.path == ("files", 0, "downloader")
-    assert "security" in diagnostic.message.lower()
-    assert diagnostic.hint is not None and "httpx" in diagnostic.hint
-
-
-def test_runtime_secret_file_requires_absolute_container_path(tmp_path: Path) -> None:
-    mounted = _write(
-        tmp_path / "runtime.toml",
-        """
-[[cdh.downloader.credentials]]
-match = "https://example.test/private/"
-type = "bearer"
-token = { secret = "runtime_read" }
-
-[secrets.runtime_read]
-file = "relative/token"
-""",
-    )
-
-    with pytest.raises(RuntimeConfigurationError) as raised:
-        load_runtime_config(
-            baked_config_path=_missing_baked_config(tmp_path),
-            mounted_config_path=mounted,
-            environ={},
-        )
-
-    assert any(item.code == "secret.invalid_file" for item in raised.value.diagnostics)
 
 
 # Runtime config startup coverage pins the default argv/env contract and the

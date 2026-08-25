@@ -9,7 +9,6 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
@@ -35,6 +34,7 @@ from comfyui_docker_helper.container.build.application import (
     verify_application_environment,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
 def _write_phases(tmp_path: Path):

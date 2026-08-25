@@ -3,10 +3,6 @@
 from pathlib import Path
 
 import pytest
-from tests.final_config_support import (
-    _credential_document,
-    _document,
-)
 
 from comfyui_docker_helper.config.authored.validation.domains import (
     validate_final_config_domains,
@@ -18,6 +14,10 @@ from comfyui_docker_helper.config.authored.validation.structure import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
+from tests.final_config_support import (
+    _credential_document,
+    _document,
+)
 
 _PRIVATE_SECRET_PATH = ("secrets", "private_git")
 _CREDENTIAL_PATH = ("cdh", "git", "credentials", 0)

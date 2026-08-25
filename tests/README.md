@@ -37,7 +37,7 @@ Do not add a custom platform marker as a second platform inventory. Cross-platfo
 Run the affected selection on its native platform, for example:
 
 ```bash
-uv run pytest tests/integration/host/test_windows_host_boundary.py
+uv run pytest tests/integration/host/platform/windows/test_windows_host_boundary.py
 uv run pytest tests/unit/host tests/integration/host
 ```
 

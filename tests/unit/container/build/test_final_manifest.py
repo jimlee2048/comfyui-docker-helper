@@ -9,8 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.build_plan_support import accepted_resolution, build_plan, final_config
-from tests.final_manifest_support import manifest_for_plan
 
 from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inventory
 from comfyui_docker_helper.config.evidence.manifest import (
@@ -45,6 +43,8 @@ from comfyui_docker_helper.container.build.manifest.observer import FinalManifes
 from comfyui_docker_helper.container.build.manifest.writer import (
     FinalManifestWriteError,
 )
+from tests.build_plan_support import accepted_resolution, build_plan, final_config
+from tests.final_manifest_support import manifest_for_plan
 
 
 def _plan_with_local_file(*, locked: bool) -> BuildPlan:

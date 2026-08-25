@@ -1,11 +1,6 @@
 """Public-configuration semantic contracts."""
 
 import pytest
-from tests.final_config_support import (
-    _credential_document,
-    _diagnostics,
-    _document,
-)
 
 from comfyui_docker_helper.config.authored.validation.domains import (
     validate_final_config_domains,
@@ -17,6 +12,11 @@ from comfyui_docker_helper.config.authored.validation.structure import (
     validate_final_config_structure,
 )
 from comfyui_docker_helper.config.diagnostics import DiagnosticSeverity
+from tests.final_config_support import (
+    _credential_document,
+    _diagnostics,
+    _document,
+)
 
 
 def test_authenticated_download_requires_httpx_with_actionable_hint() -> None:

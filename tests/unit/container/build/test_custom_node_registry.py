@@ -7,19 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.container_installer_support import (
-    _node,
-    _write_project,
-)
-from tests.container_installer_support import (
-    application as _application,
-)
-from tests.container_installer_support import (
-    custom_nodes_phase as _phase,
-)
-from tests.container_installer_support import (
-    patch_phases as _patch_phases,
-)
 
 from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inventory
 from comfyui_docker_helper.config.planning.build_plan import (
@@ -34,6 +21,19 @@ from comfyui_docker_helper.container.build.custom_nodes import (
 )
 from comfyui_docker_helper.container.build.custom_nodes.contracts import (
     CustomNodeInstallError,
+)
+from tests.container_installer_support import (
+    _node,
+    _write_project,
+)
+from tests.container_installer_support import (
+    application as _application,
+)
+from tests.container_installer_support import (
+    custom_nodes_phase as _phase,
+)
+from tests.container_installer_support import (
+    patch_phases as _patch_phases,
 )
 
 

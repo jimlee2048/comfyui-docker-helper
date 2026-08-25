@@ -5,7 +5,11 @@ import shlex
 from pathlib import PurePosixPath
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.credentials.git import git_credential_secret_target
+from comfyui_docker_helper.config.credentials.secrets import (
+    downloader_credential_secret_target,
+)
+from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     GitNodePlan,
     HttpFilePlan,
@@ -14,10 +18,6 @@ from comfyui_docker_helper.config.build_plan import (
     downloader_credential_secret_ids,
     git_credential_secret_ids,
 )
-from comfyui_docker_helper.config.credential_secrets import (
-    downloader_credential_secret_target,
-)
-from comfyui_docker_helper.config.git_credentials import git_credential_secret_target
 from comfyui_docker_helper.release_artifacts import WORKSPACE_PROFILE_CONTEXT_PATH
 
 _BUILD_PLAN_MOUNT = (

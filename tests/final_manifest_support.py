@@ -1,8 +1,7 @@
 """Shared constructors for final-manifest behavior tests."""
 
-from comfyui_docker_helper.config.build_plan import BuildPlan, manifest_binding
-from comfyui_docker_helper.config.custom_node_inventory import custom_node_inventory
-from comfyui_docker_helper.config.final_manifest import (
+from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inventory
+from comfyui_docker_helper.config.evidence.manifest import (
     ApplicationEvidence,
     AptPackageEvidence,
     CdhToolEnvironmentEvidence,
@@ -26,6 +25,7 @@ from comfyui_docker_helper.config.final_manifest import (
     VersionEvidence,
     final_build_check_ids,
 )
+from comfyui_docker_helper.config.planning.build_plan import BuildPlan, manifest_binding
 
 
 def _inventory(

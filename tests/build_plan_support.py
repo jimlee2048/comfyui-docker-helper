@@ -7,13 +7,23 @@ import io
 import zipfile
 from pathlib import Path
 
-from comfyui_docker_helper.comfyui_requirements import merge_pytorch_requirements
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.authored.models import FinalConfig
+from comfyui_docker_helper.config.authored.validation.domains import (
+    validate_direct_requirement,
+    validate_final_config_domains,
+)
+from comfyui_docker_helper.config.authored.validation.semantics import (
+    validate_final_config_semantics,
+)
+from comfyui_docker_helper.config.authored.validation.structure import (
+    validate_final_config_structure,
+)
+from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     RuntimePlanningProvenance,
     construct_build_plan,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
     ComfyCliRequestIdentity,
@@ -34,25 +44,21 @@ from comfyui_docker_helper.config.canonical_lock import (
     canonical_lock_from_entries,
     compute_request_digest,
 )
-from comfyui_docker_helper.config.canonical_request import (
+from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestGraph,
     build_canonical_request_graph,
     comfyui_requirements_request,
 )
-from comfyui_docker_helper.config.canonical_resolver import AcceptedCanonicalLock
-from comfyui_docker_helper.config.final_models import FinalConfig
-from comfyui_docker_helper.config.final_validation import (
-    validate_direct_requirement,
-    validate_final_config_domains,
-    validate_final_config_semantics,
-    validate_final_config_structure,
+from comfyui_docker_helper.config.planning.requirements import (
+    merge_pytorch_requirements,
 )
+from comfyui_docker_helper.config.planning.resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_REPOSITORY,
     UV_IMAGE_REPOSITORY,
 )
-from comfyui_docker_helper.host.planning_authority import planning_release_inputs
+from comfyui_docker_helper.host.planning.authority import planning_release_inputs
 from comfyui_docker_helper.release_artifacts import (
     WORKSPACE_PROFILE_WHEEL_MEMBER,
     CanonicalWheel,

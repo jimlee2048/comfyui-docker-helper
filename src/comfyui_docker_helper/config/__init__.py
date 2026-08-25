@@ -4,32 +4,32 @@ from importlib import import_module
 
 _EXPORTS = {
     "AcceptedCanonicalLock": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "AcceptedCanonicalLock",
     ),
     "BAKED_RUNTIME_CONFIG_PATH": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "BAKED_RUNTIME_CONFIG_PATH",
     ),
-    "BuildPlan": ("comfyui_docker_helper.config.build_plan", "BuildPlan"),
+    "BuildPlan": ("comfyui_docker_helper.config.planning.build_plan", "BuildPlan"),
     "CanonicalLock": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "CanonicalLock",
     ),
     "CanonicalLockError": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "CanonicalLockError",
     ),
     "CanonicalResolutionError": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "CanonicalResolutionError",
     ),
     "ConfigurationResult": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "ConfigurationResult",
     ),
     "ConfigurationServiceError": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "ConfigurationServiceError",
     ),
     "Diagnostic": ("comfyui_docker_helper.config.diagnostics", "Diagnostic"),
@@ -37,81 +37,81 @@ _EXPORTS = {
         "comfyui_docker_helper.config.diagnostics",
         "DiagnosticSeverity",
     ),
-    "FinalConfig": ("comfyui_docker_helper.config.final_models", "FinalConfig"),
+    "FinalConfig": ("comfyui_docker_helper.config.authored.models", "FinalConfig"),
     "LockPolicy": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "LockPolicy",
     ),
     "MOUNTED_RUNTIME_CONFIG_PATH": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "MOUNTED_RUNTIME_CONFIG_PATH",
     ),
     "ManifestBinding": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "ManifestBinding",
     ),
     "ReconcilePurpose": (
-        "comfyui_docker_helper.config.canonical_resolver",
+        "comfyui_docker_helper.config.planning.resolver",
         "ReconcilePurpose",
     ),
     "RuntimeConfig": (
-        "comfyui_docker_helper.config.runtime_models",
+        "comfyui_docker_helper.config.runtime.models",
         "RuntimeConfig",
     ),
     "RuntimeConfigurationError": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "RuntimeConfigurationError",
     ),
     "RuntimeConfigurationResult": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "RuntimeConfigurationResult",
     ),
     "RuntimeSystemSshConfig": (
-        "comfyui_docker_helper.config.runtime_models",
+        "comfyui_docker_helper.config.runtime.models",
         "RuntimeSystemSshConfig",
     ),
     "build_plan_digest": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "build_plan_digest",
     ),
     "construct_build_plan": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "construct_build_plan",
     ),
     "dump_build_plan_json": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "dump_build_plan_json",
     ),
     "dump_canonical_lock_toml": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "dump_canonical_lock_toml",
     ),
     "load_canonical_lock": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "load_canonical_lock",
     ),
     "load_runtime_config": (
-        "comfyui_docker_helper.config.runtime_config",
+        "comfyui_docker_helper.config.runtime.config",
         "load_runtime_config",
     ),
     "load_validate_config": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "load_validate_config",
     ),
     "load_validate_config_result": (
-        "comfyui_docker_helper.config.service",
+        "comfyui_docker_helper.config.authored.service",
         "load_validate_config_result",
     ),
     "manifest_binding": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "manifest_binding",
     ),
     "parse_build_plan_json": (
-        "comfyui_docker_helper.config.build_plan",
+        "comfyui_docker_helper.config.planning.build_plan",
         "parse_build_plan_json",
     ),
     "parse_canonical_lock_toml": (
-        "comfyui_docker_helper.config.canonical_lock",
+        "comfyui_docker_helper.config.planning.canonical_lock",
         "parse_canonical_lock_toml",
     ),
 }

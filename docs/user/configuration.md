@@ -2,7 +2,7 @@
 
 English | [简体中文](configuration.zh-CN.md)
 
-This guide is for users choosing and composing the TOML input to cdh. The [strict configuration models](../../src/comfyui_docker_helper/config/final_models.py) and validation code are the machine authority; this guide explains the user-facing choices without duplicating every field.
+This guide is for users choosing and composing the TOML input to cdh. The [strict configuration models](../../src/comfyui_docker_helper/config/authored/models.py) and validation code are the machine authority; this guide explains the user-facing choices without duplicating every field.
 
 ## Choose a starting example
 

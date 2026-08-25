@@ -1,0 +1,2012 @@
+"""Immutable BuildPlan v1 authority and deterministic construction."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Annotated, Literal, get_args
+
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from comfyui_docker_helper.config.authored.models import (
+    CudaImageDistro,
+    CudaImageFlavor,
+)
+from comfyui_docker_helper.config.authored.validation.domains import (
+    is_aria2_argument_value,
+    is_managed_environment_name,
+)
+from comfyui_docker_helper.config.credentials.downloader import (
+    DownloaderCredentialContextError,
+    canonicalize_downloader_credential_context,
+    parse_downloader_credential_context,
+    parse_downloader_request_url,
+    select_downloader_credential_context,
+)
+from comfyui_docker_helper.config.credentials.git import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
+    GitCredentialContextError,
+    canonicalize_git_credential_context,
+    git_credential_secret_id,
+    git_credential_secret_target,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
+    FinalSecretRef,
+    downloader_credential_secret_id,
+    downloader_credential_secret_target,
+)
+from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
+from comfyui_docker_helper.config.planning.canonical_lock import (
+    ApplicationExtrasLockEntry,
+    BuildHookLockEntry,
+    CanonicalLock,
+    CanonicalLockEntry,
+    ComfyCliRequestIdentity,
+    ComfyUIRequestIdentity,
+    ComfyUIRequirementsLockEntry,
+    ComfyUIRequirementsRequestIdentity,
+    DirectGitLockEntry,
+    DirectGitRequestIdentity,
+    DirectPythonRequestIdentity,
+    LocalFileLockEntry,
+    ManagedPythonLockEntry,
+    ManagedPythonRequestIdentity,
+    OciLockEntry,
+    OciRequestIdentity,
+    OfficialComfyUILockEntry,
+    PyTorchLockEntry,
+    PyTorchRequestIdentity,
+    RegistryNodeLockEntry,
+    RegistryRequestIdentity,
+    ResolverRequestIdentity,
+    RuntimeHookLockEntry,
+    UvImageLockEntry,
+    UvToolLockEntry,
+    canonical_entry_key,
+    dump_canonical_lock_toml,
+    pytorch_core_version_matches_channel,
+    pytorch_index_matches_channel,
+    uv_image_version_matches_tag,
+    validate_environment,
+    validate_exact_distribution_version,
+    validate_exact_registry_version,
+    validate_exact_stable_version,
+    validate_git_commit,
+    validate_git_url,
+    validate_http_url,
+    validate_normalized_extras,
+    validate_normalized_package,
+    validate_oci_repository,
+    validate_oci_tag,
+    validate_sha256_digest,
+)
+from comfyui_docker_helper.config.planning.request import (
+    CanonicalRequestGraph,
+    CustomNodeRequest,
+    DownloaderCredentialRouteRequest,
+    GitCredentialRouteRequest,
+    GitNodeRequest,
+    HttpFileRequest,
+    LocalFileRequest,
+    RegistryNodeRequest,
+)
+from comfyui_docker_helper.config.planning.resolver import (
+    entries_satisfy_request,
+)
+from comfyui_docker_helper.config.planning.target import CudaBackendAdapter
+from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
+from comfyui_docker_helper.config.validation.hooks import (
+    RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS,
+    hook_lock_identity,
+    materialized_hook_identity,
+    validate_hook_digest,
+    validate_hook_relative_path,
+)
+from comfyui_docker_helper.config.validation.os_packages import (
+    validate_apt_package_identity,
+)
+from comfyui_docker_helper.config.validation.registry import (
+    validate_registry_id,
+    validate_registry_node_authority,
+)
+from comfyui_docker_helper.config.validation.requirements import (
+    DirectRequirementError,
+    parse_direct_requirement,
+)
+from comfyui_docker_helper.config.validation.selectors import resolve_git_target_dir
+from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
+from comfyui_docker_helper.config.validation.urls import (
+    is_http_url,
+    is_reserved_file_target_name,
+)
+from comfyui_docker_helper.config.validation.values import (
+    has_control_characters,
+    is_argv_value,
+    validate_managed_python_catalog_key,
+    validate_managed_python_support_range,
+)
+from comfyui_docker_helper.exact_ledger import (
+    COMFY_CLI_MINIMUM_VERSION,
+    COMFYUI_FLOOR_COMMIT,
+    COMFYUI_MINIMUM_VERSION,
+    COMFYUI_REPOSITORY,
+    CUDA_IMAGE_REPOSITORY,
+    PIP_VERSION,
+    UV_IMAGE_REPOSITORY,
+)
+from comfyui_docker_helper.version import package_version
+
+BUILD_PLAN_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 1
+_VENV_PATH = "/opt/venv"
+
+
+class _PlanModel(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        validate_default=True,
+    )
+
+
+class ImagePlan(_PlanModel):
+    role: Literal["cuda-base", "uv-tool"]
+    repository: str
+    tag: str
+    descriptor_digest: str
+    descriptor_kind: Literal["index", "manifest"]
+    platform: Literal["linux/amd64"]
+    resolved_version: str | None = None
+
+    @field_validator("repository")
+    @classmethod
+    def _validate_repository(cls, value: str) -> str:
+        return validate_oci_repository(value)
+
+    @field_validator("tag")
+    @classmethod
+    def _validate_tag(cls, value: str) -> str:
+        return validate_oci_tag(value)
+
+    @field_validator("descriptor_digest")
+    @classmethod
+    def _validate_descriptor_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
+
+    @field_validator("resolved_version")
+    @classmethod
+    def _validate_resolved_version(cls, value: str | None) -> str | None:
+        return None if value is None else validate_exact_stable_version(value)
+
+    @model_validator(mode="after")
+    def _validate_role_version(self) -> ImagePlan:
+        if (self.role == "uv-tool") != (self.resolved_version is not None):
+            raise ValueError("only uv-tool images require a resolved version")
+        if self.role == "uv-tool" and not uv_image_version_matches_tag(
+            self.tag, self.resolved_version
+        ):
+            raise ValueError("uv image resolved version does not match its exact tag")
+        expected_repository = (
+            CUDA_IMAGE_REPOSITORY if self.role == "cuda-base" else UV_IMAGE_REPOSITORY
+        )
+        if self.repository != expected_repository:
+            raise ValueError(f"{self.role} image repository does not match the ledger")
+        return self
+
+    @property
+    def reference(self) -> str:
+        return f"{self.repository}:{self.tag}@{self.descriptor_digest}"
+
+
+class ManagedPythonPlan(_PlanModel):
+    version: str
+    implementation: Literal["cpython"]
+    platform: Literal["linux/amd64"]
+    libc: Literal["gnu"]
+    provider: Literal["uv-managed"]
+    catalog_descriptor_digest: str
+    catalog_key: str
+    catalog_url: str
+    pip_version: str
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        return validate_managed_python_support_range(
+            validate_exact_stable_version(value)
+        )
+
+    @field_validator("pip_version")
+    @classmethod
+    def _validate_pip_version(cls, value: str) -> str:
+        return validate_exact_stable_version(value)
+
+    @field_validator("catalog_descriptor_digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
+
+    @field_validator("catalog_key")
+    @classmethod
+    def _validate_catalog_key(cls, value: str) -> str:
+        return validate_managed_python_catalog_key(value)
+
+    @field_validator("catalog_url")
+    @classmethod
+    def _validate_catalog_url(cls, value: str) -> str:
+        return validate_http_url(value, "catalog_url")
+
+
+class CdhToolPlan(_PlanModel):
+    """Exact canonical cdh wheel installed as the image control-plane tool."""
+
+    name: Literal["comfyui-docker-helper"]
+    version: str
+    wheel_digest: str
+    environment: Literal["/opt/uv/tools/comfyui-docker-helper"]
+    executable: Literal["/opt/uv/bin/cdh"]
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        if validate_exact_stable_version(value) != package_version():
+            raise ValueError("cdh version does not match package metadata")
+        return value
+
+    @field_validator("wheel_digest")
+    @classmethod
+    def _validate_wheel_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
+
+
+def _validate_package_plan_source(
+    name: str,
+    extras: tuple[str, ...],
+    direct_reference: str | None,
+) -> None:
+    if direct_reference is None:
+        return
+    rendered_extras = f"[{','.join(extras)}]" if extras else ""
+    try:
+        identity = parse_direct_requirement(
+            f"{name}{rendered_extras} @ {direct_reference}"
+        )
+    except DirectRequirementError as error:
+        raise ValueError(
+            "direct_reference must be one admitted package source"
+        ) from error
+    if (
+        identity.name != name
+        or identity.extras != extras
+        or identity.specifier
+        or identity.direct_reference != direct_reference
+        or identity.marker is not None
+    ):
+        raise ValueError("direct_reference must be one admitted package source")
+
+
+class UvToolPlan(_PlanModel):
+    name: str
+    extras: tuple[str, ...]
+    version: str
+    direct_reference: str | None
+    environment: str
+
+    @model_validator(mode="after")
+    def _validate_identity(self) -> UvToolPlan:
+        validate_normalized_package(self.name)
+        validate_exact_distribution_version(self.version)
+        validate_normalized_extras(self.extras)
+        validate_environment(self.environment)
+        if self.environment != f"uv-tool:{self.name}":
+            raise ValueError("uv tool environment must match its distribution")
+        if tuple(sorted(set(self.extras))) != self.extras or any(
+            canonicalize_name(extra) != extra for extra in self.extras
+        ):
+            raise ValueError("uv tool extras must be sorted, unique, and normalized")
+        _validate_package_plan_source(self.name, self.extras, self.direct_reference)
+        return self
+
+    @property
+    def requirement(self) -> str:
+        extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        if self.direct_reference is not None:
+            return f"{self.name}{extras} @ {self.direct_reference}"
+        return f"{self.name}{extras}=={self.version}"
+
+
+class ComfyCliToolPlan(_PlanModel):
+    """Exact dedicated isolated comfy-cli tool consumer."""
+
+    name: Literal["comfy-cli"]
+    version: str
+    environment: Literal["uv-tool:comfy-cli"]
+    executables: tuple[Literal["comfy"], Literal["comfy-cli"], Literal["comfycli"]]
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        version = Version(_exact_distribution_version(value))
+        if version.local is not None or version < Version(COMFY_CLI_MINIMUM_VERSION):
+            raise ValueError("comfy-cli version is below the supported tool floor")
+        return value
+
+    @property
+    def requirement(self) -> str:
+        return f"{self.name}=={self.version}"
+
+
+class ToolStorePlan(_PlanModel):
+    tool_dir: Literal["/opt/uv/tools"]
+    bin_dir: Literal["/opt/uv/bin"]
+    cdh: CdhToolPlan
+    comfy_cli: ComfyCliToolPlan | None
+    uv_tools: tuple[UvToolPlan, ...]
+
+    @model_validator(mode="after")
+    def _validate_unique_tools(self) -> ToolStorePlan:
+        names = [tool.name for tool in self.uv_tools]
+        if self.comfy_cli is not None:
+            if self.comfy_cli.name != "comfy-cli":
+                raise ValueError("optional comfy-cli tool has the wrong owner")
+            names.append(self.comfy_cli.name)
+        if len(names) != len(set(names)):
+            raise ValueError("uv tools must have unique distribution owners")
+        return self
+
+
+class ToolchainPhase(_PlanModel):
+    platform: Literal["linux/amd64"]
+    cuda_version: str
+    pytorch_channel: str
+    cuda_image: ImagePlan
+    uv_image: ImagePlan
+    python: ManagedPythonPlan
+    tool_store: ToolStorePlan
+
+    @field_validator("cuda_version")
+    @classmethod
+    def _validate_cuda_version(cls, value: str) -> str:
+        return validate_exact_stable_version(value)
+
+    @field_validator("pytorch_channel")
+    @classmethod
+    def _validate_channel(cls, value: str) -> str:
+        if re.fullmatch(r"cu[0-9]+", value) is None:
+            raise ValueError("PyTorch channel must be canonical")
+        return value
+
+
+class PathsPlan(_PlanModel):
+    workspace: str
+    comfyui: str
+    venv: Literal["/opt/venv"]
+
+    @field_validator("workspace", "comfyui", "venv")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return _absolute_posix_path(value, "application path")
+
+    @model_validator(mode="after")
+    def _validate_distinct_roots(self) -> PathsPlan:
+        if self.comfyui == self.workspace:
+            raise ValueError("ComfyUI and workspace paths must be different")
+        return self
+
+
+class ExactPackagePlan(_PlanModel):
+    name: str
+    extras: tuple[str, ...]
+    version: str
+    direct_reference: str | None
+    environment: Literal["application"]
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        try:
+            validate_normalized_package(value)
+        except ValueError as error:
+            raise ValueError(
+                "package name must be normalized distribution name"
+            ) from error
+        if value == "comfy-cli":
+            raise ValueError("comfy-cli is reserved to the dedicated optional tool")
+        return value
+
+    @field_validator("extras")
+    @classmethod
+    def _validate_extras(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            return validate_normalized_extras(value)
+        except ValueError as error:
+            raise ValueError(
+                "package extras must be sorted, unique, and normalized"
+            ) from error
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        return validate_exact_distribution_version(value)
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> ExactPackagePlan:
+        _validate_package_plan_source(self.name, self.extras, self.direct_reference)
+        return self
+
+    @property
+    def requirement(self) -> str:
+        extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        if self.direct_reference is not None:
+            return f"{self.name}{extras} @ {self.direct_reference}"
+        return f"{self.name}{extras}=={self.version}"
+
+
+class PackageGroupPlan(_PlanModel):
+    group: Literal["application-extra"]
+    python_version: str
+    platform: Literal["linux/amd64"]
+    index_url: str
+    packages: tuple[ExactPackagePlan, ...]
+
+    @model_validator(mode="after")
+    def _validate_group_identity(self) -> PackageGroupPlan:
+        names = tuple(package.name for package in self.packages)
+        if len(names) != len(set(names)):
+            raise ValueError("application-extra packages must be unique")
+        if names != tuple(sorted(names)):
+            raise ValueError("application-extra packages must be canonically ordered")
+        if not is_http_url(self.index_url):
+            raise ValueError("application-extra index must be one HTTP(S) URL")
+        return self
+
+
+class PyTorchGroupPlan(_PlanModel):
+    group: Literal["pytorch"]
+    backend: Literal["cuda"]
+    channel: str
+    python_version: str
+    platform: Literal["linux/amd64"]
+    python_index_url: str
+    pytorch_index_url: str
+    packages: tuple[ExactPackagePlan, ...]
+    setuptools_specifier: str | None
+
+    @field_validator("python_index_url", "pytorch_index_url")
+    @classmethod
+    def _validate_index_url(cls, value: str) -> str:
+        if not is_http_url(value):
+            raise ValueError("index URL must be one HTTP(S) URL")
+        return value
+
+    @field_validator("setuptools_specifier")
+    @classmethod
+    def _validate_setuptools_specifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = SpecifierSet(value)
+        if not value or str(parsed) != value:
+            raise ValueError("setuptools specifier must be canonical")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_group_identity(self) -> PyTorchGroupPlan:
+        if re.fullmatch(r"cu[0-9]+", self.channel) is None:
+            raise ValueError("PyTorch channel must be canonical")
+        if not pytorch_index_matches_channel(self.pytorch_index_url, self.channel):
+            raise ValueError("PyTorch index must end with its derived channel")
+        if self.python_index_url == self.pytorch_index_url:
+            raise ValueError("Python and PyTorch indexes must be distinct")
+        names = tuple(canonicalize_name(package.name) for package in self.packages)
+        if "torch" not in names or len(names) != len(set(names)):
+            raise ValueError("PyTorch packages must be unique and include torch")
+        if {"pip", "setuptools"}.intersection(names):
+            raise ValueError("PyTorch packages overlap application package owners")
+        protected_names = set(CudaBackendAdapter().protected_requirement_names)
+        if any(
+            package.name in protected_names and package.direct_reference is not None
+            for package in self.packages
+        ):
+            raise ValueError("protected PyTorch packages must use the PyTorch index")
+        if names != tuple(sorted(names, key=lambda name: (name != "torch", name))):
+            raise ValueError("PyTorch packages must be canonically ordered")
+        if any(
+            not pytorch_core_version_matches_channel(
+                package.name, package.version, self.channel
+            )
+            for package in self.packages
+        ):
+            raise ValueError("PyTorch core package does not match the group channel")
+        return self
+
+
+def managed_runtime_constraints_bytes(group: PyTorchGroupPlan) -> bytes:
+    """Project exact application packages plus wheel-derived compatibility."""
+    requirements = _exact_pytorch_group_constraints(group)
+    if group.setuptools_specifier is not None:
+        requirements.append(f"setuptools{group.setuptools_specifier}")
+    return _constraints_bytes(requirements)
+
+
+def managed_build_constraints_bytes(group: PyTorchGroupPlan) -> bytes:
+    """Project exact PyTorch packages for isolated build dependencies."""
+    return _constraints_bytes(_exact_pytorch_group_constraints(group))
+
+
+def _exact_pytorch_group_constraints(group: PyTorchGroupPlan) -> list[str]:
+    return [f"{package.name}=={package.version}" for package in group.packages]
+
+
+def _constraints_bytes(requirements: list[str]) -> bytes:
+    requirements.sort()
+    return ("\n".join(requirements) + "\n").encode("utf-8")
+
+
+class ProtectedRequirementPlan(_PlanModel):
+    package: str
+    extras: tuple[str, ...]
+    selector: str
+
+    @field_validator("package")
+    @classmethod
+    def _validate_package(cls, value: str) -> str:
+        return validate_normalized_package(value)
+
+    @field_validator("extras")
+    @classmethod
+    def _validate_extras(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return validate_normalized_extras(value)
+
+    @field_validator("selector")
+    @classmethod
+    def _validate_selector(cls, value: str) -> str:
+        parsed = SpecifierSet(value)
+        if str(parsed) != value:
+            raise ValueError("protected selector must be canonical")
+        return value
+
+
+class ComfyUIRequirementsPlan(_PlanModel):
+    path: Literal["requirements.txt"]
+    floor_commit: str
+    python_version: str
+    platform: Literal["linux/amd64"]
+    protected_names: tuple[str, ...]
+    digest: str
+    protected: tuple[ProtectedRequirementPlan, ...]
+
+    @field_validator("floor_commit")
+    @classmethod
+    def _validate_floor_commit(cls, value: str) -> str:
+        return validate_git_commit(value)
+
+    @field_validator("python_version")
+    @classmethod
+    def _validate_python_version(cls, value: str) -> str:
+        return validate_exact_stable_version(value)
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
+
+    @field_validator("protected_names")
+    @classmethod
+    def _validate_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        names = tuple(validate_normalized_package(item) for item in value)
+        if names != tuple(sorted(set(names))):
+            raise ValueError("protected names must be sorted and unique")
+        return names
+
+    @model_validator(mode="after")
+    def _validate_projection(self) -> ComfyUIRequirementsPlan:
+        if self.floor_commit != COMFYUI_FLOOR_COMMIT:
+            raise ValueError("ComfyUI requirements floor does not match the ledger")
+        names = tuple(item.package for item in self.protected)
+        if names != tuple(sorted(set(names))):
+            raise ValueError("protected requirements must be sorted and unique")
+        if any(name not in self.protected_names for name in names):
+            raise ValueError("protected requirement is not adapter-owned")
+        return self
+
+
+class ManagerCapabilityPlan(_PlanModel):
+    """Checkout-owned Manager capability in the application environment."""
+
+    requirements_path: Literal["manager_requirements.txt"]
+    distribution: Literal["comfyui-manager"]
+    import_name: Literal["comfyui_manager"]
+    executable: Literal["/opt/venv/bin/cm-cli"]
+    entrypoint_name: Literal["cm-cli"]
+    import_anchor: str
+
+    @field_validator("import_anchor")
+    @classmethod
+    def _validate_import_anchor(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            not path.is_absolute()
+            or path.name != "comfyui-docker-helper-comfyui.pth"
+            or "site-packages" not in path.parts
+            or path.as_posix() != value
+        ):
+            raise ValueError("Manager import anchor must be one application site path")
+        return value
+
+
+class ComfyUIPlan(_PlanModel):
+    repository: str
+    commit: str
+    floor_commit: str
+    formal_release: str | None
+    requirements: ComfyUIRequirementsPlan
+    manager: ManagerCapabilityPlan | None
+
+    @field_validator("repository")
+    @classmethod
+    def _validate_repository(cls, value: str) -> str:
+        return validate_git_url(value)
+
+    @field_validator("commit", "floor_commit")
+    @classmethod
+    def _validate_commit(cls, value: str) -> str:
+        return validate_git_commit(value)
+
+    @field_validator("formal_release")
+    @classmethod
+    def _validate_formal_release(cls, value: str | None) -> str | None:
+        return None if value is None else validate_exact_stable_version(value)
+
+    @field_validator("floor_commit")
+    @classmethod
+    def _validate_floor_commit(cls, value: str) -> str:
+        if value != COMFYUI_FLOOR_COMMIT:
+            raise ValueError("ComfyUI floor commit does not match the exact ledger")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_official_release_authority(self) -> ComfyUIPlan:
+        if self.repository != COMFYUI_REPOSITORY:
+            raise ValueError("ComfyUI repository does not match the official ledger")
+        if self.formal_release is not None and Version(self.formal_release) < Version(
+            COMFYUI_MINIMUM_VERSION
+        ):
+            raise ValueError("ComfyUI formal release is below the supported floor")
+        return self
+
+
+class ApplicationPhase(_PlanModel):
+    paths: PathsPlan
+    os_packages: tuple[str, ...]
+    python_index_url: str
+    pip_version: str
+    python_extras: PackageGroupPlan | None
+    pytorch: PyTorchGroupPlan
+    comfyui: ComfyUIPlan
+
+    @field_validator("os_packages")
+    @classmethod
+    def _validate_os_packages(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        packages = tuple(validate_apt_package_identity(item) for item in value)
+        if len(packages) != len(set(packages)):
+            raise ValueError("OS packages must contain unique canonical identities")
+        return packages
+
+    @model_validator(mode="after")
+    def _validate_python_sources(self) -> ApplicationPhase:
+        _exact_distribution_version(self.pip_version)
+        if not is_http_url(self.python_index_url):
+            raise ValueError("python_index_url must be one HTTP(S) URL")
+        if self.pytorch.python_index_url != self.python_index_url:
+            raise ValueError("PyTorch generic dependencies must use the Python index")
+        if self.python_extras is not None and (
+            self.python_extras.index_url != self.python_index_url
+            or self.python_extras.python_version != self.pytorch.python_version
+            or self.python_extras.platform != self.pytorch.platform
+        ):
+            raise ValueError("application Python groups must share target and index")
+        python_names = (
+            set()
+            if self.python_extras is None
+            else {package.name for package in self.python_extras.packages}
+        )
+        protected_names = {package.name for package in self.pytorch.packages}
+        overlap = python_names.intersection({*protected_names, "pip", "setuptools"})
+        if overlap:
+            raise ValueError(
+                "application Python extras overlap protected package owners: "
+                f"{sorted(overlap)!r}"
+            )
+        requirements = self.comfyui.requirements
+        if (
+            requirements.python_version != self.pytorch.python_version
+            or requirements.platform != self.pytorch.platform
+            or requirements.floor_commit != self.comfyui.floor_commit
+        ):
+            raise ValueError("ComfyUI requirements target must match PyTorch")
+        adapter_protected_names = CudaBackendAdapter().protected_requirement_names
+        if requirements.protected_names != adapter_protected_names:
+            raise ValueError("ComfyUI protected names do not match the backend adapter")
+        resolved_pytorch_names = {package.name for package in self.pytorch.packages}
+        unresolved = {item.package for item in requirements.protected}.difference(
+            resolved_pytorch_names
+        )
+        if unresolved:
+            raise ValueError(
+                "ComfyUI protected requirements are missing exact PyTorch results: "
+                f"{sorted(unresolved)!r}"
+            )
+        manager = self.comfyui.manager
+        if manager is not None:
+            python_minor = ".".join(self.pytorch.python_version.split(".")[:2])
+            expected_anchor = (
+                f"{self.paths.venv}/lib/python{python_minor}/site-packages/"
+                "comfyui-docker-helper-comfyui.pth"
+            )
+            if manager.import_anchor != expected_anchor:
+                raise ValueError("Manager import anchor does not match target Python")
+        return self
+
+
+class HookPlan(_PlanModel):
+    relative_path: str
+    digest: str
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return validate_hook_digest(value)
+
+    @field_validator("relative_path")
+    @classmethod
+    def _validate_relative_path(cls, value: str) -> str:
+        return validate_hook_relative_path(value)
+
+
+class RegistryNodePlan(_PlanModel):
+    type: Literal["registry"]
+    id: str
+    version: str
+    pre_install_hooks: tuple[HookPlan, ...]
+    post_install_hooks: tuple[HookPlan, ...]
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return validate_registry_id(value)
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        return validate_exact_registry_version(value)
+
+
+class GitNodePlan(_PlanModel):
+    type: Literal["git"]
+    url: str
+    commit: str
+    target: str
+    pre_install_hooks: tuple[HookPlan, ...]
+    post_install_hooks: tuple[HookPlan, ...]
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        return validate_git_url(value)
+
+    @field_validator("commit")
+    @classmethod
+    def _validate_commit(cls, value: str) -> str:
+        return validate_git_commit(value)
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, value: str) -> str:
+        return _absolute_posix_path(value, "Git target")
+
+
+CustomNodePlan = Annotated[RegistryNodePlan | GitNodePlan, Field(discriminator="type")]
+
+
+class GitCredentialRoutePlan(_PlanModel):
+    """Safe image-side routing metadata without Secret source information."""
+
+    match: str
+    username: str
+    secret_id: str
+
+    @field_validator("match")
+    @classmethod
+    def _validate_match(cls, value: str) -> str:
+        try:
+            canonical = canonicalize_git_credential_context(value)
+        except GitCredentialContextError as error:
+            raise ValueError("Git credential match must be canonical") from error
+        if canonical != value:
+            raise ValueError("Git credential match must be canonical")
+        return value
+
+    @field_validator("username")
+    @classmethod
+    def _validate_username(cls, value: str) -> str:
+        if (
+            not value
+            or any(character in value for character in "\x00\r\n")
+            or len(value.encode("utf-8")) > GIT_CREDENTIAL_VALUE_MAX_BYTES
+        ):
+            raise ValueError("Git credential username is invalid")
+        return value
+
+    @field_validator("secret_id")
+    @classmethod
+    def _validate_secret_id(cls, value: str) -> str:
+        git_credential_secret_target(value)
+        return value
+
+
+class CustomNodesPhase(_PlanModel):
+    install_manager: bool
+    user_directory: str
+    nodes: tuple[CustomNodePlan, ...]
+    git_credentials: tuple[GitCredentialRoutePlan, ...]
+
+    @field_validator("user_directory")
+    @classmethod
+    def _validate_user_directory(cls, value: str) -> str:
+        return _absolute_posix_path(value, "Registry user directory")
+
+    @model_validator(mode="after")
+    def _validate_git_credentials(self) -> CustomNodesPhase:
+        matches = tuple(route.match for route in self.git_credentials)
+        if len(matches) != len(set(matches)):
+            raise ValueError("Git credential match contexts must be unique")
+        return self
+
+
+def git_credential_secret_ids(custom_nodes: CustomNodesPhase) -> tuple[str, ...]:
+    """Project first-use Secret IDs only for a direct-Git install phase."""
+    if not any(isinstance(node, GitNodePlan) for node in custom_nodes.nodes):
+        return ()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for route in custom_nodes.git_credentials:
+        if route.secret_id not in seen:
+            seen.add(route.secret_id)
+            ordered.append(route.secret_id)
+    return tuple(ordered)
+
+
+class Aria2Plan(_PlanModel):
+    rpc_port: int = Field(ge=1, le=65535)
+    split: int = Field(ge=1)
+    max_connection_per_server: int = Field(ge=1)
+    min_split_size: str
+    resume_download: bool
+
+    @field_validator("min_split_size")
+    @classmethod
+    def _validate_min_split_size(cls, value: str) -> str:
+        if not is_aria2_argument_value(value):
+            raise ValueError("min_split_size must be one canonical aria2 argument")
+        return value
+
+
+class HttpxPlan(_PlanModel):
+    timeout: int | float = Field(gt=0)
+
+
+class DownloaderPlan(_PlanModel):
+    default: Literal["aria2", "httpx"]
+    aria2: Aria2Plan
+    httpx: HttpxPlan
+
+
+class _FilePlan(_PlanModel):
+    target: str
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, value: str) -> str:
+        target = _absolute_posix_path(value, "file target")
+        if is_reserved_file_target_name(PurePosixPath(target).name):
+            raise ValueError("file target uses the reserved staging filename")
+        return target
+
+
+class HttpFilePlan(_FilePlan):
+    type: Literal["http"]
+    url: str
+    checksum: str | None = None
+    downloader: Literal["aria2", "httpx"]
+    download_mode: Literal["sync", "async"]
+    downloader_explicit: bool
+    download_mode_explicit: bool
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        return validate_http_url(value, "file URL")
+
+    @field_validator("checksum")
+    @classmethod
+    def _validate_checksum(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_canonical_file_checksum(value)
+
+
+class LocalFilePlan(_FilePlan):
+    type: Literal["local"]
+    relative_target: str
+    context_path: str
+    verification: Literal["sha256", "unverified-local"]
+    digest: str | None = None
+
+    @field_validator("relative_target")
+    @classmethod
+    def _validate_relative_target(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or path.as_posix() != value
+            or ".." in path.parts
+        ):
+            raise ValueError("local file relative target must be canonical")
+        return value
+
+    @field_validator("context_path")
+    @classmethod
+    def _validate_context_path(cls, value: str) -> str:
+        if re.fullmatch(r"build/files/[0-9a-f]{64}", value) is None:
+            raise ValueError("local file context path must be canonical")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str | None) -> str | None:
+        return None if value is None else validate_sha256_digest(value)
+
+    @model_validator(mode="after")
+    def _validate_verification(self) -> LocalFilePlan:
+        if self.verification == "sha256" and self.digest is None:
+            raise ValueError("locked local file requires a digest")
+        if self.verification == "unverified-local" and self.digest is not None:
+            raise ValueError("unverified local file must omit a digest")
+        return self
+
+
+FilePlan = Annotated[HttpFilePlan | LocalFilePlan, Field(discriminator="type")]
+
+
+class DownloaderCredentialRoutePlan(_PlanModel):
+    """Safe downloader routing metadata without Secret source information."""
+
+    match: str
+    type: Literal["bearer"]
+    token: FinalSecretRef
+    secret_id: str
+
+    @field_validator("match")
+    @classmethod
+    def _validate_match(cls, value: str) -> str:
+        try:
+            canonical = canonicalize_downloader_credential_context(value)
+        except DownloaderCredentialContextError as error:
+            raise ValueError("downloader credential match must be canonical") from error
+        if canonical != value:
+            raise ValueError("downloader credential match must be canonical")
+        return value
+
+    @field_validator("secret_id")
+    @classmethod
+    def _validate_secret_id(cls, value: str) -> str:
+        downloader_credential_secret_target(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_secret_binding(self) -> DownloaderCredentialRoutePlan:
+        if self.secret_id != downloader_credential_secret_id(self.token.secret):
+            raise ValueError(
+                "downloader credential Secret reference and mount ID must agree"
+            )
+        return self
+
+
+class FilesPhase(_PlanModel):
+    downloader: DownloaderPlan
+    credentials: tuple[DownloaderCredentialRoutePlan, ...]
+    default_download_mode: Literal["sync", "async"]
+    download_max_attempts: int = Field(ge=1)
+    files: tuple[FilePlan, ...]
+
+    @model_validator(mode="after")
+    def _validate_credentials(self) -> FilesPhase:
+        matches = tuple(route.match for route in self.credentials)
+        if len(matches) != len(set(matches)):
+            raise ValueError("downloader credential match routes must be unique")
+        contexts = tuple(
+            parse_downloader_credential_context(route.match)
+            for route in self.credentials
+        )
+        for item in self.files:
+            if not isinstance(item, HttpFilePlan):
+                continue
+            request = parse_downloader_request_url(item.url)
+            if (
+                select_downloader_credential_context(contexts, request) is not None
+                and item.downloader != "httpx"
+            ):
+                raise ValueError(
+                    "authenticated file downloads require the HTTPX downloader"
+                )
+        return self
+
+
+def downloader_credential_secret_ids(files: FilesPhase) -> tuple[str, ...]:
+    """Project first-use Secret IDs only when HTTPX can send file requests."""
+    if not any(
+        isinstance(item, HttpFilePlan) and item.downloader == "httpx"
+        for item in files.files
+    ):
+        return ()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for route in files.credentials:
+        if route.secret_id not in seen:
+            seen.add(route.secret_id)
+            ordered.append(route.secret_id)
+    return tuple(ordered)
+
+
+class EnvironmentPlan(_PlanModel):
+    name: str
+    value: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) is None:
+            raise ValueError("environment name must be canonical")
+        if is_managed_environment_name(value):
+            raise ValueError("environment name is reserved to cdh image authority")
+        return value
+
+    @field_validator("value")
+    @classmethod
+    def _validate_value(cls, value: str) -> str:
+        if has_control_characters(value):
+            raise ValueError("environment value must not contain controls")
+        return value
+
+
+class SshPlan(_PlanModel):
+    enable: bool
+    port: int = Field(ge=1, le=65535)
+    password: str
+    pub_keys: tuple[str, ...]
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password(cls, value: str) -> str:
+        if has_control_characters(value):
+            raise ValueError("SSH password must not contain control characters")
+        return value
+
+    @field_validator("pub_keys")
+    @classmethod
+    def _validate_pub_keys(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalization = normalize_ssh_public_keys(
+            list(value),
+            path=("runtime", "ssh", "pub_keys"),
+            code="ssh.invalid_public_key",
+        )
+        if normalization.diagnostics or normalization.values != value:
+            raise ValueError("SSH public keys must be canonical and unique")
+        return value
+
+
+class RuntimePhase(_PlanModel):
+    environment: tuple[EnvironmentPlan, ...]
+    ssh: SshPlan
+    shutdown_timeout: ShutdownTimeout
+    launch_command: tuple[str, ...]
+    hooks: tuple[HookPlan, ...]
+    download_failure_policy: Literal["continue", "fail"] | None
+
+    @field_validator("launch_command")
+    @classmethod
+    def _validate_launch_command(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or any(not is_argv_value(item) for item in value):
+            raise ValueError("launch command must contain canonical argv values")
+        _absolute_posix_path(value[0], "launch executable")
+        return value
+
+
+class BuildPlan(_PlanModel):
+    """Complete immutable build execution authority."""
+
+    schema_version: Literal[1]
+    image_config_digest: str
+    lock_digest: str
+    toolchain: ToolchainPhase
+    application: ApplicationPhase
+    custom_nodes: CustomNodesPhase
+    files: FilesPhase
+    runtime: RuntimePhase
+
+    @field_validator("image_config_digest", "lock_digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
+
+    @model_validator(mode="after")
+    def _validate_pytorch_channel(self) -> BuildPlan:
+        pytorch = self.application.pytorch
+        if (
+            pytorch.channel != self.toolchain.pytorch_channel
+            or pytorch.python_version != self.toolchain.python.version
+            or pytorch.platform != self.toolchain.platform
+            or self.toolchain.python.platform != self.toolchain.platform
+            or self.toolchain.uv_image.role != "uv-tool"
+            or self.toolchain.cuda_image.role != "cuda-base"
+            or self.toolchain.uv_image.platform != self.toolchain.platform
+            or self.toolchain.cuda_image.platform != self.toolchain.platform
+        ):
+            raise ValueError("PyTorch application target does not match the toolchain")
+        if (
+            self.application.pip_version != PIP_VERSION
+            or self.toolchain.python.pip_version != PIP_VERSION
+        ):
+            raise ValueError("pip version does not match the exact ledger")
+        if (
+            self.toolchain.python.catalog_descriptor_digest
+            != self.toolchain.uv_image.descriptor_digest
+        ):
+            raise ValueError("managed Python catalog is not bound to the uv image")
+        if bool(self.application.comfyui.manager) != self.custom_nodes.install_manager:
+            raise ValueError("Manager capability does not match custom-node intent")
+        registry_ids = (
+            node.id
+            for node in self.custom_nodes.nodes
+            if isinstance(node, RegistryNodePlan)
+        )
+        validate_registry_node_authority(
+            registry_ids,
+            install_manager=self.custom_nodes.install_manager,
+            has_manager_plan=self.application.comfyui.manager is not None,
+        )
+        expected_user_directory = str(
+            PurePosixPath(self.application.paths.comfyui) / "user"
+        )
+        if self.custom_nodes.user_directory != expected_user_directory:
+            raise ValueError("Registry user directory does not match ComfyUI")
+        expected_channel = _pytorch_channel(self.toolchain.cuda_version)
+        expected_cuda_tag = _cuda_image_tag(
+            self.toolchain.cuda_version,
+            self.toolchain.cuda_image.tag,
+        )
+        if (
+            self.toolchain.pytorch_channel != expected_channel
+            or self.toolchain.cuda_image.tag != expected_cuda_tag
+        ):
+            raise ValueError(
+                "CUDA image tag and PyTorch channel do not match toolchain"
+            )
+
+        custom_nodes_root = (
+            PurePosixPath(self.application.paths.comfyui) / "custom_nodes"
+        )
+        git_targets: list[str] = []
+        for node in self.custom_nodes.nodes:
+            if not isinstance(node, GitNodePlan):
+                continue
+            target = PurePosixPath(node.target)
+            target_name = resolve_git_target_dir(node.url, target.name)
+            if target != custom_nodes_root / target_name:
+                raise ValueError(
+                    "Git node target must be one exact child of ComfyUI custom_nodes"
+                )
+            git_targets.append(node.target)
+        if len(git_targets) != len(set(git_targets)):
+            raise ValueError("Git node targets must be unique")
+
+        build_plan_hook_identities(self.custom_nodes, self.runtime)
+
+        comfyui_root = PurePosixPath(self.application.paths.comfyui)
+        file_targets = tuple(PurePosixPath(item.target) for item in self.files.files)
+        if any(
+            target == comfyui_root or not target.is_relative_to(comfyui_root)
+            for target in file_targets
+        ):
+            raise ValueError("file targets must be strict descendants of ComfyUI")
+        if len(file_targets) != len(set(file_targets)):
+            raise ValueError("file targets must be unique")
+        for item in self.files.files:
+            if not isinstance(item, LocalFilePlan):
+                continue
+            if PurePosixPath(item.target) != comfyui_root / item.relative_target:
+                raise ValueError("local file target does not match relative target")
+            slot = hashlib.sha256(item.relative_target.encode("utf-8")).hexdigest()
+            if item.context_path != f"build/files/{slot}":
+                raise ValueError("local file context path does not match target")
+        expected_launch_head = (
+            str(PurePosixPath(self.application.paths.venv) / "bin" / "python"),
+            str(PurePosixPath(self.application.paths.comfyui) / "main.py"),
+        )
+        if self.runtime.launch_command[:2] != expected_launch_head:
+            raise ValueError(
+                "runtime launch executable and script must match the application"
+            )
+        return self
+
+
+def build_plan_hook_identities(
+    custom_nodes: CustomNodesPhase,
+    runtime: RuntimePhase,
+) -> tuple[dict[str, HookPlan], dict[str, HookPlan]]:
+    """Validate and group the complete materialized hook-tree authority."""
+    build_hooks: dict[str, HookPlan] = {}
+    destinations: set[PurePosixPath] = set()
+    for node in custom_nodes.nodes:
+        for hook in (*node.pre_install_hooks, *node.post_install_hooks):
+            identity = hook_lock_identity("build", hook.relative_path)
+            existing = build_hooks.get(identity)
+            if existing is not None and existing.digest != hook.digest:
+                raise ValueError("build hook identity has conflicting digests")
+            build_hooks[identity] = hook
+            destinations.add(materialized_hook_identity("build", hook.relative_path))
+
+    runtime_hooks: dict[str, HookPlan] = {}
+    for hook in runtime.hooks:
+        identity = hook_lock_identity("runtime", hook.relative_path)
+        destination = materialized_hook_identity("runtime", hook.relative_path)
+        if identity in runtime_hooks:
+            raise ValueError("runtime hook identities must be unique")
+        if destination in destinations:
+            raise ValueError("materialized hook identities must be unique")
+        runtime_hooks[identity] = hook
+        destinations.add(destination)
+    return build_hooks, runtime_hooks
+
+
+class ManifestBinding(_PlanModel):
+    """Stable final-verification binding without observed evidence or timestamps."""
+
+    schema_version: Literal[1]
+    build_plan_schema_version: Literal[1]
+    build_plan_digest: str
+    image_config_digest: str
+    lock_digest: str
+
+    @field_validator("build_plan_digest", "image_config_digest", "lock_digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return validate_sha256_digest(value)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePlanningProvenance:
+    """Authorship needed when projecting host config into runtime config."""
+
+    failure_policy_explicit: bool
+    file_downloader_explicit: tuple[bool, ...]
+    file_download_mode_explicit: tuple[bool, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.failure_policy_explicit) is not bool:
+            raise TypeError("failure-policy provenance must be one bool")
+        for field_name, values in (
+            ("file downloader", self.file_downloader_explicit),
+            ("file download-mode", self.file_download_mode_explicit),
+        ):
+            if not isinstance(values, tuple) or any(
+                type(value) is not bool for value in values
+            ):
+                raise TypeError(f"{field_name} provenance must be one bool tuple")
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedPackageGroup:
+    """Internal exact package tuple before projection to one public owner type."""
+
+    python_version: str
+    platform: Literal["linux/amd64"]
+    index_url: str
+    packages: tuple[ExactPackagePlan, ...]
+    setuptools_specifier: str | None = None
+
+
+def construct_build_plan(
+    graph: CanonicalRequestGraph,
+    lock: CanonicalLock,
+    *,
+    runtime_provenance: RuntimePlanningProvenance,
+) -> BuildPlan:
+    """Construct BuildPlan once from the shared request graph and accepted lock."""
+    entries = {canonical_entry_key(entry): entry for entry in lock.entries}
+    if len(entries) != len(lock.entries):
+        raise ValueError("canonical lock contains duplicate logical identities")
+    _validate_lock_satisfies_graph(graph, entries)
+    used: set[tuple[str, ...]] = set()
+    toolchain = _project_toolchain(graph, entries, used)
+    application = _project_application(graph, entries, used, toolchain)
+    custom_nodes = _project_custom_nodes(graph, entries, used)
+    files = _project_files(graph, entries, used, runtime_provenance)
+    runtime = _project_runtime(graph, entries, used, runtime_provenance)
+    unused = sorted(set(entries) - used)
+    if unused:
+        raise ValueError(f"canonical lock contains unused identities: {unused!r}")
+    return BuildPlan(
+        schema_version=BUILD_PLAN_SCHEMA_VERSION,
+        image_config_digest=graph.image_config_digest,
+        lock_digest=_digest_bytes(dump_canonical_lock_toml(lock).encode("utf-8")),
+        toolchain=toolchain,
+        application=application,
+        custom_nodes=custom_nodes,
+        files=files,
+        runtime=runtime,
+    )
+
+
+def _validate_lock_satisfies_graph(
+    graph: CanonicalRequestGraph,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+) -> None:
+    for desired in graph.desired:
+        resolved = tuple(entries[key] for key in desired.keys if key in entries)
+        if len(resolved) != len(desired.keys) or not entries_satisfy_request(
+            desired.request,
+            resolved,
+            desired.request_digest,
+        ):
+            raise ValueError(_request_mismatch_message(desired.request))
+
+
+def _request_mismatch_message(request: ResolverRequestIdentity) -> str:
+    if isinstance(request, OciRequestIdentity):
+        owner = "CUDA image" if request.role == "cuda-base" else "uv image"
+        return f"canonical {owner} does not match the request graph"
+    if isinstance(request, ManagedPythonRequestIdentity):
+        return "canonical managed Python does not match the request graph"
+    if isinstance(request, ComfyUIRequestIdentity):
+        return "canonical ComfyUI identity does not match the request graph"
+    if isinstance(request, ComfyCliRequestIdentity):
+        return "canonical comfy-cli identity does not match the request graph"
+    if isinstance(request, RegistryRequestIdentity):
+        return "canonical Registry identity does not match the request graph"
+    if isinstance(request, DirectGitRequestIdentity):
+        return "canonical Git identity does not match the request graph"
+    if isinstance(request, (DirectPythonRequestIdentity, PyTorchRequestIdentity)):
+        names = ", ".join(member.package for member in request.members)
+        return f"canonical package does not satisfy {names}"
+    return "canonical lock does not satisfy the request graph"
+
+
+def _project_toolchain(
+    graph: CanonicalRequestGraph,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> ToolchainPhase:
+    cuda_entry = _take(entries, used, ("images", "cuda"), OciLockEntry)
+    uv_entry = _take(entries, used, ("images", "uv"), OciLockEntry)
+    python_entry = _take(
+        entries,
+        used,
+        ("python", "interpreter"),
+        ManagedPythonLockEntry,
+    )
+    if python_entry.catalog_digest != uv_entry.digest:
+        raise ValueError("managed Python catalog is not bound to the uv image")
+    comfy_cli = None
+    cli_key = ("python", "uv_tools", "comfy-cli")
+    if any(cli_key in item.keys for item in graph.desired):
+        cli_entry = _take(entries, used, cli_key, UvToolLockEntry)
+        comfy_cli = ComfyCliToolPlan(
+            name=cli_entry.name,
+            version=cli_entry.version,
+            environment="uv-tool:comfy-cli",
+            executables=("comfy", "comfy-cli", "comfycli"),
+        )
+    uv_tools = tuple(
+        _uv_tool(request, entries, used)
+        for request in (
+            item.request
+            for item in graph.desired
+            if isinstance(item.request, DirectPythonRequestIdentity)
+            and item.request.group == "uv-tool"
+        )
+    )
+    return ToolchainPhase(
+        platform=graph.target_platform.value,
+        cuda_version=graph.backend.version.value,
+        pytorch_channel=graph.backend.package_channel,
+        cuda_image=_image_plan(cuda_entry),
+        uv_image=_image_plan(uv_entry),
+        python=ManagedPythonPlan(
+            version=python_entry.version,
+            implementation="cpython",
+            platform=python_entry.platform,
+            libc=python_entry.libc,
+            provider="uv-managed",
+            catalog_descriptor_digest=python_entry.catalog_digest,
+            catalog_key=python_entry.artifact_key,
+            catalog_url=python_entry.artifact_url,
+            pip_version=graph.release.pip_version,
+        ),
+        tool_store=ToolStorePlan(
+            tool_dir="/opt/uv/tools",
+            bin_dir="/opt/uv/bin",
+            cdh=CdhToolPlan(
+                name="comfyui-docker-helper",
+                version=graph.release.cdh_version,
+                wheel_digest=graph.release.cdh_wheel_digest,
+                environment="/opt/uv/tools/comfyui-docker-helper",
+                executable="/opt/uv/bin/cdh",
+            ),
+            comfy_cli=comfy_cli,
+            uv_tools=uv_tools,
+        ),
+    )
+
+
+def _project_application(
+    graph: CanonicalRequestGraph,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+    toolchain: ToolchainPhase,
+) -> ApplicationPhase:
+    comfyui_request = next(
+        item
+        for item in graph.desired
+        if isinstance(item.request, ComfyUIRequestIdentity)
+    )
+    requirements_request = next(
+        item
+        for item in graph.desired
+        if isinstance(item.request, ComfyUIRequirementsRequestIdentity)
+    )
+    pytorch_request = next(
+        item.request
+        for item in graph.desired
+        if isinstance(item.request, PyTorchRequestIdentity)
+    )
+    python_request = next(
+        (
+            item.request
+            for item in graph.desired
+            if isinstance(item.request, DirectPythonRequestIdentity)
+            and item.request.group == "application-extra"
+        ),
+        None,
+    )
+    comfyui_entry = _take(
+        entries, used, comfyui_request.keys[0], OfficialComfyUILockEntry
+    )
+    requirements_entry = _take(
+        entries,
+        used,
+        requirements_request.keys[0],
+        ComfyUIRequirementsLockEntry,
+    )
+    if requirements_entry.digest != graph.comfyui_requirements.digest:
+        raise ValueError("ComfyUI requirements lock does not match request graph")
+    python_packages = (
+        _package_group(python_request, entries, used, package_channel=None)
+        if python_request is not None
+        else None
+    )
+    pytorch_packages = _package_group(
+        pytorch_request,
+        entries,
+        used,
+        package_channel=pytorch_request.channel,
+    )
+    manager = None
+    if graph.application.install_manager:
+        python_minor = ".".join(pytorch_request.python_version.split(".")[:2])
+        manager = ManagerCapabilityPlan(
+            requirements_path="manager_requirements.txt",
+            distribution="comfyui-manager",
+            import_name="comfyui_manager",
+            executable="/opt/venv/bin/cm-cli",
+            entrypoint_name="cm-cli",
+            import_anchor=(
+                f"{_VENV_PATH}/lib/python{python_minor}/site-packages/"
+                "comfyui-docker-helper-comfyui.pth"
+            ),
+        )
+    return ApplicationPhase(
+        paths=PathsPlan(
+            workspace=graph.application.workspace,
+            comfyui=graph.application.comfyui_path,
+            venv=_VENV_PATH,
+        ),
+        os_packages=graph.application.os_packages,
+        python_index_url=graph.application.python_index_url,
+        pip_version=toolchain.python.pip_version,
+        python_extras=(
+            PackageGroupPlan(
+                group="application-extra",
+                python_version=python_packages.python_version,
+                platform=python_packages.platform,
+                index_url=python_packages.index_url,
+                packages=python_packages.packages,
+            )
+            if python_packages is not None and python_packages.packages
+            else None
+        ),
+        pytorch=PyTorchGroupPlan(
+            group="pytorch",
+            backend="cuda",
+            channel=pytorch_request.channel,
+            python_version=pytorch_packages.python_version,
+            platform=pytorch_packages.platform,
+            python_index_url=pytorch_request.python_index_url,
+            pytorch_index_url=pytorch_request.pytorch_index_url,
+            packages=pytorch_packages.packages,
+            setuptools_specifier=pytorch_packages.setuptools_specifier,
+        ),
+        comfyui=ComfyUIPlan(
+            repository=comfyui_entry.repository,
+            commit=comfyui_entry.commit,
+            floor_commit=requirements_request.request.floor_commit,
+            formal_release=comfyui_entry.formal_release,
+            requirements=ComfyUIRequirementsPlan(
+                path=requirements_request.request.path,
+                floor_commit=requirements_request.request.floor_commit,
+                python_version=pytorch_request.python_version,
+                platform=pytorch_request.platform,
+                protected_names=graph.protected_requirement_names,
+                digest=requirements_entry.digest,
+                protected=tuple(
+                    ProtectedRequirementPlan(
+                        package=item.package,
+                        extras=item.extras,
+                        selector=item.specifier,
+                    )
+                    for item in graph.comfyui_requirements.protected
+                ),
+            ),
+            manager=manager,
+        ),
+    )
+
+
+def _project_custom_nodes(
+    graph: CanonicalRequestGraph,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> CustomNodesPhase:
+    nodes = tuple(_custom_node(node, entries, used) for node in graph.custom_nodes)
+    return CustomNodesPhase(
+        install_manager=graph.application.install_manager,
+        user_directory=str(PurePosixPath(graph.application.comfyui_path) / "user"),
+        nodes=nodes,
+        git_credentials=tuple(
+            _git_credential_route(route) for route in graph.git_credentials
+        ),
+    )
+
+
+def _git_credential_route(route: GitCredentialRouteRequest) -> GitCredentialRoutePlan:
+    return GitCredentialRoutePlan(
+        match=route.match,
+        username=route.username,
+        secret_id=git_credential_secret_id(route.secret),
+    )
+
+
+def _project_files(
+    graph: CanonicalRequestGraph,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+    provenance: RuntimePlanningProvenance,
+) -> FilesPhase:
+    http_file_count = sum(isinstance(item, HttpFileRequest) for item in graph.files)
+    if len(provenance.file_downloader_explicit) != http_file_count:
+        raise ValueError("runtime file downloader provenance does not match config")
+    if len(provenance.file_download_mode_explicit) != http_file_count:
+        raise ValueError("runtime file download-mode provenance does not match config")
+    downloader_explicit = iter(provenance.file_downloader_explicit)
+    mode_explicit = iter(provenance.file_download_mode_explicit)
+    request = graph.downloader
+    return FilesPhase(
+        downloader=DownloaderPlan(
+            default=request.default,
+            aria2=Aria2Plan(
+                rpc_port=request.aria2_rpc_port,
+                split=request.aria2_split,
+                max_connection_per_server=request.aria2_max_connection_per_server,
+                min_split_size=request.aria2_min_split_size,
+                resume_download=request.aria2_resume_download,
+            ),
+            httpx=HttpxPlan(
+                timeout=request.httpx_timeout,
+            ),
+        ),
+        credentials=tuple(
+            _downloader_credential_route(route)
+            for route in graph.downloader_credentials
+        ),
+        default_download_mode=request.default_download_mode,
+        download_max_attempts=request.download_max_attempts,
+        files=tuple(
+            _project_file(
+                item,
+                entries,
+                used,
+                downloader_explicit=(
+                    next(downloader_explicit)
+                    if isinstance(item, HttpFileRequest)
+                    else False
+                ),
+                download_mode_explicit=(
+                    next(mode_explicit) if isinstance(item, HttpFileRequest) else False
+                ),
+            )
+            for item in graph.files
+        ),
+    )
+
+
+def _downloader_credential_route(
+    route: DownloaderCredentialRouteRequest,
+) -> DownloaderCredentialRoutePlan:
+    return DownloaderCredentialRoutePlan(
+        match=route.match,
+        type=route.type,
+        token=FinalSecretRef(secret=route.secret),
+        secret_id=downloader_credential_secret_id(route.secret),
+    )
+
+
+def _project_file(
+    item: HttpFileRequest | LocalFileRequest,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+    *,
+    downloader_explicit: bool,
+    download_mode_explicit: bool,
+) -> HttpFilePlan | LocalFilePlan:
+    if isinstance(item, HttpFileRequest):
+        return HttpFilePlan(
+            type="http",
+            url=item.url,
+            target=item.target,
+            checksum=item.checksum,
+            downloader=item.downloader,
+            download_mode=item.download_mode,
+            downloader_explicit=downloader_explicit,
+            download_mode_explicit=download_mode_explicit,
+        )
+    if not isinstance(item, LocalFileRequest):  # pragma: no cover - closed union
+        raise AssertionError("unsupported canonical file request")
+    digest = None
+    verification: Literal["sha256", "unverified-local"] = "unverified-local"
+    if item.content_lock:
+        entry = _take(
+            entries,
+            used,
+            ("files", "local", item.relative_target),
+            LocalFileLockEntry,
+        )
+        digest = entry.digest
+        verification = "sha256"
+    return LocalFilePlan(
+        type="local",
+        target=item.target,
+        relative_target=item.relative_target,
+        context_path=item.context_path,
+        verification=verification,
+        digest=digest,
+    )
+
+
+def _project_runtime(
+    graph: CanonicalRequestGraph,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+    provenance: RuntimePlanningProvenance,
+) -> RuntimePhase:
+    return RuntimePhase(
+        environment=tuple(
+            EnvironmentPlan(name=name, value=value)
+            for name, value in graph.runtime.environment
+        ),
+        ssh=SshPlan(
+            enable=graph.runtime.ssh.enable,
+            port=graph.runtime.ssh.port,
+            password=graph.runtime.ssh.password,
+            pub_keys=graph.runtime.ssh.pub_keys,
+        ),
+        shutdown_timeout=graph.runtime.shutdown_timeout,
+        launch_command=graph.runtime.launch_command,
+        hooks=_runtime_hooks(entries, used),
+        download_failure_policy=(
+            graph.downloader.download_failure_policy
+            if provenance.failure_policy_explicit
+            else None
+        ),
+    )
+
+
+def build_plan_digest(plan: BuildPlan) -> str:
+    return _digest_bytes(dump_build_plan_json(plan))
+
+
+def dump_build_plan_json(plan: BuildPlan) -> bytes:
+    return _canonical_json(plan.model_dump(mode="json"))
+
+
+def parse_build_plan_json(document: str | bytes) -> BuildPlan:
+    return BuildPlan.model_validate_json(document)
+
+
+def manifest_binding(plan: BuildPlan) -> ManifestBinding:
+    return ManifestBinding(
+        schema_version=MANIFEST_SCHEMA_VERSION,
+        build_plan_schema_version=plan.schema_version,
+        build_plan_digest=build_plan_digest(plan),
+        image_config_digest=plan.image_config_digest,
+        lock_digest=plan.lock_digest,
+    )
+
+
+def _take(
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+    key: tuple[str, ...],
+    expected_type: type[CanonicalLockEntry],
+) -> CanonicalLockEntry:
+    entry = entries.get(key)
+    if entry is None or not isinstance(entry, expected_type):
+        raise ValueError(f"canonical lock is missing required identity {key!r}")
+    used.add(key)
+    return entry
+
+
+def _package_group(
+    request: DirectPythonRequestIdentity | PyTorchRequestIdentity,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+    *,
+    package_channel: str | None,
+) -> _ResolvedPackageGroup:
+    key = (
+        ("python", "package_groups", "pytorch")
+        if isinstance(request, PyTorchRequestIdentity)
+        else ("python", "package_groups", "application_extras")
+    )
+    expected_type = (
+        PyTorchLockEntry
+        if isinstance(request, PyTorchRequestIdentity)
+        else ApplicationExtrasLockEntry
+    )
+    entry = _take(entries, used, key, expected_type)
+    request_members = {member.package: member for member in request.members}
+    packages: list[ExactPackagePlan] = []
+    for package in entry.packages:
+        member = request_members.get(package.name)
+        if member is None:
+            raise ValueError(
+                f"canonical {package.name} does not match its package request"
+            )
+        if package_channel is not None and not pytorch_core_version_matches_channel(
+            package.name, package.version, package_channel
+        ):
+            raise ValueError(
+                f"canonical {package.name} version does not match PyTorch channel"
+            )
+        packages.append(
+            ExactPackagePlan(
+                name=package.name,
+                extras=package.extras,
+                version=package.version,
+                direct_reference=member.direct_reference,
+                environment="application",
+            )
+        )
+    packages.sort(key=lambda item: (item.name != "torch", item.name))
+    return _ResolvedPackageGroup(
+        python_version=request.python_version,
+        platform=request.platform,
+        index_url=(
+            request.pytorch_index_url
+            if isinstance(request, PyTorchRequestIdentity)
+            else request.index_url
+        ),
+        packages=tuple(packages),
+        setuptools_specifier=(
+            entry.setuptools_specifier if isinstance(entry, PyTorchLockEntry) else None
+        ),
+    )
+
+
+def _uv_tool(
+    request: DirectPythonRequestIdentity,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> UvToolPlan:
+    member = request.members[0]
+    entry = _take(
+        entries,
+        used,
+        ("python", "uv_tools", member.package),
+        UvToolLockEntry,
+    )
+    if entry.extras != member.extras or not _selector_accepts(
+        member.specifier, entry.version
+    ):
+        raise ValueError(f"canonical uv tool does not satisfy {member.package}")
+    return UvToolPlan(
+        name=entry.name,
+        extras=entry.extras,
+        version=entry.version,
+        direct_reference=member.direct_reference,
+        environment=request.environment,
+    )
+
+
+def _selector_accepts(selector: str, version: str) -> bool:
+    return not selector or SpecifierSet(selector).contains(version, prereleases=True)
+
+
+def _absolute_posix_path(value: str, field: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or has_control_characters(value)
+        or not path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {".", ".."} for part in path.parts)
+    ):
+        raise ValueError(f"{field} must be one canonical absolute POSIX path")
+    return value
+
+
+def _pytorch_channel(cuda_version: str) -> str:
+    major, minor, *_ = cuda_version.split(".")
+    return f"cu{major}{minor}"
+
+
+def _cuda_image_tag(cuda_version: str, tag: str) -> str:
+    accepted = {
+        f"{cuda_version}-{flavor}-{distro}"
+        for flavor in get_args(CudaImageFlavor)
+        for distro in get_args(CudaImageDistro)
+    }
+    if tag not in accepted:
+        raise ValueError(
+            "CUDA image tag must match version, flavor, and distro authority"
+        )
+    return tag
+
+
+def _exact_distribution_version(value: str) -> str:
+    try:
+        version = Version(value)
+    except InvalidVersion as error:
+        raise ValueError(
+            "version must be one exact stable distribution version"
+        ) from error
+    if str(version) != value or version.is_prerelease or version.is_devrelease:
+        raise ValueError("version must be one exact stable distribution version")
+    return value
+
+
+def _custom_node(
+    node: CustomNodeRequest,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> CustomNodePlan:
+    pre_install_hooks = tuple(
+        _hook(value, entries, used) for value in node.pre_install_hooks
+    )
+    post_install_hooks = tuple(
+        _hook(value, entries, used) for value in node.post_install_hooks
+    )
+    if isinstance(node, RegistryNodeRequest):
+        entry = _take(
+            entries,
+            used,
+            ("custom_nodes", "registry", node.id),
+            RegistryNodeLockEntry,
+        )
+        return RegistryNodePlan(
+            type="registry",
+            id=entry.id,
+            version=entry.version,
+            pre_install_hooks=pre_install_hooks,
+            post_install_hooks=post_install_hooks,
+        )
+    if not isinstance(node, GitNodeRequest):  # pragma: no cover - closed union
+        raise AssertionError("unsupported canonical custom-node request")
+    entry = _take(
+        entries,
+        used,
+        ("custom_nodes", "git", node.url),
+        DirectGitLockEntry,
+    )
+    return GitNodePlan(
+        type="git",
+        url=entry.url,
+        commit=entry.commit,
+        target=node.target,
+        pre_install_hooks=pre_install_hooks,
+        post_install_hooks=post_install_hooks,
+    )
+
+
+def _hook(
+    relative_path: str,
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> HookPlan:
+    entry = _take(
+        entries,
+        used,
+        ("hooks", "build", relative_path),
+        BuildHookLockEntry,
+    )
+    return HookPlan(relative_path=relative_path, digest=entry.digest)
+
+
+def _runtime_hooks(
+    entries: dict[tuple[str, ...], CanonicalLockEntry],
+    used: set[tuple[str, ...]],
+) -> tuple[HookPlan, ...]:
+    hooks: list[HookPlan] = []
+    phase_order = {
+        directory: index
+        for index, (_, directory) in enumerate(RUNTIME_HOOK_PHASE_DIRECTORY_ITEMS)
+    }
+    runtime_keys = [key for key in entries if key[:2] == ("hooks", "runtime")]
+    runtime_keys.sort(
+        key=lambda key: (
+            phase_order.get(key[2].split("/", 1)[0], 99),
+            key[2],
+        )
+    )
+    for key in runtime_keys:
+        entry = _take(entries, used, key, RuntimeHookLockEntry)
+        relative_path = entry.relative_path
+        hooks.append(
+            HookPlan(
+                relative_path=relative_path,
+                digest=entry.digest,
+            )
+        )
+    return tuple(hooks)
+
+
+def _image_plan(entry: OciLockEntry) -> ImagePlan:
+    return ImagePlan(
+        role="uv-tool" if isinstance(entry, UvImageLockEntry) else "cuda-base",
+        repository=entry.repository,
+        tag=entry.tag,
+        descriptor_digest=entry.digest,
+        descriptor_kind=entry.kind,
+        platform=entry.platform,
+        resolved_version=(
+            entry.observed_version if isinstance(entry, UvImageLockEntry) else None
+        ),
+    )
+
+
+def _canonical_json(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("utf-8")
+
+
+def _digest_bytes(value: bytes) -> str:
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"

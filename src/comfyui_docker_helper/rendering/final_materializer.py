@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 import tomli_w
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     HookPlan,
     HttpFilePlan,
@@ -20,11 +20,11 @@ from comfyui_docker_helper.config.build_plan import (
     build_plan_hook_identities,
     dump_build_plan_json,
 )
-from comfyui_docker_helper.config.runtime_hooks import (
+from comfyui_docker_helper.config.validation.hooks import (
     BUILD_HOOK_LOCK_PREFIX,
     RUNTIME_HOOK_LOCK_PREFIX,
 )
-from comfyui_docker_helper.file_admission import (
+from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     FileCloneUnavailableError,
     operate_regular_absolute_file,

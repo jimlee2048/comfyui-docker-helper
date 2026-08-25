@@ -24,12 +24,12 @@ from tests.smoke.application_probes import (
     REGISTRY_PROOF_SOURCE,
 )
 
-from comfyui_docker_helper.config.build_plan import (
+from comfyui_docker_helper.config.planning.build_plan import (
     build_plan_digest,
     manifest_binding,
     parse_build_plan_json,
 )
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
@@ -487,7 +487,7 @@ manifest = json.loads(manifest_path.read_text())
 assert manifest["schema_version"] == 1
 strict_manifest_source = (
     "import pathlib;"
-    "from comfyui_docker_helper.config.final_manifest import "
+    "from comfyui_docker_helper.config.evidence.manifest import "
     "dump_final_manifest,parse_final_manifest;"
     "path=pathlib.Path('/opt/cdh/build/manifest.json');"
     "content=path.read_bytes();"
@@ -531,7 +531,7 @@ time.tzset()
 assert plan["lock_digest"] == os.environ["EXPECTED_LOCK_DIGEST"]
 digest_source = (
     "import pathlib; "
-    "from comfyui_docker_helper.config.build_plan import "
+    "from comfyui_docker_helper.config.planning.build_plan import "
     "build_plan_digest, parse_build_plan_json; "
     "path=pathlib.Path('/run/cdh-acceptance-build-plan.json'); "
     "print(build_plan_digest(parse_build_plan_json(path.read_bytes())))"

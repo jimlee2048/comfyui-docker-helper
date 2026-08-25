@@ -29,7 +29,7 @@ from tests.smoke.test_private_git_build_access_live import (
     _require_isolated_preflight,
 )
 
-from comfyui_docker_helper.config.git_credentials import has_password_userinfo
+from comfyui_docker_helper.config.credentials.git import has_password_userinfo
 
 pytestmark = [
     pytest.mark.smoke,

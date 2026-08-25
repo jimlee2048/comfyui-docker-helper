@@ -7,18 +7,18 @@ from packaging.utils import canonicalize_name
 from packaging.version import Version
 from tests.acceptance_scenarios import RELEASE_PYTHON_PROFILES
 
-from comfyui_docker_helper.comfyui_requirements import (
-    CUDA_PROTECTED_REQUIREMENTS,
-    parse_comfyui_requirements,
-    parse_manager_requirements,
-)
-from comfyui_docker_helper.config.canonical_lock import (
+from comfyui_docker_helper.config.planning.canonical_lock import (
     ComfyCliRequestIdentity,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     PyTorchRequestIdentity,
 )
-from comfyui_docker_helper.config.canonical_resolver import CanonicalAcquisitionError
+from comfyui_docker_helper.config.planning.requirements import (
+    CUDA_PROTECTED_REQUIREMENTS,
+    parse_comfyui_requirements,
+    parse_manager_requirements,
+)
+from comfyui_docker_helper.config.planning.resolver import CanonicalAcquisitionError
 from comfyui_docker_helper.exact_ledger import (
     COMFY_CLI_MINIMUM_VERSION,
     COMFYUI_FLOOR_COMMIT,
@@ -26,12 +26,16 @@ from comfyui_docker_helper.exact_ledger import (
     DEFAULT_MANAGED_PYTHON_VERSION,
     UV_IMAGE_REPOSITORY,
 )
-from comfyui_docker_helper.host.canonical_acquisition import DockerPythonGroupResolver
-from comfyui_docker_helper.host.identity_providers import (
-    DockerEngineOciIdentityProvider,
+from comfyui_docker_helper.host.planning.acquisition import DockerPythonGroupResolver
+from comfyui_docker_helper.host.planning.providers.comfyui import (
     GitOfficialComfyUIIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.contracts import (
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
+)
+from comfyui_docker_helper.host.planning.providers.oci import (
+    DockerEngineOciIdentityProvider,
 )
 
 QUALIFIED_TEST_UV_VERSION = "0.11.28"

@@ -22,6 +22,21 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!src/comfyui_docker_helper/container/build/
+src/comfyui_docker_helper/container/build/**
+!src/comfyui_docker_helper/container/build/**/
+!src/comfyui_docker_helper/container/build/**/*.py
+src/comfyui_docker_helper/container/build/**/__pycache__/
+!tests/unit/container/build/
+tests/unit/container/build/**
+!tests/unit/container/build/**/
+!tests/unit/container/build/**/*.py
+tests/unit/container/build/**/__pycache__/
+!tests/integration/container/build/
+tests/integration/container/build/**
+!tests/integration/container/build/**/
+!tests/integration/container/build/**/*.py
+tests/integration/container/build/**/__pycache__/
 develop-eggs/
 dist/
 downloads/

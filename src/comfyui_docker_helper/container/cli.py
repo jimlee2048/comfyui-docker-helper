@@ -16,35 +16,39 @@ from comfyui_docker_helper.cli_settings import (
 from comfyui_docker_helper.errors import ApplicationError
 
 if TYPE_CHECKING:
-    from comfyui_docker_helper.container.build_plan_input import (
+    from comfyui_docker_helper.container.build.admission import (
         BuildPlanInputAdmission,
     )
 
 if sys.platform == "linux":
-    from comfyui_docker_helper.container.build_plan_input import (
+    from comfyui_docker_helper.container.build.admission import (
         MATERIALIZED_BUILD_PLAN_PATH,
         BuildPlanInputAdmission,
     )
-    from comfyui_docker_helper.container.comfyui_installer import install_comfyui
-    from comfyui_docker_helper.container.custom_node_installer import (
+    from comfyui_docker_helper.container.build.comfyui import install_comfyui
+    from comfyui_docker_helper.container.build.custom_nodes.orchestrator import (
         install_custom_nodes,
     )
-    from comfyui_docker_helper.container.download_files import download_files
-    from comfyui_docker_helper.container.final_manifest import emit_final_manifest
-    from comfyui_docker_helper.container.presentation import (
+    from comfyui_docker_helper.container.build.downloads import download_files
+    from comfyui_docker_helper.container.build.manifest.observer import (
+        emit_final_manifest,
+    )
+    from comfyui_docker_helper.container.presentation.download import (
         default_container_download_invocation,
+    )
+    from comfyui_docker_helper.container.presentation.helper import (
         default_container_helper_display,
     )
-    from comfyui_docker_helper.container.runners import (
+    from comfyui_docker_helper.container.process.runners import (
         ContainerCommandError,
         ContainerRuntime,
     )
-    from comfyui_docker_helper.container.runtime_control_client import (
+    from comfyui_docker_helper.container.runtime.control.client import (
         follow_runtime,
         read_runtime_status,
         restart_runtime,
     )
-    from comfyui_docker_helper.container.runtime_serve import run_runtime_serve
+    from comfyui_docker_helper.container.runtime.serve import run_runtime_serve
 else:
     MATERIALIZED_BUILD_PLAN_PATH = Path("/opt/cdh/build/build-plan.json")
 

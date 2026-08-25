@@ -16,17 +16,27 @@ from comfyui_docker_helper.exact_ledger import (
     DEFAULT_CUDA_IMAGE_FLAVOR,
     UV_IMAGE_REPOSITORY,
 )
-from comfyui_docker_helper.host.identity_providers import (
-    DirectGitIdentityRequest,
-    DockerEngineOciIdentityProvider,
-    DockerManagedPythonIdentityProvider,
-    GitDirectIdentityProvider,
+from comfyui_docker_helper.host.planning.providers.comfyui import (
     GitOfficialComfyUIIdentityProvider,
-    HttpRegistryNodeIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.contracts import (
+    DirectGitIdentityRequest,
     ManagedPythonIdentityRequest,
     OciIdentityRequest,
     OfficialComfyUIIdentityRequest,
     RegistryNodeIdentityRequest,
+)
+from comfyui_docker_helper.host.planning.providers.git import (
+    GitDirectIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.oci import (
+    DockerEngineOciIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.python import (
+    DockerManagedPythonIdentityProvider,
+)
+from comfyui_docker_helper.host.planning.providers.registry import (
+    HttpRegistryNodeIdentityProvider,
 )
 
 pytestmark = [

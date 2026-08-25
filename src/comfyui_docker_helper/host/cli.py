@@ -17,35 +17,43 @@ from comfyui_docker_helper.cli_settings import (
     HELP_CONTEXT_SETTINGS,
     require_output_settings,
 )
-from comfyui_docker_helper.config.build_plan import (
-    downloader_credential_secret_ids,
-    git_credential_secret_ids,
-)
-from comfyui_docker_helper.config.credential_secrets import (
-    CREDENTIAL_SECRET_MAX_BYTES,
-)
-from comfyui_docker_helper.config.diagnostics import Diagnostic
-from comfyui_docker_helper.config.final_models import FinalGitCustomNodeConfig
-from comfyui_docker_helper.config.git_credentials import (
-    GIT_CREDENTIAL_VALUE_MAX_BYTES,
-)
-from comfyui_docker_helper.config.publication_tags import (
+from comfyui_docker_helper.config.authored.models import FinalGitCustomNodeConfig
+from comfyui_docker_helper.config.authored.publication import (
     static_release_availability,
     validate_publication_tags,
 )
-from comfyui_docker_helper.config.service import (
+from comfyui_docker_helper.config.authored.service import (
     ConfigurationResult,
     ConfigurationServiceError,
     load_validate_config_result,
 )
-from comfyui_docker_helper.config.value_validation import is_argv_value
+from comfyui_docker_helper.config.credentials.git import (
+    GIT_CREDENTIAL_VALUE_MAX_BYTES,
+)
+from comfyui_docker_helper.config.credentials.secrets import (
+    CREDENTIAL_SECRET_MAX_BYTES,
+)
+from comfyui_docker_helper.config.diagnostics import Diagnostic
+from comfyui_docker_helper.config.planning.build_plan import (
+    downloader_credential_secret_ids,
+    git_credential_secret_ids,
+)
+from comfyui_docker_helper.config.validation.values import is_argv_value
 from comfyui_docker_helper.host.buildx import (
     BuildxBuildError,
     BuildxOutput,
     FileSecretBinding,
     build_image_with_buildx,
 )
-from comfyui_docker_helper.host.events import (
+from comfyui_docker_helper.host.context.service import (
+    HostRenderServiceError,
+    PlanningOptions,
+    admit_build_hook_source,
+    prepare_render_context,
+)
+from comfyui_docker_helper.host.context.wheel import CanonicalWheelError
+from comfyui_docker_helper.host.planning.authority import default_planning_providers
+from comfyui_docker_helper.host.presentation.events import (
     HostPhase,
     HostPhaseCompleted,
     HostPhaseStarted,
@@ -54,22 +62,14 @@ from comfyui_docker_helper.host.events import (
     HostSubphaseStarted,
     HostWorkflowSucceeded,
 )
-from comfyui_docker_helper.host.planning_authority import default_planning_providers
-from comfyui_docker_helper.host.presentation import (
+from comfyui_docker_helper.host.presentation.presenter import (
     HostPresenter,
     default_host_presenter,
 )
-from comfyui_docker_helper.host.release_wheel import CanonicalWheelError
-from comfyui_docker_helper.host.render_service import (
-    HostRenderServiceError,
-    PlanningOptions,
-    admit_build_hook_source,
-    prepare_render_context,
-)
-from comfyui_docker_helper.host.workflow_display import HostWorkflowDisplay
+from comfyui_docker_helper.host.presentation.workflow import HostWorkflowDisplay
 
 if TYPE_CHECKING:
-    from comfyui_docker_helper.host.secret_session import (
+    from comfyui_docker_helper.host.credentials.session import (
         HostSecretSession,
         HostSecretSessionError,
     )
@@ -201,7 +201,7 @@ def render(
     ] = False,
 ) -> None:
     """Render a context; Docker may be used when new uv resolution is needed."""
-    from comfyui_docker_helper.host.secret_session import (
+    from comfyui_docker_helper.host.credentials.session import (
         HostSecretSession,
         HostSecretSessionError,
     )
@@ -397,7 +397,7 @@ def build(
     ] = False,
 ) -> None:
     """Render a build context and build it with Docker Buildx."""
-    from comfyui_docker_helper.host.secret_session import (
+    from comfyui_docker_helper.host.credentials.session import (
         HostSecretSession,
         HostSecretSessionError,
     )

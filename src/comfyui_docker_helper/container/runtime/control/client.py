@@ -11,8 +11,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Never
 
-from comfyui_docker_helper.container.runtime_control import (
-    RUNTIME_CONTROL_SOCKET_PATH,
+from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeAcceptedResponse,
     RuntimeAckRequest,
     RuntimeControlProtocolError,
@@ -24,9 +23,12 @@ from comfyui_docker_helper.container.runtime_control import (
     RuntimeStatusRequest,
     RuntimeStatusResponse,
     RuntimeTerminalResponse,
-    connect_runtime_control,
     receive_runtime_control_response,
     send_runtime_control_message,
+)
+from comfyui_docker_helper.container.runtime.control.transport import (
+    RUNTIME_CONTROL_SOCKET_PATH,
+    connect_runtime_control,
 )
 from comfyui_docker_helper.errors import ApplicationError
 

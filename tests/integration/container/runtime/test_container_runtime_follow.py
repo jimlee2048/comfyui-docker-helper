@@ -15,16 +15,16 @@ from typing import BinaryIO
 
 import pytest
 
+from comfyui_docker_helper.container.runtime.control.client import read_runtime_status
+from comfyui_docker_helper.container.runtime.control.server import (
+    RuntimeControlServer,
+)
+from comfyui_docker_helper.container.runtime.control.transport import (
+    open_runtime_control_listener,
+)
 from comfyui_docker_helper.container.runtime.logging import (
     RuntimeLogChunk,
     RuntimeLoggingBroker,
-)
-from comfyui_docker_helper.container.runtime_control import (
-    open_runtime_control_listener,
-)
-from comfyui_docker_helper.container.runtime_control_client import read_runtime_status
-from comfyui_docker_helper.container.runtime_control_server import (
-    RuntimeControlServer,
 )
 from comfyui_docker_helper.container.runtime_controller import RuntimeController
 
@@ -32,7 +32,7 @@ _FOLLOW_CLIENT = """
 import sys
 from pathlib import Path
 
-from comfyui_docker_helper.container.runtime_control_client import follow_runtime
+from comfyui_docker_helper.container.runtime.control.client import follow_runtime
 
 raise SystemExit(follow_runtime(Path(sys.argv[1])))
 """

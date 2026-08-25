@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Literal
 
-from comfyui_docker_helper.container.runtime_control import (
+from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeControllerPhase,
     RuntimeControllerState,
 )

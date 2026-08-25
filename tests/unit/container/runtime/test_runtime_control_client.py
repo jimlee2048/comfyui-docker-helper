@@ -10,21 +10,23 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container import runtime_control_client as client_module
-from comfyui_docker_helper.container.runtime_control import (
-    RuntimeAcceptedResponse,
-    RuntimeControlProtocolError,
-    RuntimeErrorResponse,
-    RuntimeLogResponse,
-    RuntimeStatusResponse,
-    RuntimeTerminalResponse,
-)
-from comfyui_docker_helper.container.runtime_control_client import (
+from comfyui_docker_helper.container.runtime.control import client as client_module
+from comfyui_docker_helper.container.runtime.control.client import (
     RuntimeControlClientError,
     _write_all,
     follow_runtime,
     read_runtime_status,
     restart_runtime,
+)
+from comfyui_docker_helper.container.runtime.control.protocol import (
+    RuntimeAcceptedResponse,
+    RuntimeAckRequest,
+    RuntimeControlProtocolError,
+    RuntimeErrorResponse,
+    RuntimeLogResponse,
+    RuntimeRestartRequest,
+    RuntimeStatusResponse,
+    RuntimeTerminalResponse,
 )
 
 
@@ -132,7 +134,7 @@ def test_terminal_result_wins_when_best_effort_ack_write_fails(
             ),
         )
     )
-    send_count = 0
+    sent_messages: list[object] = []
 
     monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
     monkeypatch.setattr(
@@ -142,9 +144,8 @@ def test_terminal_result_wins_when_best_effort_ack_write_fails(
     )
 
     def send(_peer: object, _message: object) -> None:
-        nonlocal send_count
-        send_count += 1
-        if send_count == 2:
+        sent_messages.append(_message)
+        if isinstance(_message, RuntimeAckRequest):
             raise BrokenPipeError("synthetic ACK write failure")
 
     monkeypatch.setattr(client_module, "send_runtime_control_message", send)
@@ -158,7 +159,17 @@ def test_terminal_result_wins_when_best_effort_ack_write_fails(
         ):
             restart_runtime(Path("unused"))
 
-    assert send_count == 2
+    request_index = next(
+        index
+        for index, message in enumerate(sent_messages)
+        if isinstance(message, RuntimeRestartRequest)
+    )
+    ack_index = next(
+        index
+        for index, message in enumerate(sent_messages)
+        if isinstance(message, RuntimeAckRequest)
+    )
+    assert request_index < ack_index
     assert peer.closed is True
 
 
@@ -176,7 +187,7 @@ def test_terminal_result_wins_when_best_effort_ack_is_interrupted(
             ),
         )
     )
-    send_count = 0
+    sent_messages: list[object] = []
 
     monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
     monkeypatch.setattr(
@@ -186,15 +197,24 @@ def test_terminal_result_wins_when_best_effort_ack_is_interrupted(
     )
 
     def send(_peer: object, _message: object) -> None:
-        nonlocal send_count
-        send_count += 1
-        if send_count == 2:
+        sent_messages.append(_message)
+        if isinstance(_message, RuntimeAckRequest):
             signal.raise_signal(signal.SIGINT)
 
     monkeypatch.setattr(client_module, "send_runtime_control_message", send)
 
     assert restart_runtime(Path("unused")) == "op-9"
-    assert send_count == 2
+    request_index = next(
+        index
+        for index, message in enumerate(sent_messages)
+        if isinstance(message, RuntimeRestartRequest)
+    )
+    ack_index = next(
+        index
+        for index, message in enumerate(sent_messages)
+        if isinstance(message, RuntimeAckRequest)
+    )
+    assert request_index < ack_index
     assert peer.closed is True
 
 
@@ -350,19 +370,22 @@ def test_follow_rejects_typed_error_and_unexpected_response(
 
 def test_local_output_write_retries_interruption_and_partial_progress() -> None:
     writes: list[bytes] = []
-    attempts = 0
+    interrupted = False
+    partial = False
 
     def writer(fd: int, data: bytes | memoryview) -> int:
-        nonlocal attempts
+        nonlocal interrupted, partial
         assert fd == 42
-        attempts += 1
-        if attempts == 1:
+        if not interrupted:
+            interrupted = True
             raise InterruptedError
         chunk = bytes(data[:2])
+        partial = partial or len(chunk) < len(data)
         writes.append(chunk)
         return len(chunk)
 
     _write_all(42, b"abcdef", writer=writer)
 
-    assert attempts == 4
+    assert interrupted is True
+    assert partial is True
     assert b"".join(writes) == b"abcdef"

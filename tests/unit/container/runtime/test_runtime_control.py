@@ -9,8 +9,10 @@ import threading
 
 import pytest
 
-from comfyui_docker_helper.container import runtime_control as control_module
-from comfyui_docker_helper.container.runtime_control import (
+from comfyui_docker_helper.container.runtime.control import (
+    transport as transport_module,
+)
+from comfyui_docker_helper.container.runtime.control.protocol import (
     RUNTIME_CONTROL_MAX_FRAME_BYTES,
     RUNTIME_CONTROL_MAX_PAYLOAD_BYTES,
     RuntimeAcceptedResponse,
@@ -24,10 +26,12 @@ from comfyui_docker_helper.container.runtime_control import (
     RuntimeStatusRequest,
     RuntimeStatusResponse,
     RuntimeTerminalResponse,
-    connect_runtime_control,
     encode_runtime_control_frame,
     receive_runtime_control_request,
     receive_runtime_control_response,
+)
+from comfyui_docker_helper.container.runtime.control.transport import (
+    connect_runtime_control,
 )
 
 
@@ -194,6 +198,20 @@ def test_exact_maximum_frame_is_accepted() -> None:
         receiver.close()
 
 
+def test_oversize_frame_is_rejected_before_send_without_payload_disclosure() -> None:
+    payload_marker = "oversize-wire-payload-marker"
+    message = RuntimeErrorResponse(
+        code="invalid_request",
+        message=payload_marker + "x" * RUNTIME_CONTROL_MAX_PAYLOAD_BYTES,
+    )
+
+    with pytest.raises(RuntimeControlProtocolError) as raised:
+        encode_runtime_control_frame(message)
+
+    assert raised.value.code == "frame_too_large"
+    assert payload_marker not in str(raised.value)
+
+
 def test_oversize_header_is_rejected_without_reading_payload() -> None:
     sender, receiver = socket.socketpair()
     try:
@@ -224,7 +242,7 @@ def test_connect_closes_its_socket_when_interrupted_by_base_exception(
             self.closed = True
 
     peer = InterruptedSocket()
-    monkeypatch.setattr(control_module.socket, "socket", lambda *_args: peer)
+    monkeypatch.setattr(transport_module.socket, "socket", lambda *_args: peer)
 
     with pytest.raises(SyntheticInterrupt):
         connect_runtime_control()

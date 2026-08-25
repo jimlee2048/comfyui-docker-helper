@@ -22,7 +22,9 @@ from comfyui_docker_helper.container.process.control import (
     DirectProcess,
     terminate_direct_process_until,
 )
-from comfyui_docker_helper.container.runtime_control import RUNTIME_CONTROL_DIRECTORY
+from comfyui_docker_helper.container.runtime.control.transport import (
+    RUNTIME_CONTROL_DIRECTORY,
+)
 from comfyui_docker_helper.errors import ApplicationError
 
 _ROOT_UID = 0

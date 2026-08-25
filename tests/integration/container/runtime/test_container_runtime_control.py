@@ -9,15 +9,19 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container import runtime_control as control_module
-from comfyui_docker_helper.container.runtime_control import (
-    RuntimeControlEndpointError,
-    RuntimePeerCredentials,
+from comfyui_docker_helper.container.runtime.control import (
+    transport as transport_module,
+)
+from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeRestartRequest,
-    connect_runtime_control,
-    open_runtime_control_listener,
     receive_runtime_control_request,
     send_runtime_control_message,
+)
+from comfyui_docker_helper.container.runtime.control.transport import (
+    RuntimeControlEndpointError,
+    RuntimePeerCredentials,
+    connect_runtime_control,
+    open_runtime_control_listener,
 )
 
 
@@ -99,7 +103,7 @@ def test_stale_socket_disappearance_uses_the_single_bind_retry(
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stale.bind(os.fspath(endpoint))
     stale.close()
-    original_admit = control_module._admit_stale_candidate
+    original_admit = transport_module._admit_stale_candidate
     calls = 0
 
     def disappear_during_check(
@@ -115,7 +119,7 @@ def test_stale_socket_disappearance_uses_the_single_bind_retry(
         return original_admit(path, owner_uid=owner_uid)
 
     monkeypatch.setattr(
-        control_module,
+        transport_module,
         "_admit_stale_candidate",
         disappear_during_check,
     )
@@ -135,7 +139,7 @@ def test_wrong_owner_stale_candidate_is_not_removed(tmp_path: Path) -> None:
     stale.close()
 
     with pytest.raises(RuntimeControlEndpointError, match="unsafe"):
-        control_module._admit_stale_candidate(
+        transport_module._admit_stale_candidate(
             endpoint,
             owner_uid=os.geteuid() + 1,
         )
@@ -160,6 +164,37 @@ def test_unsafe_existing_endpoint_fails_closed(tmp_path: Path, kind: str) -> Non
         open_runtime_control_listener(endpoint)
 
     assert endpoint.exists() or endpoint.is_symlink()
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "wrong-owner"])
+def test_unsafe_control_directory_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    control_directory = tmp_path / "control"
+    if kind == "file":
+        control_directory.write_text("not a directory", encoding="utf-8")
+    elif kind == "symlink":
+        target = tmp_path / "target"
+        target.mkdir()
+        control_directory.symlink_to(target, target_is_directory=True)
+    else:
+        control_directory.mkdir(mode=0o700)
+        owner_uid = os.geteuid()
+        monkeypatch.setattr(transport_module.os, "geteuid", lambda: owner_uid + 1)
+
+    endpoint = control_directory / "runtime.sock"
+    with pytest.raises(RuntimeControlEndpointError, match="unsafe"):
+        open_runtime_control_listener(endpoint)
+
+    assert not endpoint.exists()
+    if kind == "file":
+        assert control_directory.read_text(encoding="utf-8") == "not a directory"
+    elif kind == "symlink":
+        assert control_directory.is_symlink()
+    else:
+        assert control_directory.is_dir()
 
 
 def test_wrong_uid_peer_is_closed_before_request_processing(tmp_path: Path) -> None:
@@ -191,7 +226,7 @@ def test_stale_identity_change_is_not_removed(
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stale.bind(os.fspath(endpoint))
     stale.close()
-    original_admit = control_module._admit_stale_candidate
+    original_admit = transport_module._admit_stale_candidate
     calls = 0
 
     def replace_before_confirmation(
@@ -209,7 +244,7 @@ def test_stale_identity_change_is_not_removed(
         return original_admit(path, owner_uid=owner_uid)
 
     monkeypatch.setattr(
-        control_module,
+        transport_module,
         "_admit_stale_candidate",
         replace_before_confirmation,
     )
@@ -252,7 +287,7 @@ def test_listener_records_identity_after_securing_endpoint(
 
     listener = open_runtime_control_listener(endpoint)
     try:
-        assert listener.endpoint_identity == control_module._endpoint_identity(
+        assert listener.endpoint_identity == transport_module._endpoint_identity(
             endpoint.lstat()
         )
     finally:

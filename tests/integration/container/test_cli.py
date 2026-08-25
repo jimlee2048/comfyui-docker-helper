@@ -786,7 +786,7 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
     monkeypatch: pytest.MonkeyPatch,
     json_output: bool,
 ) -> None:
-    from comfyui_docker_helper.container.runtime_control import (
+    from comfyui_docker_helper.container.runtime.control.protocol import (
         RuntimeLastRestart,
         RuntimeStatusResponse,
     )

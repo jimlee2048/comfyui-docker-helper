@@ -15,13 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
-from comfyui_docker_helper.container.runtime_control import (
-    open_runtime_control_listener,
-)
-from comfyui_docker_helper.container.runtime_control_server import (
+from comfyui_docker_helper.container.runtime.control.server import (
     RuntimeControlServer,
 )
+from comfyui_docker_helper.container.runtime.control.transport import (
+    open_runtime_control_listener,
+)
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 from comfyui_docker_helper.container.runtime_controller import RuntimeController
 
 _RESTART_CLI = """
@@ -29,8 +29,10 @@ import sys
 from pathlib import Path
 
 from comfyui_docker_helper.container import cli as container_cli
-from comfyui_docker_helper.container import runtime_control_client as client
-from comfyui_docker_helper.container.runtime_control import RuntimeAcceptedResponse
+from comfyui_docker_helper.container.runtime.control import client
+from comfyui_docker_helper.container.runtime.control.protocol import (
+    RuntimeAcceptedResponse,
+)
 from comfyui_docker_helper.cli import app
 
 endpoint = Path(sys.argv[1])

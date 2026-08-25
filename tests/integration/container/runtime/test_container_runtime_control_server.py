@@ -13,38 +13,40 @@ from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.container.runtime.control.client import (
+    RuntimeControlClientError,
+    read_runtime_status,
+    restart_runtime,
+)
+from comfyui_docker_helper.container.runtime.control.protocol import (
+    RuntimeAcceptedResponse,
+    RuntimeAckRequest,
+    RuntimeControlResponse,
+    RuntimeErrorResponse,
+    RuntimeFollowRequest,
+    RuntimeLogResponse,
+    RuntimeRestartRequest,
+    RuntimeStatusRequest,
+    RuntimeStatusResponse,
+    RuntimeTerminalResponse,
+    receive_runtime_control_response,
+    send_runtime_control_message,
+)
+from comfyui_docker_helper.container.runtime.control.server import (
+    RuntimeControlServer,
+)
+from comfyui_docker_helper.container.runtime.control.transport import (
+    RuntimeControlListener,
+    RuntimePeerCredentials,
+    connect_runtime_control,
+    open_runtime_control_listener,
+)
 from comfyui_docker_helper.container.runtime.logging import (
     RUNTIME_LOG_MAX_FOLLOWERS,
     RuntimeLogChunk,
     RuntimeLogFollower,
     RuntimeLoggingBroker,
     RuntimeLoggingError,
-)
-from comfyui_docker_helper.container.runtime_control import (
-    RuntimeAcceptedResponse,
-    RuntimeAckRequest,
-    RuntimeControlListener,
-    RuntimeControlResponse,
-    RuntimeErrorResponse,
-    RuntimeFollowRequest,
-    RuntimeLogResponse,
-    RuntimePeerCredentials,
-    RuntimeRestartRequest,
-    RuntimeStatusRequest,
-    RuntimeStatusResponse,
-    RuntimeTerminalResponse,
-    connect_runtime_control,
-    open_runtime_control_listener,
-    receive_runtime_control_response,
-    send_runtime_control_message,
-)
-from comfyui_docker_helper.container.runtime_control_client import (
-    RuntimeControlClientError,
-    read_runtime_status,
-    restart_runtime,
-)
-from comfyui_docker_helper.container.runtime_control_server import (
-    RuntimeControlServer,
 )
 from comfyui_docker_helper.container.runtime_controller import RuntimeController
 
@@ -289,6 +291,63 @@ def test_restart_client_reports_success_failure_and_busy(tmp_path: Path) -> None
         pytest.raises(RuntimeControlClientError, match="concurrent restart"),
     ):
         restart_runtime(busy_endpoint)
+
+
+def test_restart_client_receives_bounded_long_terminal_error(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    controller = _running_controller()
+    listener = open_runtime_control_listener(endpoint)
+    tail_marker = "unpublished-terminal-tail"
+    long_message = "safe-terminal-prefix-" + "x" * 8192 + tail_marker
+
+    def complete_failure() -> None:
+        assert controller.wait(1.0) is True
+        assert controller.accept_if_requested(accepted_at=1.0) is True
+        assert controller.allocate_restart_successor() == "gen-2"
+        controller.publish_restart_terminal("failed", message=long_message)
+        assert controller.wait_for_terminal_delivery(1.0) is True
+
+    with _server(listener, controller):
+        driver = threading.Thread(target=complete_failure)
+        driver.start()
+        with pytest.raises(RuntimeControlClientError) as raised:
+            restart_runtime(endpoint)
+        driver.join(timeout=1.0)
+        assert not driver.is_alive()
+
+    error = str(raised.value)
+    assert error.startswith("Runtime restart op-1 failed: safe-terminal-prefix-")
+    assert error.endswith("...")
+    assert len(error) < len(long_message)
+    assert tail_marker not in error
+
+
+def test_restart_terminal_delivery_finishes_without_ack(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path)
+    controller = _running_controller()
+    listener = open_runtime_control_listener(endpoint)
+
+    with _server(listener, controller):
+        client = connect_runtime_control(endpoint)
+        try:
+            send_runtime_control_message(client, RuntimeRestartRequest())
+            assert controller.wait(1.0) is True
+            assert controller.accept_if_requested(accepted_at=1.0) is True
+            assert controller.allocate_restart_successor() == "gen-2"
+            controller.publish_restart_terminal("failed", message="no ACK needed")
+
+            assert _receive(client) == RuntimeAcceptedResponse(operation="op-1")
+            assert _receive(client) == RuntimeTerminalResponse(
+                operation="op-1",
+                result="failed",
+                message="no ACK needed",
+            )
+
+            # This is an eventual-completion bound for a process-boundary wait,
+            # not an assertion on the exact ACK timeout or elapsed duration.
+            assert controller.wait_for_terminal_delivery(1.0) is True
+        finally:
+            client.close()
 
 
 # Live log connections span restarts while limits and disconnects stay isolated.

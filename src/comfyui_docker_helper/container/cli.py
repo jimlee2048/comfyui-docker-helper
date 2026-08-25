@@ -43,7 +43,7 @@ if sys.platform == "linux":
         ContainerCommandError,
         ContainerRuntime,
     )
-    from comfyui_docker_helper.container.runtime_control_client import (
+    from comfyui_docker_helper.container.runtime.control.client import (
         follow_runtime,
         read_runtime_status,
         restart_runtime,

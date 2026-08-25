@@ -24,6 +24,12 @@ from comfyui_docker_helper.config import (
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.readiness import wait_for_comfyui_readiness
+from comfyui_docker_helper.container.runtime.control.server import RuntimeControlServer
+from comfyui_docker_helper.container.runtime.control.transport import (
+    RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
+    RUNTIME_CONTROL_SOCKET_PATH,
+    open_runtime_control_listener,
+)
 from comfyui_docker_helper.container.runtime.diagnostics import (
     format_runtime_diagnostics,
     render_runtime_diagnostics,
@@ -64,12 +70,6 @@ from comfyui_docker_helper.container.runtime.secret_session import (
     RuntimeDownloaderCredentialPolicy,
 )
 from comfyui_docker_helper.container.runtime.state import RUNTIME_STATE_PATH
-from comfyui_docker_helper.container.runtime_control import (
-    RUNTIME_CONTROL_ACK_DRAIN_SECONDS,
-    RUNTIME_CONTROL_SOCKET_PATH,
-    open_runtime_control_listener,
-)
-from comfyui_docker_helper.container.runtime_control_server import RuntimeControlServer
 from comfyui_docker_helper.container.runtime_controller import (
     RuntimeController,
     RuntimeControllerError,

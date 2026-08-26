@@ -530,6 +530,84 @@ filename = "model.bin"
     )
 
 
+def test_sync_queue_reports_completed_when_stop_arrives_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config_path = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_download_mode = "sync"
+default_downloader = "httpx"
+
+[[files]]
+type = "http"
+url = "https://example.com/model.bin"
+target_dir = "models"
+filename = "model.bin"
+""",
+    )
+    loaded = load_runtime_config(
+        baked_config_path=config_path,
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={},
+    )
+    state_path = tmp_path / "state.json"
+    backend = AsyncBackend()
+    _install_async_backend(monkeypatch, backend)
+    presentation = RecordingRuntimeEventSink()
+    download_succeeded = threading.Event()
+    allow_worker_return = threading.Event()
+    download_runtime_files = runtime_downloads_module.download_runtime_files
+
+    def hold_after_success(*args, **kwargs):
+        result = download_runtime_files(*args, **kwargs)
+        download_succeeded.set()
+        assert allow_worker_return.wait(timeout=1)
+        return result
+
+    downloads = RuntimeDownloads(
+        loaded.config,
+        loaded.files,
+        runtime=runtime,
+        runtime_state_path=state_path,
+        event_sink=presentation,
+        direct_event_sink=presentation,
+        downloader=hold_after_success,
+    )
+    activation_errors: list[BaseException] = []
+
+    def activate() -> None:
+        try:
+            downloads.activate()
+        except BaseException as error:
+            activation_errors.append(error)
+
+    activation_thread = threading.Thread(target=activate)
+    activation_thread.start()
+    download_finished = download_succeeded.wait(timeout=1)
+    if download_finished:
+        downloads.request_stop()
+    allow_worker_return.set()
+    activation_thread.join(timeout=1)
+
+    assert download_finished
+    assert not activation_thread.is_alive()
+    assert activation_errors == []
+    queue_states = [
+        event.state
+        for event in presentation.events
+        if isinstance(event, RuntimeDownloadQueueSummary)
+    ]
+    assert queue_states == [
+        RuntimeDownloadQueueState.ACCEPTED,
+        RuntimeDownloadQueueState.COMPLETED,
+    ]
+    assert _state_by_target(state_path)["models/model.bin"].status == "completed"
+
+
 def test_async_queue_reports_completed_when_stop_arrives_after_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

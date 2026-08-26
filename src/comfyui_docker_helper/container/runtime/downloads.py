@@ -35,6 +35,7 @@ from comfyui_docker_helper.container.runtime.files.download import (
     download_runtime_files,
 )
 from comfyui_docker_helper.container.runtime.files.models import (
+    RuntimeDownloadCancellationObserver,
     RuntimeDownloadStateObserver,
     RuntimeFileDownloadResult,
     RuntimeFilePlan,
@@ -71,6 +72,7 @@ class RuntimeDownloadRunner(Protocol):
         config: RuntimeConfig,
         state_observer: RuntimeDownloadStateObserver | None = None,
         cancel_requested: Callable[[], bool] | None = None,
+        cancellation_observer: RuntimeDownloadCancellationObserver | None = None,
         backend_observer: Callable[[CancellableDownloadBackend], None] | None = None,
         credential_policy: DownloaderCredentialPolicy | None = None,
         event_sink: RuntimeBackgroundEventSink,
@@ -473,6 +475,11 @@ def start_runtime_async_download_queue(
     startup_error: list[BaseException] = []
     backends: list[CancellableDownloadBackend] = []
     backends_lock = threading.Lock()
+    queue_was_cancelled = False
+
+    def observe_queue_cancellation() -> None:
+        nonlocal queue_was_cancelled
+        queue_was_cancelled = True
 
     def accept_queue() -> None:
         event_sink.emit(
@@ -497,11 +504,13 @@ def start_runtime_async_download_queue(
                 state_observer=state_writer,
                 startup_observer=accept_queue,
                 cancel_requested=stop_requested.is_set,
+                cancellation_observer=observe_queue_cancellation,
                 backend_observer=observe_backend,
                 credential_policy=credential_policy,
                 event_sink=event_sink,
             )
-            if not stop_requested.is_set():
+            # Cleanup requested after successful work must not erase its outcome.
+            if not queue_was_cancelled:
                 event_sink.emit(
                     RuntimeDownloadQueueSummary(
                         RuntimeDownloadQueue.ASYNCHRONOUS,
@@ -613,6 +622,12 @@ def _activate_runtime_file_plan(
         if credential_policy is not None:
             downloader_kwargs["credential_policy"] = credential_policy
         downloader_kwargs["event_sink"] = event_sink
+        sync_queue_was_cancelled = False
+
+        def observe_queue_cancellation() -> None:
+            nonlocal sync_queue_was_cancelled
+            sync_queue_was_cancelled = True
+
         if not cancel_requested():
             event_sink.emit(
                 RuntimeDownloadQueueSummary(
@@ -626,10 +641,12 @@ def _activate_runtime_file_plan(
             config=config,
             state_observer=state_writer,
             cancel_requested=cancel_requested,
+            cancellation_observer=observe_queue_cancellation,
             backend_observer=backend_observer,
             **downloader_kwargs,
         )
-        if not cancel_requested():
+        # Cleanup requested after successful work must not erase its outcome.
+        if not sync_queue_was_cancelled:
             event_sink.emit(
                 RuntimeDownloadQueueSummary(
                     RuntimeDownloadQueue.SYNCHRONOUS,

@@ -24,6 +24,7 @@ from comfyui_docker_helper.container.transfer.core import (
 type RuntimeFilePath = tuple[str | int, ...]
 type RuntimeDownloadStartupObserver = Callable[[], None]
 type RuntimeDownloadCancelRequested = Callable[[], bool]
+type RuntimeDownloadCancellationObserver = Callable[[], None]
 type RuntimeDownloadBackendObserver = Callable[[CancellableDownloadBackend], None]
 
 type RuntimeDownloadObservedStatus = Literal[

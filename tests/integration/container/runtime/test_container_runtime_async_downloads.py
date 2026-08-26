@@ -18,12 +18,17 @@ from tests.runtime_event_support import (
 )
 
 from comfyui_docker_helper.config import RuntimeConfig
+from comfyui_docker_helper.config.runtime.config import load_runtime_config
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.container.runtime import (
+    downloads as runtime_downloads_module,
+)
 from comfyui_docker_helper.container.runtime.downloads import (
     RuntimeAsyncDownloadQueueHandle,
     RuntimeAsyncQueueStarter,
     RuntimeAsyncQueueStartupError,
+    RuntimeDownloads,
     start_runtime_async_download_queue,
     stop_runtime_async_download_queue,
 )
@@ -525,6 +530,156 @@ filename = "model.bin"
     )
 
 
+def test_sync_queue_reports_completed_when_stop_arrives_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config_path = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_download_mode = "sync"
+default_downloader = "httpx"
+
+[[files]]
+type = "http"
+url = "https://example.com/model.bin"
+target_dir = "models"
+filename = "model.bin"
+""",
+    )
+    loaded = load_runtime_config(
+        baked_config_path=config_path,
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={},
+    )
+    state_path = tmp_path / "state.json"
+    backend = AsyncBackend()
+    _install_async_backend(monkeypatch, backend)
+    presentation = RecordingRuntimeEventSink()
+    download_succeeded = threading.Event()
+    allow_worker_return = threading.Event()
+    download_runtime_files = runtime_downloads_module.download_runtime_files
+
+    def hold_after_success(*args, **kwargs):
+        result = download_runtime_files(*args, **kwargs)
+        download_succeeded.set()
+        assert allow_worker_return.wait(timeout=1)
+        return result
+
+    downloads = RuntimeDownloads(
+        loaded.config,
+        loaded.files,
+        runtime=runtime,
+        runtime_state_path=state_path,
+        event_sink=presentation,
+        direct_event_sink=presentation,
+        downloader=hold_after_success,
+    )
+    activation_errors: list[BaseException] = []
+
+    def activate() -> None:
+        try:
+            downloads.activate()
+        except BaseException as error:
+            activation_errors.append(error)
+
+    activation_thread = threading.Thread(target=activate)
+    activation_thread.start()
+    download_finished = download_succeeded.wait(timeout=1)
+    if download_finished:
+        downloads.request_stop()
+    allow_worker_return.set()
+    activation_thread.join(timeout=1)
+
+    assert download_finished
+    assert not activation_thread.is_alive()
+    assert activation_errors == []
+    queue_states = [
+        event.state
+        for event in presentation.events
+        if isinstance(event, RuntimeDownloadQueueSummary)
+    ]
+    assert queue_states == [
+        RuntimeDownloadQueueState.ACCEPTED,
+        RuntimeDownloadQueueState.COMPLETED,
+    ]
+    assert _state_by_target(state_path)["models/model.bin"].status == "completed"
+
+
+def test_async_queue_reports_completed_when_stop_arrives_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    config_path = _write(
+        tmp_path / "runtime.toml",
+        """
+[cdh]
+default_download_mode = "async"
+default_downloader = "httpx"
+
+[[files]]
+type = "http"
+url = "https://example.com/model.bin"
+target_dir = "models"
+filename = "model.bin"
+""",
+    )
+    loaded = load_runtime_config(
+        baked_config_path=config_path,
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        environ={},
+    )
+    state_path = tmp_path / "state.json"
+    backend = AsyncBackend()
+    _install_async_backend(monkeypatch, backend)
+    presentation = RecordingRuntimeEventSink()
+    downloads = RuntimeDownloads(
+        loaded.config,
+        loaded.files,
+        runtime=runtime,
+        runtime_state_path=state_path,
+        event_sink=presentation,
+        direct_event_sink=presentation,
+    )
+    downloads.activate()
+
+    download_succeeded = threading.Event()
+    allow_worker_return = threading.Event()
+    download_runtime_files = runtime_downloads_module.download_runtime_files
+
+    def hold_after_success(*args, **kwargs):
+        result = download_runtime_files(*args, **kwargs)
+        download_succeeded.set()
+        assert allow_worker_return.wait(timeout=1)
+        return result
+
+    monkeypatch.setattr(
+        runtime_downloads_module,
+        "download_runtime_files",
+        hold_after_success,
+    )
+
+    downloads.start_async(cancel_requested=lambda: False)
+    assert download_succeeded.wait(timeout=1)
+    downloads.request_stop()
+    allow_worker_return.set()
+    assert downloads.stop(cancel_requested=lambda: False)
+
+    queue_states = [
+        event.state
+        for event in presentation.events
+        if isinstance(event, RuntimeDownloadQueueSummary)
+    ]
+    assert queue_states == [
+        RuntimeDownloadQueueState.ACCEPTED,
+        RuntimeDownloadQueueState.COMPLETED,
+    ]
+    assert _state_by_target(state_path)["models/model.bin"].status == "completed"
+
+
 def test_async_queue_rejects_replaced_start_generation_before_thread(
     tmp_path: Path,
 ) -> None:
@@ -847,6 +1002,7 @@ filename = "model.bin"
     backend = BlockingUntilCancelledBackend()
     _install_async_backend(monkeypatch, backend)
     handlers = _capture_signal_handlers(monkeypatch)
+    presentation = RecordingRuntimeEventSink()
     first_child: FakeChild | None = None
 
     def runtime_async_queue_starter(
@@ -908,6 +1064,7 @@ filename = "model.bin"
             state_path=state_path,
             runner=first_runner,
             runtime_async_queue_starter=runtime_async_queue_starter,
+            background_event_sink=presentation,
         )
         == 143
     )
@@ -920,6 +1077,11 @@ filename = "model.bin"
     assert not backend.partial_path.exists()
     interrupted_entries = _state_by_target(state_path)
     assert interrupted_entries["models/model.bin"].status == "pending"
+    assert [
+        event.state
+        for event in presentation.events
+        if isinstance(event, RuntimeDownloadQueueSummary)
+    ] == [RuntimeDownloadQueueState.ACCEPTED]
 
     resumed = AsyncBackend()
     resumed.payloads["model.bin"] = b"resumed"

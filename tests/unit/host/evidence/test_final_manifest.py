@@ -202,7 +202,11 @@ def test_renderer_places_manifest_emission_after_every_build_mutation(
         assert manifest_index > next(
             index for index, line in enumerate(lines) if "download-files" in line
         )
-    assert lines[manifest_index + 1 :] == [
+    runtime_index = next(
+        index for index, line in enumerate(lines) if line == "# Runtime entrypoint"
+    )
+    assert runtime_index > manifest_index
+    assert lines[runtime_index + 1 :] == [
         "STOPSIGNAL SIGTERM",
         'ENTRYPOINT ["/usr/bin/tini", "--", "/opt/uv/bin/cdh", '
         '"container", "runtime", "serve"]',

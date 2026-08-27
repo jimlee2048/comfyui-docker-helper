@@ -111,6 +111,8 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         constraints_path=constraints,
         environ={
             "UV_INDEX_URL": "https://poison.example",
+            "UV_CACHE_DIR": "/tmp/poison-cache",
+            "UV_LINK_MODE": "hardlink",
             "PIP_CONSTRAINT": "/tmp/poison",
             "PYTHONPATH": "/tmp/poison",
             "PATH": "/poison/bin",
@@ -158,6 +160,8 @@ def test_install_uses_one_exact_group_and_explicit_application_interpreter(
         "PATH": "/usr/local/cuda/bin:/usr/bin:/bin",
         "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
         "CUDA_HOME": "/usr/local/cuda",
+        "UV_CACHE_DIR": "/root/.cache/uv",
+        "UV_LINK_MODE": "copy",
     }
     assert calls[1][0][:4] == (
         "/usr/local/bin/uv",
@@ -752,6 +756,8 @@ def test_process_environment_does_not_inherit_package_or_python_configuration() 
     assert application_process_environment(
         {
             "UV_INDEX": "poison",
+            "UV_CACHE_DIR": "/tmp/poison-cache",
+            "UV_LINK_MODE": "hardlink",
             "PIP_INDEX_URL": "poison",
             "PIP_CONSTRAINT": "poison",
             "PYTHONPATH": "poison",
@@ -799,6 +805,8 @@ def test_build_environment_admits_the_reviewed_cuda_toolchain(
         "NVCC_CCBIN": "value-16",
         "CUDAARCHS": "value-17",
         "TORCH_CUDA_ARCH_LIST": "value-18",
+        "UV_CACHE_DIR": "/tmp/poison-cache",
+        "UV_LINK_MODE": "hardlink",
     }
     monkeypatch.setattr(application_installer.os, "environ", admitted)
 
@@ -807,6 +815,8 @@ def test_build_environment_admits_the_reviewed_cuda_toolchain(
         "LANG": "C.UTF-8",
         "PATH": "/usr/local/cuda/bin:/usr/bin:/bin",
         **admitted,
+        "UV_CACHE_DIR": "/root/.cache/uv",
+        "UV_LINK_MODE": "copy",
     }
 
 
@@ -823,6 +833,8 @@ def test_build_environment_excludes_ambient_configuration_and_owns_overlays() ->
             "PIP_CONSTRAINT": "/poison/constraints.txt",
             "UV_INDEX": "https://poison.example/simple",
             "UV_CONSTRAINT": "/poison/constraints.txt",
+            "UV_CACHE_DIR": "/tmp/poison-cache",
+            "UV_LINK_MODE": "hardlink",
             "ROCM_HOME": "/poison/rocm",
             "COMFYUI_PATH": "/poison/ComfyUI",
             "VIRTUAL_ENV": "/poison/venv",
@@ -842,6 +854,8 @@ def test_build_environment_excludes_ambient_configuration_and_owns_overlays() ->
         "COMFYUI_PATH": "/workspace/ComfyUI",
         "VIRTUAL_ENV": "/opt/venv",
         "LIBRARY_PATH": "",
+        "UV_CACHE_DIR": "/root/.cache/uv",
+        "UV_LINK_MODE": "copy",
     }
 
 

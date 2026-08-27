@@ -90,6 +90,7 @@ _OBSERVATION_ENVIRONMENT = {
     "HOME": "/root",
     "LANG": "C.UTF-8",
     "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "UV_CACHE_DIR": "/root/.cache/uv",
 }
 _COMFY_CLI_COMMANDS = ("comfy", "comfy-cli", "comfycli")
 

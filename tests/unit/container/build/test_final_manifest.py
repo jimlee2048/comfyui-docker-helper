@@ -381,6 +381,29 @@ def test_configured_uv_tool_evidence_rejects_managed_base_drift(
         )
 
 
+def test_dependency_observation_uses_only_the_fixed_uv_cache_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        final_manifest_service,
+        "run_argv",
+        lambda *_args, **kwargs: calls.append(kwargs),
+    )
+
+    final_manifest_service._dependency_check(
+        Path("/opt/uv/tools/example/bin/python"),
+        "example dependency verification",
+    )
+
+    assert calls[0]["env"] == {
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "UV_CACHE_DIR": "/root/.cache/uv",
+    }
+
+
 @pytest.mark.parametrize(
     ("present_command", "expected_error"),
     [(None, None), ("comfycli", "comfy-cli disabled command is present: comfycli")],

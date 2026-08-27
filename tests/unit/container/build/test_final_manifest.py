@@ -170,10 +170,154 @@ def test_comfy_cli_evidence_observes_exact_interpreter_identity(
     )
 
 
+def test_application_interpreter_observation_proves_buildplan_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    expected_base = (
+        Path("/opt/python")
+        / projection.toolchain.python.catalog_key
+        / "bin"
+        / f"python{'.'.join(projection.toolchain.python.version.split('.')[:2])}"
+    )
+    runtime = SimpleNamespace(python=Path("/opt/venv/bin/python"))
+    calls: list[tuple[tuple[Path | str, ...], Path, str]] = []
+
+    def capture(argv, *, cwd, description):
+        calls.append((argv, cwd, description))
+        return json.dumps(
+            {
+                "base_executable": str(expected_base),
+                "prefix": "/opt/venv",
+                "python_version": projection.toolchain.python.version,
+            }
+        )
+
+    monkeypatch.setattr(final_manifest_service, "_capture", capture)
+    monkeypatch.setattr(Path, "resolve", lambda path, *, strict: path)
+
+    assert (
+        final_manifest_service._observe_application_interpreter(projection, runtime)
+        == projection.toolchain.python.version
+    )
+    assert calls[0][0][:3] == (runtime.python, "-I", "-c")
+    assert calls[0][1:] == (
+        Path("/opt/cdh/build"),
+        "application interpreter identity observation",
+    )
+
+
+def test_application_interpreter_observation_rejects_managed_base_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "base_executable": "/tmp/forged-python",
+                "prefix": "/opt/venv",
+                "python_version": projection.toolchain.python.version,
+            }
+        ),
+    )
+
+    with pytest.raises(
+        FinalManifestError,
+        match="application base interpreter does not match BuildPlan",
+    ):
+        final_manifest_service._observe_application_interpreter(
+            projection,
+            SimpleNamespace(python=Path("/opt/venv/bin/python")),
+        )
+
+
+def test_cdh_evidence_proves_managed_base_and_public_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    cdh = projection.toolchain.tool_store.cdh
+    managed = projection.toolchain.python
+    expected_base = (
+        Path("/opt/python")
+        / managed.catalog_key
+        / "bin"
+        / f"python{'.'.join(managed.version.split('.')[:2])}"
+    )
+    entrypoints: list[tuple[tuple[Path | str, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(
+            {"base_executable": str(expected_base), "prefix": cdh.environment}
+        ),
+    )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_environment_inventory",
+        lambda _python: ((cdh.name, cdh.version),),
+    )
+    monkeypatch.setattr(
+        final_manifest_service, "_dependency_check", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_verify_owned_entrypoint",
+        lambda *args, **kwargs: entrypoints.append((args, kwargs)),
+    )
+    monkeypatch.setattr(Path, "resolve", lambda path, *, strict: path)
+
+    evidence = final_manifest_service._cdh_tool_evidence(projection)
+
+    assert evidence.direct.observed == cdh.version
+    assert entrypoints == [
+        (
+            (
+                Path(cdh.executable),
+                Path(cdh.environment) / "bin" / "cdh",
+                "cdh",
+            ),
+            {},
+        )
+    ]
+
+
+def test_cdh_entrypoint_observation_rejects_target_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _path: SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0),
+    )
+    monkeypatch.setattr(
+        Path,
+        "resolve",
+        lambda _path, *, strict: Path("/tmp/forged-cdh"),
+    )
+
+    with pytest.raises(
+        FinalManifestError,
+        match="cdh entrypoint ownership is invalid",
+    ):
+        final_manifest_service._verify_owned_entrypoint(
+            Path("/opt/uv/bin/cdh"),
+            Path("/opt/uv/tools/comfyui-docker-helper/bin/cdh"),
+            "cdh",
+        )
+
+
 def test_configured_uv_tool_evidence_accepts_exact_prerelease_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     version = "0.16.0rc1"
+    managed_interpreter = Path(
+        "/opt/python/cpython-3.13.14-linux-x86_64-gnu/bin/python3.13"
+    )
     monkeypatch.setattr(
         final_manifest_service,
         "_environment_inventory",
@@ -182,17 +326,96 @@ def test_configured_uv_tool_evidence_accepts_exact_prerelease_result(
     monkeypatch.setattr(
         final_manifest_service, "_dependency_check", lambda *_args: None
     )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "base_executable": str(managed_interpreter),
+                "prefix": "/opt/uv/tools/ruff",
+            }
+        ),
+    )
+    monkeypatch.setattr(Path, "resolve", lambda path, *, strict: path)
 
     evidence = final_manifest_service._tool_evidence(
         "ruff",
         version,
         "uv-tool:ruff",
         Path("/opt/uv/tools/ruff/bin/python"),
+        managed_interpreter=managed_interpreter,
     )
 
     assert isinstance(evidence.direct, DistributionVersionEvidence)
     assert evidence.direct.intended == version
     assert evidence.direct.observed == version
+
+
+def test_configured_uv_tool_evidence_rejects_managed_base_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    managed_interpreter = Path(
+        "/opt/python/cpython-3.13.14-linux-x86_64-gnu/bin/python3.13"
+    )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "_capture",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "base_executable": "/tmp/forged-python",
+                "prefix": "/opt/uv/tools/ruff",
+            }
+        ),
+    )
+
+    with pytest.raises(
+        FinalManifestError,
+        match="ruff base interpreter does not match BuildPlan",
+    ):
+        final_manifest_service._tool_evidence(
+            "ruff",
+            "0.16.0rc1",
+            "uv-tool:ruff",
+            Path("/opt/uv/tools/ruff/bin/python"),
+            managed_interpreter=managed_interpreter,
+        )
+
+
+@pytest.mark.parametrize(
+    ("present_command", "expected_error"),
+    [(None, None), ("comfycli", "comfy-cli disabled command is present: comfycli")],
+    ids=["absent", "dangling-link"],
+)
+def test_disabled_comfy_cli_observation_checks_all_reserved_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    present_command: str | None,
+    expected_error: str | None,
+) -> None:
+    plan = build_plan(
+        final_config(install_cli=False),
+        accepted_resolution(install_cli=False),
+    )
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+    observed: list[Path] = []
+
+    def observe(path: Path):
+        observed.append(path)
+        if path.name == present_command:
+            return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(Path, "lstat", observe)
+
+    if expected_error is None:
+        assert final_manifest_service._comfy_cli_evidence(projection) is None
+        assert observed == [
+            Path("/opt/uv/bin/comfy"),
+            Path("/opt/uv/bin/comfy-cli"),
+            Path("/opt/uv/bin/comfycli"),
+        ]
+    else:
+        with pytest.raises(FinalManifestError, match=expected_error):
+            final_manifest_service._comfy_cli_evidence(projection)
 
 
 def test_application_evidence_accepts_exact_prerelease_result() -> None:

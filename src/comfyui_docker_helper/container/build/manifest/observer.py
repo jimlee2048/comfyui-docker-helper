@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from packaging.utils import InvalidName, canonicalize_name
@@ -90,6 +91,16 @@ _OBSERVATION_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "PATH": "/usr/local/bin:/usr/bin:/bin",
 }
+_COMFY_CLI_COMMANDS = ("comfy", "comfy-cli", "comfycli")
+
+
+@dataclass(frozen=True, slots=True)
+class _InterpreterIdentity:
+    """Observed identity for one isolated Python interpreter."""
+
+    prefix: Path
+    base_executable: Path
+    python_version: str | None = None
 
 
 class FinalManifestError(ApplicationError):
@@ -155,21 +166,17 @@ def _observe_final_manifest(
     manager = _manager_evidence(projection, runtime, application_inventory)
     direct_packages = _direct_application_packages(projection, application_inventory)
 
-    cdh_inventory = _environment_inventory(Path(sys.executable))
-    cdh = projection.toolchain.tool_store.cdh
-    if dict(cdh_inventory).get(cdh.name) != cdh.version:
-        raise FinalManifestError("cdh direct identity does not match BuildPlan")
-    if Path(sys.prefix) != Path(cdh.environment):
-        raise FinalManifestError("cdh environment does not match BuildPlan")
-    _dependency_check(Path(sys.executable), "cdh dependency verification")
+    cdh_evidence = _cdh_tool_evidence(projection)
 
     comfy_cli = _comfy_cli_evidence(projection)
+    managed_interpreter = _managed_python_interpreter(projection)
     uv_tools = tuple(
         _tool_evidence(
             tool.name,
             tool.version,
             tool.environment,
             Path(projection.toolchain.tool_store.tool_dir) / tool.name / "bin/python",
+            managed_interpreter=managed_interpreter,
         )
         for tool in projection.toolchain.tool_store.uv_tools
     )
@@ -221,7 +228,7 @@ def _observe_final_manifest(
     container_uvx_version = _binary_version(
         (Path("/usr/local/bin/uvx"), "--version"), "uvx"
     )
-    application_python_version = _python_version(runtime.python)
+    application_python_version = _observe_application_interpreter(projection, runtime)
     final_probe = _run_final_core_probe(projection.final_probe, runtime)
 
     return FinalManifest(
@@ -252,17 +259,7 @@ def _observe_final_manifest(
             python_catalog_descriptor_digest=(
                 projection.toolchain.python.catalog_descriptor_digest
             ),
-            cdh=CdhToolEnvironmentEvidence(
-                name=cdh.name,
-                environment="uv-tool:comfyui-docker-helper",
-                direct=VersionEvidence(
-                    intended=cdh.version,
-                    observed=dict(cdh_inventory)[cdh.name],
-                ),
-                wheel_digest=cdh.wheel_digest,
-                inventory=_inventory_models(cdh_inventory),
-                dependency_check="passed",
-            ),
+            cdh=cdh_evidence,
             comfy_cli=comfy_cli,
             uv_tools=uv_tools,
         ),
@@ -446,70 +443,109 @@ def _manager_evidence(
     )
 
 
-def _comfy_cli_evidence(
-    projection: FinalManifestInput,
-) -> ComfyCliEvidence | None:
-    tool = projection.toolchain.tool_store.comfy_cli
-    if tool is None:
-        return None
-    python = Path(projection.toolchain.tool_store.tool_dir) / tool.name / "bin/python"
+def _managed_python_interpreter(projection: FinalManifestInput) -> Path:
     managed_python = projection.toolchain.python
-    managed_interpreter = (
+    return (
         Path("/opt/python")
         / managed_python.catalog_key
         / "bin"
         / f"python{'.'.join(managed_python.version.split('.')[:2])}"
     )
-    identity_script = (
-        "import json,sys;"
-        "print(json.dumps({'base_executable':sys._base_executable,"
-        "'prefix':sys.prefix},sort_keys=True,separators=(',',':')))"
+
+
+def _observe_application_interpreter(
+    projection: FinalManifestInput,
+    runtime: ContainerRuntime,
+) -> str:
+    identity = _observe_interpreter_identity(
+        runtime.python,
+        "application interpreter identity observation",
+        include_version=True,
     )
-    identity_output = _capture(
-        (python, "-I", "-c", identity_script),
-        cwd=_BUILD_DIRECTORY,
-        description="comfy-cli interpreter identity observation",
-    )
-    try:
-        identity = json.loads(identity_output)
-    except (json.JSONDecodeError, TypeError) as error:
-        raise FinalManifestError("comfy-cli interpreter identity is invalid") from error
-    if not isinstance(identity, dict) or set(identity) != {
-        "base_executable",
-        "prefix",
-    }:
-        raise FinalManifestError("comfy-cli interpreter identity is invalid")
-    prefix = identity["prefix"]
-    base_executable = identity["base_executable"]
-    if not isinstance(prefix, str) or Path(prefix) != python.parent.parent:
-        raise FinalManifestError("comfy-cli environment does not match BuildPlan")
-    if (
-        not isinstance(base_executable, str)
-        or Path(base_executable) != managed_interpreter
+    if identity.prefix != Path(projection.application.paths.venv):
+        raise FinalManifestError("application environment does not match BuildPlan")
+    if not _same_resolved_path(
+        identity.base_executable,
+        _managed_python_interpreter(projection),
     ):
+        raise FinalManifestError(
+            "application base interpreter does not match BuildPlan"
+        )
+    if identity.python_version is None:  # pragma: no cover - parser owns this shape.
+        raise FinalManifestError(
+            "application interpreter identity omitted Python version"
+        )
+    if identity.python_version != projection.toolchain.python.version:
+        raise FinalManifestError("application Python version does not match BuildPlan")
+    return identity.python_version
+
+
+def _cdh_tool_evidence(projection: FinalManifestInput) -> CdhToolEnvironmentEvidence:
+    cdh = projection.toolchain.tool_store.cdh
+    python = Path(sys.executable)
+    inventory = _environment_inventory(python)
+    identity = _observe_interpreter_identity(
+        python,
+        "cdh interpreter identity observation",
+    )
+    if identity.prefix != Path(cdh.environment):
+        raise FinalManifestError("cdh environment does not match BuildPlan")
+    if not _same_resolved_path(
+        identity.base_executable,
+        _managed_python_interpreter(projection),
+    ):
+        raise FinalManifestError("cdh base interpreter does not match BuildPlan")
+    _verify_owned_entrypoint(
+        Path(cdh.executable),
+        Path(cdh.environment) / "bin" / Path(cdh.executable).name,
+        "cdh",
+    )
+    _dependency_check(python, "cdh dependency verification")
+    observed = dict(inventory).get(cdh.name)
+    if observed != cdh.version:
+        raise FinalManifestError("cdh direct identity does not match BuildPlan")
+    return CdhToolEnvironmentEvidence(
+        name=cdh.name,
+        environment="uv-tool:comfyui-docker-helper",
+        direct=VersionEvidence(
+            intended=cdh.version,
+            observed=observed,
+        ),
+        wheel_digest=cdh.wheel_digest,
+        inventory=_inventory_models(inventory),
+        dependency_check="passed",
+    )
+
+
+def _comfy_cli_evidence(
+    projection: FinalManifestInput,
+) -> ComfyCliEvidence | None:
+    tool = projection.toolchain.tool_store.comfy_cli
+    if tool is None:
+        _verify_disabled_comfy_cli(projection)
+        return None
+    python = Path(projection.toolchain.tool_store.tool_dir) / tool.name / "bin/python"
+    managed_interpreter = _managed_python_interpreter(projection)
+    identity = _observe_interpreter_identity(
+        python,
+        "comfy-cli interpreter identity observation",
+    )
+    if identity.prefix != python.parent.parent:
+        raise FinalManifestError("comfy-cli environment does not match BuildPlan")
+    if not _same_resolved_path(identity.base_executable, managed_interpreter):
         raise FinalManifestError("comfy-cli base interpreter does not match BuildPlan")
     inventory = _environment_inventory(python)
     _dependency_check(python, "comfy-cli dependency verification")
     for command in tool.executables:
-        link = Path(projection.toolchain.tool_store.bin_dir) / command
-        expected = (
-            Path(projection.toolchain.tool_store.tool_dir) / tool.name / "bin" / command
+        _verify_owned_entrypoint(
+            Path(projection.toolchain.tool_store.bin_dir) / command,
+            Path(projection.toolchain.tool_store.tool_dir)
+            / tool.name
+            / "bin"
+            / command,
+            "comfy-cli",
+            command=command,
         )
-        try:
-            metadata = link.lstat()
-            resolved = link.resolve(strict=True)
-        except OSError as error:
-            raise FinalManifestError(
-                f"comfy-cli entrypoint is unavailable: {command}"
-            ) from error
-        if (
-            not stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_uid != 0
-            or resolved != expected
-        ):
-            raise FinalManifestError(
-                f"comfy-cli entrypoint ownership is invalid: {command}"
-            )
     observed = dict(inventory).get("comfy-cli")
     if observed is None:
         raise FinalManifestError("comfy-cli environment is missing comfy-cli")
@@ -531,7 +567,17 @@ def _tool_evidence(
     version: str,
     environment: str,
     python: Path,
+    *,
+    managed_interpreter: Path,
 ) -> ToolEnvironmentEvidence:
+    identity = _observe_interpreter_identity(
+        python,
+        f"{name} interpreter identity observation",
+    )
+    if identity.prefix != python.parent.parent:
+        raise FinalManifestError(f"{name} environment does not match BuildPlan")
+    if not _same_resolved_path(identity.base_executable, managed_interpreter):
+        raise FinalManifestError(f"{name} base interpreter does not match BuildPlan")
     inventory = _environment_inventory(python)
     _dependency_check(python, f"{name} dependency verification")
     observed = dict(inventory).get(name)
@@ -543,6 +589,98 @@ def _tool_evidence(
         direct=DistributionVersionEvidence(intended=version, observed=observed),
         inventory=_inventory_models(inventory),
         dependency_check="passed",
+    )
+
+
+def _verify_disabled_comfy_cli(projection: FinalManifestInput) -> None:
+    for command in _COMFY_CLI_COMMANDS:
+        path = Path(projection.toolchain.tool_store.bin_dir) / command
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise FinalManifestError(
+                f"comfy-cli disabled command could not be checked: {command}"
+            ) from error
+        raise FinalManifestError(f"comfy-cli disabled command is present: {command}")
+
+
+def _verify_owned_entrypoint(
+    path: Path,
+    expected: Path,
+    owner: str,
+    *,
+    command: str | None = None,
+) -> None:
+    suffix = f": {command}" if command is not None else ""
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise FinalManifestError(
+            f"{owner} entrypoint is unavailable{suffix}"
+        ) from error
+    if (
+        not stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != 0
+        or resolved != expected
+    ):
+        raise FinalManifestError(f"{owner} entrypoint ownership is invalid{suffix}")
+
+
+def _same_resolved_path(actual: Path, expected: Path) -> bool:
+    try:
+        return actual.resolve(strict=True) == expected.resolve(strict=True)
+    except OSError:
+        return False
+
+
+def _observe_interpreter_identity(
+    python: Path,
+    description: str,
+    *,
+    include_version: bool = False,
+) -> _InterpreterIdentity:
+    script = (
+        "import json,pathlib,sys;"
+        + ("import platform;" if include_version else "")
+        + "print(json.dumps({"
+        + "'base_executable':str("
+        + "pathlib.Path(sys._base_executable).resolve(strict=True)),"
+        + "'prefix':sys.prefix"
+        + (",'python_version':platform.python_version()" if include_version else "")
+        + "},sort_keys=True,separators=(',',':')))"
+    )
+    output = _capture(
+        (python, "-I", "-c", script),
+        cwd=_BUILD_DIRECTORY,
+        description=description,
+    )
+    expected_keys = {"base_executable", "prefix"}
+    if include_version:
+        expected_keys.add("python_version")
+    try:
+        raw = json.loads(output)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise FinalManifestError(
+            f"{description} returned an invalid identity"
+        ) from error
+    if not isinstance(raw, dict) or set(raw) != expected_keys:
+        raise FinalManifestError(f"{description} returned an invalid identity")
+    base_executable = raw["base_executable"]
+    prefix = raw["prefix"]
+    python_version = raw.get("python_version")
+    if (
+        not isinstance(base_executable, str)
+        or not isinstance(prefix, str)
+        or (include_version and not isinstance(python_version, str))
+    ):
+        raise FinalManifestError(f"{description} returned an invalid identity")
+    return _InterpreterIdentity(
+        prefix=Path(prefix),
+        base_executable=Path(base_executable),
+        python_version=python_version,
     )
 
 
@@ -700,14 +838,6 @@ def _binary_version(argv: tuple[Path | str, ...], name: str) -> str:
     if match is None:
         raise FinalManifestError(f"{name} returned an invalid version")
     return str(Version(match.group("version")))
-
-
-def _python_version(python: Path) -> str:
-    return _capture(
-        (python, "-I", "-c", "import platform;print(platform.python_version())"),
-        cwd=_BUILD_DIRECTORY,
-        description="managed Python version observation",
-    ).strip()
 
 
 def _required_uv_version(projection: FinalManifestInput) -> str:

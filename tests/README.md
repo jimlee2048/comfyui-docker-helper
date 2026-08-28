@@ -88,4 +88,6 @@ Lifecycle changes reuse one current image produced by the formal renderer; do no
 
 Start with focused tests for the changed owner, then expand to adjacent integration coverage. Run the full offline suite before handoff. Add live or high-cost checks only when the change affects their provider, image, runtime, or hardware boundary.
 
+For renderer changes, protect semantic operations, ordering constraints, and mount, environment, credential, and trust scopes at their narrow owner. Do not use a complete Dockerfile snapshot or exact comments, whitespace, wrapping, or line-count assertions merely to police presentation; byte-for-byte golden output is appropriate only when exact bytes are an explicit compatibility or identity contract.
+
 Use dedicated tags, containers, contexts, and logs for live image work. Record the exact image ID and preserve relevant evidence until review completes. Remove only resources created by the run; do not delete unrelated images, volumes, or caches. Never place passwords, private keys, tokens, or other credentials in fixtures or captured logs.

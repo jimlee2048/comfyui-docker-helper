@@ -81,6 +81,8 @@ _BACKEND_EXECUTABLE_DIRECTORIES: Mapping[str, tuple[str, ...]] = MappingProxyTyp
     {"cuda": ("/usr/local/cuda/bin",)}
 )
 _APPLICATION_PROCESS_PATH = "/usr/bin:/bin"
+_UV_CACHE_DIRECTORY = "/root/.cache/uv"
+_UV_LINK_MODE = "copy"
 
 
 class ApplicationInstallError(ApplicationError):
@@ -676,5 +678,11 @@ def application_build_environment(
     result.update({name: source[name] for name in admitted_names if name in source})
     result["PATH"] = ":".join(
         (*_BACKEND_EXECUTABLE_DIRECTORIES[backend], _APPLICATION_PROCESS_PATH)
+    )
+    result.update(
+        {
+            "UV_CACHE_DIR": _UV_CACHE_DIRECTORY,
+            "UV_LINK_MODE": _UV_LINK_MODE,
+        }
     )
     return result

@@ -111,6 +111,8 @@ Registry Manager and the Direct-Git Python processes for root requirements and `
 
 cdh-controlled application and custom-node package mutations use a dedicated package-build subprocess environment. The [application installer](../../src/comfyui_docker_helper/container/build/application.py) owns the exact admitted names and constructs this environment from the narrow application process environment: it retains reviewed network proxy names and exact values owned by the invoking command, then copies only reviewed generic and BuildPlan-selected backend toolchain names that are present in the current container environment. It does not inherit an ambient `PATH`, package-manager configuration, or Python configuration. This constructor is a process boundary, not a second configuration or image-rendering authority.
 
+Package-mutation owners additionally fix any uv cache location and link-materialization policy required by their operation. Those command-owned values are not admitted from ambient state or `[system.env]`, are not caller-overridable build arguments, and remain build-only rather than becoming persistent Docker `ENV` or runtime configuration. Production code and behavioral tests own their exact names and values.
+
 Ordinary ComfyUI Git and observation subprocesses retain their narrow process environment, direct-Git Git operations retain their separate Git and credential contract, and trusted build hooks retain their full-environment contract. Persistent Docker `ENV` from the selected base image and `[system.env]` has a separate rendering and image owner; the package-build constructor neither re-emits nor revalidates it.
 
 ## Official ComfyUI source and requirements
@@ -173,6 +175,8 @@ That digest proves the executable bytes, not their filesystem, network, process,
 Verified build-hook source remains in the final image as audit input and can remain visible in image layers; it must not contain secrets. Baked runtime hooks are image inputs, while deployment-mounted runtime hooks remain trusted external inputs outside the image lock.
 
 ## Final observation and replay ceiling
+
+The rendered instruction that consumes an immutable input owns its pre-use identity, integrity, and trust-boundary checks. Installed-state facts are observed after all build mutations by the final observer; installation steps do not maintain an equivalent second proof of managed-interpreter relationships, installed distributions and dependency health, or public-executable ownership. This separation keeps failure evidence authoritative without turning final observation into a planning input.
 
 cdh verifies selected direct identities and their typed consumers and records the final observed state. The resulting evidence does not strengthen the identity guarantees of its inputs:
 

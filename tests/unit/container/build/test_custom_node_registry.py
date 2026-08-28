@@ -291,12 +291,14 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
             "PIP_EXTRA_INDEX_URL": "https://poison-pip.example/simple",
             "PIP_INDEX_URL": "https://poison-pip.example/simple",
             "UV_CONFIG_FILE": "/tmp/poison-uv.toml",
+            "UV_CACHE_DIR": "/tmp/poison-uv-cache",
             "UV_BUILD_CONSTRAINT": "/tmp/poison-uv-build-constraints.txt",
             "UV_CONSTRAINT": "/tmp/poison-uv-constraints.txt",
             "UV_DEFAULT_INDEX": "https://poison-uv.example/simple",
             "UV_EXTRA_INDEX_URL": "https://poison-uv-extra.example/simple",
             "UV_INDEX": "poison=https://poison-uv.example/simple",
             "UV_INDEX_STRATEGY": "first-index",
+            "UV_LINK_MODE": "hardlink",
             "UV_NO_CONFIG": "0",
             "PATH": "/poison/bin",
             "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs",
@@ -359,6 +361,8 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
     assert build_constraints_path != constraints_path
     assert first_kwargs["env"]["UV_INDEX_STRATEGY"] == "unsafe-best-match"
     assert first_kwargs["env"]["UV_NO_CONFIG"] == "1"
+    assert first_kwargs["env"]["UV_CACHE_DIR"] == "/root/.cache/uv"
+    assert first_kwargs["env"]["UV_LINK_MODE"] == "copy"
     assert first_kwargs["env"]["PATH"] == (
         "/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin"
     )

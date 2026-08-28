@@ -118,6 +118,12 @@ The required validation depth depends on the changed risk. Do not treat a high-c
 
 Comments should explain intent or a non-obvious constraint, not restate the code. Tests should protect the current behavior contract; follow the [testing handbook](../../tests/README.md) when placing or removing coverage.
 
+### Generated Dockerfiles
+
+The rendered Dockerfile is executable build output first, but it is also an operator-inspectable artifact that can be built directly. Preserve correctness, trust boundaries, execution order, and cache behavior ahead of brevity or visual polish while keeping the effective build flow structurally legible. Group distinct responsibilities into semantic sections, format comparable instructions consistently, and keep mounts, credentials, and build-only environment policy adjacent to the command that consumes them. Do not combine unrelated operations, introduce global state, or hide trust-sensitive behavior behind extra indirection merely to reduce line or layer count.
+
+Inline programs, heredocs, generated helper scripts, and template engines are not categorically forbidden. Introduce an additional representation layer only for a concrete ownership, reuse, or escaping benefit, and keep the effective command, scope, and trust boundary reviewable in the rendered result. Exact comments, whitespace, wrapping, and line count remain implementation details unless explicitly promoted to a compatibility contract. Follow the [testing handbook](../../tests/README.md#change-selection-and-cleanup) for renderer-test boundaries.
+
 ### CLI presentation
 
 The root CLI owns one immutable detail setting for the complete invocation. `-q/--quiet` suppresses cdh-owned informational progress and summaries, ordinary mode shows the minimum useful human state, `-v/--verbose` adds safe operational detail, and `-vv` adds safe debug detail. Quiet and verbose are mutually exclusive, and these root-only options must precede the `host` or `container` group. Do not duplicate detail, color, or progress options on group or leaf commands.

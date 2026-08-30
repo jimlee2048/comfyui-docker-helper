@@ -472,7 +472,6 @@ def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
             "target": f"{plan.application.paths.comfyui}/{empty_relative_target}",
             "relative_target": empty_relative_target,
             "context_path": empty_context_path,
-            "root_mode": "0755",
             "verification": "unverified-local",
             "members": (),
             "tree_digest": None,
@@ -851,21 +850,18 @@ def _plan_with_local_tree(
         LocalTreeMemberPlan(
             relative_path=".hidden",
             kind="directory",
-            mode="0755",
             size=None,
             digest=None,
         ),
         LocalTreeMemberPlan(
             relative_path=".hidden/empty",
             kind="directory",
-            mode="0755",
             size=None,
             digest=None,
         ),
         LocalTreeMemberPlan(
             relative_path=".hidden/payload.bin",
             kind="file",
-            mode="0644",
             size=6 if locked else None,
             digest=(
                 f"sha256:{hashlib.sha256(b'hidden').hexdigest()}" if locked else None
@@ -874,14 +870,12 @@ def _plan_with_local_tree(
         LocalTreeMemberPlan(
             relative_path="nested",
             kind="directory",
-            mode="0755",
             size=None,
             digest=None,
         ),
         LocalTreeMemberPlan(
             relative_path="nested/payload.bin",
             kind="file",
-            mode="0644",
             size=6 if locked else None,
             digest=(
                 f"sha256:{hashlib.sha256(b'nested').hexdigest()}" if locked else None
@@ -893,22 +887,18 @@ def _plan_with_local_tree(
         tree_digest = local_tree_digest(
             file_admission.LocalTreeInventory(
                 (
-                    file_admission.LocalTreeMember(".hidden", "directory", "0755"),
-                    file_admission.LocalTreeMember(
-                        ".hidden/empty", "directory", "0755"
-                    ),
+                    file_admission.LocalTreeMember(".hidden", "directory"),
+                    file_admission.LocalTreeMember(".hidden/empty", "directory"),
                     file_admission.LocalTreeMember(
                         ".hidden/payload.bin",
                         "file",
-                        "0644",
                         6,
                         f"sha256:{hashlib.sha256(b'hidden').hexdigest()}",
                     ),
-                    file_admission.LocalTreeMember("nested", "directory", "0755"),
+                    file_admission.LocalTreeMember("nested", "directory"),
                     file_admission.LocalTreeMember(
                         "nested/payload.bin",
                         "file",
-                        "0644",
                         6,
                         f"sha256:{hashlib.sha256(b'nested').hexdigest()}",
                     ),
@@ -921,7 +911,6 @@ def _plan_with_local_tree(
         target=f"{plan.application.paths.comfyui}/{relative_target}",
         relative_target=relative_target,
         context_path=context_path,
-        root_mode="0755",
         verification="sha256" if locked else "unverified-local",
         members=members,
         tree_digest=tree_digest,

@@ -90,19 +90,18 @@ def _tree_projection(
     selected.write_bytes(content)
     selected.chmod(0o644)
     members = (
-        LocalTreeMemberInput("nested", "directory", "0755"),
-        LocalTreeMemberInput("nested/selected.txt", "file", "0644"),
+        LocalTreeMemberInput("nested", "directory"),
+        LocalTreeMemberInput("nested/selected.txt", "file"),
     )
     intended = None
     if locked:
         intended = local_tree_digest(
             LocalTreeInventory(
                 (
-                    LocalTreeMember("nested", "directory", "0755"),
+                    LocalTreeMember("nested", "directory"),
                     LocalTreeMember(
                         "nested/selected.txt",
                         "file",
-                        "0644",
                         len(content),
                         f"sha256:{hashlib.sha256(content).hexdigest()}",
                     ),
@@ -113,7 +112,6 @@ def _tree_projection(
         type="local",
         kind="tree",
         target=str(target),
-        root_mode="0755",
         verification="sha256" if locked else "unverified-local",
         members=members,
         intended_tree_digest=intended,
@@ -632,7 +630,6 @@ def test_empty_local_tree_evidence_is_one_compact_row(tmp_path: Path) -> None:
         type="local",
         kind="tree",
         target=str(target),
-        root_mode="0755",
         verification="unverified-local",
         members=(),
         intended_tree_digest=None,
@@ -660,7 +657,6 @@ def test_empty_local_tree_at_comfyui_root_preserves_overlay_and_checks_mode(
         type="local",
         kind="tree",
         target=str(root),
-        root_mode="0755",
         verification="unverified-local",
         members=(),
         intended_tree_digest=None,
@@ -681,28 +677,28 @@ def test_empty_local_tree_at_comfyui_root_preserves_overlay_and_checks_mode(
     "member_specs",
     [
         (),
-        (("nested", "directory", "0755"),),
+        (("nested", "directory"),),
     ],
     ids=["empty", "directories-only"],
 )
 def test_locked_local_tree_aggregates_without_regular_file_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    member_specs: tuple[tuple[str, str, str], ...],
+    member_specs: tuple[tuple[str, str], ...],
 ) -> None:
     root = tmp_path / "ComfyUI"
     target = root / "user" / "default" / "workflows"
     target.mkdir(parents=True)
     target.chmod(0o755)
-    for relative_path, _kind, _mode in member_specs:
+    for relative_path, _kind in member_specs:
         directory = target / relative_path
         directory.mkdir(parents=True)
         directory.chmod(0o755)
     intended = local_tree_digest(
         LocalTreeInventory(
             tuple(
-                LocalTreeMember(relative_path, kind, mode)
-                for relative_path, kind, mode in member_specs
+                LocalTreeMember(relative_path, kind)
+                for relative_path, kind in member_specs
             )
         )
     )
@@ -710,7 +706,6 @@ def test_locked_local_tree_aggregates_without_regular_file_records(
         type="local",
         kind="tree",
         target=str(target),
-        root_mode="0755",
         verification="sha256",
         members=tuple(LocalTreeMemberInput(*spec) for spec in member_specs),
         intended_tree_digest=intended,

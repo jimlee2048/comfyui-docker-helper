@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 
 from comfyui_docker_helper.container.build.admission import LocalTreeNormalizationInput
 from comfyui_docker_helper.errors import ApplicationError
+from comfyui_docker_helper.filesystem.admission import local_tree_mode
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
@@ -31,7 +32,7 @@ def normalize_local_trees(
         raise LocalTreeNormalizationError("COMFYUI_PATH must be absolute")
     for tree in trees:
         target = _tree_target(tree.target, root)
-        _ensure_target_root(root, target, mode=int(tree.root_mode, 8))
+        _ensure_target_root(root, target)
         for member in tree.members:
             member_path = PurePosixPath(member.relative_path)
             destination = target / member_path
@@ -45,9 +46,9 @@ def normalize_local_trees(
                     "local tree member path escapes its selected target"
                 )
             if member.kind == "directory":
-                _ensure_selected_directory(destination, mode=int(member.mode, 8))
+                _ensure_selected_directory(destination)
             else:
-                _normalize_selected_file(destination, mode=int(member.mode, 8))
+                _normalize_selected_file(destination)
 
 
 def _tree_target(
@@ -69,15 +70,13 @@ def _tree_target(
 def _ensure_target_root(
     root: PurePosixPath,
     target: PurePosixPath,
-    *,
-    mode: int,
 ) -> None:
     """Create target ancestors as needed, admitting every traversed node."""
     _admit_or_create_directory(
         Path(root),
         label="COMFYUI_PATH",
         create=target == root,
-        mode=mode if target == root else None,
+        mode=(int(local_tree_mode("directory"), 8) if target == root else None),
     )
     relative = target.relative_to(root)
     current = Path(root)
@@ -88,13 +87,16 @@ def _ensure_target_root(
             current,
             label="local tree target root" if is_target else "local tree target parent",
             create=True,
-            mode=mode if is_target else None,
+            mode=(int(local_tree_mode("directory"), 8) if is_target else None),
         )
 
 
-def _ensure_selected_directory(path: PurePosixPath, *, mode: int) -> None:
+def _ensure_selected_directory(path: PurePosixPath) -> None:
     _admit_or_create_directory(
-        Path(path), label="local tree selected directory", create=True, mode=mode
+        Path(path),
+        label="local tree selected directory",
+        create=True,
+        mode=int(local_tree_mode("directory"), 8),
     )
 
 
@@ -105,13 +107,14 @@ def _admit_or_create_directory(
     create: bool,
     mode: int | None,
 ) -> None:
+    directory_mode = int(local_tree_mode("directory"), 8)
     observed = _lstat(path, label)
     created = False
     if observed is None:
         if not create:
             raise LocalTreeNormalizationError(f"{label} is missing")
         try:
-            path.mkdir(mode=0o755)
+            path.mkdir(mode=directory_mode)
         except OSError as error:
             raise LocalTreeNormalizationError(
                 f"{label} could not be created"
@@ -122,10 +125,10 @@ def _admit_or_create_directory(
         created = True
     _require_real_directory(observed, label)
     if mode is not None or created:
-        _set_mode(path, 0o755 if mode is None else mode, label)
+        _set_mode(path, directory_mode if mode is None else mode, label)
 
 
-def _normalize_selected_file(path: PurePosixPath, *, mode: int) -> None:
+def _normalize_selected_file(path: PurePosixPath) -> None:
     destination = Path(path)
     observed = _lstat(destination, "local tree selected file")
     if observed is None:
@@ -142,7 +145,11 @@ def _normalize_selected_file(path: PurePosixPath, *, mode: int) -> None:
         raise LocalTreeNormalizationError(
             "local tree selected file is a special filesystem node"
         )
-    _set_mode(destination, mode, "local tree selected file")
+    _set_mode(
+        destination,
+        int(local_tree_mode("file"), 8),
+        "local tree selected file",
+    )
 
 
 def _lstat(path: Path, label: str) -> os.stat_result | None:

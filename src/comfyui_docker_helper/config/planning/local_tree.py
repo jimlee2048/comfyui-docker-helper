@@ -9,6 +9,7 @@ from comfyui_docker_helper.filesystem.admission import (
     LocalTreeInventory,
     LocalTreeMember,
     LocalTreeRecord,
+    local_tree_mode,
 )
 
 LOCAL_TREE_DIGEST_DOMAIN = "cdh-local-tree-sha256-v1"
@@ -53,4 +54,5 @@ __all__ = [
     "canonical_local_tree_bytes",
     "canonical_local_tree_records",
     "local_tree_digest",
+    "local_tree_mode",
 ]

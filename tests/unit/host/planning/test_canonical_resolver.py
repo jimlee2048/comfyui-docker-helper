@@ -477,8 +477,8 @@ def test_admitted_locked_tree_becomes_one_aggregate_lock_row() -> None:
     )
     inventory = LocalTreeInventory(
         (
-            LocalTreeMember("nested", "directory", "0755"),
-            LocalTreeMember("nested/file.txt", "file", "0644", 4, DIGEST_A),
+            LocalTreeMember("nested", "directory"),
+            LocalTreeMember("nested/file.txt", "file", 4, DIGEST_A),
         )
     )
     tree_digest = local_tree_digest(inventory)
@@ -486,7 +486,6 @@ def test_admitted_locked_tree_becomes_one_aggregate_lock_row() -> None:
         relative_target=target,
         context_path=context_path,
         content_lock=True,
-        root_mode="0755",
         inventory=inventory,
         tree_digest=tree_digest,
     )

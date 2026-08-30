@@ -631,7 +631,7 @@ def _local_tree_context_matches_digest(
     members: list[LocalTreeMember] = []
     for member in plan.members:
         if member.kind == "directory":
-            members.append(LocalTreeMember(member.relative_path, "directory", "0755"))
+            members.append(LocalTreeMember(member.relative_path, "directory"))
             continue
         relative = PurePosixPath(member.relative_path)
         context_file = context_root.joinpath(*relative.parts)
@@ -641,12 +641,11 @@ def _local_tree_context_matches_digest(
             LocalTreeMember(
                 member.relative_path,
                 "file",
-                "0644",
-                observed.size,
-                f"sha256:{digest.hexdigest()}",
+                size=observed.size,
+                digest=f"sha256:{digest.hexdigest()}",
             )
         )
-    observed_inventory = LocalTreeInventory(tuple(members), root_mode=plan.root_mode)
+    observed_inventory = LocalTreeInventory(tuple(members))
     return local_tree_digest(observed_inventory) == plan.tree_digest
 
 

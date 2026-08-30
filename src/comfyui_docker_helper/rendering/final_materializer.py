@@ -32,6 +32,7 @@ from comfyui_docker_helper.filesystem.admission import (
     LocalTreeInventory,
     LocalTreeMember,
     TreeAdmissionError,
+    local_tree_mode,
     operate_regular_absolute_file,
     read_regular_absolute_file,
     revalidate_local_tree,
@@ -393,23 +394,22 @@ def _local_tree_inventory(plan: LocalTreePlan) -> LocalTreeInventory:
             LocalTreeMember(
                 member.relative_path,
                 member.kind,
-                member.mode,
                 member.size,
                 member.digest,
             )
             for member in plan.members
         ),
-        root_mode=plan.root_mode,
     )
 
 
 def _ensure_directory(stage: Path, relative_path: PurePosixPath) -> None:
     """Create one Plan-selected directory with deterministic POSIX mode."""
     target = stage
+    directory_mode = int(local_tree_mode("directory"), 8)
     for part in relative_path.parts:
         target /= part
         try:
-            target.mkdir(mode=0o755, exist_ok=True)
+            target.mkdir(mode=directory_mode, exist_ok=True)
             observed = target.lstat()
         except OSError as error:
             raise FinalMaterializationError(
@@ -421,7 +421,7 @@ def _ensure_directory(stage: Path, relative_path: PurePosixPath) -> None:
             )
         if _platform_name == "posix":
             try:
-                target.chmod(0o755)
+                target.chmod(directory_mode)
             except OSError as error:
                 raise FinalMaterializationError(
                     "local tree directory mode could not be materialized"

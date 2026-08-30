@@ -671,8 +671,8 @@ def test_local_tree_plan_freezes_sorted_structure_without_unlocked_content() -> 
     resolution = accepted_resolution()
     inventory = LocalTreeInventory(
         (
-            LocalTreeMember("nested", "directory", "0755"),
-            LocalTreeMember("nested/file.txt", "file", "0644"),
+            LocalTreeMember("nested", "directory"),
+            LocalTreeMember("nested/file.txt", "file"),
         )
     )
     context_path = PurePosixPath(
@@ -682,7 +682,6 @@ def test_local_tree_plan_freezes_sorted_structure_without_unlocked_content() -> 
         relative_target=PurePosixPath(relative_target),
         context_path=context_path,
         content_lock=False,
-        root_mode="0755",
         inventory=inventory,
         tree_digest=None,
     )
@@ -693,19 +692,16 @@ def test_local_tree_plan_freezes_sorted_structure_without_unlocked_content() -> 
     assert isinstance(item, LocalTreePlan)
     assert item.target == "/workspace/ComfyUI/user/default/workflows"
     assert item.context_path == context_path.as_posix()
-    assert item.root_mode == "0755"
     assert item.members == (
         LocalTreeMemberPlan(
             relative_path="nested",
             kind="directory",
-            mode="0755",
             size=None,
             digest=None,
         ),
         LocalTreeMemberPlan(
             relative_path="nested/file.txt",
             kind="file",
-            mode="0644",
             size=None,
             digest=None,
         ),
@@ -747,7 +743,6 @@ def test_local_tree_plan_root_sentinel_and_locked_aggregate_are_current_v1() -> 
             + hashlib.sha256(relative_target.as_posix().encode("utf-8")).hexdigest()
         ),
         content_lock=True,
-        root_mode="0755",
         inventory=inventory,
         tree_digest=tree_digest,
     )

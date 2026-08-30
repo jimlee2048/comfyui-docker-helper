@@ -22,6 +22,15 @@ type LocalTreeMemberKind = Literal["directory", "file"]
 type LocalSourceKind = Literal["file", "tree"]
 
 
+def local_tree_mode(kind: LocalTreeMemberKind) -> Literal["0755", "0644"]:
+    """Return the fixed image mode for one selected tree kind."""
+    if kind == "directory":
+        return "0755"
+    if kind == "file":
+        return "0644"
+    raise ValueError("tree member kind must be directory or file")
+
+
 class TreeAdmissionError(OSError):
     """A local tree could not be admitted without exposing its host locator."""
 
@@ -43,7 +52,6 @@ class LocalTreeMember:
 
     relative_path: PurePosixPath | str
     kind: LocalTreeMemberKind
-    mode: Literal["0755", "0644"]
     size: int | None = None
     digest: str | None = None
 
@@ -51,13 +59,9 @@ class LocalTreeMember:
         path = _canonical_tree_relative_path(self.relative_path)
         object.__setattr__(self, "relative_path", path)
         if self.kind == "directory":
-            if self.mode != "0755" or self.size is not None or self.digest is not None:
-                raise ValueError(
-                    "directory tree members require mode 0755 and null content"
-                )
+            if self.size is not None or self.digest is not None:
+                raise ValueError("directory tree members require null content")
         elif self.kind == "file":
-            if self.mode != "0644":
-                raise ValueError("regular-file tree members require mode 0644")
             if self.size is not None and self.size < 0:
                 raise ValueError("regular-file tree member size must not be negative")
             if (
@@ -92,7 +96,7 @@ class LocalTreeRecord:
         if self.path == ".":
             if (
                 self.kind != "directory"
-                or self.mode != "0755"
+                or self.mode != local_tree_mode("directory")
                 or self.size is not None
                 or self.digest is not None
             ):
@@ -107,12 +111,16 @@ class LocalTreeRecord:
         if canonical_path.as_posix() != self.path:
             raise ValueError("tree member record path must be canonical")
         if self.kind == "directory":
-            if self.mode != "0755" or self.size is not None or self.digest is not None:
+            if (
+                self.mode != local_tree_mode("directory")
+                or self.size is not None
+                or self.digest is not None
+            ):
                 raise ValueError(
                     "directory tree records require mode 0755 and null content"
                 )
         elif self.kind == "file":
-            if self.mode != "0644":
+            if self.mode != local_tree_mode("file"):
                 raise ValueError("regular-file tree records require mode 0644")
             if self.size is None or self.digest is None:
                 raise ValueError("regular-file tree records require size and digest")
@@ -143,15 +151,12 @@ class LocalTreeInventory:
     """Complete sorted structure accepted from one local directory root."""
 
     members: tuple[LocalTreeMember, ...] = ()
-    root_mode: Literal["0755"] = "0755"
 
     def __post_init__(self) -> None:
         members = tuple(self.members)
         if any(not isinstance(item, LocalTreeMember) for item in members):
             raise ValueError("local tree inventory members must be LocalTreeMember")
         object.__setattr__(self, "members", members)
-        if self.root_mode != "0755":
-            raise ValueError("local tree root mode must be 0755")
         encoded_paths = tuple(
             item.relative_path.as_posix().encode("utf-8") for item in members
         )
@@ -188,14 +193,14 @@ class LocalTreeInventory:
 
     def records(self) -> tuple[LocalTreeRecord, ...]:
         """Return the canonical root-first record sequence."""
-        root = LocalTreeRecord(".", "directory", "0755")
+        root = LocalTreeRecord(".", "directory", local_tree_mode("directory"))
         return (
             root,
             *(
                 LocalTreeRecord(
                     item.relative_path.as_posix(),
                     item.kind,
-                    item.mode,
+                    local_tree_mode(item.kind),
                     item.size,
                     item.digest,
                 )
@@ -398,7 +403,7 @@ def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventor
                     code="member_reparse",
                 )
             if stat.S_ISDIR(observed.st_mode):
-                members.append(LocalTreeMember(relative, "directory", "0755"))
+                members.append(LocalTreeMember(relative, "directory"))
                 pending.append((full_path, relative))
             elif stat.S_ISREG(observed.st_mode):
                 try:
@@ -411,9 +416,8 @@ def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventor
                     LocalTreeMember(
                         relative,
                         "file",
-                        "0644",
-                        admitted.size if content_lock else None,
-                        admitted.digest if content_lock else None,
+                        size=admitted.size if content_lock else None,
+                        digest=admitted.digest if content_lock else None,
                     )
                 )
             else:

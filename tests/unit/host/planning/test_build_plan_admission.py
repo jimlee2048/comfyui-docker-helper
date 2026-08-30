@@ -136,7 +136,6 @@ def test_build_plan_rejects_file_target_ancestor_overlap_across_file_kinds() -> 
             "build/trees/"
             + hashlib.sha256(tree_relative_target.encode("utf-8")).hexdigest()
         ),
-        "root_mode": "0755",
         "verification": "unverified-local",
         "members": (),
         "tree_digest": None,

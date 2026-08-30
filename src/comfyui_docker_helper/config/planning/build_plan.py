@@ -1010,7 +1010,6 @@ class LocalTreeMemberPlan(_PlanModel):
 
     relative_path: str
     kind: Literal["directory", "file"]
-    mode: Literal["0755", "0644"]
     size: int | None
     digest: str | None
 
@@ -1049,12 +1048,8 @@ class LocalTreeMemberPlan(_PlanModel):
     @model_validator(mode="after")
     def _validate_kind_fields(self) -> LocalTreeMemberPlan:
         if self.kind == "directory":
-            if self.mode != "0755" or self.size is not None or self.digest is not None:
-                raise ValueError(
-                    "directory local tree members require mode 0755 and null content"
-                )
-        elif self.mode != "0644":
-            raise ValueError("regular-file local tree members require mode 0644")
+            if self.size is not None or self.digest is not None:
+                raise ValueError("directory local tree members require null content")
         elif (self.size is None) != (self.digest is None):
             raise ValueError(
                 "regular-file local tree member size and digest must be both set "
@@ -1070,7 +1065,6 @@ class LocalTreePlan(_FilePlan):
     kind: Literal["tree"]
     relative_target: str
     context_path: str
-    root_mode: Literal["0755"]
     verification: Literal["sha256", "unverified-local"]
     members: tuple[LocalTreeMemberPlan, ...]
     tree_digest: str | None
@@ -1117,8 +1111,6 @@ class LocalTreePlan(_FilePlan):
         slot = hashlib.sha256(self.relative_target.encode("utf-8")).hexdigest()
         if self.context_path != f"build/trees/{slot}":
             raise ValueError("local tree context path does not match target")
-        if self.root_mode != "0755":
-            raise ValueError("local tree root mode must be 0755")
         encoded_paths = tuple(
             item.relative_path.encode("utf-8") for item in self.members
         )
@@ -1151,13 +1143,11 @@ class LocalTreePlan(_FilePlan):
                     LocalTreeMember(
                         item.relative_path,
                         item.kind,
-                        item.mode,
                         item.size,
                         item.digest,
                     )
                     for item in self.members
-                ),
-                root_mode=self.root_mode,
+                )
             )
             if any(
                 item.kind == "file" and (item.size is None or item.digest is None)
@@ -1985,7 +1975,6 @@ def _project_file(
         LocalTreeMemberPlan(
             relative_path=member.relative_path.as_posix(),
             kind=member.kind,
-            mode=member.mode,
             size=member.size,
             digest=member.digest,
         )
@@ -1997,7 +1986,6 @@ def _project_file(
         target=item.target,
         relative_target=item.relative_target,
         context_path=admitted.context_path.as_posix(),
-        root_mode=admitted.root_mode,
         verification=verification,
         members=members,
         tree_digest=digest,

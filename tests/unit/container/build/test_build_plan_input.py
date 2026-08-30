@@ -74,7 +74,7 @@ def test_admission_projects_authenticated_plan_for_container_consumers(
     )
 
 
-def test_admission_projects_only_plan_selected_tree_paths_and_modes() -> None:
+def test_admission_projects_only_plan_selected_tree_paths_and_kinds() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     relative_target = "user/default/workflows"
     tree = {
@@ -85,20 +85,17 @@ def test_admission_projects_only_plan_selected_tree_paths_and_modes() -> None:
         "context_path": (
             "build/trees/" + hashlib.sha256(relative_target.encode()).hexdigest()
         ),
-        "root_mode": "0755",
         "verification": "unverified-local",
         "members": (
             {
                 "relative_path": "nested",
                 "kind": "directory",
-                "mode": "0755",
                 "size": None,
                 "digest": None,
             },
             {
                 "relative_path": "nested/file.bin",
                 "kind": "file",
-                "mode": "0644",
                 "size": None,
                 "digest": None,
             },
@@ -115,10 +112,9 @@ def test_admission_projects_only_plan_selected_tree_paths_and_modes() -> None:
     assert projected == (
         LocalTreeNormalizationInput(
             target=f"{root}/{relative_target}",
-            root_mode="0755",
             members=(
-                LocalTreeMemberInput("nested", "directory", "0755"),
-                LocalTreeMemberInput("nested/file.bin", "file", "0644"),
+                LocalTreeMemberInput("nested", "directory"),
+                LocalTreeMemberInput("nested/file.bin", "file"),
             ),
         ),
     )
@@ -153,20 +149,17 @@ def test_final_projection_keeps_tree_records_without_manifest_inventory() -> Non
         "context_path": (
             "build/trees/" + hashlib.sha256(relative_target.encode()).hexdigest()
         ),
-        "root_mode": "0755",
         "verification": "sha256",
         "members": (
             {
                 "relative_path": "nested",
                 "kind": "directory",
-                "mode": "0755",
                 "size": None,
                 "digest": None,
             },
             {
                 "relative_path": "nested/file.bin",
                 "kind": "file",
-                "mode": "0644",
                 "size": 3,
                 "digest": "sha256:"
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -189,11 +182,10 @@ def test_final_projection_keeps_tree_records_without_manifest_inventory() -> Non
             type="local",
             kind="tree",
             target=f"/workspace/ComfyUI/{relative_target}",
-            root_mode="0755",
             verification="sha256",
             members=(
-                LocalTreeMemberInput("nested", "directory", "0755"),
-                LocalTreeMemberInput("nested/file.bin", "file", "0644"),
+                LocalTreeMemberInput("nested", "directory"),
+                LocalTreeMemberInput("nested/file.bin", "file"),
             ),
             intended_tree_digest="sha256:"
             "47e5919a75ebe3e3ddaa8b1ecee1da39b8dbc65865673c6884ebc3622832db24",

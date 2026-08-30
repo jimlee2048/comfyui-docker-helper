@@ -30,9 +30,9 @@ def test_empty_tree_uses_the_canonical_digest_vector() -> None:
 
 def test_inventory_is_sorted_by_utf8_path_and_requires_real_parents() -> None:
     members = (
-        LocalTreeMember("é.txt", "file", "0644", 1, "sha256:" + "a" * 64),
-        LocalTreeMember("nested", "directory", "0755"),
-        LocalTreeMember("nested/é.txt", "file", "0644", 1, "sha256:" + "b" * 64),
+        LocalTreeMember("é.txt", "file", 1, "sha256:" + "a" * 64),
+        LocalTreeMember("nested", "directory"),
+        LocalTreeMember("nested/é.txt", "file", 1, "sha256:" + "b" * 64),
     )
     inventory = LocalTreeInventory(
         tuple(
@@ -45,14 +45,27 @@ def test_inventory_is_sorted_by_utf8_path_and_requires_real_parents() -> None:
         "nested/é.txt",
         "é.txt",
     ]
-    assert inventory.records()[0].as_dict() == {
-        "path": ".",
-        "kind": "directory",
-        "mode": "0755",
-    }
+    assert [record.as_dict() for record in inventory.records()] == [
+        {"path": ".", "kind": "directory", "mode": "0755"},
+        {"path": "nested", "kind": "directory", "mode": "0755"},
+        {
+            "path": "nested/é.txt",
+            "kind": "file",
+            "mode": "0644",
+            "size": 1,
+            "digest": "sha256:" + "b" * 64,
+        },
+        {
+            "path": "é.txt",
+            "kind": "file",
+            "mode": "0644",
+            "size": 1,
+            "digest": "sha256:" + "a" * 64,
+        },
+    ]
     with pytest.raises(ValueError, match="parents"):
         LocalTreeInventory(
-            (LocalTreeMember("missing/file", "file", "0644", 1, "sha256:" + "a" * 64),)
+            (LocalTreeMember("missing/file", "file", 1, "sha256:" + "a" * 64),)
         )
 
 
@@ -77,7 +90,6 @@ def test_tree_records_validate_root_member_shape_and_inventory_member_types() ->
                 {
                     "relative_path": "payload",
                     "kind": "file",
-                    "mode": "0644",
                 },
             )
         )  # type: ignore[arg-type]

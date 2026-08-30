@@ -26,7 +26,6 @@ def _tree(
     target = root if relative_target == "." else root / relative_target
     return LocalTreeNormalizationInput(
         target=str(target),
-        root_mode="0755",
         members=members,
     )
 
@@ -95,9 +94,9 @@ def test_normalizer_preserves_unrelated_overlay_entries_and_sets_selected_modes(
     (target / "nested").chmod(0o700)
     (target / "nested" / "selected.txt").chmod(0o600)
     members = (
-        LocalTreeMemberInput("nested", "directory", "0755"),
-        LocalTreeMemberInput("nested/selected.txt", "file", "0644"),
-        LocalTreeMemberInput("selected-empty", "directory", "0755"),
+        LocalTreeMemberInput("nested", "directory"),
+        LocalTreeMemberInput("nested/selected.txt", "file"),
+        LocalTreeMemberInput("selected-empty", "directory"),
     )
 
     normalize_local_trees((_tree(root, members=members),), root)
@@ -113,8 +112,8 @@ def test_normalizer_preserves_unrelated_overlay_entries_and_sets_selected_modes(
 @pytest.mark.parametrize(
     ("member", "existing_kind"),
     [
-        (LocalTreeMemberInput("selected", "directory", "0755"), "file"),
-        (LocalTreeMemberInput("selected", "file", "0644"), "directory"),
+        (LocalTreeMemberInput("selected", "directory"), "file"),
+        (LocalTreeMemberInput("selected", "file"), "directory"),
     ],
     ids=["directory-over-file", "file-over-directory"],
 )
@@ -146,7 +145,7 @@ def test_normalizer_rejects_missing_selected_file(tmp_path: Path) -> None:
             (
                 _tree(
                     root,
-                    members=(LocalTreeMemberInput("missing", "file", "0644"),),
+                    members=(LocalTreeMemberInput("missing", "file"),),
                 ),
             ),
             root,
@@ -157,7 +156,6 @@ def test_normalizer_rejects_path_outside_comfyui_containment(tmp_path: Path) -> 
     root = tmp_path / "ComfyUI"
     tree = LocalTreeNormalizationInput(
         target=str(tmp_path / "outside"),
-        root_mode="0755",
         members=(),
     )
 
@@ -173,7 +171,7 @@ def test_normalizer_rejects_selected_links_without_following_them(
     target = root / "user" / "default" / "workflows"
     target.mkdir(parents=True)
     target.joinpath("selected").symlink_to(tmp_path / "elsewhere")
-    member = LocalTreeMemberInput("selected", "directory", "0755")
+    member = LocalTreeMemberInput("selected", "directory")
 
     with pytest.raises(LocalTreeNormalizationError, match="link or reparse"):
         normalize_local_trees((_tree(root, members=(member,)),), root)

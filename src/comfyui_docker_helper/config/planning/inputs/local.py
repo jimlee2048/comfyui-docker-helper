@@ -51,7 +51,6 @@ class LocalTreePlanningInput:
     relative_target: PurePosixPath
     context_path: PurePosixPath
     content_lock: bool
-    root_mode: Literal["0755"]
     inventory: LocalTreeInventory
     tree_digest: str | None
     kind: Literal["tree"] = "tree"
@@ -68,8 +67,6 @@ class LocalTreePlanningInput:
         )
         if self.kind != "tree":
             raise ValueError("local tree planning input kind must be tree")
-        if self.root_mode != "0755" or self.inventory.root_mode != "0755":
-            raise ValueError("local tree planning input root mode must be 0755")
         _validate_content_identity(self.content_lock, self.tree_digest, "tree")
         if self.content_lock and self.tree_digest != local_tree_digest(self.inventory):
             raise ValueError(

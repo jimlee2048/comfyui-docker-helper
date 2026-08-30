@@ -83,7 +83,6 @@ class LocalTreeMemberInput:
 
     relative_path: str
     kind: Literal["directory", "file"]
-    mode: Literal["0755", "0644"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +92,6 @@ class FinalManifestLocalTreeInput:
     type: Literal["local"]
     kind: Literal["tree"]
     target: str
-    root_mode: Literal["0755"]
     verification: Literal["sha256", "unverified-local"]
     members: tuple[LocalTreeMemberInput, ...]
     intended_tree_digest: str | None
@@ -119,7 +117,6 @@ class LocalTreeNormalizationInput:
     """One typed, tree-only projection for the image normalizer."""
 
     target: str
-    root_mode: Literal["0755"]
     members: tuple[LocalTreeMemberInput, ...]
 
 
@@ -165,7 +162,7 @@ class BuildPlanInputAdmission:
     def local_trees(
         self,
     ) -> tuple[tuple[LocalTreeNormalizationInput, ...], str]:
-        """Project only expected local-tree paths and modes for normalization."""
+        """Project only expected local-tree paths for normalization."""
         return (
             tuple(
                 _local_tree_input(item)
@@ -237,13 +234,11 @@ def _manifest_file_input(
             type="local",
             kind="tree",
             target=item.target,
-            root_mode=item.root_mode,
             verification=item.verification,
             members=tuple(
                 LocalTreeMemberInput(
                     relative_path=member.relative_path,
                     kind=member.kind,
-                    mode=member.mode,
                 )
                 for member in item.members
             ),
@@ -263,12 +258,10 @@ def _local_tree_input(item: LocalTreePlan) -> LocalTreeNormalizationInput:
     """Drop content identities from the tree-only mutation projection."""
     return LocalTreeNormalizationInput(
         target=item.target,
-        root_mode=item.root_mode,
         members=tuple(
             LocalTreeMemberInput(
                 relative_path=member.relative_path,
                 kind=member.kind,
-                mode=member.mode,
             )
             for member in item.members
         ),

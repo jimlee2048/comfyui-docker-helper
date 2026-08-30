@@ -136,7 +136,6 @@ def admit_local_inputs(
                     relative_target=relative_target,
                     context_path=context_path,
                     content_lock=item.content_lock,
-                    root_mode=admitted.tree.root_mode,
                     inventory=admitted.tree,
                     tree_digest=tree_digest,
                 )

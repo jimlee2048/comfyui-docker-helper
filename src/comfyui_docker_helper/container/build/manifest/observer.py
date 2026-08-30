@@ -55,6 +55,7 @@ from comfyui_docker_helper.config.planning.local_tree import (
     LocalTreeInventory,
     LocalTreeMember,
     local_tree_digest,
+    local_tree_mode,
 )
 from comfyui_docker_helper.container.build.admission import (
     FinalCoreProbeInput,
@@ -783,7 +784,6 @@ def _local_tree_evidence(
     root = _observe_tree_root(
         comfyui_root,
         Path(item.target),
-        expected_mode=int(item.root_mode, 8),
     )
     observed_members: list[LocalTreeMember] = []
     for member in item.members:
@@ -792,7 +792,6 @@ def _local_tree_evidence(
             root,
             member.relative_path,
             expected_kind=member.kind,
-            expected_mode=int(member.mode, 8),
         )
         if member.kind == "file" and item.verification == "sha256":
             size, digest = _hash_declared_tree_file(destination)
@@ -803,7 +802,6 @@ def _local_tree_evidence(
             LocalTreeMember(
                 relative_path=member.relative_path,
                 kind=member.kind,
-                mode=member.mode,
                 size=size,
                 digest=digest,
             )
@@ -814,9 +812,7 @@ def _local_tree_evidence(
         if intended is None:
             raise FinalManifestError("locked local tree is missing its intended digest")
         try:
-            observed = local_tree_digest(
-                LocalTreeInventory(tuple(observed_members), root_mode=item.root_mode)
-            )
+            observed = local_tree_digest(LocalTreeInventory(tuple(observed_members)))
         except ValueError as error:
             raise FinalManifestError(
                 "observed local tree inventory is invalid"
@@ -845,15 +841,12 @@ def _local_tree_evidence(
 def _observe_tree_root(
     comfyui_root: Path,
     target: Path,
-    *,
-    expected_mode: int,
 ) -> Path:
     """Admit one expected tree root without following path components."""
     _walk_expected_tree_path(
         comfyui_root,
         target,
         expected_kind="directory",
-        expected_mode=expected_mode,
         label="local tree root",
     )
     return target
@@ -865,7 +858,6 @@ def _observe_tree_member(
     relative_path: str,
     *,
     expected_kind: Literal["directory", "file"],
-    expected_mode: int,
 ) -> Path:
     relative = PurePosixPath(relative_path)
     if (
@@ -880,7 +872,6 @@ def _observe_tree_member(
         comfyui_root,
         destination,
         expected_kind=expected_kind,
-        expected_mode=expected_mode,
         label="local tree member",
     )
     return destination
@@ -907,7 +898,6 @@ def _walk_expected_tree_path(
     target: Path,
     *,
     expected_kind: Literal["directory", "file"],
-    expected_mode: int,
     label: str,
 ) -> None:
     """lstat each expected component and validate only the final node's mode."""
@@ -924,7 +914,7 @@ def _walk_expected_tree_path(
             _require_tree_file_metadata(metadata, label)
         else:
             raise FinalManifestError("local tree member kind is invalid")
-        if stat.S_IMODE(metadata.st_mode) != expected_mode:
+        if stat.S_IMODE(metadata.st_mode) != int(local_tree_mode(expected_kind), 8):
             raise FinalManifestError(f"{label} mode does not match BuildPlan")
         return
     _require_tree_directory(current, f"{label} parent")
@@ -941,7 +931,7 @@ def _walk_expected_tree_path(
             _require_tree_file_metadata(metadata, label)
         else:
             raise FinalManifestError("local tree member kind is invalid")
-        if stat.S_IMODE(metadata.st_mode) != expected_mode:
+        if stat.S_IMODE(metadata.st_mode) != int(local_tree_mode(expected_kind), 8):
             raise FinalManifestError(f"{label} mode does not match BuildPlan")
 
 

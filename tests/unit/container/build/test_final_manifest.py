@@ -14,6 +14,7 @@ from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inven
 from comfyui_docker_helper.config.evidence.manifest import (
     DistributionVersionEvidence,
     LocalFileEvidence,
+    LocalTreeEvidence,
     ProtectedRequirementEvidence,
     dump_final_manifest,
     final_build_check_ids,
@@ -28,7 +29,16 @@ from comfyui_docker_helper.config.planning.build_plan import (
 from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestMember,
 )
-from comfyui_docker_helper.container.build.admission import BuildPlanInputAdmission
+from comfyui_docker_helper.config.planning.local_tree import (
+    LocalTreeInventory,
+    LocalTreeMember,
+    local_tree_digest,
+)
+from comfyui_docker_helper.container.build.admission import (
+    BuildPlanInputAdmission,
+    FinalManifestLocalTreeInput,
+    LocalTreeMemberInput,
+)
 from comfyui_docker_helper.container.build.events import (
     ContainerHelperEvent,
     ContainerHelperPhase,
@@ -63,6 +73,50 @@ def _plan_with_local_file(*, locked: bool) -> BuildPlan:
     )
     return plan.model_copy(
         update={"files": plan.files.model_copy(update={"files": (local,)})}
+    )
+
+
+def _tree_projection(
+    root: Path,
+    *,
+    locked: bool,
+    content: bytes = b"selected",
+) -> FinalManifestLocalTreeInput:
+    target = root / "user" / "default" / "workflows"
+    (target / "nested").mkdir(parents=True)
+    target.chmod(0o755)
+    (target / "nested").chmod(0o755)
+    selected = target / "nested" / "selected.txt"
+    selected.write_bytes(content)
+    selected.chmod(0o644)
+    members = (
+        LocalTreeMemberInput("nested", "directory", "0755"),
+        LocalTreeMemberInput("nested/selected.txt", "file", "0644"),
+    )
+    intended = None
+    if locked:
+        intended = local_tree_digest(
+            LocalTreeInventory(
+                (
+                    LocalTreeMember("nested", "directory", "0755"),
+                    LocalTreeMember(
+                        "nested/selected.txt",
+                        "file",
+                        "0644",
+                        len(content),
+                        f"sha256:{hashlib.sha256(content).hexdigest()}",
+                    ),
+                )
+            )
+        )
+    return FinalManifestLocalTreeInput(
+        type="local",
+        kind="tree",
+        target=str(target),
+        root_mode="0755",
+        verification="sha256" if locked else "unverified-local",
+        members=members,
+        intended_tree_digest=intended,
     )
 
 
@@ -553,6 +607,7 @@ def test_local_file_evidence_preserves_declared_verification(
     assert evidence == (
         LocalFileEvidence(
             type="local",
+            kind="file",
             target="/workspace/ComfyUI/models/model.bin",
             verification="sha256" if locked else "unverified-local",
             intended_checksum=digest,
@@ -566,6 +621,201 @@ def test_local_file_evidence_preserves_declared_verification(
             digest,
         )
     ]
+
+
+def test_empty_local_tree_evidence_is_one_compact_row(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    target = root / "user" / "default" / "workflows"
+    target.mkdir(parents=True)
+    target.chmod(0o755)
+    item = FinalManifestLocalTreeInput(
+        type="local",
+        kind="tree",
+        target=str(target),
+        root_mode="0755",
+        verification="unverified-local",
+        members=(),
+        intended_tree_digest=None,
+    )
+
+    evidence = final_manifest_service._local_tree_evidence(item, root)
+
+    assert evidence.model_dump(exclude_none=True) == {
+        "type": "local",
+        "kind": "tree",
+        "target": str(target),
+        "verification": "unverified-local",
+    }
+
+
+def test_empty_local_tree_at_comfyui_root_preserves_overlay_and_checks_mode(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    root.chmod(0o755)
+    lower_entry = root / "lower-image-entry.txt"
+    lower_entry.write_bytes(b"keep")
+    item = FinalManifestLocalTreeInput(
+        type="local",
+        kind="tree",
+        target=str(root),
+        root_mode="0755",
+        verification="unverified-local",
+        members=(),
+        intended_tree_digest=None,
+    )
+
+    evidence = final_manifest_service._local_tree_evidence(item, root)
+
+    assert evidence.verification == "unverified-local"
+    assert lower_entry.read_bytes() == b"keep"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+
+    root.chmod(0o700)
+    with pytest.raises(FinalManifestError, match="mode"):
+        final_manifest_service._local_tree_evidence(item, root)
+
+
+@pytest.mark.parametrize(
+    "member_specs",
+    [
+        (),
+        (("nested", "directory", "0755"),),
+    ],
+    ids=["empty", "directories-only"],
+)
+def test_locked_local_tree_aggregates_without_regular_file_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    member_specs: tuple[tuple[str, str, str], ...],
+) -> None:
+    root = tmp_path / "ComfyUI"
+    target = root / "user" / "default" / "workflows"
+    target.mkdir(parents=True)
+    target.chmod(0o755)
+    for relative_path, _kind, _mode in member_specs:
+        directory = target / relative_path
+        directory.mkdir(parents=True)
+        directory.chmod(0o755)
+    intended = local_tree_digest(
+        LocalTreeInventory(
+            tuple(
+                LocalTreeMember(relative_path, kind, mode)
+                for relative_path, kind, mode in member_specs
+            )
+        )
+    )
+    item = FinalManifestLocalTreeInput(
+        type="local",
+        kind="tree",
+        target=str(target),
+        root_mode="0755",
+        verification="sha256",
+        members=tuple(LocalTreeMemberInput(*spec) for spec in member_specs),
+        intended_tree_digest=intended,
+    )
+    monkeypatch.setattr(
+        final_manifest_service,
+        "consume_regular_absolute_file",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a tree without files must not stream a file"
+        ),
+    )
+
+    evidence = final_manifest_service._local_tree_evidence(item, root)
+
+    assert evidence.intended_tree_digest == intended
+    assert evidence.observed_tree_digest == intended
+
+
+def test_unlocked_local_tree_checks_only_expected_structure_and_never_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    item = _tree_projection(root, locked=False)
+    target = Path(item.target)
+    (target / "unrelated.txt").write_bytes(b"lower image content")
+    (target / "nested" / "unrelated.txt").write_bytes(b"another lower entry")
+    monkeypatch.setattr(
+        final_manifest_service,
+        "consume_regular_absolute_file",
+        lambda *_args, **_kwargs: pytest.fail("unlocked trees must not be hashed"),
+    )
+    monkeypatch.setattr(
+        final_manifest_service.os,
+        "scandir",
+        lambda *_args, **_kwargs: pytest.fail("tree observation must not enumerate"),
+    )
+
+    evidence = final_manifest_service._local_tree_evidence(item, root)
+
+    assert evidence.verification == "unverified-local"
+    assert evidence.intended_tree_digest is None
+    assert evidence.observed_tree_digest is None
+
+
+def test_locked_local_tree_streams_declared_files_and_reconstructs_digest(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    item = _tree_projection(root, locked=True)
+
+    evidence = final_manifest_service._local_tree_evidence(item, root)
+
+    assert evidence == LocalTreeEvidence(
+        type="local",
+        kind="tree",
+        target=item.target,
+        verification="sha256",
+        intended_tree_digest=item.intended_tree_digest,
+        observed_tree_digest=item.intended_tree_digest,
+    )
+
+
+def test_locked_local_tree_rejects_digest_drift_without_inventorying_overlay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    item = _tree_projection(root, locked=True)
+    Path(item.target, "nested", "selected.txt").write_bytes(b"changed")
+    monkeypatch.setattr(
+        final_manifest_service.os,
+        "scandir",
+        lambda *_args, **_kwargs: pytest.fail("tree observation must not enumerate"),
+    )
+
+    with pytest.raises(FinalManifestError, match="digest"):
+        final_manifest_service._local_tree_evidence(item, root)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "type", "link", "mode"],
+    ids=["missing", "type", "link", "mode"],
+)
+def test_local_tree_observation_rejects_expected_path_failures(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    item = _tree_projection(root, locked=False)
+    selected = Path(item.target, "nested", "selected.txt")
+    if failure == "missing":
+        selected.unlink()
+    elif failure == "type":
+        selected.unlink()
+        selected.mkdir()
+    elif failure == "link":
+        selected.unlink()
+        selected.symlink_to(root / "elsewhere")
+    else:
+        selected.chmod(0o600)
+
+    with pytest.raises(FinalManifestError):
+        final_manifest_service._local_tree_evidence(item, root)
 
 
 def test_final_manifest_observes_build_hook_domain_and_retained_bytes(

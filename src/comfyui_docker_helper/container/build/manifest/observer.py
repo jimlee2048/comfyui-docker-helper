@@ -10,7 +10,8 @@ import stat
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from packaging.utils import InvalidName, canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -36,6 +37,7 @@ from comfyui_docker_helper.config.evidence.manifest import (
     InventoryDistribution,
     LifecycleEvidence,
     LocalFileEvidence,
+    LocalTreeEvidence,
     MaterializedInputsEvidence,
     PlatformEvidence,
     ProtectedRequirementEvidence,
@@ -49,9 +51,15 @@ from comfyui_docker_helper.config.planning.build_plan import ProtectedRequiremen
 from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestMember,
 )
+from comfyui_docker_helper.config.planning.local_tree import (
+    LocalTreeInventory,
+    LocalTreeMember,
+    local_tree_digest,
+)
 from comfyui_docker_helper.container.build.admission import (
     FinalCoreProbeInput,
     FinalManifestInput,
+    FinalManifestLocalTreeInput,
 )
 from comfyui_docker_helper.container.build.comfyui import (
     capture_application_requirements,
@@ -76,7 +84,10 @@ from comfyui_docker_helper.container.build.manifest import writer
 from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
 from comfyui_docker_helper.container.transfer.core import verify_required_final
 from comfyui_docker_helper.errors import ApplicationError
-from comfyui_docker_helper.filesystem.admission import read_regular_absolute_file
+from comfyui_docker_helper.filesystem.admission import (
+    consume_regular_absolute_file,
+    read_regular_absolute_file,
+)
 
 _BUILD_DIRECTORY = Path("/opt/cdh/build")
 _MANIFEST_PATH = _BUILD_DIRECTORY / "manifest.json"
@@ -699,6 +710,9 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
     result: list[FileEvidence] = []
     root = Path(projection.application.paths.comfyui)
     for item in projection.files:
+        if isinstance(item, FinalManifestLocalTreeInput):
+            result.append(_local_tree_evidence(item, root))
+            continue
         target = Path(item.target)
         expected_checksum = (
             item.checksum
@@ -717,6 +731,7 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
                 result.append(
                     LocalFileEvidence(
                         type="local",
+                        kind="file",
                         target=item.target,
                         verification="sha256",
                         intended_checksum=item.digest,
@@ -727,6 +742,7 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
                 result.append(
                     LocalFileEvidence(
                         type="local",
+                        kind="file",
                         target=item.target,
                         verification="unverified-local",
                     )
@@ -752,6 +768,227 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
                 )
             )
     return tuple(result)
+
+
+def _local_tree_evidence(
+    item: FinalManifestLocalTreeInput,
+    comfyui_root: Path,
+) -> LocalTreeEvidence:
+    """Observe only the Plan-selected tree root and members.
+
+    The tree is intentionally admitted by explicit paths.  In particular, no
+    directory enumeration is used here: lower-image entries are overlay data
+    and are outside the BuildPlan's evidence authority.
+    """
+    root = _observe_tree_root(
+        comfyui_root,
+        Path(item.target),
+        expected_mode=int(item.root_mode, 8),
+    )
+    observed_members: list[LocalTreeMember] = []
+    for member in item.members:
+        destination = _observe_tree_member(
+            comfyui_root,
+            root,
+            member.relative_path,
+            expected_kind=member.kind,
+            expected_mode=int(member.mode, 8),
+        )
+        if member.kind == "file" and item.verification == "sha256":
+            size, digest = _hash_declared_tree_file(destination)
+        else:
+            size = None
+            digest = None
+        observed_members.append(
+            LocalTreeMember(
+                relative_path=member.relative_path,
+                kind=member.kind,
+                mode=member.mode,
+                size=size,
+                digest=digest,
+            )
+        )
+
+    if item.verification == "sha256":
+        intended = item.intended_tree_digest
+        if intended is None:
+            raise FinalManifestError("locked local tree is missing its intended digest")
+        try:
+            observed = local_tree_digest(
+                LocalTreeInventory(tuple(observed_members), root_mode=item.root_mode)
+            )
+        except ValueError as error:
+            raise FinalManifestError(
+                "observed local tree inventory is invalid"
+            ) from error
+        if observed != intended:
+            raise FinalManifestError("observed local tree digest does not match")
+        return LocalTreeEvidence(
+            type="local",
+            kind="tree",
+            target=item.target,
+            verification="sha256",
+            intended_tree_digest=intended,
+            observed_tree_digest=observed,
+        )
+
+    if item.intended_tree_digest is not None:
+        raise FinalManifestError("unverified local tree must omit its intended digest")
+    return LocalTreeEvidence(
+        type="local",
+        kind="tree",
+        target=item.target,
+        verification="unverified-local",
+    )
+
+
+def _observe_tree_root(
+    comfyui_root: Path,
+    target: Path,
+    *,
+    expected_mode: int,
+) -> Path:
+    """Admit one expected tree root without following path components."""
+    _walk_expected_tree_path(
+        comfyui_root,
+        target,
+        expected_kind="directory",
+        expected_mode=expected_mode,
+        label="local tree root",
+    )
+    return target
+
+
+def _observe_tree_member(
+    comfyui_root: Path,
+    tree_root: Path,
+    relative_path: str,
+    *,
+    expected_kind: Literal["directory", "file"],
+    expected_mode: int,
+) -> Path:
+    relative = PurePosixPath(relative_path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or relative.as_posix() != relative_path
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise FinalManifestError("local tree member path is not canonical")
+    destination = tree_root / relative
+    _walk_expected_tree_path(
+        comfyui_root,
+        destination,
+        expected_kind=expected_kind,
+        expected_mode=expected_mode,
+        label="local tree member",
+    )
+    return destination
+
+
+def _validate_tree_containment(comfyui_root: Path, target: Path) -> None:
+    root = PurePosixPath(comfyui_root)
+    candidate = PurePosixPath(target)
+    root_text = root.as_posix()
+    target_text = candidate.as_posix()
+    if (
+        not root.is_absolute()
+        or not candidate.is_absolute()
+        or root_text != str(comfyui_root)
+        or target_text != str(target)
+        or any(part in {".", ".."} for part in candidate.parts)
+        or not candidate.is_relative_to(root)
+    ):
+        raise FinalManifestError("local tree path escapes COMFYUI_PATH")
+
+
+def _walk_expected_tree_path(
+    comfyui_root: Path,
+    target: Path,
+    *,
+    expected_kind: Literal["directory", "file"],
+    expected_mode: int,
+    label: str,
+) -> None:
+    """lstat each expected component and validate only the final node's mode."""
+    root = PurePosixPath(comfyui_root)
+    candidate = PurePosixPath(target)
+    _validate_tree_containment(comfyui_root, target)
+    relative = candidate.relative_to(root)
+    current = comfyui_root
+    if not relative.parts:
+        metadata = _tree_lstat(current, label)
+        if expected_kind == "directory":
+            _require_tree_directory_metadata(metadata, label)
+        elif expected_kind == "file":
+            _require_tree_file_metadata(metadata, label)
+        else:
+            raise FinalManifestError("local tree member kind is invalid")
+        if stat.S_IMODE(metadata.st_mode) != expected_mode:
+            raise FinalManifestError(f"{label} mode does not match BuildPlan")
+        return
+    _require_tree_directory(current, f"{label} parent")
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        metadata = _tree_lstat(current, label)
+        is_leaf = index == len(relative.parts) - 1
+        if not is_leaf:
+            _require_tree_directory_metadata(metadata, f"{label} parent")
+            continue
+        if expected_kind == "directory":
+            _require_tree_directory_metadata(metadata, label)
+        elif expected_kind == "file":
+            _require_tree_file_metadata(metadata, label)
+        else:
+            raise FinalManifestError("local tree member kind is invalid")
+        if stat.S_IMODE(metadata.st_mode) != expected_mode:
+            raise FinalManifestError(f"{label} mode does not match BuildPlan")
+
+
+def _tree_lstat(path: Path, label: str) -> os.stat_result:
+    try:
+        return path.lstat()
+    except FileNotFoundError as error:
+        raise FinalManifestError(f"{label} is missing") from error
+    except (OSError, ValueError) as error:
+        raise FinalManifestError(f"{label} could not be inspected") from error
+
+
+def _require_tree_directory(path: Path, label: str) -> None:
+    _require_tree_directory_metadata(_tree_lstat(path, label), label)
+
+
+def _require_tree_directory_metadata(metadata: os.stat_result, label: str) -> None:
+    if _is_tree_reparse(metadata):
+        raise FinalManifestError(f"{label} must not be a link or reparse point")
+    if not stat.S_ISDIR(metadata.st_mode):
+        if stat.S_ISREG(metadata.st_mode):
+            raise FinalManifestError(f"{label} conflicts with a file")
+        raise FinalManifestError(f"{label} is a special filesystem node")
+
+
+def _require_tree_file_metadata(metadata: os.stat_result, label: str) -> None:
+    if _is_tree_reparse(metadata):
+        raise FinalManifestError(f"{label} must not be a link or reparse point")
+    if not stat.S_ISREG(metadata.st_mode):
+        if stat.S_ISDIR(metadata.st_mode):
+            raise FinalManifestError(f"{label} conflicts with a directory")
+        raise FinalManifestError(f"{label} is a special filesystem node")
+
+
+def _is_tree_reparse(metadata: os.stat_result) -> bool:
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & 0x00000400
+    )
+
+
+def _hash_declared_tree_file(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    try:
+        observed = consume_regular_absolute_file(path, digest.update)
+    except (OSError, ValueError) as error:
+        raise FinalManifestError("local tree member could not be hashed") from error
+    return observed.size, f"sha256:{digest.hexdigest()}"
 
 
 def _hook_evidence(projection: FinalManifestInput) -> tuple[HookEvidence, ...]:

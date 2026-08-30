@@ -77,7 +77,33 @@ class FinalManifestLocalFileInput:
     digest: str | None
 
 
-type FinalManifestFileInput = FinalManifestHttpFileInput | FinalManifestLocalFileInput
+@dataclass(frozen=True, slots=True)
+class LocalTreeMemberInput:
+    """One Plan-selected tree member needed by image normalization."""
+
+    relative_path: str
+    kind: Literal["directory", "file"]
+    mode: Literal["0755", "0644"]
+
+
+@dataclass(frozen=True, slots=True)
+class FinalManifestLocalTreeInput:
+    """Complete observer projection for one Plan-selected local tree."""
+
+    type: Literal["local"]
+    kind: Literal["tree"]
+    target: str
+    root_mode: Literal["0755"]
+    verification: Literal["sha256", "unverified-local"]
+    members: tuple[LocalTreeMemberInput, ...]
+    intended_tree_digest: str | None
+
+
+type FinalManifestFileInput = (
+    FinalManifestHttpFileInput
+    | FinalManifestLocalFileInput
+    | FinalManifestLocalTreeInput
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,15 +112,6 @@ class FinalCoreProbeInput:
 
     workspace: str
     checks: tuple[FinalBuildCheckId, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class LocalTreeMemberInput:
-    """One Plan-selected tree member needed by image normalization."""
-
-    relative_path: str
-    kind: Literal["directory", "file"]
-    mode: Literal["0755", "0644"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +223,7 @@ class BuildPlanInputAdmission:
 
 
 def _manifest_file_input(
-    item: HttpFilePlan | LocalFilePlan,
+    item: HttpFilePlan | LocalFilePlan | LocalTreePlan,
 ) -> FinalManifestFileInput:
     if isinstance(item, HttpFilePlan):
         return FinalManifestHttpFileInput(
@@ -215,12 +232,31 @@ def _manifest_file_input(
             target=item.target,
             checksum=item.checksum,
         )
-    return FinalManifestLocalFileInput(
-        type="local",
-        target=item.target,
-        verification=item.verification,
-        digest=item.digest,
-    )
+    if isinstance(item, LocalTreePlan):
+        return FinalManifestLocalTreeInput(
+            type="local",
+            kind="tree",
+            target=item.target,
+            root_mode=item.root_mode,
+            verification=item.verification,
+            members=tuple(
+                LocalTreeMemberInput(
+                    relative_path=member.relative_path,
+                    kind=member.kind,
+                    mode=member.mode,
+                )
+                for member in item.members
+            ),
+            intended_tree_digest=item.tree_digest,
+        )
+    if isinstance(item, LocalFilePlan):
+        return FinalManifestLocalFileInput(
+            type="local",
+            target=item.target,
+            verification=item.verification,
+            digest=item.digest,
+        )
+    raise AssertionError("unsupported final manifest file plan")
 
 
 def _local_tree_input(item: LocalTreePlan) -> LocalTreeNormalizationInput:

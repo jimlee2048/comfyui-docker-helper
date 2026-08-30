@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from packaging.specifiers import SpecifierSet
@@ -15,7 +14,10 @@ from comfyui_docker_helper.config.evidence.custom_nodes import CustomNodeInvento
 from comfyui_docker_helper.config.file_checksum import (
     validate_canonical_file_checksum,
 )
-from comfyui_docker_helper.config.planning.build_plan import ManifestBinding
+from comfyui_docker_helper.config.planning.build_plan import (
+    ManifestBinding,
+    validate_absolute_file_target,
+)
 from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_exact_distribution_version,
     validate_exact_stable_distribution_version,
@@ -413,10 +415,7 @@ class _FileEvidence(_ManifestModel):
     @field_validator("target")
     @classmethod
     def _validate_target(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if not path.is_absolute() or path.as_posix() != value:
-            raise ValueError("file target must be one canonical absolute path")
-        return value
+        return validate_absolute_file_target(value)
 
 
 class HttpFileEvidence(_FileEvidence):
@@ -450,6 +449,7 @@ class HttpFileEvidence(_FileEvidence):
 
 class LocalFileEvidence(_FileEvidence):
     type: Literal["local"]
+    kind: Literal["file"]
     verification: Literal["sha256", "unverified-local"]
     intended_checksum: str | None = None
     observed_checksum: str | None = None
@@ -471,8 +471,43 @@ class LocalFileEvidence(_FileEvidence):
         return self
 
 
+class LocalTreeEvidence(_FileEvidence):
+    """Compact final evidence for one Plan-selected local directory tree."""
+
+    type: Literal["local"]
+    kind: Literal["tree"]
+    verification: Literal["sha256", "unverified-local"]
+    intended_tree_digest: str | None = None
+    observed_tree_digest: str | None = None
+
+    @field_validator("intended_tree_digest", "observed_tree_digest")
+    @classmethod
+    def _validate_tree_digest(cls, value: str | None) -> str | None:
+        return None if value is None else validate_sha256_digest(value)
+
+    @model_validator(mode="after")
+    def _validate_verification(self) -> LocalTreeEvidence:
+        if self.verification == "sha256":
+            if self.intended_tree_digest is None or (
+                self.intended_tree_digest != self.observed_tree_digest
+            ):
+                raise ValueError("verified local tree digest must match")
+        elif (
+            self.intended_tree_digest is not None
+            or self.observed_tree_digest is not None
+        ):
+            raise ValueError("unverified local tree evidence must omit content digests")
+        return self
+
+
+LocalEvidence = Annotated[
+    LocalFileEvidence | LocalTreeEvidence,
+    Field(discriminator="kind"),
+]
+
+
 FileEvidence = Annotated[
-    HttpFileEvidence | LocalFileEvidence,
+    HttpFileEvidence | LocalEvidence,
     Field(discriminator="type"),
 ]
 

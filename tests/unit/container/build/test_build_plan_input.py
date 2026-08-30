@@ -13,10 +13,12 @@ from comfyui_docker_helper.config.planning.build_plan import (
     LocalFilePlan,
     build_plan_digest,
     dump_build_plan_json,
+    manifest_binding,
 )
 from comfyui_docker_helper.container.build.admission import (
     BuildPlanInputAdmission,
     FinalManifestLocalFileInput,
+    FinalManifestLocalTreeInput,
     LocalTreeMemberInput,
     LocalTreeNormalizationInput,
 )
@@ -136,6 +138,65 @@ def test_final_projection_retains_local_identity_without_context_locator(
             target="/workspace/ComfyUI/models/model.bin",
             verification="sha256" if locked else "unverified-local",
             digest=f"sha256:{'a' * 64}" if locked else None,
+        ),
+    )
+
+
+def test_final_projection_keeps_tree_records_without_manifest_inventory() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    relative_target = "user/default/workflows"
+    tree = {
+        "type": "local",
+        "kind": "tree",
+        "target": f"/workspace/ComfyUI/{relative_target}",
+        "relative_target": relative_target,
+        "context_path": (
+            "build/trees/" + hashlib.sha256(relative_target.encode()).hexdigest()
+        ),
+        "root_mode": "0755",
+        "verification": "sha256",
+        "members": (
+            {
+                "relative_path": "nested",
+                "kind": "directory",
+                "mode": "0755",
+                "size": None,
+                "digest": None,
+            },
+            {
+                "relative_path": "nested/file.bin",
+                "kind": "file",
+                "mode": "0644",
+                "size": 3,
+                "digest": "sha256:"
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            },
+        ),
+        "tree_digest": "sha256:"
+        "47e5919a75ebe3e3ddaa8b1ecee1da39b8dbc65865673c6884ebc3622832db24",
+    }
+    document = plan.model_dump(mode="python")
+    document["files"]["files"] = (tree,)
+    plan = BuildPlan.model_validate(document)
+
+    projection = BuildPlanInputAdmission(plan).final_manifest()
+
+    assert projection.binding == manifest_binding(plan)
+    projected = projection.files
+
+    assert projected == (
+        FinalManifestLocalTreeInput(
+            type="local",
+            kind="tree",
+            target=f"/workspace/ComfyUI/{relative_target}",
+            root_mode="0755",
+            verification="sha256",
+            members=(
+                LocalTreeMemberInput("nested", "directory", "0755"),
+                LocalTreeMemberInput("nested/file.bin", "file", "0644"),
+            ),
+            intended_tree_digest="sha256:"
+            "47e5919a75ebe3e3ddaa8b1ecee1da39b8dbc65865673c6884ebc3622832db24",
         ),
     )
 

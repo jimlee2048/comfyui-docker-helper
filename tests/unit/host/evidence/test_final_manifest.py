@@ -12,13 +12,19 @@ from comfyui_docker_helper.config.evidence.manifest import (
     DistributionVersionEvidence,
     FinalManifest,
     InventoryDistribution,
+    LocalFileEvidence,
+    LocalTreeEvidence,
     SetuptoolsEvidence,
     ToolEnvironmentEvidence,
     VersionEvidence,
     dump_final_manifest,
     parse_final_manifest,
 )
-from comfyui_docker_helper.config.planning.build_plan import BuildPlan
+from comfyui_docker_helper.config.planning.build_plan import (
+    BuildPlan,
+    LocalFilePlan,
+    validate_absolute_file_target,
+)
 from comfyui_docker_helper.rendering.final_renderer import (
     render_build_plan_dockerfile,
 )
@@ -72,6 +78,102 @@ def test_manifest_rejects_intended_observed_identity_mismatch() -> None:
 
     with pytest.raises(ValidationError, match="does not satisfy compatibility"):
         SetuptoolsEvidence(compatibility="<82", observed="82.0.0")
+
+
+def test_local_tree_evidence_is_strict_and_compact() -> None:
+    unlocked = LocalTreeEvidence(
+        type="local",
+        kind="tree",
+        target="/workspace/ComfyUI/user/default/workflows",
+        verification="unverified-local",
+    )
+    locked = LocalTreeEvidence(
+        type="local",
+        kind="tree",
+        target="/workspace/ComfyUI/user/default/workflows",
+        verification="sha256",
+        intended_tree_digest="sha256:"
+        "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
+        observed_tree_digest="sha256:"
+        "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
+    )
+
+    assert unlocked.model_dump(exclude_none=True) == {
+        "target": "/workspace/ComfyUI/user/default/workflows",
+        "type": "local",
+        "kind": "tree",
+        "verification": "unverified-local",
+    }
+    assert locked.model_dump(exclude_none=True) == {
+        "target": "/workspace/ComfyUI/user/default/workflows",
+        "type": "local",
+        "kind": "tree",
+        "verification": "sha256",
+        "intended_tree_digest": "sha256:"
+        "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
+        "observed_tree_digest": "sha256:"
+        "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
+    }
+
+
+def test_file_target_authority_is_shared_by_plan_and_manifest() -> None:
+    reserved = "/workspace/ComfyUI/.cdh-staging/model.bin"
+    with pytest.raises(ValueError, match="reserved staging"):
+        validate_absolute_file_target(reserved)
+    with pytest.raises(ValidationError, match="reserved staging"):
+        LocalFilePlan(
+            type="local",
+            kind="file",
+            target=reserved,
+            relative_target="models/model.bin",
+            context_path="build/files/" + "a" * 64,
+            verification="unverified-local",
+            digest=None,
+        )
+    with pytest.raises(ValidationError, match="reserved staging"):
+        LocalTreeEvidence(
+            type="local",
+            kind="tree",
+            target=reserved,
+            verification="unverified-local",
+        )
+
+    double_slash = "//workspace/ComfyUI/models/model.bin"
+    assert validate_absolute_file_target(double_slash) == double_slash
+    assert (
+        LocalTreeEvidence(
+            type="local",
+            kind="tree",
+            target=double_slash,
+            verification="unverified-local",
+        ).target
+        == double_slash
+    )
+
+
+def test_local_file_and_tree_rows_are_discriminated_by_kind() -> None:
+    document = manifest_for_plan(
+        build_plan(final_config(), accepted_resolution())
+    ).model_dump(mode="python")
+    document["files"] = (
+        {
+            "type": "local",
+            "kind": "file",
+            "target": "/workspace/ComfyUI/models/model.bin",
+            "verification": "unverified-local",
+        },
+        {
+            "type": "local",
+            "kind": "tree",
+            "target": "/workspace/ComfyUI/user/default/workflows",
+            "verification": "unverified-local",
+        },
+    )
+
+    manifest = FinalManifest.model_validate(document)
+
+    assert isinstance(manifest.files[0], LocalFileEvidence)
+    assert isinstance(manifest.files[1], LocalTreeEvidence)
 
 
 # User package evidence admits complete versions; managed tool evidence stays stable.

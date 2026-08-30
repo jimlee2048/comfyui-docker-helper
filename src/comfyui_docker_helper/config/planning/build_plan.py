@@ -926,13 +926,7 @@ class _FilePlan(_PlanModel):
     @field_validator("target")
     @classmethod
     def _validate_target(cls, value: str) -> str:
-        target = _absolute_posix_path(value, "file target")
-        if any(
-            is_reserved_file_target_component(part)
-            for part in PurePosixPath(target).parts
-        ):
-            raise ValueError("file target uses the reserved staging path component")
-        return target
+        return validate_absolute_file_target(value)
 
 
 class HttpFilePlan(_FilePlan):
@@ -2170,6 +2164,16 @@ def _absolute_posix_path(value: str, field: str) -> str:
     ):
         raise ValueError(f"{field} must be one canonical absolute POSIX path")
     return value
+
+
+def validate_absolute_file_target(value: str) -> str:
+    """Validate one canonical absolute file target shared by Plan/evidence."""
+    target = _absolute_posix_path(value, "file target")
+    if any(
+        is_reserved_file_target_component(part) for part in PurePosixPath(target).parts
+    ):
+        raise ValueError("file target uses the reserved staging path component")
+    return target
 
 
 def _pytorch_channel(cuda_version: str) -> str:

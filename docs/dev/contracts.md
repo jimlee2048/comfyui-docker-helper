@@ -42,6 +42,8 @@ Resolved publication tags and output selection belong to the host's process-loca
 
 The [final manifest schema](../../src/comfyui_docker_helper/config/evidence/manifest.py) and [observer](../../src/comfyui_docker_helper/container/build/manifest/observer.py) own strict schema-v1 final image evidence. Observation runs only after build mutations, re-proves the selected final state, binds the image-config, lock, and BuildPlan digests, and publishes no partial manifest when an observation fails. Local-tree evidence is one compact Plan-bound row; the complete projection and evidence rules live in [Image local-tree projection and final evidence](#image-local-tree-projection-and-final-evidence).
 
+Verified HTTP and local-file evidence records the observed checksum; verified local-tree evidence records the observed aggregate digest. The observer compares content with Plan intent before emitting those rows. Unverified rows omit content identity. Final files evidence does not duplicate intended values, and reading a manifest alone does not replay the observer's comparison with the Plan.
+
 The manifest is downstream evidence. It is not configuration, a resolver result, canonical-lock input, BuildPlan input, an attestation, a support verdict, or a general application health check.
 
 ## Host local-filesystem boundaries

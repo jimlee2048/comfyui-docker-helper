@@ -735,7 +735,6 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
                         kind="file",
                         target=item.target,
                         verification="sha256",
-                        intended_checksum=item.digest,
                         observed_checksum=item.digest,
                     )
                 )
@@ -764,7 +763,6 @@ def _file_evidence(projection: FinalManifestInput) -> tuple[FileEvidence, ...]:
                     url=item.url,
                     target=item.target,
                     verification="sha256",
-                    intended_checksum=item.checksum,
                     observed_checksum=item.checksum,
                 )
             )
@@ -824,7 +822,6 @@ def _local_tree_evidence(
             kind="tree",
             target=item.target,
             verification="sha256",
-            intended_tree_digest=intended,
             observed_tree_digest=observed,
         )
 

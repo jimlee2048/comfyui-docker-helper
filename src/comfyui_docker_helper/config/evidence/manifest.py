@@ -422,7 +422,6 @@ class HttpFileEvidence(_FileEvidence):
     type: Literal["http"]
     url: str
     verification: Literal["sha256", "unverified-moving"]
-    intended_checksum: str | None = None
     observed_checksum: str | None = None
 
     @field_validator("url")
@@ -430,19 +429,17 @@ class HttpFileEvidence(_FileEvidence):
     def _validate_url(cls, value: str) -> str:
         return validate_http_url(value, "file URL")
 
-    @field_validator("intended_checksum", "observed_checksum")
+    @field_validator("observed_checksum")
     @classmethod
     def _validate_checksum(cls, value: str | None) -> str | None:
         return None if value is None else validate_canonical_file_checksum(value)
 
     @model_validator(mode="after")
     def _validate_verification(self) -> HttpFileEvidence:
-        expected = self.intended_checksum
-        observed = self.observed_checksum
         if self.verification == "sha256":
-            if expected is None or expected != observed:
-                raise ValueError("verified file checksum must match")
-        elif expected is not None or observed is not None:
+            if self.observed_checksum is None:
+                raise ValueError("verified file requires an observed checksum")
+        elif self.observed_checksum is not None:
             raise ValueError("moving file evidence must omit content checksums")
         return self
 
@@ -451,10 +448,9 @@ class LocalFileEvidence(_FileEvidence):
     type: Literal["local"]
     kind: Literal["file"]
     verification: Literal["sha256", "unverified-local"]
-    intended_checksum: str | None = None
     observed_checksum: str | None = None
 
-    @field_validator("intended_checksum", "observed_checksum")
+    @field_validator("observed_checksum")
     @classmethod
     def _validate_checksum(cls, value: str | None) -> str | None:
         return None if value is None else validate_canonical_file_checksum(value)
@@ -462,11 +458,9 @@ class LocalFileEvidence(_FileEvidence):
     @model_validator(mode="after")
     def _validate_verification(self) -> LocalFileEvidence:
         if self.verification == "sha256":
-            if self.intended_checksum is None or (
-                self.intended_checksum != self.observed_checksum
-            ):
-                raise ValueError("verified local file checksum must match")
-        elif self.intended_checksum is not None or self.observed_checksum is not None:
+            if self.observed_checksum is None:
+                raise ValueError("verified local file requires an observed checksum")
+        elif self.observed_checksum is not None:
             raise ValueError("unverified local evidence must omit content checksums")
         return self
 
@@ -477,10 +471,9 @@ class LocalTreeEvidence(_FileEvidence):
     type: Literal["local"]
     kind: Literal["tree"]
     verification: Literal["sha256", "unverified-local"]
-    intended_tree_digest: str | None = None
     observed_tree_digest: str | None = None
 
-    @field_validator("intended_tree_digest", "observed_tree_digest")
+    @field_validator("observed_tree_digest")
     @classmethod
     def _validate_tree_digest(cls, value: str | None) -> str | None:
         return None if value is None else validate_sha256_digest(value)
@@ -488,14 +481,9 @@ class LocalTreeEvidence(_FileEvidence):
     @model_validator(mode="after")
     def _validate_verification(self) -> LocalTreeEvidence:
         if self.verification == "sha256":
-            if self.intended_tree_digest is None or (
-                self.intended_tree_digest != self.observed_tree_digest
-            ):
-                raise ValueError("verified local tree digest must match")
-        elif (
-            self.intended_tree_digest is not None
-            or self.observed_tree_digest is not None
-        ):
+            if self.observed_tree_digest is None:
+                raise ValueError("verified local tree requires an observed digest")
+        elif self.observed_tree_digest is not None:
             raise ValueError("unverified local tree evidence must omit content digests")
         return self
 

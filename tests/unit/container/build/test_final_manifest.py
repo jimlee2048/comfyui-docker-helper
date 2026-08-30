@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import pytest
 from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inventory
 from comfyui_docker_helper.config.evidence.manifest import (
     DistributionVersionEvidence,
+    HttpFileEvidence,
     LocalFileEvidence,
     LocalTreeEvidence,
     ProtectedRequirementEvidence,
@@ -36,6 +38,7 @@ from comfyui_docker_helper.config.planning.local_tree import (
 )
 from comfyui_docker_helper.container.build.admission import (
     BuildPlanInputAdmission,
+    FinalManifestHttpFileInput,
     FinalManifestLocalTreeInput,
     LocalTreeMemberInput,
 )
@@ -585,12 +588,27 @@ def test_final_manifest_projection_binds_the_authenticated_plan(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("locked", [True, False], ids=["locked", "unlocked"])
-def test_local_file_evidence_preserves_declared_verification(
+@pytest.mark.parametrize("source_type", ["http", "local"])
+def test_single_file_evidence_preserves_declared_verification(
     monkeypatch: pytest.MonkeyPatch,
     locked: bool,
+    source_type: str,
 ) -> None:
     plan = _plan_with_local_file(locked=locked)
     projection = BuildPlanInputAdmission(plan).final_manifest()
+    digest = f"sha256:{'a' * 64}" if locked else None
+    if source_type == "http":
+        projection = replace(
+            projection,
+            files=(
+                FinalManifestHttpFileInput(
+                    type="http",
+                    url="https://example.test/model.bin",
+                    target="/workspace/ComfyUI/models/model.bin",
+                    checksum=digest,
+                ),
+            ),
+        )
     observations: list[tuple[Path, Path, str | None]] = []
 
     def verify(*, root: Path, target: Path, expected_checksum: str | None) -> None:
@@ -600,17 +618,23 @@ def test_local_file_evidence_preserves_declared_verification(
 
     evidence = final_manifest_service._file_evidence(projection)
 
-    digest = f"sha256:{'a' * 64}" if locked else None
-    assert evidence == (
-        LocalFileEvidence(
+    if source_type == "local":
+        expected = LocalFileEvidence(
             type="local",
             kind="file",
             target="/workspace/ComfyUI/models/model.bin",
             verification="sha256" if locked else "unverified-local",
-            intended_checksum=digest,
             observed_checksum=digest,
-        ),
-    )
+        )
+    else:
+        expected = HttpFileEvidence(
+            type="http",
+            url="https://example.test/model.bin",
+            target="/workspace/ComfyUI/models/model.bin",
+            verification="sha256" if locked else "unverified-moving",
+            observed_checksum=digest,
+        )
+    assert evidence == (expected,)
     assert observations == [
         (
             Path("/workspace/ComfyUI"),
@@ -719,7 +743,6 @@ def test_locked_local_tree_aggregates_without_regular_file_records(
 
     evidence = final_manifest_service._local_tree_evidence(item, root)
 
-    assert evidence.intended_tree_digest == intended
     assert evidence.observed_tree_digest == intended
 
 
@@ -746,7 +769,6 @@ def test_unlocked_local_tree_checks_only_expected_structure_and_never_hashes(
     evidence = final_manifest_service._local_tree_evidence(item, root)
 
     assert evidence.verification == "unverified-local"
-    assert evidence.intended_tree_digest is None
     assert evidence.observed_tree_digest is None
 
 
@@ -763,7 +785,6 @@ def test_locked_local_tree_streams_declared_files_and_reconstructs_digest(
         kind="tree",
         target=item.target,
         verification="sha256",
-        intended_tree_digest=item.intended_tree_digest,
         observed_tree_digest=item.intended_tree_digest,
     )
 

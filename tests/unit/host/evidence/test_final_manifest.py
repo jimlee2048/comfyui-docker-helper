@@ -11,6 +11,7 @@ from comfyui_docker_helper.config.evidence.manifest import (
     ComfyCliEvidence,
     DistributionVersionEvidence,
     FinalManifest,
+    HttpFileEvidence,
     InventoryDistribution,
     LocalFileEvidence,
     LocalTreeEvidence,
@@ -92,8 +93,6 @@ def test_local_tree_evidence_is_strict_and_compact() -> None:
         kind="tree",
         target="/workspace/ComfyUI/user/default/workflows",
         verification="sha256",
-        intended_tree_digest="sha256:"
-        "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
         observed_tree_digest="sha256:"
         "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
     )
@@ -109,35 +108,30 @@ def test_local_tree_evidence_is_strict_and_compact() -> None:
         "type": "local",
         "kind": "tree",
         "verification": "sha256",
-        "intended_tree_digest": "sha256:"
-        "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
         "observed_tree_digest": "sha256:"
         "bfc5b459d61053042f6cc32617c7c26524963209696bbc6297794722dcabc95d",
     }
 
 
 @pytest.mark.parametrize(
-    ("verification", "intended", "observed", "message"),
+    ("verification", "observed", "message"),
     [
-        ("sha256", None, None, "verified local tree digest must match"),
+        ("sha256", None, "requires an observed digest"),
         (
             "sha256",
-            "sha256:" + "a" * 64,
-            "sha256:" + "b" * 64,
-            "verified local tree digest must match",
+            "sha256:invalid",
+            "digest must be sha256",
         ),
         (
             "unverified-local",
             "sha256:" + "a" * 64,
-            None,
             "unverified local tree evidence must omit content digests",
         ),
     ],
-    ids=["sha256-missing-digest", "sha256-digest-mismatch", "unverified-with-digest"],
+    ids=["sha256-missing-digest", "invalid-digest", "unverified-with-digest"],
 )
 def test_local_tree_evidence_enforces_verification_digest_schema(
     verification: str,
-    intended: str | None,
     observed: str | None,
     message: str,
 ) -> None:
@@ -147,8 +141,43 @@ def test_local_tree_evidence_enforces_verification_digest_schema(
             kind="tree",
             target="/workspace/ComfyUI/user/default/workflows",
             verification=verification,
-            intended_tree_digest=intended,
             observed_tree_digest=observed,
+        )
+
+
+@pytest.mark.parametrize("source_type", ["http", "local"])
+def test_single_file_evidence_records_only_verified_observed_identity(
+    source_type: str,
+) -> None:
+    identity = {"type": source_type, "target": "/workspace/ComfyUI/models/model.bin"}
+    if source_type == "http":
+        identity["url"] = "https://example.test/model.bin"
+        model = HttpFileEvidence
+        unverified = "unverified-moving"
+    else:
+        identity["kind"] = "file"
+        model = LocalFileEvidence
+        unverified = "unverified-local"
+    digest = "sha256:" + "a" * 64
+    verified = model.model_validate(
+        {**identity, "verification": "sha256", "observed_checksum": digest}
+    )
+    moving = model.model_validate({**identity, "verification": unverified})
+
+    assert verified.model_dump(exclude_none=True) == {
+        **identity,
+        "verification": "sha256",
+        "observed_checksum": digest,
+    }
+    assert moving.model_dump(exclude_none=True) == {
+        **identity,
+        "verification": unverified,
+    }
+    with pytest.raises(ValidationError, match="requires an observed checksum"):
+        model.model_validate({**identity, "verification": "sha256"})
+    with pytest.raises(ValidationError, match="must omit content checksums"):
+        model.model_validate(
+            {**identity, "verification": unverified, "observed_checksum": digest}
         )
 
 

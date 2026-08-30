@@ -755,7 +755,7 @@ def test_local_tree_plan_root_sentinel_and_locked_aggregate_are_current_v1() -> 
 
     assert isinstance(item, LocalTreePlan)
     assert item.target == "/workspace/ComfyUI"
-    assert item.relative_target == "."
+    assert item.context_path == admitted.context_path.as_posix()
     assert item.members == ()
     assert item.tree_digest == tree_digest
 

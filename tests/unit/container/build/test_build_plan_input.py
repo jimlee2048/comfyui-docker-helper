@@ -39,7 +39,6 @@ def _plan_with_local_file(*, locked: bool) -> BuildPlan:
         type="local",
         kind="file",
         target="/workspace/ComfyUI/models/model.bin",
-        relative_target=relative_target,
         context_path=(
             "build/files/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
         ),
@@ -81,7 +80,6 @@ def test_admission_projects_only_plan_selected_tree_paths_and_kinds() -> None:
         "type": "local",
         "kind": "tree",
         "target": f"{plan.application.paths.comfyui}/{relative_target}",
-        "relative_target": relative_target,
         "context_path": (
             "build/trees/" + hashlib.sha256(relative_target.encode()).hexdigest()
         ),
@@ -145,7 +143,6 @@ def test_final_projection_keeps_tree_records_without_manifest_inventory() -> Non
         "type": "local",
         "kind": "tree",
         "target": f"/workspace/ComfyUI/{relative_target}",
-        "relative_target": relative_target,
         "context_path": (
             "build/trees/" + hashlib.sha256(relative_target.encode()).hexdigest()
         ),

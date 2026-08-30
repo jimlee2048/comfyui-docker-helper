@@ -64,7 +64,6 @@ def _plan_with_local_file(*, locked: bool) -> BuildPlan:
         type="local",
         kind="file",
         target="/workspace/ComfyUI/models/model.bin",
-        relative_target=relative_target,
         context_path=(
             "build/files/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
         ),

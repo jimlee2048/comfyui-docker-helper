@@ -161,7 +161,6 @@ def test_file_target_authority_is_shared_by_plan_and_manifest() -> None:
             type="local",
             kind="file",
             target=reserved,
-            relative_target="models/model.bin",
             context_path="build/files/" + "a" * 64,
             verification="unverified-local",
             digest=None,

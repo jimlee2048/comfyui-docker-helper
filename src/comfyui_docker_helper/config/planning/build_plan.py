@@ -954,32 +954,9 @@ class HttpFilePlan(_FilePlan):
 class LocalFilePlan(_FilePlan):
     type: Literal["local"]
     kind: Literal["file"]
-    relative_target: str
     context_path: str
     verification: Literal["sha256", "unverified-local"]
     digest: str | None = None
-
-    @field_validator("relative_target")
-    @classmethod
-    def _validate_relative_target(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if (
-            path.is_absolute()
-            or not path.parts
-            or path.as_posix() != value
-            or ".." in path.parts
-            or "\\" in value
-            or has_control_characters(value)
-            or any(is_reserved_file_target_component(part) for part in path.parts)
-        ):
-            raise ValueError("local file relative target must be canonical")
-        try:
-            value.encode("utf-8", "strict")
-        except UnicodeEncodeError as error:
-            raise ValueError(
-                "local file relative target must be strict UTF-8"
-            ) from error
-        return value
 
     @field_validator("context_path")
     @classmethod
@@ -995,9 +972,6 @@ class LocalFilePlan(_FilePlan):
 
     @model_validator(mode="after")
     def _validate_verification(self) -> LocalFilePlan:
-        slot = hashlib.sha256(self.relative_target.encode("utf-8")).hexdigest()
-        if self.context_path != f"build/files/{slot}":
-            raise ValueError("local file context path does not match target")
         if self.verification == "sha256" and self.digest is None:
             raise ValueError("locked local file requires a digest")
         if self.verification == "unverified-local" and self.digest is not None:
@@ -1063,36 +1037,10 @@ class LocalTreePlan(_FilePlan):
 
     type: Literal["local"]
     kind: Literal["tree"]
-    relative_target: str
     context_path: str
     verification: Literal["sha256", "unverified-local"]
     members: tuple[LocalTreeMemberPlan, ...]
     tree_digest: str | None
-
-    @field_validator("relative_target")
-    @classmethod
-    def _validate_relative_target(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if value == ".":
-            return value
-        if (
-            path.is_absolute()
-            or not path.parts
-            or path.as_posix() != value
-            or any(part in {"", ".."} for part in path.parts)
-            or (value != "." and "." in path.parts)
-            or "\\" in value
-            or has_control_characters(value)
-            or any(is_reserved_file_target_component(part) for part in path.parts)
-        ):
-            raise ValueError("local tree relative target must be canonical")
-        try:
-            value.encode("utf-8", "strict")
-        except UnicodeEncodeError as error:
-            raise ValueError(
-                "local tree relative target must be strict UTF-8"
-            ) from error
-        return value
 
     @field_validator("context_path")
     @classmethod
@@ -1108,9 +1056,6 @@ class LocalTreePlan(_FilePlan):
 
     @model_validator(mode="after")
     def _validate_inventory(self) -> LocalTreePlan:
-        slot = hashlib.sha256(self.relative_target.encode("utf-8")).hexdigest()
-        if self.context_path != f"build/trees/{slot}":
-            raise ValueError("local tree context path does not match target")
         encoded_paths = tuple(
             item.relative_path.encode("utf-8") for item in self.members
         )
@@ -1415,21 +1360,26 @@ class BuildPlan(_PlanModel):
                     "file targets must be strict descendants of ComfyUI; local tree "
                     "targets may equal the ComfyUI root"
                 )
+            if isinstance(item, (LocalFilePlan, LocalTreePlan)):
+                relative_target = target.relative_to(comfyui_root).as_posix()
+                if "\\" in relative_target:
+                    raise ValueError("local target must be a canonical POSIX path")
+                try:
+                    encoded_target = relative_target.encode("utf-8", "strict")
+                except UnicodeEncodeError as error:
+                    raise ValueError("local target must be strict UTF-8") from error
+                slot = hashlib.sha256(encoded_target).hexdigest()
+                prefix = "trees" if isinstance(item, LocalTreePlan) else "files"
+                if item.context_path != f"build/{prefix}/{slot}":
+                    raise ValueError(
+                        f"local {item.kind} context path does not match target"
+                    )
         if len(file_targets) != len(set(file_targets)):
             raise ValueError("file targets must be unique")
         for index, target in enumerate(file_targets):
             for other in file_targets[index + 1 :]:
                 if target.is_relative_to(other) or other.is_relative_to(target):
                     raise ValueError("file targets must not overlap")
-        for item in self.files.files:
-            if not isinstance(item, LocalFilePlan):
-                if not isinstance(item, LocalTreePlan):
-                    continue
-                if PurePosixPath(item.target) != comfyui_root / item.relative_target:
-                    raise ValueError("local tree target does not match relative target")
-                continue
-            if PurePosixPath(item.target) != comfyui_root / item.relative_target:
-                raise ValueError("local file target does not match relative target")
         expected_launch_head = (
             str(PurePosixPath(self.application.paths.venv) / "bin" / "python"),
             str(PurePosixPath(self.application.paths.comfyui) / "main.py"),
@@ -1962,7 +1912,6 @@ def _project_file(
             type="local",
             kind="file",
             target=item.target,
-            relative_target=item.relative_target,
             context_path=admitted.context_path.as_posix(),
             verification=verification,
             digest=digest,
@@ -1984,7 +1933,6 @@ def _project_file(
         type="local",
         kind="tree",
         target=item.target,
-        relative_target=item.relative_target,
         context_path=admitted.context_path.as_posix(),
         verification=verification,
         members=members,

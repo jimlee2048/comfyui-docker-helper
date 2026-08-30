@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import PurePosixPath
 
 import pytest
 from pydantic import ValidationError
@@ -119,7 +120,6 @@ def test_build_plan_rejects_file_target_ancestor_overlap_across_file_kinds() -> 
         "type": "local",
         "kind": "file",
         "target": f"{root}/{local_relative_target}",
-        "relative_target": local_relative_target,
         "context_path": (
             "build/files/"
             + hashlib.sha256(local_relative_target.encode("utf-8")).hexdigest()
@@ -131,7 +131,6 @@ def test_build_plan_rejects_file_target_ancestor_overlap_across_file_kinds() -> 
         "type": "local",
         "kind": "tree",
         "target": f"{root}/{tree_relative_target}",
-        "relative_target": tree_relative_target,
         "context_path": (
             "build/trees/"
             + hashlib.sha256(tree_relative_target.encode("utf-8")).hexdigest()
@@ -143,6 +142,76 @@ def test_build_plan_rejects_file_target_ancestor_overlap_across_file_kinds() -> 
     document["files"]["files"] = (http, local, tree)
 
     with pytest.raises(ValidationError, match="file targets must not overlap"):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    ("kind", "relative_target"),
+    [("file", "models/é.bin"), ("tree", "."), ("tree", "user/default/workflows")],
+    ids=["file-unicode", "tree-root", "tree-nested"],
+)
+def test_local_plan_binds_context_to_target_and_round_trips_null_identity(
+    kind: str, relative_target: str
+) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(mode="json")
+    root = PurePosixPath(document["application"]["paths"]["comfyui"])
+    prefix = "trees" if kind == "tree" else "files"
+    item = {
+        "type": "local",
+        "kind": kind,
+        "target": (root / relative_target).as_posix(),
+        "context_path": (
+            f"build/{prefix}/"
+            + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+        ),
+        "verification": "unverified-local",
+        **(
+            {"members": [], "tree_digest": None} if kind == "tree" else {"digest": None}
+        ),
+    }
+    document["files"]["files"] = [item]
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert json.loads(dump_build_plan_json(parsed))["files"]["files"] == [item]
+    item["context_path"] = f"build/{prefix}/" + "b" * 64
+    with pytest.raises(ValidationError, match="context path does not match target"):
+        parse_build_plan_json(json.dumps(document))
+
+
+@pytest.mark.parametrize(
+    ("kind", "target", "message"),
+    [
+        ("file", "/workspace/ComfyUI", "strict descendants"),
+        ("tree", "/workspace/outside", "strict descendants"),
+        ("file", "/workspace/ComfyUI/models\\file.bin", "canonical POSIX"),
+        ("tree", "/workspace/ComfyUI/\ud800", "strict UTF-8"),
+    ],
+    ids=["file-at-root", "tree-outside", "backslash", "surrogate"],
+)
+def test_local_plan_rejects_unsafe_target_before_deriving_context(
+    kind: str, target: str, message: str
+) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    prefix = "trees" if kind == "tree" else "files"
+    document["files"]["files"] = (
+        {
+            "type": "local",
+            "kind": kind,
+            "target": target,
+            "context_path": f"build/{prefix}/" + "a" * 64,
+            "verification": "unverified-local",
+            **(
+                {"members": (), "tree_digest": None}
+                if kind == "tree"
+                else {"digest": None}
+            ),
+        },
+    )
+
+    with pytest.raises(ValidationError, match=message):
         BuildPlan.model_validate(document)
 
 

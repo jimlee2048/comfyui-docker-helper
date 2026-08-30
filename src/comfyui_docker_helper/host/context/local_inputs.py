@@ -7,7 +7,6 @@ import os
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
 
 from comfyui_docker_helper.config.authored.models import FinalLocalFileConfig
 from comfyui_docker_helper.config.authored.service import ConfigurationResult
@@ -16,13 +15,15 @@ from comfyui_docker_helper.config.diagnostics import (
     DiagnosticError,
     DiagnosticSeverity,
 )
-from comfyui_docker_helper.config.planning.local_tree import (
-    LocalTreeInventory,
-    local_tree_digest,
+from comfyui_docker_helper.config.planning.inputs.local import (
+    LocalFilePlanningInput,
+    LocalPlanningInput,
+    LocalTreePlanningInput,
 )
+from comfyui_docker_helper.config.planning.local_tree import local_tree_digest
 from comfyui_docker_helper.config.planning.request import (
     FileRequest,
-    LocalFileRequest,
+    LocalSourceRequest,
 )
 from comfyui_docker_helper.filesystem.admission import (
     TreeAdmissionError,
@@ -35,33 +36,6 @@ from comfyui_docker_helper.rendering.final_materializer import (
 
 class LocalInputAdmissionError(DiagnosticError):
     """Expected failure while admitting a configured local build source."""
-
-
-@dataclass(frozen=True, slots=True)
-class LocalFilePlanningInput:
-    """Shape and optional content identity for one admitted regular file."""
-
-    relative_target: PurePosixPath
-    context_path: PurePosixPath
-    content_lock: bool
-    digest: str | None
-    kind: Literal["file"] = "file"
-
-
-@dataclass(frozen=True, slots=True)
-class LocalTreePlanningInput:
-    """Complete structural inventory for one admitted directory source."""
-
-    relative_target: PurePosixPath
-    context_path: PurePosixPath
-    content_lock: bool
-    root_mode: Literal["0755"]
-    inventory: LocalTreeInventory
-    tree_digest: str | None
-    kind: Literal["tree"] = "tree"
-
-
-type LocalPlanningInput = LocalFilePlanningInput | LocalTreePlanningInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +68,7 @@ def admit_local_inputs(
     ):
         if not isinstance(item, FinalLocalFileConfig):
             continue
-        if not isinstance(request, LocalFileRequest):
+        if not isinstance(request, LocalSourceRequest):
             raise LocalInputAdmissionError(
                 (
                     Diagnostic(
@@ -133,7 +107,11 @@ def admit_local_inputs(
                 )
             if admitted.file is None:
                 raise AssertionError("file admission omitted its file record")
-            context_path = PurePosixPath(request.context_path)
+            context_path = PurePosixPath(
+                "build",
+                "files",
+                hashlib.sha256(relative_target.as_posix().encode("utf-8")).hexdigest(),
+            )
             planning_inputs.append(
                 LocalFilePlanningInput(
                     relative_target=relative_target,

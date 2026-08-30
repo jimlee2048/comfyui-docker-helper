@@ -24,6 +24,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectGitRequestIdentity,
     LocalExecutableLockEntry,
     LocalFileLockEntry,
+    LocalTreeLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciRequestIdentity,
@@ -44,7 +45,12 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
-from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.inputs.local import (
+    LocalFilePlanningInput,
+    LocalPlanningInput,
+    LocalTreePlanningInput,
+    index_local_planning_inputs,
+)
 from comfyui_docker_helper.config.planning.request import (
     DesiredResolution,
     SelectorStability,
@@ -120,12 +126,6 @@ class LocalExecutableEntryAcquirer(Protocol):
     ) -> LocalExecutableLockEntry: ...
 
 
-class LocalFileEntryAcquirer(Protocol):
-    """Host-local file content seam kept separate from executable hooks."""
-
-    def acquire(self, request: LocalFileIdentityRequest) -> LocalFileLockEntry: ...
-
-
 class CanonicalResolutionError(DiagnosticError):
     """Deterministically aggregated reconciliation/acquisition failures."""
 
@@ -139,8 +139,8 @@ def reconcile_canonical_lock(
     *,
     local_requests: tuple[LocalExecutableIdentityRequest, ...] = (),
     local_acquirer: LocalExecutableEntryAcquirer | None = None,
-    local_file_requests: tuple[LocalFileIdentityRequest, ...] = (),
-    local_file_acquirer: LocalFileEntryAcquirer | None = None,
+    local_inputs: tuple[LocalPlanningInput, ...] = (),
+    local_targets: tuple[str, ...] = (),
     existing: CanonicalLock | None,
     acquirer: CanonicalEntryAcquirer,
     policy: LockPolicy = LockPolicy.DEFAULT,
@@ -151,8 +151,8 @@ def reconcile_canonical_lock(
         raise ValueError("check uses default reconciliation policy")
     ordered = tuple(sorted(desired, key=lambda item: item.keys))
     hook_entries, hook_reads = _acquire_local_entries(local_requests, local_acquirer)
-    file_entries, file_reads = _acquire_local_file_entries(
-        local_file_requests, local_file_acquirer
+    file_entries, file_reads = _local_entries_from_admission(
+        local_inputs, expected_targets=local_targets
     )
     fixed = (*hook_entries, *file_entries)
     local_reads = (*hook_reads, *file_reads)
@@ -228,7 +228,9 @@ def reconcile_canonical_lock(
 
 def _accept_locked(
     desired: tuple[DesiredResolution, ...],
-    fixed: tuple[LocalExecutableLockEntry | LocalFileLockEntry, ...],
+    fixed: tuple[
+        LocalExecutableLockEntry | LocalFileLockEntry | LocalTreeLockEntry, ...
+    ],
     local_reads: tuple[LockEntryKey, ...],
     existing: CanonicalLock | None,
     existing_by_key: dict[LockEntryKey, CanonicalLockEntry],
@@ -317,35 +319,59 @@ def _acquire_local_entries(
     return tuple(entries), tuple(reads)
 
 
-def _acquire_local_file_entries(
-    requests: tuple[LocalFileIdentityRequest, ...],
-    acquirer: LocalFileEntryAcquirer | None,
-) -> tuple[tuple[LocalFileLockEntry, ...], tuple[LockEntryKey, ...]]:
-    if requests and acquirer is None:
-        raise ValueError("local file requests require a local file acquirer")
-    ordered = tuple(sorted(requests, key=lambda item: item.relative_target.as_posix()))
-    entries: list[LocalFileLockEntry] = []
-    diagnostics: list[Diagnostic] = []
+def _local_entries_from_admission(
+    inputs: tuple[LocalPlanningInput, ...],
+    *,
+    expected_targets: tuple[str, ...] = (),
+) -> tuple[
+    tuple[LocalFileLockEntry | LocalTreeLockEntry, ...],
+    tuple[LockEntryKey, ...],
+]:
+    """Project one already-admitted local input into its optional lock row.
+
+    Local source bytes and tree membership have already been consumed by the
+    Host admission boundary.  Reconciliation must use those exact facts rather
+    than opening the source a second time.
+    """
+    indexed = index_local_planning_inputs(inputs)
+    if len(expected_targets) != len(set(expected_targets)):
+        raise ValueError("local request targets must be unique")
+    missing = sorted(set(expected_targets) - set(indexed))
+    if missing:
+        raise ValueError(f"missing local planning inputs for targets: {missing!r}")
+    unused = sorted(set(indexed) - set(expected_targets))
+    if unused:
+        raise ValueError(f"unused local planning inputs for targets: {unused!r}")
+    entries: list[LocalFileLockEntry | LocalTreeLockEntry] = []
     reads: list[LockEntryKey] = []
-    for request in ordered:
-        key = ("files", "local", request.relative_target.as_posix())
+    for relative_target in sorted(indexed):
+        item = indexed[relative_target]
+        if not item.content_lock:
+            continue
+        key = ("files", "local", relative_target)
         reads.append(key)
-        try:
-            entry = acquirer.acquire(request) if acquirer is not None else None
-        except CanonicalAcquisitionError as error:
-            diagnostics.append(
-                Diagnostic(
-                    path=("config.lock.toml", *key),
-                    code="lock.local_read_failed",
-                    message=str(error),
+        if isinstance(item, LocalFilePlanningInput):
+            if item.digest is None:  # pragma: no cover - input validates this
+                raise ValueError("locked local file input has no digest")
+            entries.append(
+                LocalFileLockEntry(
+                    kind="file",
+                    relative_target=relative_target,
+                    digest=item.digest,
                 )
             )
-            continue
-        if entry is None or canonical_entry_key(entry) != key:
-            raise ValueError("local file acquirer returned an incompatible identity")
-        entries.append(entry)
-    if diagnostics:
-        raise CanonicalResolutionError(tuple(diagnostics))
+        elif isinstance(item, LocalTreePlanningInput):
+            if item.tree_digest is None:  # pragma: no cover - input validates this
+                raise ValueError("locked local tree input has no digest")
+            entries.append(
+                LocalTreeLockEntry(
+                    kind="tree",
+                    relative_target=relative_target,
+                    tree_digest=item.tree_digest,
+                )
+            )
+        else:  # pragma: no cover - closed LocalPlanningInput union
+            raise AssertionError("unsupported local planning input")
     return tuple(entries), tuple(reads)
 
 
@@ -489,7 +515,9 @@ def _locked_diagnostic(key: LockEntryKey, reason: str) -> Diagnostic:
 
 def _validate_desired_keys(
     desired: tuple[DesiredResolution, ...],
-    fixed: tuple[LocalExecutableLockEntry | LocalFileLockEntry, ...],
+    fixed: tuple[
+        LocalExecutableLockEntry | LocalFileLockEntry | LocalTreeLockEntry, ...
+    ],
 ) -> None:
     keys = [key for item in desired for key in item.keys]
     keys.extend(canonical_entry_key(entry) for entry in fixed)

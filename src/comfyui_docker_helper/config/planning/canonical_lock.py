@@ -7,7 +7,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import tomli_w
@@ -30,7 +30,10 @@ from comfyui_docker_helper.config.validation.selectors import (
     normalize_comfyui_version,
     normalize_registry_version,
 )
-from comfyui_docker_helper.config.validation.urls import is_http_url
+from comfyui_docker_helper.config.validation.urls import (
+    is_http_url,
+    is_reserved_file_target_component,
+)
 from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
     validate_managed_python_catalog_key,
@@ -414,6 +417,7 @@ class RuntimeHookLockEntry(LocalExecutableLockEntry):
 class LocalFileLockEntry(_StrictLockModel):
     """Content identity for one locked host-local build file."""
 
+    kind: Literal["file"]
     relative_target: str
     digest: str
 
@@ -422,18 +426,63 @@ class LocalFileLockEntry(_StrictLockModel):
     def _validate_relative_target(cls, value: str) -> str:
         parts = value.split("/")
         if (
-            value.startswith("/")
+            not value
+            or value.startswith("/")
             or "\\" in value
             or has_control_characters(value)
             or any(part in {"", ".", ".."} for part in parts)
+            or any(is_reserved_file_target_component(part) for part in parts)
         ):
             raise ValueError("relative_target must be one canonical relative file path")
+        try:
+            value.encode("utf-8", "strict")
+        except UnicodeEncodeError as error:
+            raise ValueError("relative_target must be strict UTF-8") from error
         return value
 
     @field_validator("digest")
     @classmethod
     def _validate_digest(cls, value: str) -> str:
         return _require_sha256(value)
+
+
+class LocalTreeLockEntry(_StrictLockModel):
+    """Aggregate content identity for one locked host-local directory tree."""
+
+    kind: Literal["tree"]
+    relative_target: str
+    tree_digest: str
+
+    @field_validator("relative_target")
+    @classmethod
+    def _validate_relative_target(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            not value
+            or value.startswith("/")
+            or "\\" in value
+            or has_control_characters(value)
+            or any(part in {"", ".."} for part in parts)
+            or (value != "." and "." in parts)
+            or any(is_reserved_file_target_component(part) for part in parts)
+        ):
+            raise ValueError("relative_target must be one canonical relative tree path")
+        try:
+            value.encode("utf-8", "strict")
+        except UnicodeEncodeError as error:
+            raise ValueError("relative_target must be strict UTF-8") from error
+        return value
+
+    @field_validator("tree_digest")
+    @classmethod
+    def _validate_tree_digest(cls, value: str) -> str:
+        return _require_sha256(value)
+
+
+LocalLockEntry = Annotated[
+    LocalFileLockEntry | LocalTreeLockEntry,
+    Field(discriminator="kind"),
+]
 
 
 CanonicalLockEntry = (
@@ -450,6 +499,7 @@ CanonicalLockEntry = (
     | BuildHookLockEntry
     | RuntimeHookLockEntry
     | LocalFileLockEntry
+    | LocalTreeLockEntry
 )
 
 
@@ -558,7 +608,7 @@ class HooksLock(_StrictLockModel):
 class FilesLock(_StrictLockModel):
     """Optional locked identities for host-local build files."""
 
-    local: tuple[LocalFileLockEntry, ...] = ()
+    local: tuple[LocalLockEntry, ...] = ()
 
     @field_validator("local", mode="before")
     @classmethod
@@ -569,7 +619,7 @@ class FilesLock(_StrictLockModel):
     def _validate_local(self) -> FilesLock:
         targets = [entry.relative_target for entry in self.local]
         if targets != sorted(set(targets)):
-            raise ValueError("local file targets must be sorted and unique")
+            raise ValueError("local targets must be sorted and unique")
         return self
 
 
@@ -1045,6 +1095,8 @@ def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
         return ("hooks", "runtime", entry.relative_path)
     if isinstance(entry, LocalFileLockEntry):
         return ("files", "local", entry.relative_target)
+    if isinstance(entry, LocalTreeLockEntry):
+        return ("files", "local", entry.relative_target)
     raise TypeError(f"unsupported canonical lock entry: {type(entry).__name__}")
 
 
@@ -1149,7 +1201,7 @@ def canonical_lock_from_entries(
                 entry
                 for key, entry in sorted(by_key.items())
                 if key[:2] == ("files", "local")
-                and isinstance(entry, LocalFileLockEntry)
+                and isinstance(entry, (LocalFileLockEntry, LocalTreeLockEntry))
             ),
         ),
     )

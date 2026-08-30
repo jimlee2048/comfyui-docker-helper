@@ -433,6 +433,7 @@ def test_renderer_places_local_files_authoritatively_after_build_mutations() -> 
         *document["files"]["files"],
         {
             "type": "local",
+            "kind": "file",
             "target": f"{plan.application.paths.comfyui}/{relative_target}",
             "relative_target": relative_target,
             "context_path": context_path,
@@ -752,6 +753,7 @@ def _plan_with_local_file(*, digest: str | None = None) -> tuple[BuildPlan, str]
     )
     local = LocalFilePlan(
         type="local",
+        kind="file",
         target=f"/workspace/ComfyUI/{relative_target}",
         relative_target=relative_target,
         context_path=context_path,

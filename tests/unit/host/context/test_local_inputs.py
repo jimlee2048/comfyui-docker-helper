@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from comfyui_docker_helper.config.authored.service import load_validate_config_result
-from comfyui_docker_helper.config.planning.request import LocalFileRequest
+from comfyui_docker_helper.config.planning.request import LocalSourceRequest
 from comfyui_docker_helper.host.context.local_inputs import (
     LocalFilePlanningInput,
     LocalInputAdmissionError,
@@ -45,12 +45,11 @@ content_lock = {str(locked).lower()}
 '''
 
 
-def _request(target: str, *, locked: bool = False) -> LocalFileRequest:
-    return LocalFileRequest(
+def _request(target: str, *, locked: bool = False) -> LocalSourceRequest:
+    return LocalSourceRequest(
         type="local",
         target=f"/opt/ComfyUI/{target}",
         relative_target=target,
-        context_path="build/files/" + "a" * 64,
         content_lock=locked,
     )
 

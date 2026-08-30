@@ -33,7 +33,6 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
     LocalExecutableLockEntry,
-    LocalFileLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciRequestIdentity,
@@ -55,7 +54,6 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
-from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
 from comfyui_docker_helper.config.planning.pytorch import (
     pytorch_resolution_manifest_bytes,
 )
@@ -70,7 +68,6 @@ from comfyui_docker_helper.exact_ledger import (
     COMFYUI_FLOOR_COMMIT,
     COMFYUI_MINIMUM_VERSION,
 )
-from comfyui_docker_helper.filesystem.admission import consume_regular_absolute_file
 from comfyui_docker_helper.host.planning.providers.contracts import (
     DirectGitIdentityProvider,
     DirectGitIdentityRequest,
@@ -574,22 +571,6 @@ class LocalExecutableEntryAcquirer:
         return entry_type(
             relative_path=Path(*path.parts[1:]).as_posix(),
             digest=identity.digest,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class LocalFileEntryAcquirer:
-    """Stream-hash one current host-local build file for lock reconciliation."""
-
-    def acquire(self, request: LocalFileIdentityRequest) -> LocalFileLockEntry:
-        digest = hashlib.sha256()
-        try:
-            consume_regular_absolute_file(request.source_path, digest.update)
-        except (OSError, ValueError) as error:
-            raise CanonicalAcquisitionError("local file could not be read") from error
-        return LocalFileLockEntry(
-            relative_target=request.relative_target.as_posix(),
-            digest=f"sha256:{digest.hexdigest()}",
         )
 
 

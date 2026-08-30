@@ -10,10 +10,9 @@ import stat
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.config.authored.models import FinalLocalFileConfig
 from comfyui_docker_helper.config.authored.publication import (
     PublicationTagError,
     resolve_publication_tags,
@@ -34,11 +33,9 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
-from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestError,
-    FileRequest,
-    LocalFileRequest,
+    LocalSourceRequest,
     build_canonical_request_graph,
 )
 from comfyui_docker_helper.config.planning.resolver import (
@@ -52,7 +49,6 @@ from comfyui_docker_helper.config.planning.resolver import (
 from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     consume_regular_absolute_file,
-    observe_regular_absolute_file,
     operate_regular_absolute_file,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
@@ -61,14 +57,15 @@ from comfyui_docker_helper.host.context.hook_paths import (
     observed_path_is_real_directory,
     observed_path_is_reparse,
 )
+from comfyui_docker_helper.host.context.local_inputs import (
+    LocalInputAdmissionError,
+    admit_local_inputs,
+)
 from comfyui_docker_helper.host.context.runtime_hooks import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
 )
 from comfyui_docker_helper.host.filesystem.private_state import create_private_directory
-from comfyui_docker_helper.host.planning.acquisition import (
-    LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
-)
 from comfyui_docker_helper.host.planning.authority import (
     CachingCanonicalAcquirer,
     build_local_executable_requests,
@@ -213,9 +210,7 @@ def prepare_render_context(
             build_hooks_dir=build_hook_source_root,
             runtime_hook_requests=runtime_hooks.requests,
         )
-        local_file_sources, local_file_requests = _local_file_inputs(
-            result, graph.files, output
-        )
+        local_admission = admit_local_inputs(result, graph.files, output)
         _advance_phase(
             event_sink,
             completed=HostPhase.BUILD_INPUT_RESOLUTION,
@@ -228,8 +223,12 @@ def prepare_render_context(
                 graph.desired,
                 local_requests=local_requests,
                 local_acquirer=local_acquirer,
-                local_file_requests=local_file_requests,
-                local_file_acquirer=FilesystemLocalFileEntryAcquirer(),
+                local_inputs=local_admission.planning_inputs,
+                local_targets=tuple(
+                    item.relative_target
+                    for item in graph.files
+                    if isinstance(item, LocalSourceRequest)
+                ),
                 existing=existing,
                 acquirer=acquirer,
                 policy=selected.policy,
@@ -243,6 +242,7 @@ def prepare_render_context(
         plan = construct_build_plan(
             graph,
             accepted.lock,
+            local_inputs=local_admission.planning_inputs,
             runtime_provenance=_runtime_provenance(result),
         )
         output_plan = _resolve_buildx_output_plan(
@@ -257,13 +257,15 @@ def prepare_render_context(
                 )
                 for request in local_requests
             )
-            + local_file_sources
+            + local_admission.materialization_sources
         )
     except RuntimeHookInputError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except CanonicalResolutionError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except CanonicalRequestError as error:
+        raise HostRenderServiceError(error.diagnostics) from error
+    except LocalInputAdmissionError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except PublicationTagError as error:
         raise HostRenderServiceError(
@@ -333,52 +335,6 @@ def _observed_subphase(
     _emit(event_sink, HostSubphaseStarted(subphase))
     yield
     _emit(event_sink, HostSubphaseCompleted(subphase))
-
-
-def _local_file_inputs(
-    result: ConfigurationResult,
-    graph_files: tuple[FileRequest, ...],
-    output: Path,
-) -> tuple[
-    tuple[LocalMaterializationSource, ...],
-    tuple[LocalFileIdentityRequest, ...],
-]:
-    sources: list[LocalMaterializationSource] = []
-    requests: list[LocalFileIdentityRequest] = []
-    for item, normalized, request in zip(
-        result.config.files, result.domains.files, graph_files, strict=True
-    ):
-        if not isinstance(item, FinalLocalFileConfig):
-            continue
-        if not isinstance(request, LocalFileRequest):
-            raise AssertionError("local file request projection is inconsistent")
-        locator = Path(item.source)
-        source = locator if locator.is_absolute() else result.secret_file_base / locator
-        source = Path(os.path.abspath(source))
-        _validate_input_output_separation(output, source, "local file")
-        try:
-            observe_regular_absolute_file(source)
-        except (OSError, ValueError) as error:
-            raise _render_error(
-                "render.local_file_source_unavailable",
-                "local file source must be a readable regular file without links",
-            ) from error
-        if normalized.relative_target == ".":
-            raise _render_error(
-                "render.local_file_target_invalid",
-                "local file target must name an exact file below COMFYUI_PATH",
-            )
-        sources.append(
-            LocalMaterializationSource(PurePosixPath(request.context_path), source)
-        )
-        if item.content_lock:
-            requests.append(
-                LocalFileIdentityRequest(
-                    source_path=source,
-                    relative_target=PurePosixPath(normalized.relative_target),
-                )
-            )
-    return tuple(sources), tuple(requests)
 
 
 def _resolve_buildx_output_plan(

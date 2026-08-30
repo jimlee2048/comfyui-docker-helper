@@ -17,6 +17,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     CudaImageLockEntry,
     DirectGitLockEntry,
     LocalFileLockEntry,
+    LocalTreeLockEntry,
     ManagedPythonLockEntry,
     OfficialComfyUILockEntry,
     PyTorchLockEntry,
@@ -323,6 +324,7 @@ def test_local_file_lock_round_trip_is_target_keyed_and_deterministic() -> None:
     entries = [
         *_entries(),
         LocalFileLockEntry(
+            kind="file",
             relative_target="models/model.bin",
             digest=DIGEST_C,
         ),
@@ -339,3 +341,26 @@ def test_local_file_lock_round_trip_is_target_keyed_and_deterministic() -> None:
         "models/model.bin",
     )
     assert "[[files.local]]" in document
+
+
+def test_local_tree_lock_round_trip_is_one_aggregate_target_row() -> None:
+    entries = [
+        *_entries(),
+        LocalTreeLockEntry(
+            kind="tree",
+            relative_target=".",
+            tree_digest=DIGEST_C,
+        ),
+    ]
+
+    lock = canonical_lock_from_entries(entries)
+    document = dump_canonical_lock_toml(lock)
+    parsed = parse_canonical_lock_toml(document)
+
+    assert parsed == lock
+    assert parsed.files.local == (
+        LocalTreeLockEntry(kind="tree", relative_target=".", tree_digest=DIGEST_C),
+    )
+    assert 'kind = "tree"' in document
+    assert "tree_digest" in document
+    assert "members" not in document

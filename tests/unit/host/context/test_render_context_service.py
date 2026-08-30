@@ -398,48 +398,6 @@ def test_check_compares_complete_path_type_and_bytes_without_following(
     assert outside.read_text() == "outside sentinel"
 
 
-def test_check_unlocked_local_file_rejects_size_before_reading_bytes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "model.bin"
-    source.write_bytes(b"original")
-    config = tmp_path / "config.toml"
-    config.write_text(
-        _config()
-        + f'''
-[cdh]
-local_file_mode = "copy"
-
-[[files]]
-type = "local"
-source = "{source.as_posix()}"
-target = "models/model.bin"
-'''
-    )
-    output = tmp_path / "context"
-    prepared = _prepare(config, output, FakeAcquirer())
-    context_file = output / prepared.plan.files.files[0].context_path
-    context_file.write_bytes(b"different size")
-
-    monkeypatch.setattr(
-        render_service_module.AdmittedRegularFileReader,
-        "read_chunk",
-        lambda *_args, **_kwargs: pytest.fail(
-            "size mismatch must not consume file bytes"
-        ),
-    )
-    with pytest.raises(HostRenderServiceError) as raised:
-        _prepare(
-            config,
-            output,
-            FakeAcquirer(),
-            options=PlanningOptions(check=True),
-        )
-
-    assert raised.value.diagnostics[0].code == "render.context_changed"
-
-
 def test_check_unlocked_local_file_detects_same_size_byte_mismatch(
     tmp_path: Path,
 ) -> None:

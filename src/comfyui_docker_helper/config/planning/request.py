@@ -138,15 +138,21 @@ class HttpFileRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class LocalFileRequest:
+class LocalSourceRequest:
+    """Shape-neutral intent for one host-local build source.
+
+    The source is intentionally not represented here: Host admission determines
+    whether the locator is one file or one directory tree.  The admitted
+    planning input carries the kind-specific context identity and inventory.
+    """
+
     type: Literal["local"]
     target: str
     relative_target: str
-    context_path: str
     content_lock: bool
 
 
-type FileRequest = HttpFileRequest | LocalFileRequest
+type FileRequest = HttpFileRequest | LocalSourceRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,15 +497,11 @@ def build_canonical_request_graph(
                 )
             )
         else:
-            slot = hashlib.sha256(
-                normalized.relative_target.encode("utf-8")
-            ).hexdigest()
             files.append(
-                LocalFileRequest(
+                LocalSourceRequest(
                     type="local",
                     target=target,
                     relative_target=normalized.relative_target,
-                    context_path=f"build/files/{slot}",
                     content_lock=item.content_lock,
                 )
             )

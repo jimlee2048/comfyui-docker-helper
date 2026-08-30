@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import tomli_w
@@ -29,6 +29,8 @@ from comfyui_docker_helper.config.authored.validation.structure import (
 from comfyui_docker_helper.config.planning.build_plan import (
     BUILD_PLAN_SCHEMA_VERSION,
     BuildPlan,
+    LocalTreeMemberPlan,
+    LocalTreePlan,
     RuntimePlanningProvenance,
 )
 from comfyui_docker_helper.config.planning.build_plan import (
@@ -38,14 +40,24 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     CanonicalLock,
     DirectPythonRequestIdentity,
     LocalFileLockEntry,
+    LocalTreeLockEntry,
     PyTorchRequestIdentity,
     UvToolLockEntry,
     canonical_lock_from_entries,
+)
+from comfyui_docker_helper.config.planning.inputs.local import (
+    LocalFilePlanningInput,
+    LocalTreePlanningInput,
+)
+from comfyui_docker_helper.config.planning.local_tree import (
+    LocalTreeInventory,
+    local_tree_digest,
 )
 from comfyui_docker_helper.config.planning.resolver import AcceptedCanonicalLock
 from comfyui_docker_helper.exact_ledger import (
     UV_IMAGE_REPOSITORY,
 )
+from comfyui_docker_helper.filesystem.admission import LocalTreeMember
 from comfyui_docker_helper.version import package_version
 
 _VALID_SSH_KEY = (
@@ -574,7 +586,7 @@ def test_local_file_mode_does_not_change_image_config_identity() -> None:
     assert first_graph.image_config_digest == second_graph.image_config_digest
 
 
-def test_local_file_locator_is_not_serialized_and_slot_depends_only_on_target() -> None:
+def test_local_graph_identity_depends_only_on_target_and_lock_mode() -> None:
     first_document = final_config().model_dump(mode="json", exclude_none=True)
     first_document["files"] = [
         {
@@ -594,8 +606,11 @@ def test_local_file_locator_is_not_serialized_and_slot_depends_only_on_target() 
     second_graph = request_graph(second_config, resolution)
 
     assert first_graph == second_graph
-    assert "/private/" not in repr(first_graph)
-    assert first_graph.files[0].context_path.startswith("build/files/")
+    local = first_graph.files[0]
+    assert local.type == "local"
+    assert local.target == "/workspace/ComfyUI/models/model.bin"
+    assert local.relative_target == "models/model.bin"
+    assert local.content_lock is False
 
 
 def test_local_file_plan_consumes_only_locked_content_identity() -> None:
@@ -614,6 +629,7 @@ def test_local_file_plan_consumes_only_locked_content_identity() -> None:
         [
             *resolution.lock.entries,
             LocalFileLockEntry(
+                kind="file",
                 relative_target="models/model.bin",
                 digest=DIGEST_A,
             ),
@@ -621,11 +637,132 @@ def test_local_file_plan_consumes_only_locked_content_identity() -> None:
     )
     locked_resolution = AcceptedCanonicalLock(lock, (), False, (), ())
 
-    item = build_plan(config, locked_resolution).files.files[0]
+    context_path = "build/files/" + hashlib.sha256(b"models/model.bin").hexdigest()
+    item = build_plan(
+        config,
+        locked_resolution,
+        local_inputs=(
+            LocalFilePlanningInput(
+                relative_target=PurePosixPath("models/model.bin"),
+                context_path=PurePosixPath(context_path),
+                content_lock=True,
+                digest=DIGEST_A,
+            ),
+        ),
+    ).files.files[0]
 
     assert item.type == "local"
     assert item.verification == "sha256"
     assert item.digest == DIGEST_A
+
+
+def test_local_tree_plan_freezes_sorted_structure_without_unlocked_content() -> None:
+    document = final_config().model_dump(mode="json", exclude_none=True)
+    relative_target = "user/default/workflows"
+    document["files"] = [
+        {
+            "type": "local",
+            "source": "workflows",
+            "target": relative_target,
+            "content_lock": False,
+        }
+    ]
+    config = validate_final_config_structure(document)
+    resolution = accepted_resolution()
+    inventory = LocalTreeInventory(
+        (
+            LocalTreeMember("nested", "directory", "0755"),
+            LocalTreeMember("nested/file.txt", "file", "0644"),
+        )
+    )
+    context_path = PurePosixPath(
+        "build/trees/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+    )
+    admitted = LocalTreePlanningInput(
+        relative_target=PurePosixPath(relative_target),
+        context_path=context_path,
+        content_lock=False,
+        root_mode="0755",
+        inventory=inventory,
+        tree_digest=None,
+    )
+
+    plan = build_plan(config, resolution, local_inputs=(admitted,))
+    item = plan.files.files[0]
+
+    assert isinstance(item, LocalTreePlan)
+    assert item.target == "/workspace/ComfyUI/user/default/workflows"
+    assert item.context_path == context_path.as_posix()
+    assert item.root_mode == "0755"
+    assert item.members == (
+        LocalTreeMemberPlan(
+            relative_path="nested",
+            kind="directory",
+            mode="0755",
+            size=None,
+            digest=None,
+        ),
+        LocalTreeMemberPlan(
+            relative_path="nested/file.txt",
+            kind="file",
+            mode="0644",
+            size=None,
+            digest=None,
+        ),
+    )
+    assert item.tree_digest is None
+    assert BuildPlan.model_validate_json(plan.model_dump_json()) == plan
+
+
+def test_local_tree_plan_root_sentinel_and_locked_aggregate_are_current_v1() -> None:
+    document = final_config().model_dump(mode="json", exclude_none=True)
+    document["files"] = [
+        {
+            "type": "local",
+            "source": ".",
+            "target": ".",
+            "content_lock": True,
+        }
+    ]
+    config = validate_final_config_structure(document)
+    resolution = accepted_resolution()
+    inventory = LocalTreeInventory(())
+    tree_digest = local_tree_digest(inventory)
+    lock = canonical_lock_from_entries(
+        [
+            *resolution.lock.entries,
+            LocalTreeLockEntry(
+                kind="tree",
+                relative_target=".",
+                tree_digest=tree_digest,
+            ),
+        ]
+    )
+    locked_resolution = AcceptedCanonicalLock(lock, (), False, (), ())
+    relative_target = PurePosixPath(".")
+    admitted = LocalTreePlanningInput(
+        relative_target=relative_target,
+        context_path=PurePosixPath(
+            "build/trees/"
+            + hashlib.sha256(relative_target.as_posix().encode("utf-8")).hexdigest()
+        ),
+        content_lock=True,
+        root_mode="0755",
+        inventory=inventory,
+        tree_digest=tree_digest,
+    )
+
+    item = build_plan(
+        config,
+        locked_resolution,
+        local_inputs=(admitted,),
+    ).files.files[0]
+
+    assert isinstance(item, LocalTreePlan)
+    assert item.target == "/workspace/ComfyUI"
+    assert item.relative_target == "."
+    assert item.members == ()
+    assert item.tree_digest == tree_digest
 
 
 def test_redundant_default_package_and_ssh_key_spelling_do_not_change_plan(

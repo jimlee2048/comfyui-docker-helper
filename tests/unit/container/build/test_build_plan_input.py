@@ -33,6 +33,7 @@ def _plan_with_local_file(*, locked: bool) -> BuildPlan:
     relative_target = "models/model.bin"
     local = LocalFilePlan(
         type="local",
+        kind="file",
         target="/workspace/ComfyUI/models/model.bin",
         relative_target=relative_target,
         context_path=(

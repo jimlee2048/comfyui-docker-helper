@@ -27,7 +27,6 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
-from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
 from comfyui_docker_helper.config.planning.request import DesiredResolution
 from comfyui_docker_helper.config.planning.resolver import (
     CanonicalAcquisitionError,
@@ -38,7 +37,6 @@ from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
 from comfyui_docker_helper.host.planning.acquisition import (
     DockerPythonGroupResolver,
     LocalExecutableEntryAcquirer,
-    LocalFileEntryAcquirer,
     ProviderIdentityAcquirer,
     ResolvedPythonGroup,
     ResolvedPythonMember,
@@ -742,19 +740,3 @@ def test_local_hook_acquisition_returns_typed_tree_row_without_prefix() -> None:
     assert isinstance(entry, BuildHookLockEntry)
     assert entry.relative_path == "common/setup.sh"
     assert entry.digest == DIGEST_A
-
-
-def test_local_file_acquisition_streams_current_content_into_target_key(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "model.bin"
-    source.write_bytes(b"model-content")
-    request = LocalFileIdentityRequest(
-        source,
-        PurePosixPath("models/model.bin"),
-    )
-
-    entry = LocalFileEntryAcquirer().acquire(request)
-
-    assert entry.relative_target == "models/model.bin"
-    assert entry.digest == (f"sha256:{hashlib.sha256(b'model-content').hexdigest()}")

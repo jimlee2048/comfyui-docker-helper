@@ -25,9 +25,6 @@ from comfyui_docker_helper.host.context.service import (
     HostRenderServiceError,
     PlanningOptions,
 )
-from comfyui_docker_helper.host.planning.acquisition import (
-    LocalFileEntryAcquirer,
-)
 
 
 def test_local_requirements_parser_failure_leaves_no_partial_context(
@@ -181,7 +178,6 @@ content_lock = true
 @pytest.mark.parametrize("locator_kind", ["relative", "absolute"])
 def test_unlocked_local_file_admits_both_locator_shapes_without_hashing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     locator_kind: str,
 ) -> None:
     config_dir = tmp_path / "configuration"
@@ -205,11 +201,6 @@ target = "models/model.bin"
     )
     output = tmp_path / "context"
 
-    monkeypatch.setattr(
-        LocalFileEntryAcquirer,
-        "acquire",
-        lambda *_args: pytest.fail("unlocked local file must not be hashed"),
-    )
     prepared = _prepare(config, output, FakeAcquirer())
     local = prepared.plan.files.files[0]
     source.write_bytes(b"source changed after publication")

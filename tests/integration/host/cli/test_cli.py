@@ -324,6 +324,7 @@ def test_root_command_exposes_current_groups() -> None:
         "emit-final-manifest",
         "install-comfyui",
         "install-custom-nodes",
+        "normalize-local-trees",
         "runtime",
     }
     assert set(command.commands["container"].commands["runtime"].commands) == {

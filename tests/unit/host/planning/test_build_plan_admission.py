@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -103,6 +104,47 @@ def test_build_plan_parser_accepts_reused_build_hook_and_separate_tree_path() ->
 
     assert parsed.custom_nodes.nodes[0].pre_install_hooks[0].digest == DIGEST_A
     assert parsed.runtime.hooks[0].relative_path == "pre-start.d/shared.py"
+
+
+def test_build_plan_rejects_file_target_ancestor_overlap_across_file_kinds() -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    root = "/workspace/ComfyUI"
+    local_relative_target = "models/checkpoints/local.bin"
+    tree_relative_target = "models/checkpoints"
+    http = dict(document["files"]["files"][0])
+    http["target"] = f"{root}/models/checkpoints/remote.bin"
+    local = {
+        "type": "local",
+        "kind": "file",
+        "target": f"{root}/{local_relative_target}",
+        "relative_target": local_relative_target,
+        "context_path": (
+            "build/files/"
+            + hashlib.sha256(local_relative_target.encode("utf-8")).hexdigest()
+        ),
+        "verification": "unverified-local",
+        "digest": None,
+    }
+    tree = {
+        "type": "local",
+        "kind": "tree",
+        "target": f"{root}/{tree_relative_target}",
+        "relative_target": tree_relative_target,
+        "context_path": (
+            "build/trees/"
+            + hashlib.sha256(tree_relative_target.encode("utf-8")).hexdigest()
+        ),
+        "root_mode": "0755",
+        "verification": "unverified-local",
+        "members": (),
+        "tree_digest": None,
+    }
+    document["files"]["files"] = (http, local, tree)
+
+    with pytest.raises(ValidationError, match="file targets must not overlap"):
+        BuildPlan.model_validate(document)
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,8 @@ from comfyui_docker_helper.config.planning.build_plan import (
 from comfyui_docker_helper.container.build.admission import (
     BuildPlanInputAdmission,
     FinalManifestLocalFileInput,
+    LocalTreeMemberInput,
+    LocalTreeNormalizationInput,
 )
 from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
@@ -67,6 +69,56 @@ def test_admission_projects_authenticated_plan_for_container_consumers(
     assert admission.file_downloads() == (
         plan.files,
         plan.application.paths.comfyui,
+    )
+
+
+def test_admission_projects_only_plan_selected_tree_paths_and_modes() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    relative_target = "user/default/workflows"
+    tree = {
+        "type": "local",
+        "kind": "tree",
+        "target": f"{plan.application.paths.comfyui}/{relative_target}",
+        "relative_target": relative_target,
+        "context_path": (
+            "build/trees/" + hashlib.sha256(relative_target.encode()).hexdigest()
+        ),
+        "root_mode": "0755",
+        "verification": "unverified-local",
+        "members": (
+            {
+                "relative_path": "nested",
+                "kind": "directory",
+                "mode": "0755",
+                "size": None,
+                "digest": None,
+            },
+            {
+                "relative_path": "nested/file.bin",
+                "kind": "file",
+                "mode": "0644",
+                "size": None,
+                "digest": None,
+            },
+        ),
+        "tree_digest": None,
+    }
+    document = plan.model_dump(mode="python")
+    document["files"]["files"] = (tree,)
+    plan = BuildPlan.model_validate(document)
+
+    projected, root = BuildPlanInputAdmission(plan).local_trees()
+
+    assert root == plan.application.paths.comfyui
+    assert projected == (
+        LocalTreeNormalizationInput(
+            target=f"{root}/{relative_target}",
+            root_mode="0755",
+            members=(
+                LocalTreeMemberInput("nested", "directory", "0755"),
+                LocalTreeMemberInput("nested/file.bin", "file", "0644"),
+            ),
+        ),
     )
 
 

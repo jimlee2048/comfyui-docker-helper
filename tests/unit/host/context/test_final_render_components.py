@@ -456,6 +456,73 @@ def test_renderer_places_local_files_authoritatively_after_build_mutations() -> 
     assert rendered.index(copy_line) < rendered.index("container emit-final-manifest")
 
 
+def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
+    plan, context_path = _plan_with_local_tree()
+    document = plan.model_dump(mode="python")
+    empty_relative_target = "models/empty-tree"
+    empty_context_path = (
+        "build/trees/"
+        + hashlib.sha256(empty_relative_target.encode("utf-8")).hexdigest()
+    )
+    document["files"]["files"] = (
+        *document["files"]["files"],
+        {
+            "type": "local",
+            "kind": "tree",
+            "target": f"{plan.application.paths.comfyui}/{empty_relative_target}",
+            "relative_target": empty_relative_target,
+            "context_path": empty_context_path,
+            "root_mode": "0755",
+            "verification": "unverified-local",
+            "members": (),
+            "tree_digest": None,
+        },
+    )
+    plan = BuildPlan.model_validate(document)
+
+    rendered = render_build_plan_dockerfile(plan)
+    copy_lines = (
+        "COPY --link "
+        + json.dumps(
+            [
+                f"{context_path}/",
+                f"{plan.application.paths.comfyui}/user/default/workflows/",
+            ]
+        ),
+        "COPY --link "
+        + json.dumps(
+            [
+                f"{empty_context_path}/",
+                f"{plan.application.paths.comfyui}/{empty_relative_target}/",
+            ]
+        ),
+    )
+    normalizer_blocks = tuple(
+        block for block in _run_blocks(rendered) if "normalize-local-trees" in block
+    )
+
+    assert all(rendered.count(copy_line) == 1 for copy_line in copy_lines)
+    assert rendered.count("normalize-local-trees") == 1
+    assert len(normalizer_blocks) == 1
+    normalizer = normalizer_blocks[0]
+    assert (
+        normalizer.count(
+            "--mount=type=bind,source=build-plan.json,"
+            "target=/opt/cdh/build/build-plan.json,readonly"
+        )
+        == 1
+    )
+    assert f"--build-plan-digest {build_plan_digest(plan)}" in _flatten_command(
+        normalizer
+    )
+    assert rendered.index(copy_lines[0]) < rendered.index(copy_lines[1])
+    normalizer_index = rendered.index("normalize-local-trees")
+    assert max(rendered.index(copy_line) for copy_line in copy_lines) < normalizer_index
+    assert rendered.index("normalize-local-trees") < rendered.index(
+        "container emit-final-manifest"
+    )
+
+
 # Custom-node and application modes render one ordered observed execution boundary.
 def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> None:
     plan = build_plan(

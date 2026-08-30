@@ -20,6 +20,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
     HttpFilePlan,
     LocalFilePlan,
+    LocalTreePlan,
     ManifestBinding,
     ToolchainPhase,
     build_plan_digest,
@@ -88,6 +89,24 @@ class FinalCoreProbeInput:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalTreeMemberInput:
+    """One Plan-selected tree member needed by image normalization."""
+
+    relative_path: str
+    kind: Literal["directory", "file"]
+    mode: Literal["0755", "0644"]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTreeNormalizationInput:
+    """One typed, tree-only projection for the image normalizer."""
+
+    target: str
+    root_mode: Literal["0755"]
+    members: tuple[LocalTreeMemberInput, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class BuildPlanInputAdmission:
     """Invocation-scoped admission with command-specific typed projections."""
 
@@ -125,6 +144,19 @@ class BuildPlanInputAdmission:
     def file_downloads(self) -> tuple[FilesPhase, str]:
         """Project file policy with its authoritative ComfyUI root."""
         return self._plan.files, self._plan.application.paths.comfyui
+
+    def local_trees(
+        self,
+    ) -> tuple[tuple[LocalTreeNormalizationInput, ...], str]:
+        """Project only expected local-tree paths and modes for normalization."""
+        return (
+            tuple(
+                _local_tree_input(item)
+                for item in self._plan.files.files
+                if isinstance(item, LocalTreePlan)
+            ),
+            self._plan.application.paths.comfyui,
+        )
 
     def final_manifest(self) -> FinalManifestInput:
         """Project only the complete cross-domain final observation inputs."""
@@ -188,4 +220,20 @@ def _manifest_file_input(
         target=item.target,
         verification=item.verification,
         digest=item.digest,
+    )
+
+
+def _local_tree_input(item: LocalTreePlan) -> LocalTreeNormalizationInput:
+    """Drop content identities from the tree-only mutation projection."""
+    return LocalTreeNormalizationInput(
+        target=item.target,
+        root_mode=item.root_mode,
+        members=tuple(
+            LocalTreeMemberInput(
+                relative_path=member.relative_path,
+                kind=member.kind,
+                mode=member.mode,
+            )
+            for member in item.members
+        ),
     )

@@ -1433,6 +1433,10 @@ class BuildPlan(_PlanModel):
                 )
         if len(file_targets) != len(set(file_targets)):
             raise ValueError("file targets must be unique")
+        for index, target in enumerate(file_targets):
+            for other in file_targets[index + 1 :]:
+                if target.is_relative_to(other) or other.is_relative_to(target):
+                    raise ValueError("file targets must not overlap")
         for item in self.files.files:
             if not isinstance(item, LocalFilePlan):
                 if not isinstance(item, LocalTreePlan):

@@ -116,6 +116,42 @@ def test_local_tree_evidence_is_strict_and_compact() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("verification", "intended", "observed", "message"),
+    [
+        ("sha256", None, None, "verified local tree digest must match"),
+        (
+            "sha256",
+            "sha256:" + "a" * 64,
+            "sha256:" + "b" * 64,
+            "verified local tree digest must match",
+        ),
+        (
+            "unverified-local",
+            "sha256:" + "a" * 64,
+            None,
+            "unverified local tree evidence must omit content digests",
+        ),
+    ],
+    ids=["sha256-missing-digest", "sha256-digest-mismatch", "unverified-with-digest"],
+)
+def test_local_tree_evidence_enforces_verification_digest_schema(
+    verification: str,
+    intended: str | None,
+    observed: str | None,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        LocalTreeEvidence(
+            type="local",
+            kind="tree",
+            target="/workspace/ComfyUI/user/default/workflows",
+            verification=verification,
+            intended_tree_digest=intended,
+            observed_tree_digest=observed,
+        )
+
+
 def test_file_target_authority_is_shared_by_plan_and_manifest() -> None:
     reserved = "/workspace/ComfyUI/.cdh-staging/model.bin"
     with pytest.raises(ValueError, match="reserved staging"):

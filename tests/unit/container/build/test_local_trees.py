@@ -68,6 +68,20 @@ def test_normalizer_modes_new_nested_target_parents_under_restrictive_umask(
     assert unrelated.stat().st_mode & 0o777 == 0o700
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="requires symbolic links")
+def test_normalizer_rejects_symlink_target_parent_without_following_it(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    target_parent = root / "user" / "default"
+    target_parent.parent.mkdir()
+    target_parent.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    with pytest.raises(LocalTreeNormalizationError, match="link or reparse"):
+        normalize_local_trees((_tree(root, "user/default/workflows"),), root)
+
+
 def test_normalizer_preserves_unrelated_overlay_entries_and_sets_selected_modes(
     tmp_path: Path,
 ) -> None:

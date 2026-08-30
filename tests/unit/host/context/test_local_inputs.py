@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,30 @@ def test_file_bundle_keeps_file_shape_and_source_output_separation(
         )
     assert raised.value.diagnostics[0].code == "render.input_output_overlap"
     assert str(source) not in raised.value.diagnostics[0].message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX symlink loop")
+def test_self_loop_source_reports_content_safe_inspection_failure(
+    tmp_path: Path,
+) -> None:
+    source_locator = "self-loop"
+    source = tmp_path / source_locator
+    source.symlink_to(source.name)
+    config = tmp_path / "config.toml"
+    config.write_text(_config_with_local(source_locator, "models/model.bin"))
+    result = load_validate_config_result(config)
+
+    with pytest.raises(LocalInputAdmissionError) as raised:
+        admit_local_inputs(
+            result,
+            (_request("models/model.bin"),),
+            tmp_path / "context",
+        )
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "render.input_output_inspect_failed"
+    assert source_locator not in diagnostic.message
+    assert source_locator not in str(raised.value)
 
 
 def test_reserved_tree_member_diagnostic_is_source_relative(

@@ -1060,6 +1060,60 @@ def test_materializer_writes_one_complete_local_tree_context(
         assert (context / ".hidden" / "payload.bin").stat().st_mode & 0o777 == 0o644
 
 
+@pytest.mark.parametrize(
+    "drift_phase",
+    ["before", "during"],
+    ids=["before-materialization", "during-materialization"],
+)
+def test_materializer_maps_tree_membership_drift_to_its_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift_phase: str,
+) -> None:
+    source = tmp_path / "tree"
+    (source / ".hidden" / "empty").mkdir(parents=True)
+    (source / ".hidden" / "payload.bin").write_bytes(b"hidden")
+    (source / "nested").mkdir()
+    (source / "nested" / "payload.bin").write_bytes(b"nested")
+    plan, context_path = _plan_with_local_tree()
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+    drift = file_admission.TreeAdmissionError(
+        "synthetic membership drift",
+        code="membership_drift",
+    )
+    outcomes: list[file_admission.TreeAdmissionError | None] = (
+        [drift] if drift_phase == "before" else [None, drift]
+    )
+
+    def revalidate(
+        _source: Path,
+        expected: file_admission.LocalTreeInventory,
+    ) -> file_admission.LocalTreeInventory:
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        return expected
+
+    monkeypatch.setattr(materializer_module, "revalidate_local_tree", revalidate)
+
+    with pytest.raises(
+        FinalMaterializationError,
+        match=f"changed {drift_phase} materialization",
+    ):
+        _materialize_private_stage(
+            plan,
+            stage,
+            canonical_wheel=canonical_wheel(),
+            local_sources=(
+                LocalMaterializationSource(
+                    PurePosixPath(context_path), source, kind="tree"
+                ),
+            ),
+            local_file_mode="copy",
+        )
+
+
 def test_materializer_requires_tree_source_kind_to_match_plan(
     tmp_path: Path,
 ) -> None:

@@ -791,6 +791,20 @@ def test_locked_local_tree_rejects_digest_drift_without_inventorying_overlay(
         final_manifest_service._local_tree_evidence(item, root)
 
 
+def test_local_tree_observation_rejects_expected_member_ancestor_link(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    item = _tree_projection(root, locked=False)
+    ancestor = Path(item.target, "nested")
+    (ancestor / "selected.txt").unlink()
+    ancestor.rmdir()
+    ancestor.symlink_to(root / "elsewhere", target_is_directory=True)
+
+    with pytest.raises(FinalManifestError, match="link or reparse"):
+        final_manifest_service._local_tree_evidence(item, root)
+
+
 @pytest.mark.parametrize(
     "failure",
     ["missing", "type", "link", "mode"],

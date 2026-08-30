@@ -178,7 +178,7 @@ def _ensure_source_output_separation(
     try:
         output_resolved = output.resolve(strict=False)
         source_resolved = source.resolve(strict=True)
-    except (OSError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         raise LocalInputAdmissionError(
             (
                 Diagnostic(

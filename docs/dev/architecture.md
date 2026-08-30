@@ -30,18 +30,18 @@ The root CLI, configuration, shared services, rendering, and every `cdh host *` 
 
 `cdh container *` is an image-internal Linux execution surface. On a non-Linux host the package and root CLI remain importable, container help remains available, and attempting to execute a container helper returns the platform-boundary diagnostic without importing its Linux-only implementation closure.
 
-Host source admission observes user-selected local inputs under a cooperative-input contract rather than treating them as an adversarial filesystem namespace. It rejects unsafe path shapes and statically observed links, reparse points, and special files, then obtains regular-file shape, size, consumed bytes, and any requested content identity from one opened leaf. Large local build files use descriptor- or handle-backed bounded streaming without a cdh size ceiling. This does not isolate those inputs from an untrusted local process modifying them concurrently. The boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
+Host source admission for public `type = "local"` `[[files]]` declarations handles one user-selected regular file or complete directory tree under a cooperative-input contract. It rejects unsafe shapes and observed links, reparse points, and special files; accepted file/tree facts flow through the public-local admission bundle and BuildPlan, while host locators remain out of serialized artifacts. Hook roots and local executable inputs use separate admission/acquisition paths. The boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
 
 ## Component responsibilities
 
 | Component | Responsibility |
 | --- | --- |
 | [`cli_output/`](../../src/comfyui_docker_helper/cli_output/) | Presentation-neutral root detail settings, independent stream capability policy, control-safe text, and the minimal injected event-sink protocol. It contains no Host or Container renderer. |
-| [`config/`](../../src/comfyui_docker_helper/config/) | Strict public and runtime models, merge and validation, canonical request/lock/reconciliation models, BuildPlan construction, and final-manifest schemas. It owns shared decisions and serialized shapes, not concrete external I/O orchestration. |
-| [`filesystem/`](../../src/comfyui_docker_helper/filesystem/) | Cooperative cross-platform regular-file admission, bounded reads and streaming, platform-available clone support, and Windows filesystem primitives. It is a shared low-level boundary with no Host, rendering, or Container orchestration. |
+| [`config/`](../../src/comfyui_docker_helper/config/) | Strict public and runtime models, merge and validation, and canonical request/lock/reconciliation models. `config/planning/` owns local-tree digests, serialized planning projections, and BuildPlan construction; `config/evidence/` owns final-manifest schemas. The component owns shared decisions and serialized shapes, not concrete external I/O orchestration. |
+| [`filesystem/`](../../src/comfyui_docker_helper/filesystem/) | Cooperative cross-platform regular-file and complete local-tree admission, member inventory records, bounded reads and streaming, platform-available clone support, and Windows filesystem primitives. It is a shared low-level boundary with no Host, rendering, or Container orchestration. |
 | [`host/`](../../src/comfyui_docker_helper/host/) | Operator CLI composition, provider acquisition, command-scoped Secret resolution and credential delivery, Docker-backed uv resolution, canonical-wheel construction, lock/context orchestration, publication choices, diagnostics, and Buildx invocation. It owns host filesystem, network, Git, Docker, and package-build effects. |
 | [`rendering/`](../../src/comfyui_docker_helper/rendering/) | Deterministic projection of one BuildPlan plus verified release/local inputs into a directly Buildx-usable context and Dockerfile. Rendering does not plan or resolve identities. |
-| [`container/`](../../src/comfyui_docker_helper/container/) | Image-internal BuildPlan admission, build-time installation/download/final observation, and runtime configuration, transfer, hook, SSH, process, and lifecycle services. |
+| [`container/`](../../src/comfyui_docker_helper/container/) | Image-internal BuildPlan admission, build-time installation/download/local-tree normalization/final observation, and runtime configuration, transfer, hook, SSH, process, and lifecycle services. |
 
 Package-level modules provide package-wide authorities such as release artifacts, SSH build inputs, and exact project-owned identities. Planning-specific requirement and PyTorch rules live under `config/planning/`; these modules support the core planning and execution components without creating another orchestration layer.
 
@@ -60,10 +60,11 @@ Data flows forward:
 ```text
 effective config
   -> in-memory canonical request graph
+  -> one Host public-local-file/tree admission bundle
   -> accepted canonical lock
-  -> BuildPlan
-  -> rendered context
-  -> image mutations
+  -> BuildPlan (complete tree inventory; locked local-file SHA/tree aggregate identities)
+  -> private materialization/rendered context
+  -> image mutations and local-tree normalization
   -> final observation
 ```
 
@@ -75,12 +76,13 @@ The following table locates the main planning and evidence concepts. The [cross-
 
 | Concept | Location and role |
 | --- | --- |
-| [Canonical request graph](../../src/comfyui_docker_helper/config/planning/request.py) | An immutable in-memory projection assembled during host planning. Reconciliation consumes its desired requests, and BuildPlan construction consumes the same graph with the accepted lock. |
-| [Canonical lock](../../src/comfyui_docker_helper/config/planning/canonical_lock.py) | Strict serialized host reconciliation state containing accepted exact external and opted-in local-content identities. An unlocked local build file has no content row. The lock is written beside the context but excluded from Docker build input. |
-| [BuildPlan](../../src/comfyui_docker_helper/config/planning/build_plan.py) | The immutable build execution plan constructed from the request graph and accepted lock, then serialized into the Docker context and mounted read-only for authenticated, command-specific container consumption. cdh does not retain it in the final image filesystem. |
+| [Canonical request graph](../../src/comfyui_docker_helper/config/planning/request.py) | An immutable in-memory projection assembled during host planning. Local source requests remain shape-neutral; the graph carries no host locator or tree inventory. Reconciliation and BuildPlan construction consume this graph with one matching public-local admission bundle. See [planning contracts](contracts.md#canonical-request-graph). |
+| Host public-local-file/tree admission bundle ([adapter](../../src/comfyui_docker_helper/host/context/local_inputs.py)) | One process-local bundle per preparation attempt containing admitted public local-file/tree facts, private materialization sources, and empty-source warnings. It is the shared authority for those declarations in reconciliation, BuildPlan construction, and materialization; hooks and local executables use separate authorities. See [the bundle contract](contracts.md#host-local-admission-bundle). |
+| [Canonical lock](../../src/comfyui_docker_helper/config/planning/canonical_lock.py) | Strict serialized host reconciliation state containing exact external identities, target-keyed local-file SHA rows, and aggregate-only local-tree rows when content-locked. It is written beside the context but excluded from Docker build input. See [canonical lock](contracts.md#canonical-lock). |
+| [BuildPlan](../../src/comfyui_docker_helper/config/planning/build_plan.py) | Immutable build execution authority constructed from the graph, accepted lock, and admitted inputs. It is the only complete serialized/planning inventory authority for local trees; process-local bundles and typed execution projections carry only the member fields their owners require. It is mounted read-only for command-specific container consumption. See [BuildPlan](contracts.md#buildplan). |
 | [Buildx output plan](../../src/comfyui_docker_helper/host/buildx.py) | Process-local resolved publication tags and output selection for one Buildx invocation. It is not part of the BuildPlan, rendered context, final manifest, or image identity. |
-| [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) | A host-side projection boundary that verifies supplied wheel and local bytes, writes the BuildPlan-derived context, and performs no planning or resolution. Host orchestration publishes or compares the complete cdh-owned context. |
-| [Final manifest](../../src/comfyui_docker_helper/container/build/manifest/observer.py) | Final image-state observation emitted only after build mutations and checks succeed. It records observed state but does not become a resolver, lock, or planning input. |
+| [Materialization](../../src/comfyui_docker_helper/rendering/final_materializer.py) | Host-side private-stage projection of one BuildPlan plus exact release/local inputs; it performs no planning or resolution and publishes or compares a complete cdh-owned context. See [materialization](contracts.md#materialization-boundary). |
+| [Final manifest](../../src/comfyui_docker_helper/container/build/manifest/observer.py) | Final image-state observation after build mutations, with one compact Plan-bound row per local tree. It remains downstream evidence, not a resolver, lock, or planning input. See [final observation](contracts.md#image-local-tree-projection-and-final-evidence). |
 
 The canonical cdh wheel crosses the host-to-build boundary as one verified release artifact. Host planning constructs it from package-owned release projection inputs, materialization binds its exact bytes to the BuildPlan, and the image installs cdh from that wheel. Materialization also obtains the static workspace profile from this exact retained wheel, so the installed package tree does not become a second release input. The uv image used for resolution and the isolated wheel build backend remain separate responsibilities even when their version strings happen to match.
 
@@ -92,7 +94,7 @@ The canonical cdh wheel crosses the host-to-build boundary as one verified relea
 
 ### Render and reconcile a context
 
-The host render service admits local hook roots, local build-file locators, and any existing canonical lock, then obtains the prerequisite exact identities needed to assemble the canonical request graph. Local build-file locators remain host-only materialization data, and only content-locked files contribute an identity to reconciliation. The service constructs one BuildPlan from the accepted lock and passes the plan with the canonical wheel and exact local sources to materialization.
+The host render service obtains the prerequisite exact identities and assembles the canonical request graph. After graph construction, it admits effective public local file/tree declarations into one bundle; hook roots and local executable inputs use separate adapters and acquirers. The public-local bundle is the shared source of accepted file/tree facts for lock reconciliation, BuildPlan construction, and private materialization; no host locator is serialized. The service constructs one BuildPlan from the graph, accepted lock, and matching local inputs, then passes the plan with the canonical wheel and exact local sources to materialization. See [Host local-admission bundle](contracts.md#host-local-admission-bundle).
 
 Canonical Git and downloader credential route metadata enters the request graph, image-configuration digest, and BuildPlan, while host Secret source locators and resolved values remain process-local. A command-scoped host session acquires each logical source once and applies consumer-specific Git-password or Bearer-token admission. On `host build`, the accepted BuildPlan determines the consumer-isolated snapshots bound to the real Buildx invocation. See the [host Secret source and credential contract](contracts.md#host-secret-source-and-credential-boundary) for exact matching, transport, persistence, and cleanup boundaries.
 
@@ -110,7 +112,7 @@ When `host build --ssh` is applicable to a direct-Git custom node, POSIX hosts r
 
 After context preparation, the host forwards any selected external-cache import or export specification directly to Buildx. Cache selection belongs to host Docker execution rather than the BuildPlan or rendered context; see the [Docker transport contract](contracts.md#uv-release-backend-docker-transport-and-cdh-wheel) for the complete ownership boundary.
 
-The Dockerfile installs the toolchain and application, processes configured nodes, and then applies authoritative HTTP or local build-file content before final observation. An instruction that consumes an immutable input proves its identity and other trust-boundary preconditions before use. After all build mutations, final observation owns installed-state verification for managed interpreters, distributions, dependencies, public executables, and retained files, then publishes the manifest; it does not make another planning decision or turn observed state into replay identity. Only HTTP file declarations project into baked runtime defaults. The complete Plan remains available in the rendered host context for audit and rebuild, while cdh retains only its digest binding in the final manifest rather than retaining the Plan at its fixed product path. See the [final-observation contract](contracts.md#final-observation-and-replay-ceiling) for the proof and replay boundary.
+The Dockerfile installs the toolchain and application, processes configured nodes, and then applies authoritative HTTP or local build-file content before final observation. Each local tree is copied once to its exact target root; the Plan-mounted `normalize-local-trees` helper applies the selected image modes while remaining limited to expected roots and members. Final observation publishes compact Plan-bound evidence after all mutations and does not make another planning decision. Only HTTP file declarations project into baked runtime defaults. See the [image projection and final-evidence contract](contracts.md#image-local-tree-projection-and-final-evidence) and [final-observation contract](contracts.md#final-observation-and-replay-ceiling).
 
 ### Run the container lifecycle
 

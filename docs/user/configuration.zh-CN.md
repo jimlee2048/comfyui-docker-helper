@@ -29,7 +29,7 @@ cdh host validate \
 - `system.extra_packages` 使用允许的 Debian 包名；
 - `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras、selector 或具名 direct reference，以及 marker；
 - `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID，或精确的直接 Git URL；
-- `files` 使用规范化后的 `target_dir` 加 `filename` 目标；
+- `files` 使用规范化后的直接 `target` 标识；
 - `cdh.downloader.credentials` 使用 `match` 表示的 canonical HTTP(S) origin 与路径；
 - `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
 
@@ -43,7 +43,7 @@ Registry ID 的大小写变体表示同一资源，并在原位置覆盖，靠�
 
 即使原始 `match` 字符串不同，canonical 等价的 credential context 也表示同一路由。靠后的路由会在原位置原子替换完整的靠前路由；路由字段不会逐字段合并。同一层中存在歧义的重复 route 仍然无效。靠后的 `credentials = []`、`custom_nodes = []` 或 `files = []` 会重置相应集合。每个 `[secrets.<name>]` 表也是原子来源定义，因此靠后的层可以用 `file` 替换 `env`，而不会保留旧字段。所有层生成生效配置后，才会检查严格结构、唯一性和跨字段规则。
 
-对于 `[[files]]`，cdh 会将多余的 `/`、`.` 路径段和末尾 `/` 视为同一目录的等价写法。例如，`models//checkpoints/` 会规范化为 `models/checkpoints`。使用 `target_dir = "."` 或 `target_dir = "./"` 可将文件直接放在 ComfyUI 根目录。空目录、绝对目录、控制字符以及任何明确写出的 `..` 路径段仍然无效。相同规范化目标的 overlay 会修补相同 `type` 的条目；改变 `type` 会完整替换该条目，避免继承另一种来源专属的字段。
+对于 `[[files]]`，`target` 是相对于 `COMFYUI_PATH` 的一个直接相对 POSIX 路径。多余的 `/` 和 `.` 路径段会规范化为一个标识；空值、绝对路径、控制字符、明确的 `..`、反斜杠以及任何末尾斜杠均无效。HTTP 和本地文件的 target 必须是 `COMFYUI_PATH` 的严格后代，并表示一个确切文件。本地目录 target 相对于 `COMFYUI_PATH`，可以用 `target = "."` 等于其根目录；cdh 会在 render/build 准入期间判断本地来源是文件还是目录。相同规范化目标的 overlay 会修补相同 `type` 的条目；改变 `type` 会完整替换该条目，避免继承另一种来源专属的字段。生效的 target 区域不能通过相等或祖先/后代关系重叠。
 
 例如，将以下内容保存为 `local.toml`，以禁用 comfy-cli，并移除完整示例所选择的节点和文件：
 
@@ -116,29 +116,35 @@ Marker 只针对 cdh 的固定构建目标求值一次：配置指定的 CPython
 
 ## 在镜像构建期间添加文件
 
-每个构建文件都要显式选择 HTTP 或宿主机本地来源。两种 variant 只共享镜像中的目标：
+每个构建文件都要显式选择 HTTP 或宿主机本地来源。两种 variant 使用相同的 `source + target` 操作形状：
 
 ```toml
 [[files]]
 type = "http"
-url = "https://example.test/model.safetensors"
-target_dir = "models/checkpoints"
-filename = "remote-model.safetensors"
+source = "https://example.test/model.safetensors"
+target = "models/checkpoints/remote-model.safetensors"
 downloader = "httpx"
 
 [[files]]
 type = "local"
-path = "artifacts/model.safetensors"
-target_dir = "models/checkpoints"
-filename = "local-model.safetensors"
+source = "artifacts/model.safetensors"
+target = "models/checkpoints/local-model.safetensors"
+content_lock = false
+
+[[files]]
+type = "local"
+source = "artifacts/workflows"
+target = "user/default/workflows"
 content_lock = false
 ```
 
-HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地文件改用 `path` 和可选的 `content_lock`，不使用 downloader，也不接受手写 checksum。所有构建文件都是权威内容：成功的构建会把声明的内容放到目标位置，因此构建配置没有 `overwrite` 字段。
+HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地来源可以是一个普通文件，也可以是一个完整的真实目录树；本地来源不使用 downloader，也不接受手写 checksum。文件 target 是确切的最终路径。目录 target 是目标根目录，cdh 会把来源根目录的内容复制到该根目录下，不额外添加来源目录名。目录应用是 overlay：选中的条目替换目标中兼容的条目，而无关的镜像下层内容保留；cdh 不做 mirror，也不删除这些内容。所有构建文件对其选中的条目都是权威的，因此构建配置没有 `overwrite` 字段。
 
-相对的本地 `path` 统一以第一个 `-f` 配置文件的真实父目录作为基准。绝对路径和规范化后的父目录穿越均可使用。所选来源必须是宿主机上的单个普通文件；cdh 会拒绝观测到的符号链接、Windows junction 和其他 reparse point、目录及特殊文件。该 locator 是普通的非 Secret 宿主机输入：它不会序列化到 lock、BuildPlan、渲染 metadata、manifest 或镜像配置中，但也不享受 Secret 值处理或脱敏。
+本地 `source` 不能为空。相对的本地 `source` 统一以第一个 `-f` 配置文件的真实父目录作为基准；显式的 `source = "."` 会选择第一个配置文件的真实父目录本身。绝对路径和规范化后的父目录穿越均可使用。render/build 准入会选择所有真实的后代目录和普通文件，包括点开头的条目和空目录，并拒绝链接、Windows junction 或其他 reparse point、特殊文件、不可读取的条目和不安全名称。source 与渲染输出不能重叠。source locator 是普通的非 Secret 宿主机输入：它不会序列化到 lock、BuildPlan、渲染 metadata、manifest 或镜像配置中，但也不享受 Secret 值处理或脱敏。`host validate` 只检查结构和 target 语法，不读取本地 source。
 
-`content_lock = false` 是默认值，可避免 cdh 在规划期间执行 SHA-256 扫描。`content_lock = true` 会以流式方式为来源计算 SHA-256 identity，将其存入 canonical lock 和 BuildPlan，并在 materialization 上下文时再次验证该 identity。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明上下文 materialization mode、`--check` 成本、向远程 builder 传输以及镜像放置行为。本地来源仅用于构建；只有 HTTP 文件声明会成为固化的运行时默认配置。
+选中的目录和普通文件在镜像中使用 cdh 所有的 `0755` 和 `0644` 模式；宿主机所有者、时间戳、ACL、xattr 和可执行位不会被复制。`.cdh-staging` 为 HTTP 下载 staging 保留，target 或任何本地目录树成员路径中都禁止出现。空的本地目录有效，并仍会创建目标根目录，但 render、build、check 和 dry-run 各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。validate 不产生该 warning，quiet 模式也会保留它。
+
+`content_lock = false` 是默认值。本地文件不会在 BuildPlan 或 lock 中产生 content digest。本地目录树仍会把完整且排序的成员 inventory 记录到 BuildPlan，但不记录成员 size 或 digest；`--locked` 比较该结构而不比较未锁定的字节，`--check` 则流式比较完整的 source/context 字节相等性。使用 `content_lock = true` 时，本地文件会在 BuildPlan 中得到一个按 target 定位的 SHA-256 digest，并在 canonical lock 中得到一条匹配的 lock row；本地目录树会在 BuildPlan 中记录成员 size、digest 和一个聚合 tree digest，而 canonical lock 只记录聚合 tree row。materialization 和最终观测会验证所选 identity。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明上下文 materialization mode、reconciliation 成本、远程 builder 传输和镜像放置行为。本地来源仅用于构建；只有 HTTP 文件声明会成为固化的运行时默认配置。
 
 ## 为 HTTPX 文件下载提供认证
 
@@ -155,9 +161,8 @@ token = { secret = "hf_read" }
 
 [[files]]
 type = "http"
-url = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
-target_dir = "models/checkpoints"
-filename = "model.safetensors"
+source = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+target = "models/checkpoints/model.safetensors"
 downloader = "httpx"
 ```
 

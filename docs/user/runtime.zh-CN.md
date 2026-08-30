@@ -91,7 +91,7 @@ docker exec CONTAINER cdh container runtime follow
 
 ## 文件、下载与持久状态
 
-主机端的 HTTP `[[files]]` 声明会成为固化到镜像中的运行时默认配置；宿主机本地构建文件不会。运行时只接受 `type = "http"` 条目；挂载配置中的本地来源会被拒绝，而不会尝试在容器内解释宿主机路径。每次容器启动或 restart 被接纳时，固化和挂载的文件列表会以规范化后的 `target_dir` 加 `filename` 为键进行合并。在比较 identity 前，多余的 `/`、`.` 路径段和末尾 `/` 会被规范化；`.` 与 `./` 表示 `COMFYUI_PATH` 根目录本身。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。生效条目必须包含 HTTP type 和 URL，重复或无效的生效目标会在合并后失败。每个目标都相对于 `COMFYUI_PATH`，绝对路径和任何明确写出的 `..` 路径段仍然无效。
+主机端的 HTTP `[[files]]` 声明会成为固化到镜像中的运行时默认配置；宿主机本地构建文件不会。运行时只接受 `type = "http"` 条目；挂载配置中的本地来源会被拒绝，而不会尝试在容器内解释宿主机路径。每个 HTTP 条目使用 `source` 表示带 host 的 URL，使用 `target` 表示相对于 `COMFYUI_PATH` 的确切最终文件路径；运行时不接受目录 target、根 target，也不会从 URL 推断 target 文件名。比较 identity 前，多余的 `/` 和 `.` 路径段会被规范化；空值、绝对路径、明确的 `..`、反斜杠、控制字符和末尾斜杠均无效。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。合并后，重复或重叠的生效 target 会失败，挂载的 runtime 文件列表不能包含 local 条目。
 
 同步下载会在 pre-start Hook 之前完成。异步下载会在 ComfyUI 启动前被接收到一个后台队列中，并且可以在 ComfyUI 运行期间继续；它们不会阻塞 ComfyUI readiness。
 
@@ -136,9 +136,8 @@ token = { secret = "hf_read" }
 
 [[files]]
 type = "http"
-url = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
-target_dir = "models/checkpoints"
-filename = "model.safetensors"
+source = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+target = "models/checkpoints/model.safetensors"
 downloader = "httpx"
 ```
 

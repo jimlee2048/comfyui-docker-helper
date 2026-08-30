@@ -2,15 +2,583 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import stat
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from typing import Literal
 
 _close_descriptor = os.close
 _platform_name = os.name
 _READ_CHUNK_BYTES = 1024 * 1024
+_FILE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_RESERVED_TREE_COMPONENT = ".cdh-staging"
+
+type LocalTreeMemberKind = Literal["directory", "file"]
+type LocalSourceKind = Literal["file", "tree"]
+
+
+class TreeAdmissionError(OSError):
+    """A local tree could not be admitted without exposing its host locator."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        relative_path: PurePosixPath | None = None,
+        code: str = "invalid_source",
+    ) -> None:
+        self.relative_path = relative_path
+        self.code = code
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTreeMember:
+    """One canonical descendant record in a host-local directory tree."""
+
+    relative_path: PurePosixPath | str
+    kind: LocalTreeMemberKind
+    mode: Literal["0755", "0644"]
+    size: int | None = None
+    digest: str | None = None
+
+    def __post_init__(self) -> None:
+        path = _canonical_tree_relative_path(self.relative_path)
+        object.__setattr__(self, "relative_path", path)
+        if self.kind == "directory":
+            if self.mode != "0755" or self.size is not None or self.digest is not None:
+                raise ValueError(
+                    "directory tree members require mode 0755 and null content"
+                )
+        elif self.kind == "file":
+            if self.mode != "0644":
+                raise ValueError("regular-file tree members require mode 0644")
+            if self.size is not None and self.size < 0:
+                raise ValueError("regular-file tree member size must not be negative")
+            if (
+                self.digest is not None
+                and _FILE_DIGEST_PATTERN.fullmatch(self.digest) is None
+            ):
+                raise ValueError(
+                    "regular-file tree member digest must be sha256:<64 lowercase hex>"
+                )
+            if (self.size is None) != (self.digest is None):
+                raise ValueError(
+                    "regular-file tree member size and digest must be both set or "
+                    "both null"
+                )
+        else:
+            raise ValueError("tree member kind must be directory or file")
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTreeRecord:
+    """One serialized root or member record used by the tree digest."""
+
+    path: str
+    kind: LocalTreeMemberKind
+    mode: Literal["0755", "0644"]
+    size: int | None = None
+    digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str):
+            raise ValueError("tree records require a string path")
+        if self.path == ".":
+            if (
+                self.kind != "directory"
+                or self.mode != "0755"
+                or self.size is not None
+                or self.digest is not None
+            ):
+                raise ValueError(
+                    "tree root records require directory mode 0755 and null content"
+                )
+            return
+        try:
+            canonical_path = _canonical_tree_relative_path(self.path)
+        except ValueError as error:
+            raise ValueError("tree member record path must be canonical") from error
+        if canonical_path.as_posix() != self.path:
+            raise ValueError("tree member record path must be canonical")
+        if self.kind == "directory":
+            if self.mode != "0755" or self.size is not None or self.digest is not None:
+                raise ValueError(
+                    "directory tree records require mode 0755 and null content"
+                )
+        elif self.kind == "file":
+            if self.mode != "0644":
+                raise ValueError("regular-file tree records require mode 0644")
+            if self.size is None or self.digest is None:
+                raise ValueError("regular-file tree records require size and digest")
+            if self.size < 0:
+                raise ValueError("regular-file tree record size must not be negative")
+            if _FILE_DIGEST_PATTERN.fullmatch(self.digest) is None:
+                raise ValueError(
+                    "regular-file tree record digest must be sha256:<64 lowercase hex>"
+                )
+        else:
+            raise ValueError("tree record kind must be directory or file")
+
+    def as_dict(self) -> dict[str, str | int]:
+        record: dict[str, str | int] = {
+            "path": self.path,
+            "kind": self.kind,
+            "mode": self.mode,
+        }
+        if self.kind == "file":
+            assert self.size is not None and self.digest is not None
+            record["size"] = self.size
+            record["digest"] = self.digest
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTreeInventory:
+    """Complete sorted structure accepted from one local directory root."""
+
+    members: tuple[LocalTreeMember, ...] = ()
+    root_mode: Literal["0755"] = "0755"
+
+    def __post_init__(self) -> None:
+        members = tuple(self.members)
+        if any(not isinstance(item, LocalTreeMember) for item in members):
+            raise ValueError("local tree inventory members must be LocalTreeMember")
+        object.__setattr__(self, "members", members)
+        if self.root_mode != "0755":
+            raise ValueError("local tree root mode must be 0755")
+        encoded_paths = tuple(
+            item.relative_path.as_posix().encode("utf-8") for item in members
+        )
+        if encoded_paths != tuple(sorted(encoded_paths)):
+            raise ValueError("local tree members must be sorted by UTF-8 path")
+        if len(set(encoded_paths)) != len(encoded_paths):
+            raise ValueError("local tree members must be unique")
+        by_path = {item.relative_path: item for item in members}
+        for item in members:
+            for parent in _tree_parent_paths(item.relative_path):
+                parent_item = by_path.get(parent)
+                if parent_item is None or parent_item.kind != "directory":
+                    raise ValueError(
+                        "local tree member parents must be admitted directories"
+                    )
+        content_states = {
+            item.size is not None and item.digest is not None
+            for item in members
+            if item.kind == "file"
+        }
+        if len(content_states) > 1:
+            raise ValueError("local tree file content records must be uniformly locked")
+
+    @property
+    def locked(self) -> bool:
+        """Whether regular-file content records are present."""
+        return any(
+            item.kind == "file" and item.size is not None for item in self.members
+        )
+
+    @property
+    def empty(self) -> bool:
+        return not self.members
+
+    def records(self) -> tuple[LocalTreeRecord, ...]:
+        """Return the canonical root-first record sequence."""
+        root = LocalTreeRecord(".", "directory", "0755")
+        return (
+            root,
+            *(
+                LocalTreeRecord(
+                    item.relative_path.as_posix(),
+                    item.kind,
+                    item.mode,
+                    item.size,
+                    item.digest,
+                )
+                for item in self.members
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedLocalFile:
+    """One regular local source admitted through the bounded reader."""
+
+    source_path: Path
+    size: int
+    digest: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedLocalSource:
+    """One process-local source classified as a regular file or complete tree."""
+
+    source_path: Path
+    kind: LocalSourceKind
+    file: AdmittedLocalFile | None = None
+    tree: LocalTreeInventory | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "file":
+            if self.file is None or self.tree is not None:
+                raise ValueError("file admission requires only a file record")
+        elif self.kind == "tree":
+            if self.tree is None or self.file is not None:
+                raise ValueError("tree admission requires only a tree inventory")
+        else:
+            raise ValueError("local source kind must be file or tree")
+
+
+def admit_local_source(
+    path: str | os.PathLike[str],
+    *,
+    content_lock: bool = False,
+) -> AdmittedLocalSource:
+    """Admit one source as a regular file or complete real directory tree.
+
+    A tree is enumerated by cdh rather than delegated to ``rglob`` or a copy
+    helper.  Every regular member is drained through the existing admitted
+    regular-file reader; ``content_lock`` only controls whether those bytes
+    are hashed into the returned inventory.
+    """
+    canonical = _canonical_absolute_source_path(path)
+    if _platform_name == "nt":
+        # Keep the Windows local-drive and component authority in one module;
+        # Python's directory walk below only handles the admitted tree shape.
+        from comfyui_docker_helper.filesystem.windows import (
+            validate_local_absolute_path,
+        )
+
+        validate_local_absolute_path(canonical)
+    try:
+        observed = os.lstat(canonical)
+    except OSError as error:
+        raise TreeAdmissionError(
+            "local source could not be inspected", code="source_unavailable"
+        ) from error
+    if _is_reparse_observation(observed):
+        raise TreeAdmissionError(
+            "local source must not be a link or reparse point", code="source_reparse"
+        )
+    if stat.S_ISREG(observed.st_mode):
+        return AdmittedLocalSource(
+            Path(canonical),
+            "file",
+            file=_admit_local_file(canonical, content_lock=content_lock),
+        )
+    if stat.S_ISDIR(observed.st_mode):
+        if _platform_name == "nt":
+            from comfyui_docker_helper.filesystem.windows import (
+                validate_local_directory_absolute_path,
+            )
+
+            validate_local_directory_absolute_path(canonical)
+        return AdmittedLocalSource(
+            Path(canonical),
+            "tree",
+            tree=_enumerate_local_tree(canonical, content_lock=content_lock),
+        )
+    raise TreeAdmissionError(
+        "local source must be a regular file or real directory", code="source_type"
+    )
+
+
+def admit_local_tree(
+    path: str | os.PathLike[str],
+    *,
+    content_lock: bool = False,
+) -> LocalTreeInventory:
+    """Admit and return one complete local directory inventory."""
+    admitted = admit_local_source(path, content_lock=content_lock)
+    if admitted.kind != "tree" or admitted.tree is None:
+        raise TreeAdmissionError(
+            "local source must be a real directory", code="source_type"
+        )
+    return admitted.tree
+
+
+def revalidate_local_tree(
+    path: str | os.PathLike[str],
+    expected: LocalTreeInventory,
+) -> LocalTreeInventory:
+    """Re-enumerate a tree and require its accepted structure to be unchanged."""
+    current = admit_local_tree(path, content_lock=expected.locked)
+    if current != expected:
+        changed = _first_inventory_difference(expected, current)
+        raise TreeAdmissionError(
+            "local source directory changed during admission",
+            relative_path=changed,
+            code="membership_drift",
+        )
+    return current
+
+
+def _admit_local_file(path: str, *, content_lock: bool) -> AdmittedLocalFile:
+    def consume(reader: AdmittedRegularFileReader) -> tuple[int, str | None]:
+        digest = hashlib.sha256() if content_lock else None
+        while chunk := reader.read_chunk():
+            if digest is not None:
+                digest.update(chunk)
+        return reader.size, None if digest is None else f"sha256:{digest.hexdigest()}"
+
+    try:
+        size, digest = operate_regular_absolute_file(path, consume)
+    except (OSError, ValueError) as error:
+        raise TreeAdmissionError(
+            "local source file could not be read", code="source_unreadable"
+        ) from error
+    return AdmittedLocalFile(Path(path), size, digest)
+
+
+def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventory:
+    members: list[LocalTreeMember] = []
+    pending: list[tuple[str, PurePosixPath]] = [(path, PurePosixPath("."))]
+    while pending:
+        directory, relative_directory = pending.pop()
+        try:
+            current = os.lstat(directory)
+        except OSError as error:
+            raise TreeAdmissionError(
+                "local source directory could not be inspected",
+                relative_path=(
+                    relative_directory
+                    if relative_directory != PurePosixPath(".")
+                    else None
+                ),
+                code="traversal_failed",
+            ) from error
+        if _is_reparse_observation(current) or not stat.S_ISDIR(current.st_mode):
+            raise TreeAdmissionError(
+                "local source tree contains a non-directory traversal node",
+                relative_path=(
+                    relative_directory
+                    if relative_directory != PurePosixPath(".")
+                    else None
+                ),
+                code="shape_changed",
+            )
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise TreeAdmissionError(
+                "local source directory could not be traversed",
+                relative_path=(
+                    relative_directory
+                    if relative_directory != PurePosixPath(".")
+                    else None
+                ),
+                code="traversal_failed",
+            ) from error
+        # Validate names before sorting so an unsafe name cannot influence the
+        # ordering or become part of a user-facing diagnostic accidentally.
+        validated: list[tuple[bytes, os.DirEntry[str], PurePosixPath]] = []
+        for entry in entries:
+            name = entry.name
+            relative = _join_tree_relative_path(relative_directory, name)
+            validated.append((relative.as_posix().encode("utf-8"), entry, relative))
+        validated.sort(key=lambda item: item[0])
+        for _encoded, entry, relative in validated:
+            full_path = os.fspath(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise TreeAdmissionError(
+                    "local source member could not be inspected",
+                    relative_path=relative,
+                    code="member_unavailable",
+                ) from error
+            if _is_reparse_observation(observed):
+                raise TreeAdmissionError(
+                    "local source member must not be a link or reparse point",
+                    relative_path=relative,
+                    code="member_reparse",
+                )
+            if stat.S_ISDIR(observed.st_mode):
+                members.append(LocalTreeMember(relative, "directory", "0755"))
+                pending.append((full_path, relative))
+            elif stat.S_ISREG(observed.st_mode):
+                try:
+                    admitted = _admit_local_file(full_path, content_lock=content_lock)
+                except TreeAdmissionError as error:
+                    raise TreeAdmissionError(
+                        str(error), relative_path=relative, code=error.code
+                    ) from error
+                members.append(
+                    LocalTreeMember(
+                        relative,
+                        "file",
+                        "0644",
+                        admitted.size if content_lock else None,
+                        admitted.digest if content_lock else None,
+                    )
+                )
+            else:
+                raise TreeAdmissionError(
+                    "local source member must be a real directory or regular file",
+                    relative_path=relative,
+                    code="member_type",
+                )
+    try:
+        return LocalTreeInventory(tuple(sorted(members, key=_tree_member_sort_key)))
+    except (UnicodeError, ValueError) as error:
+        if isinstance(error, TreeAdmissionError):
+            raise
+        raise TreeAdmissionError(
+            "local source tree inventory is invalid", code="inventory_invalid"
+        ) from error
+
+
+def _first_inventory_difference(
+    expected: LocalTreeInventory,
+    current: LocalTreeInventory,
+) -> PurePosixPath | None:
+    before = {item.relative_path: item for item in expected.members}
+    after = {item.relative_path: item for item in current.members}
+    for path in sorted((*before.keys(), *after.keys()), key=_tree_path_sort_key):
+        if before.get(path) != after.get(path):
+            return path
+    return None
+
+
+def _canonical_absolute_source_path(path: str | os.PathLike[str]) -> str:
+    value = os.fspath(path)
+    if not isinstance(value, str):
+        raise ValueError("local source path must be one canonical absolute path")
+    if _platform_name == "nt":
+        # The Windows parser is the authority for drive, namespace, stream,
+        # DOS-device, and component rules.  The call here keeps a clear error
+        # boundary while avoiding a second path implementation.
+        return value
+    parsed = PurePosixPath(value)
+    if (
+        not value
+        or not parsed.is_absolute()
+        or value.startswith("//")
+        or "\\" in value
+        or parsed.as_posix() != value
+        or any(part in {"", ".", ".."} for part in parsed.parts[1:])
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError("local source path must be one canonical absolute POSIX path")
+    _observe_posix_directory_components(parsed)
+    return value
+
+
+def _observe_posix_directory_components(path: PurePosixPath) -> None:
+    candidate = PurePosixPath("/")
+    # The final component may be either the admitted file or directory; its
+    # no-follow type is checked by ``admit_local_source``/the file reader.
+    for component in path.parts[1:-1]:
+        candidate /= component
+        try:
+            observed = os.lstat(candidate)
+        except OSError as error:
+            raise TreeAdmissionError(
+                "local source path could not be inspected", code="source_unavailable"
+            ) from error
+        if _is_reparse_observation(observed) or not stat.S_ISDIR(observed.st_mode):
+            raise TreeAdmissionError(
+                "local source path ancestors must be real directories",
+                code="source_ancestor",
+            )
+
+
+def _join_tree_relative_path(parent: PurePosixPath, name: str) -> PurePosixPath:
+    relative = PurePosixPath(name) if parent == PurePosixPath(".") else parent / name
+    try:
+        _validate_tree_component(name)
+    except TreeAdmissionError as error:
+        if error.relative_path is None:
+            raise TreeAdmissionError(
+                str(error), relative_path=relative, code=error.code
+            ) from error
+        raise
+    try:
+        relative.as_posix().encode("utf-8", "strict")
+    except UnicodeEncodeError as error:
+        raise TreeAdmissionError(
+            "local source member name is not strict UTF-8",
+            relative_path=relative,
+            code="member_name",
+        ) from error
+    return relative
+
+
+def _validate_tree_component(name: str) -> None:
+    if _platform_name == "nt":
+        from comfyui_docker_helper.filesystem.windows import (
+            validate_local_tree_component,
+        )
+
+        try:
+            validate_local_tree_component(name)
+        except ValueError as error:
+            raise TreeAdmissionError(
+                "local source member name is not representable on Windows",
+                code="member_name",
+            ) from error
+    if (
+        not name
+        or name in {".", ".."}
+        or "\\" in name
+        or "\x00" in name
+        or any(unicodedata.category(character) == "Cc" for character in name)
+        or name == _RESERVED_TREE_COMPONENT
+    ):
+        raise TreeAdmissionError(
+            "local source member name is unsafe or reserved",
+            code=(
+                "reserved_member" if name == _RESERVED_TREE_COMPONENT else "member_name"
+            ),
+        )
+
+
+def _canonical_tree_relative_path(value: PurePosixPath | str) -> PurePosixPath:
+    raw_value = value.as_posix() if isinstance(value, PurePosixPath) else value
+    path = PurePosixPath(raw_value)
+    text = path.as_posix()
+    if (
+        path.is_absolute()
+        or not path.parts
+        or text != raw_value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError("local tree member path must be canonical relative POSIX")
+    for component in path.parts:
+        try:
+            _validate_tree_component(component)
+        except TreeAdmissionError as error:
+            raise ValueError(str(error)) from error
+    try:
+        text.encode("utf-8", "strict")
+    except UnicodeEncodeError:
+        raise ValueError("local tree member path must be strict UTF-8") from None
+    return path
+
+
+def _tree_parent_paths(path: PurePosixPath) -> tuple[PurePosixPath, ...]:
+    return tuple(
+        PurePosixPath("/").joinpath(*path.parts[:index]).relative_to("/")
+        for index in range(1, len(path.parts))
+    )
+
+
+def _tree_path_sort_key(path: PurePosixPath) -> bytes:
+    return path.as_posix().encode("utf-8", "strict")
+
+
+def _tree_member_sort_key(member: LocalTreeMember) -> bytes:
+    return _tree_path_sort_key(member.relative_path)
+
+
+def _is_reparse_observation(observed: os.stat_result) -> bool:
+    return stat.S_ISLNK(observed.st_mode) or bool(
+        getattr(observed, "st_file_attributes", 0) & 0x00000400
+    )
 
 
 @dataclass(frozen=True, slots=True)

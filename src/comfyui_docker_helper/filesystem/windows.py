@@ -449,6 +449,21 @@ def validate_local_absolute_path(path: str) -> None:
         raise OSError("path requires a verifiable local drive")
 
 
+def validate_local_directory_absolute_path(path: str) -> None:
+    """Admit a real local directory path before a native directory walk."""
+    parsed = _parse_windows_regular_file_path(path, allow_drive_root=True)
+    api = _PyWin32Api()
+    if api.get_drive_type(parsed.drive_root) not in _LOCAL_DRIVE_TYPES:
+        raise OSError("path requires a verifiable local drive")
+    _observe_windows_directory_components(parsed, api=api)
+
+
+def validate_local_tree_component(component: str) -> None:
+    """Reuse the regular-file Windows component authority for tree members."""
+    if not _valid_component(component):
+        raise ValueError("local tree member name is not representable on Windows")
+
+
 def create_private_directory(parent: str, *, prefix: str) -> str:
     """Create and verify one private random directory below a canonical parent."""
     return _create_private_directory_windows(
@@ -605,6 +620,20 @@ def _observe_windows_components(path: _ParsedWindowsPath, *, api: _WindowsApi) -
             if directory:
                 raise OSError("admitted input must be a regular local file")
         elif not directory:
+            raise OSError("admitted path ancestors must be real local directories")
+
+
+def _observe_windows_directory_components(
+    path: _ParsedWindowsPath, *, api: _WindowsApi
+) -> None:
+    """Reject links, reparse points, and non-directories in a tree root path."""
+    candidate = path.drive_root.rstrip("\\")
+    for component in path.components:
+        candidate = f"{candidate}\\{component}"
+        attributes = api.get_file_attributes(candidate)
+        if attributes & _FILE_ATTRIBUTE_REPARSE_POINT or not (
+            attributes & _FILE_ATTRIBUTE_DIRECTORY
+        ):
             raise OSError("admitted path ancestors must be real local directories")
 
 

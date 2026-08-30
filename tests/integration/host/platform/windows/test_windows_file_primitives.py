@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -58,6 +59,45 @@ def test_windows_scoped_reader_observes_and_streams_small_chunks(
     assert observed == file_admission.ObservedRegularFile(len(payload), None)
     assert b"".join(chunks) == payload
     assert all(0 < len(chunk) <= 3 for chunk in chunks)
+
+
+def test_windows_tree_admission_keeps_hidden_empty_and_locked_members(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    (source / ".hidden" / "empty").mkdir(parents=True)
+    payload = source / ".hidden" / "payload.txt"
+    payload.write_bytes(b"payload")
+
+    inventory = file_admission.admit_local_tree(source, content_lock=True)
+
+    assert [item.relative_path.as_posix() for item in inventory.members] == [
+        ".hidden",
+        ".hidden/empty",
+        ".hidden/payload.txt",
+    ]
+    member = inventory.members[-1]
+    assert member.size == len(b"payload")
+    assert member.digest == f"sha256:{hashlib.sha256(b'payload').hexdigest()}"
+
+
+def test_windows_tree_admission_rejects_a_nested_junction(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "payload.txt").write_bytes(b"outside")
+    source = tmp_path / "tree"
+    source.mkdir()
+    linked = source / "linked"
+    _create_junction(linked, outside)
+    try:
+        with pytest.raises(file_admission.TreeAdmissionError) as raised:
+            file_admission.admit_local_tree(source)
+        assert raised.value.code == "member_reparse"
+        assert raised.value.relative_path == Path("linked")
+    finally:
+        linked.rmdir()
 
 
 @pytest.mark.parametrize("location", ["leaf", "ancestor"])

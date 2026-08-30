@@ -82,3 +82,33 @@ def test_windows_open_output_handle_preserves_original_context(
     config.write_text(_config(install_cli=False))
     _prepare(config, output, FakeAcquirer(), options=PlanningOptions(check=True))
     assert {path.name for path in tmp_path.iterdir()} == {config.name, output.name}
+
+
+def test_windows_local_tree_context_materializes_direct_members(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "local-tree"
+    (source / "nested" / "empty").mkdir(parents=True)
+    (source / "nested" / "payload.bin").write_bytes(b"payload")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{source.as_posix()}"
+target = "user/default/workflows"
+'''
+    )
+    output = tmp_path / "context"
+
+    prepared = _prepare(config, output, FakeAcquirer())
+    local = prepared.plan.files.files[0]
+    context = output / local.context_path
+
+    assert local.kind == "tree"
+    assert (context / "nested" / "payload.bin").read_bytes() == b"payload"
+    assert (context / "nested" / "empty").is_dir()
+    assert not (context / source.name).exists()
+
+    _prepare(config, output, FakeAcquirer(), options=PlanningOptions(check=True))

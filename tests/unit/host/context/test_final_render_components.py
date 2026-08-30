@@ -30,10 +30,13 @@ from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
     HookPlan,
     LocalFilePlan,
+    LocalTreeMemberPlan,
+    LocalTreePlan,
     build_plan_digest,
     dump_build_plan_json,
     parse_build_plan_json,
 )
+from comfyui_docker_helper.config.planning.local_tree import local_tree_digest
 from comfyui_docker_helper.config.runtime.config import load_runtime_config
 from comfyui_docker_helper.filesystem import admission as file_admission
 from comfyui_docker_helper.release_artifacts import (
@@ -768,6 +771,102 @@ def _plan_with_local_file(*, digest: str | None = None) -> tuple[BuildPlan, str]
     )
 
 
+def _plan_with_local_tree(
+    *,
+    locked: bool = False,
+) -> tuple[BuildPlan, str]:
+    plan = build_plan(final_config(), accepted_resolution())
+    relative_target = "user/default/workflows"
+    context_path = (
+        f"build/trees/{hashlib.sha256(relative_target.encode('utf-8')).hexdigest()}"
+    )
+    members = (
+        LocalTreeMemberPlan(
+            relative_path=".hidden",
+            kind="directory",
+            mode="0755",
+            size=None,
+            digest=None,
+        ),
+        LocalTreeMemberPlan(
+            relative_path=".hidden/empty",
+            kind="directory",
+            mode="0755",
+            size=None,
+            digest=None,
+        ),
+        LocalTreeMemberPlan(
+            relative_path=".hidden/payload.bin",
+            kind="file",
+            mode="0644",
+            size=6 if locked else None,
+            digest=(
+                f"sha256:{hashlib.sha256(b'hidden').hexdigest()}" if locked else None
+            ),
+        ),
+        LocalTreeMemberPlan(
+            relative_path="nested",
+            kind="directory",
+            mode="0755",
+            size=None,
+            digest=None,
+        ),
+        LocalTreeMemberPlan(
+            relative_path="nested/payload.bin",
+            kind="file",
+            mode="0644",
+            size=6 if locked else None,
+            digest=(
+                f"sha256:{hashlib.sha256(b'nested').hexdigest()}" if locked else None
+            ),
+        ),
+    )
+    tree_digest = None
+    if locked:
+        tree_digest = local_tree_digest(
+            file_admission.LocalTreeInventory(
+                (
+                    file_admission.LocalTreeMember(".hidden", "directory", "0755"),
+                    file_admission.LocalTreeMember(
+                        ".hidden/empty", "directory", "0755"
+                    ),
+                    file_admission.LocalTreeMember(
+                        ".hidden/payload.bin",
+                        "file",
+                        "0644",
+                        6,
+                        f"sha256:{hashlib.sha256(b'hidden').hexdigest()}",
+                    ),
+                    file_admission.LocalTreeMember("nested", "directory", "0755"),
+                    file_admission.LocalTreeMember(
+                        "nested/payload.bin",
+                        "file",
+                        "0644",
+                        6,
+                        f"sha256:{hashlib.sha256(b'nested').hexdigest()}",
+                    ),
+                )
+            )
+        )
+    local = LocalTreePlan(
+        type="local",
+        kind="tree",
+        target=f"{plan.application.paths.comfyui}/{relative_target}",
+        relative_target=relative_target,
+        context_path=context_path,
+        root_mode="0755",
+        verification="sha256" if locked else "unverified-local",
+        members=members,
+        tree_digest=tree_digest,
+    )
+    return (
+        plan.model_copy(
+            update={"files": plan.files.model_copy(update={"files": (local,)})}
+        ),
+        context_path,
+    )
+
+
 def test_materializer_writes_deterministic_plan_and_verified_input(
     tmp_path: Path,
 ) -> None:
@@ -783,7 +882,7 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
         accepted_resolution(hook_digest=digest),
     )
     source_input = LocalMaterializationSource(
-        PurePosixPath("build-hooks/hooks/pre.py"), source
+        PurePosixPath("build-hooks/hooks/pre.py"), source, kind="file"
     )
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -856,6 +955,66 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
     assert parse_build_plan_json((first / "build-plan.json").read_bytes()) == plan
 
 
+@pytest.mark.parametrize("locked", [False, True])
+def test_materializer_writes_one_complete_local_tree_context(
+    tmp_path: Path,
+    locked: bool,
+) -> None:
+    source = tmp_path / "tree"
+    (source / ".hidden" / "empty").mkdir(parents=True)
+    (source / ".hidden" / "payload.bin").write_bytes(b"hidden")
+    (source / "nested").mkdir()
+    (source / "nested" / "payload.bin").write_bytes(b"nested")
+    plan, context_path = _plan_with_local_tree(locked=locked)
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+
+    _materialize_private_stage(
+        plan,
+        stage,
+        canonical_wheel=canonical_wheel(),
+        local_sources=(
+            LocalMaterializationSource(
+                PurePosixPath(context_path), source, kind="tree"
+            ),
+        ),
+        local_file_mode="copy",
+    )
+
+    context = stage / context_path
+    assert context.is_dir()
+    assert (context / ".hidden" / "payload.bin").read_bytes() == b"hidden"
+    assert (context / "nested" / "payload.bin").read_bytes() == b"nested"
+    assert (context / ".hidden" / "empty").is_dir()
+    assert not (context / "tree").exists()
+    if os.name == "posix":
+        assert context.stat().st_mode & 0o777 == 0o755
+        assert (context / ".hidden").stat().st_mode & 0o777 == 0o755
+        assert (context / ".hidden" / "payload.bin").stat().st_mode & 0o777 == 0o644
+
+
+def test_materializer_requires_tree_source_kind_to_match_plan(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    source.mkdir()
+    plan, context_path = _plan_with_local_tree()
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+
+    with pytest.raises(FinalMaterializationError, match="exactly match"):
+        _materialize_private_stage(
+            plan,
+            stage,
+            canonical_wheel=canonical_wheel(),
+            local_sources=(
+                LocalMaterializationSource(
+                    PurePosixPath(context_path), source, kind="file"
+                ),
+            ),
+        )
+
+
 def test_local_copy_publishes_bytes_independent_from_the_source(tmp_path: Path) -> None:
     source = tmp_path / "model.bin"
     original = b"abcdefgh"
@@ -869,7 +1028,9 @@ def test_local_copy_publishes_bytes_independent_from_the_source(tmp_path: Path) 
         stage,
         canonical_wheel=canonical_wheel(),
         local_sources=(
-            LocalMaterializationSource(PurePosixPath(context_path), source),
+            LocalMaterializationSource(
+                PurePosixPath(context_path), source, kind="file"
+            ),
         ),
         local_file_mode="copy",
     )
@@ -912,7 +1073,9 @@ def test_clone_unavailable_falls_back_only_in_auto_mode(
             stage,
             canonical_wheel=canonical_wheel(),
             local_sources=(
-                LocalMaterializationSource(PurePosixPath(context_path), source),
+                LocalMaterializationSource(
+                    PurePosixPath(context_path), source, kind="file"
+                ),
             ),
             local_file_mode=mode,
         )
@@ -942,7 +1105,9 @@ def test_locked_local_materialization_rejects_second_read_digest_drift(
             stage,
             canonical_wheel=canonical_wheel(),
             local_sources=(
-                LocalMaterializationSource(PurePosixPath(context_path), source),
+                LocalMaterializationSource(
+                    PurePosixPath(context_path), source, kind="file"
+                ),
             ),
             local_file_mode="copy",
         )
@@ -1222,7 +1387,7 @@ def test_materializer_rejects_missing_extra_or_changed_local_sources(
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("build-hooks/hooks/pre.py"), source
+                    PurePosixPath("build-hooks/hooks/pre.py"), source, kind="file"
                 ),
             ),
         )
@@ -1255,7 +1420,7 @@ def test_materializer_writes_the_same_admitted_bytes_it_verifies(
         canonical_wheel=canonical_wheel(),
         local_sources=(
             LocalMaterializationSource(
-                PurePosixPath("build-hooks/hooks/pre.py"), source
+                PurePosixPath("build-hooks/hooks/pre.py"), source, kind="file"
             ),
         ),
     )
@@ -1329,7 +1494,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("build-hooks/hooks/pre.py"), source
+                    PurePosixPath("build-hooks/hooks/pre.py"), source, kind="file"
                 ),
             ),
         )
@@ -1351,6 +1516,7 @@ def test_materializer_rejects_symlink_source_and_symlink_parent(tmp_path: Path) 
                 LocalMaterializationSource(
                     PurePosixPath("build-hooks/hooks/pre.py"),
                     build_hooks / "hooks/pre.py",
+                    kind="file",
                 ),
             ),
         )
@@ -1381,7 +1547,7 @@ def test_materializer_rejects_special_source_file(tmp_path: Path) -> None:
             canonical_wheel=canonical_wheel(),
             local_sources=(
                 LocalMaterializationSource(
-                    PurePosixPath("build-hooks/hooks/pre.py"), source
+                    PurePosixPath("build-hooks/hooks/pre.py"), source, kind="file"
                 ),
             ),
         )

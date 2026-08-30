@@ -204,8 +204,18 @@ def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
 def test_host_context_modes_are_deterministic_under_restrictive_umask(
     tmp_path: Path,
 ) -> None:
+    source = tmp_path / "empty-tree"
+    source.mkdir()
     config = tmp_path / "config.toml"
-    config.write_text(_config())
+    config.write_text(
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{source.as_posix()}"
+target = "user/default/workflows"
+'''
+    )
     hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
     previous_umask = os.umask(0o077)
@@ -430,6 +440,143 @@ target = "models/model.bin"
         )
 
     assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def _local_tree_config(source: Path, *, content_lock: bool = False) -> str:
+    return (
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{source.as_posix()}"
+target = "user/default/workflows"
+content_lock = {str(content_lock).lower()}
+'''
+    )
+
+
+def test_check_unlocked_local_tree_streams_same_size_member_bytes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "payload.bin").write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(_local_tree_config(source))
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = (
+        output / prepared.plan.files.files[0].context_path / "nested" / "payload.bin"
+    )
+    context_file.write_bytes(b"changed!")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_locked_mode_freezes_unlocked_local_tree_structure_without_hashing(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "payload.bin").write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(_local_tree_config(source))
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = (
+        output / prepared.plan.files.files[0].context_path / "nested" / "payload.bin"
+    )
+    context_file.write_bytes(b"changed!")
+
+    _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        options=PlanningOptions(locked=True),
+    )
+
+
+def test_check_locked_local_tree_hashes_context_members_against_plan(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "payload.bin").write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(_local_tree_config(source, content_lock=True))
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = (
+        output / prepared.plan.files.files[0].context_path / "nested" / "payload.bin"
+    )
+    context_file.write_bytes(b"changed!")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_empty_local_tree_warnings_are_once_and_in_effective_order(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first-tree"
+    second = tmp_path / "second-tree"
+    first.mkdir()
+    second.mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{first.as_posix()}"
+target = "user/default/first"
+
+[[files]]
+type = "local"
+source = "{second.as_posix()}"
+target = "user/default/second"
+'''
+    )
+    output = tmp_path / "context"
+
+    prepared = _prepare(config, output, FakeAcquirer())
+    expected_paths = [("files", 0, "source"), ("files", 1, "source")]
+    assert [warning.path for warning in prepared.warnings] == expected_paths
+    assert [warning.code for warning in prepared.warnings] == [
+        "render.local_source_empty",
+        "render.local_source_empty",
+    ]
+
+    checked = _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        options=PlanningOptions(check=True),
+    )
+    assert [warning.path for warning in checked.warnings] == expected_paths
+
+    dry_run = _prepare(
+        config,
+        tmp_path / "dry-run",
+        FakeAcquirer(),
+        options=PlanningOptions(dry_run=True),
+    )
+    assert [warning.path for warning in dry_run.warnings] == expected_paths
 
 
 def test_unlocked_local_file_comparison_ignores_short_read_boundaries(

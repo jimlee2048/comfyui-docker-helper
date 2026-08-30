@@ -151,7 +151,9 @@ def admit_local_inputs(
                         DiagnosticSeverity.WARNING,
                     )
                 )
-        materialization_sources.append(LocalMaterializationSource(context_path, source))
+        materialization_sources.append(
+            LocalMaterializationSource(context_path, source, kind=admitted.kind)
+        )
 
     return LocalAdmissionBundle(
         tuple(planning_inputs), tuple(materialization_sources), tuple(warnings)

@@ -1892,9 +1892,8 @@ token = { secret = "root_token" }
 
 [[files]]
 type = "http"
-url = "https://example.test/model.bin"
-target_dir = "models/checkpoints"
-filename = "model.bin"
+source = "https://example.test/model.bin"
+target = "models/checkpoints/model.bin"
 downloader = "httpx"
 """
         )

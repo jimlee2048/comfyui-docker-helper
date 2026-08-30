@@ -143,16 +143,14 @@ env = "RUNTIME_TOKEN"
 
 [[files]]
 type = "http"
-url = "https://example.test/private/sync.bin"
-target_dir = "models"
-filename = "sync.bin"
+source = "https://example.test/private/sync.bin"
+target = "models/sync.bin"
 download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://example.test/private/async.bin"
-target_dir = "models"
-filename = "async.bin"
+source = "https://example.test/private/async.bin"
+target = "models/async.bin"
 download_mode = "async"
 """,
     )

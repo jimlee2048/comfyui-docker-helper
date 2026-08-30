@@ -540,8 +540,8 @@ def test_canonical_requirement_spelling_is_stable_from_layered_config_to_plan(
 def test_runtime_file_directory_spelling_is_canonical_from_request_to_plan() -> None:
     first_document = final_config().model_dump(mode="json", exclude_none=True)
     second_document = deepcopy(first_document)
-    first_document["files"][0]["target_dir"] = "./models//checkpoints/"
-    second_document["files"][0]["target_dir"] = "models/checkpoints"
+    first_document["files"][0]["target"] = "./models//checkpoints/./model.safetensors"
+    second_document["files"][0]["target"] = "models/checkpoints/model.safetensors"
     first_config = validate_final_config_structure(first_document)
     second_config = validate_final_config_structure(second_document)
     resolution = accepted_resolution()
@@ -579,14 +579,13 @@ def test_local_file_locator_is_not_serialized_and_slot_depends_only_on_target() 
     first_document["files"] = [
         {
             "type": "local",
-            "path": "/private/first-model.bin",
-            "target_dir": "models",
-            "filename": "model.bin",
+            "source": "/private/first-model.bin",
+            "target": "models/model.bin",
             "content_lock": False,
         }
     ]
     second_document = deepcopy(first_document)
-    second_document["files"][0]["path"] = "/other/private-model.bin"
+    second_document["files"][0]["source"] = "/other/private-model.bin"
     first_config = validate_final_config_structure(first_document)
     second_config = validate_final_config_structure(second_document)
     resolution = accepted_resolution()
@@ -604,9 +603,8 @@ def test_local_file_plan_consumes_only_locked_content_identity() -> None:
     document["files"] = [
         {
             "type": "local",
-            "path": "model.bin",
-            "target_dir": "models",
-            "filename": "model.bin",
+            "source": "model.bin",
+            "target": "models/model.bin",
             "content_lock": True,
         }
     ]

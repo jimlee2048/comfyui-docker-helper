@@ -481,7 +481,7 @@ def build_canonical_request_graph(
             files.append(
                 HttpFileRequest(
                     type="http",
-                    url=item.url,
+                    url=item.source,
                     target=target,
                     checksum=item.checksum,
                     downloader=item.downloader or downloader.default,
@@ -693,14 +693,23 @@ def _image_config_projection(
     document["files"] = [
         (
             {
-                **item.model_dump(mode="json"),
-                "target_dir": normalized.directory.as_posix(),
+                "type": "http",
+                "url": item.source,
+                "target": normalized.relative_target,
+                **{
+                    name: value
+                    for name, value in {
+                        "checksum": item.checksum,
+                        "downloader": item.downloader,
+                        "download_mode": item.download_mode,
+                    }.items()
+                    if value is not None
+                },
             }
             if isinstance(item, FinalHttpFileConfig)
             else {
                 "type": "local",
-                "target_dir": normalized.directory.as_posix(),
-                "filename": item.filename,
+                "target": normalized.relative_target,
                 "content_lock": item.content_lock,
             }
         )

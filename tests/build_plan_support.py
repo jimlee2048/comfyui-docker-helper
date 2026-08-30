@@ -159,9 +159,8 @@ def final_config(
             "files": [
                 {
                     "type": "http",
-                    "url": "https://example.test/model.safetensors",
-                    "target_dir": "models/checkpoints",
-                    "filename": "model.safetensors",
+                    "source": "https://example.test/model.safetensors",
+                    "target": "models/checkpoints/model.safetensors",
                 }
             ],
         }

@@ -934,14 +934,13 @@ def test_requirement_extra_aliases_are_stably_deduplicated() -> None:
     assert requirement.extras == ("foo-bar", "z-extra")
 
 
-def test_file_directory_normalization_supports_the_comfyui_root() -> None:
+def test_direct_file_target_normalization_accepts_redundant_components() -> None:
     document = _document()
     document["files"] = [
         {
             "type": "http",
-            "url": "https://example.com/root",
-            "target_dir": "./",
-            "filename": "root.bin",
+            "source": "https://example.com/root",
+            "target": "./models//checkpoints/./root.bin",
         }
     ]
     config = validate_final_config_structure(document)
@@ -949,25 +948,65 @@ def test_file_directory_normalization_supports_the_comfyui_root() -> None:
     domains = validate_final_config_domains(config)
 
     assert domains.diagnostics == ()
-    assert [item.directory.as_posix() for item in domains.files] == ["."]
-    assert [item.relative_target for item in domains.files] == ["root.bin"]
-    assert config.files[0].target_dir == "./"
+    assert [item.directory.as_posix() for item in domains.files] == [
+        "models/checkpoints"
+    ]
+    assert [item.relative_target for item in domains.files] == [
+        "models/checkpoints/root.bin"
+    ]
+    assert config.files[0].target == "./models//checkpoints/./root.bin"
 
 
-def test_file_target_rejects_only_the_exact_internal_staging_leaf() -> None:
+def test_local_directory_root_target_is_structurally_admitted() -> None:
+    document = _document()
+    document["files"] = [{"type": "local", "source": "ordinary.bin", "target": "."}]
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+
+    assert domains.diagnostics == ()
+    assert domains.files[0].relative_target == "."
+
+
+def test_local_source_must_be_nonempty_but_explicit_dot_is_valid() -> None:
+    empty_document = _document()
+    empty_document["files"] = [
+        {"type": "local", "source": "", "target": "models/model.bin"}
+    ]
+    empty_config = validate_final_config_structure(empty_document)
+    empty_diagnostics = validate_final_config_domains(empty_config).diagnostics
+    assert [
+        (item.path, item.code, item.severity)
+        for item in empty_diagnostics
+        if item.code.startswith("file.")
+    ] == [
+        (
+            ("files", 0, "source"),
+            "file.empty_source",
+            DiagnosticSeverity.ERROR,
+        )
+    ]
+
+    dot_document = _document()
+    dot_document["files"] = [
+        {"type": "local", "source": ".", "target": "models/model.bin"}
+    ]
+    dot_config = validate_final_config_structure(dot_document)
+    assert validate_final_config_domains(dot_config).diagnostics == ()
+
+
+def test_file_target_rejects_reserved_staging_component_anywhere() -> None:
     document = _document()
     document["files"] = [
         {
             "type": "http",
-            "url": "https://example.com/reserved",
-            "target_dir": "models",
-            "filename": ".cdh-staging",
+            "source": "https://example.com/reserved",
+            "target": "models/.cdh-staging/root.bin",
         },
         {
             "type": "local",
-            "path": "ordinary.bin",
-            "target_dir": ".cdh-staging",
-            "filename": ".cdh-staging.part",
+            "source": "ordinary.bin",
+            "target": ".cdh-staging/files/model.bin",
         },
     ]
     config = validate_final_config_structure(document)
@@ -980,10 +1019,15 @@ def test_file_target_rejects_only_the_exact_internal_staging_leaf() -> None:
         if item.code.startswith("file.")
     ] == [
         (
-            ("files", 0, "filename"),
-            "file.invalid_filename",
+            ("files", 0, "target"),
+            "file.reserved_target_component",
             DiagnosticSeverity.ERROR,
-        )
+        ),
+        (
+            ("files", 1, "target"),
+            "file.reserved_target_component",
+            DiagnosticSeverity.ERROR,
+        ),
     ]
 
 

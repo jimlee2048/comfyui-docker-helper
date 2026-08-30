@@ -308,13 +308,11 @@ post_install_hooks = ["post.sh"]
 # Required source variant. Supported by build and runtime.
 type = "http"
 # Required. Must be an HTTP(S) URL with a host.
-url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
-# Required. Relative to COMFYUI_PATH. Redundant "/", "." segments, and a
-# trailing slash are normalized. Use "." or "./" for the ComfyUI root.
-# Absolute paths, empty values, control characters, and ".." are rejected.
-target_dir = "models/example-docs"
-# Required. Must be a single filename component.
-filename = "comfyui-readme-aria2.md"
+source = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
+# Required. Relative to COMFYUI_PATH. Redundant "/" and "." segments normalize
+# to one identity; absolute paths, empty values, controls, "..", backslashes,
+# and trailing-slash spellings are rejected.
+target = "models/example-docs/comfyui-readme-aria2.md"
 # Optional. Trusted SHA-256 obtained independently from the download origin.
 # Hex case is normalized to lowercase; cdh never fetches or infers this value.
 # checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -325,9 +323,8 @@ download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
-target_dir = "models/example-docs"
-filename = "comfyui-readme-httpx.md"
+source = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
+target = "models/example-docs/comfyui-readme-httpx.md"
 downloader = "httpx"
 download_mode = "sync"
 
@@ -336,9 +333,8 @@ download_mode = "sync"
 # -f file as their base; absolute paths are also accepted. The source must be
 # one regular file without symlink or reparse-point components.
 type = "local"
-path = "local-files/example-model.txt"
-target_dir = "models/example-docs"
-filename = "local-example-model.txt"
+source = "local-files/example-model.txt"
+target = "models/example-docs/local-example-model.txt"
 # Default: false. true streams SHA-256 into the canonical lock and verifies the
 # same identity again during context materialization; false avoids that hash.
 content_lock = false

@@ -1,9 +1,9 @@
-"""Shared URL and runtime-target validation contracts."""
+"""Shared URL and direct-target validation contracts."""
 
 import pytest
 
-from comfyui_docker_helper.config.validation.urls import (
-    validate_relative_file_directory,
+from comfyui_docker_helper.config.validation.runtime_files import (
+    validate_relative_file_target,
 )
 
 
@@ -11,18 +11,17 @@ from comfyui_docker_helper.config.validation.urls import (
     ("authored", "canonical"),
     [
         (".", "."),
-        ("./", "."),
-        ("models/", "models"),
+        ("models", "models"),
         ("models//checkpoints", "models/checkpoints"),
-        ("./models/./checkpoints/", "models/checkpoints"),
-        (r"models\checkpoints", r"models\checkpoints"),
+        ("./models/./checkpoints", "models/checkpoints"),
+        ("nested/model.bin", "nested/model.bin"),
     ],
 )
-def test_relative_file_directory_normalizes_safe_posix_spellings(
+def test_direct_file_target_normalizes_safe_posix_spellings(
     authored: str,
     canonical: str,
 ) -> None:
-    result = validate_relative_file_directory(authored)
+    result = validate_relative_file_target(authored)
 
     assert result.code is None
     assert result.path is not None
@@ -32,18 +31,28 @@ def test_relative_file_directory_normalizes_safe_posix_spellings(
 @pytest.mark.parametrize(
     ("authored", "code"),
     [
-        ("", "empty_directory"),
-        ("/models", "absolute_directory"),
-        ("..", "parent_directory_segment"),
-        ("models/../checkpoints", "parent_directory_segment"),
+        ("", "empty_target"),
+        ("/models", "absolute_target"),
+        ("..", "parent_target_segment"),
+        ("models/../checkpoints", "parent_target_segment"),
         ("models\x00checkpoints", "control_character"),
+        (r"models\checkpoints", "backslash"),
+        ("models/", "trailing_slash"),
+        ("models/.cdh-staging/model.bin", "reserved_target_component"),
     ],
 )
-def test_relative_file_directory_rejects_unsafe_authored_paths(
+def test_direct_file_target_rejects_unsafe_authored_paths(
     authored: str,
     code: str,
 ) -> None:
-    result = validate_relative_file_directory(authored)
+    result = validate_relative_file_target(authored)
 
     assert result.path is None
     assert result.code == code
+
+
+def test_exact_file_target_rejects_the_local_directory_root_sentinel() -> None:
+    result = validate_relative_file_target(".", allow_root=False)
+
+    assert result.path is None
+    assert result.code == "root_target"

@@ -15,6 +15,7 @@ from comfyui_docker_helper.config.authored.models import (
     FinalConfig,
     FinalGitCustomNodeConfig,
     FinalHttpFileConfig,
+    FinalLocalFileConfig,
     FinalRegistryCustomNodeConfig,
 )
 from comfyui_docker_helper.config.authored.publication import (
@@ -56,6 +57,9 @@ from comfyui_docker_helper.config.validation.requirements import (
     parse_direct_requirement,
     target_marker_environment,
 )
+from comfyui_docker_helper.config.validation.runtime_files import (
+    normalize_authored_file_target,
+)
 from comfyui_docker_helper.config.validation.selectors import (
     is_stable_public_operand,
     normalize_comfyui_version,
@@ -65,8 +69,6 @@ from comfyui_docker_helper.config.validation.selectors import (
 from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
-    validate_file_name,
-    validate_relative_file_directory,
 )
 from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
@@ -902,36 +904,35 @@ def _validate_file_domains(
 ) -> None:
     for index, item in enumerate(config.files):
         base: DiagnosticPath = ("files", index)
-        if isinstance(item, FinalHttpFileConfig) and not is_http_url(item.url):
+        if isinstance(item, FinalHttpFileConfig) and not is_http_url(item.source):
             diagnostics.append(
                 Diagnostic(
-                    (*base, "url"),
+                    (*base, "source"),
                     "file.invalid_url",
                     "must be an HTTP(S) URL with a host",
                 )
             )
-        directory = validate_relative_file_directory(item.target_dir)
-        if directory.path is None:
+        if isinstance(item, FinalLocalFileConfig) and not item.source:
             diagnostics.append(
                 Diagnostic(
-                    (*base, "target_dir"),
-                    f"file.{directory.code}",
-                    directory.message or "invalid directory",
+                    (*base, "source"),
+                    "file.empty_source",
+                    "must not be empty",
                 )
             )
-        filename = validate_file_name(item.filename)
-        if filename.filename is None:
-            diagnostics.append(
-                Diagnostic(
-                    (*base, "filename"),
-                    "file.invalid_filename",
-                    filename.message or "invalid filename",
-                )
-            )
-        if directory.path is not None and filename.filename is not None:
-            target = (directory.path / filename.filename).as_posix()
-            file_targets.append(LocatedValue((*base, "filename"), target))
-            files.append(NormalizedFile(directory.path, target))
+        # Local ``.`` remains provisionally valid until render/build admission
+        # can classify the source as a directory. HTTP and local-file variants
+        # must name an exact destination file at this boundary.
+        target = normalize_authored_file_target(
+            item.target,
+            (*base, "target"),
+            diagnostics,
+            allow_root=not isinstance(item, FinalHttpFileConfig),
+        )
+        if target is not None:
+            target_value = target.as_posix()
+            file_targets.append(LocatedValue((*base, "target"), target_value))
+            files.append(NormalizedFile(target.parent, target_value))
 
 
 def _validate_build_domains(

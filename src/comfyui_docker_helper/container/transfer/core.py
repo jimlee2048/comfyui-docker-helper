@@ -24,7 +24,7 @@ from comfyui_docker_helper.config.file_checksum import (
 )
 from comfyui_docker_helper.config.validation.urls import (
     DownloaderName,
-    is_reserved_file_target_name,
+    is_reserved_file_target_component,
 )
 from comfyui_docker_helper.container.transfer.events import (
     DownloadEvent,
@@ -1952,8 +1952,10 @@ def _relative_target(root: Path, target: Path) -> Path:
         raise DownloadFilesError(
             "download target must be a strict descendant of COMFYUI_PATH"
         )
-    if is_reserved_file_target_name(relative.name):
-        raise DownloadFilesError("download target uses the reserved staging filename")
+    if any(is_reserved_file_target_component(part) for part in relative.parts):
+        raise DownloadFilesError(
+            "download target uses the reserved staging path component"
+        )
     return relative
 
 

@@ -227,9 +227,8 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
             ) from error
         runtime_item = {
             "type": "http",
-            "url": item.url,
-            "target_dir": relative.parent.as_posix(),
-            "filename": relative.name,
+            "source": item.url,
+            "target": relative.as_posix(),
         }
         if item.checksum is not None:
             runtime_item["checksum"] = item.checksum

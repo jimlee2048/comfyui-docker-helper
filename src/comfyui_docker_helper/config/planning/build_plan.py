@@ -123,7 +123,7 @@ from comfyui_docker_helper.config.validation.selectors import resolve_git_target
 from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
-    is_reserved_file_target_name,
+    is_reserved_file_target_component,
 )
 from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
@@ -915,8 +915,11 @@ class _FilePlan(_PlanModel):
     @classmethod
     def _validate_target(cls, value: str) -> str:
         target = _absolute_posix_path(value, "file target")
-        if is_reserved_file_target_name(PurePosixPath(target).name):
-            raise ValueError("file target uses the reserved staging filename")
+        if any(
+            is_reserved_file_target_component(part)
+            for part in PurePosixPath(target).parts
+        ):
+            raise ValueError("file target uses the reserved staging path component")
         return target
 
 

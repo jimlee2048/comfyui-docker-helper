@@ -260,7 +260,7 @@ def test_build_plan_admission_rejects_reserved_staging_final_leaf() -> None:
     document = plan.model_dump(mode="python")
     document["files"]["files"][0]["target"] = "/workspace/ComfyUI/models/.cdh-staging"
 
-    with pytest.raises(ValidationError, match="reserved staging filename"):
+    with pytest.raises(ValidationError, match="reserved staging path component"):
         BuildPlan.model_validate(document)
 
 

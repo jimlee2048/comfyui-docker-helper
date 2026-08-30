@@ -22,24 +22,21 @@ extra_args = []
 
 [[files]]
 type = "http"
-url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
-target_dir = "models/cdh-smoke"
-filename = "httpx-redirect-readme.md"
+source = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+target = "models/cdh-smoke/httpx-redirect-readme.md"
 downloader = "httpx"
 download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts/raw/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
-target_dir = "models/cdh-smoke"
-filename = "httpx-repeat-readme.md"
+source = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts/raw/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+target = "models/cdh-smoke/httpx-repeat-readme.md"
 downloader = "httpx"
 download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
-target_dir = "models/cdh-smoke"
-filename = "httpx-readme.md"
+source = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+target = "models/cdh-smoke/httpx-readme.md"
 downloader = "httpx"
 download_mode = "sync"

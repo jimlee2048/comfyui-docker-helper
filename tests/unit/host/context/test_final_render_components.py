@@ -1085,7 +1085,7 @@ def test_comfyui_root_file_is_materialized_and_reloaded_canonically(
     tmp_path: Path,
 ) -> None:
     document = final_config().model_dump(mode="json", exclude_none=True)
-    document["files"][0]["target_dir"] = "./"
+    document["files"][0]["target"] = "root.safetensors"
     config = validate_final_config_structure(document)
     plan = build_plan(config, accepted_resolution())
     output = tmp_path / "output"
@@ -1099,8 +1099,11 @@ def test_comfyui_root_file_is_materialized_and_reloaded_canonically(
         mounted_config_path=tmp_path / "missing.toml",
         environ={},
     )
-    assert baked_document["files"][0]["target_dir"] == "."
-    assert runtime.files[0]["target_dir"] == "."
+    assert baked_document["files"][0]["source"] == (
+        "https://example.test/model.safetensors"
+    )
+    assert baked_document["files"][0]["target"] == "root.safetensors"
+    assert runtime.files[0]["target"] == "root.safetensors"
 
 
 @pytest.mark.skipif(

@@ -33,6 +33,9 @@ from comfyui_docker_helper.config.validation.registry import (
     registry_distribution_identity,
     registry_resource_identity,
 )
+from comfyui_docker_helper.config.validation.runtime_files import (
+    relative_file_targets_overlap,
+)
 from comfyui_docker_helper.exact_ledger import CUDA_PROTECTED_REQUIREMENTS
 
 
@@ -106,13 +109,7 @@ def validate_final_config_semantics(
         diagnostics,
         origins=origins,
     )
-    _duplicate_diagnostics(
-        domains.file_targets,
-        "file.duplicate_target",
-        "file targets must be unique",
-        diagnostics,
-        origins=origins,
-    )
+    _file_target_overlap_diagnostics(domains.file_targets, diagnostics, origins=origins)
     if domains.workspace is not None and domains.comfyui_path == domains.workspace:
         diagnostics.append(
             Diagnostic(
@@ -196,7 +193,7 @@ def _authenticated_downloader_diagnostics(
         if not isinstance(item, FinalHttpFileConfig):
             continue
         try:
-            request = parse_downloader_request_url(item.url)
+            request = parse_downloader_request_url(item.source)
         except DownloaderCredentialContextError:
             continue
         if (
@@ -249,6 +246,30 @@ def _duplicate_diagnostics(
             )
         else:
             seen[value] = item
+
+
+def _file_target_overlap_diagnostics(
+    values: tuple[LocatedValue, ...],
+    diagnostics: list[Diagnostic],
+    *,
+    origins: OriginNode | None,
+) -> None:
+    """Reject effective file target regions that equal or contain one another."""
+    established: list[LocatedValue] = []
+    for item in values:
+        for earlier in established:
+            if not relative_file_targets_overlap(earlier.value, item.value):
+                continue
+            diagnostics.append(
+                Diagnostic(
+                    item.path,
+                    "file.overlapping_target",
+                    "file targets must not equal or overlap another target region",
+                    source_context=_comparison(earlier.path, item.path, origins),
+                )
+            )
+            break
+        established.append(item)
 
 
 def _apt_package_diagnostics(

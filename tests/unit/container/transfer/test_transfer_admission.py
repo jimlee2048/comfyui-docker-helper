@@ -565,10 +565,12 @@ def test_reserved_staging_final_fails_before_parent_or_transport_mutation(
 ) -> None:
     root = tmp_path / "ComfyUI"
     root.mkdir()
-    request = replace(_request(root), target=root / "models" / ".cdh-staging")
+    request = replace(
+        _request(root), target=root / "models" / ".cdh-staging" / "model.bin"
+    )
     backend = BytesBackend(b"new")
 
-    with pytest.raises(DownloadFilesError, match="reserved staging filename"):
+    with pytest.raises(DownloadFilesError, match="reserved staging path component"):
         transfer_file(request, backend=backend, settings=_settings())
 
     assert backend.calls == []

@@ -491,9 +491,8 @@ timeout = 120
 
 [[files]]
 type = "http"
-url = "{hanging_url}"
-target_dir = "models"
-filename = "pending.bin"
+source = "{hanging_url}"
+target = "models/pending.bin"
 downloader = "httpx"
 download_mode = "async"
 """,

@@ -292,9 +292,8 @@ extra_args = ["--cpu"]
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models/checkpoints"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/checkpoints/model.bin"
 download_mode = "sync"
 """,
     )

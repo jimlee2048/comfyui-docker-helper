@@ -310,30 +310,26 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/async-a.bin"
-target_dir = "models"
-filename = "async-a.bin"
+source = "https://example.com/async-a.bin"
+target = "models/async-a.bin"
 download_mode = "async"
 
 [[files]]
 type = "http"
-url = "https://example.com/sync-a.bin"
-target_dir = "models"
-filename = "sync-a.bin"
+source = "https://example.com/sync-a.bin"
+target = "models/sync-a.bin"
 download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://example.com/async-b.bin"
-target_dir = "models"
-filename = "async-b.bin"
+source = "https://example.com/async-b.bin"
+target = "models/async-b.bin"
 download_mode = "async"
 
 [[files]]
 type = "http"
-url = "https://example.com/sync-b.bin"
-target_dir = "models"
-filename = "sync-b.bin"
+source = "https://example.com/sync-b.bin"
+target = "models/sync-b.bin"
 download_mode = "sync"
 """,
     )
@@ -435,9 +431,8 @@ port = 8299
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     hooks = tmp_path / "hooks"
@@ -544,9 +539,8 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     loaded = load_runtime_config(
@@ -622,9 +616,8 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     loaded = load_runtime_config(
@@ -693,9 +686,8 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     state_path = tmp_path / "state.json"
@@ -816,9 +808,8 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     state_path = tmp_path / "state.json"
@@ -900,9 +891,8 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     state_path = tmp_path / "state.json"
@@ -993,9 +983,8 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     state_path = tmp_path / "state.json"
@@ -1136,9 +1125,8 @@ default_downloader = "httpx"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 overwrite = true
 """,
     )
@@ -1237,15 +1225,13 @@ download_failure_policy = "{policy}"
 
 [[files]]
 type = "http"
-url = "https://example.com/a.bin"
-target_dir = "models"
-filename = "a.bin"
+source = "https://example.com/a.bin"
+target = "models/a.bin"
 
 [[files]]
 type = "http"
-url = "https://example.com/b.bin"
-target_dir = "models"
-filename = "b.bin"
+source = "https://example.com/b.bin"
+target = "models/b.bin"
 """,
     )
     backend = AsyncBackend()
@@ -1307,8 +1293,7 @@ filename = "b.bin"
                     {
                         "type": "http",
                         "url": "https://example.com/a.bin",
-                        "target_dir": "models",
-                        "filename": "a.bin",
+                        "target": "models/a.bin",
                     }
                 ],
                 comfyui_path=runtime.comfyui_path,
@@ -1368,9 +1353,8 @@ shutdown_timeout = 2.3
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     hooks = tmp_path / "hooks"
@@ -1442,9 +1426,8 @@ download_failure_policy = "continue"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
     state_path = tmp_path / "state.json"

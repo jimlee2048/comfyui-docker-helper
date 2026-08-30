@@ -23,7 +23,7 @@ from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.validation.urls import (
     DownloaderName,
     is_http_url,
-    is_reserved_file_target_name,
+    is_reserved_file_target_component,
 )
 from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
@@ -48,7 +48,7 @@ type RuntimeDownloadStatus = Literal[
 
 def runtime_download_desired_identity_digest(
     *,
-    source: str,
+    url: str,
     target: str,
     checksum: str | None,
     overwrite: bool,
@@ -60,7 +60,7 @@ def runtime_download_desired_identity_digest(
         "checksum": checksum,
         "downloader": downloader,
         "overwrite": overwrite,
-        "source": source,
+        "url": url,
         "target": target,
     }
     canonical = json.dumps(
@@ -108,7 +108,7 @@ class RuntimeResumeState(ConfigModel):
 class RuntimeDownloadEntry(ConfigModel):
     """Canonical persisted authority for one runtime file desired identity."""
 
-    source: str
+    url: str
     target: str
     checksum: str | None
     overwrite: bool
@@ -117,11 +117,11 @@ class RuntimeDownloadEntry(ConfigModel):
     status: RuntimeDownloadStatus
     resume: RuntimeResumeState | None = None
 
-    @field_validator("source")
+    @field_validator("url")
     @classmethod
-    def _validate_source(cls, value: str) -> str:
+    def _validate_url(cls, value: str) -> str:
         if not is_http_url(value):
-            raise ValueError("source must be an HTTP(S) URL with a host")
+            raise ValueError("url must be an HTTP(S) URL with a host")
         return value
 
     @field_validator("target")
@@ -141,8 +141,8 @@ class RuntimeDownloadEntry(ConfigModel):
         path = PurePosixPath(value)
         if path.is_absolute():
             raise ValueError("target must be a relative POSIX path")
-        if is_reserved_file_target_name(path.name):
-            raise ValueError("target uses the reserved staging filename")
+        if any(is_reserved_file_target_component(part) for part in path.parts):
+            raise ValueError("target uses the reserved staging path component")
         return path.as_posix()
 
     @field_validator("checksum")

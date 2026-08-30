@@ -413,9 +413,8 @@ local_file_mode = "copy"
 
 [[files]]
 type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
+source = "{source.as_posix()}"
+target = "models/model.bin"
 '''
     )
     output = tmp_path / "context"
@@ -455,9 +454,8 @@ local_file_mode = "copy"
 
 [[files]]
 type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
+source = "{source.as_posix()}"
+target = "models/model.bin"
 '''
     )
     output = tmp_path / "context"
@@ -519,9 +517,8 @@ local_file_mode = "copy"
 
 [[files]]
 type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
+source = "{source.as_posix()}"
+target = "models/model.bin"
 content_lock = true
 '''
     )

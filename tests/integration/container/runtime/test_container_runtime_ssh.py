@@ -420,16 +420,14 @@ pub_keys = ["{VALID_SSH_KEY}"]
 
 [[files]]
 type = "http"
-url = "https://example.com/sync.bin"
-target_dir = "models"
-filename = "sync.bin"
+source = "https://example.com/sync.bin"
+target = "models/sync.bin"
 download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://example.com/async.bin"
-target_dir = "models"
-filename = "async.bin"
+source = "https://example.com/async.bin"
+target = "models/async.bin"
 download_mode = "async"
 """,
     )
@@ -1196,9 +1194,8 @@ default_download_mode = "async"
 
 [[files]]
 type = "http"
-url = "https://example.com/async.bin"
-target_dir = "models"
-filename = "async.bin"
+source = "https://example.com/async.bin"
+target = "models/async.bin"
 """,
     )
     hooks = tmp_path / "hooks"

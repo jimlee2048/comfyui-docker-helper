@@ -29,8 +29,7 @@ extra_args = []
 
 [[files]]
 type = "http"
-url = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
-target_dir = "models/cdh-smoke"
-filename = "aria2-readme.md"
+source = "https://raw.githubusercontent.com/pythongosssss/ComfyUI-Custom-Scripts/609f3afaa74b2f88ef9ce8d939626065e3247469/README.md"
+target = "models/cdh-smoke/aria2-readme.md"
 downloader = "aria2"
 download_mode = "sync"

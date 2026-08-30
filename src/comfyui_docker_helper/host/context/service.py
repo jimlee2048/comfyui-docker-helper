@@ -352,18 +352,22 @@ def _local_file_inputs(
             continue
         if not isinstance(request, LocalFileRequest):
             raise AssertionError("local file request projection is inconsistent")
-        locator = Path(item.path)
+        locator = Path(item.source)
         source = locator if locator.is_absolute() else result.secret_file_base / locator
         source = Path(os.path.abspath(source))
         _validate_input_output_separation(output, source, "local file")
-        if not item.content_lock:
-            try:
-                observe_regular_absolute_file(source)
-            except (OSError, ValueError) as error:
-                raise _render_error(
-                    "render.local_file_source_unavailable",
-                    "local file source must be a readable regular file without links",
-                ) from error
+        try:
+            observe_regular_absolute_file(source)
+        except (OSError, ValueError) as error:
+            raise _render_error(
+                "render.local_file_source_unavailable",
+                "local file source must be a readable regular file without links",
+            ) from error
+        if normalized.relative_target == ".":
+            raise _render_error(
+                "render.local_file_target_invalid",
+                "local file target must name an exact file below COMFYUI_PATH",
+            )
         sources.append(
             LocalMaterializationSource(PurePosixPath(request.context_path), source)
         )

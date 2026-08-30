@@ -50,9 +50,8 @@ file = "/run/secrets/runtime-token"
 
 [[files]]
 type = "http"
-url = "https://example.test/private/model.bin?download=1"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.test/private/model.bin?download=1"
+target = "models/model.bin"
 """,
     )
 
@@ -81,9 +80,8 @@ env = "RUNTIME_TOKEN"
 
 [[files]]
 type = "http"
-url = "https://example.test/private/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.test/private/model.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -426,9 +424,8 @@ def test_runtime_file_entries_are_accepted_and_recorded(tmp_path: Path) -> None:
         """
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -441,8 +438,7 @@ filename = "model.bin"
         {
             "type": "http",
             "url": "https://example.com/model.bin",
-            "target_dir": "models",
-            "filename": "model.bin",
+            "target": "models/model.bin",
         },
     )
 
@@ -455,9 +451,8 @@ def test_runtime_file_merge_uses_canonical_target_and_returns_canonical_dir(
         """
 [[files]]
 type = "http"
-url = "https://example.com/base.bin"
-target_dir = "models//checkpoints/"
-filename = "model.bin"
+source = "https://example.com/base.bin"
+target = "models//checkpoints/./model.bin"
 overwrite = false
 """,
     )
@@ -466,8 +461,7 @@ overwrite = false
         """
 [[files]]
 type = "http"
-target_dir = "./models/checkpoints"
-filename = "model.bin"
+target = "./models/checkpoints/./model.bin"
 overwrite = true
 """,
     )
@@ -481,8 +475,7 @@ overwrite = true
         {
             "type": "http",
             "url": "https://example.com/base.bin",
-            "target_dir": "models/checkpoints",
-            "filename": "model.bin",
+            "target": "models/checkpoints/model.bin",
             "overwrite": True,
         },
     )
@@ -494,9 +487,8 @@ def test_runtime_file_url_accepts_valid_userinfo(tmp_path: Path) -> None:
         """
 [[files]]
 type = "http"
-url = "https://user:password@example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://user:password@example.com/model.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -511,9 +503,9 @@ filename = "model.bin"
 @pytest.mark.parametrize(
     ("field", "value", "code"),
     [
-        ("url", "https://example.com/model\\u007f.bin", "runtime_file.invalid_url"),
-        ("target_dir", "models\\u007fescape", "runtime_file.control_character"),
-        ("filename", "model\\u007f.bin", "runtime_file.invalid_filename"),
+        ("source", "https://example.com/model\\u007f.bin", "runtime_file.invalid_url"),
+        ("target", "models\\u007fescape/model.bin", "runtime_file.control_character"),
+        ("target", "models/model\\u007f.bin", "runtime_file.control_character"),
     ],
 )
 def test_runtime_file_domains_reject_control_characters(
@@ -523,9 +515,8 @@ def test_runtime_file_domains_reject_control_characters(
     code: str,
 ) -> None:
     values = {
-        "url": "https://example.com/model.bin",
-        "target_dir": "models",
-        "filename": "model.bin",
+        "source": "https://example.com/model.bin",
+        "target": "models/model.bin",
     }
     values[field] = value
     mounted = _write(
@@ -533,9 +524,8 @@ def test_runtime_file_domains_reject_control_characters(
         f"""
 [[files]]
 type = "http"
-url = "{values["url"]}"
-target_dir = "{values["target_dir"]}"
-filename = "{values["filename"]}"
+source = "{values["source"]}"
+target = "{values["target"]}"
 """,
     )
 
@@ -556,9 +546,8 @@ def test_runtime_file_non_http_url_fails_runtime_validation(
         """
 [[files]]
 type = "http"
-url = "ftp://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "ftp://example.com/model.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -569,19 +558,20 @@ filename = "model.bin"
         )
 
     assert _identities(error.value) == [
-        (("files", 0, "url"), "runtime_file.invalid_url")
+        (("files", 0, "source"), "runtime_file.invalid_url")
     ]
 
 
-def test_runtime_file_rejects_reserved_staging_final_leaf(tmp_path: Path) -> None:
+def test_runtime_file_rejects_reserved_staging_component_anywhere(
+    tmp_path: Path,
+) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
         """
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = ".cdh-staging"
+source = "https://example.com/model.bin"
+target = "models/.cdh-staging/model.bin"
 """,
     )
 
@@ -592,8 +582,41 @@ filename = ".cdh-staging"
         )
 
     assert _identities(error.value) == [
-        (("files", 0, "filename"), "runtime_file.invalid_filename")
+        (("files", 0, "target"), "runtime_file.reserved_target_component")
     ]
+
+
+def test_runtime_file_target_regions_reject_component_prefix_overlap(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "mounted.toml",
+        """
+[[files]]
+type = "http"
+source = "https://example.com/base.bin"
+target = "models"
+
+[[files]]
+type = "http"
+source = "https://example.com/nested.bin"
+target = "models/checkpoints/nested.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 1, "target"), "runtime_file.overlapping_target")
+    ]
+    comparison = error.value.diagnostics[0].source_context
+    assert isinstance(comparison, DiagnosticComparison)
+    assert comparison.earlier.location.path == ("files", 0, "target")
+    assert comparison.later.location.path == ("files", 1, "target")
 
 
 def test_invalid_mounted_runtime_file_after_baked_reports_effective_and_source_paths(
@@ -604,9 +627,8 @@ def test_invalid_mounted_runtime_file_after_baked_reports_effective_and_source_p
         """
 [[files]]
 type = "http"
-url = "https://example.com/baked.bin"
-target_dir = "models"
-filename = "baked.bin"
+source = "https://example.com/baked.bin"
+target = "models/baked.bin"
 """,
     )
     mounted = _write(
@@ -614,9 +636,8 @@ filename = "baked.bin"
         """
 [[files]]
 type = "http"
-url = "ftp://example.com/mounted.bin"
-target_dir = "models"
-filename = "mounted.bin"
+source = "ftp://example.com/mounted.bin"
+target = "models/mounted.bin"
 """,
     )
 
@@ -624,12 +645,12 @@ filename = "mounted.bin"
         load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
 
     assert _identities(error.value) == [
-        (("files", 1, "url"), "runtime_file.invalid_url")
+        (("files", 1, "source"), "runtime_file.invalid_url")
     ]
     context = error.value.diagnostics[0].source_context
     assert isinstance(context, SourceLocation)
     assert context.source.label == str(mounted)
-    assert context.path == ("files", 0, "url")
+    assert context.path == ("files", 0, "source")
 
 
 def test_multiple_invalid_runtime_file_items_keep_authored_indexes(
@@ -640,15 +661,13 @@ def test_multiple_invalid_runtime_file_items_keep_authored_indexes(
         """
 [[files]]
 type = "http"
-url = "https://example.com/a.bin"
-target_dir = "/models"
-filename = "a.bin"
+source = "https://example.com/a.bin"
+target = "/models/a.bin"
 
 [[files]]
 type = "http"
-url = "https://example.com/b.bin"
-target_dir = "models"
-filename = "nested/b.bin"
+source = "https://example.com/b.bin"
+target = "models/../nested/b.bin"
 """,
     )
 
@@ -659,8 +678,8 @@ filename = "nested/b.bin"
         )
 
     assert _identities(error.value) == [
-        (("files", 0, "target_dir"), "runtime_file.absolute_directory"),
-        (("files", 1, "filename"), "runtime_file.invalid_filename"),
+        (("files", 0, "target"), "runtime_file.absolute_target"),
+        (("files", 1, "target"), "runtime_file.parent_target_segment"),
     ]
 
 
@@ -672,9 +691,8 @@ def test_runtime_file_async_download_mode_is_accepted(
         """
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 download_mode = "async"
 """,
     )
@@ -695,9 +713,8 @@ def test_runtime_file_invalid_download_mode_fails_schema_validation(
         """
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 download_mode = "parallel"
 """,
     )
@@ -750,9 +767,8 @@ def test_runtime_file_unknown_field_fails_schema_validation(tmp_path: Path) -> N
         """
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 unexpected = true
 """,
     )
@@ -776,9 +792,8 @@ def test_runtime_file_merge_preserves_current_baked_mounted_contract(
         """
 [[files]]
 type = "http"
-url = "https://example.com/baked.bin"
-target_dir = "models"
-filename = "baked.bin"
+source = "https://example.com/baked.bin"
+target = "models/baked.bin"
 """,
     )
     appended_mounted = _write(
@@ -786,9 +801,8 @@ filename = "baked.bin"
         """
 [[files]]
 type = "http"
-url = "https://example.com/mounted.bin"
-target_dir = "models"
-filename = "mounted.bin"
+source = "https://example.com/mounted.bin"
+target = "models/mounted.bin"
 downloader = "httpx"
 """,
     )
@@ -802,14 +816,12 @@ downloader = "httpx"
         {
             "type": "http",
             "url": "https://example.com/baked.bin",
-            "target_dir": "models",
-            "filename": "baked.bin",
+            "target": "models/baked.bin",
         },
         {
             "type": "http",
             "url": "https://example.com/mounted.bin",
-            "target_dir": "models",
-            "filename": "mounted.bin",
+            "target": "models/mounted.bin",
             "downloader": "httpx",
         },
     )
@@ -819,9 +831,8 @@ downloader = "httpx"
         """
 [[files]]
 type = "http"
-url = "https://example.com/baked.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/baked.bin"
+target = "models/model.bin"
 overwrite = false
 downloader = "aria2"
 """,
@@ -831,8 +842,7 @@ downloader = "aria2"
         """
 [[files]]
 type = "http"
-target_dir = "models"
-filename = "model.bin"
+target = "models/model.bin"
 overwrite = true
 """,
     )
@@ -846,8 +856,7 @@ overwrite = true
         {
             "type": "http",
             "url": "https://example.com/baked.bin",
-            "target_dir": "models",
-            "filename": "model.bin",
+            "target": "models/model.bin",
             "overwrite": True,
             "downloader": "aria2",
         },
@@ -858,9 +867,8 @@ overwrite = true
         """
 [[files]]
 type = "http"
-url = "https://example.com/baked.bin"
-target_dir = "models"
-filename = "baked.bin"
+source = "https://example.com/baked.bin"
+target = "models/baked.bin"
 """,
     )
     reset_mounted = _write(tmp_path / "reset-mounted.toml", "files = []\n")
@@ -917,9 +925,8 @@ def test_runtime_file_invalid_fields_may_be_repaired_by_later_layer(
         """
 [[files]]
 type = "http"
-url = "ftp://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "ftp://example.com/model.bin"
+target = "models/model.bin"
 checksum = "invalid"
 """,
     )
@@ -928,9 +935,8 @@ checksum = "invalid"
         """
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/model.bin"
 checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 """,
     )
@@ -944,8 +950,7 @@ checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         {
             "type": "http",
             "url": "https://example.com/model.bin",
-            "target_dir": "models",
-            "filename": "model.bin",
+            "target": "models/model.bin",
             "checksum": (
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             ),
@@ -961,9 +966,8 @@ def test_runtime_file_local_source_is_rejected_by_strict_admission(
         """
 [[files]]
 type = "local"
-path = "/run/seeds/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "/run/seeds/model.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -975,7 +979,6 @@ filename = "model.bin"
 
     assert _identities(raised.value) == [
         (("files", 0, "type"), "schema.literal_error"),
-        (("files", 0, "path"), "schema.extra_forbidden"),
     ]
 
 
@@ -987,9 +990,8 @@ def test_invalid_runtime_files_may_be_reset_before_effective_validation(
         """
 [[files]]
 type = "http"
-url = "ftp://example.com/model.bin"
-target_dir = "/models"
-filename = "nested/model.bin"
+source = "ftp://example.com/model.bin"
+target = "/models/nested/model.bin"
 """,
     )
     mounted = _write(tmp_path / "mounted.toml", "files = []\n")
@@ -1010,8 +1012,7 @@ def test_runtime_file_missing_effective_url_is_attributed_to_authored_item(
         """
 [[files]]
 type = "http"
-target_dir = "models"
-filename = "model.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -1021,7 +1022,7 @@ filename = "model.bin"
             mounted_config_path=mounted,
         )
 
-    assert _identities(error.value) == [(("files", 0, "url"), "schema.missing")]
+    assert _identities(error.value) == [(("files", 0, "source"), "schema.missing")]
     context = error.value.diagnostics[0].source_context
     assert isinstance(context, SourceLocation)
     assert context.source.label == str(mounted)
@@ -1037,21 +1038,18 @@ def test_three_runtime_file_duplicates_compare_first_with_each_later_item(
         """
 [[files]]
 type = "http"
-url = "https://example.com/one.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/one.bin"
+target = "models/model.bin"
 
 [[files]]
 type = "http"
-url = "https://example.com/two.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/two.bin"
+target = "models/model.bin"
 
 [[files]]
 type = "http"
-url = "https://example.com/three.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/three.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -1062,8 +1060,8 @@ filename = "model.bin"
         )
 
     assert _identities(error.value) == [
-        (("files", 1, "filename"), "runtime_file.duplicate_target"),
-        (("files", 2, "filename"), "runtime_file.duplicate_target"),
+        (("files", 1, "target"), "runtime_file.overlapping_target"),
+        (("files", 2, "target"), "runtime_file.overlapping_target"),
     ]
     contexts = [diagnostic.source_context for diagnostic in error.value.diagnostics]
     assert all(isinstance(context, DiagnosticComparison) for context in contexts)
@@ -1075,8 +1073,8 @@ filename = "model.bin"
         for context in contexts
         if isinstance(context, DiagnosticComparison)
     ] == [
-        (("files", 0, "filename"), ("files", 1, "filename")),
-        (("files", 0, "filename"), ("files", 2, "filename")),
+        (("files", 0, "target"), ("files", 1, "target")),
+        (("files", 0, "target"), ("files", 2, "target")),
     ]
     assert all(
         context.earlier.display_value is None and context.later.display_value is None
@@ -1093,9 +1091,8 @@ def test_cross_layer_runtime_file_ambiguity_preserves_authored_sources(
         """
 [[files]]
 type = "http"
-url = "https://example.com/base.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/base.bin"
+target = "models/model.bin"
 """,
     )
     mounted = _write(
@@ -1103,15 +1100,13 @@ filename = "model.bin"
         """
 [[files]]
 type = "http"
-url = "https://example.com/later-one.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/later-one.bin"
+target = "models/model.bin"
 
 [[files]]
 type = "http"
-url = "https://example.com/later-two.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/later-two.bin"
+target = "models/model.bin"
 """,
     )
 
@@ -1119,8 +1114,8 @@ filename = "model.bin"
         load_runtime_config(baked_config_path=baked, mounted_config_path=mounted)
 
     assert [diagnostic.path for diagnostic in error.value.diagnostics] == [
-        ("files", 1, "filename"),
-        ("files", 2, "filename"),
+        ("files", 1, "target"),
+        ("files", 2, "target"),
     ]
     contexts = [diagnostic.source_context for diagnostic in error.value.diagnostics]
     assert [
@@ -1133,8 +1128,8 @@ filename = "model.bin"
         for context in contexts
         if isinstance(context, DiagnosticComparison)
     ] == [
-        (str(baked), ("files", 0, "filename"), str(mounted), ("files", 0, "filename")),
-        (str(baked), ("files", 0, "filename"), str(mounted), ("files", 1, "filename")),
+        (str(baked), ("files", 0, "target"), str(mounted), ("files", 0, "target")),
+        (str(baked), ("files", 0, "target"), str(mounted), ("files", 1, "target")),
     ]
 
 

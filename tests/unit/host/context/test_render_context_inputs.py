@@ -99,15 +99,13 @@ default_download_mode = "async"
 
 [[files]]
 type = "http"
-url = "https://example.test/implicit.bin"
-target_dir = "models"
-filename = "implicit.bin"
+source = "https://example.test/implicit.bin"
+target = "models/implicit.bin"
 
 [[files]]
 type = "http"
-url = "https://example.test/explicit.bin"
-target_dir = "models"
-filename = "explicit.bin"
+source = "https://example.test/explicit.bin"
+target = "models/explicit.bin"
 downloader = "httpx"
 download_mode = "async"
 """
@@ -162,9 +160,8 @@ def test_locked_local_file_uses_first_config_parent_and_omits_locator(
         """
 [[files]]
 type = "local"
-path = "assets/model.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "assets/model.bin"
+target = "models/model.bin"
 content_lock = true
 """
     )
@@ -202,9 +199,8 @@ local_file_mode = "copy"
 
 [[files]]
 type = "local"
-path = "{locator}"
-target_dir = "models"
-filename = "model.bin"
+source = "{locator}"
+target = "models/model.bin"
 '''
     )
     output = tmp_path / "context"
@@ -242,9 +238,8 @@ local_file_mode = "copy"
 
 [[files]]
 type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
+source = "{source.as_posix()}"
+target = "models/model.bin"
 '''
     )
     output = tmp_path / "context"
@@ -259,6 +254,29 @@ filename = "model.bin"
     )
 
 
+def test_local_file_root_target_is_rejected_even_when_content_locked(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"local-model")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{source.as_posix()}"
+target = "."
+content_lock = true
+'''
+    )
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, tmp_path / "context", FakeAcquirer())
+
+    assert raised.value.diagnostics[0].code == "render.local_file_target_invalid"
+
+
 def test_local_file_source_must_not_overlap_rendered_context(tmp_path: Path) -> None:
     output = tmp_path / "context"
     source = output / "model.bin"
@@ -270,9 +288,8 @@ def test_local_file_source_must_not_overlap_rendered_context(tmp_path: Path) -> 
         + f"""
 [[files]]
 type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
+source = "{source.as_posix()}"
+target = "models/model.bin"
 """
     )
 
@@ -292,9 +309,8 @@ def test_invalid_local_file_locator_is_a_content_safe_render_diagnostic(
         + f"""
 [[files]]
 type = "local"
-path = "\\u0000{marker}"
-target_dir = "models"
-filename = "model.bin"
+source = "\\u0000{marker}"
+target = "models/model.bin"
 """
     )
 

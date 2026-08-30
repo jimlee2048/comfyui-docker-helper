@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -161,7 +161,7 @@ def test_tree_admission_rejects_links_special_nodes_and_reserved_members(
     with pytest.raises(file_admission.TreeAdmissionError) as raised:
         file_admission.admit_local_tree(source)
     assert raised.value.code == "reserved_member"
-    assert raised.value.relative_path == Path(".cdh-staging")
+    assert raised.value.relative_path == PurePosixPath(".cdh-staging")
 
     (source / ".cdh-staging").rmdir()
     fifo = source / "fifo"
@@ -194,4 +194,4 @@ def test_tree_admission_surfaces_traversal_failure_and_membership_drift(
     with pytest.raises(file_admission.TreeAdmissionError) as raised:
         file_admission.revalidate_local_tree(source, inventory)
     assert raised.value.code == "membership_drift"
-    assert raised.value.relative_path == Path("new")
+    assert raised.value.relative_path == PurePosixPath("new")

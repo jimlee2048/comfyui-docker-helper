@@ -6,7 +6,7 @@ import hashlib
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -95,7 +95,7 @@ def test_windows_tree_admission_rejects_a_nested_junction(
         with pytest.raises(file_admission.TreeAdmissionError) as raised:
             file_admission.admit_local_tree(source)
         assert raised.value.code == "member_reparse"
-        assert raised.value.relative_path == Path("linked")
+        assert raised.value.relative_path == PurePosixPath("linked")
     finally:
         linked.rmdir()
 

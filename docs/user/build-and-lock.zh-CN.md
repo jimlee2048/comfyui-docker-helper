@@ -195,6 +195,8 @@ cdh host render \
 
 未锁定输入在准入时只安全打开本地文件，不会通读其内容，`--dry-run` 也如此。之后在 copy 或显式 `--check` 中遇到读取错误会使该操作失败；不完整的 materialization 不会发布。成功的未锁定 clone 同样不证明每个数据块都已读过，因此 Docker 消费内容时仍可能遇到读取错误。来源安全检查和结构检查仍然保留；详见[宿主机文件系统契约](../dev/contracts.md#cooperative-source-reads)。
 
+对于启用内容锁的输入，普通 copy 会对正在传输的字节计算摘要；成功 clone 则读取取得的私有副本计算摘要，不再回读原件。这会根据 Plan 验证为 Docker 准备的输入，而不会在普通 copy 后额外通读副本。来源结构检查仍然保留，但不会在取得输入后重新对来源内容计算摘要；详见[materialization 契约](../dev/contracts.md#materialization-boundary)。
+
 render、build、check 和 dry-run 准备阶段会针对每个空的本地 source 目录各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。`host validate` 不读取本地 source，因此不会产生该 warning；quiet 模式不会隐藏它。本地 source locator 只在进程内存在，不会序列化到 lock、BuildPlan、上下文 metadata、runtime 配置、最终 manifest 或镜像中。
 
 只有 HTTP 构建文件会投影到 `runtime/config.toml`。本地来源 locator 仅属于宿主机，不会成为 runtime import 指令；部署时替换仍由挂载的运行时配置独立负责。
@@ -293,6 +295,6 @@ cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁�
 
 ## 最终证据和重放边界
 
-所有镜像变更成功后，cdh 会写入严格的最终状态观测 `/opt/cdh/build/manifest.json`。它绑定镜像配置、canonical lock 和 BuildPlan 的 digest，并记录预期和观测到的直接身份。本地目录树贡献一条 compact row，包含 kind、target、verification，以及在启用内容锁时相等的预期和观测聚合 tree digest；该 row 不重复成员、计数或宿主机路径。最终 observer 只检查 Plan 选中的根和成员，因此无关的 lower image 条目不进入其 evidence。该 manifest 是证据，而不是另一个解析器、lock、重放输入、支持性结论或一般性的服务健康检查。
+所有镜像变更成功后，cdh 会写入严格的最终状态观测 `/opt/cdh/build/manifest.json`。它绑定镜像配置、canonical lock 和 BuildPlan 的 digest，并记录经过验证的最终状态证据。本地目录树贡献一条 compact row，包含 kind、target、verification，以及启用内容锁时与 Plan 预期比较通过的观测聚合 tree digest；该 row 不重复成员、计数或宿主机路径。最终 observer 只检查 Plan 选中的根和成员，因此无关的 lower image 条目不进入其 evidence。该 manifest 是证据，而不是另一个解析器、lock、重放输入、支持性结论或一般性的服务健康检查。
 
 cdh 为由 cdh 控制的直接输入提供有界且经过验证的重放。对于在目标环境生效的软件包 direct reference，重放 identity 是用户编写的 request 加精确的已安装顶层分发包版本，而不是已获取 artifact：它不会证明某个 URL 的内容未变，也不会把 moving VCS ref 固定到观测到的 commit。`--locked` 只在宿主端协调期间避免接触 source；之后执行的 Buildx build 仍可能需要获取并安装该生效且由用户编写的 source。这并不承诺离线构建或字节完全一致的构建，也不承诺对传递依赖项或每个已获取 artifact 进行完整锁定，不为缺少用户所提供 hash/checksum 的软件包或文件下载提供真实性保证，不保证受信任安装程序或 Hook 的效果具有确定性，也不承诺重放部署时变更。

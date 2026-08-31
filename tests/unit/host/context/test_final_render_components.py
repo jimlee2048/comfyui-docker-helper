@@ -1194,7 +1194,7 @@ def test_clone_unavailable_falls_back_only_in_auto_mode(
             call()
 
 
-def test_locked_local_materialization_rejects_second_read_digest_drift(
+def test_locked_local_materialization_rejects_acquired_content_drift(
     tmp_path: Path,
 ) -> None:
     intended = b"intended local model"
@@ -1217,6 +1217,85 @@ def test_locked_local_materialization_rejects_second_read_digest_drift(
             ),
             local_file_mode="copy",
         )
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_tree_check_placeholders_are_projected_from_plan(
+    tmp_path: Path,
+    locked: bool,
+) -> None:
+    plan, context_path = _plan_with_local_tree(locked=locked)
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+
+    _materialize_private_stage(
+        plan,
+        stage,
+        canonical_wheel=canonical_wheel(),
+        local_sources=(
+            LocalMaterializationSource(
+                PurePosixPath(context_path), tmp_path / "unused-source", kind="tree"
+            ),
+        ),
+        check_placeholders=True,
+    )
+
+    context = stage / context_path
+    assert (context / ".hidden" / "empty").is_dir()
+    assert (context / ".hidden" / "payload.bin").read_bytes() == b""
+    assert (context / "nested" / "payload.bin").read_bytes() == b""
+
+
+@pytest.mark.parametrize("matches_plan", [True, False])
+def test_locked_clone_verifies_acquired_bytes_instead_of_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    matches_plan: bool,
+) -> None:
+    intended = b"AAAA"
+    other = b"BBBB"
+    source = tmp_path / "model.bin"
+    source.write_bytes(other if matches_plan else intended)
+    acquired = intended if matches_plan else other
+    digest = f"sha256:{hashlib.sha256(intended).hexdigest()}"
+    plan, context_path = _plan_with_local_file(digest=digest)
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+
+    def clone_result(_reader, destination_fd):
+        # Model the acquired snapshot independently from the later source view.
+        assert os.write(destination_fd, acquired) == len(acquired)
+
+    def reject_source_read(*_args, **_kwargs):
+        pytest.fail("clone verification consumed source content")
+
+    monkeypatch.setattr(
+        file_admission.AdmittedRegularFileReader, "clone_to", clone_result
+    )
+    monkeypatch.setattr(
+        file_admission.AdmittedRegularFileReader, "read_chunk", reject_source_read
+    )
+    monkeypatch.setattr(materializer_module, "_CLONE_VERIFY_CHUNK_BYTES", 2)
+
+    def materialize():
+        _materialize_private_stage(
+            plan,
+            stage,
+            canonical_wheel=canonical_wheel(),
+            local_sources=(
+                LocalMaterializationSource(
+                    PurePosixPath(context_path), source, kind="file"
+                ),
+            ),
+            local_file_mode="clone",
+        )
+
+    if matches_plan:
+        materialize()
+    else:
+        with pytest.raises(FinalMaterializationError, match="digest"):
+            materialize()
+    assert (stage / context_path).read_bytes() == acquired
 
 
 def test_materializer_avoids_posix_mode_calls_on_windows(

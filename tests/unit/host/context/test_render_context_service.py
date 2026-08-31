@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,7 @@ from tests.host_render_service_support import (
     _tree,
 )
 
+from comfyui_docker_helper.filesystem import admission as file_admission
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.context import service as render_service_module
 from comfyui_docker_helper.host.context.service import (
@@ -453,6 +454,153 @@ target = "user/default/workflows"
 content_lock = {str(content_lock).lower()}
 '''
     )
+
+
+@pytest.mark.parametrize(
+    ("purpose", "locked", "source_passes", "context_passes"),
+    [
+        ("copy", False, 1, 0),
+        ("copy", True, 2, 0),
+        ("clone", False, 0, 0),
+        ("clone", True, 1, 0),
+        ("check", False, 1, 1),
+        ("check", True, 1, 1),
+        ("locked", False, 0, 0),
+        ("locked", True, 1, 1),
+        ("dry-run", False, 0, 0),
+        ("dry-run", True, 1, 0),
+    ],
+)
+def test_local_tree_preparation_reads_content_only_for_its_purpose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    purpose: str,
+    locked: bool,
+    source_passes: int,
+    context_passes: int,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    payload = source / "nested" / "payload.bin"
+    content = b"model content"
+    payload.write_bytes(content)
+    config = tmp_path / "config.toml"
+    mode = "clone" if purpose == "clone" else "copy"
+    config.write_text(
+        _local_tree_config(source, content_lock=locked)
+        + f'\n[cdh]\nlocal_file_mode = "{mode}"\n'
+    )
+    output = tmp_path / "context"
+    context_file = None
+    if purpose in {"check", "locked"}:
+        prepared = _prepare(config, output, FakeAcquirer())
+        context_file = (
+            output / prepared.plan.files.files[0].context_path / "nested/payload.bin"
+        )
+    read_bytes = {"source": 0, "context": 0}
+    operate = file_admission._operate_regular_absolute_file
+
+    def observe(path, operation):
+        key = (
+            "source"
+            if Path(path) == payload
+            else "context"
+            if Path(path) == context_file
+            else None
+        )
+        if key is None:
+            return operate(path, operation)
+
+        def count_operation(reader):
+            def read(limit=None):
+                chunk = reader.read_chunk(limit)
+                read_bytes[key] += len(chunk)
+                return chunk
+
+            return operation(replace(reader, _read_chunk=read))
+
+        return operate(path, count_operation)
+
+    def clone_result(_reader, destination_fd):
+        assert os.write(destination_fd, content) == len(content)
+
+    monkeypatch.setattr(file_admission, "_operate_regular_absolute_file", observe)
+    if purpose == "clone":
+        monkeypatch.setattr(
+            file_admission.AdmittedRegularFileReader, "clone_to", clone_result
+        )
+    options = PlanningOptions(
+        check=purpose == "check",
+        locked=purpose == "locked",
+        dry_run=purpose == "dry-run",
+    )
+
+    prepared = _prepare(config, output, FakeAcquirer(), options=options)
+
+    assert read_bytes == {
+        "source": source_passes * len(content),
+        "context": context_passes * len(content),
+    }
+    if purpose == "dry-run":
+        assert not output.exists()
+    else:
+        context_file = (
+            output / prepared.plan.files.files[0].context_path / "nested/payload.bin"
+        )
+        assert context_file.read_bytes() == content
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_late_unlocked_read_failure_does_not_publish_partial_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overwrite: bool,
+) -> None:
+    source = tmp_path / "tree"
+    source.mkdir()
+    payload = source / "payload.bin"
+    payload.write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _local_tree_config(source) + '\n[cdh]\nlocal_file_mode = "copy"\n'
+    )
+    output = tmp_path / "context"
+    if overwrite:
+        _prepare(config, output, FakeAcquirer())
+    before = _tree(output) if overwrite else None
+    before_paths = set(tmp_path.iterdir())
+    operate = file_admission._operate_regular_absolute_file
+    consumed = 0
+
+    def observe(path, operation):
+        if Path(path) != payload:
+            return operate(path, operation)
+
+        def fail_midstream(reader):
+            def read(_limit=None):
+                nonlocal consumed
+                if consumed:
+                    raise OSError("synthetic midstream failure")
+                chunk = reader.read_chunk(4)
+                consumed += len(chunk)
+                return chunk
+
+            return operation(replace(reader, _read_chunk=read))
+
+        return operate(path, fail_midstream)
+
+    monkeypatch.setattr(file_admission, "_operate_regular_absolute_file", observe)
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer(), overwrite=overwrite)
+
+    assert consumed == 4
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert set(tmp_path.iterdir()) == before_paths
+    if overwrite:
+        assert _tree(output) == before
+    else:
+        assert not output.exists()
 
 
 def test_check_unlocked_local_tree_streams_same_size_member_bytes(

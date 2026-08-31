@@ -48,6 +48,7 @@ from comfyui_docker_helper.rendering.final_renderer import (
 
 _platform_name = os.name
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_CLONE_VERIFY_CHUNK_BYTES = 1024 * 1024
 
 
 class FinalMaterializationError(RuntimeError):
@@ -333,25 +334,26 @@ def _materialize_local_tree(
     """Materialize one complete source tree below its deterministic context slot."""
     if mode not in {"auto", "clone", "copy"}:
         raise FinalMaterializationError("local file materialization mode is invalid")
-    try:
-        expected = _local_tree_inventory(plan)
-    except (TypeError, ValueError) as error:
-        raise FinalMaterializationError(
-            "local tree Plan inventory is invalid"
-        ) from error
-    try:
-        revalidate_local_tree(source, expected)
-    except TreeAdmissionError as error:
-        message = (
-            "local source tree changed before materialization"
-            if error.code == "membership_drift"
-            else "local source tree could not be enumerated"
-        )
-        raise FinalMaterializationError(message) from error
-    except (OSError, ValueError) as error:
-        raise FinalMaterializationError(
-            "local source tree could not be enumerated"
-        ) from error
+    if not check_placeholders:
+        try:
+            expected = _local_tree_inventory(plan)
+        except (TypeError, ValueError) as error:
+            raise FinalMaterializationError(
+                "local tree Plan inventory is invalid"
+            ) from error
+        try:
+            revalidate_local_tree(source, expected)
+        except TreeAdmissionError as error:
+            message = (
+                "local source tree changed before materialization"
+                if error.code == "membership_drift"
+                else "local source tree could not be enumerated"
+            )
+            raise FinalMaterializationError(message) from error
+        except (OSError, ValueError) as error:
+            raise FinalMaterializationError(
+                "local source tree could not be enumerated"
+            ) from error
 
     _ensure_directory(stage, relative_path)
     for member in plan.members:
@@ -371,6 +373,9 @@ def _materialize_local_tree(
                 expected_digest=member.digest,
                 mode=mode,
             )
+
+    if check_placeholders:
+        return
 
     try:
         revalidate_local_tree(source, expected)
@@ -463,7 +468,8 @@ def _materialize_regular_file(
                             digest.update(chunk)
                         _write_all(output.fileno(), chunk)
                 elif digest is not None:
-                    while chunk := reader.read_chunk():
+                    output.seek(0)
+                    while chunk := output.read(_CLONE_VERIFY_CHUNK_BYTES):
                         digest.update(chunk)
                 if os.fstat(output.fileno()).st_size != reader.size:
                     raise FinalMaterializationError(
@@ -477,7 +483,7 @@ def _materialize_regular_file(
             ) from error
         if digest is not None and f"sha256:{digest.hexdigest()}" != expected_digest:
             raise FinalMaterializationError(
-                "local source digest does not match BuildPlan"
+                "materialized local file digest does not match BuildPlan"
             )
 
     try:

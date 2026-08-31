@@ -138,9 +138,9 @@ target = "user/default/workflows"
 content_lock = false
 ```
 
-HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地来源可以是一个普通文件，也可以是一个完整的真实目录树；本地来源不使用 downloader，也不接受手写 checksum。文件 target 是确切的最终路径。目录 target 是目标根目录，cdh 会把来源根目录的内容复制到该根目录下，不额外添加来源目录名。目录应用是 overlay：选中的条目替换目标中兼容的条目，而无关的镜像下层内容保留；cdh 不做 mirror，也不删除这些内容。所有构建文件对其选中的条目都是权威的，因此构建配置没有 `overwrite` 字段。
+HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地来源可以是一个普通文件，也可以是一个完整的真实目录树；本地来源不使用 downloader，也不接受手写 checksum。文件 target 是确切的最终路径。目录 target 是目标根目录，cdh 会把来源目录的内容复制到该根目录下，不附加来源目录名。目录应用采用覆盖合并：选中的条目替换目标中兼容的条目，而无关的镜像下层内容保留；cdh 不做镜像同步删除。所有构建文件对其选中的条目都是权威的，因此构建配置没有 `overwrite` 字段。
 
-本地 `source` 不能为空。相对的本地 `source` 统一以第一个 `-f` 配置文件的真实父目录作为基准；显式的 `source = "."` 会选择第一个配置文件的真实父目录本身。绝对路径和规范化后的父目录穿越均可使用。render/build 准入会选择所有真实的后代目录和普通文件，包括点开头的条目和空目录，并拒绝链接、Windows junction 或其他 reparse point、特殊文件、不可读取的条目和不安全名称。source 与渲染输出不能重叠。source locator 是普通的非 Secret 宿主机输入：它不会序列化到 lock、BuildPlan、渲染 metadata、manifest 或镜像配置中，但也不享受 Secret 值处理或脱敏。`host validate` 只检查结构和 target 语法，不读取本地 source。
+本地 `source` 不能为空。相对的本地 `source` 统一以第一个 `-f` 配置文件的真实父目录作为基准；显式的 `source = "."` 会选择第一个配置文件的真实父目录本身。绝对路径和规范化后的父目录穿越均可使用。render/build 准入会选择所有真实的后代目录和普通文件，包括点开头的条目和空目录，并拒绝链接、Windows junction 或其他 reparse point、特殊文件、不可读取的条目和不安全名称。source 与渲染输出不能重叠。本地 source 路径属于普通的宿主机输入，而不是 Secret 值。`host validate` 只检查结构和 target 语法，不读取本地 source。
 
 选中的目录和普通文件在镜像中使用 cdh 规定的 `0755` 和 `0644` 权限；宿主机所有者、时间戳、ACL、xattr 和可执行位不会被复制。
 
@@ -148,7 +148,7 @@ HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地来源可以�
 
 空的本地目录有效，并仍会创建目标根目录，但 render、build、check 和 dry-run 各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。validate 不产生该 warning，quiet 模式也会保留它。
 
-`content_lock = false` 是默认值。本地文件不会在 BuildPlan 或 lock 中产生 content digest。本地目录树仍会把完整且排序的成员 inventory 记录到 BuildPlan，但不记录成员 size 或 digest；`--locked` 比较该结构而不比较未锁定的字节，`--check` 则流式比较完整的 source/context 字节相等性。使用 `content_lock = true` 时，本地文件会在 BuildPlan 中得到一个按 target 定位的 SHA-256 digest，并在 canonical lock 中得到一条匹配的 lock row；本地目录树会在 BuildPlan 中记录成员 size、digest 和一个聚合 tree digest，而 canonical lock 只记录聚合 tree row。materialization 和最终观测会验证所选 identity。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明上下文 materialization mode、reconciliation 成本、远程 builder 传输和镜像放置行为。本地来源仅用于构建；只有 HTTP 文件声明会成为固化的运行时默认配置。
+`content_lock = false` 是默认值，普通规划不会对本地字节计算内容摘要。使用 `content_lock = true` 时，cdh 会为所选本地文件或目录树内容计算内容摘要，并在准备上下文及最终镜像观测时验证该摘要。`--locked` 会检查现有 lock、本地目录树结构和启用内容锁的内容摘要，但不会比较未锁定 source 的字节；如需流式比较来源/上下文的字节相等性，请使用 `--check`。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明 materialization mode、读取和远程 builder 传输成本、空 source warning 以及镜像放置行为。本地 source 路径仅在宿主机准备阶段使用；准备好的内容仍是镜像构建输入，只有 HTTP 文件声明会成为固化的运行时默认配置。
 
 ## 为 HTTPX 文件下载提供认证
 

@@ -1,4 +1,4 @@
-"""Plan-driven normalization of selected local-tree image paths."""
+"""Plan-driven validation and normalization of selected local-tree image paths."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
 
 class LocalTreeNormalizationError(ApplicationError):
-    """A selected local-tree path could not be normalized safely."""
+    """A selected local-tree path could not be placed safely."""
 
 
 def validate_local_trees(

@@ -79,7 +79,7 @@ class FinalManifestLocalFileInput:
 
 @dataclass(frozen=True, slots=True)
 class LocalTreeMemberInput:
-    """One Plan-selected tree member needed by image normalization."""
+    """One Plan-selected tree member needed by image placement and observation."""
 
     relative_path: str
     kind: Literal["directory", "file"]
@@ -114,7 +114,7 @@ class FinalCoreProbeInput:
 
 @dataclass(frozen=True, slots=True)
 class LocalTreeNormalizationInput:
-    """One typed, tree-only projection for the image normalizer."""
+    """Tree paths and kinds shared by placement validation and normalization."""
 
     target: str
     members: tuple[LocalTreeMemberInput, ...]
@@ -162,7 +162,7 @@ class BuildPlanInputAdmission:
     def local_trees(
         self,
     ) -> tuple[tuple[LocalTreeNormalizationInput, ...], str]:
-        """Project only expected local-tree paths for normalization."""
+        """Project expected tree paths for placement validation and normalization."""
         return (
             tuple(
                 _local_tree_input(item)
@@ -255,7 +255,7 @@ def _manifest_file_input(
 
 
 def _local_tree_input(item: LocalTreePlan) -> LocalTreeNormalizationInput:
-    """Drop content identities from the tree-only mutation projection."""
+    """Project tree shape without the content identities used by observation."""
     return LocalTreeNormalizationInput(
         target=item.target,
         members=tuple(

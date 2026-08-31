@@ -179,9 +179,9 @@ cdh host render \
 
 ## 构建文件与本地上下文 materialization
 
-构建 `[[files]]` 声明是最终镜像内容的权威，并使用一个 `source + target` 操作。HTTP source 会下载到 cdh 所有的 staging，并在通过已配置的 checksum 后原子替换其确切 target。本地普通文件 source 会 materialize 到 Plan 所有的 `build/files/<target-hash>` slot，再以 `COPY --link --chmod=0644` 放到其确切 target。本地目录 source 会 materialize 到一个 `build/trees/<target-hash>` slot，再用一次目录 `COPY --link` 复制到确切的目标根目录；不会添加 source basename。HTTP 和本地文件 target 必须是 `COMFYUI_PATH` 的严格后代，并表示一个确切文件；本地目录 target 相对于 `COMFYUI_PATH`，可以等于根目录（`.`）。HTTP 不会从 URL 或响应 metadata 推断 target 文件名。
+构建 `[[files]]` 声明是最终镜像内容的权威，并使用一个 `source + target` 操作。HTTP source 会下载到 cdh 管理的暂存目录，并在通过已配置的 checksum 后原子替换其确切 target。本地 source 可以是一个普通文件，也可以是一个完整的真实目录树；cdh 会在构建镜像前把它准备为独立的构建输入。本地文件放到其确切 target；本地目录会把来源目录内容放到目标根目录下，不附加来源目录名。HTTP 和本地文件 target 必须是 `COMFYUI_PATH` 的严格后代，并表示一个确切文件；本地目录 target 相对于 `COMFYUI_PATH`，可以等于根目录（`.`）。HTTP 不会从 URL 或响应 metadata 推断 target 文件名。
 
-目录应用是 overlay，而不是 mirror。选中的文件和目录会替换 target 下兼容的条目，而无关的 lower image 内容保留；文件/目录冲突或不兼容的目标根目录会失败。每个选中的目录都会规范化为 `0755`，每个选中的普通文件都会规范化为 `0644`；宿主机所有者、时间戳、ACL、xattr 和可执行位不属于镜像权威。所有生效 target 区域必须通过相等和 component-prefix overlap 保持互不相交。目标和本地目录成员须遵循[文件命名规则](configuration.zh-CN.md#在镜像构建期间添加文件)，不能使用保留名称 `.cdh-staging` 或以 `.wh.` 开头的名称。完全空的本地目录有效，并仍会创建目标根目录。
+目录应用采用覆盖合并（保留无关条目），而不是镜像同步删除。选中的文件和目录会替换 target 下兼容的条目，而无关的下层镜像内容保留；文件/目录冲突或不兼容的目标根目录会失败。每个选中的目录都会规范化为 `0755`，每个选中的普通文件都会规范化为 `0644`；宿主机所有者、时间戳、ACL、xattr 和可执行位不属于镜像权威。生效的 target 区域不能相同，也不能互相包含。目标和本地目录成员须遵循[文件命名规则](configuration.zh-CN.md#在镜像构建期间添加文件)，不能使用保留名称 `.cdh-staging` 或以 `.wh.` 开头的名称。完全空的本地目录有效，并仍会创建目标根目录。
 
 通过 `[cdh].local_file_mode` 选择本地文件及本地目录树普通成员的字节如何进入渲染上下文：
 
@@ -191,15 +191,11 @@ cdh host render \
 
 任何 clone mode 都不会使用 hardlink 或 symlink：已发布的上下文文件或目录树不受后续来源变更影响。可用的本地文件系统上，clone 可以避免实际复制未变化的 extent，但完整 source 仍属于上下文。BuildKit 必须读取它，远程 builder 也必须接收它，因此 `content_lock = false` 不会消除上下文存储、builder cache 或上传成本。
 
-使用 `content_lock = false` 时，普通规划不会对本地 source 字节执行 hash。本地文件没有 content digest；本地目录树的 BuildPlan 仍会冻结完整且排序的 inventory，包括相对成员和节点类型，输出模式由节点类型固定决定。`--locked` 比较该目录树结构但不比较未锁定字节，`--check` 比较完整成员关系，并对每个 source/context 文件进行流式字节比较。使用 `content_lock = true` 时，本地文件会在 BuildPlan 中得到一个按 target 定位的 SHA-256 digest，并在 canonical lock 中得到一条匹配 row；本地目录树会在 BuildPlan 中记录每个普通成员的 size、SHA-256 和一个聚合 tree identity，而 canonical lock 只保存一个聚合 `sha256:` 条目，不重复成员 inventory。materialization 和最终观测会重新验证已接纳的 inventory 和 identity。这些操作均为有界内存，但当结果需要时必然读取完整文件。
+使用 `content_lock = false` 时，普通规划会记录本地结构，但不会对 source 字节计算内容摘要。`--locked` 要求现有 lock，并检查启用内容锁的本地内容摘要和目录树结构，但不会比较未锁定 source 的字节；`--check` 比较完整的来源/上下文结构，并流式比较文件字节。使用 `content_lock = true` 时，cdh 会为本地文件或本地目录树的每个普通成员计算内容摘要，并在准备上下文及最终镜像观测时验证该摘要。内容锁和 `--check` 会在结果需要时读取完整文件，但使用有界内存。
 
-未锁定输入在准入时只安全打开本地文件，不会通读其内容，`--dry-run` 也如此。之后在 copy 或显式 `--check` 中遇到读取错误会使该操作失败；不完整的 materialization 不会发布。成功的未锁定 clone 同样不证明每个数据块都已读过，因此 Docker 消费内容时仍可能遇到读取错误。来源安全检查和结构检查仍然保留；详见[宿主机文件系统契约](../dev/contracts.md#cooperative-source-reads)。
+未锁定的本地 source 在准入时只会被安全打开并检查结构，不会通读内容，`--dry-run` 也如此。copy、显式 `--check` 和 Docker 仍需要读取其字节；之后发生的读取错误会使该操作失败，不完整的 materialization 不会发布，而成功的未锁定 clone 也不证明每个数据块都可读。来源安全检查和结构检查仍然保留；详见[宿主机文件系统契约](../dev/contracts.md#cooperative-source-reads)。
 
-对于启用内容锁的输入，普通 copy 会对正在传输的字节计算摘要；成功 clone 则读取取得的私有副本计算摘要，不再回读原件。这会根据 Plan 验证为 Docker 准备的输入，而不会在普通 copy 后额外通读副本。来源结构检查仍然保留，但不会在取得输入后重新对来源内容计算摘要；详见[materialization 契约](../dev/contracts.md#materialization-boundary)。
-
-render、build、check 和 dry-run 准备阶段会针对每个空的本地 source 目录各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。`host validate` 不读取本地 source，因此不会产生该 warning；quiet 模式不会隐藏它。本地 source locator 只在进程内存在，不会序列化到 lock、BuildPlan、上下文 metadata、runtime 配置、最终 manifest 或镜像中。
-
-只有 HTTP 构建文件会投影到 `runtime/config.toml`。本地来源 locator 仅属于宿主机，不会成为 runtime import 指令；部署时替换仍由挂载的运行时配置独立负责。
+render、build、check 和 dry-run 准备阶段会针对每个空的本地 source 目录各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。`host validate` 不读取本地 source，因此不会产生该 warning；quiet 模式不会隐藏它。本地 source 路径仅在宿主机准备阶段使用；构建器会读取准备好的上下文数据。本地来源不会成为运行时导入指令；只有 HTTP 构建文件会投影到 `runtime/config.toml`。详见[materialization 契约](../dev/contracts.md#materialization-boundary)。
 
 ## 经过认证的 HTTPX 文件下载
 
@@ -213,19 +209,7 @@ BuildKit Secret 内容通常不会使指令 cache 失效。因此 token 轮换�
 
 ## 从生效配置到上下文
 
-cdh 使用单向前进的规划流程：
-
-```text
-effective configuration
-  -> canonical request graph
-  -> 一个 Host local-admission bundle（planning inventory、private source、warning）
-  -> canonical lock
-  -> BuildPlan（完整的已接纳目录树 inventory）
-  -> private rendered context
-  -> image construction and final observation
-```
-
-生效配置描述意图。request graph 中的本地 source request 保持 shape-neutral，且不含宿主机 locator。一个 Host admission bundle 会为每个本地 source 分类，创建完整的已接纳 inventory，计算选择启用的 tree identity，保留进程内用于 materialization 的 source，并携带空 source warning。`config.lock.toml` 记录已接受的精确外部 identity、Hook identity、每个启用内容锁的本地文件按 target 定位的 SHA-256 row，以及每个启用内容锁的本地目录树的聚合 row。随后，cdh 构造一个不可变的 BuildPlan，作为构建时执行权威；其完整目录树 inventory 是唯一持久化的成员 inventory，只有启用内容锁的目录树会额外保留成员 size 和 digest。上下文渲染会将该计划连同其精确 wheel 和 private 本地输入一起投影出来；构建时辅助程序不会重新读取宿主机配置或 lock 来作出新的规划决策。
+cdh 会验证最终的分层配置、协调 lock，并在运行 Buildx 前准备私有上下文。本地 source 路径仅在宿主机准备阶段使用；镜像构建会使用准备好的上下文数据。关于内部所有权和工件边界，参见[规划与序列化权威](../dev/contracts.md#planning-and-serialized-authority)以及[materialization 契约](../dev/contracts.md#materialization-boundary)。
 
 ## 协调模式
 
@@ -233,13 +217,13 @@ effective configuration
 
 | 模式 | 解析行为 | 上下文和构建行为 |
 | --- | --- | --- |
-| 默认 | 复用未变更的条目，解析缺失或已变更的输入，并移除已删除的身份。本地 source 会被准入；`content_lock = true` 会为一个本地文件或一个本地目录树的成员计算其 identity。 | 写入已接受的 lock 和渲染上下文。 |
-| `--locked` | 要求现有 lock 与每个启用内容锁的本地文件 digest 或本地目录树聚合 digest 完全匹配；协调期间不调用解析提供方或 Docker。 | 比较现有上下文且不写入任何内容。会比较本地目录树结构，但不会比较未启用内容锁的本地 source bytes；如需显式流式比较，请使用 `--check`。检查通过后，`host build` 仍会调用 Buildx。 |
+| 默认 | 复用未变更的条目，解析缺失或已变更的输入，并移除已删除的身份。本地 source 会被准入；`content_lock = true` 会为所选本地输入计算内容摘要。 | 写入已接受的 lock 和渲染上下文。 |
+| `--locked` | 要求现有 lock 与每个启用内容锁的本地输入内容摘要完全匹配；协调期间不调用解析提供方或 Docker。 | 比较现有上下文且不写入任何内容。会比较本地目录树结构，但不会比较未启用内容锁的本地 source bytes；如需显式流式比较，请使用 `--check`。检查通过后，`host build` 仍会调用 Buildx。 |
 | `--upgrade-lock` | 刷新浮动选择器，同时保留未变更的精确选择。 | 写入更新后的 lock 和渲染上下文。 |
 | `--check` | 应用默认协调策略。 | 将完整的预期上下文与现有上下文进行比较，包括本地目录树成员关系和流式文件字节；不写入任何内容，也不构建。 |
-| `--dry-run` | 使用默认策略；与 `--locked` 或 `--upgrade-lock` 组合使用时除外。 | 准入并规划本地 source（包括空目录 warning），然后输出精确的 BuildPlan，并在独立的进程内 `Buildx output` 区段中显示适用时已展开的 mode 和 tag，否则显示 `None`；不写入任何内容，也不构建。 |
+| `--dry-run` | 使用默认策略；与 `--locked` 或 `--upgrade-lock` 组合使用时除外。 | 准入并规划本地 source（包括空目录 warning），然后输出完整的计划预览，并在独立的 `Buildx output` 区段中显示适用时已展开的 mode 和 tag，否则显示 `None`；不写入任何内容，也不构建。 |
 
-`--check` 不能与 lock 策略或 dry-run 修饰选项组合使用。`--locked` 与 `--upgrade-lock` 互斥。当 `--dry-run` 与 lock 策略组合使用时，预览行为会取代上下文比较或发布。`Buildx output: None` 表示本次调用没有 publication output plan；它既不属于 BuildPlan，也不是 BuildPlan 中缺少的字段。
+`--check` 不能与 lock 策略或 dry-run 修饰选项组合使用。`--locked` 与 `--upgrade-lock` 互斥。当 `--dry-run` 与 lock 策略组合使用时，预览行为会取代上下文比较或发布。`Buildx output: None` 表示本次调用没有镜像发布输出；它不是错误，也不表示计划预览缺少内容。
 
 不写入并不一定意味着离线。默认、`--check` 和 `--dry-run` 可能会调用解析提供方；当当前 lock 无法提供所需的镜像身份时，它们可能还需要 Docker。完整且匹配的 lock 可使这些路径无需 Docker。只有 `--locked` 禁止在协调期间调用解析提供方和 Docker；Docker Buildx 仍是 `host build` 的一项独立要求。
 
@@ -263,7 +247,7 @@ effective configuration
 - `Dockerfile`，使用字面量且带 digest 的基础镜像引用渲染而成；以及
 - `.dockerignore`，将 `config.lock.toml` 和 `.cdh-rendered` 排除在 Buildx 输入之外。
 
-上下文不包含根级 `config.toml`。宿主机本地源路径、Secret source locator、解析后的 Secret 值、发布 tag 及 output selector 都不是 BuildPlan 输入。Dockerfile 没有能够替换由 lock 定权的镜像身份的参数。完整 Plan 仍保留在宿主机上下文中，所选的本地或远程 builder 仍可访问它，但每条指令的只读挂载不会把 `/opt/cdh/build/build-plan.json` 持久化到最终镜像中；最终 manifest 仍保留 Plan digest 绑定以及每个本地目录树的一条 compact evidence row。
+上下文不包含根级 `config.toml`。cdh 生成的构建 metadata 不嵌入宿主机 source locator 或 Secret 值。所选的本地或远程 builder 可以读取渲染上下文及其中的 BuildPlan；受信任的 Hook 和安装程序也可以读取或复制其构建步骤可见的输入。发布 tag 和 output selector 仍是本次调用的选项。Dockerfile 使用由 lock 定权的镜像身份，最终 manifest 记录 cdh 验证过的绑定。关于宿主机到上下文以及临时挂载的边界，参见 [materialization 契约](../dev/contracts.md#materialization-boundary)。
 
 ## Python 环境和包源
 
@@ -295,6 +279,6 @@ cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁�
 
 ## 最终证据和重放边界
 
-所有镜像变更成功后，cdh 会写入严格的最终状态观测 `/opt/cdh/build/manifest.json`。它绑定镜像配置、canonical lock 和 BuildPlan 的 digest，并记录经过验证的最终状态证据。本地目录树贡献一条 compact row，包含 kind、target、verification，以及启用内容锁时与 Plan 预期比较通过的观测聚合 tree digest；该 row 不重复成员、计数或宿主机路径。最终 observer 只检查 Plan 选中的根和成员，因此无关的 lower image 条目不进入其 evidence。该 manifest 是证据，而不是另一个解析器、lock、重放输入、支持性结论或一般性的服务健康检查。
+所有镜像变更成功后，cdh 会写入严格的最终状态观测 `/opt/cdh/build/manifest.json`。它绑定镜像配置、canonical lock 和 BuildPlan 的 digest，并记录经过验证的最终状态证据，包括在适用时对选中的本地目录树内容进行检查。无关的下层镜像条目不在这些检查范围内。该 manifest 是证据，而不是另一个解析器、lock、重放输入、支持性结论或一般性的服务健康检查。
 
 cdh 为由 cdh 控制的直接输入提供有界且经过验证的重放。对于在目标环境生效的软件包 direct reference，重放 identity 是用户编写的 request 加精确的已安装顶层分发包版本，而不是已获取 artifact：它不会证明某个 URL 的内容未变，也不会把 moving VCS ref 固定到观测到的 commit。`--locked` 只在宿主端协调期间避免接触 source；之后执行的 Buildx build 仍可能需要获取并安装该生效且由用户编写的 source。这并不承诺离线构建或字节完全一致的构建，也不承诺对传递依赖项或每个已获取 artifact 进行完整锁定，不为缺少用户所提供 hash/checksum 的软件包或文件下载提供真实性保证，不保证受信任安装程序或 Hook 的效果具有确定性，也不承诺重放部署时变更。

@@ -207,3 +207,113 @@ def test_tree_admission_surfaces_traversal_failure_and_membership_drift(
         file_admission.revalidate_local_tree(source, inventory)
     assert raised.value.code == "membership_drift"
     assert raised.value.relative_path == PurePosixPath("new")
+
+
+@pytest.mark.parametrize("kind", ["file", "tree"])
+@pytest.mark.parametrize("locked", [False, True])
+def test_local_admission_reads_content_only_to_establish_locked_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    locked: bool,
+) -> None:
+    source = tmp_path / "source"
+    if kind == "tree":
+        source.mkdir()
+    payload = source / "payload" if kind == "tree" else source
+    content = b"model content"
+    payload.write_bytes(content)
+    read_bytes = 0
+    original_read = file_admission.AdmittedRegularFileReader.read_chunk
+
+    def count_read(reader, limit=None):
+        nonlocal read_bytes
+        chunk = original_read(reader, limit)
+        read_bytes += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(
+        file_admission.AdmittedRegularFileReader, "read_chunk", count_read
+    )
+
+    admitted = file_admission.admit_local_source(source, content_lock=locked)
+
+    assert admitted.kind == kind
+    if kind == "tree":
+        assert admitted.tree is not None
+        record = admitted.tree.members[0]
+    else:
+        assert admitted.file is not None
+        record = admitted.file
+    assert record.digest == (
+        f"sha256:{hashlib.sha256(content).hexdigest()}" if locked else None
+    )
+    assert read_bytes == (len(content) if locked else 0)
+
+
+def test_unlocked_admission_requires_a_successful_safe_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"payload")
+
+    def fail_open(path, _operation):
+        assert Path(path) == source
+        raise PermissionError("synthetic open failure")
+
+    monkeypatch.setattr(file_admission, "operate_regular_absolute_file", fail_open)
+
+    with pytest.raises(file_admission.TreeAdmissionError) as raised:
+        file_admission.admit_local_source(source)
+
+    assert raised.value.code == "source_unreadable"
+
+
+def test_tree_revalidation_observes_structure_without_reading_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "tree"
+    source.mkdir()
+    payload = source / "payload"
+    payload.write_bytes(b"initial")
+    expected = file_admission.admit_local_tree(source, content_lock=True)
+    payload.write_bytes(b"different content and size")
+
+    def reject_read(*_args, **_kwargs):
+        pytest.fail("structural revalidation consumed file content")
+
+    monkeypatch.setattr(
+        file_admission.AdmittedRegularFileReader, "read_chunk", reject_read
+    )
+
+    observed = file_admission.revalidate_local_tree(source, expected)
+
+    assert observed == LocalTreeInventory((LocalTreeMember("payload", "file"),))
+
+
+@pytest.mark.parametrize("change", ["add", "remove", "change-kind"])
+def test_tree_revalidation_rejects_changed_member_paths_or_kinds(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    source = tmp_path / "tree"
+    source.mkdir()
+    payload = source / "payload"
+    payload.write_bytes(b"content")
+    expected = file_admission.admit_local_tree(source, content_lock=True)
+    if change == "add":
+        (source / "new").mkdir()
+        changed_path = "new"
+    else:
+        payload.unlink()
+        if change == "change-kind":
+            payload.mkdir()
+        changed_path = "payload"
+
+    with pytest.raises(file_admission.TreeAdmissionError) as raised:
+        file_admission.revalidate_local_tree(source, expected)
+
+    assert raised.value.code == "membership_drift"
+    assert raised.value.relative_path == PurePosixPath(changed_path)

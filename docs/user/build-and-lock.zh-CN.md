@@ -193,6 +193,8 @@ cdh host render \
 
 使用 `content_lock = false` 时，普通规划不会对本地 source 字节执行 hash。本地文件没有 content digest；本地目录树的 BuildPlan 仍会冻结完整且排序的 inventory，包括相对成员和节点类型，输出模式由节点类型固定决定。`--locked` 比较该目录树结构但不比较未锁定字节，`--check` 比较完整成员关系，并对每个 source/context 文件进行流式字节比较。使用 `content_lock = true` 时，本地文件会在 BuildPlan 中得到一个按 target 定位的 SHA-256 digest，并在 canonical lock 中得到一条匹配 row；本地目录树会在 BuildPlan 中记录每个普通成员的 size、SHA-256 和一个聚合 tree identity，而 canonical lock 只保存一个聚合 `sha256:` 条目，不重复成员 inventory。materialization 和最终观测会重新验证已接纳的 inventory 和 identity。这些操作均为有界内存，但当结果需要时必然读取完整文件。
 
+未锁定输入在准入时只安全打开本地文件，不会通读其内容，`--dry-run` 也如此。之后在 copy 或显式 `--check` 中遇到读取错误会使该操作失败；不完整的 materialization 不会发布。成功的未锁定 clone 同样不证明每个数据块都已读过，因此 Docker 消费内容时仍可能遇到读取错误。来源安全检查和结构检查仍然保留；详见[宿主机文件系统契约](../dev/contracts.md#cooperative-source-reads)。
+
 render、build、check 和 dry-run 准备阶段会针对每个空的本地 source 目录各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。`host validate` 不读取本地 source，因此不会产生该 warning；quiet 模式不会隐藏它。本地 source locator 只在进程内存在，不会序列化到 lock、BuildPlan、上下文 metadata、runtime 配置、最终 manifest 或镜像中。
 
 只有 HTTP 构建文件会投影到 `runtime/config.toml`。本地来源 locator 仅属于宿主机，不会成为 runtime import 指令；部署时替换仍由挂载的运行时配置独立负责。

@@ -181,13 +181,6 @@ class LocalTreeInventory:
             raise ValueError("local tree file content records must be uniformly locked")
 
     @property
-    def locked(self) -> bool:
-        """Whether regular-file content records are present."""
-        return any(
-            item.kind == "file" and item.size is not None for item in self.members
-        )
-
-    @property
     def empty(self) -> bool:
         return not self.members
 
@@ -211,7 +204,7 @@ class LocalTreeInventory:
 
 @dataclass(frozen=True, slots=True)
 class AdmittedLocalFile:
-    """One regular local source admitted through the bounded reader."""
+    """One safely opened regular local source with optional content identity."""
 
     source_path: Path
     size: int
@@ -246,9 +239,8 @@ def admit_local_source(
     """Admit one source as a regular file or complete real directory tree.
 
     A tree is enumerated by cdh rather than delegated to ``rglob`` or a copy
-    helper.  Every regular member is drained through the existing admitted
-    regular-file reader; ``content_lock`` only controls whether those bytes
-    are hashed into the returned inventory.
+    helper. Every regular member is safely opened; only content-locked
+    admission consumes its bytes to establish a content identity.
     """
     canonical = _canonical_absolute_source_path(path)
     if _platform_name == "nt":
@@ -311,9 +303,9 @@ def revalidate_local_tree(
     expected: LocalTreeInventory,
 ) -> LocalTreeInventory:
     """Re-enumerate a tree and require its accepted structure to be unchanged."""
-    current = admit_local_tree(path, content_lock=expected.locked)
-    if current != expected:
-        changed = _first_inventory_difference(expected, current)
+    current = admit_local_tree(path)
+    changed = _first_tree_structure_difference(expected, current)
+    if changed is not None:
         raise TreeAdmissionError(
             "local source directory changed during admission",
             relative_path=changed,
@@ -323,15 +315,18 @@ def revalidate_local_tree(
 
 
 def _admit_local_file(path: str, *, content_lock: bool) -> AdmittedLocalFile:
-    def consume(reader: AdmittedRegularFileReader) -> tuple[int, str | None]:
-        digest = hashlib.sha256() if content_lock else None
+    def consume(reader: AdmittedRegularFileReader) -> tuple[int, str]:
+        digest = hashlib.sha256()
         while chunk := reader.read_chunk():
-            if digest is not None:
-                digest.update(chunk)
-        return reader.size, None if digest is None else f"sha256:{digest.hexdigest()}"
+            digest.update(chunk)
+        return reader.size, f"sha256:{digest.hexdigest()}"
 
     try:
-        size, digest = operate_regular_absolute_file(path, consume)
+        if content_lock:
+            size, digest = operate_regular_absolute_file(path, consume)
+        else:
+            size = observe_regular_absolute_file(path).size
+            digest = None
     except (OSError, ValueError) as error:
         raise TreeAdmissionError(
             "local source file could not be read", code="source_unreadable"
@@ -436,13 +431,13 @@ def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventor
         ) from error
 
 
-def _first_inventory_difference(
+def _first_tree_structure_difference(
     expected: LocalTreeInventory,
     current: LocalTreeInventory,
 ) -> PurePosixPath | None:
-    before = {item.relative_path: item for item in expected.members}
-    after = {item.relative_path: item for item in current.members}
-    for path in sorted((*before.keys(), *after.keys()), key=_tree_path_sort_key):
+    before = {item.relative_path: item.kind for item in expected.members}
+    after = {item.relative_path: item.kind for item in current.members}
+    for path in sorted(before.keys() | after.keys(), key=_tree_path_sort_key):
         if before.get(path) != after.get(path):
             return path
     return None

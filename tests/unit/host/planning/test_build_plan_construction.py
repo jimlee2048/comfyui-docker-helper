@@ -549,7 +549,7 @@ def test_canonical_requirement_spelling_is_stable_from_layered_config_to_plan(
     assert first_plan.image_config_digest == first_graph.image_config_digest
 
 
-def test_runtime_file_directory_spelling_is_canonical_from_request_to_plan() -> None:
+def test_runtime_file_target_spelling_is_canonical_from_request_to_plan() -> None:
     first_document = final_config().model_dump(mode="json", exclude_none=True)
     second_document = deepcopy(first_document)
     first_document["files"][0]["target"] = "./models//checkpoints/./model.safetensors"
@@ -613,7 +613,16 @@ def test_local_graph_identity_depends_only_on_target_and_lock_mode() -> None:
     assert local.content_lock is False
 
 
-def test_local_file_plan_consumes_only_locked_content_identity() -> None:
+@pytest.mark.parametrize(
+    "admitted_digest",
+    [
+        pytest.param(DIGEST_A, id="current"),
+        pytest.param(DIGEST_B, id="stale"),
+    ],
+)
+def test_local_file_plan_requires_current_locked_content_identity(
+    admitted_digest: str,
+) -> None:
     document = final_config().model_dump(mode="json", exclude_none=True)
     document["files"] = [
         {
@@ -638,22 +647,56 @@ def test_local_file_plan_consumes_only_locked_content_identity() -> None:
     locked_resolution = AcceptedCanonicalLock(lock, (), False, (), ())
 
     context_path = "build/files/" + hashlib.sha256(b"models/model.bin").hexdigest()
-    item = build_plan(
-        config,
-        locked_resolution,
-        local_inputs=(
-            LocalFilePlanningInput(
-                relative_target=PurePosixPath("models/model.bin"),
-                context_path=PurePosixPath(context_path),
-                content_lock=True,
-                digest=DIGEST_A,
-            ),
-        ),
-    ).files.files[0]
+    admitted = LocalFilePlanningInput(
+        relative_target=PurePosixPath("models/model.bin"),
+        context_path=PurePosixPath(context_path),
+        content_lock=True,
+        digest=admitted_digest,
+    )
+    if admitted_digest == DIGEST_B:
+        with pytest.raises(ValueError, match="local planning input digest is stale"):
+            build_plan(config, locked_resolution, local_inputs=(admitted,))
+        return
+
+    item = build_plan(config, locked_resolution, local_inputs=(admitted,)).files.files[
+        0
+    ]
 
     assert item.type == "local"
     assert item.verification == "sha256"
     assert item.digest == DIGEST_A
+
+
+def test_build_plan_rejects_missing_admitted_local_input() -> None:
+    document = final_config().model_dump(mode="json", exclude_none=True)
+    document["files"] = [
+        {
+            "type": "local",
+            "source": "model.bin",
+            "target": "models/model.bin",
+            "content_lock": False,
+        }
+    ]
+    config = validate_final_config_structure(document)
+
+    with pytest.raises(ValueError, match="missing local planning input"):
+        build_plan(config, accepted_resolution())
+
+
+def test_build_plan_rejects_unused_admitted_local_input() -> None:
+    relative_target = PurePosixPath("models/extra.bin")
+    admitted = LocalFilePlanningInput(
+        relative_target=relative_target,
+        context_path=PurePosixPath(
+            "build/files/"
+            + hashlib.sha256(relative_target.as_posix().encode()).hexdigest()
+        ),
+        content_lock=False,
+        digest=None,
+    )
+
+    with pytest.raises(ValueError, match="unused local planning inputs"):
+        build_plan(final_config(), accepted_resolution(), local_inputs=(admitted,))
 
 
 def test_local_tree_plan_freezes_sorted_structure_without_unlocked_content() -> None:

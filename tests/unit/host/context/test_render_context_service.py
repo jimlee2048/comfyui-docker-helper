@@ -631,6 +631,7 @@ def test_check_unlocked_local_tree_streams_same_size_member_bytes(
 
 def test_locked_mode_freezes_unlocked_local_tree_structure_without_hashing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "tree"
     (source / "nested").mkdir(parents=True)
@@ -639,10 +640,15 @@ def test_locked_mode_freezes_unlocked_local_tree_structure_without_hashing(
     config.write_text(_local_tree_config(source))
     output = tmp_path / "context"
     prepared = _prepare(config, output, FakeAcquirer())
-    context_file = (
-        output / prepared.plan.files.files[0].context_path / "nested" / "payload.bin"
-    )
+    context_root = output / prepared.plan.files.files[0].context_path
+    context_file = context_root / "nested" / "payload.bin"
     context_file.write_bytes(b"changed!")
+    before = _tree(output)
+    monkeypatch.setattr(
+        render_service_module,
+        "_regular_files_equal",
+        lambda *_args: pytest.fail("unlocked --locked must not compare file bytes"),
+    )
 
     _prepare(
         config,
@@ -650,6 +656,19 @@ def test_locked_mode_freezes_unlocked_local_tree_structure_without_hashing(
         FakeAcquirer(),
         options=PlanningOptions(locked=True),
     )
+    (source / "empty").mkdir()
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(locked=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+    assert _tree(output) == before
+    assert not (context_root / "empty").exists()
 
 
 def test_check_locked_local_tree_hashes_context_members_against_plan(
@@ -725,6 +744,23 @@ target = "user/default/second"
         options=PlanningOptions(dry_run=True),
     )
     assert [warning.path for warning in dry_run.warnings] == expected_paths
+
+
+def test_local_file_comparison_rejects_size_mismatch_without_reading_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.bin"
+    context = tmp_path / "context.bin"
+    source.write_bytes(b"a")
+    context.write_bytes(b"bb")
+    monkeypatch.setattr(
+        render_service_module.AdmittedRegularFileReader,
+        "read_chunk",
+        lambda *_args: pytest.fail("different file sizes need no byte comparison"),
+    )
+
+    assert not render_service_module._regular_files_equal(source, context)
 
 
 def test_unlocked_local_file_comparison_ignores_short_read_boundaries(

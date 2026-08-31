@@ -216,6 +216,63 @@ def test_local_plan_rejects_unsafe_target_before_deriving_context(
 
 
 @pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("missing-parent", id="missing-parent"),
+        pytest.param("unverified-content", id="unverified-content"),
+        pytest.param("digest-mismatch", id="digest-mismatch"),
+    ],
+)
+def test_build_plan_parser_rejects_invalid_tree_plan(case: str) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    relative_target = "user/default/workflows"
+    members = [
+        {
+            "relative_path": "nested",
+            "kind": "directory",
+            "size": None,
+            "digest": None,
+        },
+        {
+            "relative_path": "nested/file.txt",
+            "kind": "file",
+            "size": None,
+            "digest": None,
+        },
+    ]
+    tree = {
+        "type": "local",
+        "kind": "tree",
+        "target": f"/workspace/ComfyUI/{relative_target}",
+        "context_path": (
+            "build/trees/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+        ),
+        "verification": "unverified-local",
+        "members": members,
+        "tree_digest": None,
+    }
+    if case == "missing-parent":
+        members.pop(0)
+        message = "local tree member parents must be admitted directories"
+    elif case == "unverified-content":
+        members[1]["size"] = 3
+        members[1]["digest"] = DIGEST_A
+        message = "unverified local tree must omit member and tree digests"
+    else:
+        tree["verification"] = "sha256"
+        tree["tree_digest"] = DIGEST_B
+        members[1]["size"] = 3
+        members[1]["digest"] = DIGEST_A
+        message = "local tree digest does not match its inventory"
+    document["files"]["files"] = (tree,)
+
+    with pytest.raises(ValidationError, match=message):
+        parse_build_plan_json(json.dumps(document))
+
+
+@pytest.mark.parametrize(
     "relative_path",
     ["unknown.d/hook.sh", "pre-start.d/nested/hook.sh"],
 )

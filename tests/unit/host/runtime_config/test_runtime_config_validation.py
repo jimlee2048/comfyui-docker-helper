@@ -443,7 +443,7 @@ target = "models/model.bin"
     )
 
 
-def test_runtime_file_merge_uses_canonical_target_and_returns_canonical_dir(
+def test_runtime_file_merge_uses_and_returns_canonical_target(
     tmp_path: Path,
 ) -> None:
     baked = _write(
@@ -481,7 +481,7 @@ overwrite = true
     )
 
 
-def test_runtime_file_url_accepts_valid_userinfo(tmp_path: Path) -> None:
+def test_runtime_file_source_accepts_valid_userinfo(tmp_path: Path) -> None:
     mounted = _write(
         tmp_path / "mounted.toml",
         """
@@ -538,7 +538,7 @@ target = "{values["target"]}"
     assert _identities(error.value) == [(("files", 0, field), code)]
 
 
-def test_runtime_file_non_http_url_fails_runtime_validation(
+def test_runtime_file_non_http_source_fails_runtime_validation(
     tmp_path: Path,
 ) -> None:
     mounted = _write(
@@ -1032,7 +1032,7 @@ target = "/models/nested/model.bin"
     assert result.files == ()
 
 
-def test_runtime_file_missing_effective_url_is_attributed_to_authored_item(
+def test_runtime_file_missing_effective_source_is_attributed_to_authored_item(
     tmp_path: Path,
 ) -> None:
     mounted = _write(

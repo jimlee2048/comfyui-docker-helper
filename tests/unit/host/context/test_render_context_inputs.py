@@ -176,7 +176,7 @@ content_lock = true
 
 
 @pytest.mark.parametrize("locator_kind", ["relative", "absolute"])
-def test_unlocked_local_file_admits_both_locator_shapes_without_hashing(
+def test_unlocked_local_file_copies_from_relative_or_absolute_source(
     tmp_path: Path,
     locator_kind: str,
 ) -> None:

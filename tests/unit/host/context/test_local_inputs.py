@@ -85,27 +85,29 @@ def test_tree_bundle_keeps_one_inventory_and_emits_one_empty_warning(
     )
 
 
-def test_locked_tree_bundle_contains_only_process_local_planning_facts(
+def test_relocated_tree_keeps_planning_identity_and_uses_its_current_source(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "tree"
-    source.mkdir()
-    (source / "payload").write_bytes(b"payload")
-    config = tmp_path / "config.toml"
-    config.write_text(_config_with_local("tree", "workflows", locked=True))
-    result = load_validate_config_result(config)
+    bundles = []
+    for name in ("original", "relocated"):
+        source = tmp_path / name
+        source.mkdir()
+        (source / "payload").write_bytes(b"payload")
+        config = tmp_path / f"{name}.toml"
+        config.write_text(_config_with_local(name, "workflows", locked=True))
+        result = load_validate_config_result(config)
+        bundles.append(
+            admit_local_inputs(
+                result, (_request("workflows", locked=True),), tmp_path / "context"
+            )
+        )
 
-    bundle = admit_local_inputs(
-        result, (_request("workflows", locked=True),), tmp_path / "context"
-    )
-    planned = bundle.planning_inputs[0]
-    assert isinstance(planned, LocalTreePlanningInput)
-    assert planned.tree_digest is not None
-    assert planned.tree_digest.startswith("sha256:")
-    assert all(
-        not hasattr(planned, field)
-        for field in ("source", "source_path", "host_locator")
-    )
+    original, relocated = bundles
+    assert original.planning_inputs == relocated.planning_inputs
+    assert isinstance(original.planning_inputs[0], LocalTreePlanningInput)
+    assert original.planning_inputs[0].tree_digest is not None
+    assert original.materialization_sources[0].source_path == tmp_path / "original"
+    assert relocated.materialization_sources[0].source_path == tmp_path / "relocated"
 
 
 def test_file_bundle_keeps_file_shape_and_source_output_separation(

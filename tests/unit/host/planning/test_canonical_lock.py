@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import tomllib
 
 import pytest
 from pydantic import ValidationError
@@ -340,7 +341,9 @@ def test_local_file_lock_round_trip_is_target_keyed_and_deterministic() -> None:
         "local",
         "models/model.bin",
     )
-    assert "[[files.local]]" in document
+    assert tomllib.loads(document)["files"]["local"] == [
+        {"kind": "file", "relative_target": "models/model.bin", "digest": DIGEST_C}
+    ]
 
 
 def test_local_tree_lock_round_trip_is_one_aggregate_target_row() -> None:
@@ -361,6 +364,6 @@ def test_local_tree_lock_round_trip_is_one_aggregate_target_row() -> None:
     assert parsed.files.local == (
         LocalTreeLockEntry(kind="tree", relative_target=".", tree_digest=DIGEST_C),
     )
-    assert 'kind = "tree"' in document
-    assert "tree_digest" in document
-    assert "members" not in document
+    assert tomllib.loads(document)["files"]["local"] == [
+        {"kind": "tree", "relative_target": ".", "tree_digest": DIGEST_C}
+    ]

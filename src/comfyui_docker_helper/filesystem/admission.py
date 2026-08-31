@@ -9,7 +9,7 @@ import stat
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Literal
 
 _close_descriptor = os.close
@@ -82,72 +82,6 @@ class LocalTreeMember:
 
 
 @dataclass(frozen=True, slots=True)
-class LocalTreeRecord:
-    """One serialized root or member record used by the tree digest."""
-
-    path: str
-    kind: LocalTreeMemberKind
-    mode: Literal["0755", "0644"]
-    size: int | None = None
-    digest: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.path, str):
-            raise ValueError("tree records require a string path")
-        if self.path == ".":
-            if (
-                self.kind != "directory"
-                or self.mode != local_tree_mode("directory")
-                or self.size is not None
-                or self.digest is not None
-            ):
-                raise ValueError(
-                    "tree root records require directory mode 0755 and null content"
-                )
-            return
-        try:
-            canonical_path = _canonical_tree_relative_path(self.path)
-        except ValueError as error:
-            raise ValueError("tree member record path must be canonical") from error
-        if canonical_path.as_posix() != self.path:
-            raise ValueError("tree member record path must be canonical")
-        if self.kind == "directory":
-            if (
-                self.mode != local_tree_mode("directory")
-                or self.size is not None
-                or self.digest is not None
-            ):
-                raise ValueError(
-                    "directory tree records require mode 0755 and null content"
-                )
-        elif self.kind == "file":
-            if self.mode != local_tree_mode("file"):
-                raise ValueError("regular-file tree records require mode 0644")
-            if self.size is None or self.digest is None:
-                raise ValueError("regular-file tree records require size and digest")
-            if self.size < 0:
-                raise ValueError("regular-file tree record size must not be negative")
-            if _FILE_DIGEST_PATTERN.fullmatch(self.digest) is None:
-                raise ValueError(
-                    "regular-file tree record digest must be sha256:<64 lowercase hex>"
-                )
-        else:
-            raise ValueError("tree record kind must be directory or file")
-
-    def as_dict(self) -> dict[str, str | int]:
-        record: dict[str, str | int] = {
-            "path": self.path,
-            "kind": self.kind,
-            "mode": self.mode,
-        }
-        if self.kind == "file":
-            assert self.size is not None and self.digest is not None
-            record["size"] = self.size
-            record["digest"] = self.digest
-        return record
-
-
-@dataclass(frozen=True, slots=True)
 class LocalTreeInventory:
     """Complete sorted structure accepted from one local directory root."""
 
@@ -185,29 +119,11 @@ class LocalTreeInventory:
     def empty(self) -> bool:
         return not self.members
 
-    def records(self) -> tuple[LocalTreeRecord, ...]:
-        """Return the canonical root-first record sequence."""
-        root = LocalTreeRecord(".", "directory", local_tree_mode("directory"))
-        return (
-            root,
-            *(
-                LocalTreeRecord(
-                    item.relative_path.as_posix(),
-                    item.kind,
-                    local_tree_mode(item.kind),
-                    item.size,
-                    item.digest,
-                )
-                for item in self.members
-            ),
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class AdmittedLocalFile:
     """One safely opened regular local source with optional content identity."""
 
-    source_path: Path
     size: int
     digest: str | None = None
 
@@ -216,7 +132,6 @@ class AdmittedLocalFile:
 class AdmittedLocalSource:
     """One process-local source classified as a regular file or complete tree."""
 
-    source_path: Path
     kind: LocalSourceKind
     file: AdmittedLocalFile | None = None
     tree: LocalTreeInventory | None = None
@@ -264,7 +179,6 @@ def admit_local_source(
         )
     if stat.S_ISREG(observed.st_mode):
         return AdmittedLocalSource(
-            Path(canonical),
             "file",
             file=_admit_local_file(canonical, content_lock=content_lock),
         )
@@ -276,7 +190,6 @@ def admit_local_source(
 
             validate_local_directory_absolute_path(canonical)
         return AdmittedLocalSource(
-            Path(canonical),
             "tree",
             tree=_enumerate_local_tree(canonical, content_lock=content_lock),
         )
@@ -332,7 +245,7 @@ def _admit_local_file(path: str, *, content_lock: bool) -> AdmittedLocalFile:
         raise TreeAdmissionError(
             "local source file could not be read", code="source_unreadable"
         ) from error
-    return AdmittedLocalFile(Path(path), size, digest)
+    return AdmittedLocalFile(size, digest)
 
 
 def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventory:

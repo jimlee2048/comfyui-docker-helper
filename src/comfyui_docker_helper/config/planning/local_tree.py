@@ -4,32 +4,65 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal, NotRequired, TypedDict
 
 from comfyui_docker_helper.filesystem.admission import (
     LocalTreeInventory,
     LocalTreeMember,
-    LocalTreeRecord,
     local_tree_mode,
 )
 
 LOCAL_TREE_DIGEST_DOMAIN = "cdh-local-tree-sha256-v1"
 
 
-def canonical_local_tree_records(
+class _LocalTreeDigestRecord(TypedDict):
+    """One private record projection used only for aggregate digest encoding."""
+
+    path: str
+    kind: Literal["directory", "file"]
+    mode: Literal["0755", "0644"]
+    size: NotRequired[int]
+    digest: NotRequired[str]
+
+
+def _canonical_local_tree_records(
     inventory: LocalTreeInventory,
-) -> tuple[LocalTreeRecord, ...]:
+) -> list[_LocalTreeDigestRecord]:
     """Return the root-first canonical records for one accepted tree."""
-    return inventory.records()
+    records: list[_LocalTreeDigestRecord] = [
+        {"path": ".", "kind": "directory", "mode": local_tree_mode("directory")}
+    ]
+    for item in inventory.members:
+        if item.kind == "file":
+            if item.size is None or item.digest is None:
+                raise ValueError("regular-file tree records require size and digest")
+            records.append(
+                {
+                    "path": item.relative_path.as_posix(),
+                    "kind": item.kind,
+                    "mode": local_tree_mode(item.kind),
+                    "size": item.size,
+                    "digest": item.digest,
+                }
+            )
+        else:
+            records.append(
+                {
+                    "path": item.relative_path.as_posix(),
+                    "kind": item.kind,
+                    "mode": local_tree_mode(item.kind),
+                }
+            )
+    return records
 
 
 def canonical_local_tree_bytes(
     inventory: LocalTreeInventory,
 ) -> bytes:
     """Encode the exact domain-separated aggregate input as canonical JSON."""
-    records = canonical_local_tree_records(inventory)
     payload = {
         "domain": LOCAL_TREE_DIGEST_DOMAIN,
-        "records": [record.as_dict() for record in records],
+        "records": _canonical_local_tree_records(inventory),
     }
     return json.dumps(
         payload,
@@ -50,9 +83,7 @@ __all__ = [
     "LOCAL_TREE_DIGEST_DOMAIN",
     "LocalTreeInventory",
     "LocalTreeMember",
-    "LocalTreeRecord",
     "canonical_local_tree_bytes",
-    "canonical_local_tree_records",
     "local_tree_digest",
     "local_tree_mode",
 ]

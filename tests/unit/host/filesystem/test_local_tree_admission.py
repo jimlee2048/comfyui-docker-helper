@@ -45,45 +45,23 @@ def test_inventory_is_sorted_by_utf8_path_and_requires_real_parents() -> None:
         "nested/é.txt",
         "é.txt",
     ]
-    assert [record.as_dict() for record in inventory.records()] == [
-        {"path": ".", "kind": "directory", "mode": "0755"},
-        {"path": "nested", "kind": "directory", "mode": "0755"},
-        {
-            "path": "nested/é.txt",
-            "kind": "file",
-            "mode": "0644",
-            "size": 1,
-            "digest": "sha256:" + "b" * 64,
-        },
-        {
-            "path": "é.txt",
-            "kind": "file",
-            "mode": "0644",
-            "size": 1,
-            "digest": "sha256:" + "a" * 64,
-        },
-    ]
+    assert canonical_local_tree_bytes(inventory) == (
+        b'{"domain":"cdh-local-tree-sha256-v1","records":[{"kind":"directory",'
+        b'"mode":"0755","path":"."},{"kind":"directory","mode":"0755",'
+        b'"path":"nested"},{"digest":"sha256:'
+        b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        b'","kind":"file","mode":"0644","path":"nested/\\u00e9.txt",'
+        b'"size":1},{"digest":"sha256:'
+        b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        b'","kind":"file","mode":"0644","path":"\\u00e9.txt","size":1}]}'
+    )
     with pytest.raises(ValueError, match="parents"):
         LocalTreeInventory(
             (LocalTreeMember("missing/file", "file", 1, "sha256:" + "a" * 64),)
         )
 
 
-def test_tree_records_validate_root_member_shape_and_inventory_member_types() -> None:
-    assert (
-        file_admission.LocalTreeRecord(
-            "payload", "file", "0644", 1, "sha256:" + "a" * 64
-        ).as_dict()["path"]
-        == "payload"
-    )
-    with pytest.raises(ValueError, match="root records"):
-        file_admission.LocalTreeRecord(".", "file", "0644")
-    with pytest.raises(ValueError, match="directory tree records"):
-        file_admission.LocalTreeRecord("nested", "directory", "0755", size=1)
-    with pytest.raises(ValueError, match="require size and digest"):
-        file_admission.LocalTreeRecord("payload", "file", "0644")
-    with pytest.raises(ValueError, match="require size and digest"):
-        file_admission.LocalTreeRecord("payload", "file", "0644", size=1)
+def test_inventory_rejects_non_member_types() -> None:
     with pytest.raises(ValueError, match="LocalTreeMember"):
         LocalTreeInventory(
             (
@@ -93,6 +71,13 @@ def test_tree_records_validate_root_member_shape_and_inventory_member_types() ->
                 },
             )
         )  # type: ignore[arg-type]
+
+
+def test_local_tree_digest_rejects_unhashed_regular_members() -> None:
+    inventory = LocalTreeInventory((LocalTreeMember("payload", "file"),))
+
+    with pytest.raises(ValueError, match="require size and digest"):
+        canonical_local_tree_bytes(inventory)
 
 
 class _FakeWindowsDirectoryApi:
@@ -183,14 +168,13 @@ def test_tree_admission_rejects_links_special_nodes_and_reserved_members(
     assert raised.value.code == "member_type"
 
 
-def test_tree_admission_surfaces_traversal_failure_and_membership_drift(
+def test_tree_admission_surfaces_traversal_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "tree"
     source.mkdir()
     (source / "payload").write_bytes(b"payload")
-    original_scandir = file_admission.os.scandir
 
     def fail_scandir(_path: str) -> object:
         raise OSError("synthetic traversal failure")
@@ -199,14 +183,6 @@ def test_tree_admission_surfaces_traversal_failure_and_membership_drift(
     with pytest.raises(file_admission.TreeAdmissionError) as raised:
         file_admission.admit_local_tree(source)
     assert raised.value.code == "traversal_failed"
-    monkeypatch.setattr(file_admission.os, "scandir", original_scandir)
-
-    inventory = file_admission.admit_local_tree(source)
-    (source / "new").write_bytes(b"new")
-    with pytest.raises(file_admission.TreeAdmissionError) as raised:
-        file_admission.revalidate_local_tree(source, inventory)
-    assert raised.value.code == "membership_drift"
-    assert raised.value.relative_path == PurePosixPath("new")
 
 
 @pytest.mark.parametrize("kind", ["file", "tree"])

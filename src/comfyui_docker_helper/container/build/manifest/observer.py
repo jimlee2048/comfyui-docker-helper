@@ -791,7 +791,9 @@ def _local_tree_evidence(
             member.relative_path,
             expected_kind=member.kind,
         )
-        if member.kind == "file" and item.verification == "sha256":
+        if item.verification != "sha256":
+            continue
+        if member.kind == "file":
             size, digest = _hash_declared_tree_file(destination)
         else:
             size = None

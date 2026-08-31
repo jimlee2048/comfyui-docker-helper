@@ -181,7 +181,7 @@ cdh host render \
 
 构建 `[[files]]` 声明是最终镜像内容的权威，并使用一个 `source + target` 操作。HTTP source 会下载到 cdh 所有的 staging，并在通过已配置的 checksum 后原子替换其确切 target。本地普通文件 source 会 materialize 到 Plan 所有的 `build/files/<target-hash>` slot，再以 `COPY --link --chmod=0644` 放到其确切 target。本地目录 source 会 materialize 到一个 `build/trees/<target-hash>` slot，再用一次目录 `COPY --link` 复制到确切的目标根目录；不会添加 source basename。HTTP 和本地文件 target 必须是 `COMFYUI_PATH` 的严格后代，并表示一个确切文件；本地目录 target 相对于 `COMFYUI_PATH`，可以等于根目录（`.`）。HTTP 不会从 URL 或响应 metadata 推断 target 文件名。
 
-目录应用是 overlay，而不是 mirror。选中的文件和目录会替换 target 下兼容的条目，而无关的 lower image 内容保留；文件/目录冲突或不兼容的目标根目录会失败。每个选中的目录都会规范化为 `0755`，每个选中的普通文件都会规范化为 `0644`；宿主机所有者、时间戳、ACL、xattr 和可执行位不属于镜像权威。所有生效 target 区域必须通过相等和 component-prefix overlap 保持互不相交，target 或本地目录树成员都不能包含为 HTTP 下载 staging 保留的 `.cdh-staging`。完全空的本地目录有效，并仍会 materialize 其目标根目录。
+目录应用是 overlay，而不是 mirror。选中的文件和目录会替换 target 下兼容的条目，而无关的 lower image 内容保留；文件/目录冲突或不兼容的目标根目录会失败。每个选中的目录都会规范化为 `0755`，每个选中的普通文件都会规范化为 `0644`；宿主机所有者、时间戳、ACL、xattr 和可执行位不属于镜像权威。所有生效 target 区域必须通过相等和 component-prefix overlap 保持互不相交。目标和本地目录成员须遵循[文件命名规则](configuration.zh-CN.md#在镜像构建期间添加文件)，不能使用保留名称 `.cdh-staging` 或以 `.wh.` 开头的名称。完全空的本地目录有效，并仍会创建目标根目录。
 
 通过 `[cdh].local_file_mode` 选择本地文件及本地目录树普通成员的字节如何进入渲染上下文：
 

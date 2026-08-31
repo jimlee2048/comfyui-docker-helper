@@ -948,9 +948,6 @@ def test_direct_file_target_normalization_accepts_redundant_components() -> None
     domains = validate_final_config_domains(config)
 
     assert domains.diagnostics == ()
-    assert [item.directory.as_posix() for item in domains.files] == [
-        "models/checkpoints"
-    ]
     assert [item.relative_target for item in domains.files] == [
         "models/checkpoints/root.bin"
     ]
@@ -1029,6 +1026,61 @@ def test_file_target_rejects_reserved_staging_component_anywhere() -> None:
             DiagnosticSeverity.ERROR,
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("system", "reserved_component"),
+    [
+        ({"comfyui_path": "/workspace/.wh.explicit"}, ".wh.explicit"),
+        ({"workspace": "/workspace/.wh.derived"}, ".wh.derived"),
+    ],
+)
+def test_file_target_rejects_reserved_effective_comfyui_root(
+    system: dict[str, str],
+    reserved_component: str,
+) -> None:
+    document = _document()
+    document["system"] = system
+    document["files"] = [
+        {
+            "type": "http",
+            "source": "https://example.com/model.bin",
+            "target": "models/model.bin",
+        }
+    ]
+    config = validate_final_config_structure(document)
+
+    diagnostics = validate_final_config_domains(config).diagnostics
+
+    reserved = next(
+        item for item in diagnostics if item.code == "file.reserved_target_component"
+    )
+    assert reserved.path == ("files", 0, "target")
+    assert reserved_component in reserved.message
+    assert "image format" in reserved.message
+    assert "rename" in reserved.message
+
+
+def test_reserved_workspace_component_without_file_targets_is_allowed() -> None:
+    document = _document()
+    document["system"] = {"workspace": "/workspace/.wh.workspace"}
+    config = validate_final_config_structure(document)
+
+    assert validate_final_config_domains(config).diagnostics == ()
+
+
+def test_unmapped_whiteout_url_source_is_allowed() -> None:
+    document = _document()
+    document["files"] = [
+        {
+            "type": "http",
+            "source": "https://example.com/.wh.model",
+            "target": "models/model.bin",
+        }
+    ]
+    config = validate_final_config_structure(document)
+
+    assert validate_final_config_domains(config).diagnostics == ()
 
 
 @pytest.mark.parametrize(

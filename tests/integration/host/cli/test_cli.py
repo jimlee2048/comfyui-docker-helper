@@ -325,6 +325,7 @@ def test_root_command_exposes_current_groups() -> None:
         "install-comfyui",
         "install-custom-nodes",
         "normalize-local-trees",
+        "validate-local-trees",
         "runtime",
     }
     assert set(command.commands["container"].commands["runtime"].commands) == {
@@ -1023,6 +1024,44 @@ def test_cli_tag_override_does_not_hide_invalid_config_tags(
     assert "Error: Configuration is invalid" in result.stderr
     assert "Field: build.tags.0" in result.stderr
     assert "repository path components must use lowercase" in result.stderr
+
+
+def test_cli_rejects_reserved_effective_comfyui_root_before_planning_providers(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_providers():
+        pytest.fail("invalid configuration must fail before planning providers")
+
+    config = tmp_path / "config.toml"
+    _write_minimal_config(config)
+    with config.open("a") as stream:
+        stream.write(
+            """
+[system]
+comfyui_path = "/workspace/.wh.ComfyUI"
+
+[[files]]
+type = "http"
+source = "https://example.test/model.bin"
+target = "models/model.bin"
+"""
+        )
+    monkeypatch.setattr(host_cli, "default_planning_providers", fail_providers)
+
+    result = cli_runner.invoke(
+        app,
+        ["host", "build", "-f", str(config), "--tag", "example/image:tag"],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Error: Configuration is invalid" in result.stderr
+    assert "Field: files.0.target" in result.stderr
+    assert ".wh.ComfyUI" in result.stderr
+    assert "image format" in result.stderr
+    assert "rename" in result.stderr
 
 
 @pytest.mark.parametrize("with_tags", [False, True])

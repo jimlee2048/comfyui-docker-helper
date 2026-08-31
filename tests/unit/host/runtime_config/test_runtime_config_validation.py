@@ -586,6 +586,34 @@ target = "models/.cdh-staging/model.bin"
     ]
 
 
+def test_runtime_file_rejects_whiteout_target_component(
+    tmp_path: Path,
+) -> None:
+    mounted = _write(
+        tmp_path / "runtime.toml",
+        """
+[[files]]
+type = "http"
+source = "https://example.com/model.bin"
+target = "models/.wh.model.bin"
+""",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as error:
+        load_runtime_config(
+            baked_config_path=tmp_path / "missing-baked.toml",
+            mounted_config_path=mounted,
+        )
+
+    assert _identities(error.value) == [
+        (("files", 0, "target"), "runtime_file.reserved_target_component")
+    ]
+    diagnostic = error.value.diagnostics[0]
+    assert ".wh.model.bin" in diagnostic.message
+    assert "image format" in diagnostic.message
+    assert "rename" in diagnostic.message
+
+
 def test_runtime_file_target_regions_reject_component_prefix_overlap(
     tmp_path: Path,
 ) -> None:

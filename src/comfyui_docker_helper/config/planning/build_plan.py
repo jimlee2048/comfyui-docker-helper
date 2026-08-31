@@ -136,6 +136,7 @@ from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_publi
 from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
     is_reserved_file_target_component,
+    reserved_file_target_component_message,
 )
 from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
@@ -2105,10 +2106,18 @@ def _absolute_posix_path(value: str, field: str) -> str:
 def validate_absolute_file_target(value: str) -> str:
     """Validate one canonical absolute file target shared by Plan/evidence."""
     target = _absolute_posix_path(value, "file target")
-    if any(
-        is_reserved_file_target_component(part) for part in PurePosixPath(target).parts
-    ):
-        raise ValueError("file target uses the reserved staging path component")
+    reserved_component = next(
+        (
+            part
+            for part in PurePosixPath(target).parts
+            if is_reserved_file_target_component(part)
+        ),
+        None,
+    )
+    if reserved_component is not None:
+        raise ValueError(
+            f"file target {reserved_file_target_component_message(reserved_component)}"
+        )
     return target
 
 

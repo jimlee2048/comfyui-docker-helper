@@ -59,6 +59,21 @@ def test_runtime_plan_supports_a_file_in_the_comfyui_root(tmp_path: Path) -> Non
     assert planned.target == root / "root.bin"
 
 
+def test_runtime_plan_rejects_reserved_effective_comfyui_root(tmp_path: Path) -> None:
+    root = tmp_path / ".wh.ComfyUI"
+
+    with pytest.raises(RuntimeFilePlanError) as captured:
+        _plan(root, _file("model.bin"))
+
+    assert _identities(captured.value) == [
+        (("files", 0, "target"), "runtime_file.reserved_target_component")
+    ]
+    diagnostic = captured.value.diagnostics[0]
+    assert ".wh.ComfyUI" in diagnostic.message
+    assert "image format" in diagnostic.message
+    assert "rename" in diagnostic.message
+
+
 def test_runtime_plan_preserves_item_downloader_and_mode_selection(
     tmp_path: Path,
 ) -> None:

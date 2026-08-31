@@ -16,7 +16,11 @@ from comfyui_docker_helper.config.validation.runtime_files import (
     relative_file_targets_overlap,
     validate_runtime_file_url,
 )
-from comfyui_docker_helper.config.validation.urls import DownloaderName
+from comfyui_docker_helper.config.validation.urls import (
+    DownloaderName,
+    is_reserved_file_target_component,
+    reserved_file_target_component_message,
+)
 from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeFilePath,
     RuntimeFilePlan,
@@ -62,6 +66,7 @@ def build_runtime_file_plan(
     items: list[RuntimeFilePlanItem] = []
     established: list[tuple[str, RuntimeFilePath]] = []
     root = Path(comfyui_path)
+    root_parts = PurePosixPath(root.as_posix()).parts
 
     for source_index, item in enumerate(files):
         path: RuntimeFilePath = ("files", source_index)
@@ -79,6 +84,19 @@ def build_runtime_file_plan(
             continue
 
         relative_target = normalized.as_posix()
+        reserved_component = next(
+            (part for part in root_parts if is_reserved_file_target_component(part)),
+            None,
+        )
+        if reserved_component is not None:
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "target"),
+                    "runtime_file.reserved_target_component",
+                    reserved_file_target_component_message(reserved_component),
+                )
+            )
+            continue
         for earlier_target, _earlier_path in established:
             if not relative_file_targets_overlap(earlier_target, relative_target):
                 continue

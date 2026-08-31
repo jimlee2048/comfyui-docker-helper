@@ -15,9 +15,9 @@ from typing import Literal
 from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.merge import KeyedItemMerge
 from comfyui_docker_helper.config.validation.urls import (
-    TRANSFER_STAGING_DIRECTORY_NAME,
     is_http_url,
     is_reserved_file_target_component,
+    reserved_file_target_component_message,
 )
 from comfyui_docker_helper.config.validation.values import has_control_characters
 
@@ -147,12 +147,15 @@ def validate_relative_file_target(
             "root_target",
             "must name an exact file below COMFYUI_PATH",
         )
-    if any(is_reserved_file_target_component(part) for part in normalized.parts):
+    reserved_component = next(
+        (part for part in normalized.parts if is_reserved_file_target_component(part)),
+        None,
+    )
+    if reserved_component is not None:
         return RelativeFileTargetValidationResult(
             None,
             "reserved_target_component",
-            f"contains {TRANSFER_STAGING_DIRECTORY_NAME!r}, which is reserved for "
-            "HTTP download staging; rename or remove that path component",
+            reserved_file_target_component_message(reserved_component),
         )
     return RelativeFileTargetValidationResult(normalized)
 

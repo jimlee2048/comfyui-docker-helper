@@ -343,7 +343,8 @@ content_lock = false
 [[files]]
 # A local directory copies its contents below this exact destination root; the
 # source directory name is not added. All real descendants, including hidden
-# and empty directories, are selected; this declaration remains build-only.
+# and empty directories, are selected. Mapped names cannot be .cdh-staging
+# or start with .wh.; see the configuration guide. This is build-only.
 type = "local"
 source = "local-files"
 target = "user/default/workflows"

@@ -15,6 +15,7 @@ from comfyui_docker_helper.config.validation.runtime_files import (
         ("models//checkpoints", "models/checkpoints"),
         ("./models/./checkpoints", "models/checkpoints"),
         ("nested/model.bin", "nested/model.bin"),
+        ("models/.WH.model.bin", "models/.WH.model.bin"),
     ],
 )
 def test_direct_file_target_normalizes_safe_posix_spellings(
@@ -39,6 +40,7 @@ def test_direct_file_target_normalizes_safe_posix_spellings(
         (r"models\checkpoints", "backslash"),
         ("models/", "trailing_slash"),
         ("models/.cdh-staging/model.bin", "reserved_target_component"),
+        ("models/.wh.model.bin", "reserved_target_component"),
     ],
 )
 def test_direct_file_target_rejects_unsafe_authored_paths(

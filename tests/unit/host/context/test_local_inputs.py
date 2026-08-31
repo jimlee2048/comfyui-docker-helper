@@ -177,3 +177,82 @@ def test_reserved_tree_member_diagnostic_is_source_relative(
     assert diagnostic.code == "file.reserved_source_component"
     assert ".cdh-staging" in diagnostic.message
     assert str(source) not in diagnostic.message
+
+
+def test_whiteout_tree_member_diagnostic_is_source_relative(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / ".wh.payload").write_bytes(b"whiteout")
+    config = tmp_path / "config.toml"
+    config.write_text(_config_with_local("tree", "workflows"))
+    result = load_validate_config_result(config)
+
+    with pytest.raises(LocalInputAdmissionError) as raised:
+        admit_local_inputs(result, (_request("workflows"),), tmp_path / "context")
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.path == ("files", 0, "source")
+    assert diagnostic.code == "file.reserved_source_component"
+    assert "nested/.wh.payload" in diagnostic.message
+    assert "deletion markers" in diagnostic.message
+    assert "rename" in diagnostic.message
+    assert str(source) not in diagnostic.message
+
+
+def test_unmapped_whiteout_source_roots_are_admitted(
+    tmp_path: Path,
+) -> None:
+    file_source = tmp_path / ".wh.model"
+    file_source.write_bytes(b"model")
+    file_config = tmp_path / "file.toml"
+    file_config.write_text(_config_with_local(".wh.model", "models/model.bin"))
+    file_result = load_validate_config_result(file_config)
+    file_bundle = admit_local_inputs(
+        file_result,
+        (_request("models/model.bin"),),
+        tmp_path / "file-context",
+    )
+    assert isinstance(file_bundle.planning_inputs[0], LocalFilePlanningInput)
+
+    tree_source = tmp_path / ".wh.inputs"
+    tree_source.mkdir()
+    (tree_source / "normal.txt").write_bytes(b"normal")
+    tree_config = tmp_path / "tree.toml"
+    tree_config.write_text(_config_with_local(".wh.inputs", "workflows"))
+    tree_result = load_validate_config_result(tree_config)
+    tree_bundle = admit_local_inputs(
+        tree_result,
+        (_request("workflows"),),
+        tmp_path / "tree-context",
+    )
+    planned = tree_bundle.planning_inputs[0]
+    assert isinstance(planned, LocalTreePlanningInput)
+    member_paths = [
+        member.relative_path.as_posix() for member in planned.inventory.members
+    ]
+    assert member_paths == ["normal.txt"]
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="requires POSIX support for newline filenames"
+)
+def test_unsafe_whiteout_member_diagnostic_does_not_render_raw_name(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    source.mkdir()
+    unsafe_name = ".wh.\n"
+    (source / unsafe_name).write_bytes(b"unsafe")
+    config = tmp_path / "config.toml"
+    config.write_text(_config_with_local("tree", "workflows"))
+    result = load_validate_config_result(config)
+
+    with pytest.raises(LocalInputAdmissionError) as raised:
+        admit_local_inputs(result, (_request("workflows"),), tmp_path / "context")
+
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.code == "file.invalid_source_member"
+    assert unsafe_name not in diagnostic.message
+    assert str(source) not in diagnostic.message

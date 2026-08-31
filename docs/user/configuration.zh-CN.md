@@ -142,7 +142,11 @@ HTTP 文件还可以选择 `checksum` 和 `download_mode`。本地来源可以�
 
 本地 `source` 不能为空。相对的本地 `source` 统一以第一个 `-f` 配置文件的真实父目录作为基准；显式的 `source = "."` 会选择第一个配置文件的真实父目录本身。绝对路径和规范化后的父目录穿越均可使用。render/build 准入会选择所有真实的后代目录和普通文件，包括点开头的条目和空目录，并拒绝链接、Windows junction 或其他 reparse point、特殊文件、不可读取的条目和不安全名称。source 与渲染输出不能重叠。source locator 是普通的非 Secret 宿主机输入：它不会序列化到 lock、BuildPlan、渲染 metadata、manifest 或镜像配置中，但也不享受 Secret 值处理或脱敏。`host validate` 只检查结构和 target 语法，不读取本地 source。
 
-选中的目录和普通文件在镜像中使用 cdh 所有的 `0755` 和 `0644` 模式；宿主机所有者、时间戳、ACL、xattr 和可执行位不会被复制。`.cdh-staging` 为 HTTP 下载 staging 保留，target 或任何本地目录树成员路径中都禁止出现。空的本地目录有效，并仍会创建目标根目录，但 render、build、check 和 dry-run 各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。validate 不产生该 warning，quiet 模式也会保留它。
+选中的目录和普通文件在镜像中使用 cdh 规定的 `0755` 和 `0644` 权限；宿主机所有者、时间戳、ACL、xattr 和可执行位不会被复制。
+
+完整目标路径和选中的本地目录成员路径中，任何一段名称都不能是 `.cdh-staging`，也不能以 `.wh.` 开头。前者保留给 HTTP 下载暂存，后者保留给容器镜像的删除标记。请修改有问题的目标或成员名称；cdh 不会自动跳过它们。HTTP/local、构建/运行时配置使用同样的目标规则，包括生效的 `COMFYUI_PATH` 前缀。来源路径或 URL 不等同于目标名称：例如，本地文件 `.wh.model` 仍可复制到 `models/model.bin`。
+
+空的本地目录有效，并仍会创建目标根目录，但 render、build、check 和 dry-run 各产生一条 warning：`local source directory is empty; its target directory will still be present in the image`。validate 不产生该 warning，quiet 模式也会保留它。
 
 `content_lock = false` 是默认值。本地文件不会在 BuildPlan 或 lock 中产生 content digest。本地目录树仍会把完整且排序的成员 inventory 记录到 BuildPlan，但不记录成员 size 或 digest；`--locked` 比较该结构而不比较未锁定的字节，`--check` 则流式比较完整的 source/context 字节相等性。使用 `content_lock = true` 时，本地文件会在 BuildPlan 中得到一个按 target 定位的 SHA-256 digest，并在 canonical lock 中得到一条匹配的 lock row；本地目录树会在 BuildPlan 中记录成员 size、digest 和一个聚合 tree digest，而 canonical lock 只记录聚合 tree row。materialization 和最终观测会验证所选 identity。[构建与锁定指南](build-and-lock.zh-CN.md#构建文件与本地上下文-materialization)说明上下文 materialization mode、reconciliation 成本、远程 builder 传输和镜像放置行为。本地来源仅用于构建；只有 HTTP 文件声明会成为固化的运行时默认配置。
 

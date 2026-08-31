@@ -17,6 +17,7 @@ _platform_name = os.name
 _READ_CHUNK_BYTES = 1024 * 1024
 _FILE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RESERVED_TREE_COMPONENT = ".cdh-staging"
+_RESERVED_WHITEOUT_COMPONENT_PREFIX = ".wh."
 
 type LocalTreeMemberKind = Literal["directory", "file"]
 type LocalSourceKind = Literal["file", "tree"]
@@ -526,13 +527,17 @@ def _validate_tree_component(name: str) -> None:
         or "\\" in name
         or "\x00" in name
         or any(unicodedata.category(character) == "Cc" for character in name)
-        or name == _RESERVED_TREE_COMPONENT
     ):
         raise TreeAdmissionError(
             "local source member name is unsafe or reserved",
-            code=(
-                "reserved_member" if name == _RESERVED_TREE_COMPONENT else "member_name"
-            ),
+            code="member_name",
+        )
+    if name == _RESERVED_TREE_COMPONENT or name.startswith(
+        _RESERVED_WHITEOUT_COMPONENT_PREFIX
+    ):
+        raise TreeAdmissionError(
+            "local source member name is unsafe or reserved",
+            code="reserved_member",
         )
 
 

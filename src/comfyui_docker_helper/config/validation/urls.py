@@ -9,6 +9,7 @@ type DownloaderName = Literal["aria2", "httpx"]
 
 DOWNLOADERS: frozenset[DownloaderName] = frozenset({"aria2", "httpx"})
 TRANSFER_STAGING_DIRECTORY_NAME = ".cdh-staging"
+WHITEOUT_FILE_TARGET_PREFIX = ".wh."
 
 
 def is_http_url(url: str) -> bool:
@@ -45,5 +46,20 @@ def require_downloader_name(value: str) -> DownloaderName:
 
 
 def is_reserved_file_target_component(value: str) -> bool:
-    """Return whether one target component belongs to transfer staging."""
-    return value == TRANSFER_STAGING_DIRECTORY_NAME
+    """Return whether one target component is reserved by cdh or its image format."""
+    return value == TRANSFER_STAGING_DIRECTORY_NAME or value.startswith(
+        WHITEOUT_FILE_TARGET_PREFIX
+    )
+
+
+def reserved_file_target_component_message(value: str) -> str:
+    """Return concise corrective guidance for one reserved target component."""
+    if value == TRANSFER_STAGING_DIRECTORY_NAME:
+        return (
+            f"contains {value!r}, which is reserved for HTTP download staging; "
+            "rename or remove that path component"
+        )
+    return (
+        f"contains {value!r}, which is reserved by the container image format "
+        "for whiteout markers; rename or remove that path component"
+    )

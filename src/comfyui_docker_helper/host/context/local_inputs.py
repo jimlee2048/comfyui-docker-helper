@@ -25,6 +25,7 @@ from comfyui_docker_helper.config.planning.request import (
     FileRequest,
     LocalSourceRequest,
 )
+from comfyui_docker_helper.config.validation.urls import TRANSFER_STAGING_DIRECTORY_NAME
 from comfyui_docker_helper.filesystem.admission import (
     TreeAdmissionError,
     admit_local_source,
@@ -208,12 +209,22 @@ def _admission_diagnostic(index: int, error: BaseException) -> Diagnostic:
     if isinstance(error, TreeAdmissionError):
         relative = error.relative_path
         if error.code == "reserved_member" and relative is not None:
+            if not _safe_relative_display(relative):
+                return Diagnostic(
+                    path,
+                    "file.invalid_source_member",
+                    "local source contains an unsafe or unrepresentable member name",
+                )
+            reason = (
+                "reserved for HTTP download staging"
+                if TRANSFER_STAGING_DIRECTORY_NAME in relative.parts
+                else "reserved for container-image deletion markers"
+            )
             return Diagnostic(
                 path,
                 "file.reserved_source_component",
-                f"local source member {relative.as_posix()!r} uses the reserved "
-                "staging path component; rename or remove it (reserved for HTTP "
-                "download staging)",
+                f"local source member {relative.as_posix()!r} is {reason}; "
+                "rename or remove it",
             )
         if error.code in {"member_name", "inventory_invalid"}:
             if relative is not None and _safe_relative_display(relative):

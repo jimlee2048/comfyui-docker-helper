@@ -183,9 +183,9 @@ def test_single_file_evidence_records_only_verified_observed_identity(
 
 def test_file_target_authority_is_shared_by_plan_and_manifest() -> None:
     reserved = "/workspace/ComfyUI/.cdh-staging/model.bin"
-    with pytest.raises(ValueError, match="reserved staging"):
+    with pytest.raises(ValueError, match="reserved for HTTP download staging"):
         validate_absolute_file_target(reserved)
-    with pytest.raises(ValidationError, match="reserved staging"):
+    with pytest.raises(ValidationError, match="reserved for HTTP download staging"):
         LocalFilePlan(
             type="local",
             kind="file",
@@ -194,7 +194,7 @@ def test_file_target_authority_is_shared_by_plan_and_manifest() -> None:
             verification="unverified-local",
             digest=None,
         )
-    with pytest.raises(ValidationError, match="reserved staging"):
+    with pytest.raises(ValidationError, match="reserved for HTTP download staging"):
         LocalTreeEvidence(
             type="local",
             kind="tree",

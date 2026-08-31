@@ -93,6 +93,8 @@ docker exec CONTAINER cdh container runtime follow
 
 主机端的 HTTP `[[files]]` 声明会成为固化到镜像中的运行时默认配置；宿主机本地构建文件不会。运行时只接受 `type = "http"` 条目；挂载配置中的本地来源会被拒绝，而不会尝试在容器内解释宿主机路径。每个 HTTP 条目使用 `source` 表示带 host 的 URL，使用 `target` 表示相对于 `COMFYUI_PATH` 的确切最终文件路径；运行时不接受目录 target、根 target，也不会从 URL 推断 target 文件名。比较 identity 前，多余的 `/` 和 `.` 路径段会被规范化；空值、绝对路径、明确的 `..`、反斜杠、控制字符和末尾斜杠均无效。靠后层中已有目标的条目会在原位置修补该条目，并保留它省略的字段；新目标会追加。靠后的 `files = []` 会清空之前的列表。合并后，重复或重叠的生效 target 会失败，挂载的 runtime 文件列表不能包含 local 条目。
 
+运行时目标沿用构建目标的[文件命名规则](configuration.zh-CN.md#在镜像构建期间添加文件)：完整目标路径的任何一段名称都不能是 `.cdh-staging`，也不能以 `.wh.` 开头。
+
 同步下载会在 pre-start Hook 之前完成。异步下载会在 ComfyUI 启动前被接收到一个后台队列中，并且可以在 ComfyUI 运行期间继续；它们不会阻塞 ComfyUI readiness。
 
 `download_max_attempts` 是每个文件在一次容器启动或已接纳的 restart 中允许调用下载后端的总次数，其中包括第一次尝试。`download_failure_policy` 只在运行时适用：

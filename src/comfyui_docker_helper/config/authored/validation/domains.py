@@ -69,6 +69,8 @@ from comfyui_docker_helper.config.validation.selectors import (
 from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
+    is_reserved_file_target_component,
+    reserved_file_target_component_message,
 )
 from comfyui_docker_helper.config.validation.values import (
     has_control_characters,
@@ -151,7 +153,16 @@ def validate_final_config_domains(
         controlled_extra_args,
         diagnostics,
     )
-    _validate_file_domains(config, file_targets, files, diagnostics)
+    effective_comfyui_path = comfyui_path
+    if effective_comfyui_path is None and workspace is not None:
+        effective_comfyui_path = workspace / "ComfyUI"
+    _validate_file_domains(
+        config,
+        file_targets,
+        files,
+        diagnostics,
+        comfyui_path=effective_comfyui_path,
+    )
     _validate_build_domains(config, diagnostics)
     _validate_secret_domains(config, diagnostics)
     _validate_git_credential_domains(config, git_credential_contexts, diagnostics)
@@ -901,6 +912,8 @@ def _validate_file_domains(
     file_targets: list[LocatedValue],
     files: list[NormalizedFile],
     diagnostics: list[Diagnostic],
+    *,
+    comfyui_path: PurePosixPath | None,
 ) -> None:
     for index, item in enumerate(config.files):
         base: DiagnosticPath = ("files", index)
@@ -931,8 +944,26 @@ def _validate_file_domains(
         )
         if target is not None:
             target_value = target.as_posix()
+            if comfyui_path is not None:
+                reserved_component = next(
+                    (
+                        part
+                        for part in comfyui_path.parts
+                        if is_reserved_file_target_component(part)
+                    ),
+                    None,
+                )
+                if reserved_component is not None:
+                    diagnostics.append(
+                        Diagnostic(
+                            (*base, "target"),
+                            "file.reserved_target_component",
+                            reserved_file_target_component_message(reserved_component),
+                        )
+                    )
+                    continue
             file_targets.append(LocatedValue((*base, "target"), target_value))
-            files.append(NormalizedFile(target.parent, target_value))
+            files.append(NormalizedFile(target_value))
 
 
 def _validate_build_domains(

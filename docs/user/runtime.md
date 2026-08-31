@@ -93,6 +93,8 @@ Run these commands with the container's default user. A different UID, including
 
 Host HTTP `[[files]]` declarations become baked runtime defaults; host-local build files do not. Runtime accepts only `type = "http"` items and rejects a mounted local source instead of trying to interpret a host path inside the container. Each HTTP item uses `source` for its host-qualified URL and `target` for its exact final file path relative to `COMFYUI_PATH`; runtime does not accept a directory target, a root target, or a target filename inferred from the URL. Redundant `/` and `.` segments normalize before identity comparison, while empty values, absolute paths, explicit `..`, backslashes, controls, and trailing slashes are invalid. A later item for an existing target patches that item at its original position, retaining fields it omits; a new target appends. A later `files = []` clears the earlier list. Duplicate or overlapping effective targets fail after merging, and a mounted runtime file list cannot contain local items.
 
+Runtime targets follow the same [file naming rules](configuration.md#add-files-during-the-image-build) as build targets: no complete destination component may be `.cdh-staging` or start with `.wh.`.
+
 Synchronous downloads finish before pre-start hooks. Asynchronous downloads are accepted into one background queue before ComfyUI starts and may continue while it runs; they do not gate ComfyUI readiness.
 
 `download_max_attempts` is the total number of backend invocations allowed for each file during one container start or accepted restart, including the first attempt. `download_failure_policy` applies only at runtime:

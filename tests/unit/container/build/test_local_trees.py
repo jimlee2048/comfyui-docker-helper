@@ -15,6 +15,7 @@ from comfyui_docker_helper.container.build.admission import (
 from comfyui_docker_helper.container.build.local_trees import (
     LocalTreeNormalizationError,
     normalize_local_trees,
+    validate_local_trees,
 )
 
 
@@ -81,8 +82,9 @@ def test_normalizer_rejects_symlink_target_parent_without_following_it(
         normalize_local_trees((_tree(root, "user/default/workflows"),), root)
 
 
-def test_normalizer_preserves_unrelated_overlay_entries_and_sets_selected_modes(
+def test_tree_overlay_validation_and_normalization_preserve_unrelated_entries(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "ComfyUI"
     target = root / "user" / "default" / "workflows"
@@ -98,6 +100,18 @@ def test_normalizer_preserves_unrelated_overlay_entries_and_sets_selected_modes(
         LocalTreeMemberInput("nested/selected.txt", "file"),
         LocalTreeMemberInput("selected-empty", "directory"),
     )
+
+    monkeypatch.setattr(
+        local_trees.os,
+        "scandir",
+        lambda *_args, **_kwargs: pytest.fail("tree path admission must not enumerate"),
+    )
+    before_modes = {
+        path: path.stat().st_mode & 0o777
+        for path in (target, target / "nested", target / "nested" / "selected.txt")
+    }
+    validate_local_trees((_tree(root, members=members),), root)
+    assert {path: path.stat().st_mode & 0o777 for path in before_modes} == before_modes
 
     normalize_local_trees((_tree(root, members=members),), root)
 
@@ -117,7 +131,7 @@ def test_normalizer_preserves_unrelated_overlay_entries_and_sets_selected_modes(
     ],
     ids=["directory-over-file", "file-over-directory"],
 )
-def test_normalizer_rejects_selected_type_conflicts(
+def test_tree_placement_rejects_selected_type_conflicts(
     tmp_path: Path,
     member: LocalTreeMemberInput,
     existing_kind: str,
@@ -130,9 +144,15 @@ def test_normalizer_rejects_selected_type_conflicts(
         selected.write_bytes(b"existing")
     else:
         selected.mkdir()
+        (selected / "keep.txt").write_bytes(b"keep")
 
-    with pytest.raises(LocalTreeNormalizationError, match="conflicts"):
-        normalize_local_trees((_tree(root, members=(member,)),), root)
+    for operation in (validate_local_trees, normalize_local_trees):
+        with pytest.raises(LocalTreeNormalizationError, match="conflicts"):
+            operation((_tree(root, members=(member,)),), root)
+        if existing_kind == "file":
+            assert selected.read_bytes() == b"existing"
+        else:
+            assert (selected / "keep.txt").read_bytes() == b"keep"
 
 
 def test_normalizer_rejects_missing_selected_file(tmp_path: Path) -> None:
@@ -163,6 +183,84 @@ def test_normalizer_rejects_path_outside_comfyui_containment(tmp_path: Path) -> 
         normalize_local_trees((tree,), root)
 
 
+def test_tree_validation_allows_absent_target_ancestors_and_members(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    root.mkdir()
+    tree = _tree(
+        root,
+        "new/nested/workflows",
+        members=(
+            LocalTreeMemberInput("selected", "file"),
+            LocalTreeMemberInput("empty", "directory"),
+        ),
+    )
+
+    validate_local_trees((tree,), root)
+
+    assert not (root / "new").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="requires symbolic links")
+def test_tree_validation_rejects_symlinked_comfyui_ancestor(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "workspace"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    root = linked_parent / "ComfyUI"
+
+    with pytest.raises(LocalTreeNormalizationError, match="link or reparse"):
+        validate_local_trees((_tree(root, "models/workflows"),), root)
+
+
+@pytest.mark.parametrize(
+    ("setup", "message"),
+    [
+        (
+            "target-parent-file",
+            "conflicts with a file",
+        ),
+        (
+            "target-link",
+            "link or reparse",
+        ),
+        (
+            "selected-special",
+            "special filesystem node",
+        ),
+    ],
+    ids=["target-parent-file", "target-link", "selected-special"],
+)
+def test_tree_validation_rejects_incompatible_existing_paths(
+    tmp_path: Path,
+    setup: str,
+    message: str,
+) -> None:
+    root = tmp_path / "ComfyUI"
+    target = root / "user" / "default" / "workflows"
+    root.mkdir()
+    if setup == "target-parent-file":
+        (root / "user").write_bytes(b"file")
+    elif setup == "target-link":
+        (root / "user").mkdir()
+        (root / "user" / "default").symlink_to(tmp_path / "elsewhere")
+    else:
+        target.mkdir(parents=True)
+        os.mkfifo(target / "selected")
+
+    member = (
+        LocalTreeMemberInput("selected", "file")
+        if setup == "selected-special"
+        else LocalTreeMemberInput("selected", "directory")
+    )
+
+    with pytest.raises(LocalTreeNormalizationError, match=message):
+        validate_local_trees((_tree(root, members=(member,)),), root)
+
+
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="requires symbolic links")
 def test_normalizer_rejects_selected_links_without_following_them(
     tmp_path: Path,
@@ -175,20 +273,3 @@ def test_normalizer_rejects_selected_links_without_following_them(
 
     with pytest.raises(LocalTreeNormalizationError, match="link or reparse"):
         normalize_local_trees((_tree(root, members=(member,)),), root)
-
-
-def test_normalizer_does_not_enumerate_unselected_lower_entries(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "ComfyUI"
-    target = root / "user" / "default" / "workflows"
-    target.mkdir(parents=True)
-    (target / "unrelated").mkdir()
-    monkeypatch.setattr(
-        local_trees.os,
-        "scandir",
-        lambda *_args, **_kwargs: pytest.fail("normalizer must not enumerate"),
-    )
-
-    normalize_local_trees((_tree(root, "."),), root)

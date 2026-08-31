@@ -33,6 +33,7 @@ if sys.platform == "linux":
     from comfyui_docker_helper.container.build.local_trees import (
         LocalTreeNormalizationError,
         normalize_local_trees,
+        validate_local_trees,
     )
     from comfyui_docker_helper.container.build.manifest.observer import (
         emit_final_manifest,
@@ -123,6 +124,24 @@ def normalize_local_trees_command(
     trees, comfyui_root = _admission(build_plan_digest).local_trees()
     try:
         normalize_local_trees(trees, comfyui_root)
+    except LocalTreeNormalizationError as error:
+        raise ContainerCommandError(str(error)) from error
+
+
+@app.command("validate-local-trees", context_settings=HELP_CONTEXT_SETTINGS)
+def validate_local_trees_command(
+    build_plan_digest: Annotated[
+        str,
+        typer.Option(
+            "--build-plan-digest",
+            help="Expected owning BuildPlan SHA-256 digest.",
+        ),
+    ],
+) -> None:
+    """Validate existing Plan-selected local-tree paths before COPY."""
+    trees, comfyui_root = _admission(build_plan_digest).local_trees()
+    try:
+        validate_local_trees(trees, comfyui_root)
     except LocalTreeNormalizationError as error:
         raise ContainerCommandError(str(error)) from error
 

@@ -318,15 +318,36 @@ def _copied_files_phase(plan: BuildPlan) -> list[str]:
                 ),
             )
         )
+    if local_trees:
+        lines.append(
+            _run(
+                (_BUILD_PLAN_MOUNT,),
+                (
+                    _format_command(
+                        f"{_shell_word(cdh.executable)} container validate-local-trees",
+                        (
+                            "--build-plan-digest "
+                            + _shell_word(build_plan_digest(plan)),
+                        ),
+                    ),
+                ),
+            )
+        )
     lines.extend(
         "COPY --link --chmod=0644 "
-        + json.dumps([item.context_path, item.target], ensure_ascii=True)
+        + json.dumps(
+            [item.context_path, _copy_path(item.target)],
+            ensure_ascii=True,
+        )
         for item in plan.files.files
         if isinstance(item, LocalFilePlan)
     )
     lines.extend(
         "COPY --link "
-        + json.dumps([f"{item.context_path}/", f"{item.target}/"], ensure_ascii=True)
+        + json.dumps(
+            [f"{item.context_path}/", f"{_copy_path(item.target)}/"],
+            ensure_ascii=True,
+        )
         for item in local_trees
     )
     if local_trees:
@@ -474,3 +495,8 @@ def _command_absence_checks(bin_dir: str, commands: tuple[str, ...]) -> tuple[st
 
 def _shell_word(value: str) -> str:
     return shlex.quote(value)
+
+
+def _copy_path(value: str) -> str:
+    """Escape Dockerfile COPY variable markers while retaining literal paths."""
+    return value.replace("$", r"\$")

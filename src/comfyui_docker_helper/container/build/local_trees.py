@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from comfyui_docker_helper.container.build.admission import LocalTreeNormalizationInput
 from comfyui_docker_helper.errors import ApplicationError
@@ -15,6 +16,75 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
 class LocalTreeNormalizationError(ApplicationError):
     """A selected local-tree path could not be normalized safely."""
+
+
+def validate_local_trees(
+    trees: tuple[LocalTreeNormalizationInput, ...],
+    comfyui_root: str | os.PathLike[str],
+) -> None:
+    """Admit existing selected tree paths without changing the image.
+
+    Only the target roots, their required ancestors, and the Plan-selected
+    members are inspected. Missing paths are valid because the following
+    linked COPY may create them; existing paths must have the kind required by
+    the Plan and must not be links, reparse points, or special nodes.
+    """
+    root = PurePosixPath(os.fspath(comfyui_root))
+    if not root.is_absolute():
+        raise LocalTreeNormalizationError("COMFYUI_PATH must be absolute")
+    root_path = Path(root)
+    for tree in trees:
+        target = _tree_target(tree.target, root)
+        relative_target = target.relative_to(root)
+        current = Path(root.anchor)
+        path_exists = True
+        for part in root.parts[1:]:
+            current /= part
+            label = "COMFYUI_PATH" if current == root_path else "COMFYUI_PATH ancestor"
+            if not _validate_existing_directory(current, label):
+                path_exists = False
+                break
+        if not path_exists:
+            continue
+
+        for part in relative_target.parts:
+            current /= part
+            label = (
+                "local tree target root"
+                if current == Path(target)
+                else "local tree target parent"
+            )
+            if not _validate_existing_directory(current, label):
+                path_exists = False
+                break
+
+        if not path_exists:
+            continue
+
+        for member in tree.members:
+            member_path = PurePosixPath(member.relative_path)
+            if (
+                member_path.is_absolute()
+                or member_path == PurePosixPath(".")
+                or ".." in member_path.parts
+                or not (target / member_path).is_relative_to(target)
+            ):
+                raise LocalTreeNormalizationError(
+                    "local tree member path escapes its selected target"
+                )
+            current = Path(target)
+            for part in member_path.parts[:-1]:
+                current /= part
+                if not _validate_existing_directory(
+                    current,
+                    "local tree selected member parent",
+                ):
+                    break
+            else:
+                _validate_existing_member(
+                    current / member_path.parts[-1],
+                    member.kind,
+                )
 
 
 def normalize_local_trees(
@@ -128,23 +198,35 @@ def _admit_or_create_directory(
         _set_mode(path, directory_mode if mode is None else mode, label)
 
 
+def _validate_existing_directory(path: Path, label: str) -> bool:
+    """Validate one existing directory and report whether it was present."""
+    observed = _lstat(path, label)
+    if observed is None:
+        return False
+    _require_real_directory(observed, label)
+    return True
+
+
+def _validate_existing_member(
+    path: Path,
+    kind: Literal["directory", "file"],
+) -> None:
+    """Validate one existing selected member without changing its mode."""
+    observed = _lstat(path, "local tree selected member")
+    if observed is None:
+        return
+    if kind == "directory":
+        _require_real_directory(observed, "local tree selected directory")
+        return
+    _require_real_file(observed, "local tree selected file")
+
+
 def _normalize_selected_file(path: PurePosixPath) -> None:
     destination = Path(path)
     observed = _lstat(destination, "local tree selected file")
     if observed is None:
         raise LocalTreeNormalizationError("local tree selected file is missing")
-    if _is_reparse(observed):
-        raise LocalTreeNormalizationError(
-            "local tree selected file must not be a link or reparse point"
-        )
-    if not stat.S_ISREG(observed.st_mode):
-        if stat.S_ISDIR(observed.st_mode):
-            raise LocalTreeNormalizationError(
-                "local tree selected file conflicts with a directory"
-            )
-        raise LocalTreeNormalizationError(
-            "local tree selected file is a special filesystem node"
-        )
+    _require_real_file(observed, "local tree selected file")
     _set_mode(
         destination,
         int(local_tree_mode("file"), 8),
@@ -172,6 +254,18 @@ def _require_real_directory(observed: os.stat_result, label: str) -> None:
         raise LocalTreeNormalizationError(f"{label} is a special filesystem node")
 
 
+def _require_real_file(observed: os.stat_result, label: str) -> None:
+    """Require a selected path to be a non-link regular file."""
+    if _is_reparse(observed):
+        raise LocalTreeNormalizationError(
+            f"{label} must not be a link or reparse point"
+        )
+    if not stat.S_ISREG(observed.st_mode):
+        if stat.S_ISDIR(observed.st_mode):
+            raise LocalTreeNormalizationError(f"{label} conflicts with a directory")
+        raise LocalTreeNormalizationError(f"{label} is a special filesystem node")
+
+
 def _set_mode(path: Path, mode: int, label: str) -> None:
     try:
         os.chmod(path, mode, follow_symlinks=False)
@@ -193,4 +287,5 @@ def _is_reparse(observed: os.stat_result) -> bool:
 __all__ = [
     "LocalTreeNormalizationError",
     "normalize_local_trees",
+    "validate_local_trees",
 ]

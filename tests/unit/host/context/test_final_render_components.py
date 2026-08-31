@@ -422,7 +422,10 @@ def test_renderer_omits_build_download_command_when_no_files() -> None:
     document["files"] = []
     plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
 
-    assert "container download-files" not in render_build_plan_dockerfile(plan)
+    rendered = render_build_plan_dockerfile(plan)
+    assert "container download-files" not in rendered
+    assert "container validate-local-trees" not in rendered
+    assert "container normalize-local-trees" not in rendered
 
 
 def test_renderer_places_local_files_authoritatively_after_build_mutations() -> None:
@@ -455,15 +458,60 @@ def test_renderer_places_local_files_authoritatively_after_build_mutations() -> 
     assert rendered.index(copy_line) < rendered.index("container emit-final-manifest")
 
 
+def test_renderer_escapes_dollar_in_local_file_copy_destination_only() -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    relative_target = "models/$NAME/${OTHER}/model.bin"
+    context_path = (
+        "build/files/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+    )
+    document = plan.model_dump(mode="python")
+    document["files"]["files"] = (
+        *document["files"]["files"],
+        {
+            "type": "local",
+            "kind": "file",
+            "target": f"{plan.application.paths.comfyui}/{relative_target}",
+            "context_path": context_path,
+            "verification": "unverified-local",
+        },
+    )
+    changed = BuildPlan.model_validate(document)
+
+    rendered = render_build_plan_dockerfile(changed)
+    copy_line = "COPY --link --chmod=0644 " + json.dumps(
+        [
+            context_path,
+            f"{plan.application.paths.comfyui}/{relative_target}".replace("$", "\\$"),
+        ]
+    )
+
+    assert copy_line in rendered
+    assert "container validate-local-trees" not in rendered
+    assert 'ENV PATH="/opt/uv/bin:/opt/venv/bin:${PATH}"' in rendered
+
+
 def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
     plan, context_path = _plan_with_local_tree()
     document = plan.model_dump(mode="python")
+    relative_file_target = "models/local.bin"
+    file_context_path = (
+        "build/files/"
+        + hashlib.sha256(relative_file_target.encode("utf-8")).hexdigest()
+    )
+    file_target = f"{plan.application.paths.comfyui}/{relative_file_target}"
     empty_relative_target = "models/empty-tree"
     empty_context_path = (
         "build/trees/"
         + hashlib.sha256(empty_relative_target.encode("utf-8")).hexdigest()
     )
     document["files"]["files"] = (
+        {
+            "type": "local",
+            "kind": "file",
+            "target": file_target,
+            "context_path": file_context_path,
+            "verification": "unverified-local",
+        },
         *document["files"]["files"],
         {
             "type": "local",
@@ -479,6 +527,7 @@ def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
 
     rendered = render_build_plan_dockerfile(plan)
     copy_lines = (
+        "COPY --link --chmod=0644 " + json.dumps([file_context_path, file_target]),
         "COPY --link "
         + json.dumps(
             [
@@ -497,9 +546,25 @@ def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
     normalizer_blocks = tuple(
         block for block in _run_blocks(rendered) if "normalize-local-trees" in block
     )
+    validator_blocks = tuple(
+        block for block in _run_blocks(rendered) if "validate-local-trees" in block
+    )
 
     assert all(rendered.count(copy_line) == 1 for copy_line in copy_lines)
+    assert rendered.count("validate-local-trees") == 1
     assert rendered.count("normalize-local-trees") == 1
+    assert len(validator_blocks) == 1
+    validator = validator_blocks[0]
+    assert (
+        validator.count(
+            "--mount=type=bind,source=build-plan.json,"
+            "target=/opt/cdh/build/build-plan.json,readonly"
+        )
+        == 1
+    )
+    assert f"--build-plan-digest {build_plan_digest(plan)}" in _flatten_command(
+        validator
+    )
     assert len(normalizer_blocks) == 1
     normalizer = normalizer_blocks[0]
     assert (
@@ -512,12 +577,32 @@ def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
     assert f"--build-plan-digest {build_plan_digest(plan)}" in _flatten_command(
         normalizer
     )
-    assert rendered.index(copy_lines[0]) < rendered.index(copy_lines[1])
+    assert rendered.index(copy_lines[1]) < rendered.index(copy_lines[2])
+    validator_index = rendered.index("validate-local-trees")
     normalizer_index = rendered.index("normalize-local-trees")
+    assert validator_index < min(rendered.index(copy_line) for copy_line in copy_lines)
     assert max(rendered.index(copy_line) for copy_line in copy_lines) < normalizer_index
     assert rendered.index("normalize-local-trees") < rendered.index(
         "container emit-final-manifest"
     )
+
+
+def test_renderer_escapes_dollar_in_local_tree_copy_destination() -> None:
+    relative_target = "user/$NAME/${OTHER}/workflows"
+    plan, context_path = _plan_with_local_tree(relative_target=relative_target)
+
+    rendered = render_build_plan_dockerfile(plan)
+    copy_line = "COPY --link " + json.dumps(
+        [
+            f"{context_path}/",
+            f"{plan.application.paths.comfyui}/{relative_target}".replace("$", "\\$")
+            + "/",
+        ]
+    )
+
+    assert rendered.count(copy_line) == 1
+    assert rendered.count("container validate-local-trees") == 1
+    assert rendered.count("container normalize-local-trees") == 1
 
 
 # Custom-node and application modes render one ordered observed execution boundary.
@@ -837,9 +922,9 @@ def _plan_with_local_file(*, digest: str | None = None) -> tuple[BuildPlan, str]
 def _plan_with_local_tree(
     *,
     locked: bool = False,
+    relative_target: str = "user/default/workflows",
 ) -> tuple[BuildPlan, str]:
     plan = build_plan(final_config(), accepted_resolution())
-    relative_target = "user/default/workflows"
     context_path = (
         f"build/trees/{hashlib.sha256(relative_target.encode('utf-8')).hexdigest()}"
     )

@@ -130,6 +130,7 @@ def _emit_comfyui_success(event_sink) -> None:
         (["install-custom-nodes"], "Usage: cdh container install-custom-nodes"),
         (["emit-final-manifest"], "Usage: cdh container emit-final-manifest"),
         (["normalize-local-trees"], "Usage: cdh container normalize-local-trees"),
+        (["validate-local-trees"], "Usage: cdh container validate-local-trees"),
         (["runtime"], "Usage: cdh container runtime"),
         (["runtime", "serve"], "Usage: cdh container runtime serve"),
         (["runtime", "restart"], "Usage: cdh container runtime restart"),
@@ -188,6 +189,7 @@ def test_registry_helper_help_exposes_only_owned_inputs(
         "install-custom-nodes",
         "emit-final-manifest",
         "normalize-local-trees",
+        "validate-local-trees",
     ],
 )
 def test_container_commands_admit_one_canonical_plan_per_invocation(
@@ -245,6 +247,11 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
     monkeypatch.setattr(
         container_cli,
         "normalize_local_trees",
+        lambda trees, root: observed.append((trees, root)),
+    )
+    monkeypatch.setattr(
+        container_cli,
+        "validate_local_trees",
         lambda trees, root: observed.append((trees, root)),
     )
     monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
@@ -307,26 +314,38 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
             "normalize-local-trees": [
                 ((), plan.application.paths.comfyui),
             ],
+            "validate-local-trees": [
+                ((), plan.application.paths.comfyui),
+            ],
         }[command]
     )
 
 
-def test_normalize_local_trees_cli_converts_normalization_error(
+@pytest.mark.parametrize(
+    ("command", "operation"),
+    [
+        ("normalize-local-trees", "normalize_local_trees"),
+        ("validate-local-trees", "validate_local_trees"),
+    ],
+)
+def test_local_tree_cli_reports_placement_error(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    operation: str,
 ) -> None:
     plan = _materialized_download_plan(tmp_path, monkeypatch)
 
     def fail_normalization(_trees, _root) -> None:
         raise container_cli.LocalTreeNormalizationError("selected conflict")
 
-    monkeypatch.setattr(container_cli, "normalize_local_trees", fail_normalization)
+    monkeypatch.setattr(container_cli, operation, fail_normalization)
     result = cli_runner.invoke(
         app,
         [
             "container",
-            "normalize-local-trees",
+            command,
             "--build-plan-digest",
             build_plan_digest(plan),
         ],

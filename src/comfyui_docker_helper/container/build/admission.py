@@ -20,6 +20,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
     HttpFilePlan,
     LocalFilePlan,
+    LocalTreePlan,
     ManifestBinding,
     ToolchainPhase,
     build_plan_digest,
@@ -76,7 +77,31 @@ class FinalManifestLocalFileInput:
     digest: str | None
 
 
-type FinalManifestFileInput = FinalManifestHttpFileInput | FinalManifestLocalFileInput
+@dataclass(frozen=True, slots=True)
+class LocalTreeMemberInput:
+    """One Plan-selected tree member needed by image placement and observation."""
+
+    relative_path: str
+    kind: Literal["directory", "file"]
+
+
+@dataclass(frozen=True, slots=True)
+class FinalManifestLocalTreeInput:
+    """Complete observer projection for one Plan-selected local tree."""
+
+    type: Literal["local"]
+    kind: Literal["tree"]
+    target: str
+    verification: Literal["sha256", "unverified-local"]
+    members: tuple[LocalTreeMemberInput, ...]
+    intended_tree_digest: str | None
+
+
+type FinalManifestFileInput = (
+    FinalManifestHttpFileInput
+    | FinalManifestLocalFileInput
+    | FinalManifestLocalTreeInput
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +110,14 @@ class FinalCoreProbeInput:
 
     workspace: str
     checks: tuple[FinalBuildCheckId, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTreeNormalizationInput:
+    """Tree paths and kinds shared by placement validation and normalization."""
+
+    target: str
+    members: tuple[LocalTreeMemberInput, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +158,19 @@ class BuildPlanInputAdmission:
     def file_downloads(self) -> tuple[FilesPhase, str]:
         """Project file policy with its authoritative ComfyUI root."""
         return self._plan.files, self._plan.application.paths.comfyui
+
+    def local_trees(
+        self,
+    ) -> tuple[tuple[LocalTreeNormalizationInput, ...], str]:
+        """Project expected tree paths for placement validation and normalization."""
+        return (
+            tuple(
+                _local_tree_input(item)
+                for item in self._plan.files.files
+                if isinstance(item, LocalTreePlan)
+            ),
+            self._plan.application.paths.comfyui,
+        )
 
     def final_manifest(self) -> FinalManifestInput:
         """Project only the complete cross-domain final observation inputs."""
@@ -174,7 +220,7 @@ class BuildPlanInputAdmission:
 
 
 def _manifest_file_input(
-    item: HttpFilePlan | LocalFilePlan,
+    item: HttpFilePlan | LocalFilePlan | LocalTreePlan,
 ) -> FinalManifestFileInput:
     if isinstance(item, HttpFilePlan):
         return FinalManifestHttpFileInput(
@@ -183,9 +229,40 @@ def _manifest_file_input(
             target=item.target,
             checksum=item.checksum,
         )
-    return FinalManifestLocalFileInput(
-        type="local",
+    if isinstance(item, LocalTreePlan):
+        return FinalManifestLocalTreeInput(
+            type="local",
+            kind="tree",
+            target=item.target,
+            verification=item.verification,
+            members=tuple(
+                LocalTreeMemberInput(
+                    relative_path=member.relative_path,
+                    kind=member.kind,
+                )
+                for member in item.members
+            ),
+            intended_tree_digest=item.tree_digest,
+        )
+    if isinstance(item, LocalFilePlan):
+        return FinalManifestLocalFileInput(
+            type="local",
+            target=item.target,
+            verification=item.verification,
+            digest=item.digest,
+        )
+    raise AssertionError("unsupported final manifest file plan")
+
+
+def _local_tree_input(item: LocalTreePlan) -> LocalTreeNormalizationInput:
+    """Project tree shape without the content identities used by observation."""
+    return LocalTreeNormalizationInput(
         target=item.target,
-        verification=item.verification,
-        digest=item.digest,
+        members=tuple(
+            LocalTreeMemberInput(
+                relative_path=member.relative_path,
+                kind=member.kind,
+            )
+            for member in item.members
+        ),
     )

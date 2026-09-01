@@ -46,8 +46,13 @@ def test_root_cli_does_not_load_platform_implementations() -> None:
 
 @pytest.mark.parametrize(
     "command",
-    [["runtime", "serve"], ["download-files"]],
-    ids=["runtime", "build-helper"],
+    [
+        ["runtime", "serve"],
+        ["download-files"],
+        ["validate-local-trees"],
+        ["normalize-local-trees"],
+    ],
+    ids=["runtime", "build-helper", "tree-precheck", "tree-helper"],
 )
 def test_container_execution_reports_linux_only_before_service_loading(
     command: list[str],

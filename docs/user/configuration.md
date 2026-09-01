@@ -29,7 +29,7 @@ Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recur
 - `system.extra_packages` uses the admitted Debian package name;
 - `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, selector or named direct reference, and marker;
 - `comfyui.custom_nodes` uses a lowercase-only Registry resource ID or the exact direct-Git URL;
-- `files` uses the normalized `target_dir` plus `filename` target; and
+- `files` uses the normalized direct `target` identity; and
 - `cdh.downloader.credentials` uses the canonical HTTP(S) origin and path represented by `match`; and
 - `cdh.git.credentials` uses the canonical credential context represented by `match`.
 
@@ -43,7 +43,7 @@ Registry ID case variants identify the same resource and overlay at the original
 
 Canonically equivalent credential contexts identify the same route even when their raw `match` strings differ. A later route atomically replaces the complete earlier route at its original position; route fields never merge individually. Ambiguous duplicates authored in one layer remain invalid. A later `credentials = []`, `custom_nodes = []`, or `files = []` resets that collection. Each `[secrets.<name>]` table is also an atomic source definition, so a later layer can replace `env` with `file` without retaining the old field. Strict structure, uniqueness, and cross-field rules are checked after all layers have produced the effective configuration.
 
-For `[[files]]`, cdh treats redundant `/`, `.` path segments, and a trailing `/` as alternate spellings of the same directory. For example, `models//checkpoints/` is canonicalized to `models/checkpoints`. Use `target_dir = "."` or `target_dir = "./"` to place a file directly in the ComfyUI root. Empty and absolute directories, control characters, and every authored `..` segment remain invalid. An overlay for the same normalized target patches an item of the same `type`; changing `type` replaces the complete item so source-specific fields are not inherited.
+For `[[files]]`, `target` is one direct relative POSIX path relative to `COMFYUI_PATH`. Redundant `/` and `.` segments normalize to one identity; empty values, absolute paths, control characters, explicit `..`, backslashes, and every trailing slash are invalid. HTTP and local-file targets must be strict descendants of `COMFYUI_PATH` and name an exact file. A local tree target is relative to `COMFYUI_PATH` and may equal its root with `target = "."`; cdh determines whether a local source is a file or directory during render/build admission. An overlay for the same normalized target patches an item of the same `type`; changing `type` replaces the complete item so source-specific fields are not inherited. Effective target regions may not overlap by equality or ancestor/descendant relationship.
 
 For example, save this as `local.toml` to disable comfy-cli and remove the nodes and files selected by the full example:
 
@@ -116,29 +116,39 @@ Build hooks and custom-node installers execute trusted user-selected code during
 
 ## Add files during the image build
 
-Every build file explicitly selects an HTTP or host-local source. The two variants share only their image target:
+Every build file explicitly selects an HTTP or host-local source. Both variants use the same `source + target` operation shape:
 
 ```toml
 [[files]]
 type = "http"
-url = "https://example.test/model.safetensors"
-target_dir = "models/checkpoints"
-filename = "remote-model.safetensors"
+source = "https://example.test/model.safetensors"
+target = "models/checkpoints/remote-model.safetensors"
 downloader = "httpx"
 
 [[files]]
 type = "local"
-path = "artifacts/model.safetensors"
-target_dir = "models/checkpoints"
-filename = "local-model.safetensors"
+source = "artifacts/model.safetensors"
+target = "models/checkpoints/local-model.safetensors"
+content_lock = false
+
+[[files]]
+type = "local"
+source = "artifacts/workflows"
+target = "user/default/workflows"
 content_lock = false
 ```
 
-HTTP files may also select `checksum` and `download_mode`. Local files instead use `path` and optional `content_lock`; they do not use a downloader or a hand-authored checksum. All build files are authoritative: a successful build places the declared content at the target, so build configuration has no `overwrite` field.
+HTTP files may also select `checksum` and `download_mode`. A local source may be one regular file or one complete real directory tree; local files do not use a downloader or a hand-authored checksum. A file targets its exact final path. A directory targets its destination root, and cdh copies the source root's contents below that root without adding the source basename. Directory application is an overlay: selected entries replace compatible entries at the target while unrelated lower-image entries remain; cdh does not mirror or delete them. All build files are authoritative for their selected entries, so build configuration has no `overwrite` field.
 
-A relative local `path` uses the real parent directory of the first `-f` configuration file as its common base. Absolute paths and normalized parent traversal are accepted. The selected source must be one regular host file; cdh rejects observed symlinks, Windows junctions and other reparse points, directories, and special files. The locator is ordinary non-secret host input: it is not serialized into the lock, BuildPlan, rendered metadata, manifest, or image configuration, but it does not receive Secret-value handling or redaction.
+A local `source` must be non-empty. A relative local `source` uses the real parent directory of the first `-f` configuration file as its common base; an explicit `source = "."` therefore selects the first configuration file's real parent directory itself. Absolute paths and normalized parent traversal are accepted. Render/build admission selects every real descendant directory and regular file, including dot-prefixed and empty directories, and rejects links, Windows junctions or other reparse points, special files, unreadable entries, and unsafe names. The source and rendered output may not overlap. Local source paths are ordinary host inputs rather than Secret values. `host validate` checks the structure and target syntax without reading the local source.
 
-`content_lock = false` is the default and avoids a cdh SHA-256 scan during planning. `content_lock = true` streams the source into a SHA-256 identity stored in the canonical lock and BuildPlan, then verifies that identity again while materializing the context. The [build and lock guide](build-and-lock.md#build-files-and-local-context-materialization) explains context materialization modes, `--check` cost, remote-builder transfer, and image placement. Local sources are build-only; only HTTP file declarations become baked runtime defaults.
+Selected directories and regular files are represented in the image with project-owned modes `0755` and `0644`; host ownership, timestamps, ACLs, xattrs, and executable bits are not copied.
+
+No component of a complete destination or selected local-tree member path may be named `.cdh-staging` or start with `.wh.`. The former is reserved for HTTP download staging; the latter is reserved for container-image deletion markers. Rename an offending target or tree member rather than expecting it to be skipped. These target rules apply equally to HTTP/local and build/runtime configuration, including the effective `COMFYUI_PATH` prefix. A source locator or URL is not a destination name: a local file named `.wh.model` may still target `models/model.bin`.
+
+An empty local directory is valid and still creates its target root, but render, build, check, and dry-run each emit one warning: `local source directory is empty; its target directory will still be present in the image`. Validation emits no such warning, and quiet mode keeps it visible.
+
+`content_lock = false` is the default and avoids hashing local bytes during ordinary planning. With `content_lock = true`, cdh hashes the selected local file or tree content and verifies that identity while preparing the context and in final image observation. `--locked` checks the existing lock, local-tree structure, and content-locked identities without comparing bytes from unlocked sources; use `--check` to stream source/context byte equality. The [build and lock guide](build-and-lock.md#build-files-and-local-context-materialization) explains materialization modes, read and remote-builder transfer costs, empty-source warnings, and image placement. Local source paths are used only during host preparation; their prepared contents are image-build inputs, while only HTTP file declarations become baked runtime defaults.
 
 ## Authenticate HTTPX file downloads
 
@@ -155,9 +165,8 @@ token = { secret = "hf_read" }
 
 [[files]]
 type = "http"
-url = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
-target_dir = "models/checkpoints"
-filename = "model.safetensors"
+source = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+target = "models/checkpoints/model.safetensors"
 downloader = "httpx"
 ```
 

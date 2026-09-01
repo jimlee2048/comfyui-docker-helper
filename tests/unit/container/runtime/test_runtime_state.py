@@ -30,14 +30,14 @@ def _entry(
     *,
     target: str = "models/checkpoints/model.safetensors",
     status: str = "pending",
-    source: str = "https://example.com/model.safetensors",
+    url: str = "https://example.com/model.safetensors",
     checksum: str | None = None,
     overwrite: bool = False,
     downloader: str = "httpx",
     resume: RuntimeResumeState | None = None,
 ) -> RuntimeDownloadEntry:
     return RuntimeDownloadEntry(
-        source=source,
+        url=url,
         target=target,
         checksum=checksum,
         overwrite=overwrite,
@@ -74,9 +74,9 @@ def test_write_runtime_state_serializes_deterministic_json_shape(
         '{"downloads":{"'
         f"{DIGEST_KEY}"
         '":{"checksum":null,"download_mode":"sync","downloader":"httpx",'
-        '"overwrite":false,"resume":null,"source":'
-        '"https://example.com/model.safetensors","status":"pending","target":'
-        '"models/checkpoints/model.safetensors"}},"run_id":"run-1",'
+        '"overwrite":false,"resume":null,"status":"pending","target":'
+        '"models/checkpoints/model.safetensors","url":'
+        '"https://example.com/model.safetensors"}},"run_id":"run-1",'
         '"schema_version":1}\n'
     )
     assert load_runtime_state(path) == state
@@ -151,6 +151,8 @@ def test_runtime_state_rejects_extra_fields_and_invalid_digest_key() -> None:
         "/models/model.bin",
         "a\\b",
         "models/.cdh-staging",
+        ".cdh-staging/models/model.bin",
+        "models/.cdh-staging/model.bin",
     ],
 )
 def test_runtime_download_entry_rejects_invalid_target_paths(target: str) -> None:

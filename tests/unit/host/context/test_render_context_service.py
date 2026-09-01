@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,7 @@ from tests.host_render_service_support import (
     _tree,
 )
 
+from comfyui_docker_helper.filesystem import admission as file_admission
 from comfyui_docker_helper.host.buildx import BuildxOutputPlan
 from comfyui_docker_helper.host.context import service as render_service_module
 from comfyui_docker_helper.host.context.service import (
@@ -204,8 +205,18 @@ def test_host_passes_fresh_output_sibling_private_stages_to_materializer(
 def test_host_context_modes_are_deterministic_under_restrictive_umask(
     tmp_path: Path,
 ) -> None:
+    source = tmp_path / "empty-tree"
+    source.mkdir()
     config = tmp_path / "config.toml"
-    config.write_text(_config())
+    config.write_text(
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{source.as_posix()}"
+target = "user/default/workflows"
+'''
+    )
     hooks = _runtime_hooks(tmp_path / "hooks")
     output = tmp_path / "context"
     previous_umask = os.umask(0o077)
@@ -398,49 +409,6 @@ def test_check_compares_complete_path_type_and_bytes_without_following(
     assert outside.read_text() == "outside sentinel"
 
 
-def test_check_unlocked_local_file_rejects_size_before_reading_bytes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "model.bin"
-    source.write_bytes(b"original")
-    config = tmp_path / "config.toml"
-    config.write_text(
-        _config()
-        + f'''
-[cdh]
-local_file_mode = "copy"
-
-[[files]]
-type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
-'''
-    )
-    output = tmp_path / "context"
-    prepared = _prepare(config, output, FakeAcquirer())
-    context_file = output / prepared.plan.files.files[0].context_path
-    context_file.write_bytes(b"different size")
-
-    monkeypatch.setattr(
-        render_service_module.AdmittedRegularFileReader,
-        "read_chunk",
-        lambda *_args, **_kwargs: pytest.fail(
-            "size mismatch must not consume file bytes"
-        ),
-    )
-    with pytest.raises(HostRenderServiceError) as raised:
-        _prepare(
-            config,
-            output,
-            FakeAcquirer(),
-            options=PlanningOptions(check=True),
-        )
-
-    assert raised.value.diagnostics[0].code == "render.context_changed"
-
-
 def test_check_unlocked_local_file_detects_same_size_byte_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -455,9 +423,8 @@ local_file_mode = "copy"
 
 [[files]]
 type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
+source = "{source.as_posix()}"
+target = "models/model.bin"
 '''
     )
     output = tmp_path / "context"
@@ -474,6 +441,326 @@ filename = "model.bin"
         )
 
     assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def _local_tree_config(source: Path, *, content_lock: bool = False) -> str:
+    return (
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{source.as_posix()}"
+target = "user/default/workflows"
+content_lock = {str(content_lock).lower()}
+'''
+    )
+
+
+@pytest.mark.parametrize(
+    ("purpose", "locked", "source_passes", "context_passes"),
+    [
+        ("copy", False, 1, 0),
+        ("copy", True, 2, 0),
+        ("clone", False, 0, 0),
+        ("clone", True, 1, 0),
+        ("check", False, 1, 1),
+        ("check", True, 1, 1),
+        ("locked", False, 0, 0),
+        ("locked", True, 1, 1),
+        ("dry-run", False, 0, 0),
+        ("dry-run", True, 1, 0),
+    ],
+)
+def test_local_tree_preparation_reads_content_only_for_its_purpose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    purpose: str,
+    locked: bool,
+    source_passes: int,
+    context_passes: int,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    payload = source / "nested" / "payload.bin"
+    content = b"model content"
+    payload.write_bytes(content)
+    config = tmp_path / "config.toml"
+    mode = "clone" if purpose == "clone" else "copy"
+    config.write_text(
+        _local_tree_config(source, content_lock=locked)
+        + f'\n[cdh]\nlocal_file_mode = "{mode}"\n'
+    )
+    output = tmp_path / "context"
+    context_file = None
+    if purpose in {"check", "locked"}:
+        prepared = _prepare(config, output, FakeAcquirer())
+        context_file = (
+            output / prepared.plan.files.files[0].context_path / "nested/payload.bin"
+        )
+    read_bytes = {"source": 0, "context": 0}
+    operate = file_admission._operate_regular_absolute_file
+
+    def observe(path, operation):
+        key = (
+            "source"
+            if Path(path) == payload
+            else "context"
+            if Path(path) == context_file
+            else None
+        )
+        if key is None:
+            return operate(path, operation)
+
+        def count_operation(reader):
+            def read(limit=None):
+                chunk = reader.read_chunk(limit)
+                read_bytes[key] += len(chunk)
+                return chunk
+
+            return operation(replace(reader, _read_chunk=read))
+
+        return operate(path, count_operation)
+
+    def clone_result(_reader, destination_fd):
+        assert os.write(destination_fd, content) == len(content)
+
+    monkeypatch.setattr(file_admission, "_operate_regular_absolute_file", observe)
+    if purpose == "clone":
+        monkeypatch.setattr(
+            file_admission.AdmittedRegularFileReader, "clone_to", clone_result
+        )
+    options = PlanningOptions(
+        check=purpose == "check",
+        locked=purpose == "locked",
+        dry_run=purpose == "dry-run",
+    )
+
+    prepared = _prepare(config, output, FakeAcquirer(), options=options)
+
+    assert read_bytes == {
+        "source": source_passes * len(content),
+        "context": context_passes * len(content),
+    }
+    if purpose == "dry-run":
+        assert not output.exists()
+    else:
+        context_file = (
+            output / prepared.plan.files.files[0].context_path / "nested/payload.bin"
+        )
+        assert context_file.read_bytes() == content
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_late_unlocked_read_failure_does_not_publish_partial_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overwrite: bool,
+) -> None:
+    source = tmp_path / "tree"
+    source.mkdir()
+    payload = source / "payload.bin"
+    payload.write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _local_tree_config(source) + '\n[cdh]\nlocal_file_mode = "copy"\n'
+    )
+    output = tmp_path / "context"
+    if overwrite:
+        _prepare(config, output, FakeAcquirer())
+    before = _tree(output) if overwrite else None
+    before_paths = set(tmp_path.iterdir())
+    operate = file_admission._operate_regular_absolute_file
+    consumed = 0
+
+    def observe(path, operation):
+        if Path(path) != payload:
+            return operate(path, operation)
+
+        def fail_midstream(reader):
+            def read(_limit=None):
+                nonlocal consumed
+                if consumed:
+                    raise OSError("synthetic midstream failure")
+                chunk = reader.read_chunk(4)
+                consumed += len(chunk)
+                return chunk
+
+            return operation(replace(reader, _read_chunk=read))
+
+        return operate(path, fail_midstream)
+
+    monkeypatch.setattr(file_admission, "_operate_regular_absolute_file", observe)
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(config, output, FakeAcquirer(), overwrite=overwrite)
+
+    assert consumed == 4
+    assert raised.value.diagnostics[0].code == "render.context_write_failed"
+    assert set(tmp_path.iterdir()) == before_paths
+    if overwrite:
+        assert _tree(output) == before
+    else:
+        assert not output.exists()
+
+
+def test_check_unlocked_local_tree_streams_same_size_member_bytes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "payload.bin").write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(_local_tree_config(source))
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = (
+        output / prepared.plan.files.files[0].context_path / "nested" / "payload.bin"
+    )
+    context_file.write_bytes(b"changed!")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_locked_mode_freezes_unlocked_local_tree_structure_without_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "payload.bin").write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(_local_tree_config(source))
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_root = output / prepared.plan.files.files[0].context_path
+    context_file = context_root / "nested" / "payload.bin"
+    context_file.write_bytes(b"changed!")
+    before = _tree(output)
+    monkeypatch.setattr(
+        render_service_module,
+        "_regular_files_equal",
+        lambda *_args: pytest.fail("unlocked --locked must not compare file bytes"),
+    )
+
+    _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        options=PlanningOptions(locked=True),
+    )
+    (source / "empty").mkdir()
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(locked=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+    assert _tree(output) == before
+    assert not (context_root / "empty").exists()
+
+
+def test_check_locked_local_tree_hashes_context_members_against_plan(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "tree"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "payload.bin").write_bytes(b"original")
+    config = tmp_path / "config.toml"
+    config.write_text(_local_tree_config(source, content_lock=True))
+    output = tmp_path / "context"
+    prepared = _prepare(config, output, FakeAcquirer())
+    context_file = (
+        output / prepared.plan.files.files[0].context_path / "nested" / "payload.bin"
+    )
+    context_file.write_bytes(b"changed!")
+
+    with pytest.raises(HostRenderServiceError) as raised:
+        _prepare(
+            config,
+            output,
+            FakeAcquirer(),
+            options=PlanningOptions(check=True),
+        )
+
+    assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+def test_empty_local_tree_warnings_are_once_and_in_effective_order(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first-tree"
+    second = tmp_path / "second-tree"
+    first.mkdir()
+    second.mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f'''
+[[files]]
+type = "local"
+source = "{first.as_posix()}"
+target = "user/default/first"
+
+[[files]]
+type = "local"
+source = "{second.as_posix()}"
+target = "user/default/second"
+'''
+    )
+    output = tmp_path / "context"
+
+    prepared = _prepare(config, output, FakeAcquirer())
+    expected_paths = [("files", 0, "source"), ("files", 1, "source")]
+    assert [warning.path for warning in prepared.warnings] == expected_paths
+    assert [warning.code for warning in prepared.warnings] == [
+        "render.local_source_empty",
+        "render.local_source_empty",
+    ]
+
+    checked = _prepare(
+        config,
+        output,
+        FakeAcquirer(),
+        options=PlanningOptions(check=True),
+    )
+    assert [warning.path for warning in checked.warnings] == expected_paths
+
+    dry_run = _prepare(
+        config,
+        tmp_path / "dry-run",
+        FakeAcquirer(),
+        options=PlanningOptions(dry_run=True),
+    )
+    assert [warning.path for warning in dry_run.warnings] == expected_paths
+
+
+def test_local_file_comparison_rejects_size_mismatch_without_reading_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.bin"
+    context = tmp_path / "context.bin"
+    source.write_bytes(b"a")
+    context.write_bytes(b"bb")
+    monkeypatch.setattr(
+        render_service_module.AdmittedRegularFileReader,
+        "read_chunk",
+        lambda *_args: pytest.fail("different file sizes need no byte comparison"),
+    )
+
+    assert not render_service_module._regular_files_equal(source, context)
 
 
 def test_unlocked_local_file_comparison_ignores_short_read_boundaries(
@@ -519,9 +806,8 @@ local_file_mode = "copy"
 
 [[files]]
 type = "local"
-path = "{source.as_posix()}"
-target_dir = "models"
-filename = "model.bin"
+source = "{source.as_posix()}"
+target = "models/model.bin"
 content_lock = true
 '''
     )

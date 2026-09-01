@@ -180,15 +180,14 @@ class FinalComfyUIConfig(FinalConfigModel):
 class _FinalFileConfig(FinalConfigModel):
     """Fields shared by build file source variants."""
 
-    target_dir: str
-    filename: str
+    target: str
 
 
 class FinalHttpFileConfig(_FinalFileConfig):
     """A required HTTP(S) file download."""
 
     type: Literal["http"]
-    url: str
+    source: str
     checksum: str | None = None
     downloader: Literal["aria2", "httpx"] | None = None
     download_mode: Literal["sync", "async"] | None = None
@@ -205,7 +204,7 @@ class FinalLocalFileConfig(_FinalFileConfig):
     """A host-local file materialized into the build context."""
 
     type: Literal["local"]
-    path: str
+    source: str
     content_lock: bool = False
 
 

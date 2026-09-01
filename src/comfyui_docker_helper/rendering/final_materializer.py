@@ -9,6 +9,7 @@ import stat
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 import tomli_w
 
@@ -17,6 +18,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
     HookPlan,
     HttpFilePlan,
     LocalFilePlan,
+    LocalTreePlan,
     build_plan_hook_identities,
     dump_build_plan_json,
 )
@@ -27,8 +29,13 @@ from comfyui_docker_helper.config.validation.hooks import (
 from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
     FileCloneUnavailableError,
+    LocalTreeInventory,
+    LocalTreeMember,
+    TreeAdmissionError,
+    local_tree_mode,
     operate_regular_absolute_file,
     read_regular_absolute_file,
+    revalidate_local_tree,
 )
 from comfyui_docker_helper.release_artifacts import (
     WORKSPACE_PROFILE_CONTEXT_PATH,
@@ -40,10 +47,15 @@ from comfyui_docker_helper.rendering.final_renderer import (
 )
 
 _platform_name = os.name
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_CLONE_VERIFY_CHUNK_BYTES = 1024 * 1024
 
 
 class FinalMaterializationError(RuntimeError):
     """The BuildPlan context could not be materialized safely."""
+
+
+type LocalMaterializationKind = Literal["file", "tree"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +64,11 @@ class LocalMaterializationSource:
 
     relative_path: PurePosixPath
     source_path: Path
+    kind: LocalMaterializationKind
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"file", "tree"}:
+            raise ValueError("local materialization source kind is invalid")
 
 
 def _materialize_private_stage(
@@ -91,8 +108,17 @@ def _materialize_private_stage(
         for item in plan.files.files
         if isinstance(item, LocalFilePlan)
     }
-    expected_sources = {*expected_hooks, *local_files}
-    sources = {item.relative_path.as_posix(): item for item in local_sources}
+    local_trees = {
+        item.context_path: item
+        for item in plan.files.files
+        if isinstance(item, LocalTreePlan)
+    }
+    expected_sources = {(relative_path, "file") for relative_path in expected_hooks}
+    expected_sources.update((relative_path, "file") for relative_path in local_files)
+    expected_sources.update((relative_path, "tree") for relative_path in local_trees)
+    sources = {
+        (item.relative_path.as_posix(), item.kind): item for item in local_sources
+    }
     if len(sources) != len(local_sources) or set(sources) != expected_sources:
         raise FinalMaterializationError(
             "local materialization sources must exactly match plan inputs"
@@ -104,7 +130,7 @@ def _materialize_private_stage(
     )
     _write(stage, PurePosixPath("build-plan.json"), dump_build_plan_json(plan))
     for relative_path, hook in expected_hooks.items():
-        source = sources[relative_path].source_path
+        source = sources[(relative_path, "file")].source_path
         content = _verified_source(source, hook.digest)
         if relative_path in runtime_hooks:
             runtime_relative = PurePosixPath(
@@ -117,18 +143,31 @@ def _materialize_private_stage(
             )
             output = PurePosixPath("build/hooks") / build_relative
         _write(stage, output, content, executable=True)
-    for relative_path, item in local_files.items():
-        output = PurePosixPath(relative_path)
-        if check_placeholders:
-            _write(stage, output, b"")
-            continue
-        _materialize_local_file(
-            stage,
-            output,
-            sources[relative_path].source_path,
-            item,
-            mode=local_file_mode,
-        )
+    for item in plan.files.files:
+        if isinstance(item, LocalFilePlan):
+            relative_path = item.context_path
+            output = PurePosixPath(relative_path)
+            source = sources[(relative_path, "file")].source_path
+            if check_placeholders:
+                _write(stage, output, b"")
+            else:
+                _materialize_local_file(
+                    stage,
+                    output,
+                    source,
+                    item,
+                    mode=local_file_mode,
+                )
+        elif isinstance(item, LocalTreePlan):
+            relative_path = item.context_path
+            _materialize_local_tree(
+                stage,
+                PurePosixPath(relative_path),
+                sources[(relative_path, "tree")].source_path,
+                item,
+                mode=local_file_mode,
+                check_placeholders=check_placeholders,
+            )
     _write(
         stage,
         PurePosixPath("runtime/config.toml"),
@@ -227,9 +266,8 @@ def _runtime_config_bytes(plan: BuildPlan) -> bytes:
             ) from error
         runtime_item = {
             "type": "http",
-            "url": item.url,
-            "target_dir": relative.parent.as_posix(),
-            "filename": relative.name,
+            "source": item.url,
+            "target": relative.as_posix(),
         }
         if item.checksum is not None:
             runtime_item["checksum"] = item.checksum
@@ -275,11 +313,140 @@ def _materialize_local_file(
 ) -> None:
     if mode not in {"auto", "clone", "copy"}:
         raise FinalMaterializationError("local file materialization mode is invalid")
+    _materialize_regular_file(
+        stage,
+        relative_path,
+        source,
+        expected_digest=plan.digest,
+        mode=mode,
+    )
+
+
+def _materialize_local_tree(
+    stage: Path,
+    relative_path: PurePosixPath,
+    source: Path,
+    plan: LocalTreePlan,
+    *,
+    mode: str,
+    check_placeholders: bool,
+) -> None:
+    """Materialize one complete source tree below its deterministic context slot."""
+    if mode not in {"auto", "clone", "copy"}:
+        raise FinalMaterializationError("local file materialization mode is invalid")
+    if not check_placeholders:
+        try:
+            expected = _local_tree_inventory(plan)
+        except (TypeError, ValueError) as error:
+            raise FinalMaterializationError(
+                "local tree Plan inventory is invalid"
+            ) from error
+        try:
+            revalidate_local_tree(source, expected)
+        except TreeAdmissionError as error:
+            message = (
+                "local source tree changed before materialization"
+                if error.code == "membership_drift"
+                else "local source tree could not be enumerated"
+            )
+            raise FinalMaterializationError(message) from error
+        except (OSError, ValueError) as error:
+            raise FinalMaterializationError(
+                "local source tree could not be enumerated"
+            ) from error
+
+    _ensure_directory(stage, relative_path)
+    for member in plan.members:
+        member_path = PurePosixPath(member.relative_path)
+        if member.kind == "directory":
+            _ensure_directory(stage, relative_path / member_path)
+            continue
+        source_member = source.joinpath(*member_path.parts)
+        target_member = relative_path / member_path
+        if check_placeholders:
+            _write(stage, target_member, b"")
+        else:
+            _materialize_regular_file(
+                stage,
+                target_member,
+                source_member,
+                expected_digest=member.digest,
+                mode=mode,
+            )
+
+    if check_placeholders:
+        return
+
+    try:
+        revalidate_local_tree(source, expected)
+    except TreeAdmissionError as error:
+        message = (
+            "local source tree changed during materialization"
+            if error.code == "membership_drift"
+            else "local source tree could not be re-enumerated"
+        )
+        raise FinalMaterializationError(message) from error
+    except (OSError, ValueError) as error:
+        raise FinalMaterializationError(
+            "local source tree could not be re-enumerated"
+        ) from error
+
+
+def _local_tree_inventory(plan: LocalTreePlan) -> LocalTreeInventory:
+    """Convert the strict Plan inventory to the shared admission shape."""
+    return LocalTreeInventory(
+        tuple(
+            LocalTreeMember(
+                member.relative_path,
+                member.kind,
+                member.size,
+                member.digest,
+            )
+            for member in plan.members
+        ),
+    )
+
+
+def _ensure_directory(stage: Path, relative_path: PurePosixPath) -> None:
+    """Create one Plan-selected directory with deterministic POSIX mode."""
+    target = stage
+    directory_mode = int(local_tree_mode("directory"), 8)
+    for part in relative_path.parts:
+        target /= part
+        try:
+            target.mkdir(mode=directory_mode, exist_ok=True)
+            observed = target.lstat()
+        except OSError as error:
+            raise FinalMaterializationError(
+                "local tree directory could not be materialized"
+            ) from error
+        if _observed_path_is_reparse(observed) or not stat.S_ISDIR(observed.st_mode):
+            raise FinalMaterializationError(
+                "local tree directory must be a real directory"
+            )
+        if _platform_name == "posix":
+            try:
+                target.chmod(directory_mode)
+            except OSError as error:
+                raise FinalMaterializationError(
+                    "local tree directory mode could not be materialized"
+                ) from error
+
+
+def _materialize_regular_file(
+    stage: Path,
+    relative_path: PurePosixPath,
+    source: Path,
+    *,
+    expected_digest: str | None,
+    mode: str,
+) -> None:
+    """Copy one admitted regular file with the configured clone policy."""
     _write(stage, relative_path, b"")
     target = stage.joinpath(*relative_path.parts)
 
     def materialize(reader: AdmittedRegularFileReader) -> None:
-        digest = hashlib.sha256() if plan.digest is not None else None
+        digest = hashlib.sha256() if expected_digest is not None else None
         try:
             with target.open("r+b", buffering=0) as output:
                 cloned = False
@@ -301,7 +468,8 @@ def _materialize_local_file(
                             digest.update(chunk)
                         _write_all(output.fileno(), chunk)
                 elif digest is not None:
-                    while chunk := reader.read_chunk():
+                    output.seek(0)
+                    while chunk := output.read(_CLONE_VERIFY_CHUNK_BYTES):
                         digest.update(chunk)
                 if os.fstat(output.fileno()).st_size != reader.size:
                     raise FinalMaterializationError(
@@ -313,9 +481,9 @@ def _materialize_local_file(
             raise FinalMaterializationError(
                 "local file could not be materialized"
             ) from error
-        if digest is not None and f"sha256:{digest.hexdigest()}" != plan.digest:
+        if digest is not None and f"sha256:{digest.hexdigest()}" != expected_digest:
             raise FinalMaterializationError(
-                "local source digest does not match BuildPlan"
+                "materialized local file digest does not match BuildPlan"
             )
 
     try:
@@ -326,6 +494,13 @@ def _materialize_local_file(
         raise FinalMaterializationError(
             "local source must be a readable regular file without symlinks"
         ) from error
+
+
+def _observed_path_is_reparse(observed: os.stat_result) -> bool:
+    """Recognize links and Windows reparse points in one no-follow observation."""
+    return stat.S_ISLNK(observed.st_mode) or bool(
+        getattr(observed, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
 
 
 def _write_all(descriptor: int, content: bytes) -> None:

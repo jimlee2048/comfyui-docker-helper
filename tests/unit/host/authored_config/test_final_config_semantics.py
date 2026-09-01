@@ -37,9 +37,8 @@ def test_authenticated_download_requires_httpx_with_actionable_hint() -> None:
     document["files"] = [
         {
             "type": "http",
-            "url": "https://example.com/models/model.bin?download=true",
-            "target_dir": "models/checkpoints",
-            "filename": "model.bin",
+            "source": "https://example.com/models/model.bin?download=true",
+            "target": "models/checkpoints/model.bin",
         }
     ]
     config = validate_final_config_structure(document)
@@ -460,15 +459,13 @@ def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     document["files"] = [
         {
             "type": "http",
-            "url": "https://example.com/a",
-            "target_dir": "models/x",
-            "filename": "a.bin",
+            "source": "https://example.com/a",
+            "target": "models/x/a.bin",
         },
         {
             "type": "local",
-            "path": "model.bin",
-            "target_dir": "models//x/./",
-            "filename": "a.bin",
+            "source": "model.bin",
+            "target": "models//x/./a.bin",
         },
     ]
     config = validate_final_config_structure(document)
@@ -479,11 +476,39 @@ def test_duplicate_file_targets_are_detected_after_path_normalization() -> None:
     assert [
         (item.path, item.code, item.severity)
         for item in diagnostics
-        if item.code == "file.duplicate_target"
+        if item.code == "file.overlapping_target"
     ] == [
         (
-            ("files", 1, "filename"),
-            "file.duplicate_target",
+            ("files", 1, "target"),
+            "file.overlapping_target",
+            DiagnosticSeverity.ERROR,
+        )
+    ]
+
+
+def test_file_target_regions_reject_component_prefix_overlap() -> None:
+    document = _document()
+    document["files"] = [
+        {"type": "local", "source": "models", "target": "models"},
+        {
+            "type": "http",
+            "source": "https://example.com/a",
+            "target": "models/checkpoints/a.bin",
+        },
+    ]
+    config = validate_final_config_structure(document)
+
+    domains = validate_final_config_domains(config)
+    diagnostics = validate_final_config_semantics(config, domains)
+
+    assert [
+        (item.path, item.code, item.severity)
+        for item in diagnostics
+        if item.code == "file.overlapping_target"
+    ] == [
+        (
+            ("files", 1, "target"),
+            "file.overlapping_target",
             DiagnosticSeverity.ERROR,
         )
     ]

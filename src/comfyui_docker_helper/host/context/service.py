@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from comfyui_docker_helper.cli_output.events import EventSink
-from comfyui_docker_helper.config.authored.models import FinalLocalFileConfig
 from comfyui_docker_helper.config.authored.publication import (
     PublicationTagError,
     resolve_publication_tags,
@@ -25,6 +24,7 @@ from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     LocalFilePlan,
+    LocalTreePlan,
     RuntimePlanningProvenance,
     construct_build_plan,
 )
@@ -34,11 +34,10 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
-from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.local_tree import local_tree_digest
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestError,
-    FileRequest,
-    LocalFileRequest,
+    LocalSourceRequest,
     build_canonical_request_graph,
 )
 from comfyui_docker_helper.config.planning.resolver import (
@@ -51,8 +50,9 @@ from comfyui_docker_helper.config.planning.resolver import (
 )
 from comfyui_docker_helper.filesystem.admission import (
     AdmittedRegularFileReader,
+    LocalTreeInventory,
+    LocalTreeMember,
     consume_regular_absolute_file,
-    observe_regular_absolute_file,
     operate_regular_absolute_file,
 )
 from comfyui_docker_helper.host.buildx import BuildxOutput, BuildxOutputPlan
@@ -61,14 +61,15 @@ from comfyui_docker_helper.host.context.hook_paths import (
     observed_path_is_real_directory,
     observed_path_is_reparse,
 )
+from comfyui_docker_helper.host.context.local_inputs import (
+    LocalInputAdmissionError,
+    admit_local_inputs,
+)
 from comfyui_docker_helper.host.context.runtime_hooks import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
 )
 from comfyui_docker_helper.host.filesystem.private_state import create_private_directory
-from comfyui_docker_helper.host.planning.acquisition import (
-    LocalFileEntryAcquirer as FilesystemLocalFileEntryAcquirer,
-)
 from comfyui_docker_helper.host.planning.authority import (
     CachingCanonicalAcquirer,
     build_local_executable_requests,
@@ -213,9 +214,7 @@ def prepare_render_context(
             build_hooks_dir=build_hook_source_root,
             runtime_hook_requests=runtime_hooks.requests,
         )
-        local_file_sources, local_file_requests = _local_file_inputs(
-            result, graph.files, output
-        )
+        local_admission = admit_local_inputs(result, graph.files, output)
         _advance_phase(
             event_sink,
             completed=HostPhase.BUILD_INPUT_RESOLUTION,
@@ -228,8 +227,12 @@ def prepare_render_context(
                 graph.desired,
                 local_requests=local_requests,
                 local_acquirer=local_acquirer,
-                local_file_requests=local_file_requests,
-                local_file_acquirer=FilesystemLocalFileEntryAcquirer(),
+                local_inputs=local_admission.planning_inputs,
+                local_targets=tuple(
+                    item.relative_target
+                    for item in graph.files
+                    if isinstance(item, LocalSourceRequest)
+                ),
                 existing=existing,
                 acquirer=acquirer,
                 policy=selected.policy,
@@ -243,6 +246,7 @@ def prepare_render_context(
         plan = construct_build_plan(
             graph,
             accepted.lock,
+            local_inputs=local_admission.planning_inputs,
             runtime_provenance=_runtime_provenance(result),
         )
         output_plan = _resolve_buildx_output_plan(
@@ -253,17 +257,21 @@ def prepare_render_context(
         sources = (
             tuple(
                 LocalMaterializationSource(
-                    request.canonical_path, request.root / request.relative_path
+                    request.canonical_path,
+                    request.root / request.relative_path,
+                    kind="file",
                 )
                 for request in local_requests
             )
-            + local_file_sources
+            + local_admission.materialization_sources
         )
     except RuntimeHookInputError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except CanonicalResolutionError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except CanonicalRequestError as error:
+        raise HostRenderServiceError(error.diagnostics) from error
+    except LocalInputAdmissionError as error:
         raise HostRenderServiceError(error.diagnostics) from error
     except PublicationTagError as error:
         raise HostRenderServiceError(
@@ -303,7 +311,7 @@ def prepare_render_context(
         plan=plan,
         lock_result=accepted,
         output_plan=output_plan,
-        warnings=runtime_hooks.warnings,
+        warnings=(*runtime_hooks.warnings, *local_admission.warnings),
     )
 
 
@@ -333,48 +341,6 @@ def _observed_subphase(
     _emit(event_sink, HostSubphaseStarted(subphase))
     yield
     _emit(event_sink, HostSubphaseCompleted(subphase))
-
-
-def _local_file_inputs(
-    result: ConfigurationResult,
-    graph_files: tuple[FileRequest, ...],
-    output: Path,
-) -> tuple[
-    tuple[LocalMaterializationSource, ...],
-    tuple[LocalFileIdentityRequest, ...],
-]:
-    sources: list[LocalMaterializationSource] = []
-    requests: list[LocalFileIdentityRequest] = []
-    for item, normalized, request in zip(
-        result.config.files, result.domains.files, graph_files, strict=True
-    ):
-        if not isinstance(item, FinalLocalFileConfig):
-            continue
-        if not isinstance(request, LocalFileRequest):
-            raise AssertionError("local file request projection is inconsistent")
-        locator = Path(item.path)
-        source = locator if locator.is_absolute() else result.secret_file_base / locator
-        source = Path(os.path.abspath(source))
-        _validate_input_output_separation(output, source, "local file")
-        if not item.content_lock:
-            try:
-                observe_regular_absolute_file(source)
-            except (OSError, ValueError) as error:
-                raise _render_error(
-                    "render.local_file_source_unavailable",
-                    "local file source must be a readable regular file without links",
-                ) from error
-        sources.append(
-            LocalMaterializationSource(PurePosixPath(request.context_path), source)
-        )
-        if item.content_lock:
-            requests.append(
-                LocalFileIdentityRequest(
-                    source_path=source,
-                    relative_target=PurePosixPath(normalized.relative_target),
-                )
-            )
-    return tuple(sources), tuple(requests)
 
 
 def _resolve_buildx_output_plan(
@@ -542,11 +508,7 @@ def _check_context(
                 _MARKER_FILE,
                 (json.dumps(_MARKER, sort_keys=True) + "\n").encode("utf-8"),
             )
-            local_paths = {
-                item.context_path
-                for item in plan.files.files
-                if isinstance(item, LocalFilePlan)
-            }
+            local_paths = _local_context_file_paths(plan)
             if _tree(expected, content_excluded=local_paths) != _tree(
                 output, content_excluded=local_paths
             ):
@@ -588,29 +550,103 @@ def _check_local_context_files(
     *,
     check_unlocked_sources: bool,
 ) -> None:
-    by_identity = {item.relative_path.as_posix(): item for item in sources}
+    by_identity = {(item.relative_path.as_posix(), item.kind): item for item in sources}
     for item in plan.files.files:
-        if not isinstance(item, LocalFilePlan):
+        if isinstance(item, LocalFilePlan):
+            source = by_identity[(item.context_path, "file")].source_path
+            context_file = Path(os.path.abspath(output / item.context_path))
+            try:
+                if item.digest is not None:
+                    digest = hashlib.sha256()
+                    consume_regular_absolute_file(context_file, digest.update)
+                    matches = f"sha256:{digest.hexdigest()}" == item.digest
+                elif check_unlocked_sources:
+                    matches = _regular_files_equal(source, context_file)
+                else:
+                    matches = True
+            except (OSError, ValueError) as error:
+                raise FinalMaterializationError(
+                    "local context file could not be checked"
+                ) from error
+        elif isinstance(item, LocalTreePlan):
+            source = by_identity[(item.context_path, "tree")].source_path
+            context_root = Path(os.path.abspath(output / item.context_path))
+            try:
+                if item.tree_digest is not None:
+                    matches = _local_tree_context_matches_digest(item, context_root)
+                elif check_unlocked_sources:
+                    matches = _local_tree_sources_equal(item, source, context_root)
+                else:
+                    matches = True
+            except (OSError, ValueError) as error:
+                raise FinalMaterializationError(
+                    "local context tree could not be checked"
+                ) from error
+        else:  # pragma: no cover - closed BuildPlan union
             continue
-        source = by_identity[item.context_path].source_path
-        context_file = Path(os.path.abspath(output / item.context_path))
-        try:
-            if item.digest is not None:
-                digest = hashlib.sha256()
-                consume_regular_absolute_file(context_file, digest.update)
-                matches = f"sha256:{digest.hexdigest()}" == item.digest
-            elif check_unlocked_sources:
-                matches = _regular_files_equal(source, context_file)
-            else:
-                matches = True
-        except (OSError, ValueError) as error:
-            raise FinalMaterializationError(
-                "local context file could not be checked"
-            ) from error
         if not matches:
             raise _render_error(
                 "render.context_changed", "rendered context is out of date"
             )
+
+
+def _local_context_file_paths(plan: BuildPlan) -> set[str]:
+    """Return local context files whose content is checked separately."""
+    paths: set[str] = set()
+    for item in plan.files.files:
+        if isinstance(item, LocalFilePlan):
+            paths.add(item.context_path)
+        elif isinstance(item, LocalTreePlan):
+            context_root = PurePosixPath(item.context_path)
+            paths.update(
+                (context_root / member.relative_path).as_posix()
+                for member in item.members
+                if member.kind == "file"
+            )
+    return paths
+
+
+def _local_tree_sources_equal(
+    plan: LocalTreePlan,
+    source: Path,
+    context_root: Path,
+) -> bool:
+    """Stream every unlocked source/context file without making a second copy."""
+    for member in plan.members:
+        if member.kind != "file":
+            continue
+        relative = PurePosixPath(member.relative_path)
+        if not _regular_files_equal(
+            source.joinpath(*relative.parts), context_root.joinpath(*relative.parts)
+        ):
+            return False
+    return True
+
+
+def _local_tree_context_matches_digest(
+    plan: LocalTreePlan,
+    context_root: Path,
+) -> bool:
+    """Stream locked context members and compare one aggregate tree identity."""
+    members: list[LocalTreeMember] = []
+    for member in plan.members:
+        if member.kind == "directory":
+            members.append(LocalTreeMember(member.relative_path, "directory"))
+            continue
+        relative = PurePosixPath(member.relative_path)
+        context_file = context_root.joinpath(*relative.parts)
+        digest = hashlib.sha256()
+        observed = consume_regular_absolute_file(context_file, digest.update)
+        members.append(
+            LocalTreeMember(
+                member.relative_path,
+                "file",
+                size=observed.size,
+                digest=f"sha256:{digest.hexdigest()}",
+            )
+        )
+    observed_inventory = LocalTreeInventory(tuple(members))
+    return local_tree_digest(observed_inventory) == plan.tree_digest
 
 
 def _regular_files_equal(source: Path, context_file: Path) -> bool:

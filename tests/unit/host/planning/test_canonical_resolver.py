@@ -18,7 +18,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     CudaImageLockEntry,
     DirectPythonRequestIdentity,
     DirectPythonRequestMember,
-    LocalFileLockEntry,
+    LocalTreeLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
     OciRequestIdentity,
@@ -33,7 +33,14 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
 from comfyui_docker_helper.config.planning.inputs.executable import (
     LocalExecutableIdentityRequest,
 )
-from comfyui_docker_helper.config.planning.inputs.file import LocalFileIdentityRequest
+from comfyui_docker_helper.config.planning.inputs.local import (
+    LocalFilePlanningInput,
+    LocalTreePlanningInput,
+)
+from comfyui_docker_helper.config.planning.local_tree import (
+    LocalTreeInventory,
+    local_tree_digest,
+)
 from comfyui_docker_helper.config.planning.request import DesiredResolution
 from comfyui_docker_helper.config.planning.resolver import (
     AcquiredCanonicalEntries,
@@ -45,6 +52,7 @@ from comfyui_docker_helper.config.planning.resolver import (
     reconcile_canonical_lock,
 )
 from comfyui_docker_helper.exact_ledger import COMFYUI_FLOOR_COMMIT
+from comfyui_docker_helper.filesystem.admission import LocalTreeMember
 
 DIGEST_A = f"sha256:{'a' * 64}"
 DIGEST_B = f"sha256:{'b' * 64}"
@@ -219,19 +227,6 @@ class FakeLocalAcquirer:
     def acquire(self, request):
         return BuildHookLockEntry(
             relative_path=PurePosixPath(*request.canonical_path.parts[1:]).as_posix(),
-            digest=self.digest,
-        )
-
-
-@dataclass
-class FakeLocalFileAcquirer:
-    digest: str = DIGEST_A
-    calls: list[LocalFileIdentityRequest] = field(default_factory=list)
-
-    def acquire(self, request: LocalFileIdentityRequest) -> LocalFileLockEntry:
-        self.calls.append(request)
-        return LocalFileLockEntry(
-            relative_target=request.relative_target.as_posix(),
             digest=self.digest,
         )
 
@@ -430,14 +425,20 @@ def test_locked_hook_drift_fails_without_external_provider_calls() -> None:
 
 
 def test_locked_local_file_drift_fails_before_provider_work() -> None:
-    request = LocalFileIdentityRequest(
-        Path("/tmp/model.bin"), PurePosixPath("models/model.bin")
+    target = PurePosixPath("models/model.bin")
+    context_path = PurePosixPath(
+        "build/files/" + hashlib.sha256(target.as_posix().encode()).hexdigest()
     )
-    initial = FakeLocalFileAcquirer()
+    initial = LocalFilePlanningInput(
+        relative_target=target,
+        context_path=context_path,
+        content_lock=True,
+        digest=DIGEST_A,
+    )
     existing = reconcile_canonical_lock(
         _desired(),
-        local_file_requests=(request,),
-        local_file_acquirer=initial,
+        local_inputs=(initial,),
+        local_targets=(target.as_posix(),),
         existing=None,
         acquirer=FakeAcquirer(),
     ).lock
@@ -446,8 +447,15 @@ def test_locked_local_file_drift_fails_before_provider_work() -> None:
     with pytest.raises(CanonicalResolutionError) as raised:
         reconcile_canonical_lock(
             _desired(),
-            local_file_requests=(request,),
-            local_file_acquirer=FakeLocalFileAcquirer(DIGEST_B),
+            local_inputs=(
+                LocalFilePlanningInput(
+                    relative_target=target,
+                    context_path=context_path,
+                    content_lock=True,
+                    digest=DIGEST_B,
+                ),
+            ),
+            local_targets=(target.as_posix(),),
             existing=existing,
             acquirer=provider,
             policy=LockPolicy.LOCKED,
@@ -460,6 +468,44 @@ def test_locked_local_file_drift_fails_before_provider_work() -> None:
         "local",
         "models/model.bin",
     )
+
+
+def test_admitted_locked_tree_becomes_one_aggregate_lock_row() -> None:
+    target = PurePosixPath("user/default/workflows")
+    context_path = PurePosixPath(
+        "build/trees/" + hashlib.sha256(target.as_posix().encode()).hexdigest()
+    )
+    inventory = LocalTreeInventory(
+        (
+            LocalTreeMember("nested", "directory"),
+            LocalTreeMember("nested/file.txt", "file", 4, DIGEST_A),
+        )
+    )
+    tree_digest = local_tree_digest(inventory)
+    admitted = LocalTreePlanningInput(
+        relative_target=target,
+        context_path=context_path,
+        content_lock=True,
+        inventory=inventory,
+        tree_digest=tree_digest,
+    )
+
+    accepted = reconcile_canonical_lock(
+        _desired(),
+        local_inputs=(admitted,),
+        local_targets=(target.as_posix(),),
+        existing=None,
+        acquirer=FakeAcquirer(),
+    )
+
+    assert accepted.lock.files.local == (
+        LocalTreeLockEntry(
+            kind="tree",
+            relative_target=target.as_posix(),
+            tree_digest=tree_digest,
+        ),
+    )
+    assert accepted.local_reads == (("files", "local", target.as_posix()),)
 
 
 @pytest.mark.parametrize("purpose", [ReconcilePurpose.CHECK, ReconcilePurpose.DRY_RUN])

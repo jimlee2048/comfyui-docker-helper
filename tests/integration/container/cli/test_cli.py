@@ -129,6 +129,8 @@ def _emit_comfyui_success(event_sink) -> None:
         (["install-comfyui"], "Usage: cdh container install-comfyui"),
         (["install-custom-nodes"], "Usage: cdh container install-custom-nodes"),
         (["emit-final-manifest"], "Usage: cdh container emit-final-manifest"),
+        (["normalize-local-trees"], "Usage: cdh container normalize-local-trees"),
+        (["validate-local-trees"], "Usage: cdh container validate-local-trees"),
         (["runtime"], "Usage: cdh container runtime"),
         (["runtime", "serve"], "Usage: cdh container runtime serve"),
         (["runtime", "restart"], "Usage: cdh container runtime restart"),
@@ -186,6 +188,8 @@ def test_registry_helper_help_exposes_only_owned_inputs(
         "install-comfyui",
         "install-custom-nodes",
         "emit-final-manifest",
+        "normalize-local-trees",
+        "validate-local-trees",
     ],
 )
 def test_container_commands_admit_one_canonical_plan_per_invocation(
@@ -239,6 +243,16 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
         container_cli,
         "emit_final_manifest",
         lambda projection, **_kwargs: observed.append((projection,)),
+    )
+    monkeypatch.setattr(
+        container_cli,
+        "normalize_local_trees",
+        lambda trees, root: observed.append((trees, root)),
+    )
+    monkeypatch.setattr(
+        container_cli,
+        "validate_local_trees",
+        lambda trees, root: observed.append((trees, root)),
     )
     monkeypatch.setenv("WORKSPACE", plan.application.paths.workspace)
     monkeypatch.setenv("COMFYUI_PATH", plan.application.paths.comfyui)
@@ -297,8 +311,48 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
                     ),
                 )
             ],
+            "normalize-local-trees": [
+                ((), plan.application.paths.comfyui),
+            ],
+            "validate-local-trees": [
+                ((), plan.application.paths.comfyui),
+            ],
         }[command]
     )
+
+
+@pytest.mark.parametrize(
+    ("command", "operation"),
+    [
+        ("normalize-local-trees", "normalize_local_trees"),
+        ("validate-local-trees", "validate_local_trees"),
+    ],
+)
+def test_local_tree_cli_reports_placement_error(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    operation: str,
+) -> None:
+    plan = _materialized_download_plan(tmp_path, monkeypatch)
+
+    def fail_normalization(_trees, _root) -> None:
+        raise container_cli.LocalTreeNormalizationError("selected conflict")
+
+    monkeypatch.setattr(container_cli, operation, fail_normalization)
+    result = cli_runner.invoke(
+        app,
+        [
+            "container",
+            command,
+            "--build-plan-digest",
+            build_plan_digest(plan),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "selected conflict" in result.output
 
 
 def test_install_comfyui_constructs_display_after_admission_and_runtime(

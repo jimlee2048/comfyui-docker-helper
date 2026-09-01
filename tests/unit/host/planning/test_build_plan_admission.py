@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import PurePosixPath
 
 import pytest
 from pydantic import ValidationError
@@ -103,6 +105,171 @@ def test_build_plan_parser_accepts_reused_build_hook_and_separate_tree_path() ->
 
     assert parsed.custom_nodes.nodes[0].pre_install_hooks[0].digest == DIGEST_A
     assert parsed.runtime.hooks[0].relative_path == "pre-start.d/shared.py"
+
+
+def test_build_plan_rejects_file_target_ancestor_overlap_across_file_kinds() -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    root = "/workspace/ComfyUI"
+    local_relative_target = "models/checkpoints/local.bin"
+    tree_relative_target = "models/checkpoints"
+    http = dict(document["files"]["files"][0])
+    http["target"] = f"{root}/models/checkpoints/remote.bin"
+    local = {
+        "type": "local",
+        "kind": "file",
+        "target": f"{root}/{local_relative_target}",
+        "context_path": (
+            "build/files/"
+            + hashlib.sha256(local_relative_target.encode("utf-8")).hexdigest()
+        ),
+        "verification": "unverified-local",
+        "digest": None,
+    }
+    tree = {
+        "type": "local",
+        "kind": "tree",
+        "target": f"{root}/{tree_relative_target}",
+        "context_path": (
+            "build/trees/"
+            + hashlib.sha256(tree_relative_target.encode("utf-8")).hexdigest()
+        ),
+        "verification": "unverified-local",
+        "members": (),
+        "tree_digest": None,
+    }
+    document["files"]["files"] = (http, local, tree)
+
+    with pytest.raises(ValidationError, match="file targets must not overlap"):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    ("kind", "relative_target"),
+    [("file", "models/é.bin"), ("tree", "."), ("tree", "user/default/workflows")],
+    ids=["file-unicode", "tree-root", "tree-nested"],
+)
+def test_local_plan_binds_context_to_target_and_round_trips_null_identity(
+    kind: str, relative_target: str
+) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(mode="json")
+    root = PurePosixPath(document["application"]["paths"]["comfyui"])
+    prefix = "trees" if kind == "tree" else "files"
+    item = {
+        "type": "local",
+        "kind": kind,
+        "target": (root / relative_target).as_posix(),
+        "context_path": (
+            f"build/{prefix}/"
+            + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+        ),
+        "verification": "unverified-local",
+        **(
+            {"members": [], "tree_digest": None} if kind == "tree" else {"digest": None}
+        ),
+    }
+    document["files"]["files"] = [item]
+
+    parsed = parse_build_plan_json(json.dumps(document))
+
+    assert json.loads(dump_build_plan_json(parsed))["files"]["files"] == [item]
+    item["context_path"] = f"build/{prefix}/" + "b" * 64
+    with pytest.raises(ValidationError, match="context path does not match target"):
+        parse_build_plan_json(json.dumps(document))
+
+
+@pytest.mark.parametrize(
+    ("kind", "target", "message"),
+    [
+        ("file", "/workspace/ComfyUI", "strict descendants"),
+        ("tree", "/workspace/outside", "strict descendants"),
+        ("file", "/workspace/ComfyUI/models\\file.bin", "canonical POSIX"),
+        ("tree", "/workspace/ComfyUI/\ud800", "strict UTF-8"),
+    ],
+    ids=["file-at-root", "tree-outside", "backslash", "surrogate"],
+)
+def test_local_plan_rejects_unsafe_target_before_deriving_context(
+    kind: str, target: str, message: str
+) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    prefix = "trees" if kind == "tree" else "files"
+    document["files"]["files"] = (
+        {
+            "type": "local",
+            "kind": kind,
+            "target": target,
+            "context_path": f"build/{prefix}/" + "a" * 64,
+            "verification": "unverified-local",
+            **(
+                {"members": (), "tree_digest": None}
+                if kind == "tree"
+                else {"digest": None}
+            ),
+        },
+    )
+
+    with pytest.raises(ValidationError, match=message):
+        BuildPlan.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("missing-parent", id="missing-parent"),
+        pytest.param("unverified-content", id="unverified-content"),
+        pytest.param("digest-mismatch", id="digest-mismatch"),
+    ],
+)
+def test_build_plan_parser_rejects_invalid_tree_plan(case: str) -> None:
+    document = build_plan(final_config(), accepted_resolution()).model_dump(
+        mode="python"
+    )
+    relative_target = "user/default/workflows"
+    members = [
+        {
+            "relative_path": "nested",
+            "kind": "directory",
+            "size": None,
+            "digest": None,
+        },
+        {
+            "relative_path": "nested/file.txt",
+            "kind": "file",
+            "size": None,
+            "digest": None,
+        },
+    ]
+    tree = {
+        "type": "local",
+        "kind": "tree",
+        "target": f"/workspace/ComfyUI/{relative_target}",
+        "context_path": (
+            "build/trees/" + hashlib.sha256(relative_target.encode("utf-8")).hexdigest()
+        ),
+        "verification": "unverified-local",
+        "members": members,
+        "tree_digest": None,
+    }
+    if case == "missing-parent":
+        members.pop(0)
+        message = "local tree member parents must be admitted directories"
+    elif case == "unverified-content":
+        members[1]["size"] = 3
+        members[1]["digest"] = DIGEST_A
+        message = "unverified local tree must omit member and tree digests"
+    else:
+        tree["verification"] = "sha256"
+        tree["tree_digest"] = DIGEST_B
+        members[1]["size"] = 3
+        members[1]["digest"] = DIGEST_A
+        message = "local tree digest does not match its inventory"
+    document["files"]["files"] = (tree,)
+
+    with pytest.raises(ValidationError, match=message):
+        parse_build_plan_json(json.dumps(document))
 
 
 @pytest.mark.parametrize(
@@ -260,7 +427,7 @@ def test_build_plan_admission_rejects_reserved_staging_final_leaf() -> None:
     document = plan.model_dump(mode="python")
     document["files"]["files"][0]["target"] = "/workspace/ComfyUI/models/.cdh-staging"
 
-    with pytest.raises(ValidationError, match="reserved staging filename"):
+    with pytest.raises(ValidationError, match="reserved for HTTP download staging"):
         BuildPlan.model_validate(document)
 
 

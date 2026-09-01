@@ -1318,9 +1318,8 @@ password = "secret"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models/checkpoints"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/checkpoints/model.bin"
 """,
             encoding="utf-8",
         )

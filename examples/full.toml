@@ -109,7 +109,8 @@ extra_packages = []
 # extra_packages = ["sageattention @ https://github.com/jimlee2048/SageAttention/releases/download/v2.2.0/sageattention-2.2.0+cu130torch2.13-cp39-abi3-linux_x86_64.whl"]
 
 [cdh]
-# Host-only local-file context materialization. Default: "auto". Supported:
+# Host-only materialization for local files and regular members of local trees.
+# Default: "auto". Supported:
 # "auto" (try copy-on-write clone, then copy only when unavailable), "clone"
 # (require clone support), and "copy" (always stream-copy).
 local_file_mode = "auto"
@@ -308,13 +309,11 @@ post_install_hooks = ["post.sh"]
 # Required source variant. Supported by build and runtime.
 type = "http"
 # Required. Must be an HTTP(S) URL with a host.
-url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
-# Required. Relative to COMFYUI_PATH. Redundant "/", "." segments, and a
-# trailing slash are normalized. Use "." or "./" for the ComfyUI root.
-# Absolute paths, empty values, control characters, and ".." are rejected.
-target_dir = "models/example-docs"
-# Required. Must be a single filename component.
-filename = "comfyui-readme-aria2.md"
+source = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
+# Required. Relative to COMFYUI_PATH. Redundant "/" and "." segments normalize
+# to one identity; absolute paths, empty values, controls, "..", backslashes,
+# and trailing-slash spellings are rejected.
+target = "models/example-docs/comfyui-readme-aria2.md"
 # Optional. Trusted SHA-256 obtained independently from the download origin.
 # Hex case is normalized to lowercase; cdh never fetches or infers this value.
 # checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -325,20 +324,28 @@ download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
-target_dir = "models/example-docs"
-filename = "comfyui-readme-httpx.md"
+source = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
+target = "models/example-docs/comfyui-readme-httpx.md"
 downloader = "httpx"
 download_mode = "sync"
 
 [[files]]
 # Build-only host-local source. Relative paths use the real parent of the first
-# -f file as their base; absolute paths are also accepted. The source must be
-# one regular file without symlink or reparse-point components.
+# -f file as their base; absolute paths are also accepted. A local source may
+# be one regular file or one complete real directory tree.
 type = "local"
-path = "local-files/example-model.txt"
-target_dir = "models/example-docs"
-filename = "local-example-model.txt"
+source = "local-files/example-model.txt"
+target = "models/example-docs/local-example-model.txt"
 # Default: false. true streams SHA-256 into the canonical lock and verifies the
 # same identity again during context materialization; false avoids that hash.
+content_lock = false
+
+[[files]]
+# A local directory copies its contents below this exact destination root; the
+# source directory name is not added. All real descendants, including hidden
+# and empty directories, are selected. Mapped names cannot be .cdh-staging
+# or start with .wh.; see the configuration guide. This is build-only.
+type = "local"
+source = "local-files"
+target = "user/default/workflows"
 content_lock = false

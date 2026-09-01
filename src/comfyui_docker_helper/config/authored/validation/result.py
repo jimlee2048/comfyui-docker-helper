@@ -27,9 +27,8 @@ class LocatedValue:
 
 @dataclass(frozen=True, slots=True)
 class NormalizedFile:
-    """Canonical target information for one admitted runtime file."""
+    """Canonical target information for one admitted file."""
 
-    directory: PurePosixPath
     relative_target: str
 
 

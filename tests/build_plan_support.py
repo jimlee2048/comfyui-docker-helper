@@ -44,6 +44,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     canonical_lock_from_entries,
     compute_request_digest,
 )
+from comfyui_docker_helper.config.planning.inputs.local import LocalPlanningInput
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestGraph,
     build_canonical_request_graph,
@@ -159,9 +160,8 @@ def final_config(
             "files": [
                 {
                     "type": "http",
-                    "url": "https://example.test/model.safetensors",
-                    "target_dir": "models/checkpoints",
-                    "filename": "model.safetensors",
+                    "source": "https://example.test/model.safetensors",
+                    "target": "models/checkpoints/model.safetensors",
                 }
             ],
         }
@@ -401,6 +401,8 @@ def request_graph(
 def build_plan(
     config: FinalConfig,
     resolution: AcceptedCanonicalLock,
+    *,
+    local_inputs: tuple[LocalPlanningInput, ...] = (),
     **kwargs,
 ) -> BuildPlan:
     provenance = kwargs.pop(
@@ -416,6 +418,7 @@ def build_plan(
     return construct_build_plan(
         request_graph(config, resolution),
         resolution.lock,
+        local_inputs=local_inputs,
         runtime_provenance=provenance,
         **kwargs,
     )

@@ -55,8 +55,7 @@ def runtime_file(
     item = {
         "type": "http",
         "url": f"https://example.test/{name}",
-        "target_dir": "models",
-        "filename": name,
+        "target": f"models/{name}",
         "overwrite": overwrite,
     }
     if downloader is not None:
@@ -84,13 +83,13 @@ def runtime_entry(
     *,
     target: str = "models/a.bin",
     status: str = "completed",
-    source: str = "https://example.test/a.bin",
+    url: str = "https://example.test/a.bin",
     checksum: str | None = None,
     overwrite: bool = False,
     downloader: str = "httpx",
 ) -> RuntimeDownloadEntry:
     return RuntimeDownloadEntry(
-        source=source,
+        url=url,
         target=target,
         checksum=checksum,
         overwrite=overwrite,
@@ -107,7 +106,7 @@ def runtime_entry_for_item(
     downloader: str = "httpx",
 ) -> RuntimeDownloadEntry:
     return runtime_entry(
-        source=item.url,
+        url=item.url,
         target=item.relative_target,
         checksum=item.checksum,
         overwrite=item.overwrite,

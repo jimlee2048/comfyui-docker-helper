@@ -1,8 +1,5 @@
 """Shared URL and download-target validation helpers."""
 
-import posixpath
-from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -12,32 +9,7 @@ type DownloaderName = Literal["aria2", "httpx"]
 
 DOWNLOADERS: frozenset[DownloaderName] = frozenset({"aria2", "httpx"})
 TRANSFER_STAGING_DIRECTORY_NAME = ".cdh-staging"
-
-
-@dataclass(frozen=True, slots=True)
-class RelativeDirectoryValidationResult:
-    """Normalized relative directory or a stable validation failure code."""
-
-    path: PurePosixPath | None
-    code: (
-        Literal[
-            "absolute_directory",
-            "parent_directory_segment",
-            "empty_directory",
-            "control_character",
-        ]
-        | None
-    ) = None
-    message: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class FilenameValidationResult:
-    """Validated filename or a stable validation failure code."""
-
-    filename: str | None
-    code: Literal["invalid_filename"] | None = None
-    message: str | None = None
+WHITEOUT_FILE_TARGET_PREFIX = ".wh."
 
 
 def is_http_url(url: str) -> bool:
@@ -73,61 +45,21 @@ def require_downloader_name(value: str) -> DownloaderName:
     return downloader
 
 
-def validate_relative_file_directory(value: str) -> RelativeDirectoryValidationResult:
-    """Validate and normalize a runtime-compatible relative file directory."""
-    if has_control_characters(value):
-        return RelativeDirectoryValidationResult(
-            None,
-            "control_character",
-            "must not contain control characters",
-        )
-    if value.startswith("/"):
-        return RelativeDirectoryValidationResult(
-            None,
-            "absolute_directory",
-            "must be relative",
-        )
-    parts = value.split("/")
-    if not value:
-        return RelativeDirectoryValidationResult(
-            None,
-            "empty_directory",
-            "must not be empty",
-        )
-    if any(part == ".." for part in parts):
-        return RelativeDirectoryValidationResult(
-            None,
-            "parent_directory_segment",
-            "must not contain '..'",
-        )
-
-    normalized = PurePosixPath(posixpath.normpath(value))
-    return RelativeDirectoryValidationResult(normalized, None)
+def is_reserved_file_target_component(value: str) -> bool:
+    """Return whether one target component is reserved by cdh or its image format."""
+    return value == TRANSFER_STAGING_DIRECTORY_NAME or value.startswith(
+        WHITEOUT_FILE_TARGET_PREFIX
+    )
 
 
-def validate_file_name(value: str) -> FilenameValidationResult:
-    """Validate one nonempty POSIX filename component."""
-    if (
-        not value
-        or value in {".", ".."}
-        or "/" in value
-        or "\\" in value
-        or has_control_characters(value)
-    ):
-        return FilenameValidationResult(
-            None,
-            "invalid_filename",
-            "must be one nonempty filename component",
+def reserved_file_target_component_message(value: str) -> str:
+    """Return concise corrective guidance for one reserved target component."""
+    if value == TRANSFER_STAGING_DIRECTORY_NAME:
+        return (
+            f"contains {value!r}, which is reserved for HTTP download staging; "
+            "rename or remove that path component"
         )
-    if is_reserved_file_target_name(value):
-        return FilenameValidationResult(
-            None,
-            "invalid_filename",
-            f"must not use reserved filename {TRANSFER_STAGING_DIRECTORY_NAME}",
-        )
-    return FilenameValidationResult(value)
-
-
-def is_reserved_file_target_name(value: str) -> bool:
-    """Return whether one final leaf conflicts with transfer staging authority."""
-    return value == TRANSFER_STAGING_DIRECTORY_NAME
+    return (
+        f"contains {value!r}, which is reserved by the container image format "
+        "for whiteout markers; rename or remove that path component"
+    )

@@ -154,7 +154,7 @@ def _runtime_download_entry_for_reconciliation(
     resume_authority: ResumeAuthority | None,
 ) -> RuntimeDownloadEntry:
     return RuntimeDownloadEntry(
-        source=item.url,
+        url=item.url,
         target=item.relative_target,
         checksum=item.checksum,
         overwrite=item.overwrite,
@@ -177,7 +177,7 @@ def _validate_runtime_state_entries(
     namespace_owners: dict[str, str] = {}
     for digest, entry in state.downloads.items():
         expected = runtime_download_desired_identity_digest(
-            source=entry.source,
+            url=entry.url,
             target=entry.target,
             checksum=entry.checksum,
             overwrite=entry.overwrite,
@@ -222,7 +222,7 @@ def validate_runtime_file_state_plan(
             ) from error
         expected_resume = _entry_resume_authority(root, entry)
         if (
-            entry.source != admitted.url
+            entry.url != admitted.url
             or entry.target != admitted.relative_target
             or entry.checksum != admitted.checksum
             or entry.overwrite != admitted.overwrite
@@ -259,7 +259,7 @@ def _reconcile_stale_runtime_entry(
     if authority is not None:
         request = FileTransferRequest(
             root=root,
-            url=entry.source,
+            url=entry.url,
             target=target,
             overwrite=entry.overwrite,
             expected_checksum=entry.checksum,
@@ -363,7 +363,7 @@ def _entry_transfer_identity(
     target = root.joinpath(*PurePosixPath(entry.target).parts)
     return project_transfer_identity(
         root=root,
-        url=entry.source,
+        url=entry.url,
         target=target,
         expected_checksum=entry.checksum,
     )

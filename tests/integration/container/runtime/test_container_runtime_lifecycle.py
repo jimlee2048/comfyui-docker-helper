@@ -490,9 +490,8 @@ def _runtime_config(root: Path, *, include_file: bool = False) -> Path:
         """
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models/checkpoints"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/checkpoints/model.bin"
 """
         if include_file
         else ""
@@ -1509,9 +1508,8 @@ default_download_mode = "sync"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models/checkpoints"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/checkpoints/model.bin"
 """,
     )
     events: list[str] = []
@@ -1586,9 +1584,8 @@ default_download_mode = "async"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models/checkpoints"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/checkpoints/model.bin"
 """,
     )
     hooks = tmp_path / "hooks"
@@ -1778,9 +1775,8 @@ default_download_mode = "async"
 
 [[files]]
 type = "http"
-url = "https://example.com/model.bin"
-target_dir = "models/checkpoints"
-filename = "model.bin"
+source = "https://example.com/model.bin"
+target = "models/checkpoints/model.bin"
 """,
     )
     events: list[str] = []

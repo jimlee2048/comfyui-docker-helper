@@ -50,13 +50,28 @@ def test_runtime_plan_projects_order_targets_modes_and_checksum(tmp_path: Path) 
 def test_runtime_plan_supports_a_file_in_the_comfyui_root(tmp_path: Path) -> None:
     root = tmp_path / "ComfyUI"
     item = _file("root.bin")
-    item["target_dir"] = "./"
+    item["target"] = "root.bin"
 
     planned = _plan(root, item).items[0]
 
     assert planned.directory == "."
     assert planned.relative_target == "root.bin"
     assert planned.target == root / "root.bin"
+
+
+def test_runtime_plan_rejects_reserved_effective_comfyui_root(tmp_path: Path) -> None:
+    root = tmp_path / ".wh.ComfyUI"
+
+    with pytest.raises(RuntimeFilePlanError) as captured:
+        _plan(root, _file("model.bin"))
+
+    assert _identities(captured.value) == [
+        (("files", 0, "target"), "runtime_file.reserved_target_component")
+    ]
+    diagnostic = captured.value.diagnostics[0]
+    assert ".wh.ComfyUI" in diagnostic.message
+    assert "image format" in diagnostic.message
+    assert "rename" in diagnostic.message
 
 
 def test_runtime_plan_preserves_item_downloader_and_mode_selection(
@@ -73,6 +88,24 @@ def test_runtime_plan_preserves_item_downloader_and_mode_selection(
     assert plan.items[0].download_mode == "sync"
     assert plan.items[1].downloader == "httpx"
     assert plan.items[1].download_mode == "async"
+
+
+def test_runtime_plan_rejects_component_prefix_target_overlap(tmp_path: Path) -> None:
+    root = tmp_path / "ComfyUI"
+    with pytest.raises(RuntimeFilePlanError) as captured:
+        _plan(
+            root,
+            _file("parent.bin"),
+            {
+                "type": "http",
+                "url": "https://example.test/nested.bin",
+                "target": "models/parent.bin/nested.bin",
+            },
+        )
+
+    assert _identities(captured.value) == [
+        (("files", 1, "target"), "runtime_file.overlapping_target")
+    ]
 
 
 # Transfer identity follows the requested bytes and destination, while execution
@@ -147,11 +180,11 @@ def test_runtime_staging_uses_transfer_identity_digest(tmp_path: Path) -> None:
     ("field", "value", "code"),
     [
         (
-            "target_dir",
-            "../models",
-            "runtime_file.parent_directory_segment",
+            "target",
+            "../models/a.bin",
+            "runtime_file.parent_target_segment",
         ),
-        ("filename", "../a.bin", "runtime_file.invalid_filename"),
+        ("target", "models/../a.bin", "runtime_file.parent_target_segment"),
         ("url", "file:///tmp/a", "runtime_file.invalid_url"),
         ("checksum", "sha256:bad", "schema.value_error"),
         ("checksum", 123, "schema.string_type"),

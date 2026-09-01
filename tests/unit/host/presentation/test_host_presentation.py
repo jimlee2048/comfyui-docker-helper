@@ -236,6 +236,23 @@ def test_single_source_warning_omits_code_and_unapproved_value() -> None:
     assert "Value:" not in plain
 
 
+def test_quiet_presenter_still_displays_planning_warnings() -> None:
+    presenter, _, stderr = _presenter(detail=OutputDetail.QUIET)
+    warning = Diagnostic(
+        path=("files", 0, "source"),
+        code="render.local_source_empty",
+        message=(
+            "local source directory is empty; its target directory will still be "
+            "present in the image"
+        ),
+        severity=DiagnosticSeverity.WARNING,
+    )
+
+    presenter.warnings((warning,))
+
+    assert warning.message in _strip_ansi(stderr.getvalue())
+
+
 def test_comparison_omits_values_not_approved_by_the_producer() -> None:
     presenter, _, stderr = _presenter(stderr_terminal=True)
 

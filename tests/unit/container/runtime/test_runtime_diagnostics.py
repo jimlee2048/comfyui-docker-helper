@@ -48,7 +48,7 @@ def test_single_source_and_hint_use_a_compact_vertical_layout() -> None:
         "runtime configuration is invalid",
         (
             Diagnostic(
-                path=("files", 0, "url"),
+                path=("files", 0, "source"),
                 code="schema.missing",
                 message="Field required",
                 source_context=_location(
@@ -64,7 +64,7 @@ def test_single_source_and_hint_use_a_compact_vertical_layout() -> None:
     lines = rendered.splitlines()
     assert lines[0] == "runtime configuration is invalid"
     assert len(lines) == 4
-    assert lines[1].startswith("[files.0.url] ")
+    assert lines[1].startswith("[files.0.source] ")
     assert "schema.missing" in lines[1]
     assert lines[2].strip() == "Source: /etc/cdh/runtime/config.toml [files.0]"
     assert lines[3].strip().startswith("Hint: ")
@@ -75,15 +75,18 @@ def test_comparison_renders_symmetric_sites_and_only_approved_values() -> None:
         "runtime configuration is invalid",
         (
             Diagnostic(
-                path=("files", 1, "filename"),
-                code="runtime_file.duplicate_target",
-                message="runtime file targets must be unique",
+                path=("files", 1, "target"),
+                code="runtime_file.overlapping_target",
+                message=(
+                    "runtime file targets must not equal or overlap "
+                    "another target region"
+                ),
                 source_context=DiagnosticComparison(
                     earlier=DiagnosticComparisonSite(
                         _location(
                             1,
                             "/opt/cdh/runtime/config.toml",
-                            ("files", 0, "filename"),
+                            ("files", 0, "target"),
                         ),
                         "model-a.safetensors",
                     ),
@@ -91,7 +94,7 @@ def test_comparison_renders_symmetric_sites_and_only_approved_values() -> None:
                         _location(
                             2,
                             "/etc/cdh/runtime/config.toml",
-                            ("files", 0, "filename"),
+                            ("files", 0, "target"),
                         )
                     ),
                 ),
@@ -103,15 +106,13 @@ def test_comparison_renders_symmetric_sites_and_only_approved_values() -> None:
     lines = rendered.splitlines()
     assert lines[0] == "runtime configuration is invalid"
     assert len(lines) == 6
-    assert lines[1].startswith("[files.1.filename] ")
-    assert "runtime_file.duplicate_target" in lines[1]
+    assert lines[1].startswith("[files.1.target] ")
+    assert "runtime_file.overlapping_target" in lines[1]
     assert lines[2].strip() == (
-        "Earlier: /opt/cdh/runtime/config.toml [files.0.filename]"
+        "Earlier: /opt/cdh/runtime/config.toml [files.0.target]"
     )
     assert lines[3].strip() == "Value: model-a.safetensors"
-    assert lines[4].strip() == (
-        "Later: /etc/cdh/runtime/config.toml [files.0.filename]"
-    )
+    assert lines[4].strip() == ("Later: /etc/cdh/runtime/config.toml [files.0.target]")
     assert sum("Value:" in line for line in lines) == 1
     assert lines[5].strip().startswith("Hint: ")
 

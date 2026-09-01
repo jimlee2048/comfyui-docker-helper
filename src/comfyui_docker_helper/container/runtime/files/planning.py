@@ -12,10 +12,15 @@ from comfyui_docker_helper.config import Diagnostic
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.validation.runtime_files import (
-    normalize_runtime_file_path,
+    normalize_runtime_file_target,
+    relative_file_targets_overlap,
     validate_runtime_file_url,
 )
-from comfyui_docker_helper.config.validation.urls import DownloaderName
+from comfyui_docker_helper.config.validation.urls import (
+    DownloaderName,
+    is_reserved_file_target_component,
+    reserved_file_target_component_message,
+)
 from comfyui_docker_helper.container.runtime.files.models import (
     RuntimeFilePath,
     RuntimeFilePlan,
@@ -35,9 +40,8 @@ from comfyui_docker_helper.container.transfer.core import (
 
 class _RuntimeFileConfig(ConfigModel):
     type: Literal["http"]
-    target_dir: str
-    filename: str
     url: str
+    target: str
     overwrite: bool = False
     checksum: str | None = None
     downloader: DownloaderName | None = None
@@ -60,7 +64,9 @@ def build_runtime_file_plan(
     """Validate final merged runtime file items and derive safe target paths."""
     diagnostics: list[Diagnostic] = []
     items: list[RuntimeFilePlanItem] = []
+    established: list[tuple[str, RuntimeFilePath]] = []
     root = Path(comfyui_path)
+    root_parts = PurePosixPath(root.as_posix()).parts
 
     for source_index, item in enumerate(files):
         path: RuntimeFilePath = ("files", source_index)
@@ -73,17 +79,43 @@ def build_runtime_file_plan(
         if not validate_runtime_file_url(config.url, (*path, "url"), diagnostics):
             continue
 
-        normalized = _normalize_runtime_file_path(config, path, diagnostics)
+        normalized = _normalize_runtime_file_target(config, path, diagnostics)
         if normalized is None:
             continue
 
-        directory, relative_target = normalized
-        target = root.joinpath(*PurePosixPath(relative_target).parts)
+        relative_target = normalized.as_posix()
+        reserved_component = next(
+            (part for part in root_parts if is_reserved_file_target_component(part)),
+            None,
+        )
+        if reserved_component is not None:
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "target"),
+                    "runtime_file.reserved_target_component",
+                    reserved_file_target_component_message(reserved_component),
+                )
+            )
+            continue
+        for earlier_target, _earlier_path in established:
+            if not relative_file_targets_overlap(earlier_target, relative_target):
+                continue
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "target"),
+                    "runtime_file.overlapping_target",
+                    "runtime file targets must not equal or overlap "
+                    "another target region",
+                )
+            )
+            break
+        established.append((relative_target, path))
+        target = root.joinpath(*normalized.parts)
         items.append(
             RuntimeFilePlanItem(
                 url=config.url,
-                directory=directory.as_posix(),
-                filename=config.filename,
+                directory=normalized.parent.as_posix(),
+                filename=normalized.name,
                 relative_target=relative_target,
                 target=target,
                 overwrite=config.overwrite,
@@ -115,7 +147,7 @@ def runtime_file_state_identity_digest(
     if downloader is None:
         raise RuntimeStateError("runtime desired identity requires a downloader")
     return runtime_download_desired_identity_digest(
-        source=item.url,
+        url=item.url,
         target=item.relative_target,
         checksum=item.checksum,
         overwrite=item.overwrite,
@@ -142,15 +174,14 @@ def _runtime_item_root(item: RuntimeFilePlanItem) -> Path:
     return item.target.parents[len(relative_parts) - 1]
 
 
-def _normalize_runtime_file_path(
+def _normalize_runtime_file_target(
     item: _RuntimeFileConfig,
     path: RuntimeFilePath,
     diagnostics: list[Diagnostic],
-) -> tuple[PurePosixPath, str] | None:
-    return normalize_runtime_file_path(
-        item.target_dir,
-        item.filename,
-        path,
+) -> PurePosixPath | None:
+    return normalize_runtime_file_target(
+        item.target,
+        (*path, "target"),
         diagnostics,
     )
 

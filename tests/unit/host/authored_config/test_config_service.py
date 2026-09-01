@@ -145,9 +145,8 @@ def test_service_tracks_keyed_file_overlay_and_append_origins(tmp_path: Path) ->
 
 [[files]]
 type = "http"
-url = "https://example.com/base.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/base.bin"
+target = "models/model.bin"
 checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 """
     )
@@ -155,30 +154,28 @@ checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         """
 [[files]]
 type = "http"
-url = "https://example.com/later.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/later.bin"
+target = "models/model.bin"
 
 [[files]]
 type = "http"
-url = "https://example.com/new.bin"
-target_dir = "models"
-filename = "new.bin"
+source = "https://example.com/new.bin"
+target = "models/new.bin"
 """
     )
 
     result = load_validate_config_result([base, override])
 
-    assert [(item.filename, item.url) for item in result.config.files] == [
-        ("model.bin", "https://example.com/later.bin"),
-        ("new.bin", "https://example.com/new.bin"),
+    assert [(item.target, item.source) for item in result.config.files] == [
+        ("models/model.bin", "https://example.com/later.bin"),
+        ("models/new.bin", "https://example.com/new.bin"),
     ]
     base_checksum = result.origins.exact_location(("files", 0, "checksum"))
-    later_url = result.origins.exact_location(("files", 0, "url"))
+    later_url = result.origins.exact_location(("files", 0, "source"))
     appended = result.origins.exact_location(("files", 1))
     assert base_checksum is not None and base_checksum.source.layer_ordinal == 0
     assert later_url is not None and later_url.source.layer_ordinal == 1
-    assert later_url.path == ("files", 0, "url")
+    assert later_url.path == ("files", 0, "source")
     assert appended is not None and appended.source.layer_ordinal == 1
     assert appended.path == ("files", 1)
 
@@ -192,9 +189,8 @@ def test_service_tracks_an_empty_keyed_sequence_reset(tmp_path: Path) -> None:
 
 [[files]]
 type = "http"
-url = "https://example.com/base.bin"
-target_dir = "models"
-filename = "model.bin"
+source = "https://example.com/base.bin"
+target = "models/model.bin"
 """
     )
     reset.write_text("files = []\n")

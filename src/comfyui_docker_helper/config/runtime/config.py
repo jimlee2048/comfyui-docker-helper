@@ -51,7 +51,8 @@ from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.runtime.models import RuntimeConfig
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.runtime_files import (
-    normalize_runtime_file_path,
+    normalize_runtime_file_target,
+    relative_file_targets_overlap,
     runtime_file_item_merge,
     runtime_file_target_identity,
     validate_runtime_file_url,
@@ -182,10 +183,9 @@ class _RuntimeSystemConfigPatch(ConfigModel):
 
 
 class _RuntimeFilePatch(ConfigModel):
-    type: Literal["http"]
-    url: str | None = None
-    target_dir: str
-    filename: str
+    type: Literal["http"] | None = None
+    source: str | None = None
+    target: str
     overwrite: bool | None = None
     checksum: str | None = None
     downloader: DownloaderName | None = None
@@ -654,46 +654,65 @@ def _validate_effective_runtime_files(
 ) -> tuple[dict[str, Any], ...]:
     diagnostics: list[Diagnostic] = []
     documents: list[dict[str, Any]] = []
-    established: dict[str, RuntimeFilePath] = {}
+    established: list[tuple[str, RuntimeFilePath]] = []
     for index, item in enumerate(items or ()):
         path: RuntimeFilePath = ("files", index)
-        if item.url is None:
+        if item.type is None:
             diagnostics.append(
                 Diagnostic(
-                    (*path, "url"),
+                    (*path, "type"),
+                    "schema.missing",
+                    "Field required",
+                )
+            )
+        if item.source is None:
+            diagnostics.append(
+                Diagnostic(
+                    (*path, "source"),
                     "schema.missing",
                     "Field required",
                 )
             )
         else:
-            validate_runtime_file_url(item.url, (*path, "url"), diagnostics)
-        normalized = normalize_runtime_file_path(
-            item.target_dir,
-            item.filename,
-            path,
+            validate_runtime_file_url(item.source, (*path, "source"), diagnostics)
+        normalized = normalize_runtime_file_target(
+            item.target,
+            (*path, "target"),
             diagnostics,
         )
         if normalized is not None:
-            target = normalized[1]
-            earlier_path = established.get(target)
-            if earlier_path is None:
-                established[target] = path
-            else:
+            target = normalized.as_posix()
+            for earlier_target, earlier_path in established:
+                if not relative_file_targets_overlap(earlier_target, target):
+                    continue
                 diagnostics.append(
                     Diagnostic(
-                        (*path, "filename"),
-                        "runtime_file.duplicate_target",
-                        "runtime file targets must be unique",
+                        (*path, "target"),
+                        "runtime_file.overlapping_target",
+                        "runtime file targets must not equal or overlap "
+                        "another target region",
                         source_context=_runtime_comparison(
-                            (*earlier_path, "filename"),
-                            (*path, "filename"),
+                            (*earlier_path, "target"),
+                            (*path, "target"),
                             origins,
                         ),
                     )
                 )
-        document = item.model_dump(mode="json", exclude_none=True)
-        if normalized is not None:
-            document["target_dir"] = normalized[0].as_posix()
+                break
+            established.append((target, path))
+        document = {
+            "type": item.type,
+            "url": item.source,
+            **(
+                {"target": normalized.as_posix()}
+                if normalized is not None
+                else {"target": item.target}
+            ),
+        }
+        for field in ("overwrite", "checksum", "downloader", "download_mode"):
+            value = getattr(item, field)
+            if value is not None:
+                document[field] = value
         documents.append(document)
 
     if diagnostics:

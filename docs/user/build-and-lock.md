@@ -12,7 +12,7 @@ All `cdh host *` workflows run natively on supported Windows and Linux hosts. In
 
 Automated Windows validation covers native CLI, filesystem, Git, rendering, packaging, and Docker/Buildx adapter behavior. It does not run a real Docker Desktop build or prove Docker Desktop SSH-agent forwarding. Docker Desktop, builder, or agent-integration failures therefore retain the underlying Docker/BuildKit diagnostic.
 
-cdh validates the file type and lexical path shape it observes while reading local Secret, hook, and build-file inputs, and rejects observed symbolic links, Windows junctions or other reparse points, and special files. Secret files additionally enforce the 65,525-byte limit. Hook files and content-locked local build files bind streamed source bytes to a digest and revalidate that digest before publication; unlocked local build files are still admitted and materialized without creating a cdh content digest. This is not isolation from another local process: do not allow an untrusted process to modify a selected input file or its directory concurrently with cdh.
+cdh validates the file type and lexical path shape it observes while reading local Secret, hook, and build-file inputs, and rejects observed symbolic links, Windows junctions or other reparse points, and special files. Secret files additionally enforce the 65,525-byte limit. A local build source may be one regular file or one complete real directory tree; tree admission includes every real descendant directory and regular file, including hidden and empty directories, and rejects unsafe names and traversal failures. Hook files and content-locked local build sources bind streamed bytes to a digest and revalidate that identity before publication; unlocked local sources are still admitted and materialized without creating a cdh content digest. This is not isolation from another local process: do not allow an untrusted process to modify a selected input file, directory, or tree concurrently with cdh.
 
 ## Validate, render, and build
 
@@ -179,19 +179,23 @@ Only direct regular `.sh` and `.py` files under `pre-start.d/`, `post-start.d/`,
 
 ## Build files and local context materialization
 
-Build `[[files]]` declarations are authoritative final image content. HTTP files are downloaded into staging and atomically replace the target after any configured checksum succeeds. Host-local files are materialized into a plan-owned `build/files/` context slot, then placed at the exact target with `COPY --link --chmod=0644`. Existing lower-image content does not suppress either operation, and build files have no `overwrite` setting. Every target remains a strict descendant of `COMFYUI_PATH`.
+Build `[[files]]` declarations are authoritative final image content and use one `source + target` operation. An HTTP source is downloaded into cdh-owned staging and atomically replaces its exact target after any configured checksum succeeds. A local source may be one regular file or one complete real directory tree; cdh prepares it as independent build input before image construction. A local file is placed at its exact target. A local directory is placed at its destination root, with the source basename omitted. HTTP and local-file targets must be strict descendants of `COMFYUI_PATH` and name an exact file; a local-tree target is relative to `COMFYUI_PATH` and may equal the root (`.`). HTTP never infers a target filename from its URL or response metadata.
 
-Set `[cdh].local_file_mode` to choose how local bytes enter the rendered context:
+Directory application is an overlay, not a mirror. Selected files and directories replace compatible entries below the target while unrelated lower-image entries remain; a file/directory conflict or an incompatible target root fails. Every selected directory is normalized to `0755` and every selected regular file to `0644`; host ownership, timestamps, ACLs, xattrs, and executable bits are not image authority. Effective target regions must not overlap by equality or ancestor/descendant relationship. Target and local-tree member names must follow the [file naming rules](configuration.md#add-files-during-the-image-build), which reserve `.cdh-staging` and the `.wh.` prefix. A completely empty local directory is valid and still materializes its target root.
+
+Set `[cdh].local_file_mode` to choose how local-file and local-tree regular-member bytes enter the rendered context:
 
 - `auto` is the default. It attempts a copy-on-write clone and falls back to streaming copy only when clone capability is unavailable or the filesystems do not support the operation.
 - `clone` requires a supported copy-on-write clone and fails without publishing a context when it is unavailable.
 - `copy` always performs a fixed-buffer streaming copy.
 
-Neither clone mode uses a hardlink or symlink: the published context file is independent from later source changes. A clone can avoid physically copying unchanged extents on a capable local filesystem, but the complete file still belongs to the context. BuildKit must read it, and a remote builder must receive it, so `content_lock = false` does not eliminate context storage, builder-cache, or upload costs.
+Neither clone mode uses a hardlink or symlink: the published context file or tree is independent from later source changes. A clone can avoid physically copying unchanged extents on a capable local filesystem, but the complete source still belongs to the context. BuildKit must read it, and a remote builder must receive it, so `content_lock = false` does not eliminate context storage, builder-cache, or upload costs.
 
-With `content_lock = false`, ordinary planning does not hash the source. An explicit `--check` first compares safe file shape and size, then streams byte equality only when sizes match. With `content_lock = true`, planning streams SHA-256 into the canonical lock and BuildPlan; materialization rehashes the source, and `--check` streams the context slot against that intended digest. These operations are bounded-memory but necessarily read the complete file when their result requires it.
+With `content_lock = false`, ordinary planning records local structure without hashing source bytes. `--locked` requires the existing lock and checks content-locked local identities and tree structure, but does not compare bytes from unlocked sources; `--check` compares complete source/context structure and streams file bytes. With `content_lock = true`, cdh hashes a local file or each regular member of a local tree and verifies that identity while preparing the context and in final image observation. Content locking and `--check` read complete files when their result requires it, using bounded memory.
 
-Only HTTP build files are projected into `runtime/config.toml`. A local source locator is host-only and never becomes a runtime import instruction; deployment-time replacement remains the mounted runtime configuration's separate responsibility.
+An unlocked local source is safely opened and checked for structure without being read end to end, including during `--dry-run`. Copy, explicit `--check`, and Docker still need to read its bytes; a later read error fails that operation, an incomplete materialization is never published, and a successful unlocked clone does not prove that every block is readable. Source safety and structural checks remain in place; see the [host filesystem contract](../dev/contracts.md#cooperative-source-reads).
+
+Render, build, check, and dry-run preparation emit exactly one warning for each empty local source directory: `local source directory is empty; its target directory will still be present in the image`. `host validate` performs no local-source I/O and emits no such warning; quiet mode does not suppress it. Local source paths are host-only inputs used during preparation; the prepared context data is consumed by the image build. Local sources never become runtime import instructions; only HTTP build files are projected into `runtime/config.toml`. See the [materialization contract](../dev/contracts.md#materialization-boundary) for the host-to-context boundary.
 
 ## Authenticated HTTPX file downloads
 
@@ -205,13 +209,7 @@ BuildKit Secret contents do not ordinarily invalidate an instruction cache. Rota
 
 ## From effective configuration to a context
 
-cdh uses one forward-only planning flow:
-
-```text
-effective configuration -> canonical lock -> BuildPlan -> rendered context
-```
-
-The effective configuration describes intent. `config.lock.toml` records the accepted exact external identities, hook identities, and explicitly content-locked local file identities used for host reconciliation. cdh then constructs one immutable BuildPlan, which is the build-time execution authority. Context rendering projects that plan together with its exact wheel and admitted local inputs; build-time helpers do not re-read host configuration or the lock to make new planning decisions.
+cdh validates the effective layered configuration, reconciles the lock, and prepares a private context before Buildx runs. Local source paths are used only during host preparation; the image build consumes the resulting context data. See [planning and serialized authority](../dev/contracts.md#planning-and-serialized-authority) and the [materialization boundary](../dev/contracts.md#materialization-boundary) for internal ownership and artifact boundaries.
 
 ## Reconciliation modes
 
@@ -219,13 +217,13 @@ Provider policy and filesystem/build side effects are separate. Choose among the
 
 | Mode | Resolution behavior | Context and build behavior |
 | --- | --- | --- |
-| Default | Reuse unchanged entries, resolve missing or changed inputs, and remove deleted identities. | Write the accepted lock and rendered context. |
-| `--locked` | Require the existing lock and content-locked local inputs to match exactly; make no provider or Docker calls during reconciliation. | Compare the existing context and write nothing. Unlocked local source bytes are not compared; use `--check` for that explicit streamed comparison. `host build` still invokes Buildx after the checks pass. |
+| Default | Reuse unchanged entries, resolve missing or changed inputs, and remove deleted identities. Local sources are admitted; `content_lock = true` hashes the selected local input for its identity. | Write the accepted lock and rendered context. |
+| `--locked` | Require the existing lock and each content-locked local input identity to match exactly; make no provider or Docker calls during reconciliation. | Compare the existing context and write nothing. Local-tree structure is compared; unlocked local source bytes are not compared. Use `--check` for that explicit streamed comparison. `host build` still invokes Buildx after the checks pass. |
 | `--upgrade-lock` | Refresh moving selectors while retaining unchanged exact selections. | Write the updated lock and rendered context. |
-| `--check` | Apply default reconciliation policy. | Compare the complete expected context with the existing one; write nothing and do not build. |
-| `--dry-run` | Use default policy unless combined with `--locked` or `--upgrade-lock`. | Print the exact BuildPlan plus a separate process-local `Buildx output` section containing the expanded mode and tags when applicable, or `None`; write nothing and do not build. |
+| `--check` | Apply default reconciliation policy. | Compare the complete expected context with the existing one, including local-tree membership and streamed file bytes; write nothing and do not build. |
+| `--dry-run` | Use default policy unless combined with `--locked` or `--upgrade-lock`. | Admit and plan local sources, including empty-tree warnings, then print the full plan preview plus a separate `Buildx output` section containing the expanded mode and tags when applicable, or `None`; write nothing and do not build. |
 
-`--check` cannot be combined with a lock-policy or dry-run modifier. `--locked` and `--upgrade-lock` are mutually exclusive. When `--dry-run` is combined with a lock policy, preview behavior replaces context comparison or publication. `Buildx output: None` means that this invocation has no publication output plan; it is not part of, or a missing field from, the BuildPlan.
+`--check` cannot be combined with a lock-policy or dry-run modifier. `--locked` and `--upgrade-lock` are mutually exclusive. When `--dry-run` is combined with a lock policy, preview behavior replaces context comparison or publication. `Buildx output: None` means that this invocation has no image-publication output; it is not an error or a missing part of the plan preview.
 
 No-write does not necessarily mean offline. Default, `--check`, and `--dry-run` may call providers and may require Docker when the current lock cannot supply a required image identity. A complete matching lock keeps those paths Docker-free. Only `--locked` forbids provider and Docker calls during reconciliation; Docker Buildx remains a separate requirement for `host build`.
 
@@ -242,13 +240,14 @@ A rendered context contains:
 - `build-plan.json`, the canonical build-time execution plan, mounted read-only only while each owning build instruction runs;
 - `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`, the exact validated cdh wheel installed into the image;
 - `build/hooks/`, containing only referenced verified build-hook bytes when configured;
-- `build/files/`, containing plan-addressed independent copies or clones of configured host-local build files;
+- `build/files/`, containing plan-addressed independent copies or clones of configured host-local files;
+- `build/trees/`, containing one plan-addressed complete local-tree context per configured host-local directory;
 - `runtime/config.toml`, derived from the BuildPlan;
 - `runtime/hooks/`, containing the verified baked runtime hook tree when configured;
 - `Dockerfile`, rendered with literal digest-qualified base-image references; and
 - `.dockerignore`, which excludes `config.lock.toml` and `.cdh-rendered` from Buildx input.
 
-The context contains no root `config.toml`. Host-local source paths, Secret source locators, resolved Secret values, publication tags, and output selection are not BuildPlan inputs. The Dockerfile has no argument that can replace lock-authoritative image identities. The complete Plan remains in the host context and is available to the selected local or remote builder, but its per-instruction read-only mounts do not persist `/opt/cdh/build/build-plan.json` in the final image; the final manifest retains the Plan digest binding.
+The context contains no root `config.toml`. cdh-generated build metadata does not embed host-source locators or Secret values. The selected local or remote builder can read the rendered context and its BuildPlan; trusted hooks and installers can also read or copy inputs made available to their build step. Publication tags and output selection remain invocation choices. The Dockerfile uses lock-authoritative image identities, while the final manifest records cdh's verified bindings. See the [materialization contract](../dev/contracts.md#materialization-boundary) for the host-to-context and ephemeral-mount boundaries.
 
 ## Python environments and package sources
 
@@ -280,6 +279,6 @@ Package direct references are ordinary public configuration, not Secret locators
 
 ## Final evidence and replay boundary
 
-After all image mutations succeed, cdh writes the strict final-state observation `/opt/cdh/build/manifest.json`. It binds the image-configuration, canonical lock, and BuildPlan digests and records intended and observed direct identities. The manifest is evidence, not another resolver, lock, replay input, support verdict, or general service-health check.
+After all image mutations succeed, cdh writes the strict final-state observation `/opt/cdh/build/manifest.json`. It binds the image-configuration, canonical lock, and BuildPlan digests and records verified final-state evidence, including checks for selected local-tree content where applicable. Unrelated lower-image entries remain outside those checks. The manifest is evidence, not another resolver, lock, replay input, support verdict, or general service-health check.
 
 cdh provides bounded verified replay of cdh-controlled direct inputs. For a target-active package direct reference, the replay identity is the authored request plus the exact installed top-level distribution version, not the fetched artifact: unchanged content at a URL is not proved, and a moving VCS ref is not pinned to an observed commit. `--locked` avoids source contact only during host-side reconciliation; a subsequent Buildx build may still need to fetch and install that active authored source. This does not promise an offline or byte-identical build, a complete lock of transitive dependencies or every fetched artifact, authenticity for package or file downloads without a user-supplied hash/checksum, deterministic effects from trusted installers or hooks, or replay of deployment-time mutations.

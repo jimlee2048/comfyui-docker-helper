@@ -23,6 +23,7 @@ from comfyui_docker_helper.config.credentials.git import (
     canonicalize_git_credential_context,
 )
 from comfyui_docker_helper.config.diagnostics import Diagnostic, DiagnosticError
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.config.planning.canonical_lock import (
     ComfyCliRequestIdentity,
     ComfyUIRequestIdentity,
@@ -209,6 +210,7 @@ class RuntimeRequest:
     environment: tuple[tuple[str, str], ...]
     ssh: SshRequest
     shutdown_timeout: int | float
+    logs: RuntimeLogSettings
     launch_command: tuple[str, ...]
 
 
@@ -551,6 +553,7 @@ def build_canonical_request_graph(
                 domains.ssh_public_keys,
             ),
             shutdown_timeout=config.cdh.shutdown_timeout,
+            logs=config.cdh.logs,
             launch_command=(
                 f"{_VENV_PATH}/bin/python",
                 f"{comfyui_path}/main.py",

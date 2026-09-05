@@ -31,9 +31,6 @@
 - If genuine browser verification is required, use the preferred tool if specified by the current agent runtime; if sub-agent feature is available, delegate the browser verification task to a new sub-agent.
 
 ### Codex-Specific
-- For Codex sub-agents delegation:
-  - For planning or review tasks, prefer using model `gpt-5.6-sol` with `xhigh` reasoning effort.
-  - In other scenarios, prefer using model `gpt-5.6-luna` with `max` reasoning effort.
 - Run the following commands with elevated execution:
   - Docker CLI commands, such as `docker build`.
   - Commands that may access a local GPU, such as `nvidia-smi`.

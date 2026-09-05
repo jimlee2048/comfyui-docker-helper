@@ -67,6 +67,23 @@ def test_exceptional_controller_cleanup_uses_one_clipped_deadline(
             )
         raise ApplicationError("controlled", exit_code=7)
 
+    class Server:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def stop_accepting(self, *, deadline, force_requested):
+            closes.append(("stop_accepting", deadline))
+
+        def close(self, *, deadline, force_requested):
+            closes.append(("server", deadline))
+
+    monkeypatch.setattr(
+        serve_module, "open_runtime_control_listener", lambda path: None
+    )
+    monkeypatch.setattr(serve_module, "RuntimeControlServer", Server)
     monkeypatch.setattr(serve_module, "RuntimeEventDelivery", Delivery)
     monkeypatch.setattr(serve_module, "_run_runtime_serve", fail)
     before = time.monotonic()
@@ -77,8 +94,13 @@ def test_exceptional_controller_cleanup_uses_one_clipped_deadline(
     )
     after = time.monotonic()
     assert result == 7
-    assert closes[0][0] == "delivery" and closes[1][0] == "broker"
-    assert closes[0][1] == closes[1][1]
+    assert [item[0] for item in closes] == [
+        "stop_accepting",
+        "delivery",
+        "broker",
+        "server",
+    ]
+    assert len({item[1] for item in closes}) == 1
     allowance = 0.5 if remaining is None else min(0.5, max(0, remaining))
     assert before + allowance <= closes[0][1] <= after + allowance
 
@@ -113,6 +135,23 @@ def test_first_and_repeated_signals_during_final_cleanup_are_observed(monkeypatc
             handlers[signal.SIGTERM](signal.SIGTERM, None)
             assert force_requested()
 
+    class Server:
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def stop_accepting(self, *, deadline, force_requested):
+            pass
+
+        def close(self, *, deadline, force_requested):
+            observations.append(force_requested())
+
+    monkeypatch.setattr(
+        serve_module, "open_runtime_control_listener", lambda path: None
+    )
+    monkeypatch.setattr(serve_module, "RuntimeControlServer", Server)
     monkeypatch.setattr(serve_module, "RuntimeEventDelivery", Delivery)
     monkeypatch.setattr(serve_module, "_run_runtime_serve", lambda **kwargs: 0)
     assert (
@@ -122,7 +161,7 @@ def test_first_and_repeated_signals_during_final_cleanup_are_observed(monkeypatc
         )
         == 0
     )
-    assert observations == [True]
+    assert observations == [True, True]
     assert handlers[signal.SIGTERM] == signal.SIG_DFL
 
 

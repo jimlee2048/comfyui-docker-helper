@@ -404,6 +404,7 @@ def run_runtime_serve(
     logging_broker = runtime_logging_factory(controller.observe_runtime_failure)
     with _runtime_controller_signal_handlers(controller) as signal_state:
         background_event_sink: RuntimeEventDelivery | None = None
+        control_server: RuntimeControlServer | None = None
         try:
             logging_broker.start()
             event_sink = safe_runtime_event_sink(default_runtime_display(settings))
@@ -432,6 +433,12 @@ def run_runtime_serve(
                         error.diagnostics,
                     )
                 ) from error
+            control_server = RuntimeControlServer(
+                open_runtime_control_listener(control_socket_path),
+                controller,
+                logging_broker,
+            )
+            control_server.start()
             return _run_runtime_serve(
                 initial_sources=initial_sources,
                 controller=controller,
@@ -450,7 +457,6 @@ def run_runtime_serve(
                 readiness_waiter=readiness_waiter,
                 runtime_ssh_starter=runtime_ssh_starter,
                 runtime_state_path=runtime_state_path,
-                control_socket_path=control_socket_path,
                 generation_running=generation_running,
                 monotonic=monotonic,
                 sleep=sleep,
@@ -479,12 +485,18 @@ def run_runtime_serve(
             def force_requested() -> bool:
                 return controller.external_shutdown_snapshot().repeated
 
+            if control_server is not None:
+                control_server.stop_accepting(
+                    deadline=deadline, force_requested=force_requested
+                )
             logging_broker.defer_storage_warnings()
             if background_event_sink is not None:
                 background_event_sink.close(
                     deadline=deadline, force_requested=force_requested
                 )
             logging_broker.close(deadline=deadline, force_requested=force_requested)
+            if control_server is not None:
+                control_server.close(deadline=deadline, force_requested=force_requested)
             if (
                 background_event_sink is not None
                 and (final_warning := logging_broker.take_final_storage_warning())
@@ -514,7 +526,6 @@ def _run_runtime_serve(
     readiness_waiter: ReadinessWaiter,
     runtime_ssh_starter: RuntimeSshStarter,
     runtime_state_path: str | Path,
-    control_socket_path: Path,
     generation_running: Callable[[RuntimeController], object],
     monotonic: Callable[[], float],
     sleep: Callable[[float], object],
@@ -543,199 +554,187 @@ def _run_runtime_serve(
         logging_broker=logging_broker,
         initial_sources=initial_sources,
     )
-    listener = open_runtime_control_listener(control_socket_path)
-    with RuntimeControlServer(listener, controller, logging_broker):
-        serve_owned_generation: _ServeGenerationLease | None = None
+    serve_owned_generation: _ServeGenerationLease | None = None
 
-        def close_serve_owned_generation(
-            cause: RuntimeGenerationStopCause,
-        ) -> None:
-            nonlocal serve_owned_generation
-            lease = serve_owned_generation
-            if lease is None:
-                return
+    def close_serve_owned_generation(
+        cause: RuntimeGenerationStopCause,
+    ) -> None:
+        nonlocal serve_owned_generation
+        lease = serve_owned_generation
+        if lease is None:
+            return
+        try:
+            lease.close(cause, event_sink)
+        finally:
+            if lease.state == "stopped":
+                serve_owned_generation = None
+
+    try:
+        try:
+            current_generation = controller.begin_initial_admission()
+        except RuntimeControllerError as error:
+            failure = controller.runtime_failure_message()
+            if failure is None:
+                raise
+            raise RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE) from error
+        serve_owned_generation = _ServeGenerationLease(current_generation)
+        event_sink.emit(
+            RuntimeGenerationAdmitted(
+                current_generation,
+                RuntimeGenerationOperation.INITIAL_START,
+            )
+        )
+        initial_generation = True
+
+        def publish_start_failure(error: RuntimeExecutionError) -> None:
+            snapshot = controller.snapshot()
+            if snapshot.operation is None:
+                controller.mark_generation_terminal(str(error))
+            elif (
+                snapshot.last_restart is not None
+                and snapshot.last_restart.id == snapshot.operation
+            ):
+                controller.wait_for_terminal_delivery(RUNTIME_CONTROL_ACK_DRAIN_SECONDS)
+            else:
+                controller.publish_restart_terminal(
+                    "failed",
+                    message=str(error),
+                )
+                controller.wait_for_terminal_delivery(RUNTIME_CONTROL_ACK_DRAIN_SECONDS)
+
+        def external_failure_exit_code() -> int | None:
+            shutdown = controller.external_shutdown_snapshot()
+            if shutdown.signal is None:
+                return None
+            controller.mark_external_shutdown()
+            return 128 + int(shutdown.signal)
+
+        while True:
+            failure = controller.runtime_failure_message()
+            if failure is not None:
+                error = RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
+                close_serve_owned_generation(
+                    RuntimeGenerationStopCause.CONTROLLER_FAILURE
+                )
+                publish_start_failure(error)
+                raise error
             try:
-                lease.close(cause, event_sink)
-            finally:
-                if lease.state == "stopped":
+                generation = factory.create_generation()
+            except RuntimeExecutionError as error:
+                external_exit_code = external_failure_exit_code()
+                if external_exit_code is not None:
+                    close_serve_owned_generation(
+                        RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
+                    )
+                    return external_exit_code
+                close_serve_owned_generation(RuntimeGenerationStopCause.STARTUP_FAILURE)
+                publish_start_failure(error)
+                raise
+
+            def publish_running_checkpoint(
+                *,
+                is_initial: bool = initial_generation,
+                generation_id: str = current_generation,
+            ) -> None:
+                failure = controller.runtime_failure_message()
+                if failure is not None:
+                    raise RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
+                try:
+                    if is_initial:
+                        controller.mark_initial_generation_running()
+                    else:
+                        controller.publish_restart_terminal("succeeded")
+                        controller.release_successful_restart()
+                except RuntimeControllerError as transition_error:
+                    failure = controller.runtime_failure_message()
+                    if failure is None:
+                        raise
+                    raise RuntimeExecutionError(
+                        RUNTIME_LOGGING_UNAVAILABLE_MESSAGE
+                    ) from transition_error
+                controller.clear_shutdown_deadline()
+                generation_running(controller)
+                event_sink.emit(RuntimeGenerationReady(generation_id))
+
+            try:
+
+                def claim_lifecycle_ownership() -> None:
+                    nonlocal serve_owned_generation
                     serve_owned_generation = None
 
-        try:
-            try:
-                current_generation = controller.begin_initial_admission()
-            except RuntimeControllerError as error:
-                failure = controller.runtime_failure_message()
-                if failure is None:
-                    raise
-                raise RuntimeExecutionError(
-                    RUNTIME_LOGGING_UNAVAILABLE_MESSAGE
-                ) from error
-            serve_owned_generation = _ServeGenerationLease(current_generation)
-            event_sink.emit(
-                RuntimeGenerationAdmitted(
-                    current_generation,
-                    RuntimeGenerationOperation.INITIAL_START,
+                result = run_runtime_lifecycle(
+                    generation.config,
+                    generation.hook_plan,
+                    runtime=effective_runtime,
+                    source_env=generation.source_env,
+                    downloads=generation.downloads,
+                    ssh_service=generation.ssh_service,
+                    runner=runner,
+                    runtime_hook_runner=runtime_hook_runner,
+                    runtime_stop_hook_runner=runtime_stop_hook_runner,
+                    readiness_waiter=readiness_waiter,
+                    restart_acceptor=controller,
+                    runtime_health=controller,
+                    runtime_started=publish_running_checkpoint,
+                    external_shutdown_observer=(controller.observe_external_signal),
+                    monotonic=monotonic,
+                    sleep=sleep,
+                    event_sink=event_sink,
+                    generation=current_generation,
+                    runtime_ownership_claimed=claim_lifecycle_ownership,
+                    shutdown_deadline_observer=controller.observe_shutdown_deadline,
                 )
-            )
-            initial_generation = True
+            except RuntimeExecutionError as error:
+                external_exit_code = external_failure_exit_code()
+                if external_exit_code is not None:
+                    return external_exit_code
+                publish_start_failure(error)
+                raise
 
-            def publish_start_failure(error: RuntimeExecutionError) -> None:
-                snapshot = controller.snapshot()
-                if snapshot.operation is None:
-                    controller.mark_generation_terminal(str(error))
-                elif (
-                    snapshot.last_restart is not None
-                    and snapshot.last_restart.id == snapshot.operation
-                ):
-                    controller.wait_for_terminal_delivery(
-                        RUNTIME_CONTROL_ACK_DRAIN_SECONDS
-                    )
-                else:
-                    controller.publish_restart_terminal(
-                        "failed",
-                        message=str(error),
-                    )
-                    controller.wait_for_terminal_delivery(
-                        RUNTIME_CONTROL_ACK_DRAIN_SECONDS
-                    )
-
-            def external_failure_exit_code() -> int | None:
-                shutdown = controller.external_shutdown_snapshot()
-                if shutdown.signal is None:
-                    return None
-                controller.mark_external_shutdown()
-                return 128 + int(shutdown.signal)
-
-            while True:
+            if result.cause is RuntimeGenerationStopCause.NATURAL_EXIT:
                 failure = controller.runtime_failure_message()
                 if failure is not None:
                     error = RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
-                    close_serve_owned_generation(
-                        RuntimeGenerationStopCause.CONTROLLER_FAILURE
-                    )
                     publish_start_failure(error)
                     raise error
-                try:
-                    generation = factory.create_generation()
-                except RuntimeExecutionError as error:
-                    external_exit_code = external_failure_exit_code()
-                    if external_exit_code is not None:
-                        close_serve_owned_generation(
-                            RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN
-                        )
-                        return external_exit_code
-                    close_serve_owned_generation(
-                        RuntimeGenerationStopCause.STARTUP_FAILURE
+                controller.mark_generation_terminal("ComfyUI exited.")
+                return _normalize_exit_code(result.returncode)
+            if result.cause is RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN:
+                controller.mark_external_shutdown()
+                return _normalize_exit_code(result.returncode)
+            if result.cause is RuntimeGenerationStopCause.CONTROLLER_FAILURE:
+                failure = controller.runtime_failure_message()
+                assert failure is not None
+                error = RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
+                publish_start_failure(error)
+                raise error
+
+            assert result.cause is RuntimeGenerationStopCause.OPERATOR_RESTART
+            successor = controller.allocate_restart_successor()
+            if successor is None:
+                failure = controller.runtime_failure_message()
+                if failure is not None:
+                    controller.wait_for_terminal_delivery(
+                        RUNTIME_CONTROL_ACK_DRAIN_SECONDS
                     )
-                    publish_start_failure(error)
-                    raise
-
-                def publish_running_checkpoint(
-                    *,
-                    is_initial: bool = initial_generation,
-                    generation_id: str = current_generation,
-                ) -> None:
-                    failure = controller.runtime_failure_message()
-                    if failure is not None:
-                        raise RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
-                    try:
-                        if is_initial:
-                            controller.mark_initial_generation_running()
-                        else:
-                            controller.publish_restart_terminal("succeeded")
-                            controller.release_successful_restart()
-                    except RuntimeControllerError as transition_error:
-                        failure = controller.runtime_failure_message()
-                        if failure is None:
-                            raise
-                        raise RuntimeExecutionError(
-                            RUNTIME_LOGGING_UNAVAILABLE_MESSAGE
-                        ) from transition_error
-                    controller.clear_shutdown_deadline()
-                    generation_running(controller)
-                    event_sink.emit(RuntimeGenerationReady(generation_id))
-
-                try:
-
-                    def claim_lifecycle_ownership() -> None:
-                        nonlocal serve_owned_generation
-                        serve_owned_generation = None
-
-                    result = run_runtime_lifecycle(
-                        generation.config,
-                        generation.hook_plan,
-                        runtime=effective_runtime,
-                        source_env=generation.source_env,
-                        downloads=generation.downloads,
-                        ssh_service=generation.ssh_service,
-                        runner=runner,
-                        runtime_hook_runner=runtime_hook_runner,
-                        runtime_stop_hook_runner=runtime_stop_hook_runner,
-                        readiness_waiter=readiness_waiter,
-                        restart_acceptor=controller,
-                        runtime_health=controller,
-                        runtime_started=publish_running_checkpoint,
-                        external_shutdown_observer=(controller.observe_external_signal),
-                        monotonic=monotonic,
-                        sleep=sleep,
-                        event_sink=event_sink,
-                        generation=current_generation,
-                        runtime_ownership_claimed=claim_lifecycle_ownership,
-                        shutdown_deadline_observer=controller.observe_shutdown_deadline,
-                    )
-                except RuntimeExecutionError as error:
-                    external_exit_code = external_failure_exit_code()
-                    if external_exit_code is not None:
-                        return external_exit_code
-                    publish_start_failure(error)
-                    raise
-
-                if result.cause is RuntimeGenerationStopCause.NATURAL_EXIT:
-                    failure = controller.runtime_failure_message()
-                    if failure is not None:
-                        error = RuntimeExecutionError(
-                            RUNTIME_LOGGING_UNAVAILABLE_MESSAGE
-                        )
-                        publish_start_failure(error)
-                        raise error
-                    controller.mark_generation_terminal("ComfyUI exited.")
-                    return _normalize_exit_code(result.returncode)
-                if result.cause is RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN:
-                    controller.mark_external_shutdown()
-                    return _normalize_exit_code(result.returncode)
-                if result.cause is RuntimeGenerationStopCause.CONTROLLER_FAILURE:
-                    failure = controller.runtime_failure_message()
-                    assert failure is not None
-                    error = RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
-                    publish_start_failure(error)
-                    raise error
-
-                assert result.cause is RuntimeGenerationStopCause.OPERATOR_RESTART
-                successor = controller.allocate_restart_successor()
-                if successor is None:
-                    failure = controller.runtime_failure_message()
-                    if failure is not None:
-                        controller.wait_for_terminal_delivery(
-                            RUNTIME_CONTROL_ACK_DRAIN_SECONDS
-                        )
-                        raise RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
-                    controller.mark_external_shutdown()
-                    shutdown = controller.external_shutdown_snapshot()
-                    assert shutdown.signal is not None
-                    return 128 + int(shutdown.signal)
-                current_generation = successor
-                serve_owned_generation = _ServeGenerationLease(successor)
-                event_sink.emit(
-                    RuntimeGenerationAdmitted(
-                        current_generation,
-                        RuntimeGenerationOperation.OPERATOR_RESTART,
-                    )
+                    raise RuntimeExecutionError(RUNTIME_LOGGING_UNAVAILABLE_MESSAGE)
+                controller.mark_external_shutdown()
+                shutdown = controller.external_shutdown_snapshot()
+                assert shutdown.signal is not None
+                return 128 + int(shutdown.signal)
+            current_generation = successor
+            serve_owned_generation = _ServeGenerationLease(successor)
+            event_sink.emit(
+                RuntimeGenerationAdmitted(
+                    current_generation,
+                    RuntimeGenerationOperation.OPERATOR_RESTART,
                 )
-                initial_generation = False
-        except _RuntimeControllerShutdownRequested as request:
-            close_serve_owned_generation(RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN)
-            controller.mark_external_shutdown()
-            return 128 + int(request.signal)
+            )
+            initial_generation = False
+    except _RuntimeControllerShutdownRequested as request:
+        close_serve_owned_generation(RuntimeGenerationStopCause.EXTERNAL_SHUTDOWN)
+        controller.mark_external_shutdown()
+        return 128 + int(request.signal)
 
 
 class _RuntimeControllerShutdownRequested(BaseException):

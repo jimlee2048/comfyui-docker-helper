@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.container.runtime.control.client import (
     RuntimeControlClientError,
     read_runtime_status,
@@ -23,8 +24,9 @@ from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeAckRequest,
     RuntimeControlResponse,
     RuntimeErrorResponse,
-    RuntimeFollowRequest,
+    RuntimeLogReplayCompleteResponse,
     RuntimeLogResponse,
+    RuntimeLogsRequest,
     RuntimeRestartRequest,
     RuntimeStatusRequest,
     RuntimeStatusResponse,
@@ -45,14 +47,14 @@ from comfyui_docker_helper.container.runtime.controller import RuntimeController
 from comfyui_docker_helper.container.runtime.logging import (
     RUNTIME_LOG_MAX_FOLLOWERS,
     RuntimeLogChunk,
-    RuntimeLogFollower,
     RuntimeLoggingBroker,
     RuntimeLoggingError,
+    RuntimeLogQuery,
 )
 
 
 class _UnavailableLoggingBroker:
-    def follow(self) -> RuntimeLogFollower:
+    def logs(self, *, tail: int | None = None, follow: bool = False) -> RuntimeLogQuery:
         raise RuntimeLoggingError("not used by this test")
 
 
@@ -70,6 +72,7 @@ def _server(
 def _active_logging_broker() -> RuntimeLoggingBroker:
     broker = RuntimeLoggingBroker()
     broker._started = True
+    broker.configure(RuntimeLogSettings(mode="memory"))
     return broker
 
 
@@ -363,12 +366,13 @@ def test_follow_streams_live_binary_frames_across_runtime_boundaries(
     with RuntimeControlServer(listener, controller, broker):
         client = connect_runtime_control(endpoint)
         try:
-            send_runtime_control_message(client, RuntimeFollowRequest())
+            send_runtime_control_message(
+                client, RuntimeLogsRequest(tail=0, follow=True)
+            )
+            assert _receive(client) == RuntimeLogReplayCompleteResponse(complete=True)
             _wait_until(lambda: len(broker._followers) == 1)
             broker._publish(RuntimeLogChunk("stdout", b"old\x00\xff"))
-            assert _receive(client) == RuntimeLogResponse.from_bytes(
-                "stdout", b"old\x00\xff"
-            )
+            assert _receive(client) == RuntimeLogResponse.from_bytes(b"old\x00\xff")
 
             submission = controller.submit_restart(delivery_expected=False)
             assert submission.disposition == "submitted"
@@ -378,9 +382,7 @@ def test_follow_streams_live_binary_frames_across_runtime_boundaries(
             assert controller.release_successful_restart() is True
 
             broker._publish(RuntimeLogChunk("stderr", b"new-generation"))
-            assert _receive(client) == RuntimeLogResponse.from_bytes(
-                "stderr", b"new-generation"
-            )
+            assert _receive(client) == RuntimeLogResponse.from_bytes(b"new-generation")
         finally:
             client.close()
 
@@ -395,31 +397,53 @@ def test_follow_limit_is_busy_and_disconnected_slot_is_reused(tmp_path: Path) ->
     with RuntimeControlServer(listener, controller, broker):
         for _ in range(RUNTIME_LOG_MAX_FOLLOWERS):
             client = connect_runtime_control(endpoint)
-            send_runtime_control_message(client, RuntimeFollowRequest())
+            send_runtime_control_message(
+                client, RuntimeLogsRequest(tail=0, follow=True)
+            )
             followers.append(client)
         _wait_until(lambda: len(broker._followers) == RUNTIME_LOG_MAX_FOLLOWERS)
 
+        assert read_runtime_status(endpoint).state == "running"
         excess = connect_runtime_control(endpoint)
-        send_runtime_control_message(excess, RuntimeFollowRequest())
+        send_runtime_control_message(excess, RuntimeLogsRequest(tail=0, follow=True))
         response = _receive(excess)
         assert isinstance(response, RuntimeErrorResponse)
         assert response.code == "busy"
         assert response.operation is None
-        assert "live log" in response.message.lower()
+        assert "log query" in response.message.lower()
         assert "limit" in response.message.lower()
         excess.close()
 
         followers.pop().close()
         _wait_until(lambda: len(broker._followers) == RUNTIME_LOG_MAX_FOLLOWERS - 1)
         replacement = connect_runtime_control(endpoint)
-        send_runtime_control_message(replacement, RuntimeFollowRequest())
+        send_runtime_control_message(
+            replacement, RuntimeLogsRequest(tail=0, follow=True)
+        )
         followers.append(replacement)
         _wait_until(lambda: len(broker._followers) == RUNTIME_LOG_MAX_FOLLOWERS)
 
+        assert _receive(replacement) == RuntimeLogReplayCompleteResponse(complete=True)
         broker._publish(RuntimeLogChunk("stdout", b"replacement"))
-        assert _receive(replacement) == RuntimeLogResponse.from_bytes(
-            "stdout", b"replacement"
-        )
+        assert _receive(replacement) == RuntimeLogResponse.from_bytes(b"replacement")
 
     for follower in followers:
         follower.close()
+
+
+def test_failed_accept_thread_start_still_releases_owned_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    endpoint = _endpoint(tmp_path)
+    server = _server(open_runtime_control_listener(endpoint), _running_controller())
+
+    def failed_start() -> None:
+        raise RuntimeError("synthetic thread admission failure")
+
+    monkeypatch.setattr(server._accept_thread, "start", failed_start)
+    try:
+        with pytest.raises(RuntimeError, match="thread admission"):
+            server.start()
+    finally:
+        server.close()
+    assert not endpoint.exists()

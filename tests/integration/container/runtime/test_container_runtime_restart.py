@@ -210,6 +210,7 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
 
 def test_runtime_display_is_constructed_inside_logging_ownership(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     timeline: list[str] = []
 
@@ -261,6 +262,7 @@ def test_runtime_display_is_constructed_inside_logging_ownership(
 
     assert (
         run_runtime_serve(
+            control_socket_path=tmp_path / "control" / "runtime.sock",
             runtime_logging_factory=lambda _observer: logging,  # type: ignore[arg-type]
         )
         == 0

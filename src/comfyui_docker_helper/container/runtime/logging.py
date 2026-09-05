@@ -12,7 +12,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal
 
 from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.container.runtime.log_history import (
@@ -94,6 +94,7 @@ class RuntimeLogChunk:
 
 type RuntimeLogFollowerCloseReason = Literal[
     "broker_closed",
+    "broker_failed",
     "client_closed",
     "overflow",
 ]
@@ -152,13 +153,10 @@ class RuntimeLogFollower:
         if self._close_reason is not None:
             return
         self._close_reason = reason
-        self._chunks.clear()
-        self._queued_bytes = 0
+        if reason != "broker_closed":
+            self._chunks.clear()
+            self._queued_bytes = 0
         self._condition.notify_all()
-
-
-class RuntimeLogFollowerSource(Protocol):
-    def follow(self) -> RuntimeLogFollower: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +180,7 @@ class RuntimeLoggingBroker:
         self._failure_observer = failure_observer
         self._writer = writer
         self._closing = threading.Event()
+        self._drain_interrupted = threading.Event()
         self._failure_event = threading.Event()
         self._failure_lock = threading.Lock()
         self._failure: RuntimeLoggingFailure | None = None
@@ -315,7 +314,14 @@ class RuntimeLoggingBroker:
                     break
                 thread.join(timeout=min(0.02, remaining))
         self._close_history(deadline, force_requested)
-        self._close_followers()
+        complete = (
+            not force_requested()
+            and time.monotonic() < deadline
+            and not any(thread.is_alive() for thread in self._threads)
+            and self.failure() is None
+            and not self._drain_interrupted.is_set()
+        )
+        self._close_followers("broker_closed" if complete else "broker_failed")
 
     def _close_history(
         self, deadline: float, force_requested: Callable[[], bool]
@@ -367,6 +373,7 @@ class RuntimeLoggingBroker:
                 except InterruptedError:
                     continue
                 except OSError:
+                    self._drain_interrupted.set()
                     if not self._closing.is_set():
                         self._record_failure(
                             pipe.stream,
@@ -385,6 +392,7 @@ class RuntimeLoggingBroker:
                 try:
                     _write_all(pipe.writer_fd, chunk, writer=self._writer)
                 except OSError:
+                    self._drain_interrupted.set()
                     primary_failed = True
                     self._record_failure(
                         pipe.stream,
@@ -576,12 +584,14 @@ class RuntimeLoggingBroker:
             self._followers.discard(follower)
         follower._close(reason)
 
-    def _close_followers(self) -> None:
+    def _close_followers(
+        self, reason: RuntimeLogFollowerCloseReason = "broker_closed"
+    ) -> None:
         with self._followers_lock:
             followers = tuple(self._followers)
             self._followers.clear()
         for follower in followers:
-            follower._close("broker_closed")
+            follower._close(reason)
 
 
 def open_runtime_logging_broker(

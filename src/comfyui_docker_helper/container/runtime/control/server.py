@@ -5,16 +5,22 @@ from __future__ import annotations
 import select
 import socket
 import threading
+import time
+from collections.abc import Callable
 from contextlib import suppress
+from typing import Protocol
 
 from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeAcceptedResponse,
     RuntimeAckRequest,
     RuntimeControlProtocolError,
     RuntimeErrorResponse,
-    RuntimeFollowRequest,
     RuntimeLastRestart,
+    RuntimeLogDiagnosticResponse,
+    RuntimeLogEndResponse,
+    RuntimeLogReplayCompleteResponse,
     RuntimeLogResponse,
+    RuntimeLogsRequest,
     RuntimeRestartRequest,
     RuntimeStatusRequest,
     RuntimeStatusResponse,
@@ -33,17 +39,27 @@ from comfyui_docker_helper.container.runtime.controller import (
     RuntimeRestartTicketSnapshot,
 )
 from comfyui_docker_helper.container.runtime.logging import (
-    RuntimeLogFollower,
-    RuntimeLogFollowerSource,
+    LogQueryDiagnostic,
+    LogReplayComplete,
     RuntimeLoggingError,
     RuntimeLoggingFollowerLimitError,
+    RuntimeLogQuery,
 )
 
 _ACCEPT_POLL_SECONDS = 0.1
 _TICKET_POLL_SECONDS = 0.05
-_FOLLOW_POLL_SECONDS = 0.1
-_FOLLOW_SEND_TIMEOUT_SECONDS = 0.1
+_LOG_POLL_SECONDS = 0.1
+_LOG_SEND_TIMEOUT_SECONDS = 0.1
 _WIRE_MESSAGE_MAX_CHARS = 4096
+_LOG_WIRE_CHUNK_BYTES = 16 * 1024
+_MAX_CONTROL_PEERS = 16
+_REQUEST_IDLE_TIMEOUT_SECONDS = 1.0
+
+
+class RuntimeLogQuerySource(Protocol):
+    def logs(
+        self, *, tail: int | None = None, follow: bool = False
+    ) -> RuntimeLogQuery: ...
 
 
 class RuntimeControlServer:
@@ -53,13 +69,16 @@ class RuntimeControlServer:
         self,
         listener: RuntimeControlListener,
         controller: RuntimeController,
-        logging_broker: RuntimeLogFollowerSource,
+        logging_broker: RuntimeLogQuerySource,
     ) -> None:
         self._listener = listener
         self._controller = controller
         self._logging_broker = logging_broker
         self._stop = threading.Event()
-        self._peers_lock = threading.Lock()
+        self._abort = threading.Event()
+        self._close_deadline: float | None = None
+        self._force_requested: Callable[[], bool] = lambda: False
+        self._peers_lock = threading.Condition()
         self._peers: set[socket.socket] = set()
         self._accept_thread = threading.Thread(
             target=self._accept_loop,
@@ -71,16 +90,51 @@ class RuntimeControlServer:
         self._listener.socket.settimeout(_ACCEPT_POLL_SECONDS)
         self._accept_thread.start()
 
-    def close(self) -> None:
+    def stop_accepting(
+        self,
+        *,
+        deadline: float | None = None,
+        force_requested: Callable[[], bool] = lambda: False,
+    ) -> None:
+        self._close_deadline = deadline
+        self._force_requested = force_requested
         self._stop.set()
         self._listener.close()
+
+    def close(
+        self,
+        *,
+        deadline: float | None = None,
+        force_requested: Callable[[], bool] = lambda: False,
+    ) -> None:
+        self._close_deadline = (
+            time.monotonic() + RUNTIME_CONTROL_ACK_DRAIN_SECONDS
+            if deadline is None
+            else deadline
+        )
+        self._force_requested = force_requested
+        self.stop_accepting(
+            deadline=self._close_deadline, force_requested=force_requested
+        )
         with self._peers_lock:
+            while self._peers and not force_requested():
+                remaining = self._close_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._peers_lock.wait(timeout=min(0.02, remaining))
+            self._abort.set()
             peers = tuple(self._peers)
+        # Workers alone send frames. Closing an unfinished connection cannot
+        # manufacture a successful end when its delivery budget is exhausted.
         for peer in peers:
             with suppress(OSError):
                 peer.shutdown(socket.SHUT_RDWR)
             peer.close()
-        self._accept_thread.join(timeout=RUNTIME_CONTROL_ACK_DRAIN_SECONDS)
+        while self._accept_thread.is_alive() and not force_requested():
+            remaining = self._close_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._accept_thread.join(timeout=min(0.02, remaining))
 
     def __enter__(self) -> RuntimeControlServer:
         self.start()
@@ -111,14 +165,18 @@ class RuntimeControlServer:
                 if self._stop.is_set():
                     peer.close()
                     return
+                if len(self._peers) >= _MAX_CONTROL_PEERS:
+                    peer.close()
+                    continue
                 self._peers.add(peer)
             worker.start()
 
     def _handle_peer(self, peer: socket.socket) -> None:
         ticket: RuntimeRestartTicket | None = None
-        follower: RuntimeLogFollower | None = None
+        query: RuntimeLogQuery | None = None
         try:
             try:
+                peer.settimeout(_REQUEST_IDLE_TIMEOUT_SECONDS)
                 request = receive_runtime_control_request(peer)
             except RuntimeControlProtocolError:
                 self._send_invalid_request(peer)
@@ -144,15 +202,17 @@ class RuntimeControlServer:
                 assert ticket is not None
                 self._serve_restart(peer, ticket)
                 return
-            if isinstance(request, RuntimeFollowRequest):
+            if isinstance(request, RuntimeLogsRequest):
                 try:
-                    follower = self._logging_broker.follow()
+                    query = self._logging_broker.logs(
+                        tail=request.tail, follow=request.follow
+                    )
                 except RuntimeLoggingFollowerLimitError:
                     send_runtime_control_message(
                         peer,
                         RuntimeErrorResponse(
                             code="busy",
-                            message="The live log connection limit has been reached.",
+                            message="The log query connection limit has been reached.",
                         ),
                     )
                     return
@@ -165,7 +225,7 @@ class RuntimeControlServer:
                         ),
                     )
                     return
-                self._serve_follow(peer, follower)
+                self._serve_logs(peer, query)
                 return
             if isinstance(request, RuntimeAckRequest):
                 self._send_invalid_request(peer)
@@ -175,44 +235,108 @@ class RuntimeControlServer:
         finally:
             if ticket is not None:
                 ticket.mark_delivery_complete()
-            if follower is not None:
-                follower.close()
+            if query is not None:
+                query.close()
             with self._peers_lock:
                 self._peers.discard(peer)
+                self._peers_lock.notify_all()
             peer.close()
 
-    def _serve_follow(
-        self,
-        peer: socket.socket,
-        follower: RuntimeLogFollower,
-    ) -> None:
-        peer.settimeout(_FOLLOW_SEND_TIMEOUT_SECONDS)
-        while not self._stop.is_set():
+    def _serve_logs(self, peer: socket.socket, query: RuntimeLogQuery) -> None:
+        peer.settimeout(_LOG_SEND_TIMEOUT_SECONDS)
+        for item in query.replay():
+            if self._delivery_stopped() or self._peer_has_input_or_eof(peer):
+                return
+            if isinstance(item, bytes):
+                self._send_log_bytes(peer, item)
+            elif isinstance(item, LogQueryDiagnostic):
+                self._send_log_diagnostic(peer, item)
+            elif isinstance(item, LogReplayComplete):
+                self._send_log_message(
+                    peer, RuntimeLogReplayCompleteResponse(complete=item.complete)
+                )
+                if not item.complete or query.follower is None:
+                    return
+        follower = query.follower
+        assert follower is not None
+        while not self._delivery_stopped():
             if self._peer_has_input_or_eof(peer):
                 return
-            chunk = follower.receive(timeout=_FOLLOW_POLL_SECONDS)
+            diagnostic = query.poll_diagnostic()
+            if diagnostic is not None:
+                self._send_log_diagnostic(peer, diagnostic)
+            chunk = follower.receive(timeout=_LOG_POLL_SECONDS)
             if chunk is not None:
-                send_runtime_control_message(
-                    peer,
-                    RuntimeLogResponse.from_bytes(chunk.stream, chunk.data),
-                )
+                self._send_log_bytes(peer, chunk.data)
                 continue
             reason = follower.close_reason()
             if reason == "overflow":
-                with suppress(OSError):
-                    send_runtime_control_message(
-                        peer,
-                        RuntimeErrorResponse(
-                            code="unavailable",
-                            message=(
-                                "This live log connection could not keep up and "
-                                "was disconnected."
-                            ),
+                self._send_log_message(
+                    peer,
+                    RuntimeErrorResponse(
+                        code="unavailable",
+                        message=(
+                            "This log connection could not keep up "
+                            "and was disconnected."
                         ),
-                    )
+                    ),
+                )
+                return
+            if reason == "broker_closed":
+                diagnostic = query.poll_diagnostic()
+                if diagnostic is not None:
+                    self._send_log_diagnostic(peer, diagnostic)
+                self._send_log_message(peer, RuntimeLogEndResponse())
                 return
             if reason is not None:
                 return
+
+    def _send_log_bytes(self, peer: socket.socket, data: bytes) -> None:
+        # Base64 expands payloads; history reads can be larger than one wire frame.
+        for offset in range(0, len(data), _LOG_WIRE_CHUNK_BYTES):
+            self._send_log_message(
+                peer,
+                RuntimeLogResponse.from_bytes(
+                    data[offset : offset + _LOG_WIRE_CHUNK_BYTES]
+                ),
+            )
+
+    def _send_log_diagnostic(
+        self, peer: socket.socket, diagnostic: LogQueryDiagnostic
+    ) -> None:
+        self._send_log_message(
+            peer,
+            RuntimeLogDiagnosticResponse(
+                message=diagnostic.message, incomplete=diagnostic.incomplete
+            ),
+        )
+
+    def _delivery_stopped(self) -> bool:
+        return (
+            self._abort.is_set()
+            or self._force_requested()
+            or (
+                self._close_deadline is not None
+                and time.monotonic() >= self._close_deadline
+            )
+        )
+
+    def _send_log_message(
+        self,
+        peer: socket.socket,
+        message: RuntimeLogResponse
+        | RuntimeLogDiagnosticResponse
+        | RuntimeLogReplayCompleteResponse
+        | RuntimeLogEndResponse
+        | RuntimeErrorResponse,
+    ) -> None:
+        if self._delivery_stopped():
+            raise TimeoutError("log delivery deadline exhausted")
+        timeout = _LOG_SEND_TIMEOUT_SECONDS
+        if self._close_deadline is not None:
+            timeout = min(timeout, max(0.0, self._close_deadline - time.monotonic()))
+        peer.settimeout(timeout)
+        send_runtime_control_message(peer, message)
 
     def _serve_restart(
         self,
@@ -314,7 +438,11 @@ class RuntimeControlServer:
 
     @staticmethod
     def _peer_has_input_or_eof(peer: socket.socket) -> bool:
-        readable, _writable, _exceptional = select.select((peer,), (), (), 0)
+        try:
+            readable, _writable, _exceptional = select.select((peer,), (), (), 0)
+        except ValueError:
+            # Final bounded close can release this descriptor between polls.
+            return True
         return bool(readable)
 
 

@@ -13,7 +13,7 @@ from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, field_vali
 
 from comfyui_docker_helper.config.model_base import ConfigModel
 
-RUNTIME_CONTROL_PROTOCOL_VERSION = 1
+RUNTIME_CONTROL_PROTOCOL_VERSION = 2
 RUNTIME_CONTROL_MAX_FRAME_BYTES = 64 * 1024
 RUNTIME_CONTROL_FRAME_HEADER_BYTES = 4
 RUNTIME_CONTROL_MAX_PAYLOAD_BYTES = (
@@ -45,7 +45,7 @@ class _RuntimeControlModel(ConfigModel):
 
 
 class _RuntimeControlMessage(_RuntimeControlModel):
-    version: Literal[1] = RUNTIME_CONTROL_PROTOCOL_VERSION
+    version: Literal[2] = RUNTIME_CONTROL_PROTOCOL_VERSION
 
 
 class RuntimeRestartRequest(_RuntimeControlMessage):
@@ -56,8 +56,10 @@ class RuntimeStatusRequest(_RuntimeControlMessage):
     type: Literal["status"] = "status"
 
 
-class RuntimeFollowRequest(_RuntimeControlMessage):
-    type: Literal["follow"] = "follow"
+class RuntimeLogsRequest(_RuntimeControlMessage):
+    type: Literal["logs"] = "logs"
+    tail: Annotated[int, Field(ge=0)] | None = None
+    follow: bool = False
 
 
 class RuntimeAckRequest(_RuntimeControlMessage):
@@ -86,7 +88,6 @@ class RuntimeStatusResponse(_RuntimeControlMessage):
 
 class RuntimeLogResponse(_RuntimeControlMessage):
     type: Literal["log"] = "log"
-    stream: Literal["stdout", "stderr"]
     data: str
 
     @field_validator("data")
@@ -101,16 +102,29 @@ class RuntimeLogResponse(_RuntimeControlMessage):
     @classmethod
     def from_bytes(
         cls,
-        stream: Literal["stdout", "stderr"],
         data: bytes,
     ) -> RuntimeLogResponse:
         return cls(
-            stream=stream,
             data=base64.b64encode(data).decode("ascii"),
         )
 
     def as_bytes(self) -> bytes:
         return base64.b64decode(self.data, validate=True)
+
+
+class RuntimeLogDiagnosticResponse(_RuntimeControlMessage):
+    type: Literal["log_diagnostic"] = "log_diagnostic"
+    message: Annotated[str, Field(max_length=4096)]
+    incomplete: bool = False
+
+
+class RuntimeLogReplayCompleteResponse(_RuntimeControlMessage):
+    type: Literal["log_replay_complete"] = "log_replay_complete"
+    complete: bool
+
+
+class RuntimeLogEndResponse(_RuntimeControlMessage):
+    type: Literal["log_end"] = "log_end"
 
 
 class RuntimeTerminalResponse(_RuntimeControlMessage):
@@ -130,7 +144,7 @@ class RuntimeErrorResponse(_RuntimeControlMessage):
 type RuntimeControlRequest = Annotated[
     RuntimeRestartRequest
     | RuntimeStatusRequest
-    | RuntimeFollowRequest
+    | RuntimeLogsRequest
     | RuntimeAckRequest,
     Field(discriminator="type"),
 ]
@@ -138,6 +152,9 @@ type RuntimeControlResponse = Annotated[
     RuntimeAcceptedResponse
     | RuntimeStatusResponse
     | RuntimeLogResponse
+    | RuntimeLogDiagnosticResponse
+    | RuntimeLogReplayCompleteResponse
+    | RuntimeLogEndResponse
     | RuntimeTerminalResponse
     | RuntimeErrorResponse,
     Field(discriminator="type"),

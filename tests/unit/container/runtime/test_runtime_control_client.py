@@ -14,7 +14,7 @@ from comfyui_docker_helper.container.runtime.control import client as client_mod
 from comfyui_docker_helper.container.runtime.control.client import (
     RuntimeControlClientError,
     _write_all,
-    follow_runtime,
+    read_runtime_logs,
     read_runtime_status,
     restart_runtime,
 )
@@ -23,6 +23,9 @@ from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeAckRequest,
     RuntimeControlProtocolError,
     RuntimeErrorResponse,
+    RuntimeLogDiagnosticResponse,
+    RuntimeLogEndResponse,
+    RuntimeLogReplayCompleteResponse,
     RuntimeLogResponse,
     RuntimeRestartRequest,
     RuntimeStatusResponse,
@@ -218,8 +221,8 @@ def test_terminal_result_wins_when_best_effort_ack_is_interrupted(
     assert peer.closed is True
 
 
-# Live log clients preserve stream identity and never change container lifecycle.
-def test_follow_preserves_binary_stdout_and_stderr_identity(
+# Log payload is merged on stdout; diagnostics alone use stderr.
+def test_logs_preserve_merged_binary_payload_and_separate_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     peer = _FakePeer()
@@ -227,21 +230,22 @@ def test_follow_preserves_binary_stdout_and_stderr_identity(
     stderr_read, stderr_write = os.pipe()
     responses: Iterator[object] = iter(
         (
-            RuntimeLogResponse.from_bytes("stdout", b"out\x00\xff"),
-            RuntimeLogResponse.from_bytes("stderr", b"err\x80tail"),
-            None,
+            RuntimeLogResponse.from_bytes(b"out\x00\xff"),
+            RuntimeLogResponse.from_bytes(b"err\x80tail"),
+            RuntimeLogDiagnosticResponse(message="retention warning"),
+            RuntimeLogReplayCompleteResponse(complete=True),
         )
     )
     monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
     monkeypatch.setattr(client_module, "_send_message", lambda _peer, _message: None)
     monkeypatch.setattr(
         client_module,
-        "_receive_follow_response",
+        "_receive_logs_response",
         lambda _peer: next(responses),
     )
     try:
         assert (
-            follow_runtime(
+            read_runtime_logs(
                 Path("unused"),
                 stdout_fd=stdout_write,
                 stderr_fd=stderr_write,
@@ -252,23 +256,23 @@ def test_follow_preserves_binary_stdout_and_stderr_identity(
         os.close(stdout_write)
         os.close(stderr_write)
 
-    assert os.read(stdout_read, 1024) == b"out\x00\xff"
-    assert os.read(stderr_read, 1024) == b"err\x80tail"
+    assert os.read(stdout_read, 1024) == b"out\x00\xfferr\x80tail"
+    assert os.read(stderr_read, 1024) == b"retention warning\n"
     os.close(stdout_read)
     os.close(stderr_read)
     assert peer.closed is True
 
 
-def test_follow_local_output_failure_is_silent_nonzero(
+def test_logs_local_output_failure_is_silent_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     peer = _FakePeer()
-    responses = iter((RuntimeLogResponse.from_bytes("stdout", b"payload"),))
+    responses = iter((RuntimeLogResponse.from_bytes(b"payload"),))
     monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
     monkeypatch.setattr(client_module, "_send_message", lambda _peer, _message: None)
     monkeypatch.setattr(
         client_module,
-        "_receive_follow_response",
+        "_receive_logs_response",
         lambda _peer: next(responses),
     )
 
@@ -277,7 +281,7 @@ def test_follow_local_output_failure_is_silent_nonzero(
 
     monkeypatch.setattr(client_module, "_write_all", fail_output)
 
-    assert follow_runtime(Path("unused")) == 1
+    assert read_runtime_logs(Path("unused")) == 1
     assert peer.closed is True
 
 
@@ -291,7 +295,7 @@ def test_follow_local_output_failure_is_silent_nonzero(
         (ConnectionResetError("synthetic reset"), "connection.*lost"),
     ],
 )
-def test_follow_transport_failure_is_concise(
+def test_logs_transport_failure_is_concise(
     monkeypatch: pytest.MonkeyPatch,
     error: Exception,
     message: str,
@@ -306,7 +310,7 @@ def test_follow_transport_failure_is_concise(
     monkeypatch.setattr(client_module, "receive_runtime_control_response", fail_receive)
 
     with pytest.raises(RuntimeControlClientError, match=message):
-        follow_runtime(Path("unused"))
+        read_runtime_logs(Path("unused"))
 
     assert peer.closed is True
 
@@ -319,7 +323,7 @@ def test_follow_transport_failure_is_concise(
         (signal.SIGTERM, 143),
     ],
 )
-def test_follow_signal_ends_only_the_local_client(
+def test_logs_signal_ends_only_the_local_client(
     monkeypatch: pytest.MonkeyPatch,
     sig: signal.Signals,
     exit_code: int,
@@ -332,14 +336,14 @@ def test_follow_signal_ends_only_the_local_client(
 
     monkeypatch.setattr(client_module, "_send_message", interrupt_send)
 
-    assert follow_runtime(Path("unused")) == exit_code
+    assert read_runtime_logs(Path("unused")) == exit_code
     assert peer.closed is True
 
 
 @pytest.mark.parametrize(
     "response",
     [
-        RuntimeErrorResponse(code="unavailable", message="follow unavailable"),
+        RuntimeErrorResponse(code="unavailable", message="logs unavailable"),
         RuntimeStatusResponse(
             state="running",
             phase=None,
@@ -349,7 +353,7 @@ def test_follow_signal_ends_only_the_local_client(
         ),
     ],
 )
-def test_follow_rejects_typed_error_and_unexpected_response(
+def test_logs_rejects_typed_error_and_unexpected_response(
     monkeypatch: pytest.MonkeyPatch,
     response: object,
 ) -> None:
@@ -358,12 +362,12 @@ def test_follow_rejects_typed_error_and_unexpected_response(
     monkeypatch.setattr(client_module, "_send_message", lambda _peer, _message: None)
     monkeypatch.setattr(
         client_module,
-        "_receive_follow_response",
+        "_receive_logs_response",
         lambda _peer: response,
     )
 
     with pytest.raises(RuntimeControlClientError):
-        follow_runtime(Path("unused"))
+        read_runtime_logs(Path("unused"))
 
     assert peer.closed is True
 
@@ -389,3 +393,92 @@ def test_local_output_write_retries_interruption_and_partial_progress() -> None:
     assert interrupted is True
     assert partial is True
     assert b"".join(writes) == b"abcdef"
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_logs_require_explicit_replay_result_before_eof(
+    monkeypatch: pytest.MonkeyPatch, follow: bool
+) -> None:
+    peer = _FakePeer()
+    monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
+    monkeypatch.setattr(client_module, "_send_message", lambda *_args: None)
+    monkeypatch.setattr(client_module, "_receive_logs_response", lambda _peer: None)
+    with pytest.raises(RuntimeControlClientError, match="without a log result"):
+        read_runtime_logs(Path("unused"), follow=follow)
+    assert peer.closed
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_incomplete_diagnostic_cannot_be_overridden_by_success(
+    monkeypatch: pytest.MonkeyPatch, follow: bool
+) -> None:
+    peer = _FakePeer()
+    responses = iter(
+        (
+            RuntimeLogDiagnosticResponse(message="history gap", incomplete=True),
+            RuntimeLogReplayCompleteResponse(complete=True),
+        )
+    )
+    monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
+    monkeypatch.setattr(client_module, "_send_message", lambda *_args: None)
+    monkeypatch.setattr(
+        client_module, "_receive_logs_response", lambda _peer: next(responses)
+    )
+    monkeypatch.setattr(client_module, "_write_all", lambda *_args: None)
+    assert read_runtime_logs(Path("unused"), follow=follow) == 1
+    assert peer.closed
+
+
+def test_follow_rejects_duplicate_replay_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    peer = _FakePeer()
+    monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
+    monkeypatch.setattr(client_module, "_send_message", lambda *_args: None)
+    monkeypatch.setattr(
+        client_module,
+        "_receive_logs_response",
+        lambda _peer: RuntimeLogReplayCompleteResponse(complete=True),
+    )
+    with pytest.raises(RuntimeControlClientError, match="invalid response sequence"):
+        read_runtime_logs(Path("unused"), follow=True)
+    assert peer.closed
+
+
+@pytest.mark.parametrize("explicit_end", [False, True])
+def test_follow_requires_explicit_end_after_replay(
+    monkeypatch: pytest.MonkeyPatch, explicit_end: bool
+) -> None:
+    peer = _FakePeer()
+    responses = iter(
+        (
+            RuntimeLogReplayCompleteResponse(complete=True),
+            RuntimeLogEndResponse() if explicit_end else None,
+        )
+    )
+    monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
+    monkeypatch.setattr(client_module, "_send_message", lambda *_args: None)
+    monkeypatch.setattr(
+        client_module, "_receive_logs_response", lambda _peer: next(responses)
+    )
+    if explicit_end:
+        assert read_runtime_logs(Path("unused"), follow=True) == 0
+    else:
+        with pytest.raises(RuntimeControlClientError, match="without a log result"):
+            read_runtime_logs(Path("unused"), follow=True)
+    assert peer.closed
+
+
+@pytest.mark.parametrize("follow", [False, True])
+def test_logs_reject_end_before_replay(
+    monkeypatch: pytest.MonkeyPatch, follow: bool
+) -> None:
+    peer = _FakePeer()
+    monkeypatch.setattr(client_module, "connect_runtime_control", lambda _path: peer)
+    monkeypatch.setattr(client_module, "_send_message", lambda *_args: None)
+    monkeypatch.setattr(
+        client_module, "_receive_logs_response", lambda _peer: RuntimeLogEndResponse()
+    )
+    with pytest.raises(RuntimeControlClientError, match="invalid response sequence"):
+        read_runtime_logs(Path("unused"), follow=follow)
+    assert peer.closed

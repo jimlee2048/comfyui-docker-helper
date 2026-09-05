@@ -86,7 +86,11 @@ Lifecycle changes reuse one current image produced by the formal renderer; do no
 
 ## Change selection and cleanup
 
-Start with focused tests for the changed owner, then expand to adjacent integration coverage. Run the full offline suite before handoff. Add live or high-cost checks only when the change affects their provider, image, runtime, or hardware boundary.
+For changes to code, executable configuration, build inputs, or test infrastructure, start with focused tests for the changed owner, expand to relevant adjacent integration coverage, and run the full offline suite before handoff. Follow the native-platform requirements above. Add live or high-cost checks only when the change affects their provider, image, runtime, or hardware boundary.
+
+Changes limited to documentation, comments, or agent instructions that do not affect product execution, build output, or executable test behavior require content, link, and rule-consistency review instead of the offline suite or package builds. Validate changed runnable examples or commands at the narrowest relevant boundary, subject to the same cost authorization rules. Select validation by the changed behavior rather than the file extension; a documentation edit that changes an executable input does not qualify for this exception.
+
+Once the required checks pass, broaden or repeat validation only for new changes, failures, or unresolved concerns. Report the checks actually run and any remaining validation gaps at handoff.
 
 For renderer changes, protect semantic operations, ordering constraints, and mount, environment, credential, and trust scopes at their narrow owner. Do not use a complete Dockerfile snapshot or exact comments, whitespace, wrapping, or line-count assertions merely to police presentation; byte-for-byte golden output is appropriate only when exact bytes are an explicit compatibility or identity contract.
 

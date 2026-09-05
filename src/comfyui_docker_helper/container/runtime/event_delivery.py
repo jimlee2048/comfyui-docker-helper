@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -21,6 +22,7 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeDownloadQueueWarning,
     RuntimeDownloadReconciled,
     RuntimeEvent,
+    RuntimeLogStorageWarning,
     RuntimePresentationSaturated,
     RuntimeSshWarning,
     RuntimeStaleCleanupPending,
@@ -44,6 +46,7 @@ type RuntimeBackgroundEvent = (
     | RuntimeStaleCleanupPending
     | RuntimeDownloadFailed
     | RuntimeSshWarning
+    | RuntimeLogStorageWarning
 )
 
 
@@ -77,7 +80,9 @@ def safe_runtime_event_sink(
 class RuntimeDeliveryWorker(Protocol):
     def wake(self) -> None: ...
 
-    def close(self) -> None: ...
+    def close(
+        self, *, deadline: float, force_requested: Callable[[], bool]
+    ) -> None: ...
 
 
 class RuntimeBackgroundEventSink(EventSink[RuntimeBackgroundEvent], Protocol):
@@ -147,6 +152,8 @@ class RuntimeEventDelivery(EventSink[RuntimeBackgroundEvent]):
         self._omitted_transitions = 0
         self._next_sequence = 0
         self._closed = False
+        self._close_deadline: float | None = None
+        self._force_requested: Callable[[], bool] = lambda: False
         factory = worker_factory or _ConditionRuntimeDeliveryWorker
         self._worker = factory(self._drain_once)
 
@@ -204,14 +211,22 @@ class RuntimeEventDelivery(EventSink[RuntimeBackgroundEvent]):
             self._progress.pop(scope, None)
         self._worker.wake()
 
-    def close(self) -> None:
-        """Stop cadence polling and drain retained facts before broker teardown."""
+    def close(
+        self,
+        *,
+        deadline: float | None = None,
+        force_requested: Callable[[], bool] = lambda: False,
+    ) -> None:
+        """Let the worker render final facts within the caller's shared bound."""
+        if deadline is None:
+            deadline = time.monotonic() + 0.5
         with self._lock:
             if self._closed:
                 return
+            self._close_deadline = deadline
+            self._force_requested = force_requested
             self._closed = True
-        self._worker.close()
-        self._drain_once(final=True)
+        self._worker.close(deadline=deadline, force_requested=force_requested)
 
     def __enter__(self) -> RuntimeEventDelivery:
         return self
@@ -228,6 +243,7 @@ class RuntimeEventDelivery(EventSink[RuntimeBackgroundEvent]):
         outgoing: list[RuntimeEvent] = []
         next_delays: list[float] = []
         with self._lock:
+            final = final or self._closed
             retained = [*self._warnings, *self._transitions]
             retained.sort(key=lambda item: item.sequence)
             outgoing.extend(item.event for item in retained)
@@ -254,6 +270,10 @@ class RuntimeEventDelivery(EventSink[RuntimeBackgroundEvent]):
             if final:
                 self._progress.clear()
         for event in outgoing:
+            if self._close_deadline is not None and (
+                time.monotonic() >= self._close_deadline or self._force_requested()
+            ):
+                break
             self._event_sink.emit(event)
         if final or not next_delays:
             return None
@@ -280,19 +300,24 @@ class _ConditionRuntimeDeliveryWorker:
             self._revision += 1
             self._condition.notify()
 
-    def close(self) -> None:
+    def close(self, *, deadline: float, force_requested: Callable[[], bool]) -> None:
         with self._condition:
             self._closed = True
             self._condition.notify()
-        self._thread.join()
+        while self._thread.is_alive() and not force_requested():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._thread.join(min(remaining, 0.02))
 
     def _run(self) -> None:
         while True:
             with self._condition:
-                if self._closed:
-                    return
+                final = self._closed
                 revision = self._revision
             delay = self._callback()
+            if final:
+                return
             with self._condition:
                 self._condition.wait_for(
                     lambda observed=revision: (
@@ -311,6 +336,8 @@ def _warning_category(
         return RuntimeWarningCategory.DOWNLOAD_FAILURE
     if isinstance(event, RuntimeDownloadQueueWarning):
         return RuntimeWarningCategory.DOWNLOAD_FAILURE
+    if isinstance(event, RuntimeLogStorageWarning):
+        return RuntimeWarningCategory.LOG_STORAGE
     if isinstance(event, RuntimeSshWarning):
         return RuntimeWarningCategory.SSH
     return None

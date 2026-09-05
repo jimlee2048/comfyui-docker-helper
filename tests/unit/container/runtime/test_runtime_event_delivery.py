@@ -46,8 +46,9 @@ class _ManualWorker:
     def wake(self) -> None:
         self.wakes += 1
 
-    def close(self) -> None:
+    def close(self, *, deadline: float, force_requested: Callable[[], bool]) -> None:
         self.closed = True
+        self.callback()
 
     def run(self) -> float | None:
         return self.callback()
@@ -335,3 +336,53 @@ def test_safe_runtime_event_sink_latches_exceptions_but_preserves_interrupts() -
     interrupting = safe_runtime_event_sink(InterruptingSink())  # type: ignore[arg-type]
     with pytest.raises(KeyboardInterrupt):
         interrupting.emit(RuntimeGenerationReady("gen-3"))
+
+
+@pytest.mark.parametrize("forced", [False, True])
+def test_final_delivery_drops_pending_events_after_budget_or_force(forced):
+    import time
+
+    recorder = _Recorder()
+    factory = _ManualWorkerFactory()
+    delivery = RuntimeEventDelivery(
+        recorder, clock=time.monotonic, worker_factory=factory
+    )
+    delivery.emit(
+        RuntimeDownloadQueueWarning(
+            RuntimeDownloadQueueWarningKind.STOPPED_AFTER_FAILURE
+        )
+    )
+    delivery.close(
+        deadline=time.monotonic() + (10 if forced else -1),
+        force_requested=lambda: forced,
+    )
+    assert recorder.events == []
+    assert factory.worker.closed
+
+
+def test_blocked_presentation_does_not_make_final_worker_join_unbounded():
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class BlockedSink:
+        def emit(self, event):
+            entered.set()
+            assert release.wait(2)
+            finished.set()
+
+    delivery = RuntimeEventDelivery(BlockedSink(), clock=time.monotonic)
+    delivery.emit(
+        RuntimeDownloadQueueWarning(
+            RuntimeDownloadQueueWarningKind.STOPPED_AFTER_FAILURE
+        )
+    )
+    try:
+        assert entered.wait(2)
+        delivery.close(deadline=time.monotonic())
+        assert not finished.is_set()
+    finally:
+        release.set()
+    assert finished.wait(2)

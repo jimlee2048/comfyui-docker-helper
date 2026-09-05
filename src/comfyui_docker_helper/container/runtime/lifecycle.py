@@ -69,6 +69,7 @@ from comfyui_docker_helper.container.runtime.readiness import (
     ReadinessError,
     wait_for_comfyui_readiness,
 )
+from comfyui_docker_helper.container.runtime.shutdown import RuntimeShutdownDeadline
 from comfyui_docker_helper.container.runtime.ssh.service import (
     RuntimeSshService,
     RuntimeSshServiceError,
@@ -257,12 +258,17 @@ def run_runtime_lifecycle(
     event_sink: EventSink[RuntimeEvent],
     generation: str | None = None,
     runtime_ownership_claimed: Callable[[], object] = lambda: None,
+    shutdown_deadline_observer: Callable[
+        [RuntimeShutdownDeadline], object
+    ] = lambda _deadline: None,
 ) -> RuntimeGenerationResult:
     """Run the fixed cdh startup, child, and cleanup phase order."""
     startup_shutdown = _StartupShutdownState(
         shutdown_timeout=config.cdh.shutdown_timeout,
         monotonic=monotonic,
         external_shutdown_observer=external_shutdown_observer,
+        shutdown_deadline_observer=shutdown_deadline_observer,
+        generation=generation,
     )
     startup_cancellation = _RuntimeStartupCancellation(
         state=startup_shutdown,
@@ -315,10 +321,7 @@ def run_runtime_lifecycle(
             if generation is not None:
                 lifecycle_events.start_phase(RuntimePhase.GENERATION_CLEANUP)
             try:
-                timeline = startup_shutdown.timeline or _ShutdownTimeline.start(
-                    config.cdh.shutdown_timeout,
-                    now=monotonic(),
-                )
+                timeline = startup_shutdown.accept_timeline(now=monotonic())
 
                 def component_timeout() -> float:
                     if timeline.deadline is None:
@@ -804,7 +807,13 @@ class _StartupShutdownState:
         external_shutdown_observer: Callable[[signal.Signals], object] = (
             lambda _sig: None
         ),
+        shutdown_deadline_observer: Callable[
+            [RuntimeShutdownDeadline], object
+        ] = lambda _deadline: None,
+        generation: str | None = None,
     ) -> None:
+        self._shutdown_deadline_observer = shutdown_deadline_observer
+        self._generation = generation
         self._external_signal_state: tuple[signal.Signals | None, bool] = (
             None,
             False,
@@ -827,10 +836,7 @@ class _StartupShutdownState:
         requested_signal, _repeated_signal = self._external_signal_state
         if requested_signal is None:
             self._external_signal_state = (sig, False)
-            self.timeline = _ShutdownTimeline.start(
-                self._shutdown_timeout,
-                now=self._monotonic(),
-            )
+            self.accept_timeline(now=self._monotonic())
         else:
             self._external_signal_state = (requested_signal, True)
             self._repeated_event.set()
@@ -841,12 +847,18 @@ class _StartupShutdownState:
     def cancel_requested(self) -> bool:
         return self.requested_signal is not None
 
-    def admit_runtime_failure(self) -> None:
+    def accept_timeline(self, *, now: float) -> _ShutdownTimeline:
         if self.timeline is None:
-            self.timeline = _ShutdownTimeline.start(
-                self._shutdown_timeout,
-                now=self._monotonic(),
-            )
+            self.timeline = _ShutdownTimeline.start(self._shutdown_timeout, now=now)
+        # Re-publication also covers a first signal interrupting the assignment
+        # before its observer call. The existing timeline remains authoritative.
+        self._shutdown_deadline_observer(
+            RuntimeShutdownDeadline(self._generation, self.timeline.deadline)
+        )
+        return self.timeline
+
+    def admit_runtime_failure(self) -> None:
+        self.accept_timeline(now=self._monotonic())
 
     @property
     def requested_signal(self) -> signal.Signals | None:
@@ -1073,10 +1085,7 @@ def _wait_with_existing_signal_state(
                             ssh_service=ssh_service,
                             startup_shutdown=startup_shutdown,
                             lifecycle_events=lifecycle_events,
-                            timeline=_ShutdownTimeline.start(
-                                startup_shutdown.shutdown_timeout,
-                                now=monotonic(),
-                            ),
+                            timeline=startup_shutdown.accept_timeline(now=monotonic()),
                             monotonic=monotonic,
                             sleep=sleep,
                         )
@@ -1102,9 +1111,8 @@ def _wait_with_existing_signal_state(
                                 ssh_service=ssh_service,
                                 startup_shutdown=startup_shutdown,
                                 lifecycle_events=lifecycle_events,
-                                timeline=_ShutdownTimeline.start(
-                                    startup_shutdown.shutdown_timeout,
-                                    now=monotonic(),
+                                timeline=startup_shutdown.accept_timeline(
+                                    now=monotonic()
                                 ),
                                 monotonic=monotonic,
                                 sleep=sleep,
@@ -1125,9 +1133,8 @@ def _wait_with_existing_signal_state(
                                 ssh_service=ssh_service,
                                 startup_shutdown=startup_shutdown,
                                 lifecycle_events=lifecycle_events,
-                                timeline=_ShutdownTimeline.start(
-                                    startup_shutdown.shutdown_timeout,
-                                    now=accepted_at,
+                                timeline=startup_shutdown.accept_timeline(
+                                    now=accepted_at
                                 ),
                                 monotonic=monotonic,
                                 sleep=sleep,

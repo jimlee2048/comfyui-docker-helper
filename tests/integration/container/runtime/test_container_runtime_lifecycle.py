@@ -2847,3 +2847,32 @@ def test_graceful_shutdown_runs_stop_hooks_before_forwarding_and_child_result_wi
     assert "runtime_hook.shutdown_deadline" in captured.err
     # One handler authority remains installed from startup through child wait.
     assert restored == [signal.SIGTERM, signal.SIGINT]
+
+
+def test_spawn_failure_publishes_cleanup_deadline_before_raising(tmp_path):
+    deadlines = []
+    downloads = Mock(spec=RuntimeDownloads)
+    downloads.is_stopped.return_value = True
+    ssh = Mock(spec=RuntimeSshService)
+    ssh.is_stopped.return_value = True
+
+    def fail_spawn(*args, **kwargs):
+        raise OSError("synthetic spawn failure")
+
+    with pytest.raises(RuntimeExecutionError):
+        lifecycle_module.run_runtime_lifecycle(
+            RuntimeConfig.model_validate({"cdh": {"shutdown_timeout": 5}}),
+            RuntimeHookPlan(hooks=()),
+            runtime=_runtime(tmp_path),
+            source_env={},
+            downloads=downloads,
+            ssh_service=ssh,
+            runner=fail_spawn,
+            event_sink=RecordingRuntimeEventSink(),
+            generation="gen-2",
+            monotonic=lambda: 10,
+            shutdown_deadline_observer=deadlines.append,
+        )
+    assert len(deadlines) == 1
+    assert deadlines[0].generation == "gen-2"
+    assert deadlines[0].deadline == 15

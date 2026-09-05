@@ -13,6 +13,7 @@ from comfyui_docker_helper.config.runtime.hooks import (
     RUNTIME_HOOK_SOURCE_NAMES,
 )
 from comfyui_docker_helper.config.validation.hooks import validate_hook_relative_path
+from comfyui_docker_helper.container.runtime.log_history import LogStorageFailure
 from comfyui_docker_helper.container.transfer.events import (
     DownloadBackendName,
     DownloadRetryReason,
@@ -103,6 +104,7 @@ class RuntimeWarningCategory(StrEnum):
     STALE_CLEANUP = "stale-cleanup"
     DOWNLOAD_FAILURE = "download-failure"
     SSH = "ssh"
+    LOG_STORAGE = "log-storage"
 
 
 class RuntimeSshWarningKind(StrEnum):
@@ -507,6 +509,16 @@ class RuntimeHookWarning:
         _require_hook_scope(self.phase, self.source, self.filename)
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeLogStorageWarning:
+    """File recording failed; current capture continues in bounded memory."""
+
+    reason: LogStorageFailure
+
+    def __post_init__(self) -> None:
+        _require_enum(self.reason, LogStorageFailure, "Log storage failure reason")
+
+
 type RuntimeEvent = (
     RuntimePhaseStarted
     | RuntimePhaseCompleted
@@ -531,6 +543,7 @@ type RuntimeEvent = (
     | RuntimeStaleCleanupPending
     | RuntimeDownloadFailed
     | RuntimeSshWarning
+    | RuntimeLogStorageWarning
     | RuntimeHookWarning
 )
 

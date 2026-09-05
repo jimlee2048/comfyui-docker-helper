@@ -11,6 +11,7 @@ import pytest
 from tests.runtime_event_support import RecordingRuntimeEventSink
 
 from comfyui_docker_helper.config import Diagnostic
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.runtime import lifecycle as lifecycle_module
 from comfyui_docker_helper.container.runtime import serve as runtime_serve_module
@@ -52,8 +53,8 @@ from comfyui_docker_helper.container.runtime.hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
 )
+from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 from comfyui_docker_helper.container.runtime.serve import (
-    RuntimeExecutionError,
     run_runtime_serve,
 )
 from comfyui_docker_helper.container.runtime.ssh.config import SshdReadinessError
@@ -118,6 +119,11 @@ def _hook_names(plan: RuntimeHookPlan, phase: str) -> list[str]:
 
 
 # A controller-lifetime logging failure wakes the runtime and uses normal cleanup.
+class _InjectedLogging(RuntimeLoggingBroker):
+    def configure(self, settings: RuntimeLogSettings) -> None:
+        self._settings = settings
+
+
 def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -139,12 +145,11 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
         lambda _settings: recorder,
     )
 
-    class InjectedLogging:
-        def __enter__(self) -> InjectedLogging:
+    class InjectedLogging(_InjectedLogging):
+        def start(self) -> None:
             events.append("logging:start")
-            return self
 
-        def __exit__(self, *_exc: object) -> None:
+        def close(self, **_kwargs: object) -> None:
             events.append("logging:close")
 
     def logging_factory(observer: Callable[[str], object]) -> InjectedLogging:
@@ -167,21 +172,21 @@ def test_primary_logging_failure_wakes_serve_and_cleans_exact_generation(
         failure_observer[0]("Runtime stdout primary output failed.")
         events.append("logging:failed")
 
-    with pytest.raises(RuntimeExecutionError, match="runtime logging failed"):
-        run_runtime_serve(
-            runtime=runtime,
-            mounted_config_path=config,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_hooks_path=hooks,
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            environ={"PATH": "/usr/bin"},
-            runner=runner,  # type: ignore[arg-type]
-            runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
-            runtime_state_path=tmp_path / "state.json",
-            control_socket_path=tmp_path / "control" / "runtime.sock",
-            generation_running=generation_running,
-            runtime_logging_factory=logging_factory,  # type: ignore[arg-type]
-        )
+    result = run_runtime_serve(
+        runtime=runtime,
+        mounted_config_path=config,
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_hooks_path=hooks,
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        environ={"PATH": "/usr/bin"},
+        runner=runner,  # type: ignore[arg-type]
+        runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+        runtime_state_path=tmp_path / "state.json",
+        control_socket_path=tmp_path / "control" / "runtime.sock",
+        generation_running=generation_running,
+        runtime_logging_factory=logging_factory,  # type: ignore[arg-type]
+    )
+    assert result == 1
 
     assert child.signals == [signal.SIGTERM]
     assert events == [
@@ -208,15 +213,14 @@ def test_runtime_display_is_constructed_inside_logging_ownership(
 ) -> None:
     timeline: list[str] = []
 
-    class InjectedLogging:
+    class InjectedLogging(_InjectedLogging):
         active = False
 
-        def __enter__(self) -> InjectedLogging:
+        def start(self) -> None:
             self.active = True
             timeline.append("logging:enter")
-            return self
 
-        def __exit__(self, *_exc: object) -> None:
+        def close(self, **_kwargs: object) -> None:
             self.active = False
             timeline.append("logging:exit")
 
@@ -226,13 +230,10 @@ def test_runtime_display_is_constructed_inside_logging_ownership(
     class InjectedDelivery:
         def __init__(self, _sink: object, **_kwargs: object) -> None:
             deliveries.append(self)
-
-        def __enter__(self) -> InjectedDelivery:
             assert logging.active is True
             timeline.append("delivery:enter")
-            return self
 
-        def __exit__(self, *_exc: object) -> None:
+        def close(self, **_kwargs: object) -> None:
             assert logging.active is True
             timeline.append("delivery:exit")
 
@@ -282,11 +283,11 @@ def test_pre_lifecycle_primary_failure_closes_admitted_generation(
     semantic_events = recorder.events
     failure_observers: list[Callable[[str], object]] = []
 
-    class InjectedLogging:
-        def __enter__(self) -> InjectedLogging:
-            return self
+    class InjectedLogging(_InjectedLogging):
+        def start(self) -> None:
+            pass
 
-        def __exit__(self, *_exc: object) -> None:
+        def close(self, **_kwargs: object) -> None:
             return None
 
     def logging_factory(observer: Callable[[str], object]) -> InjectedLogging:
@@ -306,19 +307,19 @@ def test_pre_lifecycle_primary_failure_closes_admitted_generation(
         lambda _settings: FailingAfterAdmissionDisplay(),
     )
 
-    with pytest.raises(RuntimeExecutionError, match="runtime logging failed"):
-        run_runtime_serve(
-            runtime=_runtime(tmp_path),
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_config_path=tmp_path / "missing-mounted.toml",
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
-            environ={"PATH": "/usr/bin"},
-            runner=lambda *_args, **_kwargs: pytest.fail("must not start"),
-            runtime_state_path=tmp_path / "state.json",
-            control_socket_path=tmp_path / "control" / "runtime.sock",
-            runtime_logging_factory=logging_factory,  # type: ignore[arg-type]
-        )
+    result = run_runtime_serve(
+        runtime=_runtime(tmp_path),
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_config_path=tmp_path / "missing-mounted.toml",
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+        environ={"PATH": "/usr/bin"},
+        runner=lambda *_args, **_kwargs: pytest.fail("must not start"),
+        runtime_state_path=tmp_path / "state.json",
+        control_socket_path=tmp_path / "control" / "runtime.sock",
+        runtime_logging_factory=logging_factory,  # type: ignore[arg-type]
+    )
+    assert result == 1
 
     assert (
         RuntimeGenerationAdmitted("gen-1", RuntimeGenerationOperation.INITIAL_START)
@@ -406,7 +407,7 @@ def test_signal_during_serve_stopping_finishes_terminal_event_once(
     recorder = RecordingRuntimeEventSink()
     semantic_events = recorder.events
     invalid_config = tmp_path / "invalid.toml"
-    invalid_config.write_text("[comfyui\ninvalid", encoding="utf-8")
+    invalid_config.write_text("[comfyui]\nextra_args = 123", encoding="utf-8")
 
     monkeypatch.setattr(
         signal,
@@ -789,19 +790,19 @@ def test_successor_admission_failure_exits_without_starting_a_second_owner(
         config.write_text("[comfyui\ninvalid", encoding="utf-8")
         submission = controller.submit_restart(delivery_expected=False)
 
-    with pytest.raises(RuntimeExecutionError, match="runtime configuration is invalid"):
-        run_runtime_serve(
-            runtime=runtime,
-            mounted_config_path=config,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
-            environ={"PATH": "/usr/bin"},
-            runner=runner,  # type: ignore[arg-type]
-            runtime_state_path=tmp_path / "state.json",
-            control_socket_path=tmp_path / "control" / "runtime.sock",
-            generation_running=generation_running,
-        )
+    result = run_runtime_serve(
+        runtime=runtime,
+        mounted_config_path=config,
+        baked_config_path=tmp_path / "missing-baked.toml",
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+        environ={"PATH": "/usr/bin"},
+        runner=runner,  # type: ignore[arg-type]
+        runtime_state_path=tmp_path / "state.json",
+        control_socket_path=tmp_path / "control" / "runtime.sock",
+        generation_running=generation_running,
+    )
+    assert result == 1
 
     assert len(children) == 1
     assert children[0].signals == [signal.SIGTERM]
@@ -920,20 +921,20 @@ password = "configured-secret"
         assert failure_generation == "successor"
         submission = controller.submit_restart(delivery_expected=False)
 
-    with pytest.raises(RuntimeExecutionError, match="SSH startup/readiness failed"):
-        run_runtime_serve(
-            runtime=runtime,
-            mounted_config_path=config,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
-            environ={"PATH": "/usr/bin", "CDH_SSH_SNAPSHOT_SENTINEL": "captured"},
-            runner=runner,  # type: ignore[arg-type]
-            runtime_ssh_starter=ssh_starter,  # type: ignore[arg-type]
-            runtime_state_path=tmp_path / "state.json",
-            control_socket_path=tmp_path / "control" / "runtime.sock",
-            generation_running=generation_running,
-        )
+    result = run_runtime_serve(
+        runtime=runtime,
+        mounted_config_path=config,
+        baked_config_path=tmp_path / "missing-baked.toml",
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+        environ={"PATH": "/usr/bin", "CDH_SSH_SNAPSHOT_SENTINEL": "captured"},
+        runner=runner,  # type: ignore[arg-type]
+        runtime_ssh_starter=ssh_starter,  # type: ignore[arg-type]
+        runtime_state_path=tmp_path / "state.json",
+        control_socket_path=tmp_path / "control" / "runtime.sock",
+        generation_running=generation_running,
+    )
+    assert result == 1
 
     assert len(seen_environments) == (1 if failure_generation == "initial" else 2)
     assert all(environment is seen_environments[0] for environment in seen_environments)
@@ -1010,19 +1011,19 @@ def test_stop_hook_failure_blocks_successor_after_old_owner_cleanup(
             )
         )
 
-    with pytest.raises(RuntimeExecutionError, match="runtime stop hook failed"):
-        run_runtime_serve(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            mounted_hooks_path=hooks,
-            environ={"PATH": "/usr/bin"},
-            runner=runner,  # type: ignore[arg-type]
-            runtime_stop_hook_runner=failing_stop_hooks,  # type: ignore[arg-type]
-            runtime_state_path=tmp_path / "state.json",
-            control_socket_path=tmp_path / "control" / "runtime.sock",
-            generation_running=generation_running,
-        )
+    result = run_runtime_serve(
+        runtime=runtime,
+        baked_config_path=tmp_path / "missing-baked.toml",
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        mounted_hooks_path=hooks,
+        environ={"PATH": "/usr/bin"},
+        runner=runner,  # type: ignore[arg-type]
+        runtime_stop_hook_runner=failing_stop_hooks,  # type: ignore[arg-type]
+        runtime_state_path=tmp_path / "state.json",
+        control_socket_path=tmp_path / "control" / "runtime.sock",
+        generation_running=generation_running,
+    )
+    assert result == 1
 
     assert len(children) == 1
     assert children[0].signals == [signal.SIGTERM]
@@ -1327,26 +1328,26 @@ target = "models/checkpoints/model.bin"
         _write_hook(hooks, "stop", "30-new-stop-must-not-run.sh")
         submission = controller.submit_restart(delivery_expected=False)
 
-    with pytest.raises(RuntimeExecutionError, match="runtime hook failed"):
-        run_runtime_serve(
-            runtime=runtime,
-            mounted_config_path=config,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            mounted_hooks_path=hooks,
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            environ={"PATH": "/usr/bin"},
-            runner=runner,  # type: ignore[arg-type]
-            runtime_hook_runner=startup_hooks,  # type: ignore[arg-type]
-            runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
-            readiness_waiter=lambda _port, *, child: events.append("new:readiness"),
-            runtime_async_queue_starter=async_starter,
-            runtime_ssh_starter=ssh_starter,  # type: ignore[arg-type]
-            runtime_state_path=tmp_path / "state.json",
-            control_socket_path=tmp_path / "control" / "runtime.sock",
-            generation_running=generation_running,
-            monotonic=clock.monotonic,
-            sleep=clock.sleep,
-        )
+    result = run_runtime_serve(
+        runtime=runtime,
+        mounted_config_path=config,
+        baked_config_path=tmp_path / "missing-baked.toml",
+        mounted_hooks_path=hooks,
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        environ={"PATH": "/usr/bin"},
+        runner=runner,  # type: ignore[arg-type]
+        runtime_hook_runner=startup_hooks,  # type: ignore[arg-type]
+        runtime_stop_hook_runner=stop_hooks,  # type: ignore[arg-type]
+        readiness_waiter=lambda _port, *, child: events.append("new:readiness"),
+        runtime_async_queue_starter=async_starter,
+        runtime_ssh_starter=ssh_starter,  # type: ignore[arg-type]
+        runtime_state_path=tmp_path / "state.json",
+        control_socket_path=tmp_path / "control" / "runtime.sock",
+        generation_running=generation_running,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    assert result == 1
 
     assert len(children) == 2
     assert children[1].returncode == -int(signal.SIGTERM)
@@ -1429,20 +1430,20 @@ def test_successor_cleanup_precedes_real_terminal_delivery_and_ack(
         client_thread = threading.Thread(target=restart_client)
         client_thread.start()
 
-    with pytest.raises(RuntimeExecutionError, match="runtime hook failed"):
-        run_runtime_serve(
-            runtime=runtime,
-            baked_config_path=tmp_path / "missing-baked.toml",
-            baked_hooks_path=tmp_path / "missing-baked-hooks",
-            mounted_hooks_path=hooks,
-            environ={"PATH": "/usr/bin"},
-            runner=runner,  # type: ignore[arg-type]
-            runtime_hook_runner=failing_post_start,  # type: ignore[arg-type]
-            readiness_waiter=lambda _port, *, child: None,
-            runtime_state_path=tmp_path / "state.json",
-            control_socket_path=endpoint,
-            generation_running=generation_running,
-        )
+    result = run_runtime_serve(
+        runtime=runtime,
+        baked_config_path=tmp_path / "missing-baked.toml",
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        mounted_hooks_path=hooks,
+        environ={"PATH": "/usr/bin"},
+        runner=runner,  # type: ignore[arg-type]
+        runtime_hook_runner=failing_post_start,  # type: ignore[arg-type]
+        readiness_waiter=lambda _port, *, child: None,
+        runtime_state_path=tmp_path / "state.json",
+        control_socket_path=endpoint,
+        generation_running=generation_running,
+    )
+    assert result == 1
 
     assert client_thread is not None
     client_thread.join(timeout=2.0)
@@ -1453,3 +1454,49 @@ def test_successor_cleanup_precedes_real_terminal_delivery_and_ack(
     assert events.index("successor:terminate") < events.index("client:terminal")
     assert events.index("successor:reap") < events.index("client:terminal")
     assert events.index("client:terminal") < events.index("client:ack")
+
+
+def test_successful_successor_discards_completed_shutdown_deadline(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    children = []
+    published = []
+    original_observe = RuntimeController.observe_shutdown_deadline
+
+    def observe(controller, deadline):
+        published.append(deadline)
+        original_observe(controller, deadline)
+
+    monkeypatch.setattr(RuntimeController, "observe_shutdown_deadline", observe)
+
+    def runner(*args, **kwargs):
+        child = _RestartChild([], str(len(children)))
+        children.append(child)
+        return child
+
+    def running(controller):
+        assert controller.shutdown_deadline() is None
+        if len(children) == 1:
+            controller.submit_restart(delivery_expected=False)
+        else:
+            assert len(published) == 1
+            assert published[0].generation == "gen-1"
+            children[-1].returncode = 0
+
+    assert (
+        run_runtime_serve(
+            runtime=runtime,
+            baked_config_path=tmp_path / "missing-baked",
+            mounted_config_path=tmp_path / "missing-mounted",
+            baked_hooks_path=tmp_path / "missing-baked-hooks",
+            mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+            environ={"CDH_LOG_MODE": "memory"},
+            runner=runner,
+            generation_running=running,
+            control_socket_path=tmp_path / "control" / "runtime.sock",
+            runtime_state_path=tmp_path / "state.json",
+        )
+        == 0
+    )
+    assert len(children) == 2

@@ -18,13 +18,13 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from pathlib import Path
 
 from comfyui_docker_helper.container.runtime.log_history import (
     LOG_BLOCK_BYTES,
     LOG_READ_BYTES,
     LogHistoryUnavailableError,
+    LogStorageFailure,
 )
 
 LOG_FILE_QUEUE_BYTES = 256 * 1024
@@ -34,14 +34,6 @@ _ACTIVE = "runtime.log"
 _MARKER = ".cdh-logs.lock"
 _MAGIC = b"cdh raw log store v1\n"
 _ARCHIVE = re.compile(r"runtime\.([0-9]{20})\.log\Z", re.ASCII)
-
-
-class LogStorageFailure(StrEnum):
-    ADMISSION = "admission"
-    WRITE = "write"
-    ROTATION = "rotation"
-    SYNC = "sync"
-    QUEUE = "queue"
 
 
 class LogStorageError(RuntimeError):
@@ -531,11 +523,16 @@ class AsyncLogWriter:
     """Independent bounded queue; the first failure disables further recording."""
 
     def __init__(
-        self, store: RawLogStore, *, queue_bytes: int = LOG_FILE_QUEUE_BYTES
+        self,
+        store: RawLogStore,
+        *,
+        queue_bytes: int = LOG_FILE_QUEUE_BYTES,
+        failure_observer: Callable[[LogStorageFailure], object] = lambda _reason: None,
     ) -> None:
         if queue_bytes <= 0:
             raise ValueError("File queue capacity must be positive.")
         self.store = store
+        self._failure_observer = failure_observer
         self._limit = queue_bytes
         self._queue: deque[_QueuedBytes] = deque()
         self._queued_bytes = 0
@@ -590,10 +587,17 @@ class AsyncLogWriter:
             return self._failure
 
     def _fail_locked(self, reason: LogStorageFailure) -> None:
-        if self._failure is None:
+        first = self._failure is None
+        if first:
             self._failure = reason
         self._queue.clear()
         self._condition.notify_all()
+        if first:
+            # Only a bounded event offer: observers must never wait for output,
+            # call this writer, or acquire the broker publication lock.
+            # Optional diagnostic delivery cannot become a producer failure.
+            with suppress(Exception):
+                self._failure_observer(reason)
 
     def wait_for_prefix(self, end: int, *, deadline: float) -> bool:
         with self._condition:

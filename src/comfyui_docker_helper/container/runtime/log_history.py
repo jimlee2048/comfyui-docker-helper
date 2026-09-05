@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from enum import StrEnum
 
 LOG_BLOCK_BYTES = 16 * 1024
 LOG_READ_BYTES = 64 * 1024
+
+
+class LogStorageFailure(StrEnum):
+    ADMISSION = "admission"
+    WRITE = "write"
+    ROTATION = "rotation"
+    SYNC = "sync"
+    QUEUE = "queue"
 
 
 class LogHistoryUnavailableError(RuntimeError):

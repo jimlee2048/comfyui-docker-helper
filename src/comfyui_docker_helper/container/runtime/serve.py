@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -14,12 +15,19 @@ from types import FrameType, MappingProxyType
 from typing import Literal
 
 from comfyui_docker_helper.cli_output import CliOutputSettings, EventSink, OutputDetail
+from comfyui_docker_helper.cli_output.text import control_safe_text
 from comfyui_docker_helper.config import (
     BAKED_RUNTIME_CONFIG_PATH,
     MOUNTED_RUNTIME_CONFIG_PATH,
     RuntimeConfig,
     RuntimeConfigurationError,
     load_runtime_config,
+)
+from comfyui_docker_helper.config.runtime.config import (
+    RuntimeConfigurationSources,
+    load_runtime_config_from_sources,
+    load_runtime_log_settings,
+    read_runtime_config_sources,
 )
 from comfyui_docker_helper.container.process.control import DirectProcessStarter
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
@@ -56,6 +64,7 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeGenerationStopCause,
     RuntimeGenerationStopped,
     RuntimeGenerationStopping,
+    RuntimeLogStorageWarning,
 )
 from comfyui_docker_helper.container.runtime.files.download import (
     download_runtime_files,
@@ -96,6 +105,7 @@ from comfyui_docker_helper.container.runtime.ssh.service import (
     RuntimeSshStarter,
 )
 from comfyui_docker_helper.container.runtime.state import RUNTIME_STATE_PATH
+from comfyui_docker_helper.errors import ApplicationError
 
 
 @dataclass(slots=True)
@@ -192,7 +202,11 @@ class RuntimeGenerationFactory:
         ),
         runtime_ssh_starter: RuntimeSshStarter = start_sshd_if_enabled,
         runtime_state_path: str | Path = RUNTIME_STATE_PATH,
+        logging_broker: RuntimeLoggingBroker | None = None,
+        initial_sources: RuntimeConfigurationSources | None = None,
     ) -> None:
+        self._logging_broker = logging_broker
+        self._initial_sources = initial_sources
         self._runtime = runtime
         self._baked_config_path = Path(baked_config_path)
         self._mounted_config_path = Path(mounted_config_path)
@@ -210,11 +224,32 @@ class RuntimeGenerationFactory:
     def create_generation(self) -> RuntimeGeneration:
         """Read current runtime files and construct fresh component owners."""
         try:
-            result = load_runtime_config(
-                baked_config_path=self._baked_config_path,
-                mounted_config_path=self._mounted_config_path,
-                environ=self._source_env,
-            )
+            if self._logging_broker is None:
+                result = load_runtime_config(
+                    baked_config_path=self._baked_config_path,
+                    mounted_config_path=self._mounted_config_path,
+                    environ=self._source_env,
+                )
+            else:
+                sources = self._initial_sources
+                self._initial_sources = None
+                if sources is None:
+                    sources = read_runtime_config_sources(
+                        baked_config_path=self._baked_config_path,
+                        mounted_config_path=self._mounted_config_path,
+                        environ=self._source_env,
+                    )
+                log_settings = load_runtime_log_settings(sources)
+                if self._logging_broker.settings is None:
+                    self._logging_broker.configure(log_settings)
+                elif self._logging_broker.settings != log_settings:
+                    print(
+                        "cdh: Changed log recording settings take effect "
+                        "after container restart.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                result = load_runtime_config_from_sources(sources)
         except RuntimeConfigurationError as error:
             raise RuntimeExecutionError(
                 format_runtime_diagnostics(
@@ -366,15 +401,39 @@ def run_runtime_serve(
     environment = capture_runtime_environment(environ)
     controller = RuntimeController()
     settings = output_settings or CliOutputSettings()
-    with runtime_logging_factory(controller.observe_runtime_failure) as logging_broker:
-        event_sink = safe_runtime_event_sink(default_runtime_display(settings))
-        with RuntimeEventDelivery(
-            event_sink,
-            clock=time.monotonic,
-            information_enabled=settings.detail is not OutputDetail.QUIET,
-            progress_enabled=settings.detail is not OutputDetail.QUIET,
-        ) as background_event_sink:
+    logging_broker = runtime_logging_factory(controller.observe_runtime_failure)
+    with _runtime_controller_signal_handlers(controller) as signal_state:
+        background_event_sink: RuntimeEventDelivery | None = None
+        try:
+            logging_broker.start()
+            event_sink = safe_runtime_event_sink(default_runtime_display(settings))
+            background_event_sink = RuntimeEventDelivery(
+                event_sink,
+                clock=time.monotonic,
+                information_enabled=settings.detail is not OutputDetail.QUIET,
+                progress_enabled=settings.detail is not OutputDetail.QUIET,
+            )
+            logging_broker.set_storage_warning_observer(
+                lambda reason: background_event_sink.emit(
+                    RuntimeLogStorageWarning(reason)
+                )
+            )
+            try:
+                initial_sources = read_runtime_config_sources(
+                    baked_config_path=baked_config_path,
+                    mounted_config_path=mounted_config_path,
+                    environ=environment.text,
+                )
+                logging_broker.configure(load_runtime_log_settings(initial_sources))
+            except RuntimeConfigurationError as error:
+                raise RuntimeExecutionError(
+                    format_runtime_diagnostics(
+                        "runtime configuration is invalid",
+                        error.diagnostics,
+                    )
+                ) from error
             return _run_runtime_serve(
+                initial_sources=initial_sources,
                 controller=controller,
                 logging_broker=logging_broker,
                 runtime=runtime,
@@ -398,10 +457,47 @@ def run_runtime_serve(
                 event_sink=event_sink,
                 background_event_sink=background_event_sink,
             )
+        except _RuntimeControllerShutdownRequested as request:
+            controller.mark_external_shutdown()
+            return 128 + int(request.signal)
+        except ApplicationError as error:
+            signal_state.teardown = True
+            print(
+                f"Error: {control_safe_text(str(error))}", file=sys.stderr, flush=True
+            )
+            return error.exit_code
+        finally:
+            signal_state.teardown = True
+            now = time.monotonic()
+            deadline = now + 0.5
+            accepted = controller.shutdown_deadline()
+            if accepted is not None and accepted.deadline is not None:
+                deadline = min(
+                    deadline, now + max(0.0, accepted.deadline - monotonic())
+                )
+
+            def force_requested() -> bool:
+                return controller.external_shutdown_snapshot().repeated
+
+            logging_broker.defer_storage_warnings()
+            if background_event_sink is not None:
+                background_event_sink.close(
+                    deadline=deadline, force_requested=force_requested
+                )
+            logging_broker.close(deadline=deadline, force_requested=force_requested)
+            if (
+                background_event_sink is not None
+                and (final_warning := logging_broker.take_final_storage_warning())
+                is not None
+                and time.monotonic() < deadline
+                and not force_requested()
+            ):
+                event_sink.emit(RuntimeLogStorageWarning(final_warning))
 
 
 def _run_runtime_serve(
     *,
+    initial_sources: RuntimeConfigurationSources,
     controller: RuntimeController,
     logging_broker: RuntimeLoggingBroker,
     runtime: ContainerRuntime | None,
@@ -444,12 +540,11 @@ def _run_runtime_serve(
         runtime_state_path=runtime_state_path,
         background_event_sink=background_event_sink,
         event_sink=event_sink,
+        logging_broker=logging_broker,
+        initial_sources=initial_sources,
     )
     listener = open_runtime_control_listener(control_socket_path)
-    with (
-        RuntimeControlServer(listener, controller, logging_broker),
-        _runtime_controller_signal_handlers(controller),
-    ):
+    with RuntimeControlServer(listener, controller, logging_broker):
         serve_owned_generation: _ServeGenerationLease | None = None
 
         def close_serve_owned_generation(
@@ -556,6 +651,7 @@ def _run_runtime_serve(
                         raise RuntimeExecutionError(
                             RUNTIME_LOGGING_UNAVAILABLE_MESSAGE
                         ) from transition_error
+                    controller.clear_shutdown_deadline()
                     generation_running(controller)
                     event_sink.emit(RuntimeGenerationReady(generation_id))
 
@@ -585,6 +681,7 @@ def _run_runtime_serve(
                         event_sink=event_sink,
                         generation=current_generation,
                         runtime_ownership_claimed=claim_lifecycle_ownership,
+                        shutdown_deadline_observer=controller.observe_shutdown_deadline,
                     )
                 except RuntimeExecutionError as error:
                     external_exit_code = external_failure_exit_code()
@@ -647,8 +744,14 @@ class _RuntimeControllerShutdownRequested(BaseException):
         super().__init__(sig.name)
 
 
+@dataclass(slots=True)
+class _ControllerSignalState:
+    teardown: bool = False
+
+
 @contextmanager
 def _runtime_controller_signal_handlers(controller: RuntimeController):
+    state = _ControllerSignalState()
     previous_handlers = {
         sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
     }
@@ -658,7 +761,7 @@ def _runtime_controller_signal_handlers(controller: RuntimeController):
         admitted = signal.Signals(sig)
         controller.observe_external_signal(admitted)
         shutdown = controller.external_shutdown_snapshot()
-        if shutdown.repeated:
+        if shutdown.repeated or state.teardown:
             return
         assert shutdown.signal is not None
         raise _RuntimeControllerShutdownRequested(shutdown.signal)
@@ -666,7 +769,7 @@ def _runtime_controller_signal_handlers(controller: RuntimeController):
     try:
         signal.signal(signal.SIGTERM, observe)
         signal.signal(signal.SIGINT, observe)
-        yield
+        yield state
     finally:
         for sig, previous in previous_handlers.items():
             signal.signal(sig, previous)

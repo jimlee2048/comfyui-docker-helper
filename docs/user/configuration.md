@@ -84,6 +84,10 @@ When `TZ` is omitted, cdh adds no timezone value and preserves the selected base
 
 When cdh installs application or custom-node packages, a controlled subset of build-toolchain values from the effective build-container environment is available to package build steps. Existing controlled proxy handling and command-owned values remain separate; arbitrary entries do not become installer or Python configuration. See [Package-build environment](build-and-lock.md#package-build-environment) for the complete operational boundary.
 
+## Set runtime log recording defaults
+
+Use `[cdh.logs]` to bake recording defaults into the image. The same table is accepted in mounted runtime configuration; the [full example](../../examples/full.toml) lists the complete fields, defaults, size syntax, and environment overrides. See [Read and retain logs](runtime.md#read-and-retain-logs) for historical queries, storage modes, persistence, and the container restart required to apply changes.
+
 ## Choose application and tool capabilities
 
 Manager and comfy-cli are independently controlled optional capabilities. Both are enabled when their switches are omitted, and either can be disabled separately:

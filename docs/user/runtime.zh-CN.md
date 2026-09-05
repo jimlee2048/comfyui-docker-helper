@@ -30,7 +30,7 @@ cdh 按以下顺序应用运行时设置，越靠后的来源优先级越高：
 built-in defaults < baked config < mounted config < environment
 ```
 
-运行时配置包括 ComfyUI 的 `listen`、`port` 和 `extra_args`；cdh 下载设置与 downloader credential；运行时 Secret source；`system.ssh`；以及 `files`。运行时 TOML 文件中已知的仅限主机端字段会被忽略并产生警告。未知或其他不受支持的运行时字段会导致启动失败，而不会被静默接受。挂载的运行时文件无法安装软件包、更改选定的 ComfyUI 检出版本，也无法重新构建镜像。
+运行时配置包括 ComfyUI 的 `listen`、`port` 和 `extra_args`；cdh 下载与日志记录设置、downloader credential；运行时 Secret source；`system.ssh`；以及 `files`。运行时 TOML 文件中已知的仅限主机端字段会被忽略并产生警告。未知或其他不受支持的运行时字段会导致启动失败，而不会被静默接受。挂载的运行时文件无法安装软件包、更改选定的 ComfyUI 检出版本，也无法重新构建镜像。
 
 每个 TOML 来源会先完成解析和运行时适用性检查。剩余的受支持值随后与默认值及环境覆盖合并，最后由 cdh 校验生成的生效运行时文档。因此，靠后的局部条目可以从靠前层继承省略的字段，但无效的最终结果仍会带来源上下文使启动失败。
 
@@ -38,7 +38,7 @@ built-in defaults < baked config < mounted config < environment
 
 Downloader credential route 则按 canonical `match` 合并：靠后等价 route 会原子替换完整的靠前 route，新 route 会追加，`credentials = []` 会清空 catalog。每个 `[secrets.<name>]` source 都是独立的原子定义。运行时 route 与 source 由部署拥有，绝不会从构建时 counterpart 继承。
 
-支持的环境变量覆盖项如下：
+日志记录的环境变量覆盖项与 `[cdh.logs]` 一起列于[完整示例](../../examples/full.toml)。其他运行时环境变量覆盖项如下：
 
 - `CDH_COMFYUI_LISTEN`、`CDH_COMFYUI_PORT` 和 `CDH_COMFYUI_EXTRA_ARGS`；
 - `CDH_DEFAULT_DOWNLOADER`、`CDH_DEFAULT_DOWNLOAD_MODE`、`CDH_DOWNLOAD_MAX_ATTEMPTS`、`CDH_DOWNLOAD_FAILURE_POLICY` 和 `CDH_SHUTDOWN_TIMEOUT`；以及
@@ -62,7 +62,7 @@ cdh -vv container runtime COMMAND
 
 运行时下载会标识配置的目标，以及它在当前批次和尝试序列中的位置。它会报告已传输字节；有可比较的总量时还会显示百分比、速率和预计时间，总量未知时则只显示字节信息，而不会虚构百分比。重试、停滞、恢复、文件就绪和队列结果都会以完整文本行输出。当运行时输出严重积压时，cdh 可能合并重复的进度更新；若省略了信息性更新，则会输出警告，而传输和 SSH 工作会继续。
 
-ComfyUI、Hook 与 SSH 子进程的 stdout 和 stderr 仍是原始子进程输出。cdh 不会给这些字节添加前缀、重新设置样式、过滤或脱敏。容器原始 stdout 与 stderr 仍是主要日志流。根级详细度选项同样不会改变 `runtime status` 必需的人类或 JSON 结果、`runtime restart` 的结果，或 `runtime follow` 传递的 stdout/stderr 字节。
+ComfyUI、Hook 与 SSH 子进程的 stdout 和 stderr 仍是原始子进程输出。cdh 不会给这些字节添加前缀、重新设置样式、过滤或脱敏。容器原始 stdout 与 stderr 仍是主要日志流。根级详细度选项同样不会改变 `runtime status` 必需的人类或 JSON 结果、`runtime restart` 的结果，或 `runtime logs` 返回的合并字节。logs 客户端不会改变正在运行的控制进程的详细度设置。
 
 ## 运行时控制
 
@@ -72,7 +72,7 @@ ComfyUI、Hook 与 SSH 子进程的 stdout 和 stderr 仍是原始子进程输�
 docker exec CONTAINER cdh container runtime restart
 docker exec CONTAINER cdh container runtime status
 docker exec CONTAINER cdh container runtime status --json
-docker exec CONTAINER cdh container runtime follow
+docker exec CONTAINER cdh container runtime logs --follow
 ```
 
 只要部署没有覆盖 `PATH`，SSH 会话就会使用镜像的正常工具路径，因此可以直接按名称调用 `cdh` 和 `uv`。如果部署需要覆盖 `PATH`，则须保留 `/opt/uv/bin`，才能继续按名称调用 cdh、uv 和配置的 uv 工具。
@@ -85,9 +85,73 @@ docker exec CONTAINER cdh container runtime follow
 
 `status` 显示当前 ComfyUI 运行时以及正在进行的 restart；`--json` 输出稳定的机器可读状态。这是当前的内存状态，不是健康检查或持久历史。
 
-`follow` 会流式输出建立连接后产生的 stdout 和 stderr，并在手动 restart 期间保持连接。它不会回放或持久化较早的输出；如需历史记录，请使用 Docker logs 或部署环境的日志后端。停止命令或连接无法及时读取时，只会影响该实时日志会话，绝不会停止或拖慢 ComfyUI。
+`logs` 可读取保留的输出，并在手动 restart 期间持续跟随。示例与保留范围见[查看和保留日志](#查看和保留日志)。控制进程必须仍在运行；控制端点缺失时，客户端不会启动本地运行时，也不会切换为直接读取文件。
 
 请使用容器默认用户运行这些命令。不同 UID（包括通过 `docker exec --user` 选择的用户）无法访问运行时控制。
+
+## 查看和保留日志
+
+在容器内使用 `cdh container runtime logs`；从宿主机使用时，在相同命令前加上 `docker exec CONTAINER`。命令返回已捕获的 cdh 生命周期输出，以及继承运行时 stdout/stderr 的 ComfyUI、Hook 或服务输出。它不会收集任意日志文件、Docker 构建输出或独立的 exec/SSH 命令会话。
+
+```bash
+# 读取全部保留的输出后退出。
+cdh container runtime logs
+
+# 读取最近 200 行，或读取后继续跟随。
+cdh container runtime logs --tail 200
+cdh container runtime logs --tail 200 --follow
+
+# 只跟随新输出。
+cdh container runtime logs --tail 0 --follow
+
+# 导出合并输出；诊断仍输出到终端的 stderr。
+cdh container runtime logs > runtime.log
+```
+
+`--tail` 也接受 `all`；`-n` 和 `-f` 分别是 `--tail` 和 `--follow` 的短选项。原有 `runtime follow` 命令由 `runtime logs --tail 0 --follow` 替代。不指定 tail 限制的 `logs --follow` 会先返回全部保留历史。
+
+查询内容按 cdh 观察到的顺序将两个来源流合并到 stdout。警告和错误输出到 stderr；原始容器 stdout/stderr 仍然分开，并可由 Docker 日志后端读取。cdh 保留输出字节，包括 ANSI、回车、无效 UTF-8 和未结束的行。Tail 按 LF 分隔符统计行，末尾非空片段也算一行；回车不会被当作换行。可直接阅读的 `runtime.log` 和编号归档文件保存相同的原始字节，不添加 JSON 包装、时间戳或输出流标签。轮转可能将一行分到两个文件中，重启后的追加也可能接续上一条未结束的行。
+
+通过镜像配置或挂载的运行时 TOML 中的 `[cdh.logs]` 选择记录行为。精确字段、容量单位和容器启动时的环境变量覆盖见[完整示例](../../examples/full.toml)。
+
+| 模式 | 可读取的历史 |
+| --- | --- |
+| `file`（默认） | 保留的轮转文件，加上当前内存中的末尾输出；重复字节只输出一次。 |
+| `memory` | 当前控制进程保留的有容量上限的近期输出；不读取之前的文件。 |
+| `none` | 不记录新历史。查询可只读已有的 cdh 日志文件，不创建、轮转或删除文件，并提示记录已关闭；存储不存在时以空结果成功结束。 |
+
+每种模式都能只查看新输出。在 `none` 模式下，历史加实时跟随会明确警告：主动关闭记录期间的输出无法恢复。关闭记录不会关闭原始容器输出，也不会删除已有历史。
+
+默认目录是 `/var/log/cdh`。`max_size` 分别限制内存有效载荷与每个文件的容量，`max_files` 包含活动文件。默认最多保留 20 MiB 内存有效载荷和 100 MiB 文件有效载荷。内存按需增长；队列、读取器和元数据还会有各自有界的额外开销，因此这些有效载荷上限不是进程总内存上限。内部资源限制也可能中断记录或查询；增大保留设置不会移除这些限制。
+
+日志设置在控制进程的整个生命周期内固定。修改为有效的新值后执行 `runtime restart` 会产生提示，并继续使用原来的记录设置，直到容器重启。无效的生效日志值仍会使 restart 准入失败，并可能导致容器退出。等价容量写法不算配置变化。完整容器重启会使用新选定的目录，不会搬迁或删除旧目录中的日志。仅传给 logs 客户端的环境变量不会决定存储位置。
+
+### 持久化文件与准备目录
+
+内存历史可跨手动 ComfyUI 重启保留，但控制进程或容器重启后就会丢失。只要容器文件系统仍可用，已写入的文件就会在同一容器普通重启后保留。若要跨容器删除与重建保留日志，需使用保留的 volume 或 bind mount；tmpfs 不是持久存储。
+
+使用专用的、规范的容器内绝对目录。cdh 以 `0700` 创建目录，以 `0600` 创建文件；已有的 cdh 日志文件和目录必须具备相应权限，并归运行时的有效 UID 所有。祖先必须是真实目录，由 root 或该 UID 拥有，且不得具有不安全的写权限。符号链接、意外硬链接、不安全对象以及第二个写入者会被拒绝。cdh 不会递归改变挂载目录的权限或所有者。
+
+挂载父目录，让 cdh 创建自己的私有子目录。例如，使用镜像默认用户运行：
+
+```bash
+docker run --gpus all --name comfyui \
+  --mount type=volume,source=cdh-logs,target=/logs \
+  --env CDH_LOG_DIRECTORY=/logs/cdh \
+  IMAGE
+```
+
+已有的 `0755` volume 根目录可以作为这里的父目录，但它本身不满足日志目录的 `0700` 要求。直接将这种根目录选为日志目录，会使文件记录回退到内存。重用日志目录前先停止旧容器；并发运行的多个副本需要不同目录。可以使用普通工具读取文件，但在 cdh 管理期间应保持其文件名、锁标记与轮转内容不变。
+
+### 故障、缺口与命令结果
+
+目录准入、写入、轮转、sync 或有界文件队列失败时，cdh 会告警，并在本次控制进程运行期间停止文件记录。内存记录与实时输出继续，安全的已有文件仍可读取。修复存储问题后重启容器，才能重新尝试文件记录；cdh 不会自动恢复，也不会把遗漏的内存输出补写回文件。
+
+仅出现持久化警告，不会使内容完整的查询失败。如果文件历史末尾与可用内存历史之间存在缺口，查询全部历史会返回两侧可用内容，在 stderr 报告缺口，并以非零状态退出。完全位于连续内存末尾范围内的近期 tail 仍可成功。正常淘汰最旧前缀属于保留范围限制，不是错误；已知缺口、读取失败或查询期间的淘汰会被明确报告，不会静默地伪装成完整历史。初始历史不完整时，`--follow` 会以非零结果结束，不会静默转入实时输出。
+
+跟不上的客户端可能被断开，但不会因此停止 ComfyUI，也不会对原始输出施加反压。`Ctrl-C` 只结束客户端，并返回 130。有限历史读取只有在收到控制进程明确的完成结果后才算成功。跟随可跨 ComfyUI 重启持续；普通控制进程关闭时，收到明确的实时结束结果后成功退出。意外 EOF、投递丢失或关闭时投递预算耗尽会以非零状态退出。跟随成功仅覆盖截至控制进程最终投递边界的输出，不保证此后的关闭输出或日志已持久化到磁盘。容器重启后客户端不会自动重连。
+
+正常关闭时，cdh 会在已有关闭预算内排空并同步。强制终止、预算耗尽或宿主机/存储故障可能丢失尚在排队或未同步的末尾输出。原始文件无法重建上一控制进程未知的丢失，因此保留历史不是完整审计记录。能够完成日志准入时，初始运行时错误会被记录；TOML 无法解析、日志设置无效或捕获之前的失败，都可能使其无法记录。对于更早的诊断，以及部署后端自身的保留范围，请使用 Docker logs 或相应后端。
 
 ## 文件、下载与持久状态
 

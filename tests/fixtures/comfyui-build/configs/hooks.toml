@@ -10,8 +10,9 @@ image_distro = "ubuntu24.04"
 version = "2.12.1"
 
 [comfyui]
-version = "latest"
-install_manager = true
+version = "0.11.0"
+install_cli = false
+install_manager = false
 listen = "0.0.0.0"
 port = 8188
 extra_args = []
@@ -20,5 +21,7 @@ extra_args = []
 type = "git"
 url = "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git"
 ref = "609f3afaa74b2f88ef9ce8d939626065e3247469"
-pre_install_hooks = ["pre.sh", "pre.py"]
-post_install_hooks = ["post.sh", "post.py"]
+target_dir = "git-hook-probe"
+pre_clone_hooks = ["git-pre-clone.py"]
+pre_install_hooks = ["git-pre-install.py"]
+post_install_hooks = ["git-post-install.py"]

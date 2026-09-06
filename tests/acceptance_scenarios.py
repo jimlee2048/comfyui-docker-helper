@@ -257,19 +257,17 @@ ACCEPTANCE_SCENARIOS = (
         "hooks",
         "hooks.toml",
         "3.13.14",
-        ScenarioClass.CANARY,
+        ScenarioClass.COMPONENT,
         frozenset(
             {
                 Capability.APPLICATION,
-                Capability.CLI,
-                Capability.MANAGER,
                 Capability.CUSTOM_NODES,
                 Capability.HOOKS,
             }
         ),
         _BASE_COSTS,
-        None,
-        None,
+        "CDH_BUILD_HOOKS_IMAGE",
+        "CDH_BUILD_HOOKS_CONTEXT",
         "cudnn-devel",
         "ubuntu24.04",
     ),

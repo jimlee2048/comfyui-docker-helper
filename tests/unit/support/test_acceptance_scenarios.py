@@ -6,11 +6,13 @@ import os
 import subprocess
 import sys
 import tomllib
+from pathlib import Path
 
 import pytest
 from packaging.version import Version
 
 from comfyui_docker_helper.config import load_validate_config_result
+from comfyui_docker_helper.config.authored.models import FinalGitCustomNodeConfig
 from tests.acceptance_scenarios import (
     ACCEPTANCE_SCENARIOS,
     RELEASE_PYTHON_PROFILES,
@@ -136,6 +138,68 @@ def test_moving_inputs_are_classified_only_as_canaries() -> None:
         if scenario.classification is ScenarioClass.CANARY:
             assert version in {"latest", "nightly"}
             assert scenario not in RELEASE_SCENARIOS
+
+
+def test_build_hooks_component_has_dedicated_inputs_and_bounded_costs() -> None:
+    scenario = next(item for item in ACCEPTANCE_SCENARIOS if item.id == "hooks")
+
+    assert scenario.classification is ScenarioClass.COMPONENT
+    assert scenario.image_variable == "CDH_BUILD_HOOKS_IMAGE"
+    assert scenario.context_variable == "CDH_BUILD_HOOKS_CONTEXT"
+    assert scenario.costs == {Cost.NETWORK, Cost.DOCKER, Cost.SLOW}
+    assert scenario.capabilities == {
+        Capability.APPLICATION,
+        Capability.CUSTOM_NODES,
+        Capability.HOOKS,
+    }
+
+
+@pytest.mark.parametrize("admission", ["offline", "missing-image", "missing-context"])
+def test_build_hooks_component_cost_and_artifact_admission(
+    tmp_path: Path, admission: str
+) -> None:
+    scenario = next(item for item in ACCEPTANCE_SCENARIOS if item.id == "hooks")
+    assert scenario.image_variable is not None
+    assert scenario.context_variable is not None
+    environment = os.environ.copy()
+    environment.pop(scenario.image_variable, None)
+    environment.pop(scenario.context_variable, None)
+    if admission == "missing-context":
+        environment[scenario.image_variable] = "unused-image"
+    authorization = (
+        []
+        if admission == "offline"
+        else ["--run-network", "--run-docker", "--run-slow"]
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            f"--basetemp={tmp_path / 'component-admission'}",
+            "tests/smoke/test_build_hooks_live.py",
+            *authorization,
+        ],
+        cwd=_PROJECT_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=_PYTEST_PROBE_TIMEOUT_SECONDS,
+    )
+    output = completed.stdout + completed.stderr
+    if admission == "offline":
+        assert completed.returncode == pytest.ExitCode.OK, output
+        assert "1 skipped" in output
+    else:
+        missing = (
+            scenario.image_variable
+            if admission == "missing-image"
+            else scenario.context_variable
+        )
+        assert completed.returncode == pytest.ExitCode.TESTS_FAILED, output
+        assert f"build-hook component requires environment input {missing}" in output
 
 
 # Unknown selections stop at the public pytest boundary with one usage diagnostic.
@@ -335,7 +399,15 @@ def test_fixture_is_formally_valid_with_existing_references(
     hooks = [
         name
         for node in config.comfyui.custom_nodes
-        for name in (*node.pre_install_hooks, *node.post_install_hooks)
+        for name in (
+            *(
+                node.pre_clone_hooks
+                if isinstance(node, FinalGitCustomNodeConfig)
+                else ()
+            ),
+            *node.pre_install_hooks,
+            *node.post_install_hooks,
+        )
     ]
     assert (Capability.HOOKS in capabilities) is bool(hooks)
     assert (Capability.FILES in capabilities) is bool(config.files)

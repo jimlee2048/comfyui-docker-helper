@@ -69,8 +69,17 @@ def _render_detail(detail: OutputDetail) -> tuple[str, int]:
             index=2,
             total=2,
             target_name="git-node",
+            pre_clone_hook_count=3,
             pre_hook_count=0,
             post_hook_count=1,
+        ),
+        ContainerHelperPhaseStarted(ContainerHelperPhase.CUSTOM_NODE_PRE_CLONE),
+        ContainerHelperPhaseCompleted(ContainerHelperPhase.CUSTOM_NODE_PRE_CLONE),
+        ContainerHelperPhaseStarted(
+            ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION
+        ),
+        ContainerHelperPhaseCompleted(
+            ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION
         ),
         CustomNodeCompleted(index=2, total=2),
         ComfyUIInstallCompleted(),
@@ -128,6 +137,7 @@ def test_helper_detail_preserves_event_roles_and_detail_boundaries(
                 any(marker in line for line in lines)
                 for marker in (
                     "Phase complete",
+                    "pre-clone hooks=3",
                     "pre-install hooks=1",
                     "post-install hooks=2",
                     "2 nodes",
@@ -194,6 +204,7 @@ def test_helper_events_reject_url_and_control_bearing_identity() -> None:
                 index=1,
                 total=1,
                 target_name=target,
+                pre_clone_hook_count=0,
                 pre_hook_count=0,
                 post_hook_count=0,
             )
@@ -273,6 +284,15 @@ def test_helper_events_are_immutable_and_validate_safe_counts() -> None:
         CustomNodesInstallCompleted(node_count=-1)
     with pytest.raises(ValueError, match="must not exceed"):
         CustomNodeCompleted(index=2, total=1)
+    with pytest.raises(ValueError, match="non-negative"):
+        GitCustomNodeStarted(
+            index=1,
+            total=1,
+            target_name="node",
+            pre_clone_hook_count=-1,
+            pre_hook_count=0,
+            post_hook_count=0,
+        )
 
 
 def test_zero_custom_nodes_keeps_truthful_phases_and_count_visible() -> None:

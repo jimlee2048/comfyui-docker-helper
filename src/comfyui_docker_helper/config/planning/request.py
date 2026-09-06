@@ -171,6 +171,7 @@ class GitNodeRequest:
     url: str
     ref: str
     target: str
+    pre_clone_hooks: tuple[str, ...]
     pre_install_hooks: tuple[str, ...]
     post_install_hooks: tuple[str, ...]
 
@@ -462,6 +463,7 @@ def build_canonical_request_graph(
                     node.url,
                     ref,
                     target,
+                    tuple(node.pre_clone_hooks),
                     pre_install_hooks,
                     post_install_hooks,
                 )

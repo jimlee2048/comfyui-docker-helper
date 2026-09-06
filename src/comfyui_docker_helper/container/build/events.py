@@ -23,6 +23,8 @@ class ContainerHelperPhase(StrEnum):
     MANAGER_INSTALLATION = "manager-installation"
     COMFYUI_FINAL_VERIFICATION = "comfyui-final-verification"
     CUSTOM_NODES_PREPARATION = "custom-nodes-preparation"
+    CUSTOM_NODE_PRE_CLONE = "custom-node-pre-clone"
+    CUSTOM_NODE_SOURCE_PREPARATION = "custom-node-source-preparation"
     CUSTOM_NODE_PRE_INSTALL = "custom-node-pre-install"
     CUSTOM_NODE_INSTALLATION = "custom-node-installation"
     CUSTOM_NODE_POST_INSTALL = "custom-node-post-install"
@@ -79,6 +81,7 @@ class GitCustomNodeStarted:
     index: int
     total: int
     target_name: str
+    pre_clone_hook_count: int
     pre_hook_count: int
     post_hook_count: int
 
@@ -88,6 +91,7 @@ class GitCustomNodeStarted:
             self.target_name
         ):
             raise ValueError("Git custom-node target must be one safe target leaf")
+        _require_non_negative_integer(self.pre_clone_hook_count, "pre-clone hook count")
         _require_non_negative_integer(self.pre_hook_count, "pre-hook count")
         _require_non_negative_integer(self.post_hook_count, "post-hook count")
 

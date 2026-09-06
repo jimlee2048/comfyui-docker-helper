@@ -788,7 +788,9 @@ def _build_hook_source_root(
     working_directory: str | Path | None,
 ) -> Path | None:
     has_hooks = any(
-        node.pre_install_hooks or node.post_install_hooks
+        (node.type == "git" and node.pre_clone_hooks)
+        or node.pre_install_hooks
+        or node.post_install_hooks
         for node in result.config.comfyui.custom_nodes
     )
     if not has_hooks:

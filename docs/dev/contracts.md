@@ -151,10 +151,12 @@ comfy-cli is a separately resolved isolated user tool under `/opt/uv/tools`. Its
 
 ## Custom-node identity, order, and trust
 
-Registry and direct-Git custom nodes share one declaration-order, fail-fast orchestrator:
+Registry and direct-Git custom nodes share one declaration-order, fail-fast orchestrator with source-specific preparation:
 
 ```text
-pre-install hooks -> node installation -> post-install hooks
+Git: pre-clone hooks -> exact checkout and recursive submodules with proof
+     -> pre-install hooks -> root requirements and install.py -> post-install hooks
+Registry: pre-install hooks -> Manager installation -> post-install hooks
 ```
 
 The source types retain distinct identity contracts:
@@ -162,7 +164,9 @@ The source types retain distinct identity contracts:
 - A Registry node is selected by exact locked `id@version` and controlled through verified checkout-owned `cm-cli`. Success requires proof of the normalized installed project identity and version; process exit zero alone is insufficient. Manager remains the trusted executor of node-specific installation effects.
 - A direct-Git node retains the configured raw URL as an acquisition locator, while the exact root commit and recursive gitlinks are the content authority. User Git and SSH configuration may rewrite transport, so cdh does not attest the network endpoint.
 
-Direct-Git automatic execution is limited to a root `requirements.txt` and then root `install.py` when present. cdh parses and admits the root requirements before installation; dependencies chosen internally by Registry Manager or a Direct-Git `install.py` remain trusted executor effects and may include a node-authored moving VCS source that cdh does not independently lock or attest. cdh re-proves admitted repository and target state across these mutations, but an exact commit does not make the resulting worktree or arbitrary script effects deterministic. Final custom-node observation does not import or execute node code.
+Git pre-clone hooks leave the target absent for cdh's exclusive creation. Source acquisition returns a checked-out target; the orchestrator immediately proves it and the surrounding state before reporting source preparation complete or admitting pre-install hooks. The current prepared Git node is separate from the installed prefix and future absent targets, and joins the Registry scan's exclusions only after its Git proof succeeds. It enters the installed prefix only after installation succeeds. Each actual hook, source acquisition, and installation invalidates the applicable application/Manager observations and requires the corresponding boundary proof. Adjacent checks with identical scope and no intervening mutation or trusted execution share one synchronous proof; final observation remains independent.
+
+Direct-Git automatic installation is limited to a root `requirements.txt` and then root `install.py` when present. cdh reads and admits the root requirements after pre-install hooks, so trusted patches, creation, or deletion of these optional files affect installation. Missing optional files do not suppress configured hooks. Hooks use the ComfyUI root as cwd, while `install.py` uses the node root; hook subprocess environment changes do not propagate to the parent. Post-install hooks run only on success. Dependencies chosen internally by Registry Manager or a Direct-Git `install.py` remain trusted executor effects and may include a node-authored moving VCS source that cdh does not independently lock or attest. cdh re-proves admitted repository and target state across these mutations, while allowing ordinary worktree patches; an exact commit does not make the resulting worktree or arbitrary script effects deterministic. Final custom-node observation does not import or execute node code.
 
 ## Host Secret source and credential boundary
 

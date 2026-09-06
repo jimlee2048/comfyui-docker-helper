@@ -159,6 +159,7 @@ class FinalGitCustomNodeConfig(_FinalCustomNodeConfig):
     url: str
     ref: str | None = None
     target_dir: str | None = None
+    pre_clone_hooks: list[str] = Field(default_factory=list)
 
 
 FinalCustomNodeConfig = Annotated[

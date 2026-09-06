@@ -25,17 +25,12 @@ _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 _GITLINK_MODE = b"160000"
 
 
-def _install_git_node(
+def _prepare_git_node(
     node: GitNodePlan,
     custom_nodes_root: Path,
-    application: ApplicationPhase,
-    runtime: ContainerRuntime,
     git_path: Path,
-    uv_path: Path,
-    constraints_path: Path,
     git_environment: Mapping[str, str],
-    python_environment: Mapping[str, str],
-) -> None:
+) -> Path:
     root = contracts._require_real_directory(custom_nodes_root, "custom-nodes root")
     target = _planned_git_target(node, root)
     try:
@@ -75,16 +70,7 @@ def _install_git_node(
         env=git_environment,
         description=f"Git node {target.name} recursive submodule checkout",
     )
-    _verify_git_provenance(node, target, root, git_path, git_environment)
-    _install_git_root_surfaces(
-        node,
-        target,
-        application,
-        runtime,
-        uv_path,
-        constraints_path,
-        python_environment,
-    )
+    return target
 
 
 def _install_git_root_surfaces(

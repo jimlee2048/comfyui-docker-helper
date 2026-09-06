@@ -808,3 +808,29 @@ def test_downloader_credentials_overlay_by_canonical_route_atomically() -> None:
             "token": {"secret": "later"},
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("overlay", "expected"),
+    [
+        ({}, ["first.sh", "second.py"]),
+        ({"pre_clone_hooks": ["later.py"]}, ["later.py"]),
+        ({"pre_clone_hooks": []}, []),
+    ],
+    ids=["inherit", "replace", "clear"],
+)
+def test_git_pre_clone_hook_overlay(
+    overlay: dict[str, Any], expected: list[str]
+) -> None:
+    identity = {"type": "git", "url": "https://example.test/node.git"}
+    merged = _merge(
+        {
+            "comfyui": {
+                "custom_nodes": [
+                    {**identity, "pre_clone_hooks": ["first.sh", "second.py"]}
+                ]
+            }
+        },
+        {"comfyui": {"custom_nodes": [{**identity, **overlay}]}},
+    )
+    assert merged["comfyui"]["custom_nodes"][0]["pre_clone_hooks"] == expected

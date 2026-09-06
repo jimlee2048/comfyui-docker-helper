@@ -28,6 +28,9 @@ from tests.container_installer_support import (
 from tests.container_installer_support import (
     custom_nodes_phase as _phase,
 )
+from tests.container_installer_support import (
+    patch_phases as _patch_phases,
+)
 
 
 @pytest.mark.parametrize("url", ["-option", "file:///tmp/node.git", "bad"])
@@ -179,6 +182,7 @@ def test_git_credential_policy_covers_install_and_provenance_with_ssh_coexistenc
         secret_id="cdh-git-credential-private_git",
     )
     phase = _phase(runtime, (node,), git_credentials=(route,))
+    _patch_phases(monkeypatch, application, phase)
     environment = custom_node_installer._git_environment(
         phase,
         {
@@ -205,16 +209,18 @@ def test_git_credential_policy_covers_install_and_provenance_with_ssh_coexistenc
         git_installer, "_install_git_root_surfaces", lambda *_args: None
     )
 
-    git_installer._install_git_node(
-        node,
-        runtime.comfyui_path / "custom_nodes",
+    custom_node_installer.install_custom_nodes(
+        phase,
         application,
-        runtime,
-        Path("/usr/bin/git"),
-        Path("/usr/local/bin/uv"),
-        tmp_path / "constraints.txt",
-        environment,
-        {},
+        runtime=runtime,
+        environ={
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "url.ssh://mirror/.insteadOf",
+            "GIT_CONFIG_VALUE_0": "https://example.invalid/",
+            "GIT_SSH_COMMAND": "ssh -F none",
+            "GIT_SSL_CAINFO": "/custom/ca.pem",
+        },
+        build_plan_digest=f"sha256:{'a' * 64}",
     )
 
     descriptions = {item for item, _env in observed}
@@ -225,6 +231,8 @@ def test_git_credential_policy_covers_install_and_provenance_with_ssh_coexistenc
         "provenance",
     }.issubset(descriptions)
     for _description, git_environment in observed:
+        for key, value in environment.items():
+            assert git_environment[key] == value
         assert git_environment["GIT_CONFIG_COUNT"] == "5"
         assert git_environment["GIT_CONFIG_KEY_0"] == ("url.ssh://mirror/.insteadOf")
         assert git_environment["GIT_CONFIG_VALUE_0"] == ("https://example.invalid/")

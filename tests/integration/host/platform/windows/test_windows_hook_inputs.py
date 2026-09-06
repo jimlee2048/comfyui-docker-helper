@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from comfyui_docker_helper.config.authored.models import FinalGitCustomNodeConfig
 from comfyui_docker_helper.host.context.runtime_hooks import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
@@ -68,9 +69,10 @@ def test_windows_runtime_phase_and_build_root_reject_junctions(
         config=SimpleNamespace(
             comfyui=SimpleNamespace(
                 custom_nodes=(
-                    SimpleNamespace(
-                        pre_install_hooks=("10-start.sh",),
-                        post_install_hooks=(),
+                    FinalGitCustomNodeConfig(
+                        type="git",
+                        url="https://example.com/node.git",
+                        pre_install_hooks=["10-start.sh"],
                     ),
                 )
             )

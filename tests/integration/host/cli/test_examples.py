@@ -37,7 +37,11 @@ def test_full_example_references_existing_hook_scripts() -> None:
     hooks = [
         hook
         for node in result.config.comfyui.custom_nodes
-        for hook in (*node.pre_install_hooks, *node.post_install_hooks)
+        for hook in (
+            *(node.pre_clone_hooks if node.type == "git" else ()),
+            *node.pre_install_hooks,
+            *node.post_install_hooks,
+        )
     ]
 
     assert hooks

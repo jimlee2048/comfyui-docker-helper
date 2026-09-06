@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -48,9 +49,10 @@ from comfyui_docker_helper.container.build.custom_nodes.contracts import (
     CustomNodeInstallError,
 )
 from comfyui_docker_helper.container.build.custom_nodes.git import (
-    _install_git_node,
+    _prepare_git_node,
     _verify_git_provenance,
 )
+from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
 
 _LOCAL_GIT_TIMEOUT_SECONDS = 30
 
@@ -137,6 +139,7 @@ def _materialized_nested_checkout(tmp_path: Path) -> tuple[Path, GitNodePlan, st
         url="https://example.invalid/Raw/Node.git",
         commit=root_commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -204,6 +207,7 @@ def test_linked_worktree_root_is_rejected(tmp_path: Path) -> None:
         url="https://example.invalid/node.git",
         commit=commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -285,6 +289,7 @@ def test_repository_root_proof_rejects_parent_repository_discovery(
         url="ssh://git@example.invalid/node.git",
         commit=commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -305,6 +310,7 @@ def test_final_proof_rejects_a_different_valid_sibling_repository(
         url="https://example.invalid/node.git",
         commit=commit,
         target=str(custom_nodes / "expected"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -319,13 +325,13 @@ def test_final_proof_rejects_a_different_valid_sibling_repository(
         )
 
 
-def test_direct_git_install_clones_into_final_target_and_retains_repository_metadata(
+def test_direct_git_prepare_clones_into_final_target_and_retains_repository_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "source"
     _first, commit = _repository(source)
-    application, runtime = _application(tmp_path)
+    _application_phase, runtime = _application(tmp_path)
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     target = custom_nodes / "direct"
     # The clone fixture supplies a local source after BuildPlan admission.
@@ -334,24 +340,15 @@ def test_direct_git_install_clones_into_final_target_and_retains_repository_meta
         url=str(source),
         commit=commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.build.custom_nodes.git._install_git_root_surfaces",
-        lambda *_args: None,
-    )
-
-    _install_git_node(
+    _prepare_git_node(
         node,
         custom_nodes,
-        application,
-        runtime,
         Path("/usr/bin/git"),
-        Path("/usr/local/bin/uv"),
-        tmp_path / "constraints.txt",
         {**os.environ, "GIT_ALLOW_PROTOCOL": "file"},
-        {},
     )
 
     assert _git(target, "rev-parse", "HEAD").decode().strip() == commit
@@ -366,12 +363,12 @@ def test_direct_git_install_clones_into_final_target_and_retains_repository_meta
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
-def test_direct_git_install_never_replaces_an_occupied_target(
+def test_direct_git_prepare_never_replaces_an_occupied_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
 ) -> None:
-    application, runtime = _application(tmp_path)
+    _application_phase, runtime = _application(tmp_path)
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     target = custom_nodes / "direct"
     if kind == "file":
@@ -386,6 +383,7 @@ def test_direct_git_install_never_replaces_an_occupied_target(
         url=str(tmp_path / "source"),
         commit="a" * 40,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -396,16 +394,11 @@ def test_direct_git_install_never_replaces_an_occupied_target(
     )
 
     with pytest.raises(CustomNodeInstallError, match="already exists"):
-        _install_git_node(
+        _prepare_git_node(
             node,
             custom_nodes,
-            application,
-            runtime,
             Path("/usr/bin/git"),
-            Path("/usr/local/bin/uv"),
-            tmp_path / "constraints.txt",
             os.environ,
-            {},
         )
 
     if kind == "file":
@@ -418,11 +411,11 @@ def test_direct_git_install_never_replaces_an_occupied_target(
         assert target.readlink() == foreign
 
 
-def test_direct_git_install_readmits_the_real_custom_nodes_root(
+def test_direct_git_prepare_readmits_the_real_custom_nodes_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    application, runtime = _application(tmp_path)
+    _application_phase, runtime = _application(tmp_path)
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     custom_nodes.rmdir()
     replacement = tmp_path / "replacement-custom-nodes"
@@ -433,6 +426,7 @@ def test_direct_git_install_readmits_the_real_custom_nodes_root(
         url=str(tmp_path / "source"),
         commit="a" * 40,
         target=str(custom_nodes / "direct"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -443,16 +437,11 @@ def test_direct_git_install_readmits_the_real_custom_nodes_root(
     )
 
     with pytest.raises(CustomNodeInstallError, match="must be one real directory"):
-        _install_git_node(
+        _prepare_git_node(
             node,
             custom_nodes,
-            application,
-            runtime,
             Path("/usr/bin/git"),
-            Path("/usr/local/bin/uv"),
-            tmp_path / "constraints.txt",
             os.environ,
-            {},
         )
 
     assert custom_nodes.is_symlink()
@@ -462,7 +451,7 @@ def test_direct_git_install_readmits_the_real_custom_nodes_root(
 def test_failed_direct_git_clone_leaves_created_target_for_failed_layer(
     tmp_path: Path,
 ) -> None:
-    application, runtime = _application(tmp_path)
+    _application_phase, runtime = _application(tmp_path)
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     unrelated = custom_nodes / "unrelated"
     unrelated.mkdir()
@@ -473,21 +462,17 @@ def test_failed_direct_git_clone_leaves_created_target_for_failed_layer(
         url=str(tmp_path / "missing-source"),
         commit="a" * 40,
         target=str(custom_nodes / "direct"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
 
     with pytest.raises(CustomNodeInstallError, match="clone failed"):
-        _install_git_node(
+        _prepare_git_node(
             node,
             custom_nodes,
-            application,
-            runtime,
             Path("/usr/bin/git"),
-            Path("/usr/local/bin/uv"),
-            tmp_path / "constraints.txt",
             os.environ,
-            {},
         )
 
     assert unrelated.joinpath("keep").read_text() == "keep"
@@ -573,61 +558,39 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     assert locked.url == locator
     assert planned.url == locator
 
-    application, runtime = _application(tmp_path)
+    _application_phase, runtime = _application(tmp_path)
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     node = planned.model_copy(update={"target": str(custom_nodes / "direct")})
     commands: list[tuple[str, ...]] = []
-    events: list[tuple[str, Path | None]] = []
 
     def run_git(argv, **_kwargs) -> bytes:
         commands.append(tuple(os.fspath(item) for item in argv))
-        events.append(("git", None))
         return b""
 
     monkeypatch.setattr(
         "comfyui_docker_helper.container.build.custom_nodes.git._run_git", run_git
     )
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.build.custom_nodes.git._verify_git_provenance",
-        lambda _node, path, *_args, **_kwargs: events.append(("proof", Path(path))),
-    )
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.build.custom_nodes.git._install_git_root_surfaces",
-        lambda *_args: events.append(("root-install", None)),
-    )
-
-    _install_git_node(
+    _prepare_git_node(
         node,
         custom_nodes,
-        application,
-        runtime,
         Path("/usr/bin/git"),
-        Path("/usr/local/bin/uv"),
-        tmp_path / "constraints.txt",
         os.environ,
-        {},
     )
 
     assert commands[0][-2] == locator
     assert commands[0][-1] == os.fspath(custom_nodes / "direct")
-    proof_and_install = [
-        event for event in events if event[0] in {"proof", "root-install"}
-    ]
-    assert [event[0] for event in proof_and_install] == [
-        "proof",
-        "root-install",
-    ]
-    assert proof_and_install[0] == ("proof", custom_nodes / "direct")
     evidence = custom_node_inventory((node,)).nodes[0]
     assert evidence.type == "git" and evidence.url == locator
 
 
-# Mutation after installation invalidates the committed identity before later work.
-@pytest.mark.parametrize("mutation", ["root", "nested"])
-def test_post_hook_head_drift_stops_before_next_node(
+# Hook mutations must preserve Git identity and leave future targets absent.
+@pytest.mark.parametrize("hook_stage", ["pre_install_hooks", "post_install_hooks"])
+@pytest.mark.parametrize("mutation", ["root", "nested", "future"])
+def test_hook_identity_drift_stops_before_next_node(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
+    hook_stage: str,
 ) -> None:
     fixture_root = tmp_path / "fixture"
     fixture_root.mkdir()
@@ -643,6 +606,7 @@ def test_post_hook_head_drift_stops_before_next_node(
         url="https://example.invalid/first.git",
         commit=prepared_node.commit,
         target=str(first_target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(
             HookPlan(relative_path="mutate.py", digest=f"sha256:{'a' * 64}"),
@@ -653,31 +617,44 @@ def test_post_hook_head_drift_stops_before_next_node(
         url="https://example.invalid/second.git",
         commit=prepared_node.commit,
         target=str(custom_nodes / "second"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
+    first = first.model_copy(
+        update={
+            "post_install_hooks": (),
+            hook_stage: first.post_install_hooks,
+        }
+    )
     phase = _phase(runtime, (first, second))
     _patch_phases(monkeypatch, application, phase)
-    installs: list[str] = []
+    preparations: list[str] = []
 
-    def install(node, *_args) -> None:
-        installs.append(Path(node.target).name)
+    def prepare(node, *_args) -> Path:
+        preparations.append(Path(node.target).name)
         if node is not first:
-            pytest.fail("second node must not install after Git drift")
+            pytest.fail("second node must not prepare after Git drift")
         prepared.rename(first_target)
+        return first_target
 
     def mutate(_hook, **_kwargs) -> None:
         if mutation == "root":
             _git(first_target, "switch", "-c", "mutated")
-        else:
+        elif mutation == "nested":
             _git(
                 first_target / "deps/middle/nested/leaf",
                 "checkout",
                 "--detach",
                 leaf_second,
             )
+        else:
+            Path(second.target).mkdir()
 
-    monkeypatch.setattr(git_installer, "_install_git_node", install)
+    monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
+    monkeypatch.setattr(
+        git_installer, "_install_git_root_surfaces", lambda *_args: None
+    )
     monkeypatch.setattr(custom_node_installer, "run_hook", mutate)
     monkeypatch.setattr(
         git_installer,
@@ -685,11 +662,147 @@ def test_post_hook_head_drift_stops_before_next_node(
         lambda *_args, **_kwargs: pytest.fail("final health must not run"),
     )
 
-    with pytest.raises(CustomNodeInstallError, match=r"detached|commit"):
+    with pytest.raises(
+        CustomNodeInstallError, match=r"detached|commit|future Git target"
+    ):
         custom_node_installer.install_custom_nodes(
             phase,
             application,
             runtime=runtime,
         )
 
-    assert installs == ["first"]
+    assert preparations == ["first"]
+
+
+@pytest.mark.parametrize(
+    "surfaces", ["both", "requirements-only", "install-only", "none"]
+)
+def test_real_hooks_patch_install_inputs_after_recursive_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surfaces: str,
+) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    _, source_node, _ = _materialized_nested_checkout(fixture)
+    source = fixture / "sources/root"
+    (source / "requirements.txt").write_text("requests==2.30.0\n")
+    if surfaces != "install-only":
+        (source / "install.py").write_text(
+            "raise RuntimeError('unpatched installer')\n"
+        )
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "installation inputs")
+    commit = _git(source, "rev-parse", "HEAD").decode().strip()
+    application, initial_runtime = _application(tmp_path)
+    runtime = ContainerRuntime(
+        workspace=initial_runtime.workspace,
+        comfyui_path=initial_runtime.comfyui_path,
+        virtual_env=Path(sys.prefix),
+    )
+    application = application.model_copy(
+        update={"paths": application.paths.model_copy(update={"venv": str(sys.prefix)})}
+    )
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    has_requirements = surfaces in {"both", "requirements-only"}
+    has_install = surfaces in {"both", "install-only"}
+    common = (
+        "import os\nfrom pathlib import Path\n"
+        "root = Path(os.environ['COMFYUI_PATH'])\n"
+        "assert Path.cwd() == root\n"
+        "target = root / 'custom_nodes/direct'\n"
+        "trace = root / 'hook-trace'\n"
+    )
+    install_script = (
+        "from pathlib import Path\n"
+        "target = Path.cwd()\n"
+        + (
+            "assert (target / 'requirements-consumed').exists()\n"
+            if has_requirements
+            else ""
+        )
+        + "with (target.parent.parent / 'hook-trace').open('a') as out:\n"
+        "    out.write('install.py\\n')\n"
+        "(target / 'installed').write_text('patched installer')\n"
+    )
+    scripts = {
+        "clone.py": common
+        + "assert not target.exists()\ntrace.write_text('pre-clone\\n')\n",
+        "patch.py": common + "import subprocess\n" + "head = subprocess.check_output(\n"
+        "    ['git', '-C', str(target), 'rev-parse', 'HEAD']).decode().strip()\n"
+        + f"assert head == {commit!r}\n"
+        + "leaf = target / 'deps/middle/nested/leaf/content.txt'\n"
+        "assert leaf.read_text() == 'first\\n'\n"
+        + "assert (target / 'requirements.txt').read_text() == 'requests==2.30.0\\n'\n"
+        + (
+            "(target / 'requirements.txt').write_text('packaging==24.0\\n')\n"
+            if has_requirements
+            else "(target / 'requirements.txt').unlink()\n"
+        )
+        + (
+            f"(target / 'install.py').write_text({install_script!r})\n"
+            if has_install
+            else "(target / 'install.py').unlink()\n"
+        )
+        + "with trace.open('a') as out:\n    out.write('pre-install\\n')\n",
+        "post.py": common
+        + (
+            "assert (target / 'installed').read_text() == 'patched installer'\n"
+            if has_install
+            else ""
+        )
+        + "with trace.open('a') as out:\n    out.write('post-install\\n')\n",
+    }
+
+    def hook(name: str) -> HookPlan:
+        content = scripts[name].encode()
+        (hooks / name).write_bytes(content)
+        return HookPlan(
+            relative_path=name, digest=f"sha256:{hashlib.sha256(content).hexdigest()}"
+        )
+
+    node = source_node.model_copy(
+        update={
+            "target": str(runtime.comfyui_path / "custom_nodes/direct"),
+            "commit": commit,
+            "pre_clone_hooks": (hook("clone.py"),),
+            "pre_install_hooks": (hook("patch.py"),),
+            "post_install_hooks": (hook("post.py"),),
+        }
+    )
+    phase = _phase(runtime, (node,))
+    _patch_phases(monkeypatch, application, phase)
+    installed_requirements: list[str] = []
+
+    def install(argv, **kwargs):
+        if "--requirements" in argv:
+            # Offline seam observes the real post-hook installer input without
+            # contacting an index; install.py still executes as a real child.
+            content = Path(argv[argv.index("--requirements") + 1]).read_text()
+            installed_requirements.append(content)
+            Path(kwargs["cwd"], "requirements-consumed").write_text(content)
+            return subprocess.CompletedProcess(argv, 0)
+        return run_argv(argv, **kwargs)
+
+    monkeypatch.setattr(git_installer, "run_argv", install)
+    custom_node_installer.install_custom_nodes(
+        phase,
+        application,
+        runtime=runtime,
+        build_hooks_directory=hooks,
+        environ={
+            **os.environ,
+            "GIT_ALLOW_PROTOCOL": "file",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"url.{source}.insteadOf",
+            "GIT_CONFIG_VALUE_0": node.url,
+        },
+    )
+
+    expected = ["pre-clone", "pre-install"]
+    if has_install:
+        expected.append("install.py")
+    expected.append("post-install")
+    assert (runtime.comfyui_path / "hook-trace").read_text().splitlines() == expected
+    assert installed_requirements == (["packaging==24.0\n"] if has_requirements else [])

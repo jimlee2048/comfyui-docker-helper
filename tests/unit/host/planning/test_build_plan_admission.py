@@ -85,7 +85,7 @@ def test_build_plan_parser_enforces_complete_hook_tree_identity() -> None:
     document["custom_nodes"]["nodes"][0]["pre_install_hooks"] = (
         {"relative_path": "hooks/install.py", "digest": DIGEST_A},
     )
-    document["custom_nodes"]["nodes"][1]["post_install_hooks"] = (
+    document["custom_nodes"]["nodes"][1]["pre_clone_hooks"] = (
         {"relative_path": "hooks/install.py", "digest": DIGEST_B},
     )
     with pytest.raises(ValidationError, match="conflicting digests"):
@@ -98,7 +98,7 @@ def test_build_plan_parser_accepts_reused_build_hook_and_separate_tree_path() ->
     )
     hook = {"relative_path": "pre-start.d/shared.py", "digest": DIGEST_A}
     document["custom_nodes"]["nodes"][0]["pre_install_hooks"] = (hook,)
-    document["custom_nodes"]["nodes"][1]["post_install_hooks"] = (hook,)
+    document["custom_nodes"]["nodes"][1]["pre_clone_hooks"] = (hook,)
     document["runtime"]["hooks"] = (hook,)
 
     parsed = parse_build_plan_json(json.dumps(document))

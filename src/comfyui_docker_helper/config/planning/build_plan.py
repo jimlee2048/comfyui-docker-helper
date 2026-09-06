@@ -807,6 +807,7 @@ class GitNodePlan(_PlanModel):
     url: str
     commit: str
     target: str
+    pre_clone_hooks: tuple[HookPlan, ...]
     pre_install_hooks: tuple[HookPlan, ...]
     post_install_hooks: tuple[HookPlan, ...]
 
@@ -1409,7 +1410,11 @@ def build_plan_hook_identities(
     build_hooks: dict[str, HookPlan] = {}
     destinations: set[PurePosixPath] = set()
     for node in custom_nodes.nodes:
-        for hook in (*node.pre_install_hooks, *node.post_install_hooks):
+        for hook in (
+            *(node.pre_clone_hooks if isinstance(node, GitNodePlan) else ()),
+            *node.pre_install_hooks,
+            *node.post_install_hooks,
+        ):
             identity = hook_lock_identity("build", hook.relative_path)
             existing = build_hooks.get(identity)
             if existing is not None and existing.digest != hook.digest:
@@ -2199,6 +2204,9 @@ def _custom_node(
         url=entry.url,
         commit=entry.commit,
         target=node.target,
+        pre_clone_hooks=tuple(
+            _hook(value, entries, used) for value in node.pre_clone_hooks
+        ),
         pre_install_hooks=pre_install_hooks,
         post_install_hooks=post_install_hooks,
     )

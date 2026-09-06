@@ -15,6 +15,12 @@ from tests.host_render_service_support import (
     _tree,
 )
 
+from comfyui_docker_helper.config.authored.service import ConfigurationServiceError
+from comfyui_docker_helper.config.planning.build_plan import (
+    GitNodePlan,
+    build_plan_digest,
+    build_plan_hook_identities,
+)
 from comfyui_docker_helper.config.planning.canonical_lock import (
     LocalExecutableLockEntry,
     canonical_entry_key,
@@ -617,3 +623,84 @@ def test_runtime_hook_tree_accepts_regular_0644_files(tmp_path: Path) -> None:
     assert (tmp_path / "context/runtime/hooks/pre-start.d/10-hook.sh").read_text() == (
         "hook\n"
     )
+
+
+@pytest.mark.parametrize(
+    "reuse", [False, True], ids=["pre-clone-only", "cross-stage-reuse"]
+)
+def test_pre_clone_hooks_flow_through_context_identity(
+    tmp_path: Path, reuse: bool
+) -> None:
+    config = tmp_path / "config.toml"
+    text = (
+        _config()
+        + """
+[[comfyui.custom_nodes]]
+type = "git"
+url = "https://example.test/node.git"
+ref = "1111111111111111111111111111111111111111"
+pre_clone_hooks = ["second.py", "first.sh", "second.py"]
+"""
+    )
+    if reuse:
+        text += 'pre_install_hooks = ["first.sh"]\npost_install_hooks = ["second.py"]\n'
+    config.write_text(text)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    contents = {"first.sh": b"echo first\n", "second.py": b"print('second')\n"}
+    for name, content in contents.items():
+        (hooks / name).write_bytes(content)
+    output = tmp_path / "context"
+    with pytest.raises(ConfigurationServiceError) as missing_root:
+        _prepare(config, output, FakeAcquirer())
+    assert any(
+        item.code == "hook.build_hooks_dir_required"
+        for item in missing_root.value.diagnostics
+    )
+    prepared = _prepare(config, output, FakeAcquirer(), build_hooks_dir=hooks)
+    node = prepared.plan.custom_nodes.nodes[0]
+    assert isinstance(node, GitNodePlan)
+    assert [hook.relative_path for hook in node.pre_clone_hooks] == [
+        "second.py",
+        "first.sh",
+        "second.py",
+    ]
+    lock = parse_canonical_lock_toml((output / "config.lock.toml").read_bytes())
+    entries = [
+        entry for entry in lock.entries if isinstance(entry, LocalExecutableLockEntry)
+    ]
+    assert len(entries) == 2
+    build_hooks, _ = build_plan_hook_identities(
+        prepared.plan.custom_nodes, prepared.plan.runtime
+    )
+    assert len(build_hooks) == 2
+    for hook in node.pre_clone_hooks:
+        assert (
+            hook.digest
+            == "sha256:" + hashlib.sha256(contents[hook.relative_path]).hexdigest()
+        )
+        assert (output / "build/hooks" / hook.relative_path).read_bytes() == contents[
+            hook.relative_path
+        ]
+    assert (
+        "COPY --chmod=0755 build/hooks /opt/cdh/build/hooks"
+        in (output / "Dockerfile").read_text()
+    )
+    config.write_text(
+        text.replace(
+            '["second.py", "first.sh", "second.py"]',
+            '["first.sh", "second.py", "second.py"]',
+        )
+    )
+    reordered = _prepare(
+        config, tmp_path / "reordered", FakeAcquirer(), build_hooks_dir=hooks
+    )
+    assert reordered.plan.image_config_digest != prepared.plan.image_config_digest
+    assert build_plan_digest(reordered.plan) != build_plan_digest(prepared.plan)
+    (hooks / "first.sh").write_bytes(b"echo changed\n")
+    changed = _prepare(
+        config, tmp_path / "changed", FakeAcquirer(), build_hooks_dir=hooks
+    )
+    assert changed.plan.image_config_digest == reordered.plan.image_config_digest
+    assert changed.plan.lock_digest != reordered.plan.lock_digest
+    assert build_plan_digest(changed.plan) != build_plan_digest(reordered.plan)

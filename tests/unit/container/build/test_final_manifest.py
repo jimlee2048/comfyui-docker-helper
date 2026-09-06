@@ -857,10 +857,11 @@ def test_final_manifest_observes_build_hook_domain_and_retained_bytes(
     hook_path = build_hooks / "hooks/pre.py"
     hook_path.parent.mkdir(parents=True)
     hook_path.write_bytes(content)
-    plan = build_plan(
-        final_config(build_hooks_dir=build_hooks, with_hook=True),
-        accepted_resolution(hook_digest=digest),
-    )
+    config = final_config(build_hooks_dir=build_hooks, with_hook=True)
+    registry_node, git_node = config.comfyui.custom_nodes
+    git_node.pre_clone_hooks = registry_node.pre_install_hooks
+    registry_node.pre_install_hooks = []
+    plan = build_plan(config, accepted_resolution(hook_digest=digest))
     path = tmp_path / "build-plan.json"
     path.write_bytes(dump_build_plan_json(plan))
     projection = BuildPlanInputAdmission.from_path(
@@ -871,7 +872,7 @@ def test_final_manifest_observes_build_hook_domain_and_retained_bytes(
 
     def read(path: Path) -> bytes:
         observed.append(path)
-        return content
+        return hook_path.read_bytes()
 
     monkeypatch.setattr(final_manifest_service, "read_regular_absolute_file", read)
 
@@ -880,6 +881,9 @@ def test_final_manifest_observes_build_hook_domain_and_retained_bytes(
     assert tuple(item.domain for item in projection.materialized_hooks) == ("build",)
     assert tuple(item.domain for item in evidence) == ("build",)
     assert observed == [Path("/opt/cdh/build/hooks/hooks/pre.py")]
+    hook_path.write_bytes(b"changed hook bytes\n")
+    with pytest.raises(ValueError, match="hook"):
+        final_manifest_service._hook_evidence(projection)
 
 
 def test_final_projection_sorts_uv_tools_by_normalized_name() -> None:

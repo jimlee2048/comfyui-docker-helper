@@ -82,7 +82,7 @@ def _write_build_hook_config(path: Path) -> None:
 type = "git"
 url = "https://example.test/node.git"
 ref = "1111111111111111111111111111111111111111"
-pre_install_hooks = ["nested/pre.sh"]
+pre_clone_hooks = ["nested/pre.sh"]
 """
         )
 

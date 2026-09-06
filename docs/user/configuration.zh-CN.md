@@ -114,7 +114,11 @@ Marker 只针对 cdh 的固定构建目标求值一次：配置指定的 CPython
 
 自定义节点可以使用 Registry 标识，也可以使用直接 Git URL。Registry 节点需要 Manager；直接 Git 节点不需要。混合声明会保留它们在生效配置中的顺序。在靠后的层中设置 `custom_nodes = []` 可移除继承的节点。
 
-每个节点都可以指定安装前或安装后 Hook。Hook 路径相对于通过 `--build-hooks-dir` 显式传入的目录；不存在隐式 Hook 根目录。仓库中包含简短的 [`pre.sh`](../../examples/build-hooks/pre.sh) 和 [`post.sh`](../../examples/build-hooks/post.sh) 示例。
+Git 节点在 cdh 创建目标目录并克隆仓库之前运行 `pre_clone_hooks`。锁定 commit 的 detached checkout、递归 submodule checkout 和源码身份检查通过后，`pre_install_hooks` 在 cdh 读取根目录 `requirements.txt` 或执行可选根目录 `install.py` 之前运行。可在此阶段修补节点源码或安装输入；cdh 按现有 requirements 限制消费修改后的文件。`post_install_hooks` 在安装和身份检查成功后运行。即使一个或两个可选安装文件不存在，所有已配置阶段仍然运行。Registry 的 pre/post Hook 包围 Manager 安装命令；Registry 节点不接受 pre-clone Hook。
+
+节点及各 Hook 数组按顺序执行。任何 Hook、源码准备、安装或边界检查失败都会阻止后续工作；post-install Hook 不用于失败清理。所有构建 Hook 的工作目录均为 `COMFYUI_PATH`，`.sh` 使用 bash，`.py` 使用应用 venv Python。操作 Git 节点文件时，将配置的 `target_dir` 拼接在 `COMFYUI_PATH/custom_nodes` 下；pre-clone 必须让该目标保持不存在。Hook 内的环境或目录变更不会传回后续子进程。
+
+Hook 路径相对于通过 `--build-hooks-dir` 显式传入的目录；不存在隐式 Hook 根目录。每个列表默认空，遵循上文的普通列表替换规则。[完整配置](../../examples/full.toml) 使用仓库中简短的 [pre-clone](../../examples/build-hooks/pre-clone.sh)、[pre-install](../../examples/build-hooks/pre.sh) 和 [post-install](../../examples/build-hooks/post.sh) 示例。Hook 在合并后的自定义节点构建指令内执行，命中 BuildKit 缓存时可能不会重新执行。
 
 构建 Hook 和自定义节点安装程序会在镜像构建期间执行由用户选择的可信代码。使用前请检查这些代码；不要在 Hook 文件中放置机密信息，因为其内容会保留在镜像及其各层中。
 

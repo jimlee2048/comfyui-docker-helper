@@ -289,7 +289,8 @@ target_dir = "ComfyUI-Custom-Scripts"
 pre_clone_hooks = ["pre-clone.sh"]
 # After exact checkout and recursive submodules, before reading requirements.txt
 # or running optional install.py. Hooks still run when these files are absent.
-# All hooks use COMFYUI_PATH as cwd; join target_dir to operate on node files.
+# All hooks use COMFYUI_PATH as cwd; node files are under
+# COMFYUI_PATH/custom_nodes/<target_dir>.
 pre_install_hooks = ["pre.sh"]
 # After successful requirements/install.py processing and identity checks.
 post_install_hooks = ["post.sh"]

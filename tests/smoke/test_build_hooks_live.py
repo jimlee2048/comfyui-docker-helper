@@ -16,6 +16,7 @@ from tests.project_paths import FIXTURES_ROOT
 from tests.smoke.application_probes import GIT_PROOF_SOURCE
 
 from comfyui_docker_helper.config.planning.build_plan import (
+    BuildPlan,
     GitNodePlan,
     build_plan_hook_identities,
     manifest_binding,
@@ -25,6 +26,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     dump_canonical_lock_toml,
     parse_canonical_lock_toml,
 )
+from comfyui_docker_helper.host.context.wheel import build_canonical_wheel
 
 pytestmark = [
     pytest.mark.smoke,
@@ -123,12 +125,20 @@ def _environment(name: str | None) -> str:
     return value
 
 
+def _current_build_plan(context: Path) -> BuildPlan:
+    plan = parse_build_plan_json((context / "build-plan.json").read_bytes())
+    current_wheel = build_canonical_wheel()
+    if current_wheel.digest != plan.toolchain.tool_store.cdh.wheel_digest:
+        pytest.fail("build-hook context does not match the current cdh package")
+    return plan
+
+
 def test_formal_image_consumes_pre_install_patch_after_source_preparation() -> None:
     image = _environment(_SCENARIO.image_variable)
     context = Path(_environment(_SCENARIO.context_variable)).resolve(strict=True)
     assert (context / ".cdh-rendered").is_file()
     assert (context / "Dockerfile").is_file()
-    plan = parse_build_plan_json((context / "build-plan.json").read_bytes())
+    plan = _current_build_plan(context)
     lock_bytes = (context / "config.lock.toml").read_bytes()
     lock = parse_canonical_lock_toml(lock_bytes)
     assert dump_canonical_lock_toml(lock).encode() == lock_bytes

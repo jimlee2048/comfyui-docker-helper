@@ -583,7 +583,7 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     assert evidence.type == "git" and evidence.url == locator
 
 
-# Mutation after installation invalidates the committed identity before later work.
+# Hook mutations must preserve Git identity and leave future targets absent.
 @pytest.mark.parametrize("hook_stage", ["pre_install_hooks", "post_install_hooks"])
 @pytest.mark.parametrize("mutation", ["root", "nested", "future"])
 def test_hook_identity_drift_stops_before_next_node(
@@ -629,12 +629,12 @@ def test_hook_identity_drift_stops_before_next_node(
     )
     phase = _phase(runtime, (first, second))
     _patch_phases(monkeypatch, application, phase)
-    installs: list[str] = []
+    preparations: list[str] = []
 
-    def install(node, *_args) -> Path:
-        installs.append(Path(node.target).name)
+    def prepare(node, *_args) -> Path:
+        preparations.append(Path(node.target).name)
         if node is not first:
-            pytest.fail("second node must not install after Git drift")
+            pytest.fail("second node must not prepare after Git drift")
         prepared.rename(first_target)
         return first_target
 
@@ -651,7 +651,7 @@ def test_hook_identity_drift_stops_before_next_node(
         else:
             Path(second.target).mkdir()
 
-    monkeypatch.setattr(git_installer, "_prepare_git_node", install)
+    monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
     monkeypatch.setattr(
         git_installer, "_install_git_root_surfaces", lambda *_args: None
     )
@@ -671,7 +671,7 @@ def test_hook_identity_drift_stops_before_next_node(
             runtime=runtime,
         )
 
-    assert installs == ["first"]
+    assert preparations == ["first"]
 
 
 @pytest.mark.parametrize(

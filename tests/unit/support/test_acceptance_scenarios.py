@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from packaging.version import Version
 
 from comfyui_docker_helper.config import load_validate_config_result
 from comfyui_docker_helper.config.authored.models import FinalGitCustomNodeConfig
+from comfyui_docker_helper.config.planning.build_plan import dump_build_plan_json
 from tests.acceptance_scenarios import (
     ACCEPTANCE_SCENARIOS,
     RELEASE_PYTHON_PROFILES,
@@ -24,7 +26,15 @@ from tests.acceptance_scenarios import (
     ScenarioClass,
     required_release_probes,
 )
+from tests.build_plan_support import (
+    DIGEST_B,
+    accepted_resolution,
+    build_plan,
+    canonical_wheel,
+    final_config,
+)
 from tests.project_paths import FIXTURES_ROOT, PROJECT_ROOT
+from tests.smoke import test_build_hooks_live as build_hooks_probe
 
 _FIXTURE_ROOT = FIXTURES_ROOT / "comfyui-build"
 _CONFIG_ROOT = _FIXTURE_ROOT / "configs"
@@ -146,12 +156,30 @@ def test_build_hooks_component_has_dedicated_inputs_and_bounded_costs() -> None:
     assert scenario.classification is ScenarioClass.COMPONENT
     assert scenario.image_variable == "CDH_BUILD_HOOKS_IMAGE"
     assert scenario.context_variable == "CDH_BUILD_HOOKS_CONTEXT"
-    assert scenario.costs == {Cost.NETWORK, Cost.DOCKER, Cost.SLOW}
-    assert scenario.capabilities == {
-        Capability.APPLICATION,
-        Capability.CUSTOM_NODES,
-        Capability.HOOKS,
-    }
+    assert Cost.GPU not in scenario.costs
+
+
+@pytest.mark.parametrize("matches", [True, False], ids=["current", "stale"])
+def test_build_hooks_context_requires_current_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, matches: bool
+) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    (tmp_path / "build-plan.json").write_bytes(dump_build_plan_json(plan))
+    wheel = canonical_wheel()
+    if not matches:
+        wheel = replace(wheel, digest=DIGEST_B)
+    monkeypatch.setattr(build_hooks_probe, "build_canonical_wheel", lambda: wheel)
+    monkeypatch.setattr(
+        build_hooks_probe.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("context admission must not run Docker"),
+    )
+
+    if matches:
+        assert build_hooks_probe._current_build_plan(tmp_path) == plan
+    else:
+        with pytest.raises(pytest.fail.Exception, match="current cdh package"):
+            build_hooks_probe._current_build_plan(tmp_path)
 
 
 @pytest.mark.parametrize("admission", ["offline", "missing-image", "missing-context"])

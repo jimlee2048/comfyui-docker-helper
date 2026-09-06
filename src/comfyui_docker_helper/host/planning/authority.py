@@ -25,6 +25,7 @@ from comfyui_docker_helper.config.planning.inputs.executable import (
 )
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestGraph,
+    GitNodeRequest,
     PlanningReleaseInputs,
     SelectorStability,
     comfyui_request,
@@ -170,7 +171,11 @@ def build_local_executable_requests(
         {
             hook
             for node in graph.custom_nodes
-            for hook in (*node.pre_install_hooks, *node.post_install_hooks)
+            for hook in (
+                *(node.pre_clone_hooks if isinstance(node, GitNodeRequest) else ()),
+                *node.pre_install_hooks,
+                *node.post_install_hooks,
+            )
         }
     )
     if relative_hooks and build_hooks_dir is None:

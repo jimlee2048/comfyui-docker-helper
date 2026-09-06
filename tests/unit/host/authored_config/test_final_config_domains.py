@@ -3,7 +3,12 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from comfyui_docker_helper.config.authored.models import (
+    FinalGitCustomNodeConfig,
+    FinalRegistryCustomNodeConfig,
+)
 from comfyui_docker_helper.config.authored.validation.domains import (
     validate_final_config_domains,
 )
@@ -1157,8 +1162,12 @@ def test_git_source_url_accepts_supported_remote_forms(url: str) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "stage", ["pre_clone_hooks", "pre_install_hooks", "post_install_hooks"]
+)
 def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(
     tmp_path: Path,
+    stage: str,
 ) -> None:
     first = tmp_path / "first.sh"
     first.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -1168,7 +1177,7 @@ def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(
         {
             "type": "git",
             "url": "https://github.com/example/direct.git",
-            "pre_install_hooks": ["first.sh", "linked.py"],
+            stage: ["first.sh", "linked.py"],
         }
     ]
     config = validate_final_config_structure(document)
@@ -1183,12 +1192,12 @@ def test_hook_tree_preserves_order_and_requires_regular_non_symlink_files(
         if item.code == "hook.source_not_regular"
     ] == [
         (
-            ("comfyui", "custom_nodes", 0, "pre_install_hooks", 1),
+            ("comfyui", "custom_nodes", 0, stage, 1),
             "hook.source_not_regular",
             DiagnosticSeverity.ERROR,
         )
     ]
-    assert config.comfyui.custom_nodes[0].pre_install_hooks == [
+    assert config.comfyui.custom_nodes[0].model_dump()[stage] == [
         "first.sh",
         "linked.py",
     ]
@@ -1217,3 +1226,15 @@ def test_git_refs_reject_ambiguous_or_invalid_forms(ref: str) -> None:
         )
         for item in diagnostics
     )
+
+
+def test_pre_clone_hooks_are_git_only_and_default_to_empty() -> None:
+    git = FinalGitCustomNodeConfig(type="git", url="https://example.test/node.git")
+    assert git.pre_clone_hooks == []
+    with pytest.raises(ValidationError) as raised:
+        FinalRegistryCustomNodeConfig.model_validate(
+            {"type": "registry", "id": "node", "pre_clone_hooks": []}
+        )
+    assert [(error["loc"], error["type"]) for error in raised.value.errors()] == [
+        (("pre_clone_hooks",), "extra_forbidden")
+    ]

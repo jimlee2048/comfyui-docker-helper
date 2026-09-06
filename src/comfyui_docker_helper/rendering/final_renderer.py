@@ -68,7 +68,9 @@ def _base_phase(plan: BuildPlan) -> list[str]:
         "/etc/profile.d/cdh-workspace.sh",
     ]
     if any(
-        node.pre_install_hooks or node.post_install_hooks
+        (isinstance(node, GitNodePlan) and node.pre_clone_hooks)
+        or node.pre_install_hooks
+        or node.post_install_hooks
         for node in plan.custom_nodes.nodes
     ):
         lines.append("COPY --chmod=0755 build/hooks /opt/cdh/build/hooks")

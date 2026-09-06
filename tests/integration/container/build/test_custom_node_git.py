@@ -137,6 +137,7 @@ def _materialized_nested_checkout(tmp_path: Path) -> tuple[Path, GitNodePlan, st
         url="https://example.invalid/Raw/Node.git",
         commit=root_commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -204,6 +205,7 @@ def test_linked_worktree_root_is_rejected(tmp_path: Path) -> None:
         url="https://example.invalid/node.git",
         commit=commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -285,6 +287,7 @@ def test_repository_root_proof_rejects_parent_repository_discovery(
         url="ssh://git@example.invalid/node.git",
         commit=commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -305,6 +308,7 @@ def test_final_proof_rejects_a_different_valid_sibling_repository(
         url="https://example.invalid/node.git",
         commit=commit,
         target=str(custom_nodes / "expected"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -334,6 +338,7 @@ def test_direct_git_install_clones_into_final_target_and_retains_repository_meta
         url=str(source),
         commit=commit,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -386,6 +391,7 @@ def test_direct_git_install_never_replaces_an_occupied_target(
         url=str(tmp_path / "source"),
         commit="a" * 40,
         target=str(target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -433,6 +439,7 @@ def test_direct_git_install_readmits_the_real_custom_nodes_root(
         url=str(tmp_path / "source"),
         commit="a" * 40,
         target=str(custom_nodes / "direct"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -473,6 +480,7 @@ def test_failed_direct_git_clone_leaves_created_target_for_failed_layer(
         url=str(tmp_path / "missing-source"),
         commit="a" * 40,
         target=str(custom_nodes / "direct"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )
@@ -643,6 +651,7 @@ def test_post_hook_head_drift_stops_before_next_node(
         url="https://example.invalid/first.git",
         commit=prepared_node.commit,
         target=str(first_target),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(
             HookPlan(relative_path="mutate.py", digest=f"sha256:{'a' * 64}"),
@@ -653,6 +662,7 @@ def test_post_hook_head_drift_stops_before_next_node(
         url="https://example.invalid/second.git",
         commit=prepared_node.commit,
         target=str(custom_nodes / "second"),
+        pre_clone_hooks=(),
         pre_install_hooks=(),
         post_install_hooks=(),
     )

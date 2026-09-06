@@ -60,7 +60,7 @@ class RuntimeLoggingError(ApplicationError):
 
 
 class RuntimeLoggingFollowerLimitError(RuntimeError):
-    """The fixed live follower capacity is already in use."""
+    """The fixed runtime log query capacity is already in use."""
 
 
 class RuntimeLoggingFailureKind(StrEnum):
@@ -105,7 +105,6 @@ class RuntimeLogFollower:
 
     def __init__(self, broker: RuntimeLoggingBroker) -> None:
         self._broker = broker
-        self._query_owned = False
         self._condition = threading.Condition()
         self._chunks: deque[RuntimeLogChunk] = deque()
         self._queued_bytes = 0
@@ -341,22 +340,6 @@ class RuntimeLoggingBroker:
     def wait_for_failure(self, timeout: float | None = None) -> bool:
         return self._failure_event.wait(timeout)
 
-    def follow(self) -> RuntimeLogFollower:
-        with self._followers_lock:
-            if not self._started or self._closed:
-                raise RuntimeLoggingError("Runtime logging is not available.")
-            if (
-                sum(not item._query_owned for item in self._followers)
-                + self._query_count
-                >= RUNTIME_LOG_MAX_FOLLOWERS
-            ):
-                raise RuntimeLoggingFollowerLimitError(
-                    "The runtime log follower limit has been reached."
-                )
-            follower = RuntimeLogFollower(self)
-            self._followers.add(follower)
-            return follower
-
     def __enter__(self) -> RuntimeLoggingBroker:
         self.start()
         return self
@@ -507,17 +490,12 @@ class RuntimeLoggingBroker:
         with self._followers_lock:
             if not self._started or self._closed or self._settings is None:
                 raise RuntimeLoggingError("Runtime log history is not available.")
-            if (
-                self._query_count
-                + sum(not item._query_owned for item in self._followers)
-                >= RUNTIME_LOG_MAX_FOLLOWERS
-            ):
+            if self._query_count >= RUNTIME_LOG_MAX_FOLLOWERS:
                 raise RuntimeLoggingFollowerLimitError(
                     "The runtime log query limit has been reached."
                 )
             follower = RuntimeLogFollower(self) if follow else None
             if follower is not None:
-                follower._query_owned = True
                 self._followers.add(follower)
             self._query_count += 1
             retained = self._history.snapshot()

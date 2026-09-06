@@ -87,6 +87,7 @@ _PRIMARY_FAILURE = r"""
 import errno
 import os
 
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 
 
@@ -96,7 +97,10 @@ def fail_saved_writer(_fd, _data):
 
 broker = RuntimeLoggingBroker(writer=fail_saved_writer)
 broker.start()
-follower = broker.follow()
+broker.configure(RuntimeLogSettings(mode="none"))
+query = broker.logs(tail=0, follow=True)
+follower = query.follower
+assert follower is not None
 os.write(1, b"fatal")
 if not broker.wait_for_failure(2.0):
     os._exit(21)
@@ -113,6 +117,7 @@ remaining = memoryview(payload)
 while remaining:
     written = os.write(1, remaining)
     remaining = remaining[written:]
+query.close()
 broker.close()
 os._exit(0)
 """
@@ -247,12 +252,16 @@ broker.close()
 _SLOW_FOLLOWER = r"""
 import os
 
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 
 
 broker = RuntimeLoggingBroker()
 broker.start()
-follower = broker.follow()
+broker.configure(RuntimeLogSettings(mode="none"))
+query = broker.logs(tail=0, follow=True)
+follower = query.follower
+assert follower is not None
 payload = b"slow-follower-primary" * (32 * 1024)
 remaining = memoryview(payload)
 while remaining:
@@ -260,6 +269,7 @@ while remaining:
     remaining = remaining[written:]
 if follower.close_reason() != "overflow":
     raise SystemExit(51)
+query.close()
 broker.close()
 """
 

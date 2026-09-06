@@ -185,22 +185,29 @@ def test_final_sync_failure_is_pending_outside_writer_lock(tmp_path, monkeypatch
 
 def test_real_fd_history_captures_bootstrap_streams_and_live_handoff(tmp_path):
     code = r"""
-import os, sys
+import os, sys, threading
 from pathlib import Path
 from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
 broker = RuntimeLoggingBroker()
+published = threading.Event()
+publish = broker._publish
+
+def observe_publication(chunk):
+    publish(chunk)
+    published.set()
+
+broker._publish = observe_publication
 broker.start()
-barrier = broker.follow()
 os.write(1, b"bootstrap\xff\n")
-assert barrier.receive(2).data == b"bootstrap\xff\n"
+assert published.wait(2)
+broker._publish = publish
 broker.configure(RuntimeLogSettings(directory=sys.argv[1]))
 with broker.logs(follow=True) as query:
     os.write(2, b"stderr\x80\n")
     output = b"".join(item for item in query.replay() if isinstance(item, bytes))
     assert output == b"bootstrap\xff\n"
     assert query.follower.receive(2).data == b"stderr\x80\n"
-barrier.close()
 broker.close()
 stored = (Path(sys.argv[1]) / "runtime.log").read_bytes()
 assert stored == b"bootstrap\xff\nstderr\x80\n"

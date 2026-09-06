@@ -48,7 +48,7 @@ from comfyui_docker_helper.container.build.custom_nodes.contracts import (
     CustomNodeInstallError,
 )
 from comfyui_docker_helper.container.build.custom_nodes.git import (
-    _install_git_node,
+    _prepare_git_node,
     _verify_git_provenance,
 )
 
@@ -323,7 +323,7 @@ def test_final_proof_rejects_a_different_valid_sibling_repository(
         )
 
 
-def test_direct_git_install_clones_into_final_target_and_retains_repository_metadata(
+def test_direct_git_prepare_clones_into_final_target_and_retains_repository_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -342,21 +342,11 @@ def test_direct_git_install_clones_into_final_target_and_retains_repository_meta
         pre_install_hooks=(),
         post_install_hooks=(),
     )
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.build.custom_nodes.git._install_git_root_surfaces",
-        lambda *_args: None,
-    )
-
-    _install_git_node(
+    _prepare_git_node(
         node,
         custom_nodes,
-        application,
-        runtime,
         Path("/usr/bin/git"),
-        Path("/usr/local/bin/uv"),
-        tmp_path / "constraints.txt",
         {**os.environ, "GIT_ALLOW_PROTOCOL": "file"},
-        {},
     )
 
     assert _git(target, "rev-parse", "HEAD").decode().strip() == commit
@@ -371,7 +361,7 @@ def test_direct_git_install_clones_into_final_target_and_retains_repository_meta
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
-def test_direct_git_install_never_replaces_an_occupied_target(
+def test_direct_git_prepare_never_replaces_an_occupied_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
@@ -402,16 +392,11 @@ def test_direct_git_install_never_replaces_an_occupied_target(
     )
 
     with pytest.raises(CustomNodeInstallError, match="already exists"):
-        _install_git_node(
+        _prepare_git_node(
             node,
             custom_nodes,
-            application,
-            runtime,
             Path("/usr/bin/git"),
-            Path("/usr/local/bin/uv"),
-            tmp_path / "constraints.txt",
             os.environ,
-            {},
         )
 
     if kind == "file":
@@ -424,7 +409,7 @@ def test_direct_git_install_never_replaces_an_occupied_target(
         assert target.readlink() == foreign
 
 
-def test_direct_git_install_readmits_the_real_custom_nodes_root(
+def test_direct_git_prepare_readmits_the_real_custom_nodes_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,16 +435,11 @@ def test_direct_git_install_readmits_the_real_custom_nodes_root(
     )
 
     with pytest.raises(CustomNodeInstallError, match="must be one real directory"):
-        _install_git_node(
+        _prepare_git_node(
             node,
             custom_nodes,
-            application,
-            runtime,
             Path("/usr/bin/git"),
-            Path("/usr/local/bin/uv"),
-            tmp_path / "constraints.txt",
             os.environ,
-            {},
         )
 
     assert custom_nodes.is_symlink()
@@ -486,16 +466,11 @@ def test_failed_direct_git_clone_leaves_created_target_for_failed_layer(
     )
 
     with pytest.raises(CustomNodeInstallError, match="clone failed"):
-        _install_git_node(
+        _prepare_git_node(
             node,
             custom_nodes,
-            application,
-            runtime,
             Path("/usr/bin/git"),
-            Path("/usr/local/bin/uv"),
-            tmp_path / "constraints.txt",
             os.environ,
-            {},
         )
 
     assert unrelated.joinpath("keep").read_text() == "keep"
@@ -585,47 +560,23 @@ def test_direct_git_retrieval_receives_the_unchanged_declared_locator(
     custom_nodes = runtime.comfyui_path / "custom_nodes"
     node = planned.model_copy(update={"target": str(custom_nodes / "direct")})
     commands: list[tuple[str, ...]] = []
-    events: list[tuple[str, Path | None]] = []
 
     def run_git(argv, **_kwargs) -> bytes:
         commands.append(tuple(os.fspath(item) for item in argv))
-        events.append(("git", None))
         return b""
 
     monkeypatch.setattr(
         "comfyui_docker_helper.container.build.custom_nodes.git._run_git", run_git
     )
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.build.custom_nodes.git._verify_git_provenance",
-        lambda _node, path, *_args, **_kwargs: events.append(("proof", Path(path))),
-    )
-    monkeypatch.setattr(
-        "comfyui_docker_helper.container.build.custom_nodes.git._install_git_root_surfaces",
-        lambda *_args: events.append(("root-install", None)),
-    )
-
-    _install_git_node(
+    _prepare_git_node(
         node,
         custom_nodes,
-        application,
-        runtime,
         Path("/usr/bin/git"),
-        Path("/usr/local/bin/uv"),
-        tmp_path / "constraints.txt",
         os.environ,
-        {},
     )
 
     assert commands[0][-2] == locator
     assert commands[0][-1] == os.fspath(custom_nodes / "direct")
-    proof_and_install = [
-        event for event in events if event[0] in {"proof", "root-install"}
-    ]
-    assert [event[0] for event in proof_and_install] == [
-        "proof",
-        "root-install",
-    ]
-    assert proof_and_install[0] == ("proof", custom_nodes / "direct")
     evidence = custom_node_inventory((node,)).nodes[0]
     assert evidence.type == "git" and evidence.url == locator
 
@@ -670,11 +621,12 @@ def test_post_hook_head_drift_stops_before_next_node(
     _patch_phases(monkeypatch, application, phase)
     installs: list[str] = []
 
-    def install(node, *_args) -> None:
+    def install(node, *_args) -> Path:
         installs.append(Path(node.target).name)
         if node is not first:
             pytest.fail("second node must not install after Git drift")
         prepared.rename(first_target)
+        return first_target
 
     def mutate(_hook, **_kwargs) -> None:
         if mutation == "root":
@@ -687,7 +639,10 @@ def test_post_hook_head_drift_stops_before_next_node(
                 leaf_second,
             )
 
-    monkeypatch.setattr(git_installer, "_install_git_node", install)
+    monkeypatch.setattr(git_installer, "_prepare_git_node", install)
+    monkeypatch.setattr(
+        git_installer, "_install_git_root_surfaces", lambda *_args: None
+    )
     monkeypatch.setattr(custom_node_installer, "run_hook", mutate)
     monkeypatch.setattr(
         git_installer,

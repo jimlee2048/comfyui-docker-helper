@@ -308,24 +308,24 @@ def test_registry_orchestration_uses_shared_managed_python_environment(
     )
 
     operations = [
-        (event[0], event[1]) for event in events if event[0] in {"hook", "verify"}
+        (event[0], event[1][2] if event[0] == "command" else event[1])
+        for event in events
+        if event[0] in {"hook", "verify", "command"}
     ]
     assert operations == [
         ("verify", ()),
         ("hook", "pre.py"),
         ("verify", ()),
-        ("verify", ()),
+        ("command", "first@1.0.0"),
         ("verify", ("first",)),
         ("hook", "post.py"),
         ("verify", ("first",)),
         ("verify", ("first",)),
-        ("verify", ("first",)),
-        ("verify", ("first",)),
+        ("command", "second@2.0.0"),
         ("verify", ("first", "second")),
         ("hook", "one.py"),
         ("verify", ("first", "second")),
         ("hook", "two.py"),
-        ("verify", ("first", "second")),
         ("verify", ("first", "second")),
         ("verify", ("first", "second")),
     ]

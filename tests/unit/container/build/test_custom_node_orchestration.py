@@ -14,6 +14,7 @@ from comfyui_docker_helper.config.evidence.custom_nodes import custom_node_inven
 from comfyui_docker_helper.config.planning.build_plan import (
     ApplicationPhase,
     CustomNodePlan,
+    GitNodePlan,
     HookPlan,
     RegistryNodePlan,
 )
@@ -66,6 +67,16 @@ def _patch_node_runner(monkeypatch: pytest.MonkeyPatch, runner) -> None:
     monkeypatch.setattr(git_installer, "run_argv", runner)
 
 
+def _patch_git_install(monkeypatch: pytest.MonkeyPatch, installer) -> None:
+    def prepare(node, *_args) -> Path:
+        target = Path(node.target)
+        target.mkdir()
+        return target
+
+    monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
+    monkeypatch.setattr(git_installer, "_install_git_root_surfaces", installer)
+
+
 def _hook_digest(content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
@@ -96,6 +107,7 @@ def _semantic_operation_signature(
             value.index,
             value.total,
             value.target_name,
+            value.pre_clone_hook_count,
             value.pre_hook_count,
             value.post_hook_count,
         )
@@ -287,7 +299,7 @@ def test_nonempty_plan_rejects_manager_phase_mismatch_before_mutation(
         )
     monkeypatch.setattr(
         git_installer,
-        "_install_git_node",
+        "_prepare_git_node",
         lambda *_args, **_kwargs: pytest.fail(
             "phase mismatch must fail before mutation or observation"
         ),
@@ -325,11 +337,7 @@ def test_enabled_git_only_plan_observes_manager_without_registry_scanning(
         "observe_manager_capability",
         lambda *_args: events.append("observe-manager"),
     )
-    monkeypatch.setattr(
-        git_installer,
-        "_install_git_node",
-        lambda *_args: events.append("install-git"),
-    )
+    _patch_git_install(monkeypatch, lambda *_args: events.append("install-git"))
     monkeypatch.setattr(
         git_installer,
         "_verify_git_provenance",
@@ -350,9 +358,14 @@ def test_enabled_git_only_plan_observes_manager_without_registry_scanning(
 
     assert events.count("capture-manager") == 1
     assert events.count("install-git") == 1
-    assert events.count("verify-manager-authority") == 5
-    assert events.count("observe-manager") == 2
-    assert events[-1] == "observe-manager"
+    installation = events.index("install-git")
+    assert "observe-manager" in events[:installation]
+    assert events[installation + 1 :] == [
+        "verify-manager-authority",
+        "observe-manager",
+        "verify-manager-authority",
+        "observe-manager",
+    ]
 
 
 def test_enabled_git_only_plan_rejects_manager_mutation_at_next_boundary(
@@ -377,7 +390,7 @@ def test_enabled_git_only_plan_rejects_manager_mutation_at_next_boundary(
         "observe_manager_capability",
         observe_manager,
     )
-    monkeypatch.setattr(git_installer, "_install_git_node", install_git)
+    _patch_git_install(monkeypatch, install_git)
     monkeypatch.setattr(
         custom_node_installer,
         "_verify_mixed_state",
@@ -449,7 +462,7 @@ def test_enabled_git_only_plan_rejects_anchor_drift_at_next_observation(
         anchor.write_text("wrong\n")
         anchor.chmod(0o444)
 
-    monkeypatch.setattr(git_installer, "_install_git_node", mutate_anchor)
+    _patch_git_install(monkeypatch, mutate_anchor)
     monkeypatch.setattr(
         git_installer,
         "_verify_git_provenance",
@@ -495,7 +508,7 @@ def test_disabled_git_only_plan_rejects_manager_introduction_at_next_boundary(
         "observe_manager_absence",
         observe_absence,
     )
-    monkeypatch.setattr(git_installer, "_install_git_node", install_git)
+    _patch_git_install(monkeypatch, install_git)
     monkeypatch.setattr(
         custom_node_installer,
         "_verify_mixed_state",
@@ -508,7 +521,7 @@ def test_disabled_git_only_plan_rejects_manager_introduction_at_next_boundary(
             runtime=runtime,
         )
 
-    assert absence_observations == 2
+    assert absence_observations == 3
 
 
 def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
@@ -518,7 +531,12 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     application, runtime = _application(tmp_path)
     nodes: tuple[CustomNodePlan, ...] = (
         _node("first", "1.0.0", post=("first-post.py",)),
-        _git_node(runtime, pre=("git-pre.py",), post=("git-post.py",)),
+        _git_node(
+            runtime,
+            pre_clone=("git-clone-one.py", "git-clone-two.py"),
+            pre=("git-pre.py",),
+            post=("git-post.py",),
+        ),
         _node("last", "2.0.0"),
     )
     custom_nodes = _phase(runtime, nodes)
@@ -543,8 +561,8 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     monkeypatch.setattr(
         custom_node_installer,
         "_verify_mixed_state",
-        lambda _root, admitted, future, **_kwargs: events.append(
-            ("proof", names(admitted), names(future))
+        lambda _root, admitted, future, *, prepared_git=None, **_kwargs: events.append(
+            ("proof", names(admitted), names(future), prepared_git)
         ),
     )
     monkeypatch.setattr(
@@ -553,22 +571,29 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         lambda node, *_args: events.append(("install", node.id)),
     )
 
+    def prepare_git(node, _root, _git_path, git_environment) -> Path:
+        observed_git_environment.update(git_environment)
+        target = Path(node.target)
+        assert not target.exists()
+        target.mkdir()
+        events.append(("prepare", target.name))
+        return target
+
     def install_git(
         node,
-        _custom_nodes_root,
+        target,
         _application,
         _runtime,
-        _git_path,
         _uv_path,
         _constraints_path,
-        git_environment,
         python_environment,
     ) -> None:
-        observed_git_environment.update(git_environment)
+        assert target == Path(node.target)
         observed_python_environment.update(python_environment)
-        events.append(("install", Path(node.target).name))
+        events.append(("install", target.name))
 
-    monkeypatch.setattr(git_installer, "_install_git_node", install_git)
+    monkeypatch.setattr(git_installer, "_prepare_git_node", prepare_git)
+    monkeypatch.setattr(git_installer, "_install_git_root_surfaces", install_git)
 
     def run_hook(hook, **kwargs) -> None:
         assert kwargs["env"] == source_environment
@@ -606,6 +631,8 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     ]
     assert [event for event in events if event[0] == "hook"] == [
         ("hook", "first-post.py", f"sha256:{'b' * 64}"),
+        ("hook", "git-clone-one.py", f"sha256:{'e' * 64}"),
+        ("hook", "git-clone-two.py", f"sha256:{'e' * 64}"),
         ("hook", "git-pre.py", f"sha256:{'c' * 64}"),
         ("hook", "git-post.py", f"sha256:{'d' * 64}"),
     ]
@@ -615,6 +642,20 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         < events.index(("hook", "git-post.py", f"sha256:{'d' * 64}"))
     )
     git_pre_index = events.index(("hook", "git-pre.py", f"sha256:{'c' * 64}"))
+    git_clone_index = events.index(("hook", "git-clone-one.py", f"sha256:{'e' * 64}"))
+    assert [
+        event
+        for event in events[git_clone_index : git_pre_index + 1]
+        if event[0] in {"hook", "proof", "prepare"}
+    ] == [
+        ("hook", "git-clone-one.py", f"sha256:{'e' * 64}"),
+        ("proof", names(nodes[:1]), names(nodes[1:]), None),
+        ("hook", "git-clone-two.py", f"sha256:{'e' * 64}"),
+        ("proof", names(nodes[:1]), names(nodes[1:]), None),
+        ("prepare", "direct"),
+        ("proof", names(nodes[:1]), names(nodes[2:]), nodes[1]),
+        ("hook", "git-pre.py", f"sha256:{'c' * 64}"),
+    ]
     git_install_index = events.index(("install", "direct"))
     git_post_index = events.index(("hook", "git-post.py", f"sha256:{'d' * 64}"))
     assert [
@@ -623,8 +664,7 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         if event[0] in {"hook", "proof", "install"}
     ] == [
         ("hook", "git-pre.py", f"sha256:{'c' * 64}"),
-        ("proof", names(nodes[:1]), names(nodes[1:])),
-        ("proof", names(nodes[:1]), names(nodes[1:])),
+        ("proof", names(nodes[:1]), names(nodes[2:]), nodes[1]),
         ("install", "direct"),
     ]
     assert [
@@ -633,17 +673,17 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         if event[0] in {"install", "proof", "hook"}
     ] == [
         ("install", "direct"),
-        ("proof", names(nodes[:2]), names(nodes[2:])),
+        ("proof", names(nodes[:2]), names(nodes[2:]), None),
         ("hook", "git-post.py", f"sha256:{'d' * 64}"),
     ]
     business_events = [event for event in events if event[0] != "event"]
     assert business_events[-3:] == [
-        ("proof", names(nodes), ()),
+        ("proof", names(nodes), (), None),
         ("manager-check",),
         ("application-check",),
     ]
     semantic_events = [
-        event for event in events if event[0] in {"event", "hook", "install"}
+        event for event in events if event[0] in {"event", "hook", "prepare", "install"}
     ]
     assert [_semantic_operation_signature(event) for event in semantic_events] == [
         ("phase-started", ContainerHelperPhase.CUSTOM_NODES_PREPARATION),
@@ -656,7 +696,14 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         ("hook", "first-post.py"),
         ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL),
         ("node-completed", 1, 3),
-        ("git-started", 2, 3, "direct", 1, 1),
+        ("git-started", 2, 3, "direct", 2, 1, 1),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_PRE_CLONE),
+        ("hook", "git-clone-one.py"),
+        ("hook", "git-clone-two.py"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_PRE_CLONE),
+        ("phase-started", ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION),
+        ("prepare", "direct"),
+        ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION),
         ("phase-started", ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
         ("hook", "git-pre.py"),
         ("phase-completed", ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL),
@@ -680,9 +727,6 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     assert "https://example.invalid" not in repr(emitted)
     assert "c" * 40 not in repr(emitted)
     assert "sha256:" not in repr(emitted)
-    assert len([event for event in events if event[0] == "proof"]) == 16
-    assert events.count(("application-check",)) == 8
-    assert events.count(("manager-check",)) == 7
     assert events.index(("application-check",)) < events.index(("install", "first"))
     assert observed_git_environment["GIT_SSH_COMMAND"] == ("ssh -F /tmp/user-config")
     assert observed_git_environment["HOME"] == "/user/home"
@@ -778,7 +822,16 @@ def test_empty_hook_phases_reuse_observations_and_force_fresh_final_evidence(
         git_path=application_git_path,
     )
 
-    assert events.count(("typed-boundary", None)) == 5
+    assert events[:3] == [
+        ("typed-boundary", None),
+        ("application-observation", None),
+        ("process", "cm-cli"),
+    ]
+    assert events[3:6] == [
+        ("typed-boundary", None),
+        ("manager-observation", 1),
+        ("application-observation", None),
+    ]
     assert [event for event in events if event[0] == "manager-observation"] == [
         ("manager-observation", 1),
         ("manager-observation", 2),
@@ -865,9 +918,13 @@ def test_future_registry_identity_is_rejected_before_admission(
     assert commands == ["first@1.0.0"]
 
 
-def test_mixed_proof_excludes_admitted_git_only_after_fresh_git_proof(
+@pytest.mark.parametrize("state", ["admitted", "prepared"])
+@pytest.mark.parametrize("valid", [True, False], ids=["valid", "identity-drift"])
+def test_mixed_proof_excludes_git_only_after_fresh_git_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    valid: bool,
 ) -> None:
     application, runtime = _application(tmp_path)
     git = _git_node(runtime)
@@ -883,11 +940,13 @@ def test_mixed_proof_excludes_admitted_git_only_after_fresh_git_proof(
         "verify_manager_authority",
         lambda *_args: events.append("manager"),
     )
-    monkeypatch.setattr(
-        git_installer,
-        "_verify_git_provenance",
-        lambda *_args, **_kwargs: events.append("git"),
-    )
+
+    def verify_git(*_args, **_kwargs) -> None:
+        events.append("git")
+        if not valid:
+            raise CustomNodeInstallError("Git identity changed")
+
+    monkeypatch.setattr(git_installer, "_verify_git_provenance", verify_git)
 
     def verify_registry(_root, expected, *, excluded_git_targets=()):
         events.append("registry")
@@ -896,22 +955,30 @@ def test_mixed_proof_excludes_admitted_git_only_after_fresh_git_proof(
 
     monkeypatch.setattr(registry_installer, "_verify_registry_set", verify_registry)
 
-    custom_node_installer._verify_mixed_state(
-        runtime.comfyui_path / "custom_nodes",
-        (git,),
-        (_node("future-registry", "1.0.0"),),
-        application=application,
-        runtime=runtime,
-        manager_authority=object(),
-        has_registry=True,
-        git_path=Path("/usr/bin/git"),
-        git_environment={},
-    )
+    def prove() -> None:
+        custom_node_installer._verify_mixed_state(
+            runtime.comfyui_path / "custom_nodes",
+            (git,) if state == "admitted" else (),
+            (_node("future-registry", "1.0.0"),),
+            prepared_git=git if state == "prepared" else None,
+            application=application,
+            runtime=runtime,
+            manager_authority=object(),
+            has_registry=True,
+            git_path=Path("/usr/bin/git"),
+            git_environment={},
+        )
 
-    assert events == ["manager", "git", "registry"]
+    if valid:
+        prove()
+        assert events == ["manager", "git", "registry"]
+    else:
+        with pytest.raises(CustomNodeInstallError, match="identity changed"):
+            prove()
+        assert events == ["manager", "git"]
 
 
-def test_future_git_target_is_rejected_before_its_pre_hooks(
+def test_future_git_target_is_rejected_before_its_pre_clone_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1387,3 +1454,178 @@ def test_hook_mutation_of_admitted_identity_fails_before_next_node(
         )
 
     assert commands == ["first@1.0.0"]
+
+
+@pytest.mark.parametrize("hook_phase", ["pre_clone", "pre", "post"])
+def test_git_hook_mutation_is_proved_before_next_hook_or_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hook_phase: str,
+) -> None:
+    application, runtime = _application(tmp_path)
+    node = _git_node(runtime, **{hook_phase: ("first.py", "second.py")})
+    custom_nodes = _phase(runtime, (node, _git_node(runtime, "later")))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    operations: list[str] = []
+    helper_events: list[ContainerHelperEvent] = []
+    manager_valid = True
+
+    def prepare(node, *_args) -> Path:
+        operations.append(f"prepare:{Path(node.target).name}")
+        target = Path(node.target)
+        target.mkdir()
+        return target
+
+    def hook(name, **_kwargs) -> None:
+        nonlocal manager_valid
+        operations.append(name)
+        manager_valid = False
+
+    def observe_manager(*_args) -> None:
+        if not manager_valid:
+            raise ComfyUIInstallError("Manager capability was mutated")
+
+    monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
+    monkeypatch.setattr(
+        git_installer,
+        "_install_git_root_surfaces",
+        lambda node, *_args: operations.append(f"install:{Path(node.target).name}"),
+    )
+    monkeypatch.setattr(git_installer, "_verify_git_provenance", lambda *_args: None)
+    monkeypatch.setattr(custom_node_installer, "run_hook", hook)
+    monkeypatch.setattr(
+        custom_node_installer, "observe_manager_capability", observe_manager
+    )
+
+    with pytest.raises(ComfyUIInstallError, match="was mutated"):
+        custom_node_installer.install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+            event_sink=SimpleNamespace(emit=helper_events.append),
+        )
+
+    expected = {
+        "pre_clone": ["first.py"],
+        "pre": ["prepare:direct", "first.py"],
+        "post": ["prepare:direct", "install:direct", "first.py"],
+    }
+    phases = {
+        "pre_clone": ContainerHelperPhase.CUSTOM_NODE_PRE_CLONE,
+        "pre": ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL,
+        "post": ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL,
+    }
+    assert operations == expected[hook_phase]
+    assert helper_events[-1] == ContainerHelperPhaseStarted(phases[hook_phase])
+
+
+@pytest.mark.parametrize("failed_proof", ["git", "manager", "application"])
+def test_source_preparation_proof_failure_prevents_pre_install_and_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_proof: str,
+) -> None:
+    application, runtime = _application(tmp_path)
+    node = _git_node(runtime, pre=("patch.py",), post=("after.py",))
+    custom_nodes = _phase(runtime, (node,))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    operations: list[str] = []
+    helper_events: list[ContainerHelperEvent] = []
+    prepared = False
+
+    def prepare(node, *_args) -> Path:
+        nonlocal prepared
+        prepared = True
+        operations.append("prepare")
+        target = Path(node.target)
+        target.mkdir()
+        return target
+
+    def prove(kind: str) -> None:
+        if prepared and kind == failed_proof:
+            raise CustomNodeInstallError("prepared source boundary failed")
+
+    monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
+    monkeypatch.setattr(
+        git_installer, "_verify_git_provenance", lambda *_args: prove("git")
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_manager_capability",
+        lambda *_args: prove("manager"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "observe_application_state",
+        lambda *_args, **_kwargs: prove("application"),
+    )
+    monkeypatch.setattr(
+        custom_node_installer,
+        "run_hook",
+        lambda name, **_kwargs: operations.append(name),
+    )
+    monkeypatch.setattr(
+        git_installer,
+        "_install_git_root_surfaces",
+        lambda *_args: operations.append("install"),
+    )
+
+    with pytest.raises(CustomNodeInstallError, match="source boundary failed"):
+        custom_node_installer.install_custom_nodes(
+            custom_nodes,
+            application,
+            runtime=runtime,
+            event_sink=SimpleNamespace(emit=helper_events.append),
+        )
+
+    assert operations == ["prepare"]
+    assert helper_events[-1] == ContainerHelperPhaseStarted(
+        ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION
+    )
+
+
+def test_empty_git_hook_phases_keep_prepared_proof_and_independent_final_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application, runtime = _application(tmp_path)
+    node = _git_node(runtime)
+    custom_nodes = _phase(runtime, (node,))
+    _patch_phases(monkeypatch, application, custom_nodes)
+    operations: list[object] = []
+
+    def prove(
+        _root,
+        admitted,
+        future,
+        *,
+        prepared_git: GitNodePlan | None = None,
+        **_kwargs,
+    ) -> None:
+        operations.append(("proof", tuple(admitted), tuple(future), prepared_git))
+
+    def prepare(node, *_args) -> Path:
+        operations.append("prepare")
+        target = Path(node.target)
+        target.mkdir()
+        return target
+
+    monkeypatch.setattr(custom_node_installer, "_verify_mixed_state", prove)
+    monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
+    monkeypatch.setattr(
+        git_installer,
+        "_install_git_root_surfaces",
+        lambda *_args: operations.append("install"),
+    )
+    custom_node_installer.install_custom_nodes(
+        custom_nodes, application, runtime=runtime
+    )
+
+    assert operations == [
+        ("proof", (), (node,), None),
+        "prepare",
+        ("proof", (), (), node),
+        "install",
+        ("proof", (node,), (), None),
+        ("proof", (node,), (), None),
+    ]

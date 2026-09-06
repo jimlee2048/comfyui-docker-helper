@@ -73,7 +73,7 @@ def test_tail_scans_huge_line_with_bounded_reads_across_segments():
     assert completion.complete
 
 
-def test_q9_returns_both_sides_but_tail_does_not_expand_to_all():
+def test_gap_replay_returns_available_ranges_and_tail_stays_in_recent_suffix():
     old = b"old\n" * 25
     recent = b"new\n" * 100
     spans = (_span(old), _span(recent, 600))

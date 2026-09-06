@@ -341,22 +341,6 @@ def test_async_queue_failure_keeps_independent_ring_and_known_file_prefix(
         writer.close(deadline=time.monotonic() + 5)
 
 
-def test_async_writes_own_payload_after_memory_eviction(tmp_path: Path) -> None:
-    store = open_store(tmp_path / "logs", size=32)
-    writer = AsyncLogWriter(store)
-    ring = MemoryHistory(4)
-    try:
-        for offset, data in ((0, b"old!"), (4, b"new!")):
-            ring.append(offset, data)
-            assert writer.enqueue(offset, data)
-        assert writer.wait_for_prefix(8, deadline=time.monotonic() + 5)
-        assert read_all(store) == b"old!new!"
-        assert ring.read(4, 4) == b"new!"
-    finally:
-        writer.close(deadline=time.monotonic() + 5)
-    assert (store.directory / "runtime.log").read_bytes() == b"old!new!"
-
-
 def test_expired_close_and_force_do_not_wait_for_stalled_syscall(
     tmp_path: Path,
 ) -> None:

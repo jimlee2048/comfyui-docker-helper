@@ -53,7 +53,10 @@ from comfyui_docker_helper.container.runtime.hooks import (
     RuntimeHookPlan,
     RuntimeHookResult,
 )
-from comfyui_docker_helper.container.runtime.logging import RuntimeLoggingBroker
+from comfyui_docker_helper.container.runtime.logging import (
+    RuntimeLogChunk,
+    RuntimeLoggingBroker,
+)
 from comfyui_docker_helper.container.runtime.serve import (
     run_runtime_serve,
 )
@@ -1456,6 +1459,82 @@ def test_successor_cleanup_precedes_real_terminal_delivery_and_ack(
     assert events.index("successor:terminate") < events.index("client:terminal")
     assert events.index("successor:reap") < events.index("client:terminal")
     assert events.index("client:terminal") < events.index("client:ack")
+
+
+@pytest.mark.parametrize(
+    ("replacement_size", "expected_exit", "warns"),
+    [('"2m"', 0, True), ('"1024KiB"', 0, False), ("0", 1, False)],
+    ids=["changed-deferred", "equivalent-units", "invalid-rejected"],
+)
+def test_restart_keeps_active_log_settings_and_validates_replacement(
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+    replacement_size: str,
+    expected_exit: int,
+    warns: bool,
+) -> None:
+    config = tmp_path / "runtime.toml"
+    config.write_text('[cdh.logs]\nmode="memory"\nmax_size="1m"\n')
+    children: list[_RestartChild] = []
+    brokers: list[RuntimeLoggingBroker] = []
+    original_settings: RuntimeLogSettings | None = None
+    submission: RuntimeRestartSubmission | None = None
+
+    def logging_factory(observer: Callable[[str], object]) -> RuntimeLoggingBroker:
+        broker = RuntimeLoggingBroker(failure_observer=observer)
+        brokers.append(broker)
+        return broker
+
+    def runner(*_args: object, **_kwargs: object) -> _RestartChild:
+        child = _RestartChild([], str(len(children)))
+        children.append(child)
+        return child
+
+    def running(controller: RuntimeController) -> None:
+        nonlocal original_settings, submission
+        (broker,) = brokers
+        if len(children) == 1:
+            original_settings = broker.settings
+            broker._publish(RuntimeLogChunk("stdout", b"before-restart-marker\n"))
+            config.write_text(
+                f'[cdh.logs]\nmode="memory"\nmax_size={replacement_size}\n'
+            )
+            submission = controller.submit_restart(delivery_expected=False)
+            assert submission.disposition == "submitted"
+        else:
+            assert broker.settings is original_settings
+            with broker.logs() as query:
+                history = b"".join(
+                    item for item in query.replay() if isinstance(item, bytes)
+                )
+            assert b"before-restart-marker\n" in history
+            children[-1].returncode = 0
+
+    result = run_runtime_serve(
+        runtime=_runtime(tmp_path),
+        baked_config_path=tmp_path / "missing-baked",
+        mounted_config_path=config,
+        baked_hooks_path=tmp_path / "missing-baked-hooks",
+        mounted_hooks_path=tmp_path / "missing-mounted-hooks",
+        environ={},
+        runner=runner,
+        generation_running=running,
+        runtime_logging_factory=logging_factory,
+        control_socket_path=tmp_path / "control" / "runtime.sock",
+        runtime_state_path=tmp_path / "state.json",
+    )
+    assert result == expected_exit
+    assert len(children) == (2 if expected_exit == 0 else 1)
+    assert children[0].signals == [signal.SIGTERM]
+    assert brokers[0].settings is original_settings
+    assert submission is not None and submission.ticket is not None
+    assert submission.ticket.snapshot().state == (
+        "succeeded" if expected_exit == 0 else "failed"
+    )
+    diagnostic = capfd.readouterr().err
+    assert ("container restart" in diagnostic) is warns
+    if expected_exit:
+        assert "max_size" in diagnostic
 
 
 def test_successful_successor_discards_completed_shutdown_deadline(

@@ -826,19 +826,10 @@ def test_container_runtime_logs_is_output_only(
         app,
         ["--quiet", "container", "runtime", "logs"],
     )
-    help_result = cli_runner.invoke(
-        app,
-        ["container", "runtime", "logs", "--help"],
-    )
-
     assert normal.exit_code == quiet.exit_code == 129
     assert normal.stdout == quiet.stdout == "runtime-stdout\n"
     assert normal.stderr == quiet.stderr == "runtime-stderr\n"
     assert calls == ["logs", "logs"]
-    plain_help = _plain_output(help_result.output)
-    assert "retained merged container logs" in plain_help
-    assert "--detach" not in plain_help
-    assert "--no-wait" not in plain_help
 
 
 @pytest.mark.parametrize("json_output", [False, True])

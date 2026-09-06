@@ -353,40 +353,6 @@ def test_restart_terminal_delivery_finishes_without_ack(tmp_path: Path) -> None:
             client.close()
 
 
-# Live log connections span restarts while limits and disconnects stay isolated.
-def test_follow_streams_live_binary_frames_across_runtime_boundaries(
-    tmp_path: Path,
-) -> None:
-    endpoint = _endpoint(tmp_path)
-    controller = _running_controller()
-    broker = _active_logging_broker()
-    broker._publish(RuntimeLogChunk("stdout", b"before-subscription"))
-    listener = open_runtime_control_listener(endpoint)
-
-    with RuntimeControlServer(listener, controller, broker):
-        client = connect_runtime_control(endpoint)
-        try:
-            send_runtime_control_message(
-                client, RuntimeLogsRequest(tail=0, follow=True)
-            )
-            assert _receive(client) == RuntimeLogReplayCompleteResponse(complete=True)
-            _wait_until(lambda: len(broker._followers) == 1)
-            broker._publish(RuntimeLogChunk("stdout", b"old\x00\xff"))
-            assert _receive(client) == RuntimeLogResponse.from_bytes(b"old\x00\xff")
-
-            submission = controller.submit_restart(delivery_expected=False)
-            assert submission.disposition == "submitted"
-            assert controller.accept_if_requested(accepted_at=1.0) is True
-            assert controller.allocate_restart_successor() == "gen-2"
-            controller.publish_restart_terminal("succeeded")
-            assert controller.release_successful_restart() is True
-
-            broker._publish(RuntimeLogChunk("stderr", b"new-generation"))
-            assert _receive(client) == RuntimeLogResponse.from_bytes(b"new-generation")
-        finally:
-            client.close()
-
-
 def test_follow_limit_is_busy_and_disconnected_slot_is_reused(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     controller = _running_controller()

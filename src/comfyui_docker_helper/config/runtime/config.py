@@ -7,8 +7,10 @@ import shlex
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from math import isfinite
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator
@@ -36,6 +38,7 @@ from comfyui_docker_helper.config.diagnostics import (
     SourceReference,
 )
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.config.merge import (
     ANY_PATH_PART,
     AtomicPolicy,
@@ -128,6 +131,16 @@ class RuntimeConfigurationResult:
     warnings: tuple[Diagnostic, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeConfigurationSources:
+    """One source acquisition shared by logging and full generation admission."""
+
+    documents: tuple[SourceDocument, ...] = dataclass_field(repr=False)
+    environ: Mapping[str, str] = dataclass_field(repr=False)
+    environment_source: SourceReference
+    warnings: tuple[Diagnostic, ...] = ()
+
+
 class RuntimeConfigurationError(ValueError):
     """Runtime configuration failure represented by stable diagnostics."""
 
@@ -162,6 +175,7 @@ class _RuntimeCdhConfigPatch(ConfigModel):
     download_max_attempts: int | None = Field(default=None, ge=1)
     download_failure_policy: Literal["continue", "fail"] | None = None
     shutdown_timeout: ShutdownTimeout | None = None
+    logs: RuntimeLogSettings = Field(default_factory=RuntimeLogSettings)
     downloader: _RuntimeDownloaderConfigPatch | None = None
 
 
@@ -214,6 +228,23 @@ def load_runtime_config(
     environ: Mapping[str, str] | None = None,
 ) -> RuntimeConfigurationResult:
     """Load and merge code defaults, baked runtime config, and mounted config."""
+    return load_runtime_config_from_sources(
+        read_runtime_config_sources(
+            baked_config_path=baked_config_path,
+            mounted_config_path=mounted_config_path,
+            environ=environ,
+        )
+    )
+
+
+def read_runtime_config_sources(
+    *,
+    baked_config_path: RuntimeConfigPath = BAKED_RUNTIME_CONFIG_PATH,
+    mounted_config_path: RuntimeConfigPath = MOUNTED_RUNTIME_CONFIG_PATH,
+    environ: Mapping[str, str] | None = None,
+) -> RuntimeConfigurationSources:
+    """Read source files once without admitting unrelated generation fields."""
+    environment = MappingProxyType(dict(os.environ if environ is None else environ))
     warnings: list[Diagnostic] = []
     documents: list[SourceDocument] = [
         SourceDocument(SourceReference(0, "defaults"), _runtime_defaults_document())
@@ -235,11 +266,65 @@ def load_runtime_config(
         warnings.extend(document_warnings)
         documents.append(SourceDocument(source, document))
 
-    environment_source = SourceReference(len(documents), "environment")
-    try:
-        env_document, env_pub_key = _runtime_env_document(
-            os.environ if environ is None else environ
+    return RuntimeConfigurationSources(
+        documents=tuple(documents),
+        environ=environment,
+        environment_source=SourceReference(len(documents), "environment"),
+        warnings=tuple(warnings),
+    )
+
+
+class _RuntimeLogsCdhProjection(ConfigModel):
+    logs: RuntimeLogSettings = Field(default_factory=RuntimeLogSettings)
+
+
+class _RuntimeLogsProjection(ConfigModel):
+    cdh: _RuntimeLogsCdhProjection = Field(default_factory=_RuntimeLogsCdhProjection)
+
+
+def load_runtime_log_settings(
+    sources: RuntimeConfigurationSources,
+) -> RuntimeLogSettings:
+    """Admit only recording settings so later generation errors can be captured."""
+    documents: list[SourceDocument] = []
+    for source in sources.documents:
+        if "cdh" not in source.document:
+            continue
+        cdh = source.document["cdh"]
+        projection = (
+            ({"logs": cdh["logs"]} if "logs" in cdh else {})
+            if isinstance(cdh, Mapping)
+            else cdh
         )
+        documents.append(SourceDocument(source.source, {"cdh": projection}))
+    try:
+        env_document = _runtime_logs_env_document(sources.environ)
+    except RuntimeConfigurationError as error:
+        raise RuntimeConfigurationError(
+            _attach_explicit_source(error.diagnostics, sources.environment_source)
+        ) from error
+    if env_document:
+        documents.append(SourceDocument(sources.environment_source, env_document))
+    merged = merge_toml_documents(documents, policies=_RUNTIME_CONFIG_MERGE_POLICIES)
+    try:
+        return _RuntimeLogsProjection.model_validate(merged.document).cdh.logs
+    except ValidationError as error:
+        raise RuntimeConfigurationError(
+            _enrich_runtime_diagnostics(
+                _diagnostics_from_validation_error(error), merged.origins
+            )
+        ) from error
+
+
+def load_runtime_config_from_sources(
+    sources: RuntimeConfigurationSources,
+) -> RuntimeConfigurationResult:
+    """Perform strict generation admission using the already acquired sources."""
+    warnings = list(sources.warnings)
+    documents = list(sources.documents)
+    environment_source = sources.environment_source
+    try:
+        env_document, env_pub_key = _runtime_env_document(sources.environ)
     except RuntimeConfigurationError as error:
         raise RuntimeConfigurationError(
             _attach_explicit_source(error.diagnostics, environment_source)
@@ -285,7 +370,7 @@ def _runtime_defaults_document() -> dict[str, Any]:
 def _runtime_env_document(
     environ: Mapping[str, str],
 ) -> tuple[dict[str, Any], str | None]:
-    document: dict[str, Any] = {}
+    document = _runtime_logs_env_document(environ)
     ssh_pub_key: str | None = None
 
     if "CDH_COMFYUI_LISTEN" in environ:
@@ -340,6 +425,37 @@ def _runtime_env_document(
             raise RuntimeConfigurationError((diagnostic,))
 
     return document, ssh_pub_key
+
+
+def _runtime_logs_env_document(environ: Mapping[str, str]) -> dict[str, Any]:
+    logs: dict[str, Any] = {}
+    for field_name, env_name in (
+        ("mode", "CDH_LOG_MODE"),
+        ("directory", "CDH_LOG_DIRECTORY"),
+        ("max_size", "CDH_LOG_MAX_SIZE"),
+    ):
+        if env_name in environ:
+            logs[field_name] = environ[env_name]
+    if "CDH_LOG_MAX_FILES" in environ:
+        value = environ["CDH_LOG_MAX_FILES"]
+        try:
+            if re.fullmatch(r"[0-9]+", value) is None:
+                raise ValueError("invalid count grammar")
+            count = int(value)
+            if count <= 0:
+                raise ValueError("nonpositive count")
+        except ValueError as error:
+            raise RuntimeConfigurationError(
+                (
+                    Diagnostic(
+                        path=("env", "CDH_LOG_MAX_FILES"),
+                        code="env.invalid_log_max_files",
+                        message="must be a positive integer",
+                    ),
+                )
+            ) from error
+        logs["max_files"] = count
+    return {"cdh": {"logs": logs}} if logs else {}
 
 
 def _parse_env_ssh_enable(value: str) -> bool:

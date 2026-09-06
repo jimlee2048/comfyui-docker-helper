@@ -42,6 +42,7 @@ from comfyui_docker_helper.config.credentials.secrets import (
     downloader_credential_secret_target,
 )
 from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
+from comfyui_docker_helper.config.logs import LogDirectory, LogMode
 from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -1238,10 +1239,18 @@ class SshPlan(_PlanModel):
         return value
 
 
+class RuntimeLogsPlan(_PlanModel):
+    mode: LogMode
+    directory: LogDirectory
+    max_size: int = Field(gt=0)
+    max_files: int = Field(gt=0)
+
+
 class RuntimePhase(_PlanModel):
     environment: tuple[EnvironmentPlan, ...]
     ssh: SshPlan
     shutdown_timeout: ShutdownTimeout
+    logs: RuntimeLogsPlan
     launch_command: tuple[str, ...]
     hooks: tuple[HookPlan, ...]
     download_failure_policy: Literal["continue", "fail"] | None
@@ -1959,6 +1968,7 @@ def _project_runtime(
             pub_keys=graph.runtime.ssh.pub_keys,
         ),
         shutdown_timeout=graph.runtime.shutdown_timeout,
+        logs=RuntimeLogsPlan.model_validate(graph.runtime.logs.model_dump()),
         launch_command=graph.runtime.launch_command,
         hooks=_runtime_hooks(entries, used),
         download_failure_policy=(

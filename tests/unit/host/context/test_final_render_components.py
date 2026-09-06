@@ -1829,3 +1829,30 @@ def _tree(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def test_log_settings_project_through_plan_into_baked_runtime(tmp_path: Path) -> None:
+    document = final_config().model_dump(mode="python")
+    document["cdh"]["logs"] = {
+        "mode": "memory",
+        "directory": "/operator/logs",
+        "max_size": "2m",
+        "max_files": 3,
+    }
+    plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
+    output = tmp_path / "output"
+    output.mkdir(mode=0o700)
+    _materialize_private_stage(plan, output, canonical_wheel=canonical_wheel())
+    runtime = tomllib.loads((output / "runtime/config.toml").read_text())
+    assert runtime["cdh"]["logs"] == {
+        "mode": "memory",
+        "directory": "/operator/logs",
+        "max_size": 2097152,
+        "max_files": 3,
+    }
+    loaded = load_runtime_config(
+        baked_config_path=output / "runtime/config.toml",
+        mounted_config_path=tmp_path / "absent",
+        environ={},
+    )
+    assert loaded.config.cdh.logs.model_dump() == plan.runtime.logs.model_dump()

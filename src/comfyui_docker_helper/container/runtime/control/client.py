@@ -11,14 +11,18 @@ from pathlib import Path
 from types import FrameType
 from typing import Never
 
+from comfyui_docker_helper.cli_output.text import control_safe_text
 from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeAcceptedResponse,
     RuntimeAckRequest,
     RuntimeControlProtocolError,
     RuntimeControlResponse,
     RuntimeErrorResponse,
-    RuntimeFollowRequest,
+    RuntimeLogDiagnosticResponse,
+    RuntimeLogEndResponse,
+    RuntimeLogReplayCompleteResponse,
     RuntimeLogResponse,
+    RuntimeLogsRequest,
     RuntimeRestartRequest,
     RuntimeStatusRequest,
     RuntimeStatusResponse,
@@ -122,13 +126,15 @@ def read_runtime_status(
     raise RuntimeControlClientError("The runtime service sent an unexpected response.")
 
 
-def follow_runtime(
+def read_runtime_logs(
     path: Path = RUNTIME_CONTROL_SOCKET_PATH,
     *,
+    tail: int | None = None,
+    follow: bool = False,
     stdout_fd: int = 1,
     stderr_fd: int = 2,
 ) -> int:
-    """Stream live container output without changing its runtime state."""
+    """Replay retained merged bytes, optionally following subsequent output."""
     peer: socket.socket | None = None
     try:
         with _runtime_client_signal_handlers(
@@ -136,17 +142,52 @@ def follow_runtime(
             handled_signals=(signal.SIGINT, signal.SIGTERM, signal.SIGHUP),
         ):
             peer = connect_runtime_control(path)
-            _send_message(peer, RuntimeFollowRequest())
+            _send_message(peer, RuntimeLogsRequest(tail=tail, follow=follow))
+            replay_complete = False
+            incomplete = False
             while True:
-                response = _receive_follow_response(peer)
+                response = _receive_logs_response(peer)
                 if response is None:
+                    raise RuntimeControlClientError(
+                        "The runtime service closed the connection "
+                        "without a log result."
+                    )
+                if isinstance(response, RuntimeLogEndResponse):
+                    if not follow or not replay_complete:
+                        raise RuntimeControlClientError(
+                            "The runtime service sent an invalid response sequence."
+                        )
                     return 0
                 if isinstance(response, RuntimeLogResponse):
-                    target_fd = stdout_fd if response.stream == "stdout" else stderr_fd
                     try:
-                        _write_all(target_fd, response.as_bytes())
+                        _write_all(stdout_fd, response.as_bytes())
                     except OSError:
                         return 1
+                    continue
+                if isinstance(response, RuntimeLogDiagnosticResponse):
+                    incomplete = incomplete or response.incomplete
+                    try:
+                        _write_all(
+                            stderr_fd,
+                            (control_safe_text(response.message) + "\n").encode(
+                                "utf-8"
+                            ),
+                        )
+                    except OSError:
+                        return 1
+                    if replay_complete and incomplete:
+                        return 1
+                    continue
+                if isinstance(response, RuntimeLogReplayCompleteResponse):
+                    if replay_complete:
+                        raise RuntimeControlClientError(
+                            "The runtime service sent an invalid response sequence."
+                        )
+                    if incomplete or not response.complete:
+                        return 1
+                    if not follow:
+                        return 0
+                    replay_complete = True
                     continue
                 if isinstance(response, RuntimeErrorResponse):
                     raise RuntimeControlClientError(response.message)
@@ -178,7 +219,7 @@ def _receive_response(peer: socket.socket) -> RuntimeControlResponse:
     return response
 
 
-def _receive_follow_response(
+def _receive_logs_response(
     peer: socket.socket,
 ) -> RuntimeControlResponse | None:
     try:
@@ -198,7 +239,7 @@ def _send_message(
     message: (
         RuntimeRestartRequest
         | RuntimeStatusRequest
-        | RuntimeFollowRequest
+        | RuntimeLogsRequest
         | RuntimeAckRequest
     ),
 ) -> None:

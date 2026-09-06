@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 from tests.build_plan_support import (
@@ -93,3 +95,35 @@ def test_image_config_change_updates_binding_deterministically() -> None:
     assert first.image_config_digest != second.image_config_digest
     assert first.lock_digest == second.lock_digest
     assert build_plan_digest(first) != build_plan_digest(second)
+
+
+@pytest.mark.parametrize("size", [20971520, "20971520", "20m", "20MiB"])
+def test_equivalent_log_sizes_preserve_canonical_intent_and_plan(size: object) -> None:
+    config = final_config()
+    document = config.model_dump(mode="python")
+    document["cdh"]["logs"]["max_size"] = size
+    equivalent = FinalConfig.model_validate(document)
+    accepted = accepted_resolution()
+    assert request_graph(config, accepted) == request_graph(equivalent, accepted)
+    assert dump_build_plan_json(build_plan(config, accepted)) == dump_build_plan_json(
+        build_plan(equivalent, accepted)
+    )
+
+
+def test_log_settings_change_image_intent_and_are_strict_in_serialized_plan() -> None:
+    config = final_config()
+    document = config.model_dump(mode="python")
+    document["cdh"]["logs"]["mode"] = "memory"
+    changed = FinalConfig.model_validate(document)
+    accepted = accepted_resolution()
+    first = build_plan(config, accepted)
+    second = build_plan(changed, accepted)
+    assert first.image_config_digest != second.image_config_digest
+    assert second.runtime.logs.mode == "memory"
+    assert parse_build_plan_json(dump_build_plan_json(second)) == second
+    with pytest.raises(ValidationError, match="frozen"):
+        second.runtime.logs.max_size = 1
+    serialized = second.model_dump(mode="json")
+    serialized["runtime"]["logs"]["max_size"] = "20m"
+    with pytest.raises(ValidationError):
+        BuildPlan.model_validate_json(json.dumps(serialized))

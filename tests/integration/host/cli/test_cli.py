@@ -329,7 +329,7 @@ def test_root_command_exposes_current_groups() -> None:
         "runtime",
     }
     assert set(command.commands["container"].commands["runtime"].commands) == {
-        "follow",
+        "logs",
         "restart",
         "serve",
         "status",
@@ -381,7 +381,7 @@ def test_container_group_remains_helpful_outside_linux(
         ["container", "runtime", "serve", "--help"],
         ["container", "runtime", "restart", "--help"],
         ["container", "runtime", "status", "--help"],
-        ["container", "runtime", "follow", "--help"],
+        ["container", "runtime", "logs", "--help"],
     ],
 )
 def test_runtime_help_remains_available_outside_linux(

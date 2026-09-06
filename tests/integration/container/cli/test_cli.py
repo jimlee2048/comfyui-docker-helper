@@ -134,7 +134,7 @@ def _emit_comfyui_success(event_sink) -> None:
         (["runtime"], "Usage: cdh container runtime"),
         (["runtime", "serve"], "Usage: cdh container runtime serve"),
         (["runtime", "restart"], "Usage: cdh container runtime restart"),
-        (["runtime", "follow"], "Usage: cdh container runtime follow"),
+        (["runtime", "logs"], "Usage: cdh container runtime logs"),
         (["runtime", "status"], "Usage: cdh container runtime status"),
     ],
 )
@@ -805,38 +805,31 @@ def test_container_runtime_restart_waits_without_detach_options(
     assert "-d" not in help_output
 
 
-def test_container_runtime_follow_is_output_only(
+def test_container_runtime_logs_is_output_only(
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
 
-    def fake_follow_runtime() -> int:
-        calls.append("follow")
+    def fake_read_runtime_logs(*, tail: int | None, follow: bool) -> int:
+        assert tail is None
+        assert follow is False
+        calls.append("logs")
         sys.stdout.write("runtime-stdout\n")
         sys.stderr.write("runtime-stderr\n")
         return 129
 
-    monkeypatch.setattr(container_cli, "follow_runtime", fake_follow_runtime)
+    monkeypatch.setattr(container_cli, "read_runtime_logs", fake_read_runtime_logs)
 
-    normal = cli_runner.invoke(app, ["container", "runtime", "follow"])
+    normal = cli_runner.invoke(app, ["container", "runtime", "logs"])
     quiet = cli_runner.invoke(
         app,
-        ["--quiet", "container", "runtime", "follow"],
+        ["--quiet", "container", "runtime", "logs"],
     )
-    help_result = cli_runner.invoke(
-        app,
-        ["container", "runtime", "follow", "--help"],
-    )
-
     assert normal.exit_code == quiet.exit_code == 129
     assert normal.stdout == quiet.stdout == "runtime-stdout\n"
     assert normal.stderr == quiet.stderr == "runtime-stderr\n"
-    assert calls == ["follow", "follow"]
-    plain_help = _plain_output(help_result.output)
-    assert "live stdout and stderr" in plain_help
-    assert "--detach" not in plain_help
-    assert "--no-wait" not in plain_help
+    assert calls == ["logs", "logs"]
 
 
 @pytest.mark.parametrize("json_output", [False, True])
@@ -890,3 +883,41 @@ def test_container_runtime_status_renders_minimal_conditional_schema(
             "last_restart: op-1 (succeeded)"
         )
         assert all(not line.startswith("generation:") for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("options", "tail", "follow"),
+    [
+        ([], None, False),
+        (["-n", "200", "-f"], 200, True),
+        (["--tail", "0", "--follow"], 0, True),
+        (["--tail", "all"], None, False),
+    ],
+)
+def test_runtime_logs_selects_tail_and_follow(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    options: list[str],
+    tail: int | None,
+    follow: bool,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        container_cli, "read_runtime_logs", lambda **kwargs: calls.append(kwargs) or 0
+    )
+    result = cli_runner.invoke(app, ["container", "runtime", "logs", *options])
+    assert result.exit_code == 0
+    assert calls == [{"tail": tail, "follow": follow}]
+
+
+@pytest.mark.parametrize("value", ["-1", "1.5", "ALL", "true", "", "\uff11\uff12"])
+def test_runtime_logs_rejects_invalid_tail(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    def unexpected(**kwargs: object) -> int:
+        raise AssertionError("invalid selection reached runtime")
+
+    monkeypatch.setattr(container_cli, "read_runtime_logs", unexpected)
+    result = cli_runner.invoke(app, ["container", "runtime", "logs", "--tail", value])
+    assert result.exit_code == 2
+    assert "nonnegative integer" in result.stderr

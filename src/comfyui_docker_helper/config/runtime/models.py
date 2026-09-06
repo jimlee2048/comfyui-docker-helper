@@ -10,6 +10,7 @@ from comfyui_docker_helper.config.credentials.downloader import (
 from comfyui_docker_helper.config.credentials.secrets import (
     FinalSecretSourceConfig,
 )
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.config.validation.urls import DownloaderName
@@ -45,6 +46,7 @@ class RuntimeCdhConfig(ConfigModel):
     download_max_attempts: int = Field(default=3, ge=1)
     download_failure_policy: Literal["continue", "fail"] = "continue"
     shutdown_timeout: ShutdownTimeout = 8
+    logs: RuntimeLogSettings = Field(default_factory=RuntimeLogSettings)
     downloader: RuntimeDownloaderConfig = Field(default_factory=RuntimeDownloaderConfig)
 
 

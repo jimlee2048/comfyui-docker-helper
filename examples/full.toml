@@ -135,6 +135,38 @@ download_failure_policy = "fail"
 # and waits for it; cdh does not supervise the service after the start hook exits.
 shutdown_timeout = 8
 
+[cdh.logs]
+# Runtime recording defaults, baked into the image; the same table is accepted
+# in /etc/cdh/runtime/config.toml. Nested overrides inherit omitted fields.
+# Settings take effect at container startup, not at a manual runtime restart.
+# Default: "file". Supported: "none", "memory", "file" (exact strings).
+# "none" retains no new history; logs can still read existing owned files.
+# "memory" retains this controller's bounded tail only.
+# "file" also writes raw rotating files asynchronously; storage failure leaves
+# memory recording active until the container restarts. Primary/live output
+# remains available in every mode. Override with CDH_LOG_MODE.
+mode = "file"
+# Default: "/var/log/cdh". Dedicated canonical absolute POSIX container path,
+# other than /; no .., redundant / or . segments, trailing /, or controls.
+# Existing directory/files must belong to the runtime UID with 0700/0600 modes.
+# Mount a parent and choose a private child, e.g. volume:/logs and /logs/cdh.
+# Override with CDH_LOG_DIRECTORY. Host validation does not inspect this path.
+directory = "/var/log/cdh"
+# Default: 20 MiB. Independently limits memory payload AND each file's payload;
+# increasing this setting also increases the permitted memory history.
+# Positive integer bytes or quoted ASCII digits with an optional B, k/m/g,
+# KiB/MiB/GiB suffix; suffixes are case-insensitive and use powers of 1024.
+# 20_971_520, 20971520, "20971520", "20m", and "20MiB" are equivalent.
+# Fractions, booleans, whitespace, and KB/MB/GB suffixes are rejected.
+# Override with CDH_LOG_MAX_SIZE using the same string syntax.
+max_size = "20m"
+# Default: 5. Positive integer, including the active file. Defaults permit
+# 100 MiB retained file payload plus 20 MiB memory payload; queue, metadata,
+# and reader allocations are separately bounded and are additional overhead.
+# Override with CDH_LOG_MAX_FILES using positive decimal digits.
+# Supplied fields remain strictly validated even in modes that do not use them.
+max_files = 5
+
 [cdh.downloader.httpx]
 # Default: 60. Seconds for each HTTPX request attempt.
 timeout = 60

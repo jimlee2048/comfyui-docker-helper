@@ -858,3 +858,17 @@ def test_invalid_toml_and_missing_file_use_short_diagnostics(tmp_path: Path) -> 
     assert diagnostic.code == "config.file_not_found"
     assert isinstance(diagnostic.source_context, SourceLocation)
     assert diagnostic.source_context.source.label == str(missing)
+
+
+@pytest.mark.parametrize("size", ["20_971_520", "20971520", '"20m"', '"20MiB"'])
+def test_authored_log_sizes_normalize_after_toml_loading(
+    tmp_path: Path, size: str
+) -> None:
+    base = tmp_path / "config.toml"
+    override = tmp_path / "override.toml"
+    base.write_text(_config() + '\n[cdh.logs]\nmode="memory"\nmax_files=7\n')
+    override.write_text(f"[cdh.logs]\nmax_size={size}\n")
+    config = load_validate_config([base, override])
+    assert config.cdh.logs.mode == "memory"
+    assert config.cdh.logs.max_files == 7
+    assert config.cdh.logs.max_size == 20971520

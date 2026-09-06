@@ -49,7 +49,7 @@ if sys.platform == "linux":
         ContainerRuntime,
     )
     from comfyui_docker_helper.container.runtime.control.client import (
-        follow_runtime,
+        read_runtime_logs,
         read_runtime_status,
         restart_runtime,
     )
@@ -283,11 +283,36 @@ def runtime_status_command(
         typer.echo(f"last_restart: {last_restart.id} ({last_restart.result})")
 
 
-@runtime_app.command("follow", context_settings=HELP_CONTEXT_SETTINGS)
-def runtime_follow_command() -> None:
-    """Stream live stdout and stderr from the running container."""
+def _parse_log_tail(value: str) -> int | None:
+    if value == "all":
+        return None
+    if value.isascii() and value.isdecimal():
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    raise typer.BadParameter("Expected 'all' or a nonnegative integer.")
+
+
+@runtime_app.command("logs", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_logs_command(
+    tail: Annotated[
+        str,
+        typer.Option(
+            "--tail", "-n", help="Show the last N lines, or all retained output."
+        ),
+    ] = "all",
+    follow: Annotated[
+        bool,
+        typer.Option(
+            "--follow", "-f", help="Follow new output after retained history."
+        ),
+    ] = False,
+) -> None:
+    """Read retained merged container logs, optionally following new output."""
     _require_linux_container()
-    raise typer.Exit(code=follow_runtime())
+    count = _parse_log_tail(tail)
+    raise typer.Exit(code=read_runtime_logs(tail=count, follow=follow))
 
 
 def _require_linux_container() -> None:

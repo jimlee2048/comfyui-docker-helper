@@ -11,6 +11,7 @@ from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeControllerPhase,
     RuntimeControllerState,
 )
+from comfyui_docker_helper.container.runtime.shutdown import RuntimeShutdownDeadline
 
 type RuntimeRestartTicketState = Literal[
     "pending",
@@ -139,6 +140,17 @@ class RuntimeController:
             False,
         )
         self._runtime_failure: str | None = None
+        self._shutdown_deadline: RuntimeShutdownDeadline | None = None
+
+    def observe_shutdown_deadline(self, deadline: RuntimeShutdownDeadline) -> None:
+        # Main-thread lifecycle/signal projection: no I/O or lock acquisition.
+        self._shutdown_deadline = deadline
+
+    def clear_shutdown_deadline(self) -> None:
+        self._shutdown_deadline = None
+
+    def shutdown_deadline(self) -> RuntimeShutdownDeadline | None:
+        return self._shutdown_deadline
 
     def snapshot(self) -> RuntimeControllerSnapshot:
         with self._lock:

@@ -252,6 +252,9 @@ class RuntimeControlServer:
             elif isinstance(item, LogQueryDiagnostic):
                 self._send_log_diagnostic(peer, item)
             elif isinstance(item, LogReplayComplete):
+                diagnostic = query.poll_diagnostic()
+                if diagnostic is not None:
+                    self._send_log_diagnostic(peer, diagnostic)
                 self._send_log_message(
                     peer, RuntimeLogReplayCompleteResponse(complete=item.complete)
                 )

@@ -270,6 +270,50 @@ def test_gap_replay_returns_both_sides_and_never_enters_follow(
         broker.close()
 
 
+def test_finite_tail_reports_file_failure_during_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    endpoint = _endpoint(tmp_path)
+    broker = RuntimeLoggingBroker()
+    broker._started = True
+    broker.configure(RuntimeLogSettings(directory=str(tmp_path / "logs")))
+    failed = threading.Event()
+    broker.set_storage_warning_observer(lambda _failure: failed.set())
+    send = server_module.send_runtime_control_message
+
+    def fail_append(_start: int, _data: bytes) -> None:
+        raise LogStorageError(LogStorageFailure.WRITE)
+
+    def fail_recording_after_payload(
+        peer: socket.socket, message: RuntimeControlMessage
+    ) -> None:
+        send(peer, message)
+        if isinstance(message, RuntimeLogResponse):
+            broker._publish(RuntimeLogChunk("stderr", b"after-query\n"))
+            assert failed.wait(2)
+
+    try:
+        payload = b"older\nrecent\n"
+        broker._publish(RuntimeLogChunk("stdout", payload))
+        assert broker._file_writer.wait_for_prefix(
+            len(payload), deadline=time.monotonic() + 2
+        )
+        monkeypatch.setattr(broker._store, "append", fail_append)
+        monkeypatch.setattr(
+            server_module, "send_runtime_control_message", fail_recording_after_payload
+        )
+        with RuntimeControlServer(
+            open_runtime_control_listener(endpoint), _running_controller(), broker
+        ):
+            result = _read_logs(endpoint, tail=1)
+        assert failed.is_set()
+        assert result.returncode == 0
+        assert result.stdout == b"recent\n"
+        assert result.stderr.count(b"memory") == 1
+    finally:
+        broker.close()
+
+
 @pytest.mark.parametrize("shutdown", ["complete", "expired", "forced", "disconnected"])
 def test_live_end_distinguishes_complete_and_interrupted_delivery(
     tmp_path: Path, shutdown: str

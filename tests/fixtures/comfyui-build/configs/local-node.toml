@@ -1,0 +1,32 @@
+[compute_platform]
+type = "cuda"
+
+[compute_platform.cuda]
+version = "13.0.3"
+image_flavor = "cudnn-devel"
+image_distro = "ubuntu24.04"
+
+[pytorch]
+version = "2.12.1"
+
+[comfyui]
+version = "0.11.0"
+install_cli = false
+install_manager = false
+listen = "0.0.0.0"
+port = 8188
+extra_args = []
+
+[[comfyui.custom_nodes]]
+type = "local"
+source = "../local-node"
+target_dir = "local-probe"
+content_lock = true
+pre_install_hooks = ["local-pre-install.py"]
+post_install_hooks = ["local-post-install.py"]
+
+[[files]]
+type = "local"
+source = "../local-overlay-requirements.txt"
+target = "custom_nodes/local-probe/requirements.txt"
+content_lock = true

@@ -87,6 +87,25 @@ _FULL_CAPABILITIES = frozenset(
 
 ACCEPTANCE_SCENARIOS = (
     AcceptanceScenario(
+        "local-node",
+        "local-node.toml",
+        "3.13.14",
+        ScenarioClass.COMPONENT,
+        frozenset(
+            {
+                Capability.APPLICATION,
+                Capability.CUSTOM_NODES,
+                Capability.HOOKS,
+                Capability.FILES,
+            }
+        ),
+        _BASE_COSTS,
+        "CDH_LOCAL_NODE_IMAGE",
+        "CDH_LOCAL_NODE_CONTEXT",
+        "cudnn-devel",
+        "ubuntu24.04",
+    ),
+    AcceptanceScenario(
         "py313-full",
         "application-full.toml",
         "3.13.14",

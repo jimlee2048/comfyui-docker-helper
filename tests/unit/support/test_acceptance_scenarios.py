@@ -159,6 +159,28 @@ def test_build_hooks_component_has_dedicated_inputs_and_bounded_costs() -> None:
     assert Cost.GPU not in scenario.costs
 
 
+def test_local_node_component_has_dedicated_inputs_and_bounded_costs() -> None:
+    scenario = next(item for item in ACCEPTANCE_SCENARIOS if item.id == "local-node")
+
+    assert scenario.classification is ScenarioClass.COMPONENT
+    assert scenario.image_variable == "CDH_LOCAL_NODE_IMAGE"
+    assert scenario.context_variable == "CDH_LOCAL_NODE_CONTEXT"
+    assert Cost.GPU not in scenario.costs
+    config = _document(scenario)
+    node = config["comfyui"]["custom_nodes"][0]
+    source = (_CONFIG_ROOT / node["source"]).resolve(strict=True)
+    assert not (source / ".git").exists()
+    assert (source / "__init__.py").is_file()
+    assert (source / "requirements.txt").is_file()
+    assert (source / "install.py").is_file()
+    assert (source / "revision.txt").read_text().strip() == "revision-one"
+    assert (source / ".dockerignore").is_file()
+    assert (source / "ignored/notes.txt").is_file()
+    overlay = config["files"][0]
+    assert overlay["target"] == f"custom_nodes/{node['target_dir']}/requirements.txt"
+    assert (_CONFIG_ROOT / overlay["source"]).is_file()
+
+
 @pytest.mark.parametrize("matches", [True, False], ids=["current", "stale"])
 def test_build_hooks_context_requires_current_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, matches: bool
@@ -182,11 +204,19 @@ def test_build_hooks_context_requires_current_package(
             build_hooks_probe._current_build_plan(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("scenario_id", "module", "diagnostic"),
+    [
+        ("hooks", "test_build_hooks_live.py", "build-hook"),
+        ("local-node", "test_local_node_live.py", "local-node"),
+    ],
+    ids=["hooks", "local-node"],
+)
 @pytest.mark.parametrize("admission", ["offline", "missing-image", "missing-context"])
-def test_build_hooks_component_cost_and_artifact_admission(
-    tmp_path: Path, admission: str
+def test_component_cost_and_artifact_admission(
+    tmp_path: Path, admission: str, scenario_id: str, module: str, diagnostic: str
 ) -> None:
-    scenario = next(item for item in ACCEPTANCE_SCENARIOS if item.id == "hooks")
+    scenario = next(item for item in ACCEPTANCE_SCENARIOS if item.id == scenario_id)
     assert scenario.image_variable is not None
     assert scenario.context_variable is not None
     environment = os.environ.copy()
@@ -206,7 +236,7 @@ def test_build_hooks_component_cost_and_artifact_admission(
             "pytest",
             "-q",
             f"--basetemp={tmp_path / 'component-admission'}",
-            "tests/smoke/test_build_hooks_live.py",
+            f"tests/smoke/{module}",
             *authorization,
         ],
         cwd=_PROJECT_ROOT,
@@ -227,7 +257,7 @@ def test_build_hooks_component_cost_and_artifact_admission(
             else scenario.context_variable
         )
         assert completed.returncode == pytest.ExitCode.TESTS_FAILED, output
-        assert f"build-hook component requires environment input {missing}" in output
+        assert f"{diagnostic} component requires environment input {missing}" in output
 
 
 # Unknown selections stop at the public pytest boundary with one usage diagnostic.

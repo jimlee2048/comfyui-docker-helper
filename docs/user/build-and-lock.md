@@ -177,6 +177,14 @@ cdh host render \
 
 Only direct regular `.sh` and `.py` files under `pre-start.d/`, `post-start.d/`, and `stop.d/` are selected and baked. Other ordinary files and directories are ignored without recursion and produce aggregated warnings; unsafe filesystem entries and source inspection/read failures remain errors. Omitting the option bakes no runtime hook tree. Mounted runtime hooks are separate deployment-time inputs; see the [runtime guide](runtime.md) and [runtime-hook examples](../../examples/runtime-hooks/).
 
+## Local-node capture and locking
+
+A local custom node is captured into its own context subtree after Host applies the source root's `.dockerignore`; matching and source admission are described in [configuration](configuration.md#choose-custom-nodes-and-build-hooks). Once rendered, the context can be built directly without the original source directory. Re-render normally after changing selected source bytes, then build the updated context; the changed input participates in the existing combined custom-node instruction's BuildKit cache key.
+
+`content_lock = false` leaves ordinary selected file bytes unhashed during planning. `content_lock = true` records one aggregate selected-tree identity per node, including the retained `.dockerignore` bytes, and verifies the input during materialization and image-side copy before hooks. Changing excluded content does not change this identity; changing rule-file comments does. `--locked` checks locked identities and selected structure but does not refresh or compare unlocked source bytes; `--check` also streams selected source/context bytes. `--dry-run` admits the selected structure without publishing or running hooks; it still reads the rule file even when content locking is disabled. The context acquisition modes below also apply to local-node inputs.
+
+Hooks and root installers may modify the captured input after copy. Final local-node evidence proves the expected real target directory and binds the BuildPlan; it does not rehash the resulting tree or claim that installer effects are locked. Build `files` apply after node installation and hooks; their overlays do not trigger another installation or hook run.
+
 ## Build files and local context materialization
 
 Build `[[files]]` declarations are authoritative final image content and use one `source + target` operation. An HTTP source is downloaded into cdh-owned staging and atomically replaces its exact target after any configured checksum succeeds. A local source may be one regular file or one complete real directory tree; cdh prepares it as independent build input before image construction. A local file is placed at its exact target. A local directory is placed at its destination root, with the source basename omitted. HTTP and local-file targets must be strict descendants of `COMFYUI_PATH` and name an exact file; a local-tree target is relative to `COMFYUI_PATH` and may equal the root (`.`). HTTP never infers a target filename from its URL or response metadata.
@@ -241,6 +249,7 @@ A rendered context contains:
 - `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`, the exact validated cdh wheel installed into the image;
 - `build/hooks/`, containing only referenced verified build-hook bytes when configured;
 - `build/files/`, containing plan-addressed independent copies or clones of configured host-local files;
+- `build/local-nodes/`, independent selected local-node inputs consumed during the custom-node instruction;
 - `build/trees/`, containing one plan-addressed complete local-tree context per configured host-local directory;
 - `runtime/config.toml`, derived from the BuildPlan;
 - `runtime/hooks/`, containing the verified baked runtime hook tree when configured;
@@ -271,7 +280,7 @@ cdh-controlled index resolution and generic transitive dependencies use `[python
 
 Each target-active direct requirement in `python.extra_packages` is preserved for application installation while `[python].index_url` remains available for index-backed and transitive dependencies. Each active `python.uv_tools` requirement is installed under its own `/opt/uv/tools/<name>` environment with the managed Python interpreter; a direct tool keeps its authored source while transitive dependencies retain the default Python index. Installation never adds a downloader, URL rewriting, or a second package path.
 
-During custom-node installation, Registry Manager and Direct-Git Python subprocesses receive BuildPlan-owned package sources and PyTorch protections; the [developer package-source contract](../dev/contracts.md#python-and-pytorch-package-source-ownership) owns the exact index, runtime/build-constraint, and uv selection behavior. Dependencies selected by trusted Manager or `install.py` execution do not become canonical-lock or BuildPlan identities, and moving direct/VCS effects remain outside cdh-verified replay; see the [custom-node identity and trust contract](../dev/contracts.md#custom-node-identity-order-and-trust).
+During custom-node installation, Registry Manager and Git/local root-install Python subprocesses receive BuildPlan-owned package sources and PyTorch protections; the [developer package-source contract](../dev/contracts.md#python-and-pytorch-package-source-ownership) owns the exact index, runtime/build-constraint, and uv selection behavior. Dependencies selected by trusted Manager or `install.py` execution do not become canonical-lock or BuildPlan identities, and moving direct/VCS effects remain outside cdh-verified replay; see the [custom-node identity and trust contract](../dev/contracts.md#custom-node-identity-order-and-trust).
 
 cdh records and verifies the exact resolved top-level package version, but it does not lock the bytes or VCS commit behind a direct source. The image build installs the source that was configured and fails if the resulting package name or version does not match the resolved result.
 

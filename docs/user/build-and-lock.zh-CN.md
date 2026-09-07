@@ -177,6 +177,14 @@ cdh host render \
 
 只有直接位于 `pre-start.d/`、`post-start.d/` 和 `stop.d/` 下的普通 `.sh` 和 `.py` 文件会被选择并固化。其他普通文件和目录会在不递归遍历的情况下被忽略并产生聚合警告；不安全的文件系统条目以及来源检查/读取失败仍是错误。省略该选项时不会烘焙运行时 Hook 目录树。挂载的运行时 Hook 是独立的部署时输入；参见[运行时指南](runtime.zh-CN.md)和[运行时 Hook 示例](../../examples/runtime-hooks/)。
 
+## 本地节点捕获与锁定
+
+Host 按 source 根目录的 `.dockerignore` 筛选后，将 local 自定义节点捕获到独立上下文子树；匹配和来源准入详见[配置指南](configuration.zh-CN.md#选择自定义节点和构建-hook)。渲染完成后，无需原始 source 目录即可直接构建 context。修改选中源码字节后，正常重新渲染并构建更新的 context；变化的输入会参与现有合并自定义节点指令的 BuildKit cache key。
+
+`content_lock = false` 在规划时不计算普通选中文件字节的摘要。`content_lock = true` 为每个节点记录一个选中树 aggregate identity，包括保留的 `.dockerignore` 字节，并在物化及镜像内复制时、运行 Hook 之前验证输入。排除内容的变化不改变此身份，但规则文件注释的变化会改变。`--locked` 检查锁定身份和选中结构，不刷新或比较未锁定源码字节；`--check` 还流式比较选中的 source/context 字节。`--dry-run` 准入选中结构，不发布或运行 Hook；即使关闭内容锁，也仍需读取规则文件。下文的上下文获取模式同样适用于 local 节点输入。
+
+Hook 和根安装程序可在复制后修改捕获的输入。最终 local 节点证据证明预期的真实目标目录并绑定 BuildPlan，不重新计算结果树摘要，也不声称安装效果被锁定。构建 `files` 在节点安装和 Hook 之后应用；覆盖不会触发另一次安装或 Hook 执行。
+
 ## 构建文件与本地上下文 materialization
 
 构建 `[[files]]` 声明是最终镜像内容的权威，并使用一个 `source + target` 操作。HTTP source 会下载到 cdh 管理的暂存目录，并在通过已配置的 checksum 后原子替换其确切 target。本地 source 可以是一个普通文件，也可以是一个完整的真实目录树；cdh 会在构建镜像前把它准备为独立的构建输入。本地文件放到其确切 target；本地目录会把来源目录内容放到目标根目录下，不附加来源目录名。HTTP 和本地文件 target 必须是 `COMFYUI_PATH` 的严格后代，并表示一个确切文件；本地目录 target 相对于 `COMFYUI_PATH`，可以等于根目录（`.`）。HTTP 不会从 URL 或响应 metadata 推断 target 文件名。
@@ -241,6 +249,7 @@ cdh 会验证最终的分层配置、协调 lock，并在运行 Buildx 前准备
 - `bootstrap/comfyui_docker_helper-<version>-py3-none-any.whl`，安装到镜像中且经过精确验证的 cdh wheel；
 - `build/hooks/`，配置后仅包含被引用且经过验证的构建 Hook 字节；
 - `build/files/`，包含按 Plan 定址且独立复制或克隆的宿主机本地文件；
+- `build/local-nodes/`，在自定义节点指令中消费的独立 local 节点选中输入；
 - `build/trees/`，每个宿主机本地目录配置对应一个按 Plan 定址的完整目录树上下文；
 - `runtime/config.toml`，派生自 BuildPlan；
 - `runtime/hooks/`，配置后包含经过验证且已烘焙的运行时 Hook 目录树；
@@ -271,7 +280,7 @@ cdh 会验证最终的分层配置、协调 lock，并在运行 Buildx 前准备
 
 `python.extra_packages` 中每个在目标环境生效的 direct requirement 都会保留至应用安装，同时 `[python].index_url` 仍用于 index-backed 和传递依赖。每个生效的 `python.uv_tools` requirement 都使用 managed Python interpreter 安装在独立的 `/opt/uv/tools/<name>` 环境中；direct tool 保留其编写的 source，传递依赖仍使用默认 Python index。安装过程不会增加 downloader、URL rewrite 或第二条软件包路径。
 
-安装自定义节点时，Registry Manager 和 Direct-Git 的 Python 子进程都会获得由 BuildPlan 定权的软件包源和 PyTorch 保护；具体的 index、运行时/隔离构建约束及 uv 选择行为由[开发者软件包源契约](../dev/contracts.md#python-and-pytorch-package-source-ownership)统一定义。受信任的 Manager 或 `install.py` 所选择的依赖不会成为 canonical lock 或 BuildPlan 身份，其中的 moving direct/VCS 效果仍不属于 cdh 验证的重放范围；参见[自定义节点身份与信任契约](../dev/contracts.md#custom-node-identity-order-and-trust)。
+安装自定义节点时，Registry Manager 和 Git/local 根安装的 Python 子进程都会获得由 BuildPlan 定权的软件包源和 PyTorch 保护；具体的 index、运行时/隔离构建约束及 uv 选择行为由[开发者软件包源契约](../dev/contracts.md#python-and-pytorch-package-source-ownership)统一定义。受信任的 Manager 或 `install.py` 所选择的依赖不会成为 canonical lock 或 BuildPlan 身份，其中的 moving direct/VCS 效果仍不属于 cdh 验证的重放范围；参见[自定义节点身份与信任契约](../dev/contracts.md#custom-node-identity-order-and-trust)。
 
 cdh 会记录并验证解析得到的精确顶层软件包版本，但不会锁定 direct source 背后的字节或 VCS commit。镜像构建会安装配置中指定的 source；如果最终软件包名称或版本与解析结果不匹配，构建会失败。
 

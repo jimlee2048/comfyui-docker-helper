@@ -42,6 +42,7 @@ from comfyui_docker_helper.config.credentials.secrets import (
     downloader_credential_secret_target,
 )
 from comfyui_docker_helper.config.file_checksum import validate_canonical_file_checksum
+from comfyui_docker_helper.config.logs import LogDirectory, LogMode
 from comfyui_docker_helper.config.planning.canonical_lock import (
     ApplicationExtrasLockEntry,
     BuildHookLockEntry,
@@ -806,6 +807,7 @@ class GitNodePlan(_PlanModel):
     url: str
     commit: str
     target: str
+    pre_clone_hooks: tuple[HookPlan, ...]
     pre_install_hooks: tuple[HookPlan, ...]
     post_install_hooks: tuple[HookPlan, ...]
 
@@ -1238,10 +1240,18 @@ class SshPlan(_PlanModel):
         return value
 
 
+class RuntimeLogsPlan(_PlanModel):
+    mode: LogMode
+    directory: LogDirectory
+    max_size: int = Field(gt=0)
+    max_files: int = Field(gt=0)
+
+
 class RuntimePhase(_PlanModel):
     environment: tuple[EnvironmentPlan, ...]
     ssh: SshPlan
     shutdown_timeout: ShutdownTimeout
+    logs: RuntimeLogsPlan
     launch_command: tuple[str, ...]
     hooks: tuple[HookPlan, ...]
     download_failure_policy: Literal["continue", "fail"] | None
@@ -1400,7 +1410,11 @@ def build_plan_hook_identities(
     build_hooks: dict[str, HookPlan] = {}
     destinations: set[PurePosixPath] = set()
     for node in custom_nodes.nodes:
-        for hook in (*node.pre_install_hooks, *node.post_install_hooks):
+        for hook in (
+            *(node.pre_clone_hooks if isinstance(node, GitNodePlan) else ()),
+            *node.pre_install_hooks,
+            *node.post_install_hooks,
+        ):
             identity = hook_lock_identity("build", hook.relative_path)
             existing = build_hooks.get(identity)
             if existing is not None and existing.digest != hook.digest:
@@ -1959,6 +1973,7 @@ def _project_runtime(
             pub_keys=graph.runtime.ssh.pub_keys,
         ),
         shutdown_timeout=graph.runtime.shutdown_timeout,
+        logs=RuntimeLogsPlan.model_validate(graph.runtime.logs.model_dump()),
         launch_command=graph.runtime.launch_command,
         hooks=_runtime_hooks(entries, used),
         download_failure_policy=(
@@ -2189,6 +2204,9 @@ def _custom_node(
         url=entry.url,
         commit=entry.commit,
         target=node.target,
+        pre_clone_hooks=tuple(
+            _hook(value, entries, used) for value in node.pre_clone_hooks
+        ),
         pre_install_hooks=pre_install_hooks,
         post_install_hooks=post_install_hooks,
     )

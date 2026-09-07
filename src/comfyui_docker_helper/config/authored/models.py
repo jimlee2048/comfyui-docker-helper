@@ -14,6 +14,7 @@ from comfyui_docker_helper.config.credentials.secrets import (
     FinalSecretSourceConfig as _FinalSecretSourceConfig,
 )
 from comfyui_docker_helper.config.file_checksum import normalize_file_checksum
+from comfyui_docker_helper.config.logs import RuntimeLogSettings
 from comfyui_docker_helper.config.model_base import ConfigModel
 from comfyui_docker_helper.config.shutdown_timeout import ShutdownTimeout
 from comfyui_docker_helper.exact_ledger import (
@@ -120,6 +121,7 @@ class FinalCdhConfig(FinalConfigModel):
     download_max_attempts: int = Field(default=3, ge=1)
     download_failure_policy: Literal["continue", "fail"] = "fail"
     shutdown_timeout: ShutdownTimeout = 8
+    logs: RuntimeLogSettings = Field(default_factory=RuntimeLogSettings)
     local_file_mode: Literal["auto", "clone", "copy"] = "auto"
     downloader: FinalDownloaderConfig = Field(default_factory=FinalDownloaderConfig)
     git: FinalGitConfig = Field(default_factory=FinalGitConfig)
@@ -157,6 +159,7 @@ class FinalGitCustomNodeConfig(_FinalCustomNodeConfig):
     url: str
     ref: str | None = None
     target_dir: str | None = None
+    pre_clone_hooks: list[str] = Field(default_factory=list)
 
 
 FinalCustomNodeConfig = Annotated[

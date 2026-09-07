@@ -61,7 +61,7 @@ See [Architecture](architecture.md) for component responsibilities and allowed d
 
 ## Development workflow
 
-Keep each change focused on its current behavior owner. Start validation with the closest unit or integration tests, expand to adjacent coverage, and run the complete default-offline suite before handoff. Add network, Docker, GPU, or slow tests only when the changed boundary requires them; follow the [testing handbook](../../tests/README.md) for exact authorization and resource rules.
+Keep each change focused on its current behavior owner. Select validation and its completion criteria using the [testing handbook](../../tests/README.md#change-selection-and-cleanup), including its exception for documentation, comments, and agent instructions that do not affect execution. The handbook owns test scope, cost authorization, and resource rules; use the commands below as applicable to that selection.
 
 Run the configured formatting and lint checks:
 
@@ -70,7 +70,7 @@ uv run ruff format --check .
 uv run ruff check .
 ```
 
-Run focused tests while developing, then the complete offline suite:
+For changes requiring test execution under the handbook, run focused tests while developing, then the complete offline suite:
 
 ```bash
 uv run pytest tests/unit

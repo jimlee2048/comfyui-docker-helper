@@ -26,6 +26,7 @@ from tests.smoke.application_probes import (
 
 from comfyui_docker_helper.config.planning.build_plan import (
     build_plan_digest,
+    build_plan_hook_identities,
     manifest_binding,
     parse_build_plan_json,
 )
@@ -383,7 +384,10 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
         ]
         assert not plan.custom_nodes.nodes[1].pre_install_hooks
         assert not plan.custom_nodes.nodes[1].post_install_hooks
-        for hook in (*first.pre_install_hooks, *first.post_install_hooks):
+        build_hooks, _runtime_hooks = build_plan_hook_identities(
+            plan.custom_nodes, plan.runtime
+        )
+        for hook in build_hooks.values():
             materialized = context / "build" / "hooks" / hook.relative_path
             observed = f"sha256:{hashlib.sha256(materialized.read_bytes()).hexdigest()}"
             assert observed == hook.digest
@@ -409,7 +413,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
         assert cli_plan is None
 
     dockerfile = context.joinpath("Dockerfile").read_text()
-    assert dockerfile.count("container install-custom-nodes") == 1
+    assert dockerfile.count("container build install-custom-nodes") == 1
     assert dockerfile.count(
         f"--build-plan-digest {binding.build_plan_digest}"
     ) == 3 + bool(plan.files.files)
@@ -471,7 +475,10 @@ runtime_config_path = pathlib.Path("/opt/cdh/runtime/config.toml")
 assert stat.S_IMODE(runtime_config_path.lstat().st_mode) == 0o644
 plan = json.loads(plan_path.read_text())
 for node in plan["custom_nodes"]["nodes"]:
-    for hook in (*node["pre_install_hooks"], *node["post_install_hooks"]):
+    for hook in (
+        *(node["pre_clone_hooks"] if node["type"] == "git" else ()),
+        *node["pre_install_hooks"], *node["post_install_hooks"],
+    ):
         hook_path = build.joinpath("hooks", hook["relative_path"])
         assert stat.S_IMODE(hook_path.lstat().st_mode) == 0o755
 for hook in plan["runtime"]["hooks"]:

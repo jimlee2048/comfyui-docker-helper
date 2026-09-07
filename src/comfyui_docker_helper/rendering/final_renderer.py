@@ -68,7 +68,9 @@ def _base_phase(plan: BuildPlan) -> list[str]:
         "/etc/profile.d/cdh-workspace.sh",
     ]
     if any(
-        node.pre_install_hooks or node.post_install_hooks
+        (isinstance(node, GitNodePlan) and node.pre_clone_hooks)
+        or node.pre_install_hooks
+        or node.post_install_hooks
         for node in plan.custom_nodes.nodes
     ):
         lines.append("COPY --chmod=0755 build/hooks /opt/cdh/build/hooks")
@@ -232,12 +234,11 @@ def _comfyui_phase(plan: BuildPlan) -> list[str]:
                 (_UV_CACHE_MOUNT, _BUILD_PLAN_MOUNT),
                 (
                     _format_command(
-                        f"{_shell_word(cdh.executable)} container install-comfyui",
+                        f"{_shell_word(cdh.executable)} "
+                        "container build install-comfyui",
                         (
                             "--build-plan-digest "
                             + _shell_word(build_plan_digest(plan)),
-                            "--constraints "
-                            "/opt/cdh/build/python-package-constraints.txt",
                         ),
                     ),
                 ),
@@ -274,13 +275,11 @@ def _custom_nodes_phase(plan: BuildPlan) -> list[str]:
                     f"export UV_CACHE_DIR={_UV_CACHE_DIRECTORY} "
                     f"UV_LINK_MODE={_UV_LINK_MODE}",
                     _format_command(
-                        f"{_shell_word(cdh.executable)} container install-custom-nodes",
+                        f"{_shell_word(cdh.executable)} "
+                        "container build install-custom-nodes",
                         (
                             "--build-plan-digest "
                             + _shell_word(build_plan_digest(plan)),
-                            "--constraints "
-                            "/opt/cdh/build/python-package-constraints.txt",
-                            "--build-hooks-directory /opt/cdh/build/hooks",
                         ),
                         environment=command_environment,
                     ),
@@ -309,7 +308,7 @@ def _copied_files_phase(plan: BuildPlan) -> list[str]:
                 tuple(mounts),
                 (
                     _format_command(
-                        f"{_shell_word(cdh.executable)} container download-files",
+                        f"{_shell_word(cdh.executable)} container build download-files",
                         (
                             "--build-plan-digest "
                             + _shell_word(build_plan_digest(plan)),
@@ -324,7 +323,8 @@ def _copied_files_phase(plan: BuildPlan) -> list[str]:
                 (_BUILD_PLAN_MOUNT,),
                 (
                     _format_command(
-                        f"{_shell_word(cdh.executable)} container validate-local-trees",
+                        f"{_shell_word(cdh.executable)} "
+                        "container build validate-tree-targets",
                         (
                             "--build-plan-digest "
                             + _shell_word(build_plan_digest(plan)),
@@ -357,7 +357,7 @@ def _copied_files_phase(plan: BuildPlan) -> list[str]:
                 (
                     _format_command(
                         f"{_shell_word(cdh.executable)} "
-                        "container normalize-local-trees",
+                        "container build normalize-local-trees",
                         (
                             "--build-plan-digest "
                             + _shell_word(build_plan_digest(plan)),
@@ -378,7 +378,8 @@ def _final_verification_phase(plan: BuildPlan) -> list[str]:
                 (_UV_CACHE_MOUNT, _BUILD_PLAN_MOUNT),
                 (
                     _format_command(
-                        f"{_shell_word(cdh.executable)} container emit-final-manifest",
+                        f"{_shell_word(cdh.executable)} "
+                        "container build write-final-manifest",
                         (
                             "--build-plan-digest "
                             + _shell_word(build_plan_digest(plan)),

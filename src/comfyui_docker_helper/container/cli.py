@@ -31,7 +31,6 @@ if sys.platform == "linux":
     )
     from comfyui_docker_helper.container.build.downloads import download_files
     from comfyui_docker_helper.container.build.local_trees import (
-        LocalTreeNormalizationError,
         normalize_local_trees,
         validate_local_trees,
     )
@@ -49,7 +48,7 @@ if sys.platform == "linux":
         ContainerRuntime,
     )
     from comfyui_docker_helper.container.runtime.control.client import (
-        follow_runtime,
+        read_runtime_logs,
         read_runtime_status,
         restart_runtime,
     )
@@ -62,6 +61,14 @@ _CONTAINER_PLATFORM_ERROR = (
     "use 'cdh host' on the host machine"
 )
 
+BuildPlanDigestOption = Annotated[
+    str,
+    typer.Option(
+        "--build-plan-digest",
+        help="Expected owning BuildPlan SHA-256 digest.",
+    ),
+]
+
 app = typer.Typer(
     name="container",
     help="Run image-internal build and runtime helpers.",
@@ -69,6 +76,20 @@ app = typer.Typer(
     add_completion=False,
     context_settings=HELP_CONTEXT_SETTINGS,
 )
+
+build_app = typer.Typer(
+    name="build",
+    help=(
+        "Run image-internal steps during Docker image builds.\n\n"
+        "These steps are normally invoked by the generated Dockerfile. "
+        "Use 'cdh host build' to build a complete image from the host."
+    ),
+    short_help="Run image-internal steps during Docker image builds.",
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings=HELP_CONTEXT_SETTINGS,
+)
+app.add_typer(build_app)
 
 runtime_app = typer.Typer(
     name="runtime",
@@ -84,24 +105,12 @@ app.add_typer(runtime_app)
 def container(ctx: typer.Context) -> None:
     """Run container-side helper commands."""
     ctx.obj = require_output_settings(ctx)
-    if (
-        sys.platform != "linux"
-        and ctx.invoked_subcommand is not None
-        and ctx.invoked_subcommand != "runtime"
-    ):
-        _require_linux_container()
 
 
-@app.command("download-files", context_settings=HELP_CONTEXT_SETTINGS)
+@build_app.command("download-files", context_settings=HELP_CONTEXT_SETTINGS)
 def download_files_command(
     ctx: typer.Context,
-    build_plan_digest: Annotated[
-        str,
-        typer.Option(
-            "--build-plan-digest",
-            help="Expected owning BuildPlan SHA-256 digest.",
-        ),
-    ],
+    build_plan_digest: BuildPlanDigestOption,
 ) -> None:
     """Download files declared by the canonical BuildPlan."""
     files, comfyui_root = _admission(build_plan_digest).file_downloads()
@@ -110,56 +119,28 @@ def download_files_command(
         download_files(files, comfyui_root, event_sink=invocation)
 
 
-@app.command("normalize-local-trees", context_settings=HELP_CONTEXT_SETTINGS)
+@build_app.command("normalize-local-trees", context_settings=HELP_CONTEXT_SETTINGS)
 def normalize_local_trees_command(
-    build_plan_digest: Annotated[
-        str,
-        typer.Option(
-            "--build-plan-digest",
-            help="Expected owning BuildPlan SHA-256 digest.",
-        ),
-    ],
+    build_plan_digest: BuildPlanDigestOption,
 ) -> None:
-    """Normalize Plan-selected local-tree paths in the image."""
+    """Create required directories and normalize selected tree modes after COPY."""
     trees, comfyui_root = _admission(build_plan_digest).local_trees()
-    try:
-        normalize_local_trees(trees, comfyui_root)
-    except LocalTreeNormalizationError as error:
-        raise ContainerCommandError(str(error)) from error
+    normalize_local_trees(trees, comfyui_root)
 
 
-@app.command("validate-local-trees", context_settings=HELP_CONTEXT_SETTINGS)
-def validate_local_trees_command(
-    build_plan_digest: Annotated[
-        str,
-        typer.Option(
-            "--build-plan-digest",
-            help="Expected owning BuildPlan SHA-256 digest.",
-        ),
-    ],
+@build_app.command("validate-tree-targets", context_settings=HELP_CONTEXT_SETTINGS)
+def validate_tree_targets_command(
+    build_plan_digest: BuildPlanDigestOption,
 ) -> None:
-    """Validate existing Plan-selected local-tree paths before COPY."""
+    """Check selected tree targets before COPY without modifying paths."""
     trees, comfyui_root = _admission(build_plan_digest).local_trees()
-    try:
-        validate_local_trees(trees, comfyui_root)
-    except LocalTreeNormalizationError as error:
-        raise ContainerCommandError(str(error)) from error
+    validate_local_trees(trees, comfyui_root)
 
 
-@app.command("install-comfyui", context_settings=HELP_CONTEXT_SETTINGS)
+@build_app.command("install-comfyui", context_settings=HELP_CONTEXT_SETTINGS)
 def install_comfyui_command(
     ctx: typer.Context,
-    build_plan_digest: Annotated[
-        str,
-        typer.Option(
-            "--build-plan-digest",
-            help="Expected owning BuildPlan SHA-256 digest.",
-        ),
-    ],
-    constraints: Annotated[
-        Path,
-        typer.Option("--constraints", help="Materialized managed constraints file."),
-    ] = Path("/opt/cdh/build/python-package-constraints.txt"),
+    build_plan_digest: BuildPlanDigestOption,
 ) -> None:
     """Install exact official ComfyUI and its complete requirements."""
     application, toolchain = _admission(build_plan_digest).comfyui_install()
@@ -169,32 +150,14 @@ def install_comfyui_command(
         application,
         toolchain,
         runtime=runtime,
-        constraints_path=constraints,
         event_sink=display,
     )
 
 
-@app.command("install-custom-nodes", context_settings=HELP_CONTEXT_SETTINGS)
+@build_app.command("install-custom-nodes", context_settings=HELP_CONTEXT_SETTINGS)
 def install_custom_nodes_command(
     ctx: typer.Context,
-    build_plan_digest: Annotated[
-        str,
-        typer.Option(
-            "--build-plan-digest",
-            help="Expected owning BuildPlan SHA-256 digest.",
-        ),
-    ],
-    constraints: Annotated[
-        Path,
-        typer.Option("--constraints", help="Materialized managed constraints file."),
-    ] = Path("/opt/cdh/build/python-package-constraints.txt"),
-    build_hooks_directory: Annotated[
-        Path,
-        typer.Option(
-            "--build-hooks-directory",
-            help="Materialized build hook directory.",
-        ),
-    ] = Path("/opt/cdh/build/hooks"),
+    build_plan_digest: BuildPlanDigestOption,
 ) -> None:
     """Install the exact ordered Registry and direct-Git custom nodes."""
     custom_nodes, application = _admission(build_plan_digest).custom_node_install()
@@ -204,25 +167,17 @@ def install_custom_nodes_command(
         custom_nodes,
         application,
         runtime=runtime,
-        constraints_path=constraints,
-        build_hooks_directory=build_hooks_directory,
         build_plan_digest=build_plan_digest,
         event_sink=display,
     )
 
 
-@app.command("emit-final-manifest", context_settings=HELP_CONTEXT_SETTINGS)
-def emit_final_manifest_command(
+@build_app.command("write-final-manifest", context_settings=HELP_CONTEXT_SETTINGS)
+def write_final_manifest_command(
     ctx: typer.Context,
-    build_plan_digest: Annotated[
-        str,
-        typer.Option(
-            "--build-plan-digest",
-            help="Expected owning BuildPlan SHA-256 digest.",
-        ),
-    ],
+    build_plan_digest: BuildPlanDigestOption,
 ) -> None:
-    """Verify final image state and emit its observational manifest."""
+    """Verify final image state, then write its observational manifest."""
     projection = _admission(build_plan_digest).final_manifest()
     runtime = ContainerRuntime.from_env()
     display = default_container_helper_display(require_output_settings(ctx))
@@ -283,11 +238,36 @@ def runtime_status_command(
         typer.echo(f"last_restart: {last_restart.id} ({last_restart.result})")
 
 
-@runtime_app.command("follow", context_settings=HELP_CONTEXT_SETTINGS)
-def runtime_follow_command() -> None:
-    """Stream live stdout and stderr from the running container."""
+def _parse_log_tail(value: str) -> int | None:
+    if value == "all":
+        return None
+    if value.isascii() and value.isdecimal():
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    raise typer.BadParameter("Expected 'all' or a nonnegative integer.")
+
+
+@runtime_app.command("logs", context_settings=HELP_CONTEXT_SETTINGS)
+def runtime_logs_command(
+    tail: Annotated[
+        str,
+        typer.Option(
+            "--tail", "-n", help="Show the last N lines, or all retained output."
+        ),
+    ] = "all",
+    follow: Annotated[
+        bool,
+        typer.Option(
+            "--follow", "-f", help="Follow new output after retained history."
+        ),
+    ] = False,
+) -> None:
+    """Read retained merged container logs, optionally following new output."""
     _require_linux_container()
-    raise typer.Exit(code=follow_runtime())
+    count = _parse_log_tail(tail)
+    raise typer.Exit(code=read_runtime_logs(tail=count, follow=follow))
 
 
 def _require_linux_container() -> None:
@@ -296,6 +276,7 @@ def _require_linux_container() -> None:
 
 
 def _admission(digest: str) -> BuildPlanInputAdmission:
+    _require_linux_container()
     try:
         return BuildPlanInputAdmission.from_path(
             MATERIALIZED_BUILD_PLAN_PATH,

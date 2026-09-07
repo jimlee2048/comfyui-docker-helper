@@ -216,6 +216,68 @@ def _install_custom_nodes(
             environ=environ,
             application_authority=application_authority,
         )
+        prepared_git: GitNodePlan | None = None
+        # An empty hook phase retains the adjacent proof; each executed hook
+        # establishes its own boundary before another mutation is admitted.
+        if isinstance(node, GitNodePlan):
+            with _optional_helper_phase(
+                event_sink,
+                ContainerHelperPhase.CUSTOM_NODE_PRE_CLONE,
+                enabled=bool(node.pre_clone_hooks),
+            ):
+                for hook in node.pre_clone_hooks:
+                    observations.invalidate_mutation()
+                    run_hook(
+                        hook.relative_path,
+                        expected_digest=hook.digest,
+                        build_hooks_dir=build_hooks_directory,
+                        runtime=runtime,
+                        env=environ,
+                    )
+                    _verify_boundary(
+                        custom_nodes_root,
+                        admitted,
+                        future,
+                        application=application,
+                        runtime=runtime,
+                        manager_authority=manager_authority,
+                        has_registry=has_registry,
+                        git_path=git_path,
+                        git_environment=git_environment,
+                        observations=observations,
+                        uv_path=uv_path,
+                        constraints_path=constraints_path,
+                        environ=environ,
+                        application_authority=application_authority,
+                    )
+
+            with _helper_phase(
+                event_sink, ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION
+            ):
+                observations.invalidate_mutation()
+                target = git._prepare_git_node(
+                    node, custom_nodes_root, git_path, git_environment
+                )
+                future = nodes[index + 1 :]
+                prepared_git = node
+                _verify_boundary(
+                    custom_nodes_root,
+                    admitted,
+                    future,
+                    prepared_git=prepared_git,
+                    application=application,
+                    runtime=runtime,
+                    manager_authority=manager_authority,
+                    has_registry=has_registry,
+                    git_path=git_path,
+                    git_environment=git_environment,
+                    observations=observations,
+                    uv_path=uv_path,
+                    constraints_path=constraints_path,
+                    environ=environ,
+                    application_authority=application_authority,
+                )
+
         with _optional_helper_phase(
             event_sink,
             ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL,
@@ -234,6 +296,7 @@ def _install_custom_nodes(
                     custom_nodes_root,
                     admitted,
                     future,
+                    prepared_git=prepared_git,
                     application=application,
                     runtime=runtime,
                     manager_authority=manager_authority,
@@ -246,23 +309,6 @@ def _install_custom_nodes(
                     environ=environ,
                     application_authority=application_authority,
                 )
-            # The complete pre phase is a proof boundary even when it was empty.
-            _verify_boundary(
-                custom_nodes_root,
-                admitted,
-                future,
-                application=application,
-                runtime=runtime,
-                manager_authority=manager_authority,
-                has_registry=has_registry,
-                git_path=git_path,
-                git_environment=git_environment,
-                observations=observations,
-                uv_path=uv_path,
-                constraints_path=constraints_path,
-                environ=environ,
-                application_authority=application_authority,
-            )
 
         with _helper_phase(event_sink, ContainerHelperPhase.CUSTOM_NODE_INSTALLATION):
             observations.invalidate_mutation()
@@ -276,19 +322,18 @@ def _install_custom_nodes(
                     custom_node_python_environment,
                 )
             else:
-                git._install_git_node(
+                git._install_git_root_surfaces(
                     node,
-                    custom_nodes_root,
+                    target,
                     application,
                     runtime,
-                    git_path,
                     uv_path,
                     constraints_path,
-                    git_environment,
                     custom_node_python_environment,
                 )
 
             admitted.append(node)
+            prepared_git = None
             remaining = nodes[index + 1 :]
             _verify_boundary(
                 custom_nodes_root,
@@ -337,23 +382,6 @@ def _install_custom_nodes(
                     environ=environ,
                     application_authority=application_authority,
                 )
-            # The complete post phase is a proof boundary even when it was empty.
-            _verify_boundary(
-                custom_nodes_root,
-                admitted,
-                remaining,
-                application=application,
-                runtime=runtime,
-                manager_authority=manager_authority,
-                has_registry=has_registry,
-                git_path=git_path,
-                git_environment=git_environment,
-                observations=observations,
-                uv_path=uv_path,
-                constraints_path=constraints_path,
-                environ=environ,
-                application_authority=application_authority,
-            )
         _emit_helper_event(
             event_sink,
             CustomNodeCompleted(index=position, total=len(nodes)),
@@ -442,6 +470,7 @@ def _emit_custom_node_started(
             index=index,
             total=total,
             target_name=Path(node.target).name,
+            pre_clone_hook_count=len(node.pre_clone_hooks),
             pre_hook_count=pre_hook_count,
             post_hook_count=post_hook_count,
         )
@@ -596,6 +625,7 @@ def _verify_boundary(
     admitted: Sequence[CustomNodePlan],
     future: Sequence[CustomNodePlan],
     *,
+    prepared_git: GitNodePlan | None = None,
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     manager_authority: ParsedManagerRequirements | None,
@@ -614,6 +644,7 @@ def _verify_boundary(
         custom_nodes_root,
         admitted,
         future,
+        prepared_git=prepared_git,
         application=application,
         runtime=runtime,
         manager_authority=manager_authority,
@@ -650,6 +681,7 @@ def _verify_mixed_state(
     admitted: Sequence[CustomNodePlan],
     future: Sequence[CustomNodePlan],
     *,
+    prepared_git: GitNodePlan | None = None,
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     manager_authority: ParsedManagerRequirements | None,
@@ -668,6 +700,12 @@ def _verify_mixed_state(
                 node, target, custom_nodes_root, git_path, git_environment
             )
             admitted_git_targets.append(target)
+    if prepared_git is not None:
+        target = git._planned_git_target(prepared_git, custom_nodes_root)
+        git._verify_git_provenance(
+            prepared_git, target, custom_nodes_root, git_path, git_environment
+        )
+        admitted_git_targets.append(target)
     for node in future:
         if isinstance(node, GitNodePlan):
             _require_absent(

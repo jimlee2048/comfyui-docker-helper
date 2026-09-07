@@ -823,8 +823,14 @@ def _iter_node_hooks(
     node: FinalRegistryCustomNodeConfig | FinalGitCustomNodeConfig,
 ) -> Iterable[tuple[str, DiagnosticPath]]:
     base: DiagnosticPath = ("comfyui", "custom_nodes", index)
-    for field in ("pre_install_hooks", "post_install_hooks"):
-        for hook_index, hook in enumerate(getattr(node, field)):
+    stages = (
+        ("pre_install_hooks", node.pre_install_hooks),
+        ("post_install_hooks", node.post_install_hooks),
+    )
+    if isinstance(node, FinalGitCustomNodeConfig):
+        stages = (("pre_clone_hooks", node.pre_clone_hooks), *stages)
+    for field, hooks in stages:
+        for hook_index, hook in enumerate(hooks):
             yield hook, (*base, field, hook_index)
 
 

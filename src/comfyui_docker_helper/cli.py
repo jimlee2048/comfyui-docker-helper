@@ -76,5 +76,5 @@ app.add_typer(host_app, name="host", help="commands executed on the host machine
 app.add_typer(
     container_app,
     name="container",
-    help="helpers executed inside ComfyUI images",
+    help="Run image-internal build and runtime helpers.",
 )

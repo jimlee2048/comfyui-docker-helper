@@ -36,6 +36,8 @@ _HELPER_PHASE_LABELS = {
         "Verifying the ComfyUI installation"
     ),
     ContainerHelperPhase.CUSTOM_NODES_PREPARATION: "Preparing custom-node installation",
+    ContainerHelperPhase.CUSTOM_NODE_PRE_CLONE: "Running pre-clone hooks",
+    ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION: "Preparing custom-node source",
     ContainerHelperPhase.CUSTOM_NODE_PRE_INSTALL: "Running pre-install hooks",
     ContainerHelperPhase.CUSTOM_NODE_INSTALLATION: "Installing the custom node",
     ContainerHelperPhase.CUSTOM_NODE_POST_INSTALL: "Running post-install hooks",
@@ -155,8 +157,11 @@ class ContainerHelperDisplay(EventSink[ContainerHelperEvent]):
         source: Literal["registry", "git"],
     ) -> str:
         if self._settings.includes(OutputDetail.VERBOSE):
+            value += " ("
+            if isinstance(event, GitCustomNodeStarted):
+                value += f"pre-clone hooks={event.pre_clone_hook_count}, "
             value += (
-                f" (pre-install hooks={event.pre_hook_count}, "
+                f"pre-install hooks={event.pre_hook_count}, "
                 f"post-install hooks={event.post_hook_count}"
             )
             if self._settings.includes(OutputDetail.DEBUG):

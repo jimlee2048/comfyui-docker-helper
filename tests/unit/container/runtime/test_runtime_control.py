@@ -19,9 +19,12 @@ from comfyui_docker_helper.container.runtime.control.protocol import (
     RuntimeAckRequest,
     RuntimeControlProtocolError,
     RuntimeErrorResponse,
-    RuntimeFollowRequest,
     RuntimeLastRestart,
+    RuntimeLogDiagnosticResponse,
+    RuntimeLogEndResponse,
+    RuntimeLogReplayCompleteResponse,
     RuntimeLogResponse,
+    RuntimeLogsRequest,
     RuntimeRestartRequest,
     RuntimeStatusRequest,
     RuntimeStatusResponse,
@@ -40,7 +43,9 @@ from comfyui_docker_helper.container.runtime.control.transport import (
     [
         RuntimeRestartRequest(),
         RuntimeStatusRequest(),
-        RuntimeFollowRequest(),
+        RuntimeLogsRequest(),
+        RuntimeLogsRequest(tail=0, follow=True),
+        RuntimeLogsRequest(tail=200),
         RuntimeAckRequest(operation="op-1"),
     ],
 )
@@ -65,7 +70,10 @@ def test_request_frames_round_trip(message: object) -> None:
             operation="op-1",
             last_restart=RuntimeLastRestart(id="op-0", result="succeeded"),
         ),
-        RuntimeLogResponse.from_bytes("stderr", b"\x00\xffpartial"),
+        RuntimeLogResponse.from_bytes(b"\x00\xffpartial"),
+        RuntimeLogDiagnosticResponse(message="retention interrupted"),
+        RuntimeLogReplayCompleteResponse(complete=False),
+        RuntimeLogEndResponse(),
         RuntimeTerminalResponse(operation="op-1", result="failed", message="failed"),
         RuntimeErrorResponse(code="busy", message="restart busy", operation="op-1"),
     ],
@@ -81,7 +89,7 @@ def test_response_frames_round_trip(message: object) -> None:
 
 
 def test_log_response_preserves_binary_bytes() -> None:
-    message = RuntimeLogResponse.from_bytes("stdout", b"\x00\xffno-newline")
+    message = RuntimeLogResponse.from_bytes(b"\x00\xffno-newline")
 
     assert message.as_bytes() == b"\x00\xffno-newline"
 
@@ -89,15 +97,17 @@ def test_log_response_preserves_binary_bytes() -> None:
 @pytest.mark.parametrize(
     ("document", "receive_response"),
     [
-        ({"version": 2, "type": "restart"}, False),
-        ({"version": 1, "type": "future"}, False),
-        ({"version": 1, "type": "restart", "extra": "marker"}, False),
-        ({"version": "1", "type": "restart"}, False),
+        ({"version": 1, "type": "restart"}, False),
+        ({"version": 2, "type": "future"}, False),
+        ({"version": 2, "type": "restart", "extra": "marker"}, False),
+        ({"version": "2", "type": "restart"}, False),
+        ({"version": 2, "type": "logs", "tail": -1}, False),
+        ({"version": 2, "type": "logs", "tail": True}, False),
+        ({"version": 2, "type": "logs", "follow": "true"}, False),
         (
             {
-                "version": 1,
+                "version": 2,
                 "type": "log",
-                "stream": "stdout",
                 "data": "not-base64!",
             },
             True,

@@ -133,6 +133,8 @@ jobs:
           & $wheelCdh host --help | Out-Null
           & $wheelCdh host validate -f examples/minimal.toml
           & $wheelCdh container --help | Out-Null
+          & $wheelCdh container build --help | Out-Null
+          & $wheelCdh container build write-final-manifest --help | Out-Null
 
   package:
     name: Package

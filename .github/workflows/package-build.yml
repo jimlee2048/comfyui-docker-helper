@@ -92,6 +92,8 @@ jobs:
           uv pip check --python "$WHEEL_VENV/bin/python"
           test "$("$WHEEL_VENV/bin/cdh" --version)" = "cdh $EXPECTED_VERSION"
           "$WHEEL_VENV/bin/cdh" --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" container build --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" container build write-final-manifest --help >/dev/null
           "$WHEEL_VENV/bin/cdh" host validate -f examples/minimal.toml
       - name: Verify installed canonical wheel byte identity
         env:

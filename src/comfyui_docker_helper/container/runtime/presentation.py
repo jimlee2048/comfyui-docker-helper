@@ -33,6 +33,7 @@ from comfyui_docker_helper.container.runtime.events import (
     RuntimeHookCompleted,
     RuntimeHookStarted,
     RuntimeHookWarning,
+    RuntimeLogStorageWarning,
     RuntimePhase,
     RuntimePhaseCompleted,
     RuntimePhaseFailed,
@@ -106,6 +107,7 @@ _WARNING_CATEGORY_LABELS = {
     RuntimeWarningCategory.STALE_CLEANUP: "stale-file cleanup",
     RuntimeWarningCategory.DOWNLOAD_FAILURE: "download",
     RuntimeWarningCategory.SSH: "SSH",
+    RuntimeWarningCategory.LOG_STORAGE: "local log recording",
 }
 
 
@@ -203,6 +205,7 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
                     RuntimeStaleCleanupPending,
                     RuntimeDownloadFailed,
                     RuntimeSshWarning,
+                    RuntimeLogStorageWarning,
                     RuntimeHookWarning,
                 ),
             ):
@@ -364,6 +367,7 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
         | RuntimeStaleCleanupPending
         | RuntimeDownloadFailed
         | RuntimeSshWarning
+        | RuntimeLogStorageWarning
         | RuntimeHookWarning,
     ) -> None:
         if isinstance(event, RuntimePresentationSaturated):
@@ -414,6 +418,13 @@ class RuntimeDisplay(EventSink[RuntimeEvent]):
                     f"reason={_RETRY_REASON_LABELS[event.reason]}"
                 )
             code = "runtime-download-failed"
+        elif isinstance(event, RuntimeLogStorageWarning):
+            value = (
+                f"Warning: Local file recording failed ({event.reason.value}); "
+                "new logs remain only in memory "
+                "and are lost on container restart"
+            )
+            code = "log-storage-failed"
         elif isinstance(event, RuntimeSshWarning):
             value = f"Warning: {_SSH_WARNING_LABELS[event.kind]}"
             if event.returncode is not None:

@@ -46,6 +46,7 @@ def git_node(
     name: str = "direct",
     *,
     url: str = "https://example.invalid/Raw/Node.git",
+    pre_clone: tuple[str, ...] = (),
     pre: tuple[str, ...] = (),
     post: tuple[str, ...] = (),
 ) -> GitNodePlan:
@@ -54,6 +55,10 @@ def git_node(
         url=url,
         commit="c" * 40,
         target=str(runtime.comfyui_path / "custom_nodes" / name),
+        pre_clone_hooks=tuple(
+            HookPlan(relative_path=value, digest=f"sha256:{'e' * 64}")
+            for value in pre_clone
+        ),
         pre_install_hooks=tuple(
             HookPlan(relative_path=value, digest=f"sha256:{'c' * 64}") for value in pre
         ),

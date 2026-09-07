@@ -358,9 +358,9 @@ def test_renderer_places_manifest_emission_after_every_build_mutation(
     lines = render_build_plan_dockerfile(plan).splitlines()
 
     manifest_index = next(
-        index for index, line in enumerate(lines) if "emit-final-manifest" in line
+        index for index, line in enumerate(lines) if "write-final-manifest" in line
     )
-    assert sum("emit-final-manifest" in line for line in lines) == 1
+    assert sum("write-final-manifest" in line for line in lines) == 1
     assert manifest_index > next(
         index for index, line in enumerate(lines) if "install-custom-nodes" in line
     )

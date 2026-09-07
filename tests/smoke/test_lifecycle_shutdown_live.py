@@ -353,6 +353,9 @@ Path(f"/evidence/child-{marker}.pid").write_text(str(os.getpid()))
 record(f"child:start:{marker}:pid={os.getpid()}:ppid={os.getppid()}")
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
+if os.environ.get("CDH_LIFECYCLE_EMIT_LOGS") == "1":
+    print(f"startup-stdout:{marker}", flush=True)
+    print(f"startup-stderr:{marker}", file=sys.stderr, flush=True)
 record(f"child:ready:{marker}")
 index = 0
 while True:
@@ -369,13 +372,17 @@ while True:
     return path
 
 
-def _write_generation_config(path: Path, marker: str) -> Path:
+def _write_generation_config(
+    path: Path, marker: str, *, logs_directory: str | None = None
+) -> Path:
     document = f"""[cdh]
 shutdown_timeout = 8
 
 [comfyui]
 extra_args = ["--generation={marker}"]
 """
+    if logs_directory is not None:
+        document += f'\n[cdh.logs]\ndirectory = "{logs_directory}"\n'
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as stream:
         stream.write(document)
@@ -452,7 +459,7 @@ def _replace_generation_hooks(
     root: Path,
     marker: str,
     *,
-    old_marker: str,
+    old_marker: str | None = None,
 ) -> Path:
     hooks = root / "generation-hooks"
     for phase in ("pre-start.d", "stop.d"):
@@ -853,11 +860,14 @@ def test_runtime_restart_replaces_full_generation_on_stable_topology(
 
 
 # A live log session spans a restart without consuming Docker's primary logs.
-def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
+def test_runtime_logs_preserve_history_across_generation_and_container_restart(
     tmp_path: Path,
 ) -> None:
     main = _write_generation_main(tmp_path)
-    config = _write_generation_config(tmp_path / "generation.toml", "old")
+    directory = "/var/log/cdh-smoke"
+    config = _write_generation_config(
+        tmp_path / "generation.toml", "old", logs_directory=directory
+    )
     hooks = _write_generation_hooks(tmp_path, "old", stop_mode="wait")
     follow_stdout = tmp_path / "follow.stdout"
     follow_stderr = tmp_path / "follow.stderr"
@@ -880,16 +890,19 @@ def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
             follow, follower_pid_path = _start_runtime_exec(
                 name,
                 tmp_path,
-                "follow",
+                "logs",
+                "--follow",
                 stdout=stdout_stream,
                 stderr=stderr_stream,
             )
+            _wait_for_text(follow_stdout, "startup-stdout:old")
+            _wait_for_text(follow_stdout, "startup-stderr:old")
             _wait_for_text(follow_stdout, "runtime-stdout:old:")
-            _wait_for_text(follow_stderr, "runtime-stderr:old:")
+            _wait_for_text(follow_stdout, "runtime-stderr:old:")
 
             restart, _restart_pid = _start_runtime_exec(name, tmp_path, "restart")
             _wait_for_event(tmp_path, "hook:stop:old:entered")
-            _write_generation_config(config, "new")
+            _write_generation_config(config, "new", logs_directory=directory)
             _replace_generation_hooks(tmp_path, "new", old_marker="old")
             (tmp_path / "release-stop-old").write_text("release")
             restart_stdout, restart_stderr = _finish_exec(restart)
@@ -901,7 +914,7 @@ def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
 
             _wait_for_event(tmp_path, "child:ready:new")
             _wait_for_text(follow_stdout, "runtime-stdout:new:")
-            _wait_for_text(follow_stderr, "runtime-stderr:new:")
+            _wait_for_text(follow_stdout, "runtime-stderr:new:")
             logs = _docker("logs", name)
             assert "runtime-stdout:old:" in logs.stdout
             assert "runtime-stdout:new:" in logs.stdout
@@ -922,6 +935,26 @@ def test_runtime_follow_spans_restart_and_docker_logs_remain_complete(
                 "id": "op-1",
                 "result": "succeeded",
             }
+            container_id = _inspect_container(name)["Id"]
+            _docker("stop", "--time", "8", name, timeout=12)
+            assert _wait_exit(name) == 0
+            _write_generation_config(config, "reopened", logs_directory=directory)
+            _replace_generation_hooks(tmp_path, "reopened")
+            _docker("restart", name, timeout=12)
+            assert _inspect_container(name)["Id"] == container_id
+            _wait_for_event(tmp_path, "child:ready:reopened")
+            _wait_for_status(name, state="running", generation="gen-1", operation=None)
+            retained = _docker(
+                "exec", name, "/opt/uv/bin/cdh", "container", "runtime", "logs"
+            )
+            for marker in ("old", "new", "reopened"):
+                assert retained.stdout.count(f"startup-stdout:{marker}\n") == 1
+                assert retained.stdout.count(f"startup-stderr:{marker}\n") == 1
+            assert retained.stderr == ""
+            raw = _docker("exec", name, "cat", f"{directory}/runtime.log").stdout
+            assert "startup-stdout:old\n" in raw
+            assert "startup-stderr:new\n" in raw
+            assert follow_stderr.read_text() == ""
             _docker("stop", "--time", "8", name, timeout=12)
             assert _wait_exit(name) == 0
         finally:

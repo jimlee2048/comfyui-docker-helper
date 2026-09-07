@@ -48,9 +48,9 @@ def test_root_cli_does_not_load_platform_implementations() -> None:
     "command",
     [
         ["runtime", "serve"],
-        ["download-files"],
-        ["validate-local-trees"],
-        ["normalize-local-trees"],
+        ["build", "download-files", "--build-plan-digest", "sha256:" + "a" * 64],
+        ["build", "validate-tree-targets", "--build-plan-digest", "sha256:" + "a" * 64],
+        ["build", "normalize-local-trees", "--build-plan-digest", "sha256:" + "a" * 64],
     ],
     ids=["runtime", "build-helper", "tree-precheck", "tree-helper"],
 )

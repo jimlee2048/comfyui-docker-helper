@@ -103,7 +103,7 @@ def test_materialization_projects_checksum_to_runtime_and_real_build_consumer(
     runtime = tomllib.loads((output / "runtime/config.toml").read_text())
     assert runtime["files"][0]["checksum"] == CANONICAL_CHECKSUM
     dockerfile = (output / "Dockerfile").read_text()
-    assert dockerfile.count("container download-files") == 1
-    assert dockerfile.index("container install-custom-nodes") < dockerfile.index(
-        "container download-files"
+    assert dockerfile.count("container build download-files") == 1
+    assert dockerfile.index("container build install-custom-nodes") < dockerfile.index(
+        "container build download-files"
     )

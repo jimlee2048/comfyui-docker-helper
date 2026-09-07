@@ -58,7 +58,8 @@ def test_probe_failure_publishes_no_final_or_partial_manifest(
         app,
         [
             "container",
-            "emit-final-manifest",
+            "build",
+            "write-final-manifest",
             "--build-plan-digest",
             build_plan_digest(plan),
         ],

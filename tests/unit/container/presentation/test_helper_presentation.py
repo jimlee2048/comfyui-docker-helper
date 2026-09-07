@@ -18,6 +18,7 @@ from comfyui_docker_helper.container.build.events import (
     CustomNodesInstallCompleted,
     FinalManifestCompleted,
     GitCustomNodeStarted,
+    LocalCustomNodeStarted,
     RegistryCustomNodeStarted,
 )
 from comfyui_docker_helper.container.presentation.helper import (
@@ -318,3 +319,36 @@ def test_zero_custom_nodes_keeps_truthful_phases_and_count_visible() -> None:
         "verifying" in line.lower() and "custom-node" in line.lower() for line in lines
     )
     assert any("0 nodes" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "detail", [OutputDetail.QUIET, OutputDetail.NORMAL, OutputDetail.DEBUG]
+)
+def test_local_node_event_uses_safe_identity_and_existing_detail_policy(detail):
+    stream = StringIO()
+    display = default_container_helper_display(
+        CliOutputSettings(detail=detail), stderr=stream
+    )
+    display.emit(
+        LocalCustomNodeStarted(
+            index=1,
+            total=1,
+            target_name="local-node",
+            pre_hook_count=1,
+            post_hook_count=2,
+        )
+    )
+    output = stream.getvalue()
+    if detail == OutputDetail.QUIET:
+        assert output == ""
+    else:
+        assert "local-node" in output
+        assert ("source=local" in output) == (detail == OutputDetail.DEBUG)
+
+
+@pytest.mark.parametrize("target", ["../outside", "bad\nname", "", "/absolute"])
+def test_local_node_event_rejects_unsafe_display_identity(target):
+    with pytest.raises(ValueError):
+        LocalCustomNodeStarted(
+            index=1, total=1, target_name=target, pre_hook_count=0, post_hook_count=0
+        )

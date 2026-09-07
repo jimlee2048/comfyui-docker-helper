@@ -11,13 +11,20 @@ from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
     GitNodePlan,
     HookPlan,
+    LocalNodePlan,
+    LocalTreeMemberPlan,
     RegistryNodePlan,
 )
+from comfyui_docker_helper.config.planning.inputs.local_node import (
+    local_node_context_path,
+)
+from comfyui_docker_helper.config.planning.local_tree import local_tree_digest
 from comfyui_docker_helper.config.planning.requirements import ParsedComfyUIRequirements
 from comfyui_docker_helper.container.build.custom_nodes import (
     orchestrator as custom_node_installer,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
+from comfyui_docker_helper.filesystem.admission import admit_local_source
 from tests.build_plan_support import accepted_resolution, build_plan, final_config
 
 
@@ -152,4 +159,36 @@ def patch_phases(
         custom_node_installer,
         "observe_application_state",
         lambda *_args, **_kwargs: None,
+    )
+
+
+def local_node(
+    runtime: ContainerRuntime,
+    source: Path,
+    name: str = "local-node",
+    *,
+    locked: bool = False,
+    pre: tuple[HookPlan, ...] = (),
+    post: tuple[HookPlan, ...] = (),
+) -> LocalNodePlan:
+    """Capture a test source through the shared tree authority."""
+    admitted = admit_local_source(source, content_lock=locked)
+    assert admitted.tree is not None
+    return LocalNodePlan(
+        type="local",
+        target=str(runtime.comfyui_path / "custom_nodes" / name),
+        context_path=local_node_context_path(name).as_posix(),
+        verification="sha256" if locked else "unverified-local",
+        members=tuple(
+            LocalTreeMemberPlan(
+                relative_path=member.relative_path.as_posix(),
+                kind=member.kind,
+                size=member.size,
+                digest=member.digest,
+            )
+            for member in admitted.tree.members
+        ),
+        tree_digest=local_tree_digest(admitted.tree) if locked else None,
+        pre_install_hooks=pre,
+        post_install_hooks=post,
     )

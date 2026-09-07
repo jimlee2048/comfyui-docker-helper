@@ -20,6 +20,7 @@ from comfyui_docker_helper.container.build.events import (
     CustomNodesInstallCompleted,
     FinalManifestCompleted,
     GitCustomNodeStarted,
+    LocalCustomNodeStarted,
     RegistryCustomNodeStarted,
 )
 
@@ -102,8 +103,8 @@ class ContainerHelperDisplay(EventSink[ContainerHelperEvent]):
             self._complete_phase(event)
         elif isinstance(event, RegistryCustomNodeStarted):
             self._registry_node(event)
-        elif isinstance(event, GitCustomNodeStarted):
-            self._git_node(event)
+        elif isinstance(event, (GitCustomNodeStarted, LocalCustomNodeStarted)):
+            self._direct_node(event)
         elif isinstance(event, CustomNodeCompleted):
             self._writer.write(f"[{event.index}/{event.total}] Custom node complete")
         elif isinstance(event, ComfyUIInstallCompleted):
@@ -145,16 +146,21 @@ class ContainerHelperDisplay(EventSink[ContainerHelperEvent]):
         value = f"[{event.index}/{event.total}] Custom node: {event.id} {event.version}"
         self._writer.write(self._node_detail(value, event, source="registry"))
 
-    def _git_node(self, event: GitCustomNodeStarted) -> None:
+    def _direct_node(
+        self, event: GitCustomNodeStarted | LocalCustomNodeStarted
+    ) -> None:
         value = f"[{event.index}/{event.total}] Custom node: {event.target_name}"
-        self._writer.write(self._node_detail(value, event, source="git"))
+        source = "git" if isinstance(event, GitCustomNodeStarted) else "local"
+        self._writer.write(self._node_detail(value, event, source=source))
 
     def _node_detail(
         self,
         value: str,
-        event: RegistryCustomNodeStarted | GitCustomNodeStarted,
+        event: RegistryCustomNodeStarted
+        | GitCustomNodeStarted
+        | LocalCustomNodeStarted,
         *,
-        source: Literal["registry", "git"],
+        source: Literal["registry", "git", "local"],
     ) -> str:
         if self._settings.includes(OutputDetail.VERBOSE):
             value += " ("

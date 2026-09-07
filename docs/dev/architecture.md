@@ -15,7 +15,7 @@ flowchart LR
     Host --> Publication["Process-local tags and output"]
     Context --> Buildx["Docker Buildx"]
     Publication --> Buildx
-    Buildx --> Helpers["cdh container build helpers"]
+    Buildx --> Helpers["cdh container build"]
     Helpers --> Image["ComfyUI image and final manifest"]
     Image --> Runtime["Tini → cdh container runtime serve"]
     Deployment["Mounted runtime config, hooks, environment"] --> Runtime
@@ -28,7 +28,7 @@ The host build boundary and the runtime boundary admit different inputs. Runtime
 
 The root CLI, configuration, shared services, rendering, and every `cdh host *` workflow support native Windows and Linux hosts on each Python minor declared by the project (`3.12`, `3.13`, and `3.14`). A Windows host normally drives Docker Desktop in Linux container mode. Other Docker endpoints remain Docker-owned compatibility surfaces and must provide equivalent Linux `amd64` Buildx behavior; automated Windows qualification does not exercise them. Host support does not imply support for Windows container images.
 
-`cdh container *` is an image-internal Linux execution surface. On a non-Linux host the package and root CLI remain importable, container help remains available, and attempting to execute a container helper returns the platform-boundary diagnostic without importing its Linux-only implementation closure.
+`cdh container build` groups image-build steps, while `cdh container runtime` owns runtime control. Both are image-internal Linux execution surfaces. On a non-Linux host the package and root CLI remain importable, group and leaf help remain available, and a syntactically complete helper invocation returns the platform-boundary diagnostic before Plan access or Linux service execution, without importing its Linux-only implementation closure. Required-option errors remain CLI usage errors on every host.
 
 Host source admission for public `type = "local"` `[[files]]` declarations handles one user-selected regular file or complete directory tree under a cooperative-input contract. It rejects unsafe shapes and observed links, reparse points, and special files; accepted file/tree facts flow through the public-local admission bundle and BuildPlan, while host locators remain out of serialized artifacts. Hook roots and local executable inputs use separate admission/acquisition paths. The boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
 
@@ -53,7 +53,7 @@ Host orchestration is the outer build-time composition root. It calls shared con
 
 The shared `filesystem/` foundation can be consumed by Host, rendering, and Container owners but does not depend back on them. Within `config/`, validation, credential, and root model/merge primitives form the inward foundation; authored and runtime configuration are independent consumers of that foundation, planning consumes authored configuration, and evidence consumes planning results. Executable architecture tests own the exact forbidden dependency directions rather than duplicating a complete rule table here.
 
-The Docker build is a process boundary rather than an in-process dependency. The rendered Dockerfile invokes the installed `cdh container` commands inside the build. Container helpers depend on config-owned models and their own container-local services; they do not call host planning or rendering.
+The Docker build is a process boundary rather than an in-process dependency. The rendered Dockerfile invokes the installed `cdh container build` commands inside the build. This group organizes independently invoked steps; Docker owns their ordering and COPY operations. Container helpers depend on config-owned models and their own container-local services; they do not call host planning or rendering.
 
 Data flows forward:
 

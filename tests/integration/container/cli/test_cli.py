@@ -2,6 +2,7 @@
 
 import json
 import sys
+from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,9 @@ from comfyui_docker_helper.container.build.events import (
     ContainerHelperPhaseStarted,
     CustomNodesInstallCompleted,
     RegistryCustomNodeStarted,
+)
+from comfyui_docker_helper.container.build.local_trees import (
+    LocalTreeNormalizationError,
 )
 from comfyui_docker_helper.container.process.runners import ContainerRuntime
 from comfyui_docker_helper.container.transfer.core import (
@@ -123,73 +127,14 @@ def _emit_comfyui_success(event_sink) -> None:
 
 
 @pytest.mark.parametrize(
-    ("args", "usage"),
-    [
-        (["download-files"], "Usage: cdh container download-files"),
-        (["install-comfyui"], "Usage: cdh container install-comfyui"),
-        (["install-custom-nodes"], "Usage: cdh container install-custom-nodes"),
-        (["emit-final-manifest"], "Usage: cdh container emit-final-manifest"),
-        (["normalize-local-trees"], "Usage: cdh container normalize-local-trees"),
-        (["validate-local-trees"], "Usage: cdh container validate-local-trees"),
-        (["runtime"], "Usage: cdh container runtime"),
-        (["runtime", "serve"], "Usage: cdh container runtime serve"),
-        (["runtime", "restart"], "Usage: cdh container runtime restart"),
-        (["runtime", "logs"], "Usage: cdh container runtime logs"),
-        (["runtime", "status"], "Usage: cdh container runtime status"),
-    ],
-)
-def test_container_helper_help_succeeds(
-    cli_runner: CliRunner,
-    args: list[str],
-    usage: str,
-) -> None:
-    result = cli_runner.invoke(app, ["container", *args, "--help"])
-
-    assert result.exit_code == 0
-    assert usage in _plain_output(result.output)
-
-
-def test_container_helper_short_help_alias_succeeds(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(app, ["container", "download-files", "-h"])
-
-    assert result.exit_code == 0
-    assert "Usage: cdh container download-files" in _plain_output(result.output)
-
-
-def test_container_helper_help_exposes_build_plan_binding(
-    cli_runner: CliRunner,
-) -> None:
-    """Container build helpers require the Dockerfile-bound plan digest."""
-    result = cli_runner.invoke(app, ["container", "download-files", "--help"])
-
-    assert result.exit_code == 0
-    assert "--build-plan-digest" in _plain_output(result.output)
-
-
-def test_registry_helper_help_exposes_only_owned_inputs(
-    cli_runner: CliRunner,
-) -> None:
-    result = cli_runner.invoke(
-        app,
-        ["container", "install-custom-nodes", "--help"],
-    )
-
-    assert result.exit_code == 0
-    output = _plain_output(result.output)
-    assert "--build-plan-digest" in output
-    assert "--constraints" in output
-    assert "--build-hooks-directory" in output
-
-
-@pytest.mark.parametrize(
     "command",
     [
         "download-files",
         "install-comfyui",
         "install-custom-nodes",
-        "emit-final-manifest",
+        "write-final-manifest",
         "normalize-local-trees",
-        "validate-local-trees",
+        "validate-tree-targets",
     ],
 )
 def test_container_commands_admit_one_canonical_plan_per_invocation(
@@ -225,20 +170,29 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
         "download_files",
         lambda files, root, *, event_sink: observed.append((files, root)),
     )
-    monkeypatch.setattr(
-        container_cli,
-        "install_comfyui",
-        lambda application, toolchain, **_kwargs: observed.append(
-            (application, toolchain)
-        ),
-    )
-    monkeypatch.setattr(
-        container_cli,
-        "install_custom_nodes",
-        lambda custom_nodes, application, **_kwargs: observed.append(
-            (custom_nodes, application)
-        ),
-    )
+    comfyui_signature = signature(container_cli.install_comfyui)
+    custom_nodes_signature = signature(container_cli.install_custom_nodes)
+
+    def install_comfyui(application, toolchain, **kwargs):
+        call = comfyui_signature.bind(application, toolchain, **kwargs)
+        call.apply_defaults()
+        assert call.arguments["constraints_path"] == Path(
+            "/opt/cdh/build/python-package-constraints.txt"
+        )
+        observed.append((application, toolchain))
+
+    def install_custom_nodes(custom_nodes, application, **kwargs):
+        call = custom_nodes_signature.bind(custom_nodes, application, **kwargs)
+        call.apply_defaults()
+        assert call.arguments["constraints_path"] == Path(
+            "/opt/cdh/build/python-package-constraints.txt"
+        )
+        assert call.arguments["build_hooks_directory"] == Path("/opt/cdh/build/hooks")
+        assert call.arguments["build_plan_digest"] == build_plan_digest(plan)
+        observed.append((custom_nodes, application))
+
+    monkeypatch.setattr(container_cli, "install_comfyui", install_comfyui)
+    monkeypatch.setattr(container_cli, "install_custom_nodes", install_custom_nodes)
     monkeypatch.setattr(
         container_cli,
         "emit_final_manifest",
@@ -261,6 +215,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
         app,
         [
             "container",
+            "build",
             command,
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -277,7 +232,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
             ],
             "install-comfyui": [(plan.application, plan.toolchain)],
             "install-custom-nodes": [(plan.custom_nodes, plan.application)],
-            "emit-final-manifest": [
+            "write-final-manifest": [
                 (
                     build_plan_input_module.FinalManifestInput(
                         binding=build_plan_input_module.manifest_binding(plan),
@@ -314,7 +269,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
             "normalize-local-trees": [
                 ((), plan.application.paths.comfyui),
             ],
-            "validate-local-trees": [
+            "validate-tree-targets": [
                 ((), plan.application.paths.comfyui),
             ],
         }[command]
@@ -325,7 +280,7 @@ def test_container_commands_admit_one_canonical_plan_per_invocation(
     ("command", "operation"),
     [
         ("normalize-local-trees", "normalize_local_trees"),
-        ("validate-local-trees", "validate_local_trees"),
+        ("validate-tree-targets", "validate_local_trees"),
     ],
 )
 def test_local_tree_cli_reports_placement_error(
@@ -338,13 +293,14 @@ def test_local_tree_cli_reports_placement_error(
     plan = _materialized_download_plan(tmp_path, monkeypatch)
 
     def fail_normalization(_trees, _root) -> None:
-        raise container_cli.LocalTreeNormalizationError("selected conflict")
+        raise LocalTreeNormalizationError("selected conflict")
 
     monkeypatch.setattr(container_cli, operation, fail_normalization)
     result = cli_runner.invoke(
         app,
         [
             "container",
+            "build",
             command,
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -352,7 +308,8 @@ def test_local_tree_cli_reports_placement_error(
     )
 
     assert result.exit_code == 1
-    assert "selected conflict" in result.output
+    assert result.stdout == ""
+    assert result.stderr == "Error: selected conflict\n"
 
 
 def test_install_comfyui_constructs_display_after_admission_and_runtime(
@@ -406,6 +363,7 @@ def test_install_comfyui_constructs_display_after_admission_and_runtime(
         app,
         [
             "container",
+            "build",
             "install-comfyui",
             "--build-plan-digest",
             "sha256:" + "a" * 64,
@@ -432,6 +390,7 @@ def test_install_comfyui_cli_renders_normal_and_suppresses_quiet_lifecycle(
     monkeypatch.setenv("VIRTUAL_ENV", plan.application.paths.venv)
     command = [
         "container",
+        "build",
         "install-comfyui",
         "--build-plan-digest",
         build_plan_digest(plan),
@@ -481,6 +440,7 @@ def test_install_custom_nodes_detail_controls_do_not_own_child_streams(
 
     command = [
         "container",
+        "build",
         "install-custom-nodes",
         "--build-plan-digest",
         build_plan_digest(plan),
@@ -546,6 +506,7 @@ def test_download_files_executes_authenticated_plan_with_custom_root(
         app,
         [
             "container",
+            "build",
             "download-files",
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -573,6 +534,7 @@ def test_download_files_cli_renders_normal_and_suppresses_quiet_lifecycle(
         app,
         [
             "container",
+            "build",
             "download-files",
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -583,6 +545,7 @@ def test_download_files_cli_renders_normal_and_suppresses_quiet_lifecycle(
         [
             "--quiet",
             "container",
+            "build",
             "download-files",
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -619,6 +582,7 @@ def test_download_files_cli_verbose_retry_is_human_oriented(
         [
             "-v",
             "container",
+            "build",
             "download-files",
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -662,6 +626,7 @@ def test_download_files_cli_controlled_failure_stops_without_success(
         app,
         [
             "container",
+            "build",
             "download-files",
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -702,6 +667,7 @@ def test_container_plan_admission_hides_invalid_plan_secret_values(
         app,
         [
             "container",
+            "build",
             "download-files",
             "--build-plan-digest",
             build_plan_digest(plan),
@@ -734,6 +700,7 @@ def test_container_cli_rejects_registry_without_manager(
         app,
         [
             "container",
+            "build",
             "download-files",
             "--build-plan-digest",
             build_plan_digest(plan),

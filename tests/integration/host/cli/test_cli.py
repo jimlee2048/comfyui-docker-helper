@@ -52,6 +52,15 @@ from tests.build_plan_support import (
     final_config,
 )
 
+_BUILD_COMMANDS = (
+    "download-files",
+    "install-comfyui",
+    "install-custom-nodes",
+    "write-final-manifest",
+    "normalize-local-trees",
+    "validate-tree-targets",
+)
+
 
 def _plain_output(output: str) -> str:
     return Text.from_ansi(output).plain
@@ -319,15 +328,10 @@ def test_root_command_exposes_current_groups() -> None:
         "render",
         "validate",
     }
-    assert set(command.commands["container"].commands) == {
-        "download-files",
-        "emit-final-manifest",
-        "install-comfyui",
-        "install-custom-nodes",
-        "normalize-local-trees",
-        "validate-local-trees",
-        "runtime",
-    }
+    assert set(command.commands["container"].commands) == {"build", "runtime"}
+    assert set(command.commands["container"].commands["build"].commands) == set(
+        _BUILD_COMMANDS
+    )
     assert set(command.commands["container"].commands["runtime"].commands) == {
         "logs",
         "restart",
@@ -361,41 +365,132 @@ def test_help_succeeds(
     assert usage in _plain_output(result.output)
 
 
-def test_container_group_remains_helpful_outside_linux(
-    cli_runner: CliRunner,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep the public boundary visible without loading Linux-only services."""
-    monkeypatch.setattr(container_cli.sys, "platform", "win32")
-
-    result = cli_runner.invoke(app, ["container", "--help"])
-
-    assert result.exit_code == 0
-    assert "runtime" in _plain_output(result.output)
-
-
 @pytest.mark.parametrize(
     "args",
     [
-        ["container", "runtime", "--help"],
-        ["container", "runtime", "serve", "--help"],
-        ["container", "runtime", "restart", "--help"],
-        ["container", "runtime", "status", "--help"],
-        ["container", "runtime", "logs", "--help"],
+        [],
+        ["build"],
+        *[["build", command] for command in _BUILD_COMMANDS],
+        ["runtime"],
+        ["runtime", "serve"],
+        ["runtime", "restart"],
+        ["runtime", "status"],
+        ["runtime", "logs"],
+    ],
+    ids=[
+        "container",
+        "build",
+        *_BUILD_COMMANDS,
+        "runtime",
+        "serve",
+        "restart",
+        "status",
+        "logs",
     ],
 )
-def test_runtime_help_remains_available_outside_linux(
+@pytest.mark.parametrize("help_flag", ["--help", "-h"])
+def test_container_help_remains_available_outside_linux(
     args: list[str],
+    help_flag: str,
     cli_runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Expose the image-internal command tree without loading its services."""
+    """Expose every image helper without admitting a Plan or starting services."""
     monkeypatch.setattr(container_cli.sys, "platform", "win32")
+    monkeypatch.setattr(
+        container_cli,
+        "_admission",
+        lambda _digest: pytest.fail("help must not admit a BuildPlan"),
+    )
+    monkeypatch.setattr(
+        container_cli,
+        "_require_linux_container",
+        lambda: pytest.fail("help must not enter Linux execution"),
+    )
 
-    result = cli_runner.invoke(app, args)
+    result = cli_runner.invoke(app, ["container", *args, help_flag])
 
     assert result.exit_code == 0
-    assert "Usage: cdh container runtime" in _plain_output(result.output)
+    output = _plain_output(result.output)
+    assert f"Usage: cdh container {' '.join(args)}".rstrip() in output
+    if len(args) == 2 and args[0] == "build":
+        assert "--build-plan-digest" in output
+
+
+@pytest.mark.parametrize("command", _BUILD_COMMANDS)
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_build_commands_require_digest_before_admission(
+    command: str,
+    platform: str,
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(container_cli.sys, "platform", platform)
+    monkeypatch.setattr(
+        container_cli,
+        "_admission",
+        lambda _digest: pytest.fail("missing digest must not admit a BuildPlan"),
+    )
+
+    result = cli_runner.invoke(app, ["container", "build", command])
+
+    assert result.exit_code == 2
+    assert "Missing option" in _plain_output(result.stderr)
+    assert "--build-plan-digest" in _plain_output(result.stderr)
+
+
+@pytest.mark.parametrize("command", _BUILD_COMMANDS)
+def test_build_execution_rejects_non_linux_before_plan_access(
+    command: str,
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(container_cli.sys, "platform", "win32")
+    monkeypatch.setattr(
+        container_cli,
+        "BuildPlanInputAdmission",
+        SimpleNamespace(
+            from_path=lambda *_args, **_kwargs: pytest.fail(
+                "non-Linux execution must not read the BuildPlan"
+            )
+        ),
+        raising=False,
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["container", "build", command, "--build-plan-digest", "sha256:" + "a" * 64],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "run only inside" in result.stderr
+    assert "Linux image" in result.stderr
+    assert "cdh host" in result.stderr
+
+
+def test_build_group_without_command_shows_help_without_execution(
+    cli_runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        container_cli,
+        "_admission",
+        lambda _digest: pytest.fail("group help must not admit a BuildPlan"),
+    )
+    monkeypatch.setattr(
+        container_cli,
+        "_require_linux_container",
+        lambda: pytest.fail("group help must not enter Linux execution"),
+    )
+
+    result = cli_runner.invoke(app, ["container", "build"])
+
+    assert result.exit_code == 2
+    output = _plain_output(result.output)
+    assert "Usage: cdh container build" in output
+    assert "cdh host build" in " ".join(output.split())
+    assert "Dockerfile" in output
 
 
 def test_container_execution_reports_linux_only_boundary(

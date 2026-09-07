@@ -117,10 +117,10 @@ def test_renderer_mounts_build_plan_only_for_its_build_consumers() -> None:
         "target=/opt/cdh/build/build-plan.json,readonly"
     )
     consumer_markers = (
-        "container install-comfyui",
-        "container install-custom-nodes",
-        "container download-files",
-        "container emit-final-manifest",
+        "container build install-comfyui",
+        "container build install-custom-nodes",
+        "container build download-files",
+        "container build write-final-manifest",
     )
 
     assert "COPY --chmod=0644 build-plan.json" not in rendered
@@ -137,7 +137,7 @@ def test_renderer_mounts_build_plan_only_for_its_build_consumers() -> None:
     without_files = render_build_plan_dockerfile(
         build_plan(FinalConfig.model_validate(document), accepted_resolution())
     )
-    assert "container download-files" not in without_files
+    assert "container build download-files" not in without_files
     assert without_files.count(plan_mount) == len(consumer_markers) - 1
 
 
@@ -218,17 +218,17 @@ def test_renderer_scopes_package_caches_and_ssh_key_cleanup_to_owning_runs() -> 
     )
 
     application_block = next(
-        block for block in uv_blocks if "container install-comfyui" in block
+        block for block in uv_blocks if "container build install-comfyui" in block
     )
     assert "export UV_CACHE_DIR" not in application_block
 
     custom_node_block = next(
-        block for block in uv_blocks if "container install-custom-nodes" in block
+        block for block in uv_blocks if "container build install-custom-nodes" in block
     )
     assert "export UV_CACHE_DIR=/root/.cache/uv UV_LINK_MODE=copy" in custom_node_block
 
     final_observer = next(
-        block for block in uv_blocks if "container emit-final-manifest" in block
+        block for block in uv_blocks if "container build write-final-manifest" in block
     )
     assert "export UV_CACHE_DIR" not in final_observer
     assert "UV_LINK_MODE" not in final_observer
@@ -342,7 +342,7 @@ def test_renderer_installs_isolated_comfy_cli_before_generic_tools() -> None:
     cdh_install = rendered.index(f"source=bootstrap/{canonical_wheel().filename}")
     cli_install = rendered.index("comfy-cli==1.8.0")
     generic_install = rendered.index("ruff==0.15.18")
-    application_install = rendered.index("container install-comfyui")
+    application_install = rendered.index("container build install-comfyui")
     assert cdh_install < cli_install < generic_install < application_install
     cli_run_block = next(
         block for block in _run_blocks(rendered) if "comfy-cli==1.8.0" in block
@@ -423,9 +423,9 @@ def test_renderer_omits_build_download_command_when_no_files() -> None:
     plan = build_plan(FinalConfig.model_validate(document), accepted_resolution())
 
     rendered = render_build_plan_dockerfile(plan)
-    assert "container download-files" not in rendered
-    assert "container validate-local-trees" not in rendered
-    assert "container normalize-local-trees" not in rendered
+    assert "container build download-files" not in rendered
+    assert "container build validate-tree-targets" not in rendered
+    assert "container build normalize-local-trees" not in rendered
 
 
 def test_renderer_places_local_files_authoritatively_after_build_mutations() -> None:
@@ -453,9 +453,13 @@ def test_renderer_places_local_files_authoritatively_after_build_mutations() -> 
     )
 
     assert copy_line in rendered
-    assert rendered.index("container install-custom-nodes") < rendered.index(copy_line)
-    assert rendered.index("container download-files") < rendered.index(copy_line)
-    assert rendered.index(copy_line) < rendered.index("container emit-final-manifest")
+    assert rendered.index("container build install-custom-nodes") < rendered.index(
+        copy_line
+    )
+    assert rendered.index("container build download-files") < rendered.index(copy_line)
+    assert rendered.index(copy_line) < rendered.index(
+        "container build write-final-manifest"
+    )
 
 
 def test_renderer_escapes_dollar_in_local_file_copy_destination_only() -> None:
@@ -486,7 +490,7 @@ def test_renderer_escapes_dollar_in_local_file_copy_destination_only() -> None:
     )
 
     assert copy_line in rendered
-    assert "container validate-local-trees" not in rendered
+    assert "container build validate-tree-targets" not in rendered
     assert 'ENV PATH="/opt/uv/bin:/opt/venv/bin:${PATH}"' in rendered
 
 
@@ -547,11 +551,11 @@ def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
         block for block in _run_blocks(rendered) if "normalize-local-trees" in block
     )
     validator_blocks = tuple(
-        block for block in _run_blocks(rendered) if "validate-local-trees" in block
+        block for block in _run_blocks(rendered) if "validate-tree-targets" in block
     )
 
     assert all(rendered.count(copy_line) == 1 for copy_line in copy_lines)
-    assert rendered.count("validate-local-trees") == 1
+    assert rendered.count("validate-tree-targets") == 1
     assert rendered.count("normalize-local-trees") == 1
     assert len(validator_blocks) == 1
     validator = validator_blocks[0]
@@ -578,12 +582,12 @@ def test_renderer_places_one_copy_per_tree_then_one_tree_normalizer() -> None:
         normalizer
     )
     assert rendered.index(copy_lines[1]) < rendered.index(copy_lines[2])
-    validator_index = rendered.index("validate-local-trees")
+    validator_index = rendered.index("validate-tree-targets")
     normalizer_index = rendered.index("normalize-local-trees")
     assert validator_index < min(rendered.index(copy_line) for copy_line in copy_lines)
     assert max(rendered.index(copy_line) for copy_line in copy_lines) < normalizer_index
     assert rendered.index("normalize-local-trees") < rendered.index(
-        "container emit-final-manifest"
+        "container build write-final-manifest"
     )
 
 
@@ -601,8 +605,8 @@ def test_renderer_escapes_dollar_in_local_tree_copy_destination() -> None:
     )
 
     assert rendered.count(copy_line) == 1
-    assert rendered.count("container validate-local-trees") == 1
-    assert rendered.count("container normalize-local-trees") == 1
+    assert rendered.count("container build validate-tree-targets") == 1
+    assert rendered.count("container build normalize-local-trees") == 1
 
 
 # Custom-node and application modes render one ordered observed execution boundary.
@@ -613,9 +617,9 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
 
     rendered = render_build_plan_dockerfile(plan)
 
-    assert rendered.count("container install-custom-nodes") == 1
-    assert rendered.index("container install-comfyui") < rendered.index(
-        "container install-custom-nodes"
+    assert rendered.count("container build install-custom-nodes") == 1
+    assert rendered.index("container build install-comfyui") < rendered.index(
+        "container build install-custom-nodes"
     )
     custom_node_block = next(
         block for block in _run_blocks(rendered) if "install-custom-nodes" in block
@@ -632,18 +636,11 @@ def test_renderer_runs_complete_custom_node_sequence_in_one_later_layer() -> Non
     assert f"--build-plan-digest {build_plan_digest(plan)}" in _flatten_command(
         custom_node_block
     )
-    assert (
-        "--constraints /opt/cdh/build/python-package-constraints.txt"
-        in _flatten_command(custom_node_block)
+    assert rendered.index("container build install-custom-nodes") < rendered.index(
+        "container build download-files"
     )
-    assert "--build-hooks-directory /opt/cdh/build/hooks" in _flatten_command(
-        custom_node_block
-    )
-    assert rendered.index("container install-custom-nodes") < rendered.index(
-        "container download-files"
-    )
-    assert rendered.index("container download-files") < rendered.index(
-        "container emit-final-manifest"
+    assert rendered.index("container build download-files") < rendered.index(
+        "container build write-final-manifest"
     )
     assert "comfy node" not in rendered
     assert "comfy install" not in rendered
@@ -707,7 +704,7 @@ def test_renderer_scopes_strict_optional_ssh_mounts_to_direct_git_plans(
         block for block in _run_blocks(rendered) if "install-custom-nodes" in block
     )
 
-    assert rendered.count("container install-custom-nodes") == 1
+    assert rendered.count("container build install-custom-nodes") == 1
     ssh_mount = "--mount=type=ssh,id=default,required=false"
     secret_mounts = tuple(
         "--mount=type=secret,"
@@ -1076,7 +1073,7 @@ def test_materializer_writes_deterministic_plan_and_verified_input(
         f"target=/tmp/{wheel.filename},readonly" in dockerfile
     )
     assert "COPY bootstrap" not in dockerfile
-    assert "container install-comfyui" in dockerfile
+    assert "container build install-comfyui" in dockerfile
     for inline_probe in (
         "importlib.metadata as m",
         "platform.python_version()",

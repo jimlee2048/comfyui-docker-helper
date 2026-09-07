@@ -413,7 +413,7 @@ def test_rendered_context_routes_exact_lock_plan_and_single_node_layer(
         assert cli_plan is None
 
     dockerfile = context.joinpath("Dockerfile").read_text()
-    assert dockerfile.count("container install-custom-nodes") == 1
+    assert dockerfile.count("container build install-custom-nodes") == 1
     assert dockerfile.count(
         f"--build-plan-digest {binding.build_plan_digest}"
     ) == 3 + bool(plan.files.files)

@@ -37,6 +37,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
 from comfyui_docker_helper.config.planning.local_tree import local_tree_digest
 from comfyui_docker_helper.config.planning.request import (
     CanonicalRequestError,
+    LocalNodeRequest,
     LocalSourceRequest,
     build_canonical_request_graph,
 )
@@ -65,6 +66,7 @@ from comfyui_docker_helper.host.context.local_inputs import (
     LocalInputAdmissionError,
     admit_local_inputs,
 )
+from comfyui_docker_helper.host.context.local_nodes import admit_local_node_inputs
 from comfyui_docker_helper.host.context.runtime_hooks import (
     RuntimeHookInputError,
     discover_runtime_hook_inputs,
@@ -215,6 +217,7 @@ def prepare_render_context(
             runtime_hook_requests=runtime_hooks.requests,
         )
         local_admission = admit_local_inputs(result, graph.files, output)
+        node_admission = admit_local_node_inputs(result, graph.custom_nodes, output)
         _advance_phase(
             event_sink,
             completed=HostPhase.BUILD_INPUT_RESOLUTION,
@@ -228,6 +231,12 @@ def prepare_render_context(
                 local_requests=local_requests,
                 local_acquirer=local_acquirer,
                 local_inputs=local_admission.planning_inputs,
+                local_node_inputs=node_admission.planning_inputs,
+                local_node_targets=tuple(
+                    item.target_dir
+                    for item in graph.custom_nodes
+                    if isinstance(item, LocalNodeRequest)
+                ),
                 local_targets=tuple(
                     item.relative_target
                     for item in graph.files
@@ -247,6 +256,7 @@ def prepare_render_context(
             graph,
             accepted.lock,
             local_inputs=local_admission.planning_inputs,
+            local_node_inputs=node_admission.planning_inputs,
             runtime_provenance=_runtime_provenance(result),
         )
         output_plan = _resolve_buildx_output_plan(
@@ -264,6 +274,7 @@ def prepare_render_context(
                 for request in local_requests
             )
             + local_admission.materialization_sources
+            + node_admission.materialization_sources
         )
     except RuntimeHookInputError as error:
         raise HostRenderServiceError(error.diagnostics) from error
@@ -311,7 +322,11 @@ def prepare_render_context(
         plan=plan,
         lock_result=accepted,
         output_plan=output_plan,
-        warnings=(*runtime_hooks.warnings, *local_admission.warnings),
+        warnings=(
+            *runtime_hooks.warnings,
+            *local_admission.warnings,
+            *node_admission.warnings,
+        ),
     )
 
 

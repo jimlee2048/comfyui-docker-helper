@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from comfyui_docker_helper.filesystem import admission as file_admission
+from comfyui_docker_helper.host.context.local_nodes import DockerIgnoreSelection
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
@@ -138,3 +139,26 @@ def _create_junction(link: Path, target: Path) -> None:
         timeout=_NATIVE_WINDOWS_COMMAND_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("reinclude", [False, True])
+def test_windows_filtered_tree_skips_or_rejects_junction(
+    tmp_path: Path, reinclude: bool
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = tmp_path / "tree"
+    source.mkdir()
+    linked = source / "linked"
+    _create_junction(linked, outside)
+    rules = b"linked\n!linked/child\n" if reinclude else b"linked\n"
+    try:
+        selection = DockerIgnoreSelection(rules)
+        if reinclude:
+            with pytest.raises(file_admission.TreeAdmissionError) as raised:
+                file_admission.admit_local_tree(source, selection=selection)
+            assert raised.value.code == "member_reparse"
+        else:
+            assert file_admission.admit_local_tree(source, selection=selection).empty
+    finally:
+        linked.rmdir()

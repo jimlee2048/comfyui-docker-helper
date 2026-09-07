@@ -7,7 +7,7 @@ import io
 import os
 import stat
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -31,6 +31,7 @@ from comfyui_docker_helper.filesystem.admission import (
     FileCloneUnavailableError,
     LocalTreeInventory,
     LocalTreeMember,
+    LocalTreeSelection,
     TreeAdmissionError,
     local_tree_mode,
     operate_regular_absolute_file,
@@ -65,6 +66,8 @@ class LocalMaterializationSource:
     relative_path: PurePosixPath
     source_path: Path
     kind: LocalMaterializationKind
+    selection: LocalTreeSelection | None = None
+    control_file_bytes: bytes | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.kind not in {"file", "tree"}:

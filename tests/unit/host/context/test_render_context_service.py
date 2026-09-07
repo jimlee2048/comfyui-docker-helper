@@ -860,3 +860,34 @@ def test_check_detects_materialized_hook_permission_drift(tmp_path: Path) -> Non
         )
 
     assert raised.value.diagnostics[0].code == "render.context_changed"
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_local_node_dry_run_prepares_independent_lock_and_plan(
+    tmp_path: Path, locked: bool
+) -> None:
+    source = tmp_path / "node"
+    source.mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        _config()
+        + f"""
+[[comfyui.custom_nodes]]
+type = "local"
+source = "node"
+target_dir = "example"
+content_lock = {str(locked).lower()}
+"""
+    )
+    output = tmp_path / "context"
+    prepared = _prepare(
+        config, output, FakeAcquirer(), options=PlanningOptions(dry_run=True)
+    )
+    node = prepared.plan.custom_nodes.nodes[0]
+    assert node.type == "local"
+    assert node.members == ()
+    assert (node.tree_digest is not None) == locked
+    assert len(prepared.lock_result.lock.custom_nodes.local) == int(locked)
+    assert len(prepared.warnings) == 1
+    assert prepared.warnings[0].path == ("comfyui", "custom_nodes", 0, "source")
+    assert not output.exists()

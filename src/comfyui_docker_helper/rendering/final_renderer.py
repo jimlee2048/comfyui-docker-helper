@@ -14,6 +14,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
     GitNodePlan,
     HttpFilePlan,
     LocalFilePlan,
+    LocalNodePlan,
     LocalTreePlan,
     build_plan_digest,
     downloader_credential_secret_ids,
@@ -265,6 +266,11 @@ def _custom_nodes_phase(plan: BuildPlan) -> list[str]:
             for secret_id in git_credential_secret_ids(plan.custom_nodes)
         )
         command_environment = (f"GIT_SSH_COMMAND={_shell_word(_git_ssh_command())}",)
+    if any(isinstance(node, LocalNodePlan) for node in plan.custom_nodes.nodes):
+        mounts.append(
+            "--mount=type=bind,source=build/local-nodes,"
+            "target=/opt/cdh/build/local-nodes,readonly"
+        )
     mounts.append(_BUILD_PLAN_MOUNT)
     return _phase(
         "Custom nodes",

@@ -24,7 +24,6 @@ from comfyui_docker_helper.config.diagnostics import Diagnostic
 from comfyui_docker_helper.config.planning.build_plan import (
     BuildPlan,
     LocalFilePlan,
-    LocalTreePlan,
     RuntimePlanningProvenance,
     construct_build_plan,
 )
@@ -93,7 +92,10 @@ from comfyui_docker_helper.release_artifacts import CanonicalWheel
 from comfyui_docker_helper.rendering.final_materializer import (
     FinalMaterializationError,
     LocalMaterializationSource,
+    LocalTreeProjection,
     _materialize_private_stage,
+    local_tree_projections,
+    verify_local_source_control,
 )
 
 _LOCK_FILE = "config.lock.toml"
@@ -566,7 +568,7 @@ def _check_local_context_files(
     check_unlocked_sources: bool,
 ) -> None:
     by_identity = {(item.relative_path.as_posix(), item.kind): item for item in sources}
-    for item in plan.files.files:
+    for item in (*plan.files.files, *local_tree_projections(plan)):
         if isinstance(item, LocalFilePlan):
             source = by_identity[(item.context_path, "file")].source_path
             context_file = Path(os.path.abspath(output / item.context_path))
@@ -583,8 +585,10 @@ def _check_local_context_files(
                 raise FinalMaterializationError(
                     "local context file could not be checked"
                 ) from error
-        elif isinstance(item, LocalTreePlan):
-            source = by_identity[(item.context_path, "tree")].source_path
+        elif isinstance(item, LocalTreeProjection):
+            material = by_identity[(item.context_path, "tree")]
+            verify_local_source_control(material)
+            source = material.source_path
             context_root = Path(os.path.abspath(output / item.context_path))
             try:
                 if item.tree_digest is not None:
@@ -597,6 +601,7 @@ def _check_local_context_files(
                 raise FinalMaterializationError(
                     "local context tree could not be checked"
                 ) from error
+            verify_local_source_control(material)
         else:  # pragma: no cover - closed BuildPlan union
             continue
         if not matches:
@@ -608,10 +613,10 @@ def _check_local_context_files(
 def _local_context_file_paths(plan: BuildPlan) -> set[str]:
     """Return local context files whose content is checked separately."""
     paths: set[str] = set()
-    for item in plan.files.files:
+    for item in (*plan.files.files, *local_tree_projections(plan)):
         if isinstance(item, LocalFilePlan):
             paths.add(item.context_path)
-        elif isinstance(item, LocalTreePlan):
+        elif isinstance(item, LocalTreeProjection):
             context_root = PurePosixPath(item.context_path)
             paths.update(
                 (context_root / member.relative_path).as_posix()
@@ -622,7 +627,7 @@ def _local_context_file_paths(plan: BuildPlan) -> set[str]:
 
 
 def _local_tree_sources_equal(
-    plan: LocalTreePlan,
+    plan: LocalTreeProjection,
     source: Path,
     context_root: Path,
 ) -> bool:
@@ -639,7 +644,7 @@ def _local_tree_sources_equal(
 
 
 def _local_tree_context_matches_digest(
-    plan: LocalTreePlan,
+    plan: LocalTreeProjection,
     context_root: Path,
 ) -> bool:
     """Stream locked context members and compare one aggregate tree identity."""

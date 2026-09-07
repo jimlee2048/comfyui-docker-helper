@@ -30,11 +30,15 @@ from comfyui_docker_helper.config.planning.build_plan import (
     GitCredentialRoutePlan,
     HookPlan,
     LocalFilePlan,
+    LocalNodePlan,
     LocalTreeMemberPlan,
     LocalTreePlan,
     build_plan_digest,
     dump_build_plan_json,
     parse_build_plan_json,
+)
+from comfyui_docker_helper.config.planning.inputs.local_node import (
+    local_node_context_path,
 )
 from comfyui_docker_helper.config.planning.local_tree import local_tree_digest
 from comfyui_docker_helper.config.runtime.config import load_runtime_config
@@ -747,6 +751,56 @@ def test_renderer_scopes_strict_optional_ssh_mounts_to_direct_git_plans(
         assert "GIT_SSH_COMMAND" not in custom_node_block
 
 
+@pytest.mark.parametrize("mixed", [False, True], ids=["local-only", "mixed"])
+def test_renderer_binds_local_nodes_in_the_combined_install_instruction(mixed) -> None:
+    plan = build_plan(final_config(), accepted_resolution())
+    local = LocalNodePlan(
+        type="local",
+        target=f"{plan.application.paths.comfyui}/custom_nodes/local-example",
+        context_path=local_node_context_path("local-example").as_posix(),
+        verification="unverified-local",
+        members=(),
+        tree_digest=None,
+        pre_install_hooks=(),
+        post_install_hooks=(),
+    )
+    nodes = (*plan.custom_nodes.nodes, local) if mixed else (local,)
+    route = GitCredentialRoutePlan(
+        match="https://example.test/team",
+        username="first",
+        secret_id="cdh-git-credential-shared",
+    )
+    plan = plan.model_copy(
+        update={
+            "custom_nodes": plan.custom_nodes.model_copy(
+                update={"nodes": nodes, "git_credentials": (route,) if mixed else ()}
+            )
+        }
+    )
+    rendered = render_build_plan_dockerfile(plan)
+    block = next(
+        item for item in _run_blocks(rendered) if "install-custom-nodes" in item
+    )
+    mount = (
+        "--mount=type=bind,source=build/local-nodes,"
+        "target=/opt/cdh/build/local-nodes,readonly"
+    )
+    assert rendered.count("container build install-custom-nodes") == 1
+    assert rendered.count(mount) == 1
+    assert mount in block
+    assert "--mount=type=cache,target=/root/.cache/uv" in block
+    assert "source=build-plan.json" in block
+    assert build_plan_digest(plan) in block
+    assert ("--mount=type=ssh" in block) is mixed
+    assert ("id=cdh-git-credential-shared" in block) is mixed
+    assert ("GIT_SSH_COMMAND=" in block) is mixed
+    assert not any(
+        line.startswith("COPY") and "local-nodes" in line
+        for line in rendered.splitlines()
+    )
+    assert rendered.index("install-custom-nodes") < rendered.index("download-files")
+
+
 def test_renderer_mounts_distinct_git_credentials_as_required_fixed_targets() -> None:
     plan = build_plan(final_config(), accepted_resolution())
     routes = (
@@ -1156,6 +1210,8 @@ def test_materializer_maps_tree_membership_drift_to_its_phase(
     def revalidate(
         _source: Path,
         expected: file_admission.LocalTreeInventory,
+        *,
+        selection: file_admission.LocalTreeSelection | None = None,
     ) -> file_admission.LocalTreeInventory:
         outcome = outcomes.pop(0)
         if outcome is not None:

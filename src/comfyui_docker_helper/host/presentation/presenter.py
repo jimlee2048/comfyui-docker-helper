@@ -247,6 +247,8 @@ class HostPresenter:
         for node in plan.custom_nodes.nodes:
             if node.type == "registry":
                 summary = f"registry {node.id}@{node.version}"
+            elif node.type == "local":
+                summary = f"local -> {node.target}"
             else:
                 summary = f"git {node.url}@{node.commit} -> {node.target}"
             self.stdout.print(Text(f"    - {_safe_text(summary)}"), soft_wrap=True)

@@ -176,7 +176,17 @@ class GitNodeRequest:
     post_install_hooks: tuple[str, ...]
 
 
-type CustomNodeRequest = RegistryNodeRequest | GitNodeRequest
+@dataclass(frozen=True, slots=True)
+class LocalNodeRequest:
+    type: Literal["local"]
+    target: str
+    target_dir: str
+    content_lock: bool
+    pre_install_hooks: tuple[str, ...]
+    post_install_hooks: tuple[str, ...]
+
+
+type CustomNodeRequest = RegistryNodeRequest | GitNodeRequest | LocalNodeRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +459,17 @@ def build_canonical_request_graph(
                     post_install_hooks,
                 )
             )
+        elif node.type == "local":
+            nodes.append(
+                LocalNodeRequest(
+                    "local",
+                    str(PurePosixPath(comfyui_path) / "custom_nodes" / node.target_dir),
+                    node.target_dir,
+                    node.content_lock,
+                    pre_install_hooks,
+                    post_install_hooks,
+                )
+            )
         else:
             ref = node.ref or "HEAD"
             requests.append(DirectGitRequestIdentity(type="git", url=node.url, ref=ref))
@@ -689,6 +710,10 @@ def _image_config_projection(
 ) -> dict[str, object]:
     document: dict[str, object] = config.model_dump(mode="json")
     document.pop("secrets")
+    comfyui = cast(dict[str, object], document["comfyui"])
+    for node in cast(list[dict[str, object]], comfyui["custom_nodes"]):
+        if node["type"] == "local":
+            node.pop("source")
     build = cast(dict[str, object], document["build"])
     cdh = cast(dict[str, object], document["cdh"])
     cdh.pop("local_file_mode")

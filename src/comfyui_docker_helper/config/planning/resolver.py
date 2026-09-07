@@ -24,6 +24,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectGitRequestIdentity,
     LocalExecutableLockEntry,
     LocalFileLockEntry,
+    LocalNodeLockEntry,
     LocalTreeLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
@@ -50,6 +51,10 @@ from comfyui_docker_helper.config.planning.inputs.local import (
     LocalPlanningInput,
     LocalTreePlanningInput,
     index_local_planning_inputs,
+)
+from comfyui_docker_helper.config.planning.inputs.local_node import (
+    LocalNodePlanningInput,
+    index_local_node_inputs,
 )
 from comfyui_docker_helper.config.planning.request import (
     DesiredResolution,
@@ -141,6 +146,8 @@ def reconcile_canonical_lock(
     local_acquirer: LocalExecutableEntryAcquirer | None = None,
     local_inputs: tuple[LocalPlanningInput, ...] = (),
     local_targets: tuple[str, ...] = (),
+    local_node_inputs: tuple[LocalNodePlanningInput, ...] = (),
+    local_node_targets: tuple[str, ...] = (),
     existing: CanonicalLock | None,
     acquirer: CanonicalEntryAcquirer,
     policy: LockPolicy = LockPolicy.DEFAULT,
@@ -154,8 +161,11 @@ def reconcile_canonical_lock(
     file_entries, file_reads = _local_entries_from_admission(
         local_inputs, expected_targets=local_targets
     )
-    fixed = (*hook_entries, *file_entries)
-    local_reads = (*hook_reads, *file_reads)
+    node_entries, node_reads = _local_node_entries(
+        local_node_inputs, local_node_targets
+    )
+    fixed = (*hook_entries, *file_entries, *node_entries)
+    local_reads = (*hook_reads, *file_reads, *node_reads)
     _validate_desired_keys(ordered, fixed)
     existing_by_key = _entry_map(existing.entries if existing is not None else ())
 
@@ -229,7 +239,11 @@ def reconcile_canonical_lock(
 def _accept_locked(
     desired: tuple[DesiredResolution, ...],
     fixed: tuple[
-        LocalExecutableLockEntry | LocalFileLockEntry | LocalTreeLockEntry, ...
+        LocalExecutableLockEntry
+        | LocalFileLockEntry
+        | LocalTreeLockEntry
+        | LocalNodeLockEntry,
+        ...,
     ],
     local_reads: tuple[LockEntryKey, ...],
     existing: CanonicalLock | None,
@@ -317,6 +331,24 @@ def _acquire_local_entries(
     if diagnostics:
         raise CanonicalResolutionError(tuple(diagnostics))
     return tuple(entries), tuple(reads)
+
+
+def _local_node_entries(
+    inputs: tuple[LocalNodePlanningInput, ...], targets: tuple[str, ...]
+) -> tuple[tuple[LocalNodeLockEntry, ...], tuple[LockEntryKey, ...]]:
+    indexed = index_local_node_inputs(inputs)
+    if len(targets) != len(set(targets)):
+        raise ValueError("local node request targets must be unique")
+    if set(targets) - set(indexed):
+        raise ValueError("missing local node planning inputs")
+    if set(indexed) - set(targets):
+        raise ValueError("unused local node planning inputs")
+    entries = tuple(
+        LocalNodeLockEntry(target_dir=target, tree_digest=item.tree_digest)
+        for target, item in sorted(indexed.items())
+        if item.content_lock
+    )
+    return entries, tuple(canonical_entry_key(entry) for entry in entries)
 
 
 def _local_entries_from_admission(
@@ -516,7 +548,11 @@ def _locked_diagnostic(key: LockEntryKey, reason: str) -> Diagnostic:
 def _validate_desired_keys(
     desired: tuple[DesiredResolution, ...],
     fixed: tuple[
-        LocalExecutableLockEntry | LocalFileLockEntry | LocalTreeLockEntry, ...
+        LocalExecutableLockEntry
+        | LocalFileLockEntry
+        | LocalTreeLockEntry
+        | LocalNodeLockEntry,
+        ...,
     ],
 ) -> None:
     keys = [key for item in desired for key in item.keys]

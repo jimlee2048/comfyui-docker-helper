@@ -29,6 +29,7 @@ from comfyui_docker_helper.config.validation.requirements import (
 from comfyui_docker_helper.config.validation.selectors import (
     normalize_comfyui_version,
     normalize_registry_version,
+    validate_local_node_target_dir,
 )
 from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
@@ -485,6 +486,21 @@ LocalLockEntry = Annotated[
 ]
 
 
+class LocalNodeLockEntry(_StrictLockModel):
+    target_dir: str
+    tree_digest: str
+
+    @field_validator("target_dir")
+    @classmethod
+    def _validate_target_dir(cls, value: str) -> str:
+        return validate_local_node_target_dir(value)
+
+    @field_validator("tree_digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        return _require_sha256(value)
+
+
 CanonicalLockEntry = (
     CudaImageLockEntry
     | UvImageLockEntry
@@ -500,6 +516,7 @@ CanonicalLockEntry = (
     | RuntimeHookLockEntry
     | LocalFileLockEntry
     | LocalTreeLockEntry
+    | LocalNodeLockEntry
 )
 
 
@@ -567,14 +584,18 @@ class ComfyUILock(_StrictLockModel):
 class CustomNodesLock(_StrictLockModel):
     registry: tuple[RegistryNodeLockEntry, ...] = ()
     git: tuple[DirectGitLockEntry, ...] = ()
+    local: tuple[LocalNodeLockEntry, ...] = ()
 
-    @field_validator("registry", "git", mode="before")
+    @field_validator("registry", "git", "local", mode="before")
     @classmethod
     def _freeze_nodes(cls, value: object) -> tuple[object, ...]:
         return _require_tuple(value, "custom_nodes")
 
     @model_validator(mode="after")
     def _validate_nodes(self) -> CustomNodesLock:
+        targets = [entry.target_dir for entry in self.local]
+        if targets != sorted(set(targets)):
+            raise ValueError("local nodes must be sorted and unique")
         registry_ids = [entry.id for entry in self.registry]
         git_urls = [entry.url for entry in self.git]
         if registry_ids != sorted(set(registry_ids)):
@@ -653,6 +674,7 @@ class CanonicalLock(_StrictLockModel):
             *self.python.uv_tools,
             *self.custom_nodes.registry,
             *self.custom_nodes.git,
+            *self.custom_nodes.local,
             *self.hooks.build,
             *self.hooks.runtime,
             *self.files.local,
@@ -1089,6 +1111,8 @@ def canonical_entry_key(entry: CanonicalLockEntry) -> tuple[str, ...]:
         return ("custom_nodes", "registry", entry.id)
     if isinstance(entry, DirectGitLockEntry):
         return ("custom_nodes", "git", entry.url)
+    if isinstance(entry, LocalNodeLockEntry):
+        return ("custom_nodes", "local", entry.target_dir)
     if isinstance(entry, BuildHookLockEntry):
         return ("hooks", "build", entry.relative_path)
     if isinstance(entry, RuntimeHookLockEntry):
@@ -1139,6 +1163,7 @@ def canonical_lock_from_entries(
     known.update(key for key in by_key if key[:2] == ("python", "uv_tools"))
     known.update(key for key in by_key if key[:2] == ("custom_nodes", "registry"))
     known.update(key for key in by_key if key[:2] == ("custom_nodes", "git"))
+    known.update(key for key in by_key if key[:2] == ("custom_nodes", "local"))
     known.update(key for key in by_key if key[:2] == ("hooks", "build"))
     known.update(key for key in by_key if key[:2] == ("hooks", "runtime"))
     known.update(key for key in by_key if key[:2] == ("files", "local"))
@@ -1169,6 +1194,12 @@ def canonical_lock_from_entries(
             requirements=requirements,
         ),
         custom_nodes=CustomNodesLock(
+            local=tuple(
+                entry
+                for key, entry in sorted(by_key.items())
+                if key[:2] == ("custom_nodes", "local")
+                and isinstance(entry, LocalNodeLockEntry)
+            ),
             registry=tuple(
                 entry
                 for key, entry in sorted(by_key.items())

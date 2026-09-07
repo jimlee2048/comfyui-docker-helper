@@ -71,7 +71,7 @@ class FinalConfigDomainResult:
     registry_ids: tuple[LocatedValue, ...]
     registry_nodes: tuple[DiagnosticPath, ...]
     git_urls: tuple[LocatedValue, ...]
-    git_targets: tuple[LocatedValue, ...]
+    node_targets: tuple[LocatedValue, ...]
     file_targets: tuple[LocatedValue, ...]
     files: tuple[NormalizedFile, ...]
     controlled_extra_args: tuple[LocatedValue, ...]

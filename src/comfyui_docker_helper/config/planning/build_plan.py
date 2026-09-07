@@ -56,6 +56,7 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     DirectGitRequestIdentity,
     DirectPythonRequestIdentity,
     LocalFileLockEntry,
+    LocalNodeLockEntry,
     LocalTreeLockEntry,
     ManagedPythonLockEntry,
     ManagedPythonRequestIdentity,
@@ -94,6 +95,11 @@ from comfyui_docker_helper.config.planning.inputs.local import (
     LocalTreePlanningInput,
     index_local_planning_inputs,
 )
+from comfyui_docker_helper.config.planning.inputs.local_node import (
+    LocalNodePlanningInput,
+    index_local_node_inputs,
+    local_node_context_path,
+)
 from comfyui_docker_helper.config.planning.local_tree import (
     LocalTreeInventory,
     LocalTreeMember,
@@ -106,6 +112,7 @@ from comfyui_docker_helper.config.planning.request import (
     GitCredentialRouteRequest,
     GitNodeRequest,
     HttpFileRequest,
+    LocalNodeRequest,
     LocalSourceRequest,
     RegistryNodeRequest,
 )
@@ -132,7 +139,10 @@ from comfyui_docker_helper.config.validation.requirements import (
     DirectRequirementError,
     parse_direct_requirement,
 )
-from comfyui_docker_helper.config.validation.selectors import resolve_git_target_dir
+from comfyui_docker_helper.config.validation.selectors import (
+    resolve_git_target_dir,
+    validate_local_node_target_dir,
+)
 from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.validation.urls import (
     is_http_url,
@@ -784,6 +794,121 @@ class HookPlan(_PlanModel):
         return validate_hook_relative_path(value)
 
 
+class LocalTreeMemberPlan(_PlanModel):
+    """One complete source-relative member in a local-tree BuildPlan."""
+
+    relative_path: str
+    kind: Literal["directory", "file"]
+    size: int | None
+    digest: str | None
+
+    @field_validator("relative_path")
+    @classmethod
+    def _validate_relative_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or path.as_posix() != value
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or any(is_reserved_file_target_component(part) for part in path.parts)
+            or has_control_characters(value)
+            or "\\" in value
+        ):
+            raise ValueError("local tree member path must be canonical")
+        try:
+            value.encode("utf-8", "strict")
+        except UnicodeEncodeError as error:
+            raise ValueError("local tree member path must be strict UTF-8") from error
+        return value
+
+    @field_validator("size")
+    @classmethod
+    def _validate_size(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("local tree member size must not be negative")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str | None) -> str | None:
+        return None if value is None else validate_sha256_digest(value)
+
+    @model_validator(mode="after")
+    def _validate_kind_fields(self) -> LocalTreeMemberPlan:
+        if self.kind == "directory":
+            if self.size is not None or self.digest is not None:
+                raise ValueError("directory local tree members require null content")
+        elif (self.size is None) != (self.digest is None):
+            raise ValueError(
+                "regular-file local tree member size and digest must be both set "
+                "or null"
+            )
+        return self
+
+
+class _TreeInventoryPlan(_PlanModel):
+    verification: Literal["sha256", "unverified-local"]
+    members: tuple[LocalTreeMemberPlan, ...]
+    tree_digest: str | None
+
+    @field_validator("tree_digest")
+    @classmethod
+    def _validate_tree_digest(cls, value: str | None) -> str | None:
+        return None if value is None else validate_sha256_digest(value)
+
+    @model_validator(mode="after")
+    def _validate_inventory(self) -> _TreeInventoryPlan:
+        encoded_paths = tuple(
+            item.relative_path.encode("utf-8") for item in self.members
+        )
+        if encoded_paths != tuple(sorted(encoded_paths)):
+            raise ValueError("local tree members must be sorted by UTF-8 path")
+        if len(encoded_paths) != len(set(encoded_paths)):
+            raise ValueError("local tree members must be unique")
+        by_path = {item.relative_path: item for item in self.members}
+        for item in self.members:
+            path = PurePosixPath(item.relative_path)
+            for index in range(1, len(path.parts)):
+                parent = PurePosixPath(*path.parts[:index]).as_posix()
+                parent_item = by_path.get(parent)
+                if parent_item is None or parent_item.kind != "directory":
+                    raise ValueError(
+                        "local tree member parents must be admitted directories"
+                    )
+        files_have_content = {
+            item.size is not None and item.digest is not None
+            for item in self.members
+            if item.kind == "file"
+        }
+        if len(files_have_content) > 1:
+            raise ValueError("local tree file content fields must be uniformly set")
+        if self.verification == "sha256":
+            if self.tree_digest is None:
+                raise ValueError("locked local tree requires a digest")
+            inventory = LocalTreeInventory(
+                tuple(
+                    LocalTreeMember(
+                        item.relative_path,
+                        item.kind,
+                        item.size,
+                        item.digest,
+                    )
+                    for item in self.members
+                )
+            )
+            if any(
+                item.kind == "file" and (item.size is None or item.digest is None)
+                for item in self.members
+            ):
+                raise ValueError("locked local tree files require file identities")
+            if local_tree_digest(inventory) != self.tree_digest:
+                raise ValueError("local tree digest does not match its inventory")
+        elif self.tree_digest is not None or files_have_content == {True}:
+            raise ValueError("unverified local tree must omit member and tree digests")
+        return self
+
+
 class RegistryNodePlan(_PlanModel):
     type: Literal["registry"]
     id: str
@@ -827,7 +952,29 @@ class GitNodePlan(_PlanModel):
         return _absolute_posix_path(value, "Git target")
 
 
-CustomNodePlan = Annotated[RegistryNodePlan | GitNodePlan, Field(discriminator="type")]
+class LocalNodePlan(_TreeInventoryPlan):
+    type: Literal["local"]
+    target: str
+    context_path: str
+    pre_install_hooks: tuple[HookPlan, ...]
+    post_install_hooks: tuple[HookPlan, ...]
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, value: str) -> str:
+        return validate_absolute_file_target(value)
+
+    @model_validator(mode="after")
+    def _validate_slot(self) -> LocalNodePlan:
+        target_dir = validate_local_node_target_dir(PurePosixPath(self.target).name)
+        if self.context_path != local_node_context_path(target_dir).as_posix():
+            raise ValueError("local node context path is not canonical")
+        return self
+
+
+CustomNodePlan = Annotated[
+    RegistryNodePlan | GitNodePlan | LocalNodePlan, Field(discriminator="type")
+]
 
 
 class GitCredentialRoutePlan(_PlanModel):
@@ -982,60 +1129,7 @@ class LocalFilePlan(_FilePlan):
         return self
 
 
-class LocalTreeMemberPlan(_PlanModel):
-    """One complete source-relative member in a local-tree BuildPlan."""
-
-    relative_path: str
-    kind: Literal["directory", "file"]
-    size: int | None
-    digest: str | None
-
-    @field_validator("relative_path")
-    @classmethod
-    def _validate_relative_path(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if (
-            path.is_absolute()
-            or not path.parts
-            or path.as_posix() != value
-            or any(part in {"", ".", ".."} for part in path.parts)
-            or any(is_reserved_file_target_component(part) for part in path.parts)
-            or has_control_characters(value)
-            or "\\" in value
-        ):
-            raise ValueError("local tree member path must be canonical")
-        try:
-            value.encode("utf-8", "strict")
-        except UnicodeEncodeError as error:
-            raise ValueError("local tree member path must be strict UTF-8") from error
-        return value
-
-    @field_validator("size")
-    @classmethod
-    def _validate_size(cls, value: int | None) -> int | None:
-        if value is not None and value < 0:
-            raise ValueError("local tree member size must not be negative")
-        return value
-
-    @field_validator("digest")
-    @classmethod
-    def _validate_digest(cls, value: str | None) -> str | None:
-        return None if value is None else validate_sha256_digest(value)
-
-    @model_validator(mode="after")
-    def _validate_kind_fields(self) -> LocalTreeMemberPlan:
-        if self.kind == "directory":
-            if self.size is not None or self.digest is not None:
-                raise ValueError("directory local tree members require null content")
-        elif (self.size is None) != (self.digest is None):
-            raise ValueError(
-                "regular-file local tree member size and digest must be both set "
-                "or null"
-            )
-        return self
-
-
-class LocalTreePlan(_FilePlan):
+class LocalTreePlan(_TreeInventoryPlan, _FilePlan):
     """One logical local directory tree and its complete structural inventory."""
 
     type: Literal["local"]
@@ -1051,62 +1145,6 @@ class LocalTreePlan(_FilePlan):
         if re.fullmatch(r"build/trees/[0-9a-f]{64}", value) is None:
             raise ValueError("local tree context path must be canonical")
         return value
-
-    @field_validator("tree_digest")
-    @classmethod
-    def _validate_tree_digest(cls, value: str | None) -> str | None:
-        return None if value is None else validate_sha256_digest(value)
-
-    @model_validator(mode="after")
-    def _validate_inventory(self) -> LocalTreePlan:
-        encoded_paths = tuple(
-            item.relative_path.encode("utf-8") for item in self.members
-        )
-        if encoded_paths != tuple(sorted(encoded_paths)):
-            raise ValueError("local tree members must be sorted by UTF-8 path")
-        if len(encoded_paths) != len(set(encoded_paths)):
-            raise ValueError("local tree members must be unique")
-        by_path = {item.relative_path: item for item in self.members}
-        for item in self.members:
-            path = PurePosixPath(item.relative_path)
-            for index in range(1, len(path.parts)):
-                parent = PurePosixPath(*path.parts[:index]).as_posix()
-                parent_item = by_path.get(parent)
-                if parent_item is None or parent_item.kind != "directory":
-                    raise ValueError(
-                        "local tree member parents must be admitted directories"
-                    )
-        files_have_content = {
-            item.size is not None and item.digest is not None
-            for item in self.members
-            if item.kind == "file"
-        }
-        if len(files_have_content) > 1:
-            raise ValueError("local tree file content fields must be uniformly set")
-        if self.verification == "sha256":
-            if self.tree_digest is None:
-                raise ValueError("locked local tree requires a digest")
-            inventory = LocalTreeInventory(
-                tuple(
-                    LocalTreeMember(
-                        item.relative_path,
-                        item.kind,
-                        item.size,
-                        item.digest,
-                    )
-                    for item in self.members
-                )
-            )
-            if any(
-                item.kind == "file" and (item.size is None or item.digest is None)
-                for item in self.members
-            ):
-                raise ValueError("locked local tree files require file identities")
-            if local_tree_digest(inventory) != self.tree_digest:
-                raise ValueError("local tree digest does not match its inventory")
-        elif self.tree_digest is not None or files_have_content == {True}:
-            raise ValueError("unverified local tree must omit member and tree digests")
-        return self
 
 
 LocalPlan = Annotated[LocalFilePlan | LocalTreePlan, Field(discriminator="kind")]
@@ -1339,19 +1377,23 @@ class BuildPlan(_PlanModel):
         custom_nodes_root = (
             PurePosixPath(self.application.paths.comfyui) / "custom_nodes"
         )
-        git_targets: list[str] = []
+        node_targets: list[str] = []
         for node in self.custom_nodes.nodes:
-            if not isinstance(node, GitNodePlan):
+            if isinstance(node, RegistryNodePlan):
                 continue
             target = PurePosixPath(node.target)
-            target_name = resolve_git_target_dir(node.url, target.name)
+            target_name = (
+                resolve_git_target_dir(node.url, target.name)
+                if isinstance(node, GitNodePlan)
+                else validate_local_node_target_dir(target.name)
+            )
             if target != custom_nodes_root / target_name:
                 raise ValueError(
-                    "Git node target must be one exact child of ComfyUI custom_nodes"
+                    "Custom node target must be one exact child of ComfyUI custom_nodes"
                 )
-            git_targets.append(node.target)
-        if len(git_targets) != len(set(git_targets)):
-            raise ValueError("Git node targets must be unique")
+            node_targets.append(node.target)
+        if len(node_targets) != len(set(node_targets)):
+            raise ValueError("Custom node targets must be unique")
 
         build_plan_hook_identities(self.custom_nodes, self.runtime)
 
@@ -1487,6 +1529,7 @@ def construct_build_plan(
     lock: CanonicalLock,
     *,
     local_inputs: tuple[LocalPlanningInput, ...] = (),
+    local_node_inputs: tuple[LocalNodePlanningInput, ...] = (),
     runtime_provenance: RuntimePlanningProvenance,
 ) -> BuildPlan:
     """Construct BuildPlan once from the shared request graph and accepted lock."""
@@ -1498,7 +1541,23 @@ def construct_build_plan(
     used: set[tuple[str, ...]] = set()
     toolchain = _project_toolchain(graph, entries, used)
     application = _project_application(graph, entries, used, toolchain)
-    custom_nodes = _project_custom_nodes(graph, entries, used)
+    node_inputs = index_local_node_inputs(local_node_inputs)
+    requests = [
+        node for node in graph.custom_nodes if isinstance(node, LocalNodeRequest)
+    ]
+    targets = [node.target_dir for node in requests]
+    if len(targets) != len(set(targets)):
+        raise ValueError("duplicate local node request")
+    if set(targets) - set(node_inputs):
+        raise ValueError("missing local node planning inputs")
+    if set(node_inputs) - set(targets):
+        raise ValueError("unused local node planning inputs")
+    if any(
+        node.content_lock != node_inputs[node.target_dir].content_lock
+        for node in requests
+    ):
+        raise ValueError("local node planning input lock mode does not match request")
+    custom_nodes = _project_custom_nodes(graph, entries, used, node_inputs)
     files = _project_files(
         graph,
         entries,
@@ -1781,8 +1840,11 @@ def _project_custom_nodes(
     graph: CanonicalRequestGraph,
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
+    node_inputs: dict[str, LocalNodePlanningInput],
 ) -> CustomNodesPhase:
-    nodes = tuple(_custom_node(node, entries, used) for node in graph.custom_nodes)
+    nodes = tuple(
+        _custom_node(node, entries, used, node_inputs) for node in graph.custom_nodes
+    )
     return CustomNodesPhase(
         install_manager=graph.application.install_manager,
         user_directory=str(PurePosixPath(graph.application.comfyui_path) / "user"),
@@ -2170,6 +2232,7 @@ def _custom_node(
     node: CustomNodeRequest,
     entries: dict[tuple[str, ...], CanonicalLockEntry],
     used: set[tuple[str, ...]],
+    node_inputs: dict[str, LocalNodePlanningInput],
 ) -> CustomNodePlan:
     pre_install_hooks = tuple(
         _hook(value, entries, used) for value in node.pre_install_hooks
@@ -2188,6 +2251,35 @@ def _custom_node(
             type="registry",
             id=entry.id,
             version=entry.version,
+            pre_install_hooks=pre_install_hooks,
+            post_install_hooks=post_install_hooks,
+        )
+    if isinstance(node, LocalNodeRequest):
+        item = node_inputs[node.target_dir]
+        if item.content_lock:
+            entry = _take(
+                entries,
+                used,
+                ("custom_nodes", "local", node.target_dir),
+                LocalNodeLockEntry,
+            )
+            if entry.tree_digest != item.tree_digest:
+                raise ValueError("local node content differs from accepted lock")
+        return LocalNodePlan(
+            type="local",
+            target=node.target,
+            context_path=item.context_path.as_posix(),
+            verification="sha256" if item.content_lock else "unverified-local",
+            members=tuple(
+                LocalTreeMemberPlan(
+                    relative_path=member.relative_path.as_posix(),
+                    kind=member.kind,
+                    size=member.size,
+                    digest=member.digest,
+                )
+                for member in item.inventory.members
+            ),
+            tree_digest=item.tree_digest,
             pre_install_hooks=pre_install_hooks,
             post_install_hooks=post_install_hooks,
         )

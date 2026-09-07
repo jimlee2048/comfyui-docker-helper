@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from comfyui_docker_helper.config.planning.build_plan import (
     CustomNodePlan,
+    LocalNodePlan,
     RegistryNodePlan,
 )
 from comfyui_docker_helper.config.planning.canonical_lock import (
@@ -17,7 +18,10 @@ from comfyui_docker_helper.config.planning.canonical_lock import (
     validate_git_url,
 )
 from comfyui_docker_helper.config.validation.registry import validate_registry_id
-from comfyui_docker_helper.config.validation.selectors import resolve_git_target_dir
+from comfyui_docker_helper.config.validation.selectors import (
+    resolve_git_target_dir,
+    validate_local_node_target_dir,
+)
 
 
 class _InventoryModel(BaseModel):
@@ -66,8 +70,20 @@ class GitInventoryEntry(_InventoryModel):
         return resolve_git_target_dir("https://example.invalid/repository.git", value)
 
 
+class LocalInventoryEntry(_InventoryModel):
+    type: Literal["local"]
+    target: str
+    verification: Literal["local-directory"]
+    control: Literal["direct-local"]
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, value: str) -> str:
+        return validate_local_node_target_dir(value)
+
+
 CustomNodeInventoryEntry = Annotated[
-    RegistryInventoryEntry | GitInventoryEntry,
+    RegistryInventoryEntry | GitInventoryEntry | LocalInventoryEntry,
     Field(discriminator="type"),
 ]
 
@@ -79,7 +95,7 @@ class CustomNodeInventory(_InventoryModel):
 
 def custom_node_inventory(nodes: Sequence[CustomNodePlan]) -> CustomNodeInventory:
     """Project verified declarations into final typed evidence."""
-    entries: list[RegistryInventoryEntry | GitInventoryEntry] = []
+    entries: list[RegistryInventoryEntry | GitInventoryEntry | LocalInventoryEntry] = []
     for node in nodes:
         if isinstance(node, RegistryNodePlan):
             entries.append(
@@ -89,6 +105,15 @@ def custom_node_inventory(nodes: Sequence[CustomNodePlan]) -> CustomNodeInventor
                     version=node.version,
                     verification="registry-version",
                     control="direct-cm-cli",
+                )
+            )
+        elif isinstance(node, LocalNodePlan):
+            entries.append(
+                LocalInventoryEntry(
+                    type="local",
+                    target=node.target.rsplit("/", 1)[-1],
+                    verification="local-directory",
+                    control="direct-local",
                 )
             )
         else:

@@ -7,6 +7,10 @@ from urllib.parse import urlsplit
 from packaging.specifiers import InvalidSpecifier, Specifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from comfyui_docker_helper.config.validation.urls import (
+    is_reserved_file_target_component,
+)
+
 _SEMVER_PATTERN = re.compile(
     r"""
     (?:0|[1-9][0-9]*)\.
@@ -92,6 +96,17 @@ def is_safe_git_target_dir(target_dir: str) -> bool:
         target_dir not in {"", ".", ".."}
         and _GIT_TARGET_DIR_PATTERN.fullmatch(target_dir) is not None
     )
+
+
+def validate_local_node_target_dir(value: str) -> str:
+    """Validate one mapped local-node directory name."""
+    if not is_safe_git_target_dir(value):
+        raise ValueError(
+            "target_dir must match [A-Za-z0-9._-]+ and must not be . or .."
+        )
+    if is_reserved_file_target_component(value):
+        raise ValueError("target_dir contains a reserved mapped component")
+    return value
 
 
 def resolve_git_target_dir(url: str, target_dir: str | None) -> str:

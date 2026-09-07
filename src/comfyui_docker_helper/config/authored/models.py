@@ -162,8 +162,19 @@ class FinalGitCustomNodeConfig(_FinalCustomNodeConfig):
     pre_clone_hooks: list[str] = Field(default_factory=list)
 
 
+class FinalLocalCustomNodeConfig(_FinalCustomNodeConfig):
+    """A custom node captured from a host directory."""
+
+    type: Literal["local"]
+    source: str
+    target_dir: str
+    content_lock: bool = False
+
+
 FinalCustomNodeConfig = Annotated[
-    FinalRegistryCustomNodeConfig | FinalGitCustomNodeConfig,
+    FinalRegistryCustomNodeConfig
+    | FinalGitCustomNodeConfig
+    | FinalLocalCustomNodeConfig,
     Field(discriminator="type"),
 ]
 

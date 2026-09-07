@@ -103,9 +103,9 @@ def validate_final_config_semantics(
     _secret_reference_diagnostics(config, diagnostics)
     _authenticated_downloader_diagnostics(config, diagnostics)
     _duplicate_diagnostics(
-        domains.git_targets,
+        domains.node_targets,
         "custom_node.duplicate_git_target_dir",
-        "Git target directories must be unique",
+        "Custom-node target directories must be unique",
         diagnostics,
         origins=origins,
     )

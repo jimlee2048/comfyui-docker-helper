@@ -15,6 +15,7 @@ from comfyui_docker_helper.config.authored.models import (
     FinalConfig,
     FinalGitCustomNodeConfig,
     FinalHttpFileConfig,
+    FinalLocalCustomNodeConfig,
     FinalLocalFileConfig,
     FinalRegistryCustomNodeConfig,
 )
@@ -65,6 +66,7 @@ from comfyui_docker_helper.config.validation.selectors import (
     normalize_comfyui_version,
     normalize_registry_version,
     resolve_git_target_dir,
+    validate_local_node_target_dir,
 )
 from comfyui_docker_helper.config.validation.ssh_keys import normalize_ssh_public_keys
 from comfyui_docker_helper.config.validation.urls import (
@@ -117,7 +119,7 @@ def validate_final_config_domains(
     registry_ids: list[LocatedValue] = []
     registry_nodes: list[DiagnosticPath] = []
     git_urls: list[LocatedValue] = []
-    git_targets: list[LocatedValue] = []
+    node_targets: list[LocatedValue] = []
     file_targets: list[LocatedValue] = []
     files: list[NormalizedFile] = []
     controlled_extra_args: list[LocatedValue] = []
@@ -149,7 +151,7 @@ def validate_final_config_domains(
         registry_ids,
         registry_nodes,
         git_urls,
-        git_targets,
+        node_targets,
         controlled_extra_args,
         diagnostics,
     )
@@ -186,7 +188,7 @@ def validate_final_config_domains(
         registry_ids=tuple(registry_ids),
         registry_nodes=tuple(registry_nodes),
         git_urls=tuple(git_urls),
-        git_targets=tuple(git_targets),
+        node_targets=tuple(node_targets),
         file_targets=tuple(file_targets),
         files=tuple(files),
         controlled_extra_args=tuple(controlled_extra_args),
@@ -496,7 +498,7 @@ def _validate_comfyui_domains(
     registry_ids: list[LocatedValue],
     registry_nodes: list[DiagnosticPath],
     git_urls: list[LocatedValue],
-    git_targets: list[LocatedValue],
+    node_targets: list[LocatedValue],
     controlled_extra_args: list[LocatedValue],
     diagnostics: list[Diagnostic],
 ) -> None:
@@ -531,8 +533,29 @@ def _validate_comfyui_domains(
             _validate_registry_node(
                 node, path, registry_ids, registry_nodes, diagnostics
             )
+        elif isinstance(node, FinalGitCustomNodeConfig):
+            _validate_git_node(node, path, git_urls, node_targets, diagnostics)
         else:
-            _validate_git_node(node, path, git_urls, git_targets, diagnostics)
+            if not node.source.strip():
+                diagnostics.append(
+                    Diagnostic(
+                        (*path, "source"),
+                        "custom_node.invalid_local_source",
+                        "must be non-empty",
+                    )
+                )
+            try:
+                target = validate_local_node_target_dir(node.target_dir)
+            except ValueError as error:
+                diagnostics.append(
+                    Diagnostic(
+                        (*path, "target_dir"),
+                        "custom_node.invalid_local_target",
+                        str(error),
+                    )
+                )
+            else:
+                node_targets.append(LocatedValue((*path, "target_dir"), target))
         for hook, hook_path in _iter_node_hooks(index, node):
             _validate_hook(hook, hook_path, root, diagnostics)
 
@@ -724,7 +747,7 @@ def _validate_git_node(
     node: FinalGitCustomNodeConfig,
     path: DiagnosticPath,
     git_urls: list[LocatedValue],
-    git_targets: list[LocatedValue],
+    node_targets: list[LocatedValue],
     diagnostics: list[Diagnostic],
 ) -> None:
     password_userinfo = has_password_userinfo(node.url)
@@ -767,7 +790,7 @@ def _validate_git_node(
             Diagnostic(target_path, "custom_node.invalid_git_target_dir", str(error))
         )
     else:
-        git_targets.append(LocatedValue(target_path, target))
+        node_targets.append(LocatedValue(target_path, target))
 
 
 def is_git_source_url(value: str) -> bool:
@@ -820,7 +843,9 @@ def _iter_hooks(config: FinalConfig) -> Iterable[tuple[str, DiagnosticPath]]:
 
 def _iter_node_hooks(
     index: int,
-    node: FinalRegistryCustomNodeConfig | FinalGitCustomNodeConfig,
+    node: FinalRegistryCustomNodeConfig
+    | FinalGitCustomNodeConfig
+    | FinalLocalCustomNodeConfig,
 ) -> Iterable[tuple[str, DiagnosticPath]]:
     base: DiagnosticPath = ("comfyui", "custom_nodes", index)
     stages = (

@@ -28,6 +28,7 @@ from comfyui_docker_helper.config.planning.build_plan import (
     CustomNodePlan,
     CustomNodesPhase,
     GitNodePlan,
+    LocalNodePlan,
     PyTorchGroupPlan,
     RegistryNodePlan,
     managed_build_constraints_bytes,
@@ -50,7 +51,13 @@ from comfyui_docker_helper.container.build.comfyui import (
     observe_manager_capability,
     verify_manager_authority,
 )
-from comfyui_docker_helper.container.build.custom_nodes import contracts, git, registry
+from comfyui_docker_helper.container.build.custom_nodes import (
+    contracts,
+    git,
+    local,
+    registry,
+    root_install,
+)
 from comfyui_docker_helper.container.build.events import (
     ContainerHelperEvent,
     ContainerHelperPhase,
@@ -59,6 +66,7 @@ from comfyui_docker_helper.container.build.events import (
     CustomNodeCompleted,
     CustomNodesInstallCompleted,
     GitCustomNodeStarted,
+    LocalCustomNodeStarted,
     RegistryCustomNodeStarted,
 )
 from comfyui_docker_helper.container.build.git_credential_helper import (
@@ -216,7 +224,7 @@ def _install_custom_nodes(
             environ=environ,
             application_authority=application_authority,
         )
-        prepared_git: GitNodePlan | None = None
+        prepared_node: GitNodePlan | LocalNodePlan | None = None
         # An empty hook phase retains the adjacent proof; each executed hook
         # establishes its own boundary before another mutation is admitted.
         if isinstance(node, GitNodePlan):
@@ -251,20 +259,24 @@ def _install_custom_nodes(
                         application_authority=application_authority,
                     )
 
+        if isinstance(node, (GitNodePlan, LocalNodePlan)):
             with _helper_phase(
                 event_sink, ContainerHelperPhase.CUSTOM_NODE_SOURCE_PREPARATION
             ):
                 observations.invalidate_mutation()
-                target = git._prepare_git_node(
-                    node, custom_nodes_root, git_path, git_environment
-                )
+                if isinstance(node, GitNodePlan):
+                    target = git._prepare_git_node(
+                        node, custom_nodes_root, git_path, git_environment
+                    )
+                else:
+                    target = local.prepare_local_node(node, custom_nodes_root)
                 future = nodes[index + 1 :]
-                prepared_git = node
+                prepared_node = node
                 _verify_boundary(
                     custom_nodes_root,
                     admitted,
                     future,
-                    prepared_git=prepared_git,
+                    prepared_node=prepared_node,
                     application=application,
                     runtime=runtime,
                     manager_authority=manager_authority,
@@ -296,7 +308,7 @@ def _install_custom_nodes(
                     custom_nodes_root,
                     admitted,
                     future,
-                    prepared_git=prepared_git,
+                    prepared_node=prepared_node,
                     application=application,
                     runtime=runtime,
                     manager_authority=manager_authority,
@@ -322,8 +334,9 @@ def _install_custom_nodes(
                     custom_node_python_environment,
                 )
             else:
-                git._install_git_root_surfaces(
-                    node,
+                source = "Git" if isinstance(node, GitNodePlan) else "Local"
+                root_install.install_root_surfaces(
+                    f"{source} node {target.name}",
                     target,
                     application,
                     runtime,
@@ -333,7 +346,7 @@ def _install_custom_nodes(
                 )
 
             admitted.append(node)
-            prepared_git = None
+            prepared_node = None
             remaining = nodes[index + 1 :]
             _verify_boundary(
                 custom_nodes_root,
@@ -465,12 +478,20 @@ def _emit_custom_node_started(
             pre_hook_count=pre_hook_count,
             post_hook_count=post_hook_count,
         )
-    else:
+    elif isinstance(node, GitNodePlan):
         event = GitCustomNodeStarted(
             index=index,
             total=total,
             target_name=Path(node.target).name,
             pre_clone_hook_count=len(node.pre_clone_hooks),
+            pre_hook_count=pre_hook_count,
+            post_hook_count=post_hook_count,
+        )
+    else:
+        event = LocalCustomNodeStarted(
+            index=index,
+            total=total,
+            target_name=Path(node.target).name,
             pre_hook_count=pre_hook_count,
             post_hook_count=post_hook_count,
         )
@@ -522,14 +543,17 @@ def observe_custom_node_state(
     git_path: Path = _GIT_PATH,
     environ: Mapping[str, str] | None = None,
 ) -> CustomNodeInventory:
-    """Prove final local Git and Registry identities without executing node code."""
+    """Prove final custom-node identities without executing node code."""
 
     custom_nodes_root = contracts._require_real_directory(
         runtime.comfyui_path / "custom_nodes", "custom-nodes root"
     )
     git_environment = runtime.env(environ)
-    git_targets: list[Path] = []
+    direct_targets: list[Path] = []
     for node in custom_nodes.nodes:
+        if isinstance(node, LocalNodePlan):
+            direct_targets.append(local.verify_local_root(node, custom_nodes_root))
+            continue
         if not isinstance(node, GitNodePlan):
             continue
         target = git._planned_git_target(node, custom_nodes_root)
@@ -540,13 +564,13 @@ def observe_custom_node_state(
             git_path,
             git_environment,
         )
-        git_targets.append(target)
+        direct_targets.append(target)
     registry._verify_registry_set(
         custom_nodes_root,
         tuple(
             node for node in custom_nodes.nodes if isinstance(node, RegistryNodePlan)
         ),
-        excluded_git_targets=git_targets,
+        excluded_direct_targets=direct_targets,
     )
     return custom_node_inventory(custom_nodes.nodes)
 
@@ -579,7 +603,7 @@ def _validate_inputs(
         raise contracts.CustomNodeInstallError(
             "Registry user directory does not match BuildPlan"
         )
-    git_targets: set[Path] = set()
+    direct_targets: set[Path] = set()
     custom_root = runtime.comfyui_path / "custom_nodes"
     registry_nodes = tuple(
         node for node in custom_nodes.nodes if isinstance(node, RegistryNodePlan)
@@ -605,19 +629,24 @@ def _validate_inputs(
                 raise contracts.CustomNodeInstallError(
                     f"Registry node {node.id} has an invalid locked version"
                 ) from error
-        else:
+        elif isinstance(node, GitNodePlan):
             if git._COMMIT_PATTERN.fullmatch(node.commit) is None:
                 raise contracts.CustomNodeInstallError(
                     "Git node commit must be exact 40-hex"
                 )
             if not is_git_source_url(node.url):
                 raise contracts.CustomNodeInstallError("Git node URL is invalid")
-            target = git._planned_git_target(node, custom_root)
-            if target in git_targets:
+        if isinstance(node, (GitNodePlan, LocalNodePlan)):
+            target = (
+                git._planned_git_target(node, custom_root)
+                if isinstance(node, GitNodePlan)
+                else local.planned_local_target(node, custom_root)
+            )
+            if target in direct_targets:
                 raise contracts.CustomNodeInstallError(
-                    f"Git target {target.name} is duplicated in BuildPlan"
+                    f"Custom-node target {target.name} is duplicated in BuildPlan"
                 )
-            git_targets.add(target)
+            direct_targets.add(target)
 
 
 def _verify_boundary(
@@ -625,7 +654,7 @@ def _verify_boundary(
     admitted: Sequence[CustomNodePlan],
     future: Sequence[CustomNodePlan],
     *,
-    prepared_git: GitNodePlan | None = None,
+    prepared_node: GitNodePlan | LocalNodePlan | None = None,
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     manager_authority: ParsedManagerRequirements | None,
@@ -644,7 +673,7 @@ def _verify_boundary(
         custom_nodes_root,
         admitted,
         future,
-        prepared_git=prepared_git,
+        prepared_node=prepared_node,
         application=application,
         runtime=runtime,
         manager_authority=manager_authority,
@@ -681,7 +710,7 @@ def _verify_mixed_state(
     admitted: Sequence[CustomNodePlan],
     future: Sequence[CustomNodePlan],
     *,
-    prepared_git: GitNodePlan | None = None,
+    prepared_node: GitNodePlan | LocalNodePlan | None = None,
     application: ApplicationPhase,
     runtime: ContainerRuntime,
     manager_authority: ParsedManagerRequirements | None,
@@ -692,26 +721,29 @@ def _verify_mixed_state(
 
     if manager_authority is not None:
         verify_manager_authority(application, runtime, manager_authority)
-    admitted_git_targets: list[Path] = []
-    for node in admitted:
+    admitted_direct_targets: list[Path] = []
+    prepared = () if prepared_node is None else (prepared_node,)
+    for node in (*admitted, *prepared):
         if isinstance(node, GitNodePlan):
             target = git._planned_git_target(node, custom_nodes_root)
             git._verify_git_provenance(
                 node, target, custom_nodes_root, git_path, git_environment
             )
-            admitted_git_targets.append(target)
-    if prepared_git is not None:
-        target = git._planned_git_target(prepared_git, custom_nodes_root)
-        git._verify_git_provenance(
-            prepared_git, target, custom_nodes_root, git_path, git_environment
-        )
-        admitted_git_targets.append(target)
-    for node in future:
-        if isinstance(node, GitNodePlan):
-            _require_absent(
-                git._planned_git_target(node, custom_nodes_root),
-                f"future Git target {Path(node.target).name}",
+            admitted_direct_targets.append(target)
+        elif isinstance(node, LocalNodePlan):
+            # Only a proved direct root can be excluded from Registry discovery.
+            admitted_direct_targets.append(
+                local.verify_local_root(node, custom_nodes_root)
             )
+    for node in future:
+        if isinstance(node, (GitNodePlan, LocalNodePlan)):
+            target = (
+                git._planned_git_target(node, custom_nodes_root)
+                if isinstance(node, GitNodePlan)
+                else local.planned_local_target(node, custom_nodes_root)
+            )
+            source = "Git" if isinstance(node, GitNodePlan) else "Local"
+            _require_absent(target, f"future {source} target {target.name}")
     if has_registry:
         expected_registry = tuple(
             node for node in admitted if isinstance(node, RegistryNodePlan)
@@ -719,7 +751,7 @@ def _verify_mixed_state(
         registry._verify_registry_set(
             custom_nodes_root,
             expected_registry,
-            excluded_git_targets=admitted_git_targets,
+            excluded_direct_targets=admitted_direct_targets,
         )
 
 

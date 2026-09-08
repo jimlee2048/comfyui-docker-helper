@@ -7,7 +7,7 @@ import io
 import os
 import stat
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -18,6 +18,8 @@ from comfyui_docker_helper.config.planning.build_plan import (
     HookPlan,
     HttpFilePlan,
     LocalFilePlan,
+    LocalNodePlan,
+    LocalTreeMemberPlan,
     LocalTreePlan,
     build_plan_hook_identities,
     dump_build_plan_json,
@@ -31,6 +33,7 @@ from comfyui_docker_helper.filesystem.admission import (
     FileCloneUnavailableError,
     LocalTreeInventory,
     LocalTreeMember,
+    LocalTreeSelection,
     TreeAdmissionError,
     local_tree_mode,
     operate_regular_absolute_file,
@@ -65,10 +68,51 @@ class LocalMaterializationSource:
     relative_path: PurePosixPath
     source_path: Path
     kind: LocalMaterializationKind
+    selection: LocalTreeSelection | None = None
+    control_file_bytes: bytes | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.kind not in {"file", "tree"}:
             raise ValueError("local materialization source kind is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class LocalTreeProjection:
+    """Only the tree fields needed for context acquisition and comparison."""
+
+    context_path: str
+    members: tuple[LocalTreeMemberPlan, ...]
+    tree_digest: str | None
+
+
+def local_tree_projections(plan: BuildPlan) -> tuple[LocalTreeProjection, ...]:
+    return tuple(
+        LocalTreeProjection(item.context_path, item.members, item.tree_digest)
+        for item in (*plan.files.files, *plan.custom_nodes.nodes)
+        if isinstance(item, (LocalTreePlan, LocalNodePlan))
+    )
+
+
+def verify_local_source_control(source: LocalMaterializationSource) -> None:
+    """Keep the frozen selection bound to its original control-file bytes."""
+    if source.selection is None:
+        return
+    control = source.source_path / ".dockerignore"
+    try:
+        try:
+            control.lstat()
+        except FileNotFoundError:
+            observed = None
+        else:
+            observed = read_regular_absolute_file(control)
+    except (OSError, ValueError) as error:
+        raise FinalMaterializationError(
+            "local node selection control file could not be checked"
+        ) from error
+    if observed != source.control_file_bytes:
+        raise FinalMaterializationError(
+            "local node selection control file changed during preparation"
+        )
 
 
 def _materialize_private_stage(
@@ -108,11 +152,7 @@ def _materialize_private_stage(
         for item in plan.files.files
         if isinstance(item, LocalFilePlan)
     }
-    local_trees = {
-        item.context_path: item
-        for item in plan.files.files
-        if isinstance(item, LocalTreePlan)
-    }
+    local_trees = {item.context_path: item for item in local_tree_projections(plan)}
     expected_sources = {(relative_path, "file") for relative_path in expected_hooks}
     expected_sources.update((relative_path, "file") for relative_path in local_files)
     expected_sources.update((relative_path, "tree") for relative_path in local_trees)
@@ -158,16 +198,15 @@ def _materialize_private_stage(
                     item,
                     mode=local_file_mode,
                 )
-        elif isinstance(item, LocalTreePlan):
-            relative_path = item.context_path
-            _materialize_local_tree(
-                stage,
-                PurePosixPath(relative_path),
-                sources[(relative_path, "tree")].source_path,
-                item,
-                mode=local_file_mode,
-                check_placeholders=check_placeholders,
-            )
+    for relative_path, tree in local_trees.items():
+        _materialize_local_tree(
+            stage,
+            PurePosixPath(relative_path),
+            sources[(relative_path, "tree")],
+            tree,
+            mode=local_file_mode,
+            check_placeholders=check_placeholders,
+        )
     _write(
         stage,
         PurePosixPath("runtime/config.toml"),
@@ -326,16 +365,18 @@ def _materialize_local_file(
 def _materialize_local_tree(
     stage: Path,
     relative_path: PurePosixPath,
-    source: Path,
-    plan: LocalTreePlan,
+    material: LocalMaterializationSource,
+    plan: LocalTreeProjection,
     *,
     mode: str,
     check_placeholders: bool,
 ) -> None:
-    """Materialize one complete source tree below its deterministic context slot."""
+    """Materialize one selected tree below its deterministic context slot."""
+    source = material.source_path
     if mode not in {"auto", "clone", "copy"}:
         raise FinalMaterializationError("local file materialization mode is invalid")
     if not check_placeholders:
+        verify_local_source_control(material)
         try:
             expected = _local_tree_inventory(plan)
         except (TypeError, ValueError) as error:
@@ -343,7 +384,7 @@ def _materialize_local_tree(
                 "local tree Plan inventory is invalid"
             ) from error
         try:
-            revalidate_local_tree(source, expected)
+            revalidate_local_tree(source, expected, selection=material.selection)
         except TreeAdmissionError as error:
             message = (
                 "local source tree changed before materialization"
@@ -374,12 +415,27 @@ def _materialize_local_tree(
                 expected_digest=member.digest,
                 mode=mode,
             )
+            if (
+                material.selection is not None
+                and member.relative_path == ".dockerignore"
+            ):
+                try:
+                    copied = read_regular_absolute_file(stage / target_member)
+                except (OSError, ValueError) as error:
+                    raise FinalMaterializationError(
+                        "local node selection control file could not be checked"
+                    ) from error
+                if copied != material.control_file_bytes:
+                    raise FinalMaterializationError(
+                        "local node selection control file changed "
+                        "during materialization"
+                    )
 
     if check_placeholders:
         return
 
     try:
-        revalidate_local_tree(source, expected)
+        revalidate_local_tree(source, expected, selection=material.selection)
     except TreeAdmissionError as error:
         message = (
             "local source tree changed during materialization"
@@ -391,9 +447,10 @@ def _materialize_local_tree(
         raise FinalMaterializationError(
             "local source tree could not be re-enumerated"
         ) from error
+    verify_local_source_control(material)
 
 
-def _local_tree_inventory(plan: LocalTreePlan) -> LocalTreeInventory:
+def _local_tree_inventory(plan: LocalTreeProjection) -> LocalTreeInventory:
     """Convert the strict Plan inventory to the shared admission shape."""
     return LocalTreeInventory(
         tuple(

@@ -97,6 +97,26 @@ class GitCustomNodeStarted:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalCustomNodeStarted:
+    """Begin one direct local custom node in admitted order."""
+
+    index: int
+    total: int
+    target_name: str
+    pre_hook_count: int
+    post_hook_count: int
+
+    def __post_init__(self) -> None:
+        _require_item_position(self.index, self.total)
+        if type(self.target_name) is not str or not is_safe_git_target_dir(
+            self.target_name
+        ):
+            raise ValueError("Local custom-node target must be one safe target leaf")
+        _require_non_negative_integer(self.pre_hook_count, "pre-hook count")
+        _require_non_negative_integer(self.post_hook_count, "post-hook count")
+
+
+@dataclass(frozen=True, slots=True)
 class CustomNodeCompleted:
     """Complete one custom node after its final proof boundary."""
 
@@ -132,6 +152,7 @@ type ContainerHelperEvent = (
     | ContainerHelperPhaseCompleted
     | RegistryCustomNodeStarted
     | GitCustomNodeStarted
+    | LocalCustomNodeStarted
     | CustomNodeCompleted
     | ComfyUIInstallCompleted
     | CustomNodesInstallCompleted

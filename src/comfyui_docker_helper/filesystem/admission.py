@@ -10,7 +10,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Literal, Protocol
 
 _close_descriptor = os.close
 _platform_name = os.name
@@ -21,6 +21,14 @@ _RESERVED_WHITEOUT_COMPONENT_PREFIX = ".wh."
 
 type LocalTreeMemberKind = Literal["directory", "file"]
 type LocalSourceKind = Literal["file", "tree"]
+
+
+class LocalTreeSelection(Protocol):
+    """Select native relative paths without owning filesystem traversal."""
+
+    def includes(self, relative_path: str) -> bool: ...
+
+    def descends(self, relative_path: str) -> bool: ...
 
 
 def local_tree_mode(kind: LocalTreeMemberKind) -> Literal["0755", "0644"]:
@@ -151,6 +159,7 @@ def admit_local_source(
     path: str | os.PathLike[str],
     *,
     content_lock: bool = False,
+    selection: LocalTreeSelection | None = None,
 ) -> AdmittedLocalSource:
     """Admit one source as a regular file or complete real directory tree.
 
@@ -191,7 +200,9 @@ def admit_local_source(
             validate_local_directory_absolute_path(canonical)
         return AdmittedLocalSource(
             "tree",
-            tree=_enumerate_local_tree(canonical, content_lock=content_lock),
+            tree=_enumerate_local_tree(
+                canonical, content_lock=content_lock, selection=selection
+            ),
         )
     raise TreeAdmissionError(
         "local source must be a regular file or real directory", code="source_type"
@@ -202,9 +213,10 @@ def admit_local_tree(
     path: str | os.PathLike[str],
     *,
     content_lock: bool = False,
+    selection: LocalTreeSelection | None = None,
 ) -> LocalTreeInventory:
     """Admit and return one complete local directory inventory."""
-    admitted = admit_local_source(path, content_lock=content_lock)
+    admitted = admit_local_source(path, content_lock=content_lock, selection=selection)
     if admitted.kind != "tree" or admitted.tree is None:
         raise TreeAdmissionError(
             "local source must be a real directory", code="source_type"
@@ -215,9 +227,11 @@ def admit_local_tree(
 def revalidate_local_tree(
     path: str | os.PathLike[str],
     expected: LocalTreeInventory,
+    *,
+    selection: LocalTreeSelection | None = None,
 ) -> LocalTreeInventory:
     """Re-enumerate a tree and require its accepted structure to be unchanged."""
-    current = admit_local_tree(path)
+    current = admit_local_tree(path, selection=selection)
     changed = _first_tree_structure_difference(expected, current)
     if changed is not None:
         raise TreeAdmissionError(
@@ -248,7 +262,9 @@ def _admit_local_file(path: str, *, content_lock: bool) -> AdmittedLocalFile:
     return AdmittedLocalFile(size, digest)
 
 
-def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventory:
+def _enumerate_local_tree(
+    path: str, *, content_lock: bool, selection: LocalTreeSelection | None
+) -> LocalTreeInventory:
     members: list[LocalTreeMember] = []
     pending: list[tuple[str, PurePosixPath]] = [(path, PurePosixPath("."))]
     while pending:
@@ -287,15 +303,27 @@ def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventor
                 ),
                 code="traversal_failed",
             ) from error
-        # Validate names before sorting so an unsafe name cannot influence the
-        # ordering or become part of a user-facing diagnostic accidentally.
-        validated: list[tuple[bytes, os.DirEntry[str], PurePosixPath]] = []
+        validated: list[tuple[bytes, os.DirEntry[str], PurePosixPath, bool, bool]] = []
         for entry in entries:
-            name = entry.name
-            relative = _join_tree_relative_path(relative_directory, name)
-            validated.append((relative.as_posix().encode("utf-8"), entry, relative))
+            native_relative = os.path.relpath(entry.path, path)
+            selected = selection is None or selection.includes(native_relative)
+            descend = selection is None or selection.descends(native_relative)
+            if not selected and not descend:
+                continue
+            relative = _join_tree_relative_path(
+                relative_directory, entry.name, mapped=selected
+            )
+            validated.append(
+                (
+                    relative.as_posix().encode("utf-8"),
+                    entry,
+                    relative,
+                    selected,
+                    descend,
+                )
+            )
         validated.sort(key=lambda item: item[0])
-        for _encoded, entry, relative in validated:
+        for _encoded, entry, relative, selected, descend in validated:
             full_path = os.fspath(entry.path)
             try:
                 observed = entry.stat(follow_symlinks=False)
@@ -312,8 +340,12 @@ def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventor
                     code="member_reparse",
                 )
             if stat.S_ISDIR(observed.st_mode):
-                members.append(LocalTreeMember(relative, "directory"))
-                pending.append((full_path, relative))
+                if selected:
+                    members.append(LocalTreeMember(relative, "directory"))
+                if descend:
+                    pending.append((full_path, relative))
+            elif not selected:
+                continue
             elif stat.S_ISREG(observed.st_mode):
                 try:
                     admitted = _admit_local_file(full_path, content_lock=content_lock)
@@ -336,7 +368,14 @@ def _enumerate_local_tree(path: str, *, content_lock: bool) -> LocalTreeInventor
                     code="member_type",
                 )
     try:
-        return LocalTreeInventory(tuple(sorted(members, key=_tree_member_sort_key)))
+        indexed = {member.relative_path: member for member in members}
+        for member in members:
+            for parent in _tree_parent_paths(member.relative_path):
+                if parent not in indexed:
+                    indexed[parent] = LocalTreeMember(parent, "directory")
+        return LocalTreeInventory(
+            tuple(sorted(indexed.values(), key=_tree_member_sort_key))
+        )
     except (UnicodeError, ValueError) as error:
         if isinstance(error, TreeAdmissionError):
             raise
@@ -400,10 +439,12 @@ def _observe_posix_directory_components(path: PurePosixPath) -> None:
             )
 
 
-def _join_tree_relative_path(parent: PurePosixPath, name: str) -> PurePosixPath:
+def _join_tree_relative_path(
+    parent: PurePosixPath, name: str, *, mapped: bool = True
+) -> PurePosixPath:
     relative = PurePosixPath(name) if parent == PurePosixPath(".") else parent / name
     try:
-        _validate_tree_component(name)
+        _validate_tree_component(name, mapped=mapped)
     except TreeAdmissionError as error:
         if error.relative_path is None:
             raise TreeAdmissionError(
@@ -421,7 +462,7 @@ def _join_tree_relative_path(parent: PurePosixPath, name: str) -> PurePosixPath:
     return relative
 
 
-def _validate_tree_component(name: str) -> None:
+def _validate_tree_component(name: str, *, mapped: bool = True) -> None:
     if _platform_name == "nt":
         from comfyui_docker_helper.filesystem.windows import (
             validate_local_tree_component,
@@ -445,8 +486,9 @@ def _validate_tree_component(name: str) -> None:
             "local source member name is unsafe or reserved",
             code="member_name",
         )
-    if name == _RESERVED_TREE_COMPONENT or name.startswith(
-        _RESERVED_WHITEOUT_COMPONENT_PREFIX
+    if mapped and (
+        name == _RESERVED_TREE_COMPONENT
+        or name.startswith(_RESERVED_WHITEOUT_COMPONENT_PREFIX)
     ):
         raise TreeAdmissionError(
             "local source member name is unsafe or reserved",

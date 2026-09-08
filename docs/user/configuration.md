@@ -28,7 +28,7 @@ Repeat `-f/--file` to merge TOML files in command-line order. Tables merge recur
 
 - `system.extra_packages` uses the admitted Debian package name;
 - `python.extra_packages`, `python.uv_tools`, and `pytorch.extra_packages` use the complete canonical requirement, including the normalized distribution name, normalized and sorted extras, selector or named direct reference, and marker;
-- `comfyui.custom_nodes` uses a lowercase-only Registry resource ID or the exact direct-Git URL;
+- `comfyui.custom_nodes` uses a lowercase-only Registry resource ID, the exact direct-Git URL, or the local node target directory;
 - `files` uses the normalized direct `target` identity; and
 - `cdh.downloader.credentials` uses the canonical HTTP(S) origin and path represented by `match`; and
 - `cdh.git.credentials` uses the canonical credential context represented by `match`.
@@ -112,17 +112,27 @@ Unnamed bare URLs, local paths and `file:` URLs, editable requirements, raw pip/
 
 ## Choose custom nodes and build hooks
 
-Custom nodes may use either a Registry identity or a direct-Git URL. Registry nodes require Manager; direct-Git nodes do not. Mixed declarations retain their effective configuration order. Set `custom_nodes = []` in a later layer to remove inherited nodes.
+Custom nodes may use a Registry identity, a direct-Git URL, or a local package directory. Registry nodes require Manager; Git and local nodes work with both Manager and comfy-cli disabled. Mixed declarations retain their effective configuration order. Set `custom_nodes = []` in a later layer to remove inherited nodes.
 
-Git nodes run `pre_clone_hooks` before cdh creates the target directory and clones the repository. After the locked detached checkout, recursive submodule checkout, and source identity checks succeed, `pre_install_hooks` run before cdh reads root `requirements.txt` or executes optional root `install.py`. Use this stage to patch node sources or installation inputs; cdh consumes the resulting files under its existing requirements restrictions. `post_install_hooks` run after successful installation and identity checks. All configured stages still run when either or both optional installation files are absent. Registry pre/post hooks surround the Manager installation command; Registry nodes do not accept pre-clone hooks.
+Git nodes run `pre_clone_hooks` before cdh creates the target directory and clones the repository. After the locked detached checkout, recursive submodule checkout, and source identity checks succeed, `pre_install_hooks` run before cdh reads root `requirements.txt` or executes optional root `install.py`. Use this stage to patch node sources or installation inputs; cdh consumes the resulting files under its existing requirements restrictions. `post_install_hooks` run after successful installation and identity checks. All configured stages still run when either or both optional installation files are absent. Registry pre/post hooks surround the Manager installation command; Registry and local nodes do not accept pre-clone hooks.
 
-Nodes and their hook arrays execute in order. Any hook, source preparation, installation, or boundary-check failure stops later work; post-install hooks are not failure cleanup. All build hooks run with `COMFYUI_PATH` as their working directory, using bash for `.sh` or the application venv Python for `.py`. Join the configured `target_dir` under `COMFYUI_PATH/custom_nodes` to operate on Git node files; pre-clone must leave that target absent. A hook's environment or directory changes do not propagate to later subprocesses.
+Local nodes require `source` and `target_dir`; see the [full example](../../examples/full.toml). A relative source uses the real parent directory of the first configuration file, and the target is a safe direct child of `COMFYUI_PATH/custom_nodes`. A later local declaration with the same target overlays the original position, including replacing its source. Local and Git nodes cannot share a target. Render/build accepts a real directory, including an ordinary non-Git working directory; validation does not open it. The source and context output must not overlap, and selected links, reparse points, special files, and unsafe names are rejected.
+
+cdh automatically reads only the source root's `.dockerignore` using Docker SDK matching semantics, including its negation and directory-pruning behavior; this is not a promise of complete Docker CLI compatibility. The root rule file remains selected and is copied unchanged, while nested ignore files are ordinary members. Missing or empty rules select the whole tree. An empty selected tree is valid, creates its target, and produces a preparation warning. Local `[[files]]` directory sources still select complete trees without ignore filtering.
+
+The image copies the selected local source before running pre-install hooks, then processes root `requirements.txt` and optional root `install.py` just as for Git nodes, and runs post-install hooks on success. Initial directory/file modes are `0755`/`0644`; trusted hooks and installers may subsequently modify the node. `content_lock` binds the selected input, not the installed tree; see [local-node capture and locking](build-and-lock.md#local-node-capture-and-locking).
+
+A Dev Container can use this build-time capture to include an unpublished local node and its dependencies.
+
+Nodes and their hook arrays execute in order. Any hook, source preparation, installation, or boundary-check failure stops later work; post-install hooks are not failure cleanup. All build hooks run with `COMFYUI_PATH` as their working directory, using bash for `.sh` or the application venv Python for `.py`. Join the configured `target_dir` under `COMFYUI_PATH/custom_nodes` to operate on Git or local node files; pre-clone must leave that target absent. A hook's environment or directory changes do not propagate to later subprocesses.
 
 Hook paths are relative to the directory passed explicitly with `--build-hooks-dir`; there is no implicit hook root. Each list defaults to empty and follows the ordinary list replacement rules above. The repository includes small [pre-clone](../../examples/build-hooks/pre-clone.sh), [pre-install](../../examples/build-hooks/pre.sh), and [post-install](../../examples/build-hooks/post.sh) examples in the [full configuration](../../examples/full.toml). Hooks execute during the combined custom-node build instruction and may be skipped by a BuildKit cache hit.
 
 Build hooks and custom-node installers execute trusted user-selected code during the image build. Review them before use, and do not put secrets in hook files because their contents remain in the image and its layers.
 
 ## Add files during the image build
+
+Files are applied after node installation and hooks; overlaying node files does not reinstall dependencies or rerun hooks.
 
 Every build file explicitly selects an HTTP or host-local source. Both variants use the same `source + target` operation shape:
 

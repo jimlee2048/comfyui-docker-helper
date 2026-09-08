@@ -10,16 +10,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from comfyui_docker_helper.config.planning.build_plan import (
-    ApplicationPhase,
     GitNodePlan,
-)
-from comfyui_docker_helper.config.planning.requirements import (
-    ComfyUIRequirementsError,
-    parse_ordinary_requirements,
 )
 from comfyui_docker_helper.config.validation.selectors import is_safe_git_target_dir
 from comfyui_docker_helper.container.build.custom_nodes import contracts
-from comfyui_docker_helper.container.process.runners import ContainerRuntime, run_argv
 
 _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 _GITLINK_MODE = b"160000"
@@ -71,61 +65,6 @@ def _prepare_git_node(
         description=f"Git node {target.name} recursive submodule checkout",
     )
     return target
-
-
-def _install_git_root_surfaces(
-    node: GitNodePlan,
-    target: Path,
-    application: ApplicationPhase,
-    runtime: ContainerRuntime,
-    uv_path: Path,
-    constraints_path: Path,
-    python_environment: Mapping[str, str],
-) -> None:
-    requirements = _optional_root_file(target, "requirements.txt")
-    if requirements is not None:
-        try:
-            requirements_rows = parse_ordinary_requirements(
-                requirements.read_bytes(),
-                python_version=application.pytorch.python_version,
-                platform=application.pytorch.platform,
-                machine="x86_64",
-            )
-        except (OSError, ComfyUIRequirementsError) as error:
-            raise contracts.CustomNodeInstallError(
-                f"Git node {Path(node.target).name} requirements are invalid"
-            ) from error
-        if requirements_rows:
-            run_argv(
-                (
-                    uv_path,
-                    "--no-config",
-                    "pip",
-                    "install",
-                    "--python",
-                    runtime.python,
-                    "--no-python-downloads",
-                    "--default-index",
-                    application.python_index_url,
-                    "--constraint",
-                    constraints_path,
-                    "--requirements",
-                    requirements,
-                ),
-                cwd=target,
-                env=python_environment,
-                description=f"Git node {target.name} requirements install",
-                close_stdin=True,
-            )
-    install_script = _optional_root_file(target, "install.py")
-    if install_script is not None:
-        run_argv(
-            (runtime.python, install_script),
-            cwd=target,
-            env=python_environment,
-            description=f"Git node {target.name} install.py",
-            close_stdin=True,
-        )
 
 
 def _verify_git_provenance(
@@ -490,33 +429,6 @@ def _planned_git_target(node: GitNodePlan, custom_nodes_root: Path) -> Path:
             "Git target does not match the safe BuildPlan path"
         )
     return target
-
-
-def _optional_root_file(root: Path, name: str) -> Path | None:
-    path = root / name
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        raise contracts.CustomNodeInstallError(
-            f"Git node root {name} could not be inspected"
-        ) from error
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise contracts.CustomNodeInstallError(
-            f"Git node root {name} must be one regular file"
-        )
-    try:
-        resolved = path.resolve(strict=True)
-    except OSError as error:
-        raise contracts.CustomNodeInstallError(
-            f"Git node root {name} could not be resolved"
-        ) from error
-    if resolved.parent != root:
-        raise contracts.CustomNodeInstallError(
-            f"Git node root {name} escapes its repository"
-        )
-    return path
 
 
 def _run_git(

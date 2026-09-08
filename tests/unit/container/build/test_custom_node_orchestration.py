@@ -29,6 +29,9 @@ from comfyui_docker_helper.container.build.custom_nodes import (
 from comfyui_docker_helper.container.build.custom_nodes import (
     registry as registry_installer,
 )
+from comfyui_docker_helper.container.build.custom_nodes import (
+    root_install,
+)
 from comfyui_docker_helper.container.build.custom_nodes.contracts import (
     CustomNodeInstallError,
 )
@@ -64,7 +67,7 @@ from tests.container_installer_support import (
 
 def _patch_node_runner(monkeypatch: pytest.MonkeyPatch, runner) -> None:
     monkeypatch.setattr(registry_installer, "run_argv", runner)
-    monkeypatch.setattr(git_installer, "run_argv", runner)
+    monkeypatch.setattr(root_install, "run_argv", runner)
 
 
 def _patch_git_install(monkeypatch: pytest.MonkeyPatch, installer) -> None:
@@ -74,7 +77,7 @@ def _patch_git_install(monkeypatch: pytest.MonkeyPatch, installer) -> None:
         return target
 
     monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
-    monkeypatch.setattr(git_installer, "_install_git_root_surfaces", installer)
+    monkeypatch.setattr(root_install, "install_root_surfaces", installer)
 
 
 def _hook_digest(content: bytes) -> str:
@@ -173,7 +176,7 @@ def test_final_observer_proves_git_before_exact_registry_scan(
         registry_installer,
         "_verify_registry_set",
         lambda _root, expected, **kwargs: events.append(
-            ("registry", tuple(expected), tuple(kwargs["excluded_git_targets"]))
+            ("registry", tuple(expected), tuple(kwargs["excluded_direct_targets"]))
         ),
     )
 
@@ -561,8 +564,8 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
     monkeypatch.setattr(
         custom_node_installer,
         "_verify_mixed_state",
-        lambda _root, admitted, future, *, prepared_git=None, **_kwargs: events.append(
-            ("proof", names(admitted), names(future), prepared_git)
+        lambda _root, admitted, future, *, prepared_node=None, **_kwargs: events.append(
+            ("proof", names(admitted), names(future), prepared_node)
         ),
     )
     monkeypatch.setattr(
@@ -580,7 +583,7 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         return target
 
     def install_git(
-        node,
+        description,
         target,
         _application,
         _runtime,
@@ -588,12 +591,12 @@ def test_mixed_executor_preserves_one_original_order_and_hook_boundaries(
         _constraints_path,
         python_environment,
     ) -> None:
-        assert target == Path(node.target)
+        assert description == f"Git node {target.name}"
         observed_python_environment.update(python_environment)
         events.append(("install", target.name))
 
     monkeypatch.setattr(git_installer, "_prepare_git_node", prepare_git)
-    monkeypatch.setattr(git_installer, "_install_git_root_surfaces", install_git)
+    monkeypatch.setattr(root_install, "install_root_surfaces", install_git)
 
     def run_hook(hook, **kwargs) -> None:
         assert kwargs["env"] == source_environment
@@ -948,10 +951,10 @@ def test_mixed_proof_excludes_git_only_after_fresh_git_proof(
 
     monkeypatch.setattr(git_installer, "_verify_git_provenance", verify_git)
 
-    def verify_registry(_root, expected, *, excluded_git_targets=()):
+    def verify_registry(_root, expected, *, excluded_direct_targets=()):
         events.append("registry")
         assert expected == ()
-        assert excluded_git_targets == [target]
+        assert excluded_direct_targets == [target]
 
     monkeypatch.setattr(registry_installer, "_verify_registry_set", verify_registry)
 
@@ -960,7 +963,7 @@ def test_mixed_proof_excludes_git_only_after_fresh_git_proof(
             runtime.comfyui_path / "custom_nodes",
             (git,) if state == "admitted" else (),
             (_node("future-registry", "1.0.0"),),
-            prepared_git=git if state == "prepared" else None,
+            prepared_node=git if state == "prepared" else None,
             application=application,
             runtime=runtime,
             manager_authority=object(),
@@ -1487,9 +1490,11 @@ def test_git_hook_mutation_is_proved_before_next_hook_or_node(
 
     monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
     monkeypatch.setattr(
-        git_installer,
-        "_install_git_root_surfaces",
-        lambda node, *_args: operations.append(f"install:{Path(node.target).name}"),
+        root_install,
+        "install_root_surfaces",
+        lambda _description, target, *_args: operations.append(
+            f"install:{target.name}"
+        ),
     )
     monkeypatch.setattr(git_installer, "_verify_git_provenance", lambda *_args: None)
     monkeypatch.setattr(custom_node_installer, "run_hook", hook)
@@ -1565,8 +1570,8 @@ def test_source_preparation_proof_failure_prevents_pre_install_and_completion(
         lambda name, **_kwargs: operations.append(name),
     )
     monkeypatch.setattr(
-        git_installer,
-        "_install_git_root_surfaces",
+        root_install,
+        "install_root_surfaces",
         lambda *_args: operations.append("install"),
     )
 
@@ -1599,10 +1604,10 @@ def test_empty_git_hook_phases_keep_prepared_proof_and_independent_final_proof(
         admitted,
         future,
         *,
-        prepared_git: GitNodePlan | None = None,
+        prepared_node: GitNodePlan | None = None,
         **_kwargs,
     ) -> None:
-        operations.append(("proof", tuple(admitted), tuple(future), prepared_git))
+        operations.append(("proof", tuple(admitted), tuple(future), prepared_node))
 
     def prepare(node, *_args) -> Path:
         operations.append("prepare")
@@ -1613,8 +1618,8 @@ def test_empty_git_hook_phases_keep_prepared_proof_and_independent_final_proof(
     monkeypatch.setattr(custom_node_installer, "_verify_mixed_state", prove)
     monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
     monkeypatch.setattr(
-        git_installer,
-        "_install_git_root_surfaces",
+        root_install,
+        "install_root_surfaces",
         lambda *_args: operations.append("install"),
     )
     custom_node_installer.install_custom_nodes(

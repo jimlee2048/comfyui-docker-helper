@@ -295,6 +295,21 @@ pre_install_hooks = ["pre.sh"]
 # After successful requirements/install.py processing and identity checks.
 post_install_hooks = ["post.sh"]
 
+[[comfyui.custom_nodes]]
+# Local node package; no Git repository, Manager, or comfy-cli required.
+type = "local"
+# Required directory, relative to the first config file's real parent directory.
+# Read only during render/build; change this placeholder before building.
+source = "../my-custom-node"
+# Required safe direct child of COMFYUI_PATH/custom_nodes; also the merge key.
+target_dir = "my-custom-node"
+# Default false. True binds the selected input, including root .dockerignore.
+# Matching uses Docker SDK semantics; files trees still copy all members.
+content_lock = false
+# After source copy, before root requirements.txt and optional install.py.
+pre_install_hooks = []
+post_install_hooks = []
+
 # For any direct-Git build, every Secret referenced by the effective credential
 # routes is granted to the combined trusted custom-node installation step.
 

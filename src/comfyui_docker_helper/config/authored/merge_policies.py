@@ -69,6 +69,9 @@ def _custom_node_key(item: Any) -> MergeKey | None:
         except ValueError:
             return None
         return ("registry", identity)
+    if node_type == "local":
+        target = item.get("target_dir")
+        return ("local", target) if isinstance(target, str) else None
     if node_type == "git":
         url = item.get("url")
         return ("git", url) if isinstance(url, str) else None

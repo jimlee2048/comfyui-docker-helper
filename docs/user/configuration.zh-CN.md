@@ -28,7 +28,7 @@ cdh host validate \
 
 - `system.extra_packages` 使用允许的 Debian 包名；
 - `python.extra_packages`、`python.uv_tools` 和 `pytorch.extra_packages` 使用完整的 canonical requirement，其中包括规范化的分发包名、规范化并排序后的 extras、selector 或具名 direct reference，以及 marker；
-- `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID，或精确的直接 Git URL；
+- `comfyui.custom_nodes` 使用仅转为小写的 Registry 资源 ID、精确的直接 Git URL，或 local 节点的目标目录；
 - `files` 使用规范化后的直接 `target` 标识；
 - `cdh.downloader.credentials` 使用 `match` 表示的 canonical HTTP(S) origin 与路径；
 - `cdh.git.credentials` 使用 `match` 所表示的 canonical credential context。
@@ -112,17 +112,27 @@ Marker 只针对 cdh 的固定构建目标求值一次：配置指定的 CPython
 
 ## 选择自定义节点和构建 Hook
 
-自定义节点可以使用 Registry 标识，也可以使用直接 Git URL。Registry 节点需要 Manager；直接 Git 节点不需要。混合声明会保留它们在生效配置中的顺序。在靠后的层中设置 `custom_nodes = []` 可移除继承的节点。
+自定义节点可以使用 Registry 标识、直接 Git URL 或本地包目录。Registry 节点需要 Manager；Git 和 local 节点在 Manager 与 comfy-cli 都关闭时也可使用。混合声明会保留它们在生效配置中的顺序。在靠后的层中设置 `custom_nodes = []` 可移除继承的节点。
 
-Git 节点在 cdh 创建目标目录并克隆仓库之前运行 `pre_clone_hooks`。锁定 commit 的 detached checkout、递归 submodule checkout 和源码身份检查通过后，`pre_install_hooks` 在 cdh 读取根目录 `requirements.txt` 或执行可选根目录 `install.py` 之前运行。可在此阶段修补节点源码或安装输入；cdh 按现有 requirements 限制消费修改后的文件。`post_install_hooks` 在安装和身份检查成功后运行。即使一个或两个可选安装文件不存在，所有已配置阶段仍然运行。Registry 的 pre/post Hook 包围 Manager 安装命令；Registry 节点不接受 pre-clone Hook。
+Git 节点在 cdh 创建目标目录并克隆仓库之前运行 `pre_clone_hooks`。锁定 commit 的 detached checkout、递归 submodule checkout 和源码身份检查通过后，`pre_install_hooks` 在 cdh 读取根目录 `requirements.txt` 或执行可选根目录 `install.py` 之前运行。可在此阶段修补节点源码或安装输入；cdh 按现有 requirements 限制消费修改后的文件。`post_install_hooks` 在安装和身份检查成功后运行。即使一个或两个可选安装文件不存在，所有已配置阶段仍然运行。Registry 的 pre/post Hook 包围 Manager 安装命令；Registry 和 local 节点不接受 pre-clone Hook。
 
-节点及各 Hook 数组按顺序执行。任何 Hook、源码准备、安装或边界检查失败都会阻止后续工作；post-install Hook 不用于失败清理。所有构建 Hook 的工作目录均为 `COMFYUI_PATH`，`.sh` 使用 bash，`.py` 使用应用 venv Python。操作 Git 节点文件时，将配置的 `target_dir` 拼接在 `COMFYUI_PATH/custom_nodes` 下；pre-clone 必须让该目标保持不存在。Hook 内的环境或目录变更不会传回后续子进程。
+Local 节点必须指定 `source` 和 `target_dir`，参见[完整示例](../../examples/full.toml)。相对 source 以首个配置文件的真实父目录为基准，target 是 `COMFYUI_PATH/custom_nodes` 下的安全直接子目录。后层同目标的 local 声明会在原位置覆盖，包括替换 source；local 与 Git 节点不能共用目标。render/build 接受真实目录，包括普通非 Git 工作目录；validate 不打开 source。source 与上下文输出不能重叠，选中的链接、reparse point、特殊文件及不安全名称会被拒绝。
+
+cdh 只自动读取 source 根目录的 `.dockerignore`，采用 Docker SDK 的匹配语义，包括否定规则及目录剪枝行为；这不承诺完整兼容 Docker CLI。根规则文件始终被选中并原样复制，嵌套 ignore 文件仅作为普通成员。缺少规则文件或规则为空时选择完整树。选中树为空也有效，仍会创建目标并产生准备阶段 warning。Local `[[files]]` 目录仍选择完整树，不使用 ignore 筛选。
+
+镜像先复制选中的 local source，再运行 pre-install Hook，然后像 Git 节点一样处理根 `requirements.txt` 和可选的根 `install.py`，成功后运行 post-install Hook。初始目录/文件权限为 `0755`/`0644`；受信任 Hook 和安装程序之后可以修改节点。`content_lock` 绑定选中输入，而非安装后的树；参见[本地节点捕获与锁定](build-and-lock.zh-CN.md#本地节点捕获与锁定)。
+
+Dev Container 可通过这项构建时捕获功能包含尚未发布的本地节点及其依赖。
+
+节点及各 Hook 数组按顺序执行。任何 Hook、源码准备、安装或边界检查失败都会阻止后续工作；post-install Hook 不用于失败清理。所有构建 Hook 的工作目录均为 `COMFYUI_PATH`，`.sh` 使用 bash，`.py` 使用应用 venv Python。操作 Git 或 local 节点文件时，将配置的 `target_dir` 拼接在 `COMFYUI_PATH/custom_nodes` 下；pre-clone 必须让该目标保持不存在。Hook 内的环境或目录变更不会传回后续子进程。
 
 Hook 路径相对于通过 `--build-hooks-dir` 显式传入的目录；不存在隐式 Hook 根目录。每个列表默认空，遵循上文的普通列表替换规则。[完整配置](../../examples/full.toml) 使用仓库中简短的 [pre-clone](../../examples/build-hooks/pre-clone.sh)、[pre-install](../../examples/build-hooks/pre.sh) 和 [post-install](../../examples/build-hooks/post.sh) 示例。Hook 在合并后的自定义节点构建指令内执行，命中 BuildKit 缓存时可能不会重新执行。
 
 构建 Hook 和自定义节点安装程序会在镜像构建期间执行由用户选择的可信代码。使用前请检查这些代码；不要在 Hook 文件中放置机密信息，因为其内容会保留在镜像及其各层中。
 
 ## 在镜像构建期间添加文件
+
+files 在节点安装和 Hook 完成后应用；覆盖节点文件不会重新安装依赖或重跑 Hook。
 
 每个构建文件都要显式选择 HTTP 或宿主机本地来源。两种 variant 使用相同的 `source + target` 操作形状：
 

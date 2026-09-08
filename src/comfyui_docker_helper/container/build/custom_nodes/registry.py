@@ -64,10 +64,10 @@ def _verify_registry_set(
     custom_nodes_root: Path,
     expected: Sequence[RegistryNodePlan],
     *,
-    excluded_git_targets: Sequence[Path] = (),
+    excluded_direct_targets: Sequence[Path] = (),
 ) -> None:
     observed = _scan_registry_identities(
-        custom_nodes_root, excluded_git_targets=excluded_git_targets
+        custom_nodes_root, excluded_direct_targets=excluded_direct_targets
     )
     for node in expected:
         normalized = registry_distribution_identity(node.id)
@@ -96,13 +96,13 @@ def _verify_registry_set(
 def _scan_registry_identities(
     custom_nodes_root: Path,
     *,
-    excluded_git_targets: Sequence[Path] = (),
+    excluded_direct_targets: Sequence[Path] = (),
 ) -> dict[str, _ObservedRegistryIdentity]:
     root = contracts._require_real_directory(custom_nodes_root, "custom-nodes root")
-    excluded = set(excluded_git_targets)
+    excluded = set(excluded_direct_targets)
     if any(path.parent != root for path in excluded):
         raise contracts.CustomNodeInstallError(
-            "Git exclusion target escapes custom-nodes root"
+            "Direct-node exclusion target escapes custom-nodes root"
         )
     observed: dict[str, _ObservedRegistryIdentity] = {}
     try:

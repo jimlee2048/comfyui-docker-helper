@@ -9,7 +9,7 @@ The same `comfyui-docker-helper` distribution provides operator-facing host comm
 ```mermaid
 flowchart LR
     Operator["Operator or CI"] --> Host["cdh host"]
-    Inputs["TOML, Secret sources, local hooks/files, existing lock"] --> Host
+    Inputs["TOML, Secret sources, local hooks/files/nodes, existing lock"] --> Host
     Host <--> Providers["Git, registries, package sources, Docker"]
     Host --> Context["Rendered build context"]
     Host --> Publication["Process-local tags and output"]
@@ -30,7 +30,7 @@ The root CLI, configuration, shared services, rendering, and every `cdh host *` 
 
 `cdh container build` groups image-build steps, while `cdh container runtime` owns runtime control. Both are image-internal Linux execution surfaces. On a non-Linux host the package and root CLI remain importable, group and leaf help remain available, and a syntactically complete helper invocation returns the platform-boundary diagnostic before Plan access or Linux service execution, without importing its Linux-only implementation closure. Required-option errors remain CLI usage errors on every host.
 
-Host source admission for public `type = "local"` `[[files]]` declarations handles one user-selected regular file or complete directory tree under a cooperative-input contract. It rejects unsafe shapes and observed links, reparse points, and special files; accepted file/tree facts flow through the public-local admission bundle and BuildPlan, while host locators remain out of serialized artifacts. Hook roots and local executable inputs use separate admission/acquisition paths. The boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
+Host source admission for public `type = "local"` `[[files]]` declarations handles one user-selected regular file or complete directory tree under a cooperative-input contract. It rejects unsafe shapes and observed links, reparse points, and special files; accepted file/tree facts flow through the public-local admission bundle and BuildPlan, while host locators remain out of serialized artifacts. Local custom-node sources use a separate filtered-tree admission bundle; hook roots and local executable inputs use their own admission/acquisition paths. The boundary is separate from cdh-owned private state and from the container download, placement, runtime-state, and executable-containment rules in [Cross-module contracts](contracts.md#host-local-filesystem-boundaries).
 
 ## Component responsibilities
 
@@ -38,7 +38,7 @@ Host source admission for public `type = "local"` `[[files]]` declarations handl
 | --- | --- |
 | [`cli_output/`](../../src/comfyui_docker_helper/cli_output/) | Presentation-neutral root detail settings, independent stream capability policy, control-safe text, and the minimal injected event-sink protocol. It contains no Host or Container renderer. |
 | [`config/`](../../src/comfyui_docker_helper/config/) | Strict public and runtime models, merge and validation, and canonical request/lock/reconciliation models. `config/planning/` owns local-tree digests, serialized planning projections, and BuildPlan construction; `config/evidence/` owns final-manifest schemas. The component owns shared decisions and serialized shapes, not concrete external I/O orchestration. |
-| [`filesystem/`](../../src/comfyui_docker_helper/filesystem/) | Cooperative cross-platform regular-file and complete local-tree admission, member inventory records, bounded reads and streaming, platform-available clone support, and Windows filesystem primitives. It is a shared low-level boundary with no Host, rendering, or Container orchestration. |
+| [`filesystem/`](../../src/comfyui_docker_helper/filesystem/) | Cooperative cross-platform regular-file and complete or selected local-tree admission, member inventory records, bounded reads and streaming, platform-available clone support, and Windows filesystem primitives. It is a shared low-level boundary with no Host, rendering, or Container orchestration. |
 | [`host/`](../../src/comfyui_docker_helper/host/) | Operator CLI composition, provider acquisition, command-scoped Secret resolution and credential delivery, Docker-backed uv resolution, canonical-wheel construction, lock/context orchestration, publication choices, diagnostics, and Buildx invocation. It owns host filesystem, network, Git, Docker, and package-build effects. |
 | [`rendering/`](../../src/comfyui_docker_helper/rendering/) | Deterministic projection of one BuildPlan plus verified release/local inputs into a directly Buildx-usable context and Dockerfile. Rendering does not plan or resolve identities. |
 | [`container/`](../../src/comfyui_docker_helper/container/) | Image-internal BuildPlan admission, build-time installation/download/local-tree normalization/final observation, and runtime configuration, transfer, hook, SSH, process, and lifecycle services. |
@@ -60,7 +60,7 @@ Data flows forward:
 ```text
 effective config
   -> in-memory canonical request graph
-  -> one Host public-local-file/tree admission bundle
+  -> Host public-local-file/tree and local-node admission bundles
   -> accepted canonical lock
   -> BuildPlan
   -> private materialization/rendered context
@@ -76,7 +76,7 @@ The following table locates the main planning and evidence concepts. The [cross-
 
 | Concept | Location and role |
 | --- | --- |
-| [Canonical request graph](../../src/comfyui_docker_helper/config/planning/request.py) | Process-local intent shared by reconciliation and BuildPlan construction, with shape-neutral local requests. See [planning contracts](contracts.md#canonical-request-graph). |
+| [Canonical request graph](../../src/comfyui_docker_helper/config/planning/request.py) | Process-local intent shared by reconciliation and BuildPlan construction, with shape-neutral public-files local requests. See [planning contracts](contracts.md#canonical-request-graph). |
 | Host public-local-file/tree admission bundle ([adapter](../../src/comfyui_docker_helper/host/context/local_inputs.py)) | Process-local source classification, inventory, materialization sources, and warnings shared by planning and rendering. Hooks and local executables use separate authorities. See [the bundle contract](contracts.md#host-local-admission-bundle). |
 | [Canonical lock](../../src/comfyui_docker_helper/config/planning/canonical_lock.py) | Serialized host reconciliation state for exact external and opted-in local-content identities, excluded from Docker build input. See [canonical lock](contracts.md#canonical-lock). |
 | [BuildPlan](../../src/comfyui_docker_helper/config/planning/build_plan.py) | Immutable build execution authority and complete serialized local-tree inventory, constructed from the graph, accepted lock, and admitted inputs. See [BuildPlan](contracts.md#buildplan). |
@@ -94,7 +94,9 @@ The canonical cdh wheel crosses the host-to-build boundary as one verified relea
 
 ### Render and reconcile a context
 
-The host render service obtains prerequisite exact identities, assembles the request graph, and admits public local file/tree declarations once. It reconciles the lock and constructs one BuildPlan using those shared inputs, then passes the plan, canonical wheel, and exact local sources to materialization. Hook roots and local executables use separate adapters and acquirers. See [Host local-admission bundle](contracts.md#host-local-admission-bundle).
+The host render service obtains prerequisite exact identities, assembles the request graph, and admits public local file/tree and local-node declarations once through separate bundles. It reconciles the lock and constructs one BuildPlan using those shared inputs, then passes the plan, canonical wheel, and exact local sources to materialization. Hook roots and local executables use separate adapters and acquirers. See [Host local-admission bundle](contracts.md#host-local-admission-bundle).
+
+The [local-node adapter](../../src/comfyui_docker_helper/host/context/local_nodes.py) owns root `.dockerignore` acquisition and Docker SDK selection. Shared filesystem admission performs safe traversal with that selection policy. The local-node bundle separates no-locator planning facts from frozen rule/source materialization inputs; ordinary file trees keep complete-tree semantics. Rendering projects selected local nodes into independent `build/local-nodes/` slots and mounts that subtree read-only only for the combined custom-node instruction.
 
 Canonical Git and downloader credential route metadata enters the request graph, image-configuration digest, and BuildPlan, while host Secret source locators and resolved values remain process-local. A command-scoped host session acquires each logical source once and applies consumer-specific Git-password or Bearer-token admission. On `host build`, the accepted BuildPlan determines the consumer-isolated snapshots bound to the real Buildx invocation. See the [host Secret source and credential contract](contracts.md#host-secret-source-and-credential-boundary) for exact matching, transport, persistence, and cleanup boundaries.
 
@@ -111,6 +113,8 @@ For a build with an effective HTTPX file, the host similarly binds every distinc
 When `host build --ssh` is applicable to a direct-Git custom node, POSIX hosts require a non-empty `SSH_AUTH_SOCK`; native Windows instead delegates `default` agent selection to Docker and BuildKit because there is no POSIX socket-environment contract to validate. After context preparation, the host maps the default agent and existing known-hosts files directly into the Buildx invocation. POSIX discovers the defined user and system paths, while Windows discovers only user-profile paths. These compatibility inputs bypass configuration, reconciliation, BuildPlan, and materialization; rendering remains a function of BuildPlan and declares only stable optional mount identities for a direct-Git plan.
 
 After context preparation, the host forwards any selected external-cache import or export specification directly to Buildx. Cache selection belongs to host Docker execution rather than the BuildPlan or rendered context; see the [Docker transport contract](contracts.md#uv-release-backend-docker-transport-and-cdh-wheel) for the complete ownership boundary.
+
+Within the declaration-order custom-node orchestrator, the [local preparation owner](../../src/comfyui_docker_helper/container/build/custom_nodes/local.py) admits the mounted selected tree and exclusively creates and copies the current target before its pre-install hooks. The shared root installer processes Git and local `requirements.txt` and `install.py` in the application environment. Container code consumes the selected inventory and does not reinterpret ignore rules. Final local-node observation proves the real target root after all mutations; input identity remains Plan-owned rather than becoming a final-tree checksum.
 
 The Dockerfile installs the toolchain and application, processes configured nodes, and then applies authoritative HTTP or local build-file content before final observation. Before copying local trees, a Plan-bound read-only check rejects incompatible existing destination shapes. Each tree is then copied once to its exact target root, and the Plan-mounted `normalize-local-trees` helper applies the selected image modes. Both helpers stay limited to expected paths. Final observation publishes compact Plan-bound evidence after all mutations and does not make another planning decision. Only HTTP file declarations project into baked runtime defaults. See the [image projection and final-evidence contract](contracts.md#image-local-tree-projection-and-final-evidence) and [final-observation contract](contracts.md#final-observation-and-replay-ceiling).
 

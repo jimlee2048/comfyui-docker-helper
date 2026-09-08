@@ -45,6 +45,9 @@ from comfyui_docker_helper.container.build.custom_nodes import (
 from comfyui_docker_helper.container.build.custom_nodes import (
     orchestrator as custom_node_installer,
 )
+from comfyui_docker_helper.container.build.custom_nodes import (
+    root_install,
+)
 from comfyui_docker_helper.container.build.custom_nodes.contracts import (
     CustomNodeInstallError,
 )
@@ -652,12 +655,10 @@ def test_hook_identity_drift_stops_before_next_node(
             Path(second.target).mkdir()
 
     monkeypatch.setattr(git_installer, "_prepare_git_node", prepare)
-    monkeypatch.setattr(
-        git_installer, "_install_git_root_surfaces", lambda *_args: None
-    )
+    monkeypatch.setattr(root_install, "install_root_surfaces", lambda *_args: None)
     monkeypatch.setattr(custom_node_installer, "run_hook", mutate)
     monkeypatch.setattr(
-        git_installer,
+        root_install,
         "run_argv",
         lambda *_args, **_kwargs: pytest.fail("final health must not run"),
     )
@@ -785,7 +786,7 @@ def test_real_hooks_patch_install_inputs_after_recursive_checkout(
             return subprocess.CompletedProcess(argv, 0)
         return run_argv(argv, **kwargs)
 
-    monkeypatch.setattr(git_installer, "run_argv", install)
+    monkeypatch.setattr(root_install, "run_argv", install)
     custom_node_installer.install_custom_nodes(
         phase,
         application,

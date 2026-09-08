@@ -789,7 +789,7 @@ def test_build_plan_parser_rejects_execution_sensitive_scalar_forgery(
         ("comfyui-release-floor", "below the supported floor"),
         ("git-target-sibling", "exact child of ComfyUI custom_nodes"),
         ("git-target-nested", "exact child of ComfyUI custom_nodes"),
-        ("duplicate-git-target", "Git node targets must be unique"),
+        ("duplicate-git-target", "Custom node targets must be unique"),
         ("file-target-outside", "strict descendants of ComfyUI"),
         ("duplicate-file-target", "file targets must be unique"),
         ("apt-option", "canonical package identity"),

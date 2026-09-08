@@ -61,14 +61,19 @@ def test_local_node_context_is_independent_and_self_contained(tmp_path: Path, lo
         assert (snapshot / "main.py").stat().st_mode & 0o777 == 0o644
 
 
+@pytest.mark.parametrize(
+    "member,changed",
+    [("main.py", b"modified"), (".dockerignore", b"# new comment\ncache\n")],
+    ids=["ordinary-source", "rule-comments"],
+)
 def test_unlocked_modes_stream_check_but_locked_preserves_old_bytes(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, member, changed
 ):
     config, source, output = _inputs(tmp_path)
     prepared = _prepare(config, output, FakeAcquirer())
     original = _tree(output)
-    (source / "main.py").write_bytes(b"modified")
-    (source / ".dockerignore").write_bytes(b"# new comment\ncache\n")
+    original_bytes = (source / member).read_bytes()
+    (source / member).write_bytes(changed)
 
     def no_copy(*_args, **_kwargs):
         pytest.fail("no-write comparison copied a local file")
@@ -80,8 +85,7 @@ def test_unlocked_modes_stream_check_but_locked_preserves_old_bytes(
         _prepare(config, output, FakeAcquirer(), options=PlanningOptions(check=True))
     assert raised.value.diagnostics[0].code == "render.context_changed"
     assert _tree(output) == original
-    (source / "main.py").write_bytes(b"original")
-    (source / ".dockerignore").write_bytes(b"cache\n")
+    (source / member).write_bytes(original_bytes)
     (source / "cache" / "ignored.py").write_bytes(b"ignored change")
     checked = _prepare(
         config, output, FakeAcquirer(), options=PlanningOptions(check=True)

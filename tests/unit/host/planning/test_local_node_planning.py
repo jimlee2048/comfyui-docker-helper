@@ -105,8 +105,17 @@ def test_local_node_round_trip_and_compact_evidence(locked):
     assert "/private/node" not in plan.model_dump_json()
 
 
-@pytest.mark.parametrize("case", ["missing", "duplicate", "unused", "mode"])
-def test_local_input_set_must_match_requests(case):
+@pytest.mark.parametrize(
+    "case,diagnostic",
+    [
+        ("missing", "missing local node planning inputs"),
+        ("duplicate", "duplicate local node planning input"),
+        ("unused", "unused local node planning inputs"),
+        ("mode", "local node planning input lock mode does not match request"),
+    ],
+    ids=["missing", "duplicate", "unused", "mode"],
+)
+def test_local_input_set_must_match_requests(case, diagnostic):
     item = node_input()
     inputs = (
         ()
@@ -116,6 +125,7 @@ def test_local_input_set_must_match_requests(case):
         else (node_input(locked=True),)
         if case == "mode"
         else (
+            item,
             replace(
                 item,
                 target_dir="unused",
@@ -123,7 +133,7 @@ def test_local_input_set_must_match_requests(case):
             ),
         )
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=diagnostic):
         build_plan(config(), accepted_resolution(), local_node_inputs=inputs)
 
 

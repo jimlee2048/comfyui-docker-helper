@@ -151,8 +151,8 @@ def test_prepared_local_link_fails_before_hooks_or_registry_exclusion(
     monkeypatch.setattr(
         registry,
         "_verify_registry_set",
-        lambda _root, _expected, *, excluded_git_targets: exclusions.append(
-            tuple(excluded_git_targets)
+        lambda _root, _expected, *, excluded_direct_targets: exclusions.append(
+            tuple(excluded_direct_targets)
         ),
     )
     with pytest.raises(CustomNodeInstallError, match="real directory"):

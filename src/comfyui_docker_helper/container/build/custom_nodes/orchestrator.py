@@ -570,7 +570,7 @@ def observe_custom_node_state(
         tuple(
             node for node in custom_nodes.nodes if isinstance(node, RegistryNodePlan)
         ),
-        excluded_git_targets=direct_targets,
+        excluded_direct_targets=direct_targets,
     )
     return custom_node_inventory(custom_nodes.nodes)
 
@@ -751,7 +751,7 @@ def _verify_mixed_state(
         registry._verify_registry_set(
             custom_nodes_root,
             expected_registry,
-            excluded_git_targets=admitted_direct_targets,
+            excluded_direct_targets=admitted_direct_targets,
         )
 
 

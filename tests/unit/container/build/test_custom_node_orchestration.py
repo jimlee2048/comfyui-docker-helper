@@ -176,7 +176,7 @@ def test_final_observer_proves_git_before_exact_registry_scan(
         registry_installer,
         "_verify_registry_set",
         lambda _root, expected, **kwargs: events.append(
-            ("registry", tuple(expected), tuple(kwargs["excluded_git_targets"]))
+            ("registry", tuple(expected), tuple(kwargs["excluded_direct_targets"]))
         ),
     )
 
@@ -951,10 +951,10 @@ def test_mixed_proof_excludes_git_only_after_fresh_git_proof(
 
     monkeypatch.setattr(git_installer, "_verify_git_provenance", verify_git)
 
-    def verify_registry(_root, expected, *, excluded_git_targets=()):
+    def verify_registry(_root, expected, *, excluded_direct_targets=()):
         events.append("registry")
         assert expected == ()
-        assert excluded_git_targets == [target]
+        assert excluded_direct_targets == [target]
 
     monkeypatch.setattr(registry_installer, "_verify_registry_set", verify_registry)
 

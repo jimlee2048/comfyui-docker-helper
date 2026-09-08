@@ -1135,9 +1135,6 @@ class LocalTreePlan(_TreeInventoryPlan, _FilePlan):
     type: Literal["local"]
     kind: Literal["tree"]
     context_path: str
-    verification: Literal["sha256", "unverified-local"]
-    members: tuple[LocalTreeMemberPlan, ...]
-    tree_digest: str | None
 
     @field_validator("context_path")
     @classmethod

@@ -214,7 +214,7 @@ def test_final_observer_scans_exact_empty_registry_state(
         registry_installer,
         "_verify_registry_set",
         lambda root, expected, **kwargs: calls.append(
-            (root, tuple(expected), tuple(kwargs["excluded_git_targets"]))
+            (root, tuple(expected), tuple(kwargs["excluded_direct_targets"]))
         ),
     )
 

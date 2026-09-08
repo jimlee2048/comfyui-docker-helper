@@ -76,12 +76,16 @@ def test_local_fields_are_required(field):
         validate_final_config_structure(raw)
 
 
-def test_local_rejects_git_hooks_and_nonboolean_lock():
-    for field, value in [("pre_clone_hooks", []), ("content_lock", "false")]:
-        raw = document()
-        raw["comfyui"]["custom_nodes"][0][field] = value
-        with pytest.raises(FinalConfigError):
-            validate_final_config_structure(raw)
+@pytest.mark.parametrize(
+    "field,value",
+    [("pre_clone_hooks", []), ("content_lock", "false")],
+    ids=["pre-clone-hooks", "nonboolean-lock"],
+)
+def test_local_rejects_git_hooks_and_nonboolean_lock(field, value):
+    raw = document()
+    raw["comfyui"]["custom_nodes"][0][field] = value
+    with pytest.raises(FinalConfigError):
+        validate_final_config_structure(raw)
 
 
 @pytest.mark.parametrize(

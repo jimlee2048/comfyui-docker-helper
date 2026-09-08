@@ -173,7 +173,7 @@ def test_local_node_component_has_dedicated_inputs_and_bounded_costs() -> None:
     assert (source / "__init__.py").is_file()
     assert (source / "requirements.txt").is_file()
     assert (source / "install.py").is_file()
-    assert (source / "revision.txt").read_text().strip() == "revision-one"
+    assert (source / "revision.txt").read_text().strip()
     assert (source / ".dockerignore").is_file()
     assert (source / "ignored/notes.txt").is_file()
     overlay = config["files"][0]

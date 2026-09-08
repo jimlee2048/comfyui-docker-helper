@@ -230,7 +230,10 @@ def test_locked_local_identity_is_reconciled_without_provider_calls():
         )
 
 
-def test_nonempty_locked_node_proves_members_and_parent_structure():
+@pytest.mark.parametrize(
+    "missing_parent", [False, True], ids=["member-digest", "missing-parent"]
+)
+def test_nonempty_locked_node_proves_members_and_parent_structure(missing_parent):
     inventory = LocalTreeInventory(
         (
             LocalTreeMember("pkg", "directory", None, None),
@@ -266,17 +269,14 @@ def test_nonempty_locked_node_proves_members_and_parent_structure():
         "pkg",
         "pkg/__init__.py",
     )
-    for missing_parent in (False, True):
-        document = plan.model_dump(mode="python")
-        raw = document["custom_nodes"]["nodes"][-1]
-        if missing_parent:
-            raw["members"] = raw["members"][1:]
-        else:
-            raw["members"][-1]["digest"] = "sha256:" + "a" * 64
-        with pytest.raises(
-            ValidationError,
-            match="parents must be admitted"
-            if missing_parent
-            else "digest does not match",
-        ):
-            BuildPlan.model_validate(document)
+    document = plan.model_dump(mode="python")
+    raw = document["custom_nodes"]["nodes"][-1]
+    if missing_parent:
+        raw["members"] = raw["members"][1:]
+    else:
+        raw["members"][-1]["digest"] = "sha256:" + "a" * 64
+    with pytest.raises(
+        ValidationError,
+        match="parents must be admitted" if missing_parent else "digest does not match",
+    ):
+        BuildPlan.model_validate(document)

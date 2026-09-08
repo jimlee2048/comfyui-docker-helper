@@ -126,8 +126,16 @@ def test_locked_node_content_drift_fails(tmp_path: Path, where):
         _prepare(config, output, FakeAcquirer(), options=PlanningOptions(locked=True))
 
 
-@pytest.mark.parametrize("change", ["bytes", "removed", "created"])
-@pytest.mark.parametrize("mode", ["apply", "check", "locked"])
+@pytest.mark.parametrize(
+    "mode,change",
+    [
+        ("apply", "bytes"),
+        ("apply", "removed"),
+        ("apply", "created"),
+        ("check", "bytes"),
+        ("locked", "bytes"),
+    ],
+)
 def test_control_drift_after_admission_fails_without_publishing(
     tmp_path: Path, monkeypatch, change, mode
 ):

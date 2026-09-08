@@ -144,9 +144,7 @@ def test_local_target_creation_is_exclusive(tmp_path, shape):
 
 
 @pytest.mark.parametrize("surfaces", ["both", "created", "deleted", "empty"])
-def test_local_real_hooks_control_root_installation_and_allow_final_patches(
-    tmp_path, monkeypatch, surfaces
-):
+def test_local_real_hooks_control_root_installation(tmp_path, monkeypatch, surfaces):
     app, initial = application(tmp_path)
     runtime = ContainerRuntime(
         workspace=initial.workspace,
@@ -238,8 +236,16 @@ def test_local_real_hooks_control_root_installation_and_allow_final_patches(
     assert requirements == (
         ["packaging==24.0\n"] if surfaces in {"both", "created"} else []
     )
+
+
+def test_final_local_observation_allows_member_changes_but_rejects_root_link(tmp_path):
+    _app, runtime = application(tmp_path)
+    target = runtime.comfyui_path / "custom_nodes/local-node"
+    target.mkdir()
+    (target / "requirements.txt").write_text("original==1\n")
+    node = local_node(runtime, target, locked=True)
+    phase = custom_nodes_phase(runtime, (node,), install_manager=False)
     # Later authoritative files can replace original bytes or add arbitrary content.
-    target = Path(node.target)
     (target / "requirements.txt").write_text("later files overlay\n")
     (target / "arbitrary-link").symlink_to(tmp_path / "outside")
     inventory = orchestrator.observe_custom_node_state(phase, runtime=runtime)

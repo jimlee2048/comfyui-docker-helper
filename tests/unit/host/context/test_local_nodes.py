@@ -158,6 +158,12 @@ def test_empty_warning_and_control_file_retention(tmp_path: Path):
     assert bundle.planning_inputs[0].inventory.members[
         0
     ].relative_path == PurePosixPath(".dockerignore")
+
+
+def test_node_source_cannot_contain_context_output(tmp_path: Path):
+    source = tmp_path / "node"
+    source.mkdir()
+    (source / "main.py").write_bytes(b"code")
     with pytest.raises(LocalInputAdmissionError):
         _bundle(tmp_path, output=source / "context")
 

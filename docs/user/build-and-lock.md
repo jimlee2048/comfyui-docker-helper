@@ -179,11 +179,13 @@ Only direct regular `.sh` and `.py` files under `pre-start.d/`, `post-start.d/`,
 
 ## Local-node capture and locking
 
-A local custom node is captured into its own context subtree after Host applies the source root's `.dockerignore`; matching and source admission are described in [configuration](configuration.md#choose-custom-nodes-and-build-hooks). Once rendered, the context can be built directly without the original source directory. Re-render normally after changing selected source bytes, then build the updated context; the changed input participates in the existing combined custom-node instruction's BuildKit cache key.
+A local custom node is copied into the rendered context after applying the source root's `.dockerignore`; see [configuration](configuration.md#choose-custom-nodes-and-build-hooks) for filtering and source requirements. Once rendered, the context can be built directly without the original source directory. After changing selected source files, render again normally and build the updated context.
 
-`content_lock = false` leaves ordinary selected file bytes unhashed during planning. `content_lock = true` records one aggregate selected-tree identity per node, including the retained `.dockerignore` bytes, and verifies the input during materialization and image-side copy before hooks. Changing excluded content does not change this identity; changing rule-file comments does. `--locked` checks locked identities and selected structure but does not refresh or compare unlocked source bytes; `--check` also streams selected source/context bytes. `--dry-run` admits the selected structure without publishing or running hooks; it still reads the rule file even when content locking is disabled. The context acquisition modes below also apply to local-node inputs.
+`content_lock = false` does not hash ordinary selected files during planning. `content_lock = true` records a content digest for the selected directory, including the retained `.dockerignore`, and verifies it when preparing the context and copying into the image before hooks. Changes to excluded content do not affect the digest; even comment changes in `.dockerignore` do.
 
-Hooks and root installers may modify the captured input after copy. Final local-node evidence proves the expected real target directory and binds the BuildPlan; it does not rehash the resulting tree or claim that installer effects are locked. Build `files` apply after node installation and hooks; their overlays do not trigger another installation or hook run.
+`--locked` checks locked content and selected directory structure without refreshing or comparing unlocked source bytes. `--check` also compares selected source files with the existing context. `--dry-run` checks the selected structure without writing a context or running hooks; it still reads `.dockerignore` even when content locking is disabled. The context acquisition modes below also apply to local nodes.
+
+The lock covers source input, not installation results: hooks and installers may modify the copied node. Final checks require its target to remain a real directory but do not rehash its contents. Build `files` apply after node installation and hooks; overlays do not reinstall dependencies or rerun hooks.
 
 ## Build files and local context materialization
 

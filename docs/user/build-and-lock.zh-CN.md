@@ -179,11 +179,13 @@ cdh host render \
 
 ## 本地节点捕获与锁定
 
-Host 按 source 根目录的 `.dockerignore` 筛选后，将 local 自定义节点捕获到独立上下文子树；匹配和来源准入详见[配置指南](configuration.zh-CN.md#选择自定义节点和构建-hook)。渲染完成后，无需原始 source 目录即可直接构建 context。修改选中源码字节后，正常重新渲染并构建更新的 context；变化的输入会参与现有合并自定义节点指令的 BuildKit cache key。
+本地自定义节点按 source 根目录的 `.dockerignore` 筛选后，复制到渲染上下文；筛选规则和来源要求详见[配置指南](configuration.zh-CN.md#选择自定义节点和构建-hook)。渲染完成后，无需原始 source 目录即可直接构建上下文。修改选中的源码文件后，正常重新渲染并构建更新的上下文。
 
-`content_lock = false` 在规划时不计算普通选中文件字节的摘要。`content_lock = true` 为每个节点记录一个选中树 aggregate identity，包括保留的 `.dockerignore` 字节，并在物化及镜像内复制时、运行 Hook 之前验证输入。排除内容的变化不改变此身份，但规则文件注释的变化会改变。`--locked` 检查锁定身份和选中结构，不刷新或比较未锁定源码字节；`--check` 还流式比较选中的 source/context 字节。`--dry-run` 准入选中结构，不发布或运行 Hook；即使关闭内容锁，也仍需读取规则文件。下文的上下文获取模式同样适用于 local 节点输入。
+`content_lock = false` 在规划时不计算普通选中文件的摘要。`content_lock = true` 记录选中目录的内容摘要，包括保留的 `.dockerignore`，并在准备上下文及复制到镜像时、运行 Hook 之前验证。被排除内容的变化不影响摘要；即使只修改 `.dockerignore` 中的注释，摘要也会变化。
 
-Hook 和根安装程序可在复制后修改捕获的输入。最终 local 节点证据证明预期的真实目标目录并绑定 BuildPlan，不重新计算结果树摘要，也不声称安装效果被锁定。构建 `files` 在节点安装和 Hook 之后应用；覆盖不会触发另一次安装或 Hook 执行。
+`--locked` 检查锁定内容和选中的目录结构，不刷新或比较未锁定源码字节。`--check` 还会比较选中的源码文件与现有上下文。`--dry-run` 检查选中结构，不写入上下文或运行 Hook；即使关闭内容锁，也仍会读取 `.dockerignore`。下文的上下文获取模式同样适用于本地节点。
+
+锁约束的是源码输入，而非安装结果：Hook 和安装程序可修改复制后的节点。最终检查要求目标仍是真实目录，但不重新计算目录内容的摘要。构建 `files` 在节点安装和 Hook 之后应用；覆盖不会重新安装依赖或重跑 Hook。
 
 ## 构建文件与本地上下文 materialization
 

@@ -13,6 +13,12 @@ from tests.build_plan_support import (
     request_graph,
 )
 
+from comfyui_docker_helper.config.authored.validation.domains import (
+    validate_final_config_domains,
+)
+from comfyui_docker_helper.config.authored.validation.semantics import (
+    validate_final_config_semantics,
+)
 from comfyui_docker_helper.config.authored.validation.structure import (
     validate_final_config_structure,
 )
@@ -82,6 +88,27 @@ def test_source_locator_does_not_affect_intent():
     assert request_graph(config(), resolution) == request_graph(
         config(source="../another"), resolution
     )
+
+
+@pytest.mark.parametrize("field", ["workspace", "comfyui_path"])
+@pytest.mark.parametrize("component", [".cdh-staging", ".wh.nodes"])
+def test_local_node_parent_paths_follow_system_path_rules(field, component):
+    document = config().model_dump(mode="json")
+    document["files"] = []
+    document["system"][field] = f"/srv/{component}"
+    authored = validate_final_config_structure(document)
+    domains = validate_final_config_domains(authored)
+    assert not domains.diagnostics
+    assert not validate_final_config_semantics(authored, domains)
+
+    plan = build_plan(
+        authored, accepted_resolution(), local_node_inputs=(node_input(),)
+    )
+    root = PurePosixPath("/srv") / component
+    if field == "workspace":
+        root /= "ComfyUI"
+    assert plan.custom_nodes.nodes[-1].target == str(root / "custom_nodes/dev-node")
+    assert BuildPlan.model_validate_json(plan.model_dump_json()) == plan
 
 
 @pytest.mark.parametrize("locked", [False, True])

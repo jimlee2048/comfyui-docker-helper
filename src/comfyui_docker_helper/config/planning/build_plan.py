@@ -962,7 +962,7 @@ class LocalNodePlan(_TreeInventoryPlan):
     @field_validator("target")
     @classmethod
     def _validate_target(cls, value: str) -> str:
-        return validate_absolute_file_target(value)
+        return _absolute_posix_path(value, "Local target")
 
     @model_validator(mode="after")
     def _validate_slot(self) -> LocalNodePlan:

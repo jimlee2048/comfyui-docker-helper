@@ -32,9 +32,9 @@ To build images with cdh, the host needs:
 - A working Docker installation with Buildx configured to build Linux containers. On Windows, normally use Docker Desktop in Linux container mode; another endpoint must provide equivalent Linux `amd64` Buildx support. Windows containers are not supported.
 - Git on `PATH` when cdh must resolve Git-backed sources, including ComfyUI selectors that query the repository and direct-Git custom nodes. On Windows, install Git for Windows.
 
-`cdh host *` runs natively on Windows. The generated ComfyUI images still target Linux `amd64`, and `cdh container *` runs inside those Linux images rather than on the Windows host. The standard `uv tool` and `pip` commands below install the required Windows-specific Python dependencies automatically.
+`cdh host *` runs natively on Linux x86_64/ARM64, Windows x86_64, and macOS ARM64. The generated ComfyUI images still target Linux `amd64`, and `cdh container *` runs inside those Linux images. The standard `uv tool` and `pip` commands below select the required platform dependencies automatically.
 
-Native Windows host behavior is covered by automated tests, but those tests do not run an end-to-end Docker Desktop build or prove Docker Desktop SSH-agent forwarding. See [Build and lock](docs/user/build-and-lock.md#host-and-target-platforms) for the platform and input-safety boundaries.
+Native host behavior is covered by automated tests, but those tests do not run an end-to-end Docker Desktop build or prove Docker Desktop SSH-agent forwarding. See [Build and lock](docs/user/build-and-lock.md#host-and-target-platforms) for the platform and input-safety boundaries.
 
 ## Install
 

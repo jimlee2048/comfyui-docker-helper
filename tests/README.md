@@ -28,7 +28,7 @@ Give parameterized cases concise, stable IDs when their values are large, binary
 
 ## Platform coverage
 
-The complete default-offline suite runs on Linux for every supported Python minor. Required Windows validation runs the same `tests/unit/host` and `tests/integration/host` contract on Python 3.12, 3.13, and 3.14, followed by a wheel build and isolated-install smoke in every matrix cell. Windows selects those owner directories before collection, so Linux-only container and canonical distribution modules are not imported merely to be skipped. [The CI workflow](../.github/workflows/ci.yml) is the machine authority for the exact required matrix.
+The complete default-offline suite runs on Linux for every supported Python minor. Required Windows x86_64, macOS ARM64, and Linux ARM64 validation runs the same `tests/unit/host` and `tests/integration/host` contract on Python 3.12, 3.13, and 3.14, followed by a wheel build and isolated-install smoke in every matrix cell. One platform/Python CI matrix explicitly selects full-suite or host scope: Linux x86_64 runs the full suite; the other platforms select the host owner directories before collection. Scope is not inferred from the operating system. Canonical package qualification remains a separate Linux x86_64 job. ARM64 qualification uses macOS 15 and Ubuntu 24.04 with a native ARM64 interpreter. Every matrix cell checks its interpreter architecture against the platform record. [The CI workflow](../.github/workflows/ci.yml) is the machine authority for the exact required matrix.
 
 Place an operating-system-specific test at the narrowest unit or integration owner and guard it with a local `skipif` based on the native capability it requires. Operating-system selection is not an external-cost authorization, so do not add a Linux or Windows cost marker. Keep Linux-only container execution tests on Linux, and use native Windows tests for Win32 filesystem, DACL, descriptor-lock, Git-for-Windows, path, and process behavior. Mocked Docker and Buildx adapter tests prove only argument and error contracts; they do not prove Docker Desktop, named-pipe SSH forwarding, GPU use, or Windows-container execution.
 
@@ -37,7 +37,7 @@ Do not add a custom platform marker as a second platform inventory. Cross-platfo
 Run the affected selection on its native platform, for example:
 
 ```bash
-uv run --locked pytest tests/integration/host/platform/windows/test_windows_host_boundary.py
+uv run --locked pytest tests/integration/host/platform/test_non_linux_host_boundary.py
 uv run --locked pytest tests/unit/host tests/integration/host
 ```
 

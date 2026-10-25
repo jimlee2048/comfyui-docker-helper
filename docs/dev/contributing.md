@@ -25,11 +25,11 @@ When using Python language features, keep them within the `requires-python` rang
 
 ## Platform compatibility
 
-The package's root CLI, configuration, shared services, rendering, and `cdh host *` workflows support the declared Python minors on native Windows and Linux hosts. `cdh container *` executes only inside the project's Linux image, although its command group must remain importable and its help must remain usable on other hosts. Windows host support means a Windows operator can drive a Linux-container Docker endpoint; it does not add a Windows-container execution contract.
+The package's root CLI, configuration, shared services, rendering, and `cdh host *` workflows support the declared Python minors on native Linux x86_64/ARM64, Windows x86_64, and macOS ARM64 hosts. `cdh container *` executes only inside the project's Linux image, although its command group must remain importable and its help must remain usable on other hosts. Windows host support means a Windows operator can drive a Linux-container Docker endpoint; it does not add a Windows-container execution contract.
 
 Keep Linux-only container implementations outside the host import closure. Put platform-specific imports behind the narrow owner that needs them, and preserve equivalent behavior rather than assuming that POSIX descriptors, modes, signals, shell paths, or environment conventions exist on Windows. Host source reads follow the cooperative-input contract, while private state and container write/execute boundaries retain separate stronger ownership rules; read the [cross-module contracts](contracts.md#host-local-filesystem-boundaries) before changing either boundary.
 
-Filesystem, Git, Docker, and process behavior that branches by operating system needs focused native-platform coverage. Do not infer Windows behavior from a mocked POSIX test or infer Docker Desktop end-to-end support from adapter tests. The [testing handbook](../../tests/README.md#platform-coverage) owns platform test placement and the uniform supported-minor Windows host matrix.
+Filesystem, Git, Docker, and process behavior that branches by operating system needs focused native-platform coverage. Do not infer Windows behavior from a mocked POSIX test or infer Docker Desktop end-to-end support from adapter tests. The [testing handbook](../../tests/README.md#platform-coverage) owns platform test placement and the supported-minor native platform matrix.
 
 ### Optional workflow diagnostics
 
@@ -72,13 +72,13 @@ uv run --locked pytest tests/unit
 uv run --locked pytest
 ```
 
-Run platform-specific tests on the platform whose native behavior they claim. Every supported Windows Python minor runs the same host/shared selection:
+Run platform-specific tests on the platform whose native behavior they claim. Every supported Python minor on Windows and the ARM64 macOS/Linux CI hosts runs the same host/shared selection:
 
 ```bash
 uv run --locked pytest tests/unit/host tests/integration/host
 ```
 
-The exact required matrix lives in [the CI workflow](../../.github/workflows/ci.yml). Linux remains authoritative for the complete default-offline suite, Linux-image container helpers, and canonical distribution qualification; do not collect those owners on Windows merely to skip them.
+The exact required matrix lives in [the CI workflow](../../.github/workflows/ci.yml). Linux remains authoritative for the complete default-offline suite, Linux-image container helpers, and canonical distribution qualification; the unified test matrix selects only the host owners in its Windows and ARM64 cells.
 
 Validate affected examples and CLI paths directly. At minimum, configuration changes should keep the minimal example valid:
 

@@ -26,7 +26,7 @@ The host build boundary and the runtime boundary admit different inputs. Runtime
 
 ## Platform execution boundary
 
-The root CLI, configuration, shared services, rendering, and every `cdh host *` workflow support native Windows and Linux hosts on each Python minor declared by the project (`3.12`, `3.13`, and `3.14`). A Windows host normally drives Docker Desktop in Linux container mode. Other Docker endpoints remain Docker-owned compatibility surfaces and must provide equivalent Linux `amd64` Buildx behavior; automated Windows qualification does not exercise them. Host support does not imply support for Windows container images.
+The root CLI, configuration, shared services, rendering, and every `cdh host *` workflow support native Linux x86_64/ARM64, Windows x86_64, and macOS ARM64 hosts on each Python minor declared by the project (`3.12`, `3.13`, and `3.14`). A Windows host normally drives Docker Desktop in Linux container mode. Other Docker endpoints remain Docker-owned compatibility surfaces and must provide equivalent Linux `amd64` Buildx behavior; automated Windows qualification does not exercise them. Host support does not imply support for Windows container images.
 
 `cdh container build` groups image-build steps, while `cdh container runtime` owns runtime control. Both are image-internal Linux execution surfaces. On a non-Linux host the package and root CLI remain importable, group and leaf help remain available, and a syntactically complete helper invocation returns the platform-boundary diagnostic before Plan access or Linux service execution, without importing its Linux-only implementation closure. Required-option errors remain CLI usage errors on every host.
 

@@ -40,18 +40,32 @@ jobs:
         run: uv run --locked ruff check .
 
   test:
-    name: Test / Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: Test / ${{ matrix.platform.name }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - "3.12"
-          - "3.13"
-          - "3.14"
+        platform:
+          - name: Linux x86_64
+            runner: ubuntu-latest
+            architecture: x64
+            scope: full
+          - name: Windows x86_64
+            runner: windows-latest
+            architecture: x64
+            scope: host
+          - name: macOS ARM64
+            runner: macos-15
+            architecture: arm64
+            scope: host
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+            scope: host
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,37 +78,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Synchronize locked environment
         run: uv sync --locked --all-groups
+      - name: Verify native interpreter architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.platform.architecture }}
+        run: >-
+          uv run --locked python -c
+          "import os, platform; machine = platform.machine().lower();
+          architectures = {'x86_64': 'x64', 'amd64': 'x64', 'arm64': 'arm64', 'aarch64': 'arm64'};
+          assert architectures.get(machine) == os.environ['EXPECTED_ARCHITECTURE'], machine"
       - name: Run default-offline tests
+        if: matrix.platform.scope == 'full'
         run: uv run --locked pytest
-
-  windows_host:
-    name: Windows host / Python ${{ matrix.python-version }}
-    runs-on: windows-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version:
-          - "3.12"
-          - "3.13"
-          - "3.14"
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          version: "0.11.32"
-          python-version: ${{ matrix.python-version }}
-      - name: Synchronize locked environment
-        run: uv sync --locked --all-groups
-      - name: Run Windows host and shared contracts
+      - name: Run host and shared contracts
+        if: matrix.platform.scope == 'host'
         run: uv run --locked pytest tests/unit/host tests/integration/host
       - name: Build Windows wheel
+        if: matrix.platform.scope == 'host' && runner.os == 'Windows'
         env:
           DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist
         run: |
@@ -108,6 +107,7 @@ jobs:
             throw "wheel build did not produce exactly one wheel"
           }
       - name: Clean-install and exercise Windows wheel
+        if: matrix.platform.scope == 'host' && runner.os == 'Windows'
         env:
           DIST_DIR: ${{ runner.temp }}\cdh-wheel-dist
           RUNTIME_REQUIREMENTS: ${{ runner.temp }}\runtime-requirements.txt
@@ -135,6 +135,33 @@ jobs:
           & $wheelCdh container --help | Out-Null
           & $wheelCdh container build --help | Out-Null
           & $wheelCdh container build write-final-manifest --help | Out-Null
+      - name: Build and clean-install POSIX host wheel
+        if: matrix.platform.scope == 'host' && runner.os != 'Windows'
+        shell: bash
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-wheel-dist
+          RUNTIME_REQUIREMENTS: ${{ runner.temp }}/runtime-requirements.txt
+          WHEEL_VENV: ${{ runner.temp }}/cdh-wheel-venv
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          test ! -e "$DIST_DIR"
+          uv build --wheel --no-sources --force-pep517 --no-create-gitignore --out-dir "$DIST_DIR"
+          shopt -s nullglob
+          wheels=("$DIST_DIR"/*.whl)
+          test "${#wheels[@]}" -eq 1
+          uv export --locked --no-dev --no-emit-project --output-file "$RUNTIME_REQUIREMENTS"
+          uv venv --python "$PYTHON_VERSION" "$WHEEL_VENV"
+          uv pip install --python "$WHEEL_VENV/bin/python" --require-hashes --requirements "$RUNTIME_REQUIREMENTS"
+          uv pip install --python "$WHEEL_VENV/bin/python" --no-deps "${wheels[0]}"
+          uv pip check --python "$WHEEL_VENV/bin/python"
+          expected_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          test "$("$WHEEL_VENV/bin/cdh" --version)" = "cdh $expected_version"
+          "$WHEEL_VENV/bin/cdh" --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" host --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" host validate -f examples/minimal.toml
+          "$WHEEL_VENV/bin/cdh" container --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" container build --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" container build write-final-manifest --help >/dev/null
 
   package:
     name: Package
@@ -150,7 +177,6 @@ jobs:
     needs:
       - lint
       - test
-      - windows_host
       - package
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -160,10 +186,8 @@ jobs:
         env:
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
-          WINDOWS_HOST_RESULT: ${{ needs.windows_host.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           test "$LINT_RESULT" = "success"
           test "$TEST_RESULT" = "success"
-          test "$WINDOWS_HOST_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"

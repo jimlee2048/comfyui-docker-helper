@@ -8,11 +8,15 @@
 
 ## 宿主机与目标平台
 
-所有 `cdh host *` 工作流都能在受支持的 Windows 和 Linux 宿主机上原生运行。请使用项目 README 中常规的 [`uv tool` 或 `pip` 命令](../../README.zh-CN.md#安装)来安装 cdh；安装程序会选择所需的平台依赖。Docker 构建始终以 Linux `amd64` 为目标。Windows 宿主机通常使用运行 Linux 容器并支持 Buildx 的 Docker Desktop；其他 endpoint 必须提供等效的 Linux `amd64` Buildx 行为。cdh 不构建或运行 Windows 容器。`cdh container *` 用于在生成的 Linux 镜像内执行。
+所有 `cdh host *` 工作流都能在 Linux x86_64/ARM64、Windows x86_64 和 macOS ARM64 上通过 Python 3.12–3.14 原生运行。不支持 Intel macOS 和原生 Windows ARM64。请使用项目 README 中常规的 [`uv tool` 或 `pip` 命令](../../README.zh-CN.md#安装)来安装 cdh；安装程序会选择所需的平台依赖。Docker 构建始终以 Linux `amd64` 为目标。Windows 宿主机通常使用运行 Linux 容器并支持 Buildx 的 Docker Desktop；其他 endpoint 必须提供等效的 Linux `amd64` Buildx 行为。cdh 不构建或运行 Windows 容器。`cdh container *` 用于在生成的 Linux 镜像内执行。
 
-Windows 自动化验证覆盖原生 CLI、文件系统、Git、渲染、打包以及 Docker/Buildx 适配器行为，但不会运行真实的 Docker Desktop 构建，也不证明 Docker Desktop 的 SSH agent forwarding。因此，Docker Desktop、builder 或 agent 集成失败会保留其底层 Docker/BuildKit 诊断。
+ARM64 CI 在 macOS 15 和 Ubuntu 24.04 上运行；其他系统版本、Linux 发行版及 musl 环境不属于该验证矩阵。需要 Docker 的操作同时要求 Engine endpoint 能运行 Linux `amd64` 解析容器，且 Buildx builder 能构建 Linux `amd64` 镜像。ARM Engine 需要 amd64 模拟执行能力，也可以连接 amd64 endpoint；仅选择远程 Buildx builder 不会提供 Engine 的容器执行能力。
+
+宿主机自动化验证覆盖原生 CLI、文件系统、Git、渲染、打包以及 Docker/Buildx 适配器行为，但不会运行真实的 Docker Desktop 构建，也不证明 Docker Desktop 的 SSH agent forwarding。因此，Docker Desktop、builder 或 agent 集成失败会保留其底层 Docker/BuildKit 诊断。
 
 读取本地 Secret、Hook 和构建文件输入时，cdh 会验证当时观测到的文件类型和词法路径形状，并拒绝已观测到的符号链接、Windows junction 或其他 reparse point，以及特殊文件。Secret 文件还会执行 65,525 字节上限。本地构建来源可以是一个普通文件，也可以是一个完整的真实目录树；目录树准入会包含所有真实的后代目录和普通文件，包括隐藏和空目录，并拒绝不安全名称及遍历失败。Hook 文件和启用内容锁的本地来源会把流式读取的字节绑定到 digest，并在发布前复验该 identity；未启用内容锁的本地来源仍会完成准入和 materialization，但不会创建 cdh 内容 digest。这并不隔离其他本地进程：不要允许不受信任的进程在 cdh 运行期间并发修改选中的输入文件、目录或目录树。
+
+在 macOS 上，请使用真实来源路径，避免 `/tmp` 和 `/var` 等符号链接别名（通常对应 `/private/tmp` 和 `/private/var`）。现有符号链接拒绝规则同样适用于祖先目录。自动文件物化在克隆不可用时回退到普通复制；cdh 未提供 macOS 克隆实现，因此显式 clone 模式会失败。
 
 ## 验证、渲染和构建
 

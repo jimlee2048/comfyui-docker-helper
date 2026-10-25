@@ -1,4 +1,4 @@
-"""Native Windows checks for the public host/container import boundary."""
+"""Native non-Linux checks for the public host/container import boundary."""
 
 import subprocess
 import sys
@@ -8,11 +8,11 @@ from tests.import_support import container_module_names
 from typer.testing import CliRunner
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="requires native Windows import and CLI behavior",
+    sys.platform == "linux",
+    reason="requires native non-Linux import and CLI behavior",
 )
 
-_NATIVE_WINDOWS_PROBE_TIMEOUT_SECONDS = 30
+_NATIVE_PROBE_TIMEOUT_SECONDS = 30
 _HOST_SECRET_IMPLEMENTATION_MODULES = frozenset(
     {"comfyui_docker_helper.host.credentials.session"}
 )
@@ -38,7 +38,7 @@ def test_root_cli_does_not_load_platform_implementations() -> None:
         check=False,
         capture_output=True,
         text=True,
-        timeout=_NATIVE_WINDOWS_PROBE_TIMEOUT_SECONDS,
+        timeout=_NATIVE_PROBE_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stderr

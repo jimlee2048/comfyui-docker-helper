@@ -1,6 +1,6 @@
 # Testing
 
-The test suite is offline by default. `uv run pytest` may collect tests that describe network, Docker, GPU, or slow behavior, but those tests are skipped unless every matching cost authorization is present.
+The test suite is offline by default. `uv run --locked pytest` may collect tests that describe network, Docker, GPU, or slow behavior, but those tests are skipped unless every matching cost authorization is present.
 
 See the [contribution guide](../docs/dev/contributing.md) for environment setup, shared coding rules, and the general development workflow.
 
@@ -37,8 +37,8 @@ Do not add a custom platform marker as a second platform inventory. Cross-platfo
 Run the affected selection on its native platform, for example:
 
 ```bash
-uv run pytest tests/integration/host/platform/windows/test_windows_host_boundary.py
-uv run pytest tests/unit/host tests/integration/host
+uv run --locked pytest tests/integration/host/platform/windows/test_windows_host_boundary.py
+uv run --locked pytest tests/unit/host tests/integration/host
 ```
 
 Do not add hostile source-directory mutation races, stress loops, timing/fairness assertions, or extra platform combinations to strengthen the cooperative host source-read contract. Keep tests for independent container write, placement, and execution containment intact; those boundaries are not reduced by the host compatibility policy.
@@ -61,13 +61,13 @@ A test with multiple cost markers requires every corresponding option. The optio
 Useful commands include:
 
 ```bash
-uv run pytest
-uv run pytest tests/unit tests/integration
-uv run pytest tests/smoke/test_python_group_resolver_live.py \
+uv run --locked pytest
+uv run --locked pytest tests/unit tests/integration
+uv run --locked pytest tests/smoke/test_python_group_resolver_live.py \
   --run-network --run-docker
 CDH_APPLICATION_ZERO_IMAGE=example/image:tag \
 CDH_APPLICATION_ZERO_CONTEXT=/path/to/rendered-context \
-  uv run pytest tests/smoke/test_application_acceptance_live.py \
+  uv run --locked pytest tests/smoke/test_application_acceptance_live.py \
   --acceptance-scenario py313-zero \
   --run-network --run-docker --run-gpu --run-slow
 ```

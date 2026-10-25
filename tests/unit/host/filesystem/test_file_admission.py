@@ -3,6 +3,7 @@
 import errno
 import os
 import stat
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,7 +59,7 @@ def test_unbounded_consumer_streams_multiple_fixed_size_chunks(
     assert all(0 < len(chunk) <= chunk_bytes for chunk in chunks)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX FICLONE adapter")
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux FICLONE adapter")
 @pytest.mark.parametrize(
     ("error_number", "classified"),
     [

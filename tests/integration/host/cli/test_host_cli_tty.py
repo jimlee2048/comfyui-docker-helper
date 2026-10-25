@@ -118,7 +118,7 @@ install_manager = false
     assert returncode == 0
     assert "Configuration valid" in output
     assert "Configuration layers (1, merge order)" in output
-    assert f"[1/1] {config}" in output
+    assert f"[1/1]{config}" in "".join(output.split())
     assert "\x1b" not in output
 
 

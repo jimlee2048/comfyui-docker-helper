@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import stat
+import sys
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -759,7 +760,7 @@ def _operate_regular_absolute_file[T](
                 before.st_size,
                 before.st_mode,
                 read_chunk,
-                clone_to,
+                clone_to if sys.platform == "linux" else None,
             )
         )
         after = os.fstat(leaf_fd)

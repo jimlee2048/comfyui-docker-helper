@@ -136,6 +136,62 @@ jobs:
           & $wheelCdh container build --help | Out-Null
           & $wheelCdh container build write-final-manifest --help | Out-Null
 
+  arm_host:
+    name: ARM host / ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04-arm]
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: ${{ matrix.python-version }}
+      - name: Synchronize locked environment
+        run: uv sync --locked --all-groups
+      - name: Verify native ARM64 interpreter
+        run: uv run --locked python -c 'import platform; assert platform.machine().lower() in {"arm64", "aarch64"}, platform.machine()'
+      - name: Run host and shared contracts
+        run: uv run --locked pytest tests/unit/host tests/integration/host
+      - name: Build and clean-install host wheel
+        env:
+          DIST_DIR: ${{ runner.temp }}/cdh-wheel-dist
+          RUNTIME_REQUIREMENTS: ${{ runner.temp }}/runtime-requirements.txt
+          WHEEL_VENV: ${{ runner.temp }}/cdh-wheel-venv
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          test ! -e "$DIST_DIR"
+          uv build --wheel --no-sources --force-pep517 --no-create-gitignore --out-dir "$DIST_DIR"
+          shopt -s nullglob
+          wheels=("$DIST_DIR"/*.whl)
+          test "${#wheels[@]}" -eq 1
+          uv export --locked --no-dev --no-emit-project --output-file "$RUNTIME_REQUIREMENTS"
+          uv venv --python "$PYTHON_VERSION" "$WHEEL_VENV"
+          uv pip install --python "$WHEEL_VENV/bin/python" --require-hashes --requirements "$RUNTIME_REQUIREMENTS"
+          uv pip install --python "$WHEEL_VENV/bin/python" --no-deps "${wheels[0]}"
+          uv pip check --python "$WHEEL_VENV/bin/python"
+          expected_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          test "$("$WHEEL_VENV/bin/cdh" --version)" = "cdh $expected_version"
+          "$WHEEL_VENV/bin/cdh" --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" host --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" host validate -f examples/minimal.toml
+          "$WHEEL_VENV/bin/cdh" container --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" container build --help >/dev/null
+          "$WHEEL_VENV/bin/cdh" container build write-final-manifest --help >/dev/null
+
   package:
     name: Package
     uses: ./.github/workflows/package-build.yml
@@ -151,6 +207,7 @@ jobs:
       - lint
       - test
       - windows_host
+      - arm_host
       - package
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -161,9 +218,11 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
           WINDOWS_HOST_RESULT: ${{ needs.windows_host.result }}
+          ARM_HOST_RESULT: ${{ needs.arm_host.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
           test "$LINT_RESULT" = "success"
           test "$TEST_RESULT" = "success"
           test "$WINDOWS_HOST_RESULT" = "success"
+          test "$ARM_HOST_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"

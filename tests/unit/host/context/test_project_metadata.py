@@ -95,6 +95,7 @@ def test_project_release_identity_matches_package_metadata() -> None:
         if classifier.startswith("Operating System ::")
     } == {
         "Operating System :: Microsoft :: Windows",
+        "Operating System :: MacOS :: MacOS X",
         "Operating System :: POSIX :: Linux",
     }
     runtime_requirements = {

@@ -4,7 +4,9 @@ This guide covers the shared development workflow for `comfyui-docker-helper`. R
 
 ## Development environment
 
-Use [uv](https://docs.astral.sh/uv/) for Python installation, dependency management, command execution, and packaging. The [project configuration](../../pyproject.toml) owns the supported Python envelope and tool configuration; the [lockfile](../../uv.lock) owns the exact resolved development environment.
+Use [uv](https://docs.astral.sh/uv/) for Python installation, dependency management, command execution, and packaging. The [project configuration](../../pyproject.toml) owns the supported Python envelope and tool configuration; the [lockfile](../../uv.lock) owns the resolved dependency versions, not the Python interpreter or uv executable.
+
+Local development may use any supported Python version. To select a version explicitly, pass `--python` to `uv sync` or create an ignored local `.python-version` with `uv python pin`. CI selects its Python versions independently.
 
 From the repository root, create or refresh the locked environment:
 
@@ -15,8 +17,8 @@ uv sync --locked
 Confirm the local entry point and the minimal public configuration:
 
 ```bash
-uv run cdh --help
-uv run cdh host validate -f examples/minimal.toml
+uv run --locked cdh --help
+uv run --locked cdh host validate -f examples/minimal.toml
 ```
 
 When using Python language features, keep them within the `requires-python` range declared in the project configuration.
@@ -31,16 +33,7 @@ Filesystem, Git, Docker, and process behavior that branches by operating system 
 
 ### Optional workflow diagnostics
 
-uv remains the sole authority for Python installation, environments, dependency management, and package execution. Maintainers changing GitHub workflow files may optionally install the lightweight workflow diagnostics declared in the root `mise.toml`:
-
-```bash
-mise install
-mise exec -- actionlint \
-  -ignore 'unexpected key "queue" for "concurrency" section' \
-  .github/workflows/*.yml
-```
-
-The narrow ignore covers actionlint 1.7.12's stale schema for GitHub's supported `concurrency.queue` field; remove it after the installed actionlint release supports that field. The mise environment also makes ShellCheck available to actionlint for embedded shell diagnostics. These tools are workflow-maintenance conveniences, not prerequisites for ordinary contributions and not an alternative Python toolchain.
+Maintainers changing GitHub workflows may optionally install [actionlint](https://github.com/rhysd/actionlint) with [ShellCheck](https://github.com/koalaman/shellcheck) for local workflow and embedded shell diagnostics; follow their upstream installation and usage instructions.
 
 ## Repository structure
 
@@ -63,24 +56,26 @@ See [Architecture](architecture.md) for component responsibilities and allowed d
 
 Keep each change focused on its current behavior owner. Select validation and its completion criteria using the [testing handbook](../../tests/README.md#change-selection-and-cleanup), including its exception for documentation, comments, and agent instructions that do not affect execution. The handbook owns test scope, cost authorization, and resource rules; use the commands below as applicable to that selection.
 
+Use `uv run --locked` for verification so stale dependency metadata fails instead of updating `uv.lock` during a check. The environment is still synchronized as needed. Manage dependency changes with `uv add` or `uv remove`; after manual dependency edits, run `uv lock`. To deliberately upgrade one dependency, use `uv lock --upgrade-package PACKAGE`. Review and commit the affected dependency declarations and lockfile together before handing off the change.
+
 Run the configured formatting and lint checks:
 
 ```bash
-uv run ruff format --check .
-uv run ruff check .
+uv run --locked ruff format --check .
+uv run --locked ruff check .
 ```
 
 For changes requiring test execution under the handbook, run focused tests while developing, then the complete offline suite:
 
 ```bash
-uv run pytest tests/unit
-uv run pytest
+uv run --locked pytest tests/unit
+uv run --locked pytest
 ```
 
 Run platform-specific tests on the platform whose native behavior they claim. Every supported Windows Python minor runs the same host/shared selection:
 
 ```bash
-uv run pytest tests/unit/host tests/integration/host
+uv run --locked pytest tests/unit/host tests/integration/host
 ```
 
 The exact required matrix lives in [the CI workflow](../../.github/workflows/ci.yml). Linux remains authoritative for the complete default-offline suite, Linux-image container helpers, and canonical distribution qualification; do not collect those owners on Windows merely to skip them.
@@ -88,7 +83,7 @@ The exact required matrix lives in [the CI workflow](../../.github/workflows/ci.
 Validate affected examples and CLI paths directly. At minimum, configuration changes should keep the minimal example valid:
 
 ```bash
-uv run cdh host validate -f examples/minimal.toml
+uv run --locked cdh host validate -f examples/minimal.toml
 ```
 
 Build the source distribution and wheel through the declared PyPA backend:

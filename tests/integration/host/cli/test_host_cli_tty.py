@@ -18,6 +18,7 @@ def _run_in_pty(
     command: list[str],
     *,
     environment: dict[str, str],
+    cwd: Path | None = None,
 ) -> tuple[int, str, bool]:
     """Run one subprocess with both output streams attached to a real TTY."""
     import fcntl
@@ -36,6 +37,7 @@ def _run_in_pty(
         stdout=slave_fd,
         stderr=slave_fd,
         env=environment,
+        cwd=cwd,
         close_fds=True,
     )
     os.close(slave_fd)
@@ -109,16 +111,17 @@ install_manager = false
             "host",
             "validate",
             "-f",
-            str(config),
+            config.name,
         ],
         environment=environment,
+        cwd=tmp_path,
     )
 
     assert timed_out is False
     assert returncode == 0
     assert "Configuration valid" in output
     assert "Configuration layers (1, merge order)" in output
-    assert f"[1/1]{config}" in "".join(output.split())
+    assert f"[1/1] {config.name}" in output
     assert "\x1b" not in output
 
 

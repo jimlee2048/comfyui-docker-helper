@@ -569,6 +569,9 @@ class AdmittedRegularFileReader:
     mode: int | None
     _read_chunk: Callable[[int | None], bytes] = field(repr=False)
     _clone_to: Callable[[int], None] | None = field(default=None, repr=False)
+    _clone_new_file: Callable[[int, str, int], int] | None = field(
+        default=None, repr=False
+    )
 
     def read_chunk(self, limit: int | None = None) -> bytes:
         """Read at most one fixed-size chunk from the admitted file."""
@@ -579,6 +582,12 @@ class AdmittedRegularFileReader:
         if self._clone_to is None:
             raise FileCloneUnavailableError("copy-on-write clone is unavailable")
         self._clone_to(destination_fd)
+
+    def clone_new_file(self, directory_fd: int, name: str, mode: int) -> int:
+        """Clone into an absent leaf and transfer ownership of its opened fd."""
+        if self._clone_new_file is None:
+            raise FileCloneUnavailableError("copy-on-write clone is unavailable")
+        return self._clone_new_file(directory_fd, name, mode)
 
 
 def operate_regular_absolute_file[T](
@@ -755,12 +764,18 @@ def _operate_regular_absolute_file[T](
                     ) from error
                 raise
 
+        def clone_new_file(directory_fd: int, name: str, mode: int) -> int:
+            from comfyui_docker_helper.filesystem.macos import clone_new_file
+
+            return clone_new_file(leaf_fd, directory_fd, name, mode)
+
         result = operation(
             AdmittedRegularFileReader(
                 before.st_size,
                 before.st_mode,
                 read_chunk,
                 clone_to if sys.platform == "linux" else None,
+                clone_new_file if sys.platform == "darwin" else None,
             )
         )
         after = os.fstat(leaf_fd)

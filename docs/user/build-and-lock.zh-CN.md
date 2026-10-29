@@ -16,7 +16,7 @@ ARM64 CI 在 macOS 15 和 Ubuntu 24.04 上运行；其他系统版本、Linux �
 
 读取本地 Secret、Hook 和构建文件输入时，cdh 会验证当时观测到的文件类型和词法路径形状，并拒绝已观测到的符号链接、Windows junction 或其他 reparse point，以及特殊文件。Secret 文件还会执行 65,525 字节上限。本地构建来源可以是一个普通文件，也可以是一个完整的真实目录树；目录树准入会包含所有真实的后代目录和普通文件，包括隐藏和空目录，并拒绝不安全名称及遍历失败。Hook 文件和启用内容锁的本地来源会把流式读取的字节绑定到 digest，并在发布前复验该 identity；未启用内容锁的本地来源仍会完成准入和 materialization，但不会创建 cdh 内容 digest。这并不隔离其他本地进程：不要允许不受信任的进程在 cdh 运行期间并发修改选中的输入文件、目录或目录树。
 
-在 macOS 上，请使用真实来源路径，避免 `/tmp` 和 `/var` 等符号链接别名（通常对应 `/private/tmp` 和 `/private/var`）。现有符号链接拒绝规则同样适用于祖先目录。自动文件物化在克隆不可用时回退到普通复制；cdh 未提供 macOS 克隆实现，因此显式 clone 模式会失败。
+在 macOS 上，请使用真实来源路径，避免 `/tmp` 和 `/var` 等符号链接别名（通常对应 `/private/tmp` 和 `/private/var`）。现有符号链接拒绝规则同样适用于祖先目录。macOS 物化会在兼容卷上尝试原生 copy-on-write clone；模式和元数据行为见下方本地文件物化规则。
 
 ## 验证、渲染和构建
 
@@ -202,6 +202,8 @@ cdh host render \
 - `auto` 是默认值。它会尝试 copy-on-write clone，只有在 clone capability 不可用或文件系统不支持该操作时才回退到流式 copy。
 - `clone` 要求支持 copy-on-write clone；不可用时会失败且不发布上下文。
 - `copy` 始终执行固定 buffer 的流式复制。
+
+在 macOS 上，clone 保留原生扩展属性，包括 quarantine、Finder 元数据和资源叉；cdh 不保证 clone 与普通复制生成完全相同的宿主机元数据。来源的 immutable 或 append-only 标记会使 clone 不可用，因为继承这些限制会妨碍目标处理或清理。自动模式改用普通复制，显式 clone 模式则失败；其他属性不会阻止尝试原生 clone。目标使用项目规定的文件权限，只读来源也适用，且不修改来源。权限、存储和 I/O 故障仍会报错，不触发普通复制重试。
 
 任何 clone mode 都不会使用 hardlink 或 symlink：已发布的上下文文件或目录树不受后续来源变更影响。可用的本地文件系统上，clone 可以避免实际复制未变化的 extent，但完整 source 仍属于上下文。BuildKit 必须读取它，远程 builder 也必须接收它，因此 `content_lock = false` 不会消除上下文存储、builder cache 或上传成本。
 

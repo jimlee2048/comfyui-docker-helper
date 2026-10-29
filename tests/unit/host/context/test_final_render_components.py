@@ -18,6 +18,7 @@ from tests.build_plan_support import (
     canonical_wheel,
     final_config,
 )
+from tests.file_clone_support import patch_admitted_clone
 
 from comfyui_docker_helper.build_ssh import KNOWN_HOSTS_MOUNTS
 from comfyui_docker_helper.config.authored.models import FinalConfig
@@ -1305,11 +1306,7 @@ def test_clone_unavailable_falls_back_only_in_auto_mode(
     ) -> None:
         raise file_admission.FileCloneUnavailableError("clone unavailable")
 
-    monkeypatch.setattr(
-        file_admission.AdmittedRegularFileReader,
-        "clone_to",
-        unavailable,
-    )
+    patch_admitted_clone(monkeypatch, unavailable)
 
     def call() -> None:
         _materialize_private_stage(
@@ -1407,9 +1404,7 @@ def test_locked_clone_verifies_acquired_bytes_instead_of_source(
     def reject_source_read(*_args, **_kwargs):
         pytest.fail("clone verification consumed source content")
 
-    monkeypatch.setattr(
-        file_admission.AdmittedRegularFileReader, "clone_to", clone_result
-    )
+    patch_admitted_clone(monkeypatch, clone_result)
     monkeypatch.setattr(
         file_admission.AdmittedRegularFileReader, "read_chunk", reject_source_read
     )
@@ -1909,3 +1904,32 @@ def test_log_settings_project_through_plan_into_baked_runtime(tmp_path: Path) ->
         environ={},
     )
     assert loaded.config.cdh.logs.model_dump() == plan.runtime.logs.model_dump()
+
+
+@pytest.mark.parametrize("primary_error", [False, True])
+def test_materialized_descriptor_close_preserves_primary_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_error: bool
+) -> None:
+    path = tmp_path / "owned"
+    path.write_bytes(b"")
+    descriptor = os.open(path, os.O_RDONLY)
+    close = os.close
+    closed = []
+
+    def fail_close(fd):
+        assert fd == descriptor
+        close(fd)
+        closed.append(fd)
+        raise OSError("close failed")
+
+    monkeypatch.setattr(materializer_module.os, "close", fail_close)
+    expected = ValueError if primary_error else OSError
+    with (
+        pytest.raises(
+            expected, match="operation failed" if primary_error else "close failed"
+        ),
+        materializer_module._owned_descriptor(descriptor),
+    ):
+        if primary_error:
+            raise ValueError("operation failed")
+    assert closed == [descriptor]

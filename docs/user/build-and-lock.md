@@ -16,7 +16,7 @@ Automated host validation covers native CLI, filesystem, Git, rendering, packagi
 
 cdh validates the file type and lexical path shape it observes while reading local Secret, hook, and build-file inputs, and rejects observed symbolic links, Windows junctions or other reparse points, and special files. Secret files additionally enforce the 65,525-byte limit. A local build source may be one regular file or one complete real directory tree; tree admission includes every real descendant directory and regular file, including hidden and empty directories, and rejects unsafe names and traversal failures. Hook files and content-locked local build sources bind streamed bytes to a digest and revalidate that identity before publication; unlocked local sources are still admitted and materialized without creating a cdh content digest. This is not isolation from another local process: do not allow an untrusted process to modify a selected input file, directory, or tree concurrently with cdh.
 
-On macOS, use real source paths rather than symlink aliases such as `/tmp` and `/var` (normally `/private/tmp` and `/private/var`). The existing source-link rejection applies to ancestor directories too. Automatic file materialization falls back to ordinary copying when cloning is unavailable; macOS has no cdh clone implementation, so explicit clone mode fails.
+On macOS, use real source paths rather than symlink aliases such as `/tmp` and `/var` (normally `/private/tmp` and `/private/var`). The existing source-link rejection applies to ancestor directories too. macOS materialization attempts native copy-on-write cloning on compatible volumes; see the local-file materialization rules below for mode and metadata behavior.
 
 ## Validate, render, and build
 
@@ -202,6 +202,8 @@ Set `[cdh].local_file_mode` to choose how local-file and local-tree regular-memb
 - `auto` is the default. It attempts a copy-on-write clone and falls back to streaming copy only when clone capability is unavailable or the filesystems do not support the operation.
 - `clone` requires a supported copy-on-write clone and fails without publishing a context when it is unavailable.
 - `copy` always performs a fixed-buffer streaming copy.
+
+On macOS, cloning preserves native extended attributes, including quarantine, Finder metadata and resource forks; cdh does not promise identical host metadata between clone and ordinary copy. Source immutable or append-only flags make cloning unavailable because their inherited restrictions prevent ordinary destination handling or cleanup. Automatic mode copies these files instead, while explicit clone mode fails. Other attributes do not preclude attempting a native clone. The destination receives the project-owned file mode, including for read-only sources, without changing the source. Permission, storage and I/O failures remain errors rather than triggering a copy retry.
 
 Neither clone mode uses a hardlink or symlink: the published context file or tree is independent from later source changes. A clone can avoid physically copying unchanged extents on a capable local filesystem, but the complete source still belongs to the context. BuildKit must read it, and a remote builder must receive it, so `content_lock = false` does not eliminate context storage, builder-cache, or upload costs.
 

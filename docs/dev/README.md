@@ -1,14 +1,14 @@
 # Developer documentation
 
-This index is for contributors and maintainers who need to understand, change, or validate the current cdh implementation. It routes each kind of development work to its canonical guide and defines how long-lived documentation is owned and maintained.
+Start here to find a development guide or update project documentation.
 
 ## Guides
 
 - [Contributing](contributing.md) covers the shared development environment, repository structure, coding and validation workflow, and review rules.
-- [Releasing](releasing.md) owns the recurring maintainer workflow for package tags, candidate validation, human GitHub Release publication, automatic protected PyPI publication, verification, and exceptional recovery.
+- [Releasing](releasing.md) covers package tags, candidate checks, GitHub and PyPI publication, and recovery from failed releases.
 - [Architecture](architecture.md) describes the current system context, component responsibilities, dependency direction, and the small set of execution scenarios needed to understand the design.
-- [Contracts](contracts.md) records cross-module authority, schema, ownership, trust, replay, evidence, transfer, and process/lifecycle invariants.
-- The [testing handbook](../../tests/README.md) owns test layers, cost authorization, acceptance selection, and test-resource discipline.
+- [Contracts](contracts.md) describes the rules for sharing data, handling credentials and files, reproducing builds, and managing processes.
+- The [testing handbook](../../tests/README.md) explains test layers, cost authorization, acceptance selection and resource cleanup.
 
 For product use, start from the [documentation index](../README.md). Return to the [project overview](../../README.md) for installation and the shortest quick start.
 
@@ -22,7 +22,7 @@ Each document must serve one named audience and reading purpose. Assign each fac
 
 Cross-audience copy may retain a one- or two-sentence summary or warning only when the reader needs it for immediate operation, safety, data-loss prevention, or a trust or support boundary. The summary must link to the complete owner and must not expand its promise.
 
-Keep test policy in the [testing handbook](../../tests/README.md) and agent-specific automatic-context instructions in [`AGENTS.md`](../../AGENTS.md). The [documentation index](../README.md) owns cross-audience navigation rather than duplicating guide content. Shared environment, coding, Git, and review guidance belongs in [Contributing](contributing.md).
+Keep test policy in the [testing handbook](../../tests/README.md) and agent-specific automatic-context instructions in [`AGENTS.md`](../../AGENTS.md). Use the [documentation index](../README.md) to help readers find a guide. Shared environment, coding, Git, and review guidance belongs in [Contributing](contributing.md).
 
 ### Machine and behavioral authority
 
@@ -40,6 +40,6 @@ Do not copy plans, task status, branch names, commit hashes, review evidence, re
 
 ### Writing and maintenance
 
-Use current-tense English for normative technical documentation, relative repository links, stable descriptive headings, and directly runnable commands where commands add value. Maintained localizations may use their target language, but they must identify and link their normative English source, preserve its meaning and safety boundaries, and be assessed in the same change when either member of the pair changes. Remove obsolete wording when its authority changes, and avoid speculative future design, generated filler, and repeated examples.
+Use current-tense English for normative technical documentation, relative repository links, stable descriptive headings, and directly runnable commands where commands add value. English is the maintenance reference for translated guides. Link language versions through a simple language switch, preserve the same behavior and precautions, and review both versions together when either changes. Remove obsolete wording when its authority changes, and avoid speculative future design, generated filler, and repeated examples.
 
-There is no mechanical line target. Do not hard-wrap prose to a fixed column; keep each Markdown paragraph or list item on one source line unless its syntax requires a line break. Concision follows from a document's audience, canonical ownership, durable value, and the rule to link instead of copying.
+There is no mechanical line target. Do not hard-wrap prose to a fixed column; keep each Markdown paragraph or list item on one source line unless its syntax requires a line break. Keep information that helps the intended reader act or understand a decision; link to details already explained elsewhere.
